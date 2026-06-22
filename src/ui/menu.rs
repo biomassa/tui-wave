@@ -1,10 +1,11 @@
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use super::keymap::Action;
+use super::theme;
 
 pub struct MenuEntry {
     pub label: &'static str,
@@ -235,14 +236,15 @@ impl MenuBar {
             .enumerate()
             .map(|(i, item)| {
                 let style = if self.open == Some(i) {
-                    Style::default().fg(Color::Black).bg(Color::White)
+                    Style::default().fg(theme::HIGHLIGHT_FG).bg(theme::HIGHLIGHT_BG)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(theme::CHROME_FG).bg(theme::CHROME_BG)
                 };
                 Span::styled(format!(" {} ", item.label), style)
             })
             .collect();
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        let bar_style = Style::default().fg(theme::CHROME_FG).bg(theme::CHROME_BG);
+        frame.render_widget(Paragraph::new(Line::from(spans)).style(bar_style), area);
 
         if let Some(open_index) = self.open {
             self.render_submenu(frame, open_index);
@@ -269,20 +271,31 @@ impl MenuBar {
             .iter()
             .enumerate()
             .map(|(i, e)| {
-                let style = if self.selected == i {
-                    Style::default().fg(Color::Black).bg(Color::Yellow)
-                } else {
-                    Style::default()
-                };
                 let pad = (popup.width as usize)
                     .saturating_sub(2)
                     .saturating_sub(e.label.len())
                     .saturating_sub(e.shortcut.len());
-                let text = format!("{}{}{}", e.label, " ".repeat(pad), e.shortcut);
-                ListItem::new(text).style(style)
+                let line = if self.selected == i {
+                    // Selected: one uniform highlight rather than juggling a third accent
+                    // color against it, which would risk a low-contrast clash.
+                    let style = Style::default().fg(theme::HIGHLIGHT_FG).bg(theme::HIGHLIGHT_BG);
+                    Line::styled(format!("{}{}{}", e.label, " ".repeat(pad), e.shortcut), style)
+                } else {
+                    Line::from(vec![
+                        Span::styled(e.label, Style::default().fg(theme::CHROME_FG)),
+                        Span::raw(" ".repeat(pad)),
+                        Span::styled(e.shortcut, Style::default().fg(theme::SHORTCUT)),
+                    ])
+                };
+                ListItem::new(line)
             })
             .collect();
-        let list = List::new(list_items).block(Block::default().borders(Borders::ALL));
+        let list = List::new(list_items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::BORDER))
+                .style(Style::default().bg(theme::CHROME_BG)),
+        );
         frame.render_widget(list, popup);
 
         self.entry_rects = (0..entries.len())
