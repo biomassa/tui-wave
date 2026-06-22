@@ -14,9 +14,17 @@ pub struct StatusBar<'a> {
 impl<'a> Widget for StatusBar<'a> {
     fn render(self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         let seconds = self.document.playhead as f64 / self.document.sample_rate as f64;
+        let selection = match self.document.selection {
+            Some(sel) if !sel.is_empty() => format!("{} samples", sel.len()),
+            _ => "none".to_string(),
+        };
         let text = format!(
-            " pos: {} ({:.3}s) | zoom: {:.1} spl/col | amp: {:.2}x ",
-            self.document.playhead, seconds, self.viewport.samples_per_column, self.viewport.amplitude_scale
+            " pos: {} ({:.3}s) | zoom: {:.1} spl/col | amp: {:.2}x | sel: {} ",
+            self.document.playhead,
+            seconds,
+            self.viewport.samples_per_column,
+            self.viewport.amplitude_scale,
+            selection
         );
         Paragraph::new(Line::from(text))
             .style(Style::default().fg(Color::Black).bg(Color::Gray))

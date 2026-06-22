@@ -1,4 +1,5 @@
 mod audio;
+mod commands;
 mod model;
 mod ui;
 

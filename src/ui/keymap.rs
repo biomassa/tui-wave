@@ -9,6 +9,8 @@ pub enum Action {
     MoveCursorRight,
     MoveCursorLeftFine,
     MoveCursorRightFine,
+    ExtendSelectionLeft,
+    ExtendSelectionRight,
     JumpStart,
     JumpEnd,
     PageBack,
@@ -19,13 +21,26 @@ pub enum Action {
     ZoomOutVertical,
     TogglePlayback,
     Stop,
+    Cut,
+    Copy,
+    Paste,
+    Undo,
+    Redo,
 }
 
 pub fn map_key(key: KeyEvent) -> Option<Action> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') => Some(Action::Quit),
-        KeyCode::Char('c') if ctrl => Some(Action::Quit),
+        KeyCode::Char('x') if ctrl => Some(Action::Cut),
+        KeyCode::Char('c') if ctrl => Some(Action::Copy),
+        KeyCode::Char('v') if ctrl => Some(Action::Paste),
+        KeyCode::Char('z') if ctrl && shift => Some(Action::Redo),
+        KeyCode::Char('z') if ctrl => Some(Action::Undo),
+        KeyCode::Char('y') if ctrl => Some(Action::Redo),
+        KeyCode::Left if shift => Some(Action::ExtendSelectionLeft),
+        KeyCode::Right if shift => Some(Action::ExtendSelectionRight),
         KeyCode::Left if ctrl => Some(Action::MoveCursorLeftFine),
         KeyCode::Right if ctrl => Some(Action::MoveCursorRightFine),
         KeyCode::Left => Some(Action::MoveCursorLeft),
@@ -79,10 +94,49 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_quits() {
+    fn shift_arrows_extend_selection() {
+        assert_eq!(
+            map_key(key(KeyCode::Right, KeyModifiers::SHIFT)),
+            Some(Action::ExtendSelectionRight)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Left, KeyModifiers::SHIFT)),
+            Some(Action::ExtendSelectionLeft)
+        );
+    }
+
+    #[test]
+    fn ctrl_x_c_v_are_cut_copy_paste() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            Some(Action::Cut)
+        );
         assert_eq!(
             map_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            Some(Action::Quit)
+            Some(Action::Copy)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+            Some(Action::Paste)
+        );
+    }
+
+    #[test]
+    fn ctrl_z_undoes_ctrl_shift_z_redoes() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('z'), KeyModifiers::CONTROL)),
+            Some(Action::Undo)
+        );
+        assert_eq!(
+            map_key(key(
+                KeyCode::Char('z'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            Some(Action::Redo)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('y'), KeyModifiers::CONTROL)),
+            Some(Action::Redo)
         );
     }
 
