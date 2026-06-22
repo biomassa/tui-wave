@@ -21,7 +21,9 @@ pub const LAVENDER: Color = Color::Rgb(0xb4, 0xbe, 0xfe);
 pub const WAVEFORM: Color = SKY;
 /// Waveform fill within the active selection range.
 pub const WAVEFORM_SELECTED: Color = YELLOW;
-/// The playhead marker line.
+/// The cursor marker (insertion point / playback start).
+pub const CURSOR: Color = YELLOW;
+/// The playhead marker (current playback position, only visible during playback).
 pub const PLAYHEAD: Color = RED;
 /// dB scale gutter labels.
 pub const DB_SCALE: Color = SUBTEXT0;

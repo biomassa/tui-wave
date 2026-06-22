@@ -27,14 +27,14 @@ impl Command for RemoveRangeCommand {
     fn execute(&mut self, doc: &mut Document) {
         self.removed = Some(doc.remove_range(self.range.clone()));
         doc.selection = None;
-        doc.playhead = self.range.start.min(doc.len_samples());
+        doc.cursor = self.range.start.min(doc.len_samples());
         doc.dirty = true;
     }
 
     fn undo(&mut self, doc: &mut Document) {
         let removed = self.removed.take().expect("undo called before execute");
         doc.insert_range(self.range.start, removed);
-        doc.playhead = self.range.start;
+        doc.cursor = self.range.start;
         doc.dirty = true;
     }
 
@@ -57,7 +57,7 @@ mod tests {
             channels: vec![vec![1.0, 2.0, 3.0, 4.0, 5.0]],
             sample_rate: 44100,
             selection: None,
-            playhead: 0,
+            cursor: 0,
             dirty: false,
             path: None,
         };

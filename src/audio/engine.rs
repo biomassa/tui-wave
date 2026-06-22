@@ -8,10 +8,18 @@ use rodio::{DeviceSinkBuilder, Player};
 use super::source::DocumentSource;
 
 enum AudioCmd {
-    Play { from_frame: usize },
+    Play {
+        from_frame: usize,
+        loop_start: Option<usize>,
+        loop_end: Option<usize>,
+    },
     Pause,
     Stop,
-    Seek(usize),
+    Seek {
+        frame: usize,
+        loop_start: Option<usize>,
+        loop_end: Option<usize>,
+    },
     Reload(Vec<Vec<f32>>),
 }
 
@@ -47,9 +55,10 @@ impl AudioEngine {
         let playing_for_thread = playing.clone();
 
         thread::spawn(move || {
-            let Ok(device_sink) = DeviceSinkBuilder::open_default_sink() else {
+            let Ok(mut device_sink) = DeviceSinkBuilder::open_default_sink() else {
                 return;
             };
+            device_sink.log_on_drop(false);
             let player = Player::connect_new(device_sink.mixer());
             let mut data = data;
 
@@ -58,13 +67,19 @@ impl AudioEngine {
                     AudioCmd::Reload(channels) => {
                         data = Arc::new(channels);
                     }
-                    AudioCmd::Play { from_frame } => {
+                    AudioCmd::Play {
+                        from_frame,
+                        loop_start,
+                        loop_end,
+                    } => {
                         player.clear();
-                        let source = DocumentSource::new(
+                        let source = DocumentSource::new_looped(
                             data.clone(),
                             sample_rate,
                             from_frame,
                             position_for_thread.clone(),
+                            loop_start,
+                            loop_end,
                         );
                         player.append(source);
                         player.play();
@@ -79,16 +94,22 @@ impl AudioEngine {
                         playing_for_thread.store(false, Ordering::Relaxed);
                         position_for_thread.store(0, Ordering::Relaxed);
                     }
-                    AudioCmd::Seek(frame) => {
+                    AudioCmd::Seek {
+                        frame,
+                        loop_start,
+                        loop_end,
+                    } => {
                         let was_playing = playing_for_thread.load(Ordering::Relaxed);
                         player.clear();
                         position_for_thread.store(frame, Ordering::Relaxed);
                         if was_playing {
-                            let source = DocumentSource::new(
+                            let source = DocumentSource::new_looped(
                                 data.clone(),
                                 sample_rate,
                                 frame,
                                 position_for_thread.clone(),
+                                loop_start,
+                                loop_end,
                             );
                             player.append(source);
                             player.play();
@@ -106,7 +127,17 @@ impl AudioEngine {
     }
 
     pub fn play(&self, from_frame: usize) {
-        let _ = self.cmd_tx.send(AudioCmd::Play { from_frame });
+        let _ = self
+            .cmd_tx
+            .send(AudioCmd::Play { from_frame, loop_start: None, loop_end: None });
+    }
+
+    pub fn play_looped(&self, from_frame: usize, loop_start: usize, loop_end: usize) {
+        let _ = self.cmd_tx.send(AudioCmd::Play {
+            from_frame,
+            loop_start: Some(loop_start),
+            loop_end: Some(loop_end),
+        });
     }
 
     pub fn pause(&self) {
@@ -118,7 +149,17 @@ impl AudioEngine {
     }
 
     pub fn seek(&self, frame: usize) {
-        let _ = self.cmd_tx.send(AudioCmd::Seek(frame));
+        let _ = self
+            .cmd_tx
+            .send(AudioCmd::Seek { frame, loop_start: None, loop_end: None });
+    }
+
+    pub fn seek_looped(&self, frame: usize, loop_start: usize, loop_end: usize) {
+        let _ = self.cmd_tx.send(AudioCmd::Seek {
+            frame,
+            loop_start: Some(loop_start),
+            loop_end: Some(loop_end),
+        });
     }
 
     /// Refreshes the audio thread's sample data after a document edit (cut/paste/etc).
@@ -130,5 +171,11 @@ impl AudioEngine {
 
     pub fn is_playing(&self) -> bool {
         self.playing.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for AudioEngine {
+    fn drop(&mut self) {
+        let _ = self.cmd_tx.send(AudioCmd::Stop);
     }
 }

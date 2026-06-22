@@ -85,6 +85,7 @@ impl WaveformCache {
     /// Highest absolute sample value in the channel — used to auto-fit the initial
     /// vertical zoom so a quiet file doesn't render using only a sliver of the available
     /// height.
+    #[allow(dead_code)]
     pub fn peak(&self) -> f32 {
         self.peak
     }

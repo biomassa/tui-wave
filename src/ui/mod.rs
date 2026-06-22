@@ -1,4 +1,5 @@
 pub mod app;
+pub mod file_panel;
 pub mod keymap;
 pub mod layout;
 pub mod menu;

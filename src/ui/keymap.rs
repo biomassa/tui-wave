@@ -28,6 +28,15 @@ pub enum Action {
     Redo,
     Save,
     ToggleAutoVerticalZoom,
+    Reverse,
+    Normalize,
+    Delete,
+    ClearSelection,
+    SaveAs,
+    SaveAll,
+    ToggleZeroSnap,
+    Gain,
+    ToggleLoop,
 }
 
 pub fn map_key(key: KeyEvent) -> Option<Action> {
@@ -41,7 +50,11 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('z') if ctrl && shift => Some(Action::Redo),
         KeyCode::Char('z') if ctrl => Some(Action::Undo),
         KeyCode::Char('y') if ctrl => Some(Action::Redo),
+        KeyCode::Char('s') if ctrl && shift => Some(Action::SaveAs),
         KeyCode::Char('s') if ctrl => Some(Action::Save),
+        KeyCode::Char('l') if ctrl => Some(Action::SaveAll),
+        KeyCode::Char('r') if ctrl => Some(Action::Reverse),
+        KeyCode::Char('n') if ctrl => Some(Action::Normalize),
         KeyCode::Left if shift => Some(Action::ExtendSelectionLeft),
         KeyCode::Right if shift => Some(Action::ExtendSelectionRight),
         KeyCode::Left if ctrl => Some(Action::MoveCursorLeftFine),
@@ -59,8 +72,13 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Up => Some(Action::ZoomIn),
         KeyCode::Down => Some(Action::ZoomOut),
         KeyCode::Char(' ') => Some(Action::TogglePlayback),
+        KeyCode::Char('d') if ctrl => Some(Action::ClearSelection),
         KeyCode::Esc => Some(Action::Stop),
+        KeyCode::Delete => Some(Action::Delete),
         KeyCode::Char('a') | KeyCode::Char('A') => Some(Action::ToggleAutoVerticalZoom),
+        KeyCode::Char('z') | KeyCode::Char('Z') => Some(Action::ToggleZeroSnap),
+        KeyCode::Char('g') | KeyCode::Char('G') => Some(Action::Gain),
+        KeyCode::Char('l') | KeyCode::Char('L') => Some(Action::ToggleLoop),
         _ => None,
     }
 }
@@ -196,6 +214,42 @@ mod tests {
         assert_eq!(
             map_key(key(KeyCode::Esc, KeyModifiers::NONE)),
             Some(Action::Stop)
+        );
+    }
+
+    #[test]
+    fn plain_z_toggles_zero_snap() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('z'), KeyModifiers::NONE)),
+            Some(Action::ToggleZeroSnap)
+        );
+    }
+
+    #[test]
+    fn plain_upper_z_toggles_zero_snap() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('Z'), KeyModifiers::NONE)),
+            Some(Action::ToggleZeroSnap)
+        );
+    }
+
+    #[test]
+    fn plain_g_opens_gain_dialog() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('g'), KeyModifiers::NONE)),
+            Some(Action::Gain)
+        );
+    }
+
+    #[test]
+    fn plain_l_toggles_loop() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('l'), KeyModifiers::NONE)),
+            Some(Action::ToggleLoop)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('L'), KeyModifiers::NONE)),
+            Some(Action::ToggleLoop)
         );
     }
 }
