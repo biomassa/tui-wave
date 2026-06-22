@@ -24,7 +24,7 @@ pub const WAVEFORM_SELECTED: Color = YELLOW;
 /// The cursor marker (insertion point / playback start).
 pub const CURSOR: Color = YELLOW;
 /// The playhead marker (current playback position, only visible during playback).
-pub const PLAYHEAD: Color = RED;
+pub const PLAYHEAD: Color = Color::Rgb(0xff, 0xff, 0xff);
 /// dB scale gutter labels.
 pub const DB_SCALE: Color = SUBTEXT0;
 /// Window/pane borders and titles.
@@ -35,6 +35,8 @@ pub const DIRTY: Color = RED;
 /// labels they're attached to, so a shortcut always reads as "this is the key," not part
 /// of the label.
 pub const SHORTCUT: Color = PEACH;
+/// Active / enabled toggle state in the toolbar.
+pub const ACTIVE: Color = Color::Rgb(0xa6, 0xe3, 0xa1);
 /// Default text/background for the menu bar and toolbar chrome.
 pub const CHROME_FG: Color = TEXT;
 pub const CHROME_BG: Color = SURFACE0;

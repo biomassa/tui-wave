@@ -43,6 +43,18 @@ not unit-testable. Run `MANUAL_TESTING.md` checklist before any release.
 - Delete key (`Del`) with zero-crossing snap
 - Zero-crossing snapping on Cut and Delete (256-sample search window)
 
+## Toolbar active state
+
+Toggle actions (ZeroSnap, Loop, AutoVZ) show their label in green (`theme::ACTIVE`)
+when enabled. The active set is populated in `App::render` before `toolbar.render()`.
+
+## Zero-crossing snapping on selection
+
+When `snap_to_zero` is on (`Z`), both keyboard extend-selection (Shift+arrow) and
+mouse drag-to-select snap their boundaries through `document.snap_to_zero_crossing()`.
+The anchor is snapped on mouse-down, and the drag target is snapped before each
+selection update.
+
 ## Known issues (from TODO.md)
 
 - Save silently ignores write errors
