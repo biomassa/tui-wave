@@ -17,6 +17,8 @@ pub enum Action {
     ZoomOut,
     ZoomInVertical,
     ZoomOutVertical,
+    TogglePlayback,
+    Stop,
 }
 
 pub fn map_key(key: KeyEvent) -> Option<Action> {
@@ -36,6 +38,8 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::ZoomOut),
         KeyCode::Up => Some(Action::ZoomInVertical),
         KeyCode::Down => Some(Action::ZoomOutVertical),
+        KeyCode::Char(' ') => Some(Action::TogglePlayback),
+        KeyCode::Esc => Some(Action::Stop),
         _ => None,
     }
 }
@@ -85,5 +89,17 @@ mod tests {
     #[test]
     fn plain_c_does_nothing() {
         assert_eq!(map_key(key(KeyCode::Char('c'), KeyModifiers::NONE)), None);
+    }
+
+    #[test]
+    fn space_toggles_playback_and_esc_stops() {
+        assert_eq!(
+            map_key(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+            Some(Action::TogglePlayback)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(Action::Stop)
+        );
     }
 }
