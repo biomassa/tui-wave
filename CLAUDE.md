@@ -107,6 +107,16 @@ no rendering dependency, fully unit-testable. `Viewport::zoom` anchors a given s
 its current terminal column across a zoom change (zoom-to-cursor) rather than re-centering,
 which is what keeps zooming from feeling disorienting.
 
+The waveform widget always draws the playhead as a bold white vertical line
+(`waveform::playhead_column`), on top of the waveform, at whatever column
+`document.playhead` maps to — every code path that moves `playhead` (nav, playback sync,
+mouse seek) calls `viewport.ensure_visible` first (mouse seek is exempt since its target
+is computed from an already-visible column), which is what keeps the marker on-screen
+rather than scrolled out of view. `App::sync_playhead_from_audio` clamps the audio
+thread's position to `total_len - 1` — the position counter can land exactly on
+`total_len` once a track finishes playing, which would otherwise push the marker one
+column past the right edge.
+
 The waveform widget renders via min/max downsampling (one min/max pair per terminal
 column), but it does **not** scan raw samples to get there — it consults a `WaveformCache`
 (`ui/waveform_cache.rs`), a precomputed multi-resolution min/max pyramid (base bins of 64
