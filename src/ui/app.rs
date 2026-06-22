@@ -24,6 +24,7 @@ use super::menu::MenuBar;
 use super::terminal::Tui;
 use super::toolbar::Toolbar;
 use super::viewport::Viewport;
+use super::waveform_cache::WaveformCache;
 use super::widgets::statusbar::StatusBar;
 use super::widgets::waveform::WaveformWidget;
 
@@ -36,6 +37,10 @@ pub struct App {
     pub clipboard: Clipboard,
     pub menu: MenuBar,
     pub toolbar: Toolbar,
+    /// One precomputed min/max cache per channel, rebuilt whenever the document's sample
+    /// data changes. Keeps waveform render cost bounded by screen width instead of file
+    /// length — see `ui::waveform_cache`.
+    pub waveform_caches: Vec<WaveformCache>,
     /// Width/area of the waveform content as of the last render; navigation/zoom/mouse
     /// actions need this and re-reading it from the terminal on every input would require
     /// a redraw, so it's cached here instead.
@@ -51,6 +56,10 @@ impl App {
         let audio = document
             .as_ref()
             .and_then(|doc| AudioEngine::try_new(doc.channels.clone(), doc.sample_rate));
+        let waveform_caches = document
+            .as_ref()
+            .map(|doc| doc.channels.iter().map(|c| WaveformCache::build(c)).collect())
+            .unwrap_or_default();
         Self {
             should_quit: false,
             document,
@@ -60,10 +69,26 @@ impl App {
             clipboard: Clipboard::default(),
             menu: MenuBar::new(),
             toolbar: Toolbar::new(),
+            waveform_caches,
             content_width: 1,
             waveform_area: Rect::default(),
             quit_confirm: false,
         }
+    }
+
+    /// Highest peak across all channels — used to auto-fit the initial vertical zoom.
+    fn waveform_peak(&self) -> f32 {
+        self.waveform_caches
+            .iter()
+            .fold(0.0f32, |p, c| p.max(c.peak()))
+    }
+
+    fn rebuild_waveform_caches(&mut self) {
+        self.waveform_caches = self
+            .document
+            .as_ref()
+            .map(|doc| doc.channels.iter().map(|c| WaveformCache::build(c)).collect())
+            .unwrap_or_default();
     }
 
     pub fn run(&mut self, terminal: &mut Tui) -> color_eyre::Result<()> {
@@ -309,6 +334,10 @@ impl App {
         let Some(document) = self.document.as_mut() else {
             return;
         };
+        let mutates_samples = matches!(
+            action,
+            Action::Cut | Action::Paste | Action::Undo | Action::Redo
+        );
         match action {
             Action::Cut => {
                 if let Some(sel) = document.selection {
@@ -361,8 +390,11 @@ impl App {
         if let Some(viewport) = self.viewport.as_mut() {
             viewport.ensure_visible(document.playhead, self.content_width);
         }
-        if let Some(audio) = &self.audio {
-            audio.reload(document.channels.clone());
+        if mutates_samples {
+            if let Some(audio) = &self.audio {
+                audio.reload(document.channels.clone());
+            }
+            self.rebuild_waveform_caches();
         }
     }
 
@@ -428,8 +460,15 @@ impl App {
 
         self.content_width = waveform_area.width;
         self.waveform_area = waveform_area;
+        let peak = self.waveform_peak();
         let viewport = self.viewport.get_or_insert_with(|| {
-            Viewport::fit_to_width(document.len_samples(), waveform_area.width as usize)
+            let mut v = Viewport::fit_to_width(document.len_samples(), waveform_area.width as usize);
+            // Auto-fit vertical zoom to the file's actual peak so a quiet recording doesn't
+            // render using only a sliver of the available height.
+            if peak > 0.0001 {
+                v.set_amplitude_scale(0.95 / peak);
+            }
+            v
         });
 
         let channel_count = document.channel_count().max(1);
@@ -446,6 +485,7 @@ impl App {
             let widget = WaveformWidget {
                 samples,
                 viewport,
+                cache: self.waveform_caches.get(i),
                 selection,
             };
             frame.render_widget(widget, *channel_area);

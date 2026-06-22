@@ -75,6 +75,12 @@ impl Viewport {
         self.amplitude_scale =
             (self.amplitude_scale / VERTICAL_ZOOM_FACTOR).clamp(MIN_AMPLITUDE_SCALE, MAX_AMPLITUDE_SCALE);
     }
+
+    /// Sets the amplitude scale directly, clamped to the same bounds as the zoom-vertical
+    /// actions. Used for auto-fitting the initial vertical zoom to a file's peak amplitude.
+    pub fn set_amplitude_scale(&mut self, scale: f32) {
+        self.amplitude_scale = scale.clamp(MIN_AMPLITUDE_SCALE, MAX_AMPLITUDE_SCALE);
+    }
 }
 
 #[cfg(test)]

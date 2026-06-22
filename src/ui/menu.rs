@@ -86,22 +86,22 @@ impl MenuBar {
                 entries: vec![
                     MenuEntry {
                         label: "Zoom In",
-                        shortcut: "+",
+                        shortcut: "Up/+",
                         action: Action::ZoomIn,
                     },
                     MenuEntry {
                         label: "Zoom Out",
-                        shortcut: "-",
+                        shortcut: "Down/-",
                         action: Action::ZoomOut,
                     },
                     MenuEntry {
                         label: "Zoom In (Vertical)",
-                        shortcut: "Up",
+                        shortcut: "Shift+Up",
                         action: Action::ZoomInVertical,
                     },
                     MenuEntry {
                         label: "Zoom Out (Vertical)",
-                        shortcut: "Down",
+                        shortcut: "Shift+Down",
                         action: Action::ZoomOutVertical,
                     },
                 ],

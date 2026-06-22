@@ -31,3 +31,10 @@ tracks what's next.
 - Only tested on Linux/ALSA so far — macOS/CoreAudio playback behavior is unverified (see
   `MANUAL_TESTING.md`).
 - No CI configured — `cargo test`/`cargo build` are run manually.
+- Building the waveform min/max cache (`ui/waveform_cache.rs`) is O(n) and runs
+  synchronously on the main thread at load and after every mutating edit — for a very
+  large file in a debug build this is a multi-second blocking pause (fine in release).
+  Not yet streamed/backgrounded; see CLAUDE.md's note on the cache.
+- Toolbar button packing wraps to a fixed 2-row chrome height
+  (`ui/layout.rs::TOOLBAR_HEIGHT`) — on a very narrow terminal, buttons that don't fit in
+  those 2 rows are silently dropped from the toolbar (still reachable via keyboard/menu).

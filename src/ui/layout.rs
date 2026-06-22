@@ -8,10 +8,14 @@ pub struct Chrome {
     pub content: Rect,
 }
 
+/// Toolbar rows: enough for every button (with its shortcut shown inline) to wrap onto a
+/// second row on a standard 80-column terminal instead of being clipped off-screen.
+pub const TOOLBAR_HEIGHT: u16 = 2;
+
 pub fn split_chrome(area: Rect) -> Chrome {
     let [menu, toolbar, content] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(TOOLBAR_HEIGHT),
         Constraint::Fill(1),
     ])
     .areas(area);

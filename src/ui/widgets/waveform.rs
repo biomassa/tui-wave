@@ -4,13 +4,16 @@ use ratatui::style::{Color, Style};
 use ratatui::widgets::Widget;
 
 use crate::ui::viewport::Viewport;
+use crate::ui::waveform_cache::{raw_min_max, WaveformCache};
 
 /// Renders one channel's waveform into `area` using min/max downsampling: each terminal
-/// column represents `viewport.samples_per_column` samples, never iterating every sample
-/// per frame regardless of zoom level.
+/// column represents `viewport.samples_per_column` samples. The per-column min/max comes
+/// from the precomputed `WaveformCache` rather than scanning raw samples, so render cost
+/// stays bounded by screen width regardless of file length or zoom level.
 pub struct WaveformWidget<'a> {
     pub samples: &'a [f32],
     pub viewport: &'a Viewport,
+    pub cache: Option<&'a WaveformCache>,
     /// Normalized (start, end) sample range to highlight, if any.
     pub selection: Option<(usize, usize)>,
 }
@@ -34,10 +37,10 @@ impl<'a> Widget for WaveformWidget<'a> {
                 continue;
             }
 
-            let slice = &self.samples[start..end];
-            let (min, max) = slice
-                .iter()
-                .fold((f32::MAX, f32::MIN), |(mn, mx), &s| (mn.min(s), mx.max(s)));
+            let (min, max) = match self.cache {
+                Some(cache) => cache.min_max(self.samples, start, end),
+                None => raw_min_max(&self.samples[start..end]),
+            };
 
             let scaled_min = (min * self.viewport.amplitude_scale).clamp(-1.0, 1.0) as f64;
             let scaled_max = (max * self.viewport.amplitude_scale).clamp(-1.0, 1.0) as f64;

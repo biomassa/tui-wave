@@ -5,4 +5,5 @@ pub mod menu;
 pub mod terminal;
 pub mod toolbar;
 pub mod viewport;
+pub mod waveform_cache;
 pub mod widgets;
