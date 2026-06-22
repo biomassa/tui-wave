@@ -28,6 +28,7 @@ impl Toolbar {
             ("Zoom-", "Dn", Action::ZoomOut),
             ("VZoom+", "S+Up", Action::ZoomInVertical),
             ("VZoom-", "S+Dn", Action::ZoomOutVertical),
+            ("AutoVZ", "A", Action::ToggleAutoVerticalZoom),
             ("Save", "^S", Action::Save),
             ("Quit", "Q", Action::Quit),
         ];

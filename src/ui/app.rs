@@ -25,6 +25,7 @@ use super::terminal::Tui;
 use super::toolbar::Toolbar;
 use super::viewport::Viewport;
 use super::waveform_cache::WaveformCache;
+use super::widgets::db_scale::{DbScaleWidget, DB_GUTTER_WIDTH};
 use super::widgets::statusbar::StatusBar;
 use super::widgets::waveform::WaveformWidget;
 
@@ -247,6 +248,17 @@ impl App {
             return;
         }
 
+        if action == Action::ToggleAutoVerticalZoom {
+            let peak = self.waveform_peak();
+            if let Some(viewport) = self.viewport.as_mut() {
+                viewport.auto_vertical_zoom = !viewport.auto_vertical_zoom;
+                if viewport.auto_vertical_zoom && peak > 0.0001 {
+                    viewport.set_amplitude_scale(0.95 / peak);
+                }
+            }
+            return;
+        }
+
         let (Some(document), Some(viewport)) = (self.document.as_mut(), self.viewport.as_mut())
         else {
             return;
@@ -277,7 +289,8 @@ impl App {
             | Action::Paste
             | Action::Undo
             | Action::Redo
-            | Action::Save => unreachable!(),
+            | Action::Save
+            | Action::ToggleAutoVerticalZoom => unreachable!(),
             Action::MoveCursorLeft => {
                 document.playhead = document.playhead.saturating_sub(column_step.max(1));
             }
@@ -395,6 +408,14 @@ impl App {
                 audio.reload(document.channels.clone());
             }
             self.rebuild_waveform_caches();
+            // Auto vertical zoom re-fits to the new peak after edits change the data —
+            // that's what makes it "dynamic" rather than a one-time fit.
+            let peak = self.waveform_peak();
+            if let Some(viewport) = self.viewport.as_mut() {
+                if viewport.auto_vertical_zoom && peak > 0.0001 {
+                    viewport.set_amplitude_scale(0.95 / peak);
+                }
+            }
         }
     }
 
@@ -458,25 +479,52 @@ impl App {
         let [waveform_area, status_area] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
 
-        self.content_width = waveform_area.width;
-        self.waveform_area = waveform_area;
+        let gutter = DB_GUTTER_WIDTH.min(waveform_area.width / 2);
+        let inner_waveform_area = Rect {
+            x: waveform_area.x + gutter,
+            y: waveform_area.y,
+            width: waveform_area.width.saturating_sub(gutter * 2),
+            height: waveform_area.height,
+        };
+
+        self.content_width = inner_waveform_area.width;
+        self.waveform_area = inner_waveform_area;
         let peak = self.waveform_peak();
         let viewport = self.viewport.get_or_insert_with(|| {
-            let mut v = Viewport::fit_to_width(document.len_samples(), waveform_area.width as usize);
-            // Auto-fit vertical zoom to the file's actual peak so a quiet recording doesn't
-            // render using only a sliver of the available height.
-            if peak > 0.0001 {
-                v.set_amplitude_scale(0.95 / peak);
-            }
-            v
+            Viewport::fit_to_width(document.len_samples(), inner_waveform_area.width as usize)
         });
+        viewport.total_len = document.len_samples();
 
         let channel_count = document.channel_count().max(1);
-        let chunks =
+        let full_chunks =
             Layout::vertical(vec![Constraint::Fill(1); channel_count]).split(waveform_area);
         let selection = document.selection.map(|s| s.normalized());
+        let reference_amplitude = if viewport.auto_vertical_zoom {
+            peak.max(0.0001)
+        } else {
+            1.0
+        };
 
-        for (i, channel_area) in chunks.iter().enumerate() {
+        for (i, channel_full_area) in full_chunks.iter().enumerate() {
+            let channel_inner = Rect {
+                x: channel_full_area.x + gutter,
+                y: channel_full_area.y,
+                width: channel_full_area.width.saturating_sub(gutter * 2),
+                height: channel_full_area.height,
+            };
+            let left_gutter = Rect {
+                x: channel_full_area.x,
+                y: channel_full_area.y,
+                width: gutter,
+                height: channel_full_area.height,
+            };
+            let right_gutter = Rect {
+                x: channel_full_area.x + channel_full_area.width - gutter,
+                y: channel_full_area.y,
+                width: gutter,
+                height: channel_full_area.height,
+            };
+
             let samples = document
                 .channels
                 .get(i)
@@ -488,7 +536,14 @@ impl App {
                 cache: self.waveform_caches.get(i),
                 selection,
             };
-            frame.render_widget(widget, *channel_area);
+            frame.render_widget(widget, channel_inner);
+
+            let db_scale = DbScaleWidget {
+                amplitude_scale: viewport.amplitude_scale,
+                reference_amplitude,
+            };
+            frame.render_widget(db_scale, left_gutter);
+            frame.render_widget(db_scale, right_gutter);
         }
 
         frame.render_widget(StatusBar { document, viewport }, status_area);

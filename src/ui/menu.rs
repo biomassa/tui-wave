@@ -104,6 +104,11 @@ impl MenuBar {
                         shortcut: "Shift+Down",
                         action: Action::ZoomOutVertical,
                     },
+                    MenuEntry {
+                        label: "Auto Vertical Zoom",
+                        shortcut: "A",
+                        action: Action::ToggleAutoVerticalZoom,
+                    },
                 ],
             },
             MenuItem {
