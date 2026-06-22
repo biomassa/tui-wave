@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -14,6 +16,7 @@ use super::theme;
 pub struct Toolbar {
     buttons: Vec<(&'static str, &'static str, Action)>,
     rects: Vec<Rect>,
+    pub active_actions: HashSet<Action>,
 }
 
 impl Toolbar {
@@ -42,6 +45,7 @@ impl Toolbar {
         Self {
             buttons,
             rects: Vec::new(),
+            active_actions: HashSet::new(),
         }
     }
 
@@ -59,7 +63,7 @@ impl Toolbar {
         let chrome = Style::default().fg(theme::CHROME_FG);
         let shortcut_style = Style::default().fg(theme::SHORTCUT);
 
-        for (label, shortcut, _) in &self.buttons {
+        for (label, shortcut, action) in &self.buttons {
             let width = (label.len() + shortcut.len() + 3) as u16; // "[" label ":" shortcut "]"
             if x + width > area.x + area.width && x > area.x {
                 lines.push(Line::from(std::mem::take(&mut spans)));
@@ -75,8 +79,14 @@ impl Toolbar {
                 width,
                 height: 1,
             });
+            let is_active = self.active_actions.contains(action);
+            let label_style = if is_active {
+                Style::default().fg(theme::ACTIVE)
+            } else {
+                chrome
+            };
             spans.push(Span::styled("[", chrome));
-            spans.push(Span::styled(*label, chrome));
+            spans.push(Span::styled(*label, label_style));
             spans.push(Span::styled(":", chrome));
             spans.push(Span::styled(*shortcut, shortcut_style));
             spans.push(Span::styled("] ", chrome));

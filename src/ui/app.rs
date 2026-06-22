@@ -542,11 +542,14 @@ impl App {
         let target =
             (viewport.scroll_offset as f64 + col * viewport.samples_per_column) as usize;
         let target = target.min(total_len - 1);
+        let snap = self.snap_to_zero;
+        let target = if snap { document.snap_to_zero_crossing(target) } else { target };
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                document.cursor = target;
-                self.mouse_down_anchor = Some(target);
+                let anchor = if snap { document.snap_to_zero_crossing(target) } else { target };
+                document.cursor = anchor;
+                self.mouse_down_anchor = Some(anchor);
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 document.cursor = target;
@@ -735,14 +738,15 @@ impl App {
         // zoom preserves it so the user can see their selection at different zoom levels.
         match action {
             Action::ExtendSelectionLeft | Action::ExtendSelectionRight => {
+                let snap = self.snap_to_zero;
                 let anchor = document.selection.map(|s| s.start).unwrap_or(document.cursor);
-                let start = anchor.min(document.cursor);
+                let anchor = if snap { document.snap_to_zero_crossing(anchor) } else { anchor };
+                let cursor = if snap { document.snap_to_zero_crossing(document.cursor) } else { document.cursor };
+                let start = anchor.min(cursor);
                 document.selection = Some(Selection {
                     start: anchor,
-                    end: document.cursor,
+                    end: cursor,
                 });
-                // Place the insertion point at the beginning of the selection so paste,
-                // type-to-replace, etc. operate on the start of the selected range.
                 document.cursor = start;
             }
             Action::MoveCursorLeft
@@ -941,6 +945,16 @@ impl App {
 
         // Always render the file panel and chrome.
         self.file_panel.render(frame, chrome.panel);
+        self.toolbar.active_actions.clear();
+        if self.snap_to_zero {
+            self.toolbar.active_actions.insert(Action::ToggleZeroSnap);
+        }
+        if self.loop_playback {
+            self.toolbar.active_actions.insert(Action::ToggleLoop);
+        }
+        if self.viewport.as_ref().is_some_and(|v| v.auto_vertical_zoom) {
+            self.toolbar.active_actions.insert(Action::ToggleAutoVerticalZoom);
+        }
         self.toolbar.render(frame, chrome.toolbar);
         self.menu.render(frame, chrome.menu);
 
