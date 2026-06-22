@@ -11,6 +11,8 @@ use crate::ui::viewport::Viewport;
 pub struct WaveformWidget<'a> {
     pub samples: &'a [f32],
     pub viewport: &'a Viewport,
+    /// Normalized (start, end) sample range to highlight, if any.
+    pub selection: Option<(usize, usize)>,
 }
 
 impl<'a> Widget for WaveformWidget<'a> {
@@ -44,12 +46,15 @@ impl<'a> Widget for WaveformWidget<'a> {
             let top_row = (mid_row - scaled_max * half_height).floor() as i64;
             let bottom_row = (mid_row - scaled_min * half_height).ceil() as i64;
 
+            let selected = self
+                .selection
+                .is_some_and(|(sel_start, sel_end)| start < sel_end && end > sel_start);
+            let color = if selected { Color::Yellow } else { Color::Cyan };
+
             for row in top_row.max(0)..bottom_row.min(area.height as i64) {
                 let x = area.x + col;
                 let y = area.y + row as u16;
-                buf[(x, y)]
-                    .set_char('█')
-                    .set_style(Style::default().fg(Color::Cyan));
+                buf[(x, y)].set_char('█').set_style(Style::default().fg(color));
             }
         }
     }

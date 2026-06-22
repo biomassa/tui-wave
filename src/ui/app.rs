@@ -7,7 +7,13 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crate::audio::engine::AudioEngine;
+use crate::commands::cut::cut_command;
+use crate::commands::delete::delete_command;
+use crate::commands::paste::paste_command;
+use crate::model::clipboard::Clipboard;
 use crate::model::document::Document;
+use crate::model::history::History;
+use crate::model::selection::Selection;
 
 use super::keymap::{map_key, Action};
 use super::terminal::Tui;
@@ -20,6 +26,8 @@ pub struct App {
     pub document: Option<Document>,
     pub viewport: Option<Viewport>,
     pub audio: Option<AudioEngine>,
+    pub history: History,
+    pub clipboard: Clipboard,
     /// Width/area of the waveform content as of the last render; navigation/zoom/mouse
     /// actions need this and re-reading it from the terminal on every input would require
     /// a redraw, so it's cached here instead.
@@ -37,6 +45,8 @@ impl App {
             document,
             viewport: None,
             audio,
+            history: History::new(),
+            clipboard: Clipboard::default(),
             content_width: 1,
             waveform_area: Rect::default(),
         }
@@ -116,6 +126,14 @@ impl App {
             return;
         }
 
+        if matches!(
+            action,
+            Action::Cut | Action::Copy | Action::Paste | Action::Undo | Action::Redo
+        ) {
+            self.handle_edit_action(action);
+            return;
+        }
+
         let (Some(document), Some(viewport)) = (self.document.as_mut(), self.viewport.as_mut())
         else {
             return;
@@ -127,9 +145,25 @@ impl App {
         let width = self.content_width;
         let column_step = viewport.samples_per_column.max(1.0) as usize;
         let span = viewport.span(width);
+        let is_extend = matches!(
+            action,
+            Action::ExtendSelectionLeft | Action::ExtendSelectionRight
+        );
+        let anchor = if is_extend {
+            Some(document.selection.map(|s| s.start).unwrap_or(document.playhead))
+        } else {
+            None
+        };
 
         match action {
-            Action::Quit | Action::TogglePlayback | Action::Stop => unreachable!(),
+            Action::Quit
+            | Action::TogglePlayback
+            | Action::Stop
+            | Action::Cut
+            | Action::Copy
+            | Action::Paste
+            | Action::Undo
+            | Action::Redo => unreachable!(),
             Action::MoveCursorLeft => {
                 document.playhead = document.playhead.saturating_sub(column_step.max(1));
             }
@@ -141,6 +175,12 @@ impl App {
             }
             Action::MoveCursorRightFine => {
                 document.playhead = (document.playhead + 1).min(total_len - 1);
+            }
+            Action::ExtendSelectionLeft => {
+                document.playhead = document.playhead.saturating_sub(column_step.max(1));
+            }
+            Action::ExtendSelectionRight => {
+                document.playhead = (document.playhead + column_step.max(1)).min(total_len - 1);
             }
             Action::JumpStart => document.playhead = 0,
             Action::JumpEnd => document.playhead = total_len - 1,
@@ -156,6 +196,14 @@ impl App {
             Action::ZoomOutVertical => viewport.zoom_out_vertical(),
         }
 
+        document.selection = match anchor {
+            Some(anchor) => Some(Selection {
+                start: anchor,
+                end: document.playhead,
+            }),
+            None => None,
+        };
+
         viewport.ensure_visible(document.playhead, width);
 
         // Nav/zoom actions can move the cursor while audio is mid-playback (e.g. scrubbing
@@ -165,6 +213,60 @@ impl App {
             if audio.is_playing() {
                 audio.seek(document.playhead);
             }
+        }
+    }
+
+    fn handle_edit_action(&mut self, action: Action) {
+        let Some(document) = self.document.as_mut() else {
+            return;
+        };
+        match action {
+            Action::Cut => {
+                if let Some(sel) = document.selection {
+                    let (start, end) = sel.normalized();
+                    if start < end {
+                        self.clipboard.set(document.slice(start..end), document.sample_rate);
+                        self.history.apply(cut_command(start..end), document);
+                    }
+                }
+            }
+            Action::Copy => {
+                if let Some(sel) = document.selection {
+                    let (start, end) = sel.normalized();
+                    if start < end {
+                        self.clipboard.set(document.slice(start..end), document.sample_rate);
+                    }
+                }
+            }
+            Action::Paste => {
+                if !self.clipboard.is_empty() {
+                    // Pasting over an active selection replaces it: delete the selection
+                    // first, then insert at the spot it occupied.
+                    if let Some(sel) = document.selection {
+                        let (start, end) = sel.normalized();
+                        if start < end {
+                            self.history.apply(delete_command(start..end), document);
+                        }
+                    }
+                    let at = document.playhead;
+                    let data = self.clipboard.channels.clone();
+                    self.history.apply(paste_command(at, data), document);
+                }
+            }
+            Action::Undo => {
+                self.history.undo(document);
+            }
+            Action::Redo => {
+                self.history.redo(document);
+            }
+            _ => unreachable!(),
+        }
+
+        if let Some(viewport) = self.viewport.as_mut() {
+            viewport.ensure_visible(document.playhead, self.content_width);
+        }
+        if let Some(audio) = &self.audio {
+            audio.reload(document.channels.clone());
         }
     }
 
@@ -233,6 +335,7 @@ impl App {
         let channel_count = document.channel_count().max(1);
         let chunks =
             Layout::vertical(vec![Constraint::Fill(1); channel_count]).split(waveform_area);
+        let selection = document.selection.map(|s| s.normalized());
 
         for (i, channel_area) in chunks.iter().enumerate() {
             let samples = document
@@ -240,7 +343,11 @@ impl App {
                 .get(i)
                 .map(|c| c.as_slice())
                 .unwrap_or(&[]);
-            let widget = WaveformWidget { samples, viewport };
+            let widget = WaveformWidget {
+                samples,
+                viewport,
+                selection,
+            };
             frame.render_widget(widget, *channel_area);
         }
 

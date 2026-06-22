@@ -12,6 +12,7 @@ enum AudioCmd {
     Pause,
     Stop,
     Seek(usize),
+    Reload(Vec<Vec<f32>>),
 }
 
 /// Owns the audio device and playback thread. The UI thread only ever talks to this
@@ -47,9 +48,13 @@ impl AudioEngine {
                 return;
             };
             let player = Player::connect_new(device_sink.mixer());
+            let mut data = data;
 
             for cmd in cmd_rx {
                 match cmd {
+                    AudioCmd::Reload(channels) => {
+                        data = Arc::new(channels);
+                    }
                     AudioCmd::Play { from_frame } => {
                         player.clear();
                         let source = DocumentSource::new(
@@ -111,6 +116,13 @@ impl AudioEngine {
 
     pub fn seek(&self, frame: usize) {
         let _ = self.cmd_tx.send(AudioCmd::Seek(frame));
+    }
+
+    /// Refreshes the audio thread's sample data after a document edit (cut/paste/etc).
+    /// Only affects future `play`/`seek` calls — a source already playing keeps the data it
+    /// captured when it started.
+    pub fn reload(&self, channels: Vec<Vec<f32>>) {
+        let _ = self.cmd_tx.send(AudioCmd::Reload(channels));
     }
 
     pub fn is_playing(&self) -> bool {
