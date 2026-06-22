@@ -38,3 +38,6 @@ tracks what's next.
 - Toolbar button packing wraps to a fixed 2-row chrome height
   (`ui/layout.rs::TOOLBAR_HEIGHT`) — on a very narrow terminal, buttons that don't fit in
   those 2 rows are silently dropped from the toolbar (still reachable via keyboard/menu).
+- The dB scale gutter (`ui/widgets/db_scale.rs::DB_GUTTER_WIDTH`, 4 columns) is a pragmatic
+  width for labels like "-36" — on a very narrow terminal this eats a larger fraction of
+  total width than ideal; could shrink further or hide the gutter below some width.

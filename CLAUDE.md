@@ -116,14 +116,35 @@ the document's sample data changes (load, cut, paste, undo, redo — see
 made the editor unusably slow on large files at zoomed-out views (every redraw rescanned
 the whole visible range — for a multi-minute file, tens of millions of comparisons per
 frame); the cache bounds render cost to roughly the screen width regardless of file length
-or zoom level. `Viewport`'s initial `amplitude_scale` is also auto-fit from the cache's
-`peak()` at first render so a quiet recording doesn't render using only a sliver of the
-available height.
+or zoom level.
 
 Building the cache itself is an O(n) one-time cost — fast in a release build, noticeably
 slower in debug for very large files (multiple seconds for a 10-minute stereo file). Build
 with `cargo build --release` when working with large files; the per-keystroke render cost
 is unaffected by build profile once the cache exists.
+
+`Viewport.total_len` is kept in sync with the document's sample count every frame
+(`App::render`) and `ensure_visible` clamps `scroll_offset` so the visible window never
+overhangs past end-of-file — without this, certain scroll/zoom combinations left a blank
+gap between the right edge of the waveform and the window's right border. When the whole
+file fits within one window's span, `scroll_offset` is forced to 0 (there's no valid
+nonzero position that doesn't overhang).
+
+### Vertical zoom and the dB scale (`ui/widgets/db_scale.rs`)
+
+`Viewport.auto_vertical_zoom` is off by default — vertical zoom starts at 1.0 (literal
+amplitude) and only changes via explicit Shift+Up/Down, or by toggling auto vertical zoom
+(`Action::ToggleAutoVerticalZoom`, key `a`), which fits `amplitude_scale` to the document's
+peak (`App::waveform_peak`, derived from the `WaveformCache`s) and re-fits after every
+edit while it stays enabled.
+
+Each channel's pane reserves a `DB_GUTTER_WIDTH`-column gutter on both the left and right
+edge (`App::render`) showing a mirrored dB axis (0dB, -6, -12, -18, -24, -36) computed
+through the same amplitude→row mapping the waveform itself uses, so the marks always line
+up with where those levels actually render. `DbScaleWidget.reference_amplitude` is the
+pivot: 1.0 when auto vertical zoom is off (absolute dBFS — 0dB always means literal full
+scale), or the document's peak when it's on (dB relative to peak — 0dB always tracks
+wherever the loudest sample in the file actually is, which is the "dynamic" behavior).
 
 ### Keybindings
 

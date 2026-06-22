@@ -6,6 +6,15 @@ pub struct Viewport {
     pub amplitude_scale: f32,
     pub min_samples_per_column: f64,
     pub max_samples_per_column: f64,
+    /// Total sample count of the document, kept in sync by the caller (it can shrink/grow
+    /// after edits). Used to clamp `scroll_offset` so the visible window never overhangs
+    /// past end-of-file — without this, certain scroll/zoom states leave a blank gap
+    /// between the right edge of the waveform and the right border of the window.
+    pub total_len: usize,
+    /// Off by default. When on, vertical zoom auto-fits to the document's peak amplitude
+    /// (and re-fits after edits); the dB scale gutters switch from absolute dBFS to
+    /// dB-relative-to-peak to match.
+    pub auto_vertical_zoom: bool,
 }
 
 const ZOOM_FACTOR: f64 = 1.5;
@@ -27,6 +36,8 @@ impl Viewport {
             amplitude_scale: 1.0,
             min_samples_per_column: 1.0,
             max_samples_per_column,
+            total_len,
+            auto_vertical_zoom: false,
         }
     }
 
@@ -35,8 +46,14 @@ impl Viewport {
         (width.max(1) as f64 * self.samples_per_column) as usize
     }
 
+    /// Largest `scroll_offset` that doesn't let the window overhang past `total_len`.
+    fn max_scroll_offset(&self, width: u16) -> usize {
+        self.total_len.saturating_sub(self.span(width))
+    }
+
     /// Scroll so `sample` is visible, snapping to the nearest edge rather than re-centering
-    /// (keeps the view stable instead of jumping every time the cursor nears an edge).
+    /// (keeps the view stable instead of jumping every time the cursor nears an edge), then
+    /// clamps so the window never overhangs past end-of-file.
     pub fn ensure_visible(&mut self, sample: usize, width: u16) {
         let span = self.span(width).max(1);
         if sample < self.scroll_offset {
@@ -44,6 +61,7 @@ impl Viewport {
         } else if sample >= self.scroll_offset + span {
             self.scroll_offset = sample + 1 - span;
         }
+        self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset(width));
     }
 
     /// Zoom by `factor` (>1.0 = zoom in, <1.0 = zoom out) while keeping `anchor_sample`
@@ -77,7 +95,7 @@ impl Viewport {
     }
 
     /// Sets the amplitude scale directly, clamped to the same bounds as the zoom-vertical
-    /// actions. Used for auto-fitting the initial vertical zoom to a file's peak amplitude.
+    /// actions. Used by auto vertical zoom to fit the display to a file's peak amplitude.
     pub fn set_amplitude_scale(&mut self, scale: f32) {
         self.amplitude_scale = scale.clamp(MIN_AMPLITUDE_SCALE, MAX_AMPLITUDE_SCALE);
     }
@@ -93,6 +111,7 @@ mod tests {
         // 44100 / 80 = 551.25
         assert!((viewport.samples_per_column - 551.25).abs() < 0.01);
         assert_eq!(viewport.scroll_offset, 0);
+        assert!(!viewport.auto_vertical_zoom);
     }
 
     #[test]
@@ -102,9 +121,23 @@ mod tests {
         assert!(viewport.samples_per_column >= 1.0);
     }
 
+    /// A zoomed-in viewport (span well under total_len) used to exercise scroll behavior
+    /// without the anti-overhang clamp trivially forcing scroll_offset to 0.
+    fn zoomed_in_viewport(total_len: usize, samples_per_column: f64) -> Viewport {
+        Viewport {
+            samples_per_column,
+            scroll_offset: 0,
+            amplitude_scale: 1.0,
+            min_samples_per_column: 1.0,
+            max_samples_per_column: total_len as f64,
+            total_len,
+            auto_vertical_zoom: false,
+        }
+    }
+
     #[test]
     fn ensure_visible_scrolls_left_when_cursor_before_view() {
-        let mut viewport = Viewport::fit_to_width(100_000, 80);
+        let mut viewport = zoomed_in_viewport(1_000_000, 100.0);
         viewport.scroll_offset = 5_000;
         viewport.ensure_visible(1_000, 80);
         assert_eq!(viewport.scroll_offset, 1_000);
@@ -112,10 +145,30 @@ mod tests {
 
     #[test]
     fn ensure_visible_scrolls_right_when_cursor_past_view() {
-        let mut viewport = Viewport::fit_to_width(100_000, 80);
+        let mut viewport = zoomed_in_viewport(1_000_000, 100.0);
         let span = viewport.span(80);
         viewport.ensure_visible(span + 500, 80);
         assert_eq!(viewport.scroll_offset, span + 500 + 1 - span.max(1));
+    }
+
+    #[test]
+    fn ensure_visible_never_overhangs_past_end_of_file() {
+        // total_len only slightly larger than one window's span: requesting a sample near
+        // the end must not push scroll_offset far enough to leave blank space on the right.
+        let mut viewport = zoomed_in_viewport(8_500, 100.0); // span(80) = 8000
+        viewport.ensure_visible(8_499, 80);
+        assert_eq!(viewport.scroll_offset, 500); // total_len - span, not 8499+1-8000=500 too — but never more
+        assert!(viewport.scroll_offset + viewport.span(80) <= viewport.total_len);
+    }
+
+    #[test]
+    fn whole_file_fits_in_one_window_forces_scroll_to_zero() {
+        // When span >= total_len, there's no room to scroll without overhanging — any
+        // nonzero scroll_offset would leave a gap on the right.
+        let mut viewport = Viewport::fit_to_width(100_000, 80); // span == total_len here
+        viewport.scroll_offset = 12_345; // simulate a stale/manual scroll position
+        viewport.ensure_visible(1_000, 80);
+        assert_eq!(viewport.scroll_offset, 0);
     }
 
     #[test]
@@ -128,6 +181,15 @@ mod tests {
 
         let col_after = (anchor as f64 - viewport.scroll_offset as f64) / viewport.samples_per_column;
         assert!((col_before - col_after).abs() < 1.0);
+    }
+
+    #[test]
+    fn zoom_never_leaves_a_trailing_gap() {
+        let mut viewport = Viewport::fit_to_width(1_000_000, 80);
+        for _ in 0..5 {
+            viewport.zoom_in(900_000, 80);
+            assert!(viewport.scroll_offset + viewport.span(80) <= viewport.total_len);
+        }
     }
 
     #[test]

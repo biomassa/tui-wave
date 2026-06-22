@@ -27,6 +27,7 @@ pub enum Action {
     Undo,
     Redo,
     Save,
+    ToggleAutoVerticalZoom,
 }
 
 pub fn map_key(key: KeyEvent) -> Option<Action> {
@@ -59,6 +60,7 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Down => Some(Action::ZoomOut),
         KeyCode::Char(' ') => Some(Action::TogglePlayback),
         KeyCode::Esc => Some(Action::Stop),
+        KeyCode::Char('a') | KeyCode::Char('A') => Some(Action::ToggleAutoVerticalZoom),
         _ => None,
     }
 }
@@ -169,6 +171,14 @@ mod tests {
         assert_eq!(
             map_key(key(KeyCode::Down, KeyModifiers::SHIFT)),
             Some(Action::ZoomOutVertical)
+        );
+    }
+
+    #[test]
+    fn plain_a_toggles_auto_vertical_zoom() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Some(Action::ToggleAutoVerticalZoom)
         );
     }
 
