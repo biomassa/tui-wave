@@ -24,6 +24,7 @@ impl Toolbar {
             ("Redo", Action::Redo),
             ("Zoom+", Action::ZoomIn),
             ("Zoom-", Action::ZoomOut),
+            ("Save", Action::Save),
         ];
         Self {
             buttons,

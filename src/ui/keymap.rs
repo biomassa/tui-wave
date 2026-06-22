@@ -26,6 +26,7 @@ pub enum Action {
     Paste,
     Undo,
     Redo,
+    Save,
 }
 
 pub fn map_key(key: KeyEvent) -> Option<Action> {
@@ -39,6 +40,7 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('z') if ctrl && shift => Some(Action::Redo),
         KeyCode::Char('z') if ctrl => Some(Action::Undo),
         KeyCode::Char('y') if ctrl => Some(Action::Redo),
+        KeyCode::Char('s') if ctrl => Some(Action::Save),
         KeyCode::Left if shift => Some(Action::ExtendSelectionLeft),
         KeyCode::Right if shift => Some(Action::ExtendSelectionRight),
         KeyCode::Left if ctrl => Some(Action::MoveCursorLeftFine),
@@ -137,6 +139,14 @@ mod tests {
         assert_eq!(
             map_key(key(KeyCode::Char('y'), KeyModifiers::CONTROL)),
             Some(Action::Redo)
+        );
+    }
+
+    #[test]
+    fn ctrl_s_saves() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Some(Action::Save)
         );
     }
 

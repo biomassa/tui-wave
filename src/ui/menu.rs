@@ -36,11 +36,18 @@ impl MenuBar {
             MenuItem {
                 label: "File",
                 mnemonic: 'F',
-                entries: vec![MenuEntry {
-                    label: "Quit",
-                    shortcut: "Q",
-                    action: Action::Quit,
-                }],
+                entries: vec![
+                    MenuEntry {
+                        label: "Save",
+                        shortcut: "Ctrl+S",
+                        action: Action::Save,
+                    },
+                    MenuEntry {
+                        label: "Quit",
+                        shortcut: "Q",
+                        action: Action::Quit,
+                    },
+                ],
             },
             MenuItem {
                 label: "Edit",
@@ -318,8 +325,8 @@ mod tests {
         for _ in 0..menu.items.len() {
             menu.move_right();
         }
-        // Wrapped all the way around back to the first menu.
-        assert_eq!(menu.activate(), Some(Action::Quit));
+        // Wrapped all the way around back to the first menu, first entry.
+        assert_eq!(menu.activate(), Some(Action::Save));
     }
 
     #[test]

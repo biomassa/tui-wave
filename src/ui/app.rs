@@ -15,6 +15,7 @@ use crate::commands::paste::paste_command;
 use crate::model::clipboard::Clipboard;
 use crate::model::document::Document;
 use crate::model::history::History;
+use crate::model::io::save_wav;
 use crate::model::selection::Selection;
 
 use super::keymap::{map_key, Action};
@@ -40,6 +41,9 @@ pub struct App {
     /// a redraw, so it's cached here instead.
     pub content_width: u16,
     pub waveform_area: Rect,
+    /// Set when Quit is requested with unsaved changes; intercepts the next keypress as a
+    /// y/n confirmation instead of routing it through the normal keymap.
+    pub quit_confirm: bool,
 }
 
 impl App {
@@ -58,6 +62,7 @@ impl App {
             toolbar: Toolbar::new(),
             content_width: 1,
             waveform_area: Rect::default(),
+            quit_confirm: false,
         }
     }
 
@@ -77,6 +82,10 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        if self.quit_confirm {
+            self.handle_quit_confirm_key(key);
+            return;
+        }
         if self.menu.is_open() {
             self.handle_menu_key(key);
             return;
@@ -110,6 +119,13 @@ impl App {
             }
             KeyCode::Esc => self.menu.close(),
             _ => {}
+        }
+    }
+
+    fn handle_quit_confirm_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => self.should_quit = true,
+            _ => self.quit_confirm = false,
         }
     }
 
@@ -180,7 +196,11 @@ impl App {
 
     fn handle_action(&mut self, action: Action) {
         if action == Action::Quit {
-            self.should_quit = true;
+            if self.document.as_ref().is_some_and(|doc| doc.dirty) {
+                self.quit_confirm = true;
+            } else {
+                self.should_quit = true;
+            }
             return;
         }
 
@@ -191,7 +211,12 @@ impl App {
 
         if matches!(
             action,
-            Action::Cut | Action::Copy | Action::Paste | Action::Undo | Action::Redo
+            Action::Cut
+                | Action::Copy
+                | Action::Paste
+                | Action::Undo
+                | Action::Redo
+                | Action::Save
         ) {
             self.handle_edit_action(action);
             return;
@@ -226,7 +251,8 @@ impl App {
             | Action::Copy
             | Action::Paste
             | Action::Undo
-            | Action::Redo => unreachable!(),
+            | Action::Redo
+            | Action::Save => unreachable!(),
             Action::MoveCursorLeft => {
                 document.playhead = document.playhead.saturating_sub(column_step.max(1));
             }
@@ -322,6 +348,13 @@ impl App {
             Action::Redo => {
                 self.history.redo(document);
             }
+            Action::Save => {
+                if let Some(path) = document.path.clone() {
+                    if save_wav(document, &path).is_ok() {
+                        document.dirty = false;
+                    }
+                }
+            }
             _ => unreachable!(),
         }
 
@@ -377,13 +410,14 @@ impl App {
         };
 
         let title = format!(
-            " tui-wave — {} ",
+            " tui-wave — {}{} ",
             document
                 .path
                 .as_ref()
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "untitled".to_string())
+                .unwrap_or_else(|| "untitled".to_string()),
+            if document.dirty { " *" } else { "" }
         );
         let outer = Block::default().title(title).borders(Borders::ALL);
         let inner = outer.inner(chrome.content);
@@ -421,5 +455,29 @@ impl App {
 
         self.toolbar.render(frame, chrome.toolbar);
         self.menu.render(frame, chrome.menu);
+
+        if self.quit_confirm {
+            render_quit_confirm(frame, area);
+        }
     }
+}
+
+fn render_quit_confirm(frame: &mut Frame, area: Rect) {
+    let text = " Unsaved changes — quit anyway? (y/n) ";
+    let width = (text.chars().count() as u16 + 2).min(area.width);
+    let height = 3.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Black).bg(Color::Yellow));
+    let paragraph = Paragraph::new(text)
+        .alignment(Alignment::Center)
+        .block(block);
+    frame.render_widget(paragraph, popup);
 }
