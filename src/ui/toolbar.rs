@@ -6,25 +6,30 @@ use ratatui::Frame;
 use super::keymap::Action;
 
 /// Toolbar buttons share the exact same `Action` as menu entries and keyboard shortcuts
-/// (see `MenuBar`) so there is one dispatch path, not three that can drift apart.
+/// (see `MenuBar`) so there is one dispatch path, not three that can drift apart. Each
+/// button shows its keyboard shortcut inline so every bound command is visible without
+/// opening a menu.
 pub struct Toolbar {
-    buttons: Vec<(&'static str, Action)>,
+    buttons: Vec<(&'static str, &'static str, Action)>,
     rects: Vec<Rect>,
 }
 
 impl Toolbar {
     pub fn new() -> Self {
         let buttons = vec![
-            ("Play/Pause", Action::TogglePlayback),
-            ("Stop", Action::Stop),
-            ("Cut", Action::Cut),
-            ("Copy", Action::Copy),
-            ("Paste", Action::Paste),
-            ("Undo", Action::Undo),
-            ("Redo", Action::Redo),
-            ("Zoom+", Action::ZoomIn),
-            ("Zoom-", Action::ZoomOut),
-            ("Save", Action::Save),
+            ("Play/Pause", "Space", Action::TogglePlayback),
+            ("Stop", "Esc", Action::Stop),
+            ("Cut", "^X", Action::Cut),
+            ("Copy", "^C", Action::Copy),
+            ("Paste", "^V", Action::Paste),
+            ("Undo", "^Z", Action::Undo),
+            ("Redo", "^Y", Action::Redo),
+            ("Zoom+", "Up", Action::ZoomIn),
+            ("Zoom-", "Dn", Action::ZoomOut),
+            ("VZoom+", "S+Up", Action::ZoomInVertical),
+            ("VZoom-", "S+Dn", Action::ZoomOutVertical),
+            ("Save", "^S", Action::Save),
+            ("Quit", "Q", Action::Quit),
         ];
         Self {
             buttons,
@@ -32,16 +37,31 @@ impl Toolbar {
         }
     }
 
+    /// Packs buttons left-to-right, wrapping to the next row when a button wouldn't fit,
+    /// and renders each row as its own `Line` — rather than relying on `Paragraph`'s word
+    /// wrap — so the rects used for mouse hit-testing can be computed by the exact same
+    /// logic that produced what's on screen, with no risk of the two drifting apart.
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         self.rects.clear();
-        let mut spans = Vec::with_capacity(self.buttons.len() * 2);
+        let mut lines = Vec::new();
+        let mut spans = Vec::new();
         let mut x = area.x;
-        for (label, _) in &self.buttons {
-            let text = format!("[{label}]");
+        let mut row = 0u16;
+
+        for (label, shortcut, _) in &self.buttons {
+            let text = format!("[{label}:{shortcut}]");
             let width = text.chars().count() as u16;
+            if x + width > area.x + area.width && x > area.x {
+                lines.push(Line::from(std::mem::take(&mut spans)));
+                row += 1;
+                x = area.x;
+            }
+            if row >= area.height {
+                break;
+            }
             self.rects.push(Rect {
                 x,
-                y: area.y,
+                y: area.y + row,
                 width,
                 height: 1,
             });
@@ -49,13 +69,15 @@ impl Toolbar {
             spans.push(Span::raw(" "));
             x += width + 1;
         }
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        lines.push(Line::from(spans));
+
+        frame.render_widget(Paragraph::new(lines), area);
     }
 
     pub fn hit_test(&self, x: u16, y: u16) -> Option<Action> {
         self.rects
             .iter()
             .position(|r| r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height)
-            .map(|i| self.buttons[i].1)
+            .map(|i| self.buttons[i].2)
     }
 }

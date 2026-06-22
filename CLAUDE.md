@@ -100,14 +100,39 @@ is defined, not three that can drift apart. `MenuBar` and `Toolbar` are custom w
 (ratatui has no native menu) that record their rendered `Rect`s each frame for mouse
 hit-testing.
 
-### Waveform rendering and viewport (`ui/viewport.rs`, `ui/widgets/waveform.rs`)
+### Waveform rendering, viewport, and the min/max cache
 
 `Viewport` holds `samples_per_column`/`scroll_offset`/`amplitude_scale` and is pure state —
-no rendering dependency, fully unit-testable. The waveform widget renders via min/max
-downsampling: each terminal column gets one min/max pair over its sample span, never
-iterating every sample regardless of zoom level. `Viewport::zoom` anchors a given sample
-to its current terminal column across a zoom change (zoom-to-cursor) rather than
-re-centering, which is what keeps zooming from feeling disorienting.
+no rendering dependency, fully unit-testable. `Viewport::zoom` anchors a given sample to
+its current terminal column across a zoom change (zoom-to-cursor) rather than re-centering,
+which is what keeps zooming from feeling disorienting.
+
+The waveform widget renders via min/max downsampling (one min/max pair per terminal
+column), but it does **not** scan raw samples to get there — it consults a `WaveformCache`
+(`ui/waveform_cache.rs`), a precomputed multi-resolution min/max pyramid (base bins of 64
+samples, each higher level reducing the previous by 16x) built once per channel whenever
+the document's sample data changes (load, cut, paste, undo, redo — see
+`App::rebuild_waveform_caches`). Scanning raw samples for the visible range on every frame
+made the editor unusably slow on large files at zoomed-out views (every redraw rescanned
+the whole visible range — for a multi-minute file, tens of millions of comparisons per
+frame); the cache bounds render cost to roughly the screen width regardless of file length
+or zoom level. `Viewport`'s initial `amplitude_scale` is also auto-fit from the cache's
+`peak()` at first render so a quiet recording doesn't render using only a sliver of the
+available height.
+
+Building the cache itself is an O(n) one-time cost — fast in a release build, noticeably
+slower in debug for very large files (multiple seconds for a 10-minute stereo file). Build
+with `cargo build --release` when working with large files; the per-keystroke render cost
+is unaffected by build profile once the cache exists.
+
+### Keybindings
+
+`ui/keymap.rs` is the single source of truth, and `ui/menu.rs`/`ui/toolbar.rs` must show
+shortcut text that matches it exactly (toolbar buttons render as `[Label:Shortcut]`).
+Convention, deliberately diverging from Audacity's Ctrl+1/Ctrl+3 zoom shortcuts in favor of
+an arrow-key-only scheme suited to a terminal with no reliable mouse/menu access: Left/Right
+move the cursor (Ctrl+ for single-sample, Shift+ to extend selection), Up/Down zoom
+horizontally, Shift+Up/Down zoom vertically.
 
 ## Deferred (architecture supports, not built)
 

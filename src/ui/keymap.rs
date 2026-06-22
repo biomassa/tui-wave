@@ -53,8 +53,10 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::PageDown => Some(Action::PageForward),
         KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::ZoomIn),
         KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::ZoomOut),
-        KeyCode::Up => Some(Action::ZoomInVertical),
-        KeyCode::Down => Some(Action::ZoomOutVertical),
+        KeyCode::Up if shift => Some(Action::ZoomInVertical),
+        KeyCode::Down if shift => Some(Action::ZoomOutVertical),
+        KeyCode::Up => Some(Action::ZoomIn),
+        KeyCode::Down => Some(Action::ZoomOut),
         KeyCode::Char(' ') => Some(Action::TogglePlayback),
         KeyCode::Esc => Some(Action::Stop),
         _ => None,
@@ -147,6 +149,26 @@ mod tests {
         assert_eq!(
             map_key(key(KeyCode::Char('s'), KeyModifiers::CONTROL)),
             Some(Action::Save)
+        );
+    }
+
+    #[test]
+    fn up_down_zoom_horizontal_shift_zooms_vertical() {
+        assert_eq!(
+            map_key(key(KeyCode::Up, KeyModifiers::NONE)),
+            Some(Action::ZoomIn)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Down, KeyModifiers::NONE)),
+            Some(Action::ZoomOut)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Up, KeyModifiers::SHIFT)),
+            Some(Action::ZoomInVertical)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Down, KeyModifiers::SHIFT)),
+            Some(Action::ZoomOutVertical)
         );
     }
 
