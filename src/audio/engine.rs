@@ -30,9 +30,12 @@ impl AudioEngine {
     /// a waveform shouldn't require a working audio device.
     pub fn try_new(channels: Vec<Vec<f32>>, sample_rate: u32) -> Option<Self> {
         // Probe device availability on the calling thread so `try_new` can report failure
-        // synchronously instead of the caller having to poll the spawned thread.
-        if DeviceSinkBuilder::open_default_sink().is_err() {
-            return None;
+        // synchronously instead of the caller having to poll the spawned thread. Silence
+        // log-on-drop first — otherwise dropping this throwaway probe immediately prints a
+        // warning to stderr, which corrupts the raw-mode terminal.
+        match DeviceSinkBuilder::open_default_sink() {
+            Ok(mut probe) => probe.log_on_drop(false),
+            Err(_) => return None,
         }
 
         let (cmd_tx, cmd_rx) = unbounded::<AudioCmd>();

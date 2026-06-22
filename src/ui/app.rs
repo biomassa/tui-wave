@@ -1,4 +1,6 @@
-use ratatui::crossterm::event::{self, Event, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
@@ -16,7 +18,10 @@ use crate::model::history::History;
 use crate::model::selection::Selection;
 
 use super::keymap::{map_key, Action};
+use super::layout::split_chrome;
+use super::menu::MenuBar;
 use super::terminal::Tui;
+use super::toolbar::Toolbar;
 use super::viewport::Viewport;
 use super::widgets::statusbar::StatusBar;
 use super::widgets::waveform::WaveformWidget;
@@ -28,6 +33,8 @@ pub struct App {
     pub audio: Option<AudioEngine>,
     pub history: History,
     pub clipboard: Clipboard,
+    pub menu: MenuBar,
+    pub toolbar: Toolbar,
     /// Width/area of the waveform content as of the last render; navigation/zoom/mouse
     /// actions need this and re-reading it from the terminal on every input would require
     /// a redraw, so it's cached here instead.
@@ -47,6 +54,8 @@ impl App {
             audio,
             history: History::new(),
             clipboard: Clipboard::default(),
+            menu: MenuBar::new(),
+            toolbar: Toolbar::new(),
             content_width: 1,
             waveform_area: Rect::default(),
         }
@@ -57,11 +66,7 @@ impl App {
             terminal.draw(|frame| self.render(frame))?;
             if event::poll(Duration::from_millis(16))? {
                 match event::read()? {
-                    Event::Key(key) => {
-                        if let Some(action) = map_key(key) {
-                            self.handle_action(action);
-                        }
-                    }
+                    Event::Key(key) => self.handle_key(key),
                     Event::Mouse(mouse) => self.handle_mouse(mouse),
                     _ => {}
                 }
@@ -69,6 +74,43 @@ impl App {
             self.sync_playhead_from_audio();
         }
         Ok(())
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) {
+        if self.menu.is_open() {
+            self.handle_menu_key(key);
+            return;
+        }
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            if let KeyCode::Char(c) = key.code {
+                if self.menu.open_by_mnemonic(c) {
+                    return;
+                }
+            }
+        }
+        if key.code == KeyCode::F(10) {
+            self.menu.open_first();
+            return;
+        }
+        if let Some(action) = map_key(key) {
+            self.handle_action(action);
+        }
+    }
+
+    fn handle_menu_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Left => self.menu.move_left(),
+            KeyCode::Right => self.menu.move_right(),
+            KeyCode::Up => self.menu.move_up(),
+            KeyCode::Down => self.menu.move_down(),
+            KeyCode::Enter => {
+                if let Some(action) = self.menu.activate() {
+                    self.handle_action(action);
+                }
+            }
+            KeyCode::Esc => self.menu.close(),
+            _ => {}
+        }
     }
 
     fn sync_playhead_from_audio(&mut self) {
@@ -87,6 +129,27 @@ impl App {
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             return;
         }
+
+        if let Some(idx) = self.menu.hit_test_bar(mouse.column, mouse.row) {
+            self.menu.toggle_open(idx);
+            return;
+        }
+        if self.menu.is_open() {
+            if let Some(entry_idx) = self.menu.hit_test_entry(mouse.column, mouse.row) {
+                self.menu.select_entry(entry_idx);
+                if let Some(action) = self.menu.activate() {
+                    self.handle_action(action);
+                }
+            } else {
+                self.menu.close();
+            }
+            return;
+        }
+        if let Some(action) = self.toolbar.hit_test(mouse.column, mouse.row) {
+            self.handle_action(action);
+            return;
+        }
+
         let area = self.waveform_area;
         if mouse.column < area.x
             || mouse.column >= area.x + area.width
@@ -297,6 +360,7 @@ impl App {
 
     fn render(&mut self, frame: &mut Frame) {
         let area: Rect = frame.area();
+        let chrome = split_chrome(area);
 
         let Some(document) = &self.document else {
             let block = Block::default()
@@ -306,7 +370,9 @@ impl App {
             let text = Paragraph::new("No file loaded — usage: tui-wave <file.wav>")
                 .alignment(Alignment::Center)
                 .block(block);
-            frame.render_widget(text, area);
+            frame.render_widget(text, chrome.content);
+            self.toolbar.render(frame, chrome.toolbar);
+            self.menu.render(frame, chrome.menu);
             return;
         };
 
@@ -320,8 +386,8 @@ impl App {
                 .unwrap_or_else(|| "untitled".to_string())
         );
         let outer = Block::default().title(title).borders(Borders::ALL);
-        let inner = outer.inner(area);
-        frame.render_widget(outer, area);
+        let inner = outer.inner(chrome.content);
+        frame.render_widget(outer, chrome.content);
 
         let [waveform_area, status_area] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
@@ -352,5 +418,8 @@ impl App {
         }
 
         frame.render_widget(StatusBar { document, viewport }, status_area);
+
+        self.toolbar.render(frame, chrome.toolbar);
+        self.menu.render(frame, chrome.menu);
     }
 }
