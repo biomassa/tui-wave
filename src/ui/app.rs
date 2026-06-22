@@ -160,7 +160,14 @@ impl App {
             return;
         };
         if audio.playing.load(Ordering::Relaxed) {
-            document.playhead = audio.position.load(Ordering::Relaxed);
+            let total_len = document.len_samples();
+            // The audio thread's position counter can land exactly on total_len (one past
+            // the last valid sample) once a track finishes playing — clamp so the playhead
+            // marker never scrolls itself just off the right edge.
+            document.playhead = audio
+                .position
+                .load(Ordering::Relaxed)
+                .min(total_len.saturating_sub(1));
             if let Some(viewport) = self.viewport.as_mut() {
                 viewport.ensure_visible(document.playhead, self.content_width);
             }
@@ -535,6 +542,7 @@ impl App {
                 viewport,
                 cache: self.waveform_caches.get(i),
                 selection,
+                playhead: document.playhead,
             };
             frame.render_widget(widget, channel_inner);
 
