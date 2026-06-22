@@ -1,9 +1,10 @@
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
 
 use crate::model::document::Document;
+use crate::ui::theme;
 use crate::ui::viewport::Viewport;
 
 pub struct StatusBar<'a> {
@@ -27,7 +28,7 @@ impl<'a> Widget for StatusBar<'a> {
             selection
         );
         Paragraph::new(Line::from(text))
-            .style(Style::default().fg(Color::Black).bg(Color::Gray))
+            .style(Style::default().fg(theme::STATUS_FG).bg(theme::STATUS_BG))
             .render(area, buf);
     }
 }

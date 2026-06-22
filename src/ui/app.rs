@@ -2,7 +2,8 @@ use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use std::sync::atomic::Ordering;
@@ -22,6 +23,7 @@ use super::keymap::{map_key, Action};
 use super::layout::split_chrome;
 use super::menu::MenuBar;
 use super::terminal::Tui;
+use super::theme;
 use super::toolbar::Toolbar;
 use super::viewport::Viewport;
 use super::waveform_cache::WaveformCache;
@@ -459,7 +461,8 @@ impl App {
             let block = Block::default()
                 .title(" tui-wave ")
                 .borders(Borders::ALL)
-                .style(Style::default().fg(Color::White));
+                .border_style(Style::default().fg(theme::BORDER))
+                .style(Style::default().fg(theme::CHROME_FG).bg(theme::BASE));
             let text = Paragraph::new("No file loaded — usage: tui-wave <file.wav>")
                 .alignment(Alignment::Center)
                 .block(block);
@@ -469,17 +472,27 @@ impl App {
             return;
         };
 
-        let title = format!(
-            " tui-wave — {}{} ",
+        let title_text = format!(
+            " tui-wave — {} ",
             document
                 .path
                 .as_ref()
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "untitled".to_string()),
-            if document.dirty { " *" } else { "" }
         );
-        let outer = Block::default().title(title).borders(Borders::ALL);
+        let title = Line::from(vec![
+            Span::styled(title_text, Style::default().fg(theme::BORDER)),
+            Span::styled(
+                if document.dirty { "* " } else { "" },
+                Style::default().fg(theme::DIRTY),
+            ),
+        ]);
+        let outer = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::BORDER))
+            .style(Style::default().bg(theme::BASE));
         let inner = outer.inner(chrome.content);
         frame.render_widget(outer, chrome.content);
 
@@ -578,7 +591,8 @@ fn render_quit_confirm(frame: &mut Frame, area: Rect) {
     frame.render_widget(ratatui::widgets::Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Black).bg(Color::Yellow));
+        .border_style(Style::default().fg(theme::WARNING_FG))
+        .style(Style::default().fg(theme::WARNING_FG).bg(theme::WARNING_BG));
     let paragraph = Paragraph::new(text)
         .alignment(Alignment::Center)
         .block(block);

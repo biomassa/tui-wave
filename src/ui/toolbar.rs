@@ -1,9 +1,11 @@
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use super::keymap::Action;
+use super::theme;
 
 /// Toolbar buttons share the exact same `Action` as menu entries and keyboard shortcuts
 /// (see `MenuBar`) so there is one dispatch path, not three that can drift apart. Each
@@ -49,9 +51,11 @@ impl Toolbar {
         let mut x = area.x;
         let mut row = 0u16;
 
+        let chrome = Style::default().fg(theme::CHROME_FG);
+        let shortcut_style = Style::default().fg(theme::SHORTCUT);
+
         for (label, shortcut, _) in &self.buttons {
-            let text = format!("[{label}:{shortcut}]");
-            let width = text.chars().count() as u16;
+            let width = (label.len() + shortcut.len() + 3) as u16; // "[" label ":" shortcut "]"
             if x + width > area.x + area.width && x > area.x {
                 lines.push(Line::from(std::mem::take(&mut spans)));
                 row += 1;
@@ -66,13 +70,19 @@ impl Toolbar {
                 width,
                 height: 1,
             });
-            spans.push(Span::raw(text));
-            spans.push(Span::raw(" "));
+            spans.push(Span::styled("[", chrome));
+            spans.push(Span::styled(*label, chrome));
+            spans.push(Span::styled(":", chrome));
+            spans.push(Span::styled(*shortcut, shortcut_style));
+            spans.push(Span::styled("] ", chrome));
             x += width + 1;
         }
         lines.push(Line::from(spans));
 
-        frame.render_widget(Paragraph::new(lines), area);
+        frame.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(theme::CHROME_BG)),
+            area,
+        );
     }
 
     pub fn hit_test(&self, x: u16, y: u16) -> Option<Action> {

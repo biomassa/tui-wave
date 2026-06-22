@@ -107,15 +107,40 @@ no rendering dependency, fully unit-testable. `Viewport::zoom` anchors a given s
 its current terminal column across a zoom change (zoom-to-cursor) rather than re-centering,
 which is what keeps zooming from feeling disorienting.
 
-The waveform widget always draws the playhead as a bold white vertical line
-(`waveform::playhead_column`), on top of the waveform, at whatever column
-`document.playhead` maps to — every code path that moves `playhead` (nav, playback sync,
-mouse seek) calls `viewport.ensure_visible` first (mouse seek is exempt since its target
-is computed from an already-visible column), which is what keeps the marker on-screen
-rather than scrolled out of view. `App::sync_playhead_from_audio` clamps the audio
-thread's position to `total_len - 1` — the position counter can land exactly on
+The waveform widget always draws the playhead as a bold vertical line
+(`waveform::playhead_column`, themed `theme::PLAYHEAD`), on top of the waveform, at
+whatever column `document.playhead` maps to — every code path that moves `playhead` (nav,
+playback sync, mouse seek) calls `viewport.ensure_visible` first (mouse seek is exempt
+since its target is computed from an already-visible column), which is what keeps the
+marker on-screen rather than scrolled out of view. `App::sync_playhead_from_audio` clamps
+the audio thread's position to `total_len - 1` — the position counter can land exactly on
 `total_len` once a track finishes playing, which would otherwise push the marker one
 column past the right edge.
+
+A bar's top/bottom edges land at fractional (sub-row) amplitude positions almost
+everywhere; floor/ceil-ing them to whole rows (the original implementation) throws away
+most of that precision, which matters most for quiet signals or a zoomed-in bar that's
+only 1-2 rows tall. The widget instead draws the boundary row at each edge with a
+lower-eighth-block glyph (`▁▂▃▄▅▆▇█`, `waveform::lower_eighth`) sized to its fractional
+coverage: directly for the top edge (a lower-N/8 glyph already fills "from the bottom up,"
+the right orientation there), and via an fg/bg swap on the complementary glyph for the
+bottom edge (filling "from the top down" using only bottom-aligned glyphs — the upper-N/8
+counterparts are real Unicode but live in the Legacy Computing Supplement block with much
+patchier font support, so the swap trick gets the same effect with universal compatibility
+instead). This is deliberately *not* Nerd Font glyphs, which are icon-style symbols (file
+types, git status, etc.) rather than graduated fill levels — eighth-blocks are standard
+Unicode and what terminal sparkline/plot tools already rely on.
+
+### Theme (`ui/theme.rs`)
+
+Catppuccin Mocha, restricted to the handful of colors actually in use and given semantic
+names (`theme::WAVEFORM`, `theme::SHORTCUT`, etc.) — change a role's color in one place
+rather than hunting down hex values scattered across widgets. Keyboard shortcuts in the
+menu and toolbar are always rendered in `theme::SHORTCUT` (peach) against the surrounding
+label's `theme::CHROME_FG` (text) specifically so a shortcut hint never blends into the
+label it's attached to. The one exception is a *selected* menu entry, which uses one
+uniform highlight color for the whole row rather than layering a third accent on top of
+it — two light pastel accents together risk a low-contrast clash.
 
 The waveform widget renders via min/max downsampling (one min/max pair per terminal
 column), but it does **not** scan raw samples to get there — it consults a `WaveformCache`
@@ -149,12 +174,15 @@ peak (`App::waveform_peak`, derived from the `WaveformCache`s) and re-fits after
 edit while it stays enabled.
 
 Each channel's pane reserves a `DB_GUTTER_WIDTH`-column gutter on both the left and right
-edge (`App::render`) showing a mirrored dB axis (0dB, -6, -12, -18, -24, -36) computed
+edge (`App::render`) showing a mirrored dB axis (0dB, -3, -6, -12, -18, -24) computed
 through the same amplitude→row mapping the waveform itself uses, so the marks always line
 up with where those levels actually render. `DbScaleWidget.reference_amplitude` is the
 pivot: 1.0 when auto vertical zoom is off (absolute dBFS — 0dB always means literal full
 scale), or the document's peak when it's on (dB relative to peak — 0dB always tracks
 wherever the loudest sample in the file actually is, which is the "dynamic" behavior).
+`DB_MARKS` is ordered most- to least-important; when the pane is too short to give every
+mark a distinct row, `draw_label`'s `claimed_rows` tracking makes the first mark to land on
+a row win rather than a later, less important mark silently overwriting it.
 
 ### Keybindings
 

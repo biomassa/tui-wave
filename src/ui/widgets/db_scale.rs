@@ -1,17 +1,20 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::widgets::Widget;
+
+use crate::ui::theme;
 
 /// Width reserved on each side of a channel's waveform pane for the dB scale gutter.
 pub const DB_GUTTER_WIDTH: u16 = 4;
 
 const DB_MARKS: [(f32, &str); 6] = [
     (0.0, "0dB"),
+    (-3.0, "-3"),
     (-6.0, "-6"),
     (-12.0, "-12"),
     (-18.0, "-18"),
     (-24.0, "-24"),
-    (-36.0, "-36"),
 ];
 
 /// Renders the vertical dB axis for one channel's waveform pane. `reference_amplitude` is
@@ -30,34 +33,47 @@ impl Widget for DbScaleWidget {
             return;
         }
 
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                buf[(x, y)].set_bg(theme::BASE);
+            }
+        }
+
         let mid_row = area.height as f64 / 2.0;
         let half_height = area.height as f64 / 2.0;
+        // Marks are listed most- to least-important (0dB first); when the pane is too
+        // short to give every mark a distinct row, the first one to claim a row wins
+        // rather than a later mark silently overwriting an earlier label.
+        let mut claimed_rows = vec![false; area.height as usize];
 
         for &(db, label) in DB_MARKS.iter() {
             let amplitude = self.reference_amplitude * 10f32.powf(db / 20.0);
             let scaled = (amplitude * self.amplitude_scale).clamp(0.0, 1.0) as f64;
 
             let top_row = (mid_row - scaled * half_height).round() as i64;
-            draw_label(buf, area, top_row, label);
+            draw_label(buf, area, top_row, label, &mut claimed_rows);
 
             let bottom_row = (mid_row + scaled * half_height).round() as i64;
             if bottom_row != top_row {
-                draw_label(buf, area, bottom_row, label);
+                draw_label(buf, area, bottom_row, label, &mut claimed_rows);
             }
         }
     }
 }
 
-fn draw_label(buf: &mut Buffer, area: Rect, row: i64, label: &str) {
-    if row < 0 || row >= area.height as i64 {
+fn draw_label(buf: &mut Buffer, area: Rect, row: i64, label: &str, claimed_rows: &mut [bool]) {
+    if row < 0 || row >= area.height as i64 || claimed_rows[row as usize] {
         return;
     }
+    claimed_rows[row as usize] = true;
     let y = area.y + row as u16;
     for (i, ch) in label.chars().enumerate() {
         if i as u16 >= area.width {
             break;
         }
-        buf[(area.x + i as u16, y)].set_char(ch);
+        buf[(area.x + i as u16, y)]
+            .set_char(ch)
+            .set_style(Style::default().fg(theme::DB_SCALE).bg(theme::BASE));
     }
 }
 
@@ -92,5 +108,21 @@ mod tests {
         widget.render(area, &mut buf);
         // mid=10, half=10, amplitude=0.5*1.0=0.5 => top_row = round(10 - 0.5*10) = 5
         assert_eq!(buf[(0, 5)].symbol(), "0");
+    }
+
+    #[test]
+    fn colliding_marks_keep_the_first_one_drawn() {
+        // A short pane where -18dB and -24dB round to the same row: the more important
+        // (earlier-listed) -18 mark must win, not get silently overwritten by -24.
+        let widget = DbScaleWidget {
+            amplitude_scale: 1.0,
+            reference_amplitude: 1.0,
+        };
+        let area = Rect::new(0, 0, DB_GUTTER_WIDTH, 18);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        assert_eq!(buf[(0, 8)].symbol(), "-");
+        assert_eq!(buf[(1, 8)].symbol(), "1");
+        assert_eq!(buf[(2, 8)].symbol(), "8");
     }
 }
