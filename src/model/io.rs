@@ -33,7 +33,7 @@ pub fn load_wav(path: impl AsRef<Path>) -> color_eyre::Result<Document> {
         channels,
         sample_rate: spec.sample_rate,
         selection: None,
-        playhead: 0,
+            cursor: 0,
         dirty: false,
         path: Some(path),
     })

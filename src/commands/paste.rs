@@ -23,13 +23,13 @@ impl Command for PasteCommand {
     fn execute(&mut self, doc: &mut Document) {
         doc.insert_range(self.at, self.data.clone());
         doc.selection = None;
-        doc.playhead = (self.at + self.inserted_len).min(doc.len_samples());
+        doc.cursor = (self.at + self.inserted_len).min(doc.len_samples());
         doc.dirty = true;
     }
 
     fn undo(&mut self, doc: &mut Document) {
         doc.remove_range(self.at..self.at + self.inserted_len);
-        doc.playhead = self.at;
+        doc.cursor = self.at;
         doc.dirty = true;
     }
 
@@ -52,7 +52,7 @@ mod tests {
             channels: vec![vec![1.0, 2.0, 3.0]],
             sample_rate: 44100,
             selection: None,
-            playhead: 0,
+            cursor: 0,
             dirty: false,
             path: None,
         };
@@ -61,7 +61,7 @@ mod tests {
         let mut cmd = PasteCommand::new(1, vec![vec![9.0, 9.0]]);
         cmd.execute(&mut doc);
         assert_eq!(doc.channels, vec![vec![1.0, 9.0, 9.0, 2.0, 3.0]]);
-        assert_eq!(doc.playhead, 3);
+        assert_eq!(doc.cursor, 3);
 
         cmd.undo(&mut doc);
         assert_eq!(doc.channels, original);

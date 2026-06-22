@@ -69,7 +69,7 @@ mod tests {
             channels: vec![vec![0.0]],
             sample_rate: 44100,
             selection: None,
-            playhead: 0,
+            cursor: 0,
             dirty: false,
             path: None,
         }
@@ -95,6 +95,33 @@ mod tests {
 
         history.redo(&mut document);
         assert_eq!(document.channels[0][0], 1.0);
+    }
+
+    #[test]
+    fn multiple_undos_undo_in_reverse_order() {
+        let mut history = History::new();
+        let mut document = Document {
+            channels: vec![vec![0.0, 1.0, 2.0, 3.0, 4.0]],
+            sample_rate: 44100,
+            selection: None,
+            cursor: 0,
+            dirty: false,
+            path: None,
+        };
+
+        history.apply(Box::new(IncrementCommand), &mut document);
+        assert_eq!(document.channels[0][0], 1.0);
+
+        history.apply(Box::new(IncrementCommand), &mut document);
+        assert_eq!(document.channels[0][0], 2.0);
+
+        history.undo(&mut document);
+        assert_eq!(document.channels[0][0], 1.0);
+
+        history.undo(&mut document);
+        assert_eq!(document.channels[0][0], 0.0);
+
+        assert!(!history.undo(&mut document));
     }
 
     #[test]

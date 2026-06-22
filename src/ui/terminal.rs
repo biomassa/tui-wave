@@ -1,4 +1,4 @@
-use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use ratatui::crossterm::event::DisableMouseCapture;
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -10,12 +10,20 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 pub fn init() -> color_eyre::Result<Tui> {
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
+    // Enable button-event tracking (mode 1002) for press/release/drag,
+    // and SGR encoding (mode 1006) for coordinates beyond 223 columns.
+    use std::io::Write;
+    write!(io::stdout(), "\x1b[?1002h\x1b[?1006h")?;
+    io::stdout().flush()?;
     let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     Ok(terminal)
 }
 
 pub fn restore() -> color_eyre::Result<()> {
+    use std::io::Write;
+    write!(io::stdout(), "\x1b[?1002l\x1b[?1006l")?;
+    io::stdout().flush()?;
     execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
     disable_raw_mode()?;
     Ok(())

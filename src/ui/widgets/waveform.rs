@@ -39,7 +39,10 @@ pub struct WaveformWidget<'a> {
     pub cache: Option<&'a WaveformCache>,
     /// Normalized (start, end) sample range to highlight, if any.
     pub selection: Option<(usize, usize)>,
-    pub playhead: usize,
+    /// The insertion point / playback start cursor (always visible as a yellow │).
+    pub cursor: usize,
+    /// The playback position (only `Some` during playback, rendered as red │).
+    pub playhead: Option<usize>,
 }
 
 /// The terminal column the playhead falls on, given the current scroll/zoom, or `None`
@@ -147,15 +150,28 @@ impl<'a> Widget for WaveformWidget<'a> {
             }
         }
 
-        // Drawn last so the playhead is always visible on top of the waveform, even where
-        // it overlaps an existing bar.
-        if let Some(col) = playhead_column(self.viewport, self.playhead, area.width) {
+        // Draw the cursor (insertion point) first so the playhead (drawn second) can
+        // visually override it at overlapping columns during playback.
+        if let Some(col) = playhead_column(self.viewport, self.cursor, area.width) {
             let x = area.x + col;
             for row in 0..area.height {
                 let y = area.y + row;
                 buf[(x, y)]
                     .set_char('│')
-                    .set_style(Style::default().fg(theme::PLAYHEAD).add_modifier(Modifier::BOLD));
+                    .set_style(Style::default().fg(theme::CURSOR).add_modifier(Modifier::BOLD));
+            }
+        }
+
+        // Draw the playback playhead on top — only present during active playback.
+        if let Some(ph) = self.playhead {
+            if let Some(col) = playhead_column(self.viewport, ph, area.width) {
+                let x = area.x + col;
+                for row in 0..area.height {
+                    let y = area.y + row;
+                    buf[(x, y)]
+                        .set_char('│')
+                        .set_style(Style::default().fg(theme::PLAYHEAD).add_modifier(Modifier::BOLD));
+                }
             }
         }
     }

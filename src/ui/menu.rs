@@ -44,6 +44,16 @@ impl MenuBar {
                         action: Action::Save,
                     },
                     MenuEntry {
+                        label: "Save As",
+                        shortcut: "Ctrl+Shift+S",
+                        action: Action::SaveAs,
+                    },
+                    MenuEntry {
+                        label: "Save All",
+                        shortcut: "Ctrl+L",
+                        action: Action::SaveAll,
+                    },
+                    MenuEntry {
                         label: "Quit",
                         shortcut: "Q",
                         action: Action::Quit,
@@ -65,6 +75,11 @@ impl MenuBar {
                         action: Action::Copy,
                     },
                     MenuEntry {
+                        label: "Delete",
+                        shortcut: "Del",
+                        action: Action::Delete,
+                    },
+                    MenuEntry {
                         label: "Paste",
                         shortcut: "Ctrl+V",
                         action: Action::Paste,
@@ -78,6 +93,26 @@ impl MenuBar {
                         label: "Redo",
                         shortcut: "Ctrl+Y",
                         action: Action::Redo,
+                    },
+                    MenuEntry {
+                        label: "Reverse",
+                        shortcut: "Ctrl+R",
+                        action: Action::Reverse,
+                    },
+                    MenuEntry {
+                        label: "Normalize",
+                        shortcut: "Ctrl+N",
+                        action: Action::Normalize,
+                    },
+                    MenuEntry {
+                        label: "Gain",
+                        shortcut: "G",
+                        action: Action::Gain,
+                    },
+                    MenuEntry {
+                        label: "Clear Selection",
+                        shortcut: "Ctrl+D",
+                        action: Action::ClearSelection,
                     },
                 ],
             },
@@ -110,6 +145,11 @@ impl MenuBar {
                         shortcut: "A",
                         action: Action::ToggleAutoVerticalZoom,
                     },
+                    MenuEntry {
+                        label: "Zero-Crossing Snap",
+                        shortcut: "Z",
+                        action: Action::ToggleZeroSnap,
+                    },
                 ],
             },
             MenuItem {
@@ -125,6 +165,11 @@ impl MenuBar {
                         label: "Stop",
                         shortcut: "Esc",
                         action: Action::Stop,
+                    },
+                    MenuEntry {
+                        label: "Loop Playback",
+                        shortcut: "L",
+                        action: Action::ToggleLoop,
                     },
                 ],
             },
