@@ -6,6 +6,15 @@ const ZERO_CROSSING_MAX_OFFSET: usize = 256;
 
 use super::selection::Selection;
 
+/// A named position on the timeline (a WAV `cue ` point with an `adtl`/`labl` label).
+/// `position` is a sample frame index. Markers ride along with the audio: editing samples
+/// before a marker shifts it so it stays anchored to the same audible point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Marker {
+    pub position: usize,
+    pub label: String,
+}
+
 /// An open audio file. Holds no UI/audio-device state — pure data, fully unit-testable
 /// without a terminal or audio backend.
 pub struct Document {
@@ -16,6 +25,11 @@ pub struct Document {
     pub cursor: usize,
     pub dirty: bool,
     pub path: Option<PathBuf>,
+    /// Timeline markers, kept sorted by position. Loaded from / saved to WAV cue chunks.
+    pub markers: Vec<Marker>,
+    /// Raw BWF `bext` chunk bytes, preserved verbatim across a load→save round-trip so
+    /// editing a broadcast WAV doesn't strip its metadata. `None` for plain WAVs.
+    pub bext: Option<Vec<u8>>,
 }
 
 impl Document {
@@ -122,24 +136,45 @@ impl Document {
     }
 
     /// Removes `range` from every channel in place and returns the removed samples (one
-    /// Vec per channel), so the caller can store them for undo.
+    /// Vec per channel), so the caller can store them for undo. Markers shift with the cut:
+    /// those after the range move left, those inside it collapse to the cut point.
     pub fn remove_range(&mut self, range: Range<usize>) -> Vec<Vec<f32>> {
-        self.channels
+        let len = self.len_samples();
+        let start = range.start.min(len);
+        let end = range.end.min(len);
+        let removed = end.saturating_sub(start);
+        let out = self
+            .channels
             .iter_mut()
             .map(|channel| {
                 let end = range.end.min(channel.len());
                 let start = range.start.min(end);
                 channel.splice(start..end, std::iter::empty()).collect()
             })
-            .collect()
+            .collect();
+        for m in &mut self.markers {
+            if m.position >= end {
+                m.position -= removed;
+            } else if m.position > start {
+                m.position = start;
+            }
+        }
+        out
     }
 
     /// Inserts `data` (one Vec per channel) at `at` in every channel. Channels beyond
-    /// `data`'s length are left untouched.
+    /// `data`'s length are left untouched. Markers at or after `at` shift right by the
+    /// inserted length so they stay anchored to the same audio.
     pub fn insert_range(&mut self, at: usize, data: Vec<Vec<f32>>) {
+        let count = data.first().map(|c| c.len()).unwrap_or(0);
         for (channel, new_samples) in self.channels.iter_mut().zip(data) {
             let at = at.min(channel.len());
             channel.splice(at..at, new_samples);
+        }
+        for m in &mut self.markers {
+            if m.position >= at {
+                m.position += count;
+            }
         }
     }
 }
@@ -156,6 +191,8 @@ mod tests {
             cursor: 0,
             dirty: false,
             path: None,
+            markers: Vec::new(),
+            bext: None,
         }
     }
 
@@ -192,6 +229,32 @@ mod tests {
         // The snapped range should still produce a valid non-empty range.
         assert!(snapped_start < snapped_end);
         assert!(snapped_end <= 5000);
+    }
+
+    #[test]
+    fn remove_range_shifts_markers() {
+        let mut document = doc(vec![0.0; 100]);
+        document.markers = vec![
+            Marker { position: 10, label: "a".into() },  // before cut
+            Marker { position: 30, label: "b".into() },  // inside cut [20,40)
+            Marker { position: 60, label: "c".into() },  // after cut
+        ];
+        document.remove_range(20..40); // removes 20 samples
+        assert_eq!(document.markers[0].position, 10); // unchanged
+        assert_eq!(document.markers[1].position, 20); // collapsed to cut point
+        assert_eq!(document.markers[2].position, 40); // shifted left by 20
+    }
+
+    #[test]
+    fn insert_range_shifts_markers() {
+        let mut document = doc(vec![0.0; 50]);
+        document.markers = vec![
+            Marker { position: 10, label: "a".into() },
+            Marker { position: 30, label: "b".into() },
+        ];
+        document.insert_range(20, vec![vec![0.0; 5]]); // insert 5 at 20
+        assert_eq!(document.markers[0].position, 10); // before insert, unchanged
+        assert_eq!(document.markers[1].position, 35); // after insert, +5
     }
 
     #[test]

@@ -44,6 +44,12 @@ impl History {
         self.undo_stack.push(cmd);
         true
     }
+
+    /// Label of the most recently applied (and not-yet-undone) command, for display in
+    /// the status bar. `None` when the undo stack is empty.
+    pub fn last_label(&self) -> Option<&str> {
+        self.undo_stack.last().map(|cmd| cmd.label())
+    }
 }
 
 #[cfg(test)]
@@ -72,6 +78,8 @@ mod tests {
             cursor: 0,
             dirty: false,
             path: None,
+            markers: Vec::new(),
+            bext: None,
         }
     }
 
@@ -107,6 +115,8 @@ mod tests {
             cursor: 0,
             dirty: false,
             path: None,
+            markers: Vec::new(),
+            bext: None,
         };
 
         history.apply(Box::new(IncrementCommand), &mut document);

@@ -55,6 +55,8 @@ mod tests {
             cursor: 0,
             dirty: false,
             path: None,
+            markers: Vec::new(),
+            bext: None,
         };
         let original = doc.channels.clone();
 

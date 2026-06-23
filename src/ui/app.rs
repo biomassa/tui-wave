@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -13,16 +13,20 @@ use ratatui::Frame;
 use crate::audio::engine::AudioEngine;
 use crate::commands::cut::cut_command;
 use crate::commands::delete::delete_command;
+use crate::commands::fade::{fade_command, FadeCurve};
 use crate::commands::gain::gain_command;
 use crate::commands::paste::paste_command;
 use crate::commands::normalize::normalize_command;
+use crate::commands::resample::resample_command;
 use crate::commands::reverse::reverse_command;
+use crate::commands::trim::trim_command;
 use crate::model::clipboard::Clipboard;
-use crate::model::document::Document;
+use crate::model::document::{Document, Marker};
 use crate::model::history::History;
-use crate::model::io::save_wav;
+use crate::model::io::{save_wav, save_wav_with, BitDepth};
 use crate::model::selection::Selection;
 
+use super::buffer_panel::BufferPanel;
 use super::file_panel::FilePanel;
 use super::keymap::{map_key, Action};
 use super::layout::split_chrome;
@@ -39,14 +43,29 @@ use super::widgets::waveform::WaveformWidget;
 enum Dialog {
     Normalize { buffer: String },
     Gain { buffer: String, tanh_clip: bool },
+    FadeIn { curve: FadeCurve },
+    FadeOut { curve: FadeCurve },
+    Resample { buffer: String, current_rate: u32 },
+    RenameMarker { index: usize, buffer: String },
 }
 
 pub struct App {
     pub should_quit: bool,
-    pub document: Option<Document>,
+    /// All open documents (buffers). Index 0 is always the first file loaded; subsequent
+    /// entries are created by "Copy to New" or loading additional files.
+    pub documents: Vec<Document>,
+    /// Index into `documents` for the currently-active buffer.
+    pub active_document: usize,
     pub viewport: Option<Viewport>,
     pub audio: Option<AudioEngine>,
-    pub history: History,
+    /// Sample rate the current audio engine was built with. The engine captures the rate at
+    /// construction, so an operation that changes `Document.sample_rate` (resample, and its
+    /// undo/redo) must rebuild the engine rather than just `reload` it.
+    audio_sample_rate: Option<u32>,
+    /// One undo/redo stack per open document, kept index-parallel to `documents`. Undo
+    /// must never cross buffers — each `Command` stores sample data from the document it
+    /// was applied to, so replaying it against a different document would corrupt it.
+    pub histories: Vec<History>,
     pub clipboard: Clipboard,
     pub menu: MenuBar,
     pub toolbar: Toolbar,
@@ -64,12 +83,24 @@ pub struct App {
     pub quit_confirm: bool,
     /// Sample position where the current mouse-down started (for drag-to-select).
     mouse_down_anchor: Option<usize>,
+    /// Index of the marker currently being dragged with the mouse, if any.
+    dragging_marker: Option<usize>,
+    /// Rendered marker-label rects (label box + marker index) for mouse hit-testing.
+    marker_label_rects: Vec<(Rect, usize)>,
+    /// Time/cell of the last left mouse-down, used to detect double-clicks.
+    last_click: Option<(Instant, u16, u16)>,
     /// File panel on the left showing WAV files in the current directory.
     pub file_panel: FilePanel,
+    /// Buffer panel showing all open documents.
+    pub buffer_panel: BufferPanel,
     /// When true, the user is typing a Save-As path in a prompt overlay.
     pub save_as_active: bool,
     /// Buffer for the Save-As path being typed.
     pub save_as_path: String,
+    /// Output bit depth for the pending Save As (Tab cycles it in the prompt).
+    pub save_as_depth: BitDepth,
+    /// Whether to dither the pending Save As (Ctrl+D toggles; only meaningful for int depths).
+    pub save_as_dither: bool,
     /// When true, destructive operations snap selection boundaries to zero crossings.
     pub snap_to_zero: bool,
     /// When true, playback loops — the full file if no selection, or the selection range.
@@ -89,19 +120,25 @@ impl App {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let file_panel = FilePanel::new(dir);
 
-        let audio = document
-            .as_ref()
+        let documents = match document {
+            Some(doc) => vec![doc],
+            None => Vec::new(),
+        };
+        let audio = documents.first()
             .and_then(|doc| AudioEngine::try_new(doc.channels.clone(), doc.sample_rate));
-        let waveform_caches = document
-            .as_ref()
+        let audio_sample_rate = documents.first().map(|doc| doc.sample_rate);
+        let waveform_caches = documents.first()
             .map(|doc| doc.channels.iter().map(|c| WaveformCache::build(c)).collect())
             .unwrap_or_default();
+        let histories = documents.iter().map(|_| History::new()).collect();
         Self {
             should_quit: false,
-            document,
+            documents,
+            active_document: 0,
             viewport: None,
             audio,
-            history: History::new(),
+            audio_sample_rate,
+            histories,
             clipboard: Clipboard::default(),
             menu: MenuBar::new(),
             toolbar: Toolbar::new(),
@@ -110,13 +147,58 @@ impl App {
             waveform_area: Rect::default(),
             quit_confirm: false,
             mouse_down_anchor: None,
+            dragging_marker: None,
+            marker_label_rects: Vec::new(),
+            last_click: None,
             file_panel,
+            buffer_panel: BufferPanel::new(),
             save_as_active: false,
             save_as_path: String::new(),
+            save_as_depth: BitDepth::Float32,
+            save_as_dither: false,
             snap_to_zero: true,
             loop_playback: false,
             dialog: None,
             playhead_position: None,
+        }
+    }
+
+    fn active_doc(&self) -> Option<&Document> {
+        self.documents.get(self.active_document)
+    }
+
+    fn active_doc_mut(&mut self) -> Option<&mut Document> {
+        self.documents.get_mut(self.active_document)
+    }
+
+    /// Pushes a freshly-opened document and its (empty) history, keeping the two vecs
+    /// index-parallel, and makes it the active buffer.
+    fn push_document(&mut self, document: Document) {
+        self.documents.push(document);
+        self.histories.push(History::new());
+        self.active_document = self.documents.len() - 1;
+    }
+
+    fn buffer_names(&self) -> Vec<String> {
+        self.documents.iter().enumerate().map(|(i, doc)| {
+            let prefix = if doc.dirty { "*" } else { "" };
+            let name = match doc.path.as_ref() {
+                Some(p) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "untitled".to_string()),
+                None => format!("_UNSAVED_{:03}", i + 1),
+            };
+            format!("{}{}", prefix, name)
+        }).collect()
+    }
+
+    fn switch_to_buffer(&mut self, index: usize) {
+        if index >= self.documents.len() || index == self.active_document {
+            return;
+        }
+        self.active_document = index;
+        if self.active_doc().is_some() {
+            self.rebuild_audio();
+            self.rebuild_waveform_caches();
+            self.viewport = None;
         }
     }
 
@@ -126,7 +208,7 @@ impl App {
         if !self.loop_playback {
             return None;
         }
-        self.document.as_ref().map(|doc| {
+        self.active_doc().map(|doc| {
             doc.selection
                 .map(|sel| sel.normalized())
                 .unwrap_or((0, doc.len_samples()))
@@ -137,7 +219,7 @@ impl App {
     /// so it's cheap enough to call every frame.
     fn visible_peak(&self) -> f32 {
         visible_peak_raw(
-            self.document.as_ref(),
+            self.active_doc(),
             self.viewport.as_ref(),
             &self.waveform_caches,
             self.content_width,
@@ -146,8 +228,7 @@ impl App {
 
     fn rebuild_waveform_caches(&mut self) {
         self.waveform_caches = self
-            .document
-            .as_ref()
+            .active_doc()
             .map(|doc| doc.channels.iter().map(|c| WaveformCache::build(c)).collect())
             .unwrap_or_default();
     }
@@ -219,27 +300,50 @@ impl App {
         }
         // File panel keyboard focus
         if self.file_panel.focused {
-            match key.code {
-                KeyCode::Up => self.file_panel.move_up(),
-                KeyCode::Down => self.file_panel.move_down(),
-                KeyCode::Home => self.file_panel.move_top(),
-                KeyCode::End => self.file_panel.move_bottom(),
-                KeyCode::Enter => self.open_selected_file(),
+            let handled = match key.code {
+                KeyCode::Up => { self.file_panel.move_up(); true }
+                KeyCode::Down => { self.file_panel.move_down(); true }
+                KeyCode::Home => { self.file_panel.move_top(); true }
+                KeyCode::End => { self.file_panel.move_bottom(); true }
+                KeyCode::Enter => { self.open_selected_file(); true }
                 KeyCode::Char('/') => {
                     self.file_panel.filtering = true;
                     self.file_panel.filter.clear();
+                    true
                 }
                 KeyCode::Tab => {
                     self.file_panel.focused = false;
+                    self.buffer_panel.focused = true;
+                    true
                 }
-                KeyCode::Esc => {
-                    self.file_panel.focused = false;
-                }
-                _ => {}
+                KeyCode::Esc => { self.file_panel.focused = false; true }
+                _ => false,
+            };
+            if handled {
+                return;
             }
-            return;
         }
-        // Tab or '/' while not focused → focus the panel or start filtering
+        // Buffer panel keyboard focus
+        if self.buffer_panel.focused {
+            let handled = match key.code {
+                KeyCode::Up => {
+                    self.switch_to_buffer(self.active_document.saturating_sub(1));
+                    true
+                }
+                KeyCode::Down => {
+                    let max = self.documents.len().saturating_sub(1);
+                    self.switch_to_buffer((self.active_document + 1).min(max));
+                    true
+                }
+                KeyCode::Tab => { self.buffer_panel.focused = false; true }
+                KeyCode::Esc => { self.buffer_panel.focused = false; true }
+                _ => false,
+            };
+            if handled {
+                return;
+            }
+        }
+        // Tab when nothing is focused → focus the file panel
         if key.code == KeyCode::Tab {
             self.file_panel.focused = true;
             return;
@@ -272,6 +376,12 @@ impl App {
 
     fn handle_quit_confirm_key(&mut self, key: KeyEvent) {
         match key.code {
+            // Save every dirty buffer that has a path, then quit. Buffers without a path are
+            // left unsaved (Save All can't choose names) — but we still quit.
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                self.save_all();
+                self.should_quit = true;
+            }
             KeyCode::Char('y') | KeyCode::Char('Y') => self.should_quit = true,
             _ => self.quit_confirm = false,
         }
@@ -286,8 +396,10 @@ impl App {
                 } else {
                     self.file_panel.directory.join(&self.save_as_path)
                 };
-                if let Some(document) = self.document.as_mut() {
-                    if save_wav(document, &path).is_ok() {
+                let depth = self.save_as_depth;
+                let dither = self.save_as_dither && depth.supports_dither();
+                if let Some(document) = self.active_doc_mut() {
+                    if save_wav_with(document, &path, depth, dither).is_ok() {
                         document.path = Some(path.clone());
                         document.dirty = false;
                         self.file_panel.mark_dirty(&path, false);
@@ -300,6 +412,13 @@ impl App {
             KeyCode::Esc => {
                 self.save_as_active = false;
                 self.save_as_path.clear();
+            }
+            // Tab cycles bit depth; Ctrl+D toggles dither (Ctrl keeps it out of the path text).
+            KeyCode::Tab => {
+                self.save_as_depth = self.save_as_depth.next();
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.save_as_dither = !self.save_as_dither;
             }
             KeyCode::Backspace => {
                 self.save_as_path.pop();
@@ -314,21 +433,33 @@ impl App {
     fn handle_dialog_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter => {
-                let (target_db, tanh_clip) = match self.dialog.take() {
+                match self.dialog.take() {
                     Some(Dialog::Normalize { buffer }) => {
                         let db = buffer.parse::<f32>().unwrap_or(-1.0).min(0.0);
-                        (Some(db), None)
+                        self.apply_normalize(db);
                     }
                     Some(Dialog::Gain { buffer, tanh_clip }) => {
                         let db = buffer.parse::<f32>().unwrap_or(0.0);
-                        (Some(db), Some(tanh_clip))
+                        self.apply_gain(db, tanh_clip);
                     }
-                    None => (None, None),
-                };
-                if let Some(db) = target_db {
-                    self.apply_normalize(db);
-                } else if let Some(tc) = tanh_clip {
-                    self.apply_gain(0.0, tc);
+                    Some(Dialog::FadeIn { curve }) => self.apply_fade(true, 100.0, curve),
+                    Some(Dialog::FadeOut { curve }) => self.apply_fade(false, 100.0, curve),
+                    Some(Dialog::Resample { buffer, current_rate }) => {
+                        let rate = buffer.trim().parse::<u32>().unwrap_or(current_rate);
+                        self.apply_resample(rate);
+                    }
+                    Some(Dialog::RenameMarker { index, buffer }) => {
+                        if let Some(doc) = self.documents.get_mut(self.active_document) {
+                            if let Some(marker) = doc.markers.get_mut(index) {
+                                marker.label = buffer;
+                                doc.dirty = true;
+                                if let Some(path) = doc.path.clone() {
+                                    self.file_panel.mark_dirty(&path, true);
+                                }
+                            }
+                        }
+                    }
+                    None => {}
                 }
             }
             KeyCode::Esc => {
@@ -339,21 +470,51 @@ impl App {
                     match dialog {
                         Dialog::Normalize { buffer } => { buffer.pop(); }
                         Dialog::Gain { buffer, .. } => { buffer.pop(); }
+                        Dialog::Resample { buffer, .. } => { buffer.pop(); }
+                        Dialog::RenameMarker { buffer, .. } => { buffer.pop(); }
+                        Dialog::FadeIn { .. } => {}
+                        Dialog::FadeOut { .. } => {}
                     }
                 }
             }
             KeyCode::Tab => {
                 if let Some(dialog) = self.dialog.as_mut() {
-                    if let Dialog::Gain { tanh_clip, .. } = dialog {
-                        *tanh_clip = !*tanh_clip;
+                    match dialog {
+                        Dialog::Gain { tanh_clip, .. } => *tanh_clip = !*tanh_clip,
+                        Dialog::FadeIn { curve, .. } => *curve = curve.next(),
+                        Dialog::FadeOut { curve, .. } => *curve = curve.next(),
+                        _ => {}
                     }
+                }
+            }
+            // Marker rename is free text — accept any printable character.
+            KeyCode::Char(c)
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && matches!(self.dialog, Some(Dialog::RenameMarker { .. })) =>
+            {
+                if let Some(Dialog::RenameMarker { buffer, .. }) = self.dialog.as_mut() {
+                    buffer.push(c);
                 }
             }
             KeyCode::Char(c) if c == '-' || c == '.' || c.is_ascii_digit() => {
                 if let Some(dialog) = self.dialog.as_mut() {
                     match dialog {
-                        Dialog::Normalize { buffer } => buffer.push(c),
-                        Dialog::Gain { buffer, .. } => buffer.push(c),
+                        Dialog::Normalize { buffer } => {
+                            if *buffer == "-1.0" { buffer.clear(); }
+                            buffer.push(c);
+                        }
+                        Dialog::Gain { buffer, .. } => {
+                            if *buffer == "0.0" { buffer.clear(); }
+                            buffer.push(c);
+                        }
+                        // Sample rate is a positive integer — accept digits only.
+                        Dialog::Resample { buffer, .. } if c.is_ascii_digit() => {
+                            buffer.push(c);
+                        }
+                        Dialog::Resample { .. } => {}
+                        Dialog::RenameMarker { .. } => {} // handled by the free-text arm above
+                        Dialog::FadeIn { .. } => {}
+                        Dialog::FadeOut { .. } => {},
                     }
                 }
             }
@@ -361,68 +522,80 @@ impl App {
         }
     }
 
-    fn apply_normalize(&mut self, target_db: f32) {
-        let Some(document) = self.document.as_mut() else { return };
-        let sel = match document.selection {
-            Some(s) => s,
-            None => return,
-        };
-        let (start, end) = sel.normalized();
-        if start >= end {
-            return;
+    /// The sample range an operation should act on: the current selection if one exists,
+    /// otherwise the whole document. Optionally snapped to zero crossings. Returns `None`
+    /// for an empty document or a degenerate (empty) range.
+    fn operation_range(&self, idx: usize, snap: bool) -> Option<(usize, usize)> {
+        let doc = self.documents.get(idx)?;
+        let total_len = doc.len_samples();
+        if total_len == 0 {
+            return None;
         }
-        let (start, end) = if self.snap_to_zero {
-            document.snap_range_to_zero_crossing(start, end)
+        let (start, end) = doc
+            .selection
+            .map(|sel| sel.normalized())
+            .unwrap_or((0, total_len));
+        let (start, end) = if snap {
+            doc.snap_range_to_zero_crossing(start, end)
         } else {
             (start, end)
         };
-        if start < end {
-            self.history.apply(normalize_command(start, end, target_db), document);
-            if let Some(audio) = &self.audio {
-                audio.reload(document.channels.clone());
+        (start < end).then_some((start, end))
+    }
+
+    /// Shared tail for every operation that mutates sample data on `idx` (which is always
+    /// the active document): mark the file dirty, hand the new buffer to the audio engine,
+    /// rebuild the waveform caches, and re-fit auto vertical zoom if it's on.
+    fn after_sample_mutation(&mut self, idx: usize) {
+        if self.documents[idx].dirty {
+            if let Some(path) = self.documents[idx].path.clone() {
+                self.file_panel.mark_dirty(&path, true);
             }
-            self.rebuild_waveform_caches();
-            if self.viewport.as_ref().is_some_and(|v| v.auto_vertical_zoom) {
-                let peak = self.visible_peak();
-                if peak > 0.0001 {
-                    if let Some(viewport) = self.viewport.as_mut() {
-                        viewport.set_amplitude_scale(0.95 / peak);
-                    }
+        }
+        // A rate change (resample, or its undo/redo) needs a fresh engine since the rate is
+        // captured at construction; otherwise a cheap data reload is enough.
+        if self.audio_sample_rate != Some(self.documents[idx].sample_rate) {
+            self.rebuild_audio();
+        } else if let Some(audio) = &self.audio {
+            audio.reload(self.documents[idx].channels.clone());
+        }
+        self.rebuild_waveform_caches();
+        if self.viewport.as_ref().is_some_and(|v| v.auto_vertical_zoom) {
+            let peak = self.visible_peak();
+            if peak > 0.0001 {
+                if let Some(viewport) = self.viewport.as_mut() {
+                    viewport.set_amplitude_scale(0.95 / peak);
                 }
             }
         }
     }
 
+    fn apply_normalize(&mut self, target_db: f32) {
+        let idx = self.active_document;
+        let Some((start, end)) = self.operation_range(idx, self.snap_to_zero) else { return };
+        self.histories[idx].apply(normalize_command(start, end, target_db), &mut self.documents[idx]);
+        self.after_sample_mutation(idx);
+    }
+
     fn apply_gain(&mut self, gain_db: f32, tanh_clip: bool) {
-        let Some(document) = self.document.as_mut() else { return };
-        let sel = match document.selection {
-            Some(s) => s,
-            None => return,
-        };
-        let (start, end) = sel.normalized();
-        if start >= end {
+        let idx = self.active_document;
+        let Some((start, end)) = self.operation_range(idx, self.snap_to_zero) else { return };
+        self.histories[idx].apply(gain_command(start, end, gain_db, tanh_clip), &mut self.documents[idx]);
+        self.after_sample_mutation(idx);
+    }
+
+    /// Resamples the whole active document to `target_rate`. The sample count changes
+    /// drastically, so the viewport is dropped to refit; `after_sample_mutation` notices the
+    /// rate change and rebuilds the audio engine.
+    fn apply_resample(&mut self, target_rate: u32) {
+        let idx = self.active_document;
+        let Some(doc) = self.documents.get(idx) else { return };
+        if target_rate == 0 || target_rate == doc.sample_rate || doc.len_samples() == 0 {
             return;
         }
-        let (start, end) = if self.snap_to_zero {
-            document.snap_range_to_zero_crossing(start, end)
-        } else {
-            (start, end)
-        };
-        if start < end {
-            self.history.apply(gain_command(start, end, gain_db, tanh_clip), document);
-            if let Some(audio) = &self.audio {
-                audio.reload(document.channels.clone());
-            }
-            self.rebuild_waveform_caches();
-            if self.viewport.as_ref().is_some_and(|v| v.auto_vertical_zoom) {
-                let peak = self.visible_peak();
-                if peak > 0.0001 {
-                    if let Some(viewport) = self.viewport.as_mut() {
-                        viewport.set_amplitude_scale(0.95 / peak);
-                    }
-                }
-            }
-        }
+        self.histories[idx].apply(resample_command(target_rate), &mut self.documents[idx]);
+        self.viewport = None;
+        self.after_sample_mutation(idx);
     }
 
     fn open_selected_file(&mut self) {
@@ -432,38 +605,75 @@ impl App {
         self.load_file(path);
     }
 
+    fn apply_fade(&mut self, fade_in: bool, pct: f32, curve: FadeCurve) {
+        let idx = self.active_document;
+        // Fade deliberately does not snap: the curve is shaped to start/end at zero anyway,
+        // so a hard zero crossing at the boundary buys nothing.
+        let Some((start, end)) = self.operation_range(idx, false) else { return };
+        let fade_samples = ((end - start) as f32 * pct / 100.0).round() as usize;
+        let fade_samples = fade_samples.max(1).min(end - start);
+        let (fade_start, fade_end) = if fade_in {
+            (start, start + fade_samples)
+        } else {
+            (end - fade_samples, end)
+        };
+        if fade_start >= fade_end || fade_end > end { return; }
+        self.histories[idx].apply(fade_command(fade_start, fade_end, fade_in, curve), &mut self.documents[idx]);
+        self.after_sample_mutation(idx);
+    }
+
     fn load_file(&mut self, path: PathBuf) {
-        // Stop any playback and tear down the old audio engine before replacing the
-        // document, so dropping the old engine while it's still playing doesn't cause
-        // a "dropping audio sink" error or garbled terminal output.
         if let Some(audio) = self.audio.take() {
             drop(audio);
         }
-        // Load the new file and reset all editor state.
         match crate::model::io::load_wav(&path) {
             Ok(mut document) => {
                 self.file_panel.focused = false;
                 self.file_panel.filtering = false;
                 self.file_panel.filter.clear();
 
-                document.dirty = false; // freshly loaded
-                self.document = Some(document);
+                document.dirty = false;
+                // Check if this path is already open
+                if let Some(pos) = self.documents.iter().position(|d| d.path == Some(path.clone())) {
+                    self.active_document = pos;
+                } else {
+                    self.push_document(document);
+                }
                 self.viewport = None;
                 self.rebuild_audio();
                 self.rebuild_waveform_caches();
             }
             Err(e) => {
-                // Log error silently — the file disappeared or is corrupt.
                 let _ = e;
             }
         }
     }
 
+    /// Saves every dirty document that already has a path. Documents that were never
+    /// saved (no path) are skipped — Save All can't choose a filename for each; those still
+    /// need an explicit Save As.
+    fn save_all(&mut self) {
+        for document in &mut self.documents {
+            if !document.dirty {
+                continue;
+            }
+            if let Some(path) = document.path.clone() {
+                if save_wav(document, &path).is_ok() {
+                    document.dirty = false;
+                    self.file_panel.mark_dirty(&path, false);
+                }
+            }
+        }
+    }
+
     fn rebuild_audio(&mut self) {
-        if let Some(document) = self.document.as_ref() {
-            self.audio = AudioEngine::try_new(document.channels.clone(), document.sample_rate);
+        if let Some(document) = self.active_doc() {
+            let rate = document.sample_rate;
+            self.audio = AudioEngine::try_new(document.channels.clone(), rate);
+            self.audio_sample_rate = Some(rate);
         } else {
             self.audio = None;
+            self.audio_sample_rate = None;
         }
     }
 
@@ -482,6 +692,14 @@ impl App {
             if let Some(path) = self.file_panel.handle_click(mouse.column, mouse.row) {
                 self.file_panel.focused = true;
                 self.load_file(path);
+                return;
+            }
+        }
+
+        // Buffer panel: click to switch active buffer.
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if let Some(idx) = self.buffer_panel.hit_test(mouse.column, mouse.row) {
+                self.switch_to_buffer(idx);
                 return;
             }
         }
@@ -509,6 +727,12 @@ impl App {
             }
         }
 
+        // Marker interaction (drag a line to move it, double-click a label to rename) takes
+        // priority over selection when the press lands on a marker.
+        if self.try_handle_marker_mouse(mouse) {
+            return;
+        }
+
         // Waveform click/drag → seek + select.
         let area = self.waveform_area;
         if mouse.column < area.x
@@ -521,19 +745,17 @@ impl App {
             }
             return;
         }
-        // Capture loop state before the mutable borrow of self.document below.
         let loop_range = if self.loop_playback {
-            self.document.as_ref().and_then(|d| {
-                Some(d.selection.map(|sel| sel.normalized()).unwrap_or((0, d.len_samples())))
+            self.active_doc().map(|d| {
+                d.selection.map(|sel| sel.normalized()).unwrap_or((0, d.len_samples()))
             })
         } else {
             None
         };
 
-        let (Some(document), Some(viewport)) = (self.document.as_mut(), self.viewport.as_ref())
-        else {
-            return;
-        };
+        let idx = self.active_document;
+        let Some(viewport) = self.viewport.as_ref() else { return };
+        let Some(document) = self.documents.get_mut(idx) else { return };
         let total_len = document.len_samples();
         if total_len == 0 {
             return;
@@ -547,9 +769,28 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                let anchor = if snap { document.snap_to_zero_crossing(target) } else { target };
-                document.cursor = anchor;
-                self.mouse_down_anchor = Some(anchor);
+                if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                    let t = if snap { document.snap_to_zero_crossing(target) } else { target };
+                    if let Some(sel) = document.selection {
+                        let (sel_start, sel_end) = sel.normalized();
+                        if t < sel_start {
+                            document.selection = Some(Selection { start: t, end: sel_end });
+                            document.cursor = t;
+                        } else if t > sel_end {
+                            document.selection = Some(Selection { start: sel_start, end: t });
+                            document.cursor = sel_start;
+                        }
+                    } else {
+                        let anchor = document.cursor;
+                        document.selection = Some(Selection { start: anchor, end: t });
+                        document.cursor = anchor.min(t);
+                    }
+                } else {
+                    document.selection = None;
+                    let anchor = if snap { document.snap_to_zero_crossing(target) } else { target };
+                    document.cursor = anchor;
+                    self.mouse_down_anchor = Some(anchor);
+                }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if let Some(anchor) = self.mouse_down_anchor {
@@ -588,9 +829,98 @@ impl App {
         }
     }
 
+    /// Handles mouse events that land on a marker: double-click a label to rename, or
+    /// press-and-drag a marker to move it. Returns `true` if the event was consumed (so the
+    /// caller skips the normal seek/select handling).
+    fn try_handle_marker_mouse(&mut self, mouse: MouseEvent) -> bool {
+        let area = self.waveform_area;
+        let in_area = mouse.column >= area.x
+            && mouse.column < area.x + area.width
+            && mouse.row >= area.y
+            && mouse.row < area.y + area.height;
+        let idx = self.active_document;
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Ctrl+click is reserved for selection extension.
+                if !in_area || mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                    return false;
+                }
+                let hit = self
+                    .marker_label_rects
+                    .iter()
+                    .find(|(r, _)| {
+                        r.x <= mouse.column
+                            && mouse.column < r.x + r.width
+                            && r.y <= mouse.row
+                            && mouse.row < r.y + r.height
+                    })
+                    .map(|(_, mi)| *mi);
+                let now = Instant::now();
+                let is_double = self.last_click.is_some_and(|(t, x, y)| {
+                    now.duration_since(t) < Duration::from_millis(400)
+                        && x.abs_diff(mouse.column) <= 1
+                        && y == mouse.row
+                });
+                self.last_click = Some((now, mouse.column, mouse.row));
+                let Some(mi) = hit else { return false };
+                if is_double {
+                    if let Some(label) = self
+                        .documents
+                        .get(idx)
+                        .and_then(|d| d.markers.get(mi))
+                        .map(|m| m.label.clone())
+                    {
+                        self.dialog = Some(Dialog::RenameMarker { index: mi, buffer: label });
+                    }
+                    self.last_click = None;
+                    self.dragging_marker = None;
+                } else {
+                    self.dragging_marker = Some(mi);
+                }
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(mi) = self.dragging_marker else { return false };
+                let Some(viewport) = self.viewport.as_ref() else { return true };
+                let scroll = viewport.scroll_offset;
+                let spc = viewport.samples_per_column;
+                let Some(doc) = self.documents.get_mut(idx) else { return true };
+                let total = doc.len_samples();
+                if total == 0 {
+                    return true;
+                }
+                let colx = mouse.column.clamp(area.x, area.x + area.width - 1);
+                let col = (colx - area.x) as f64;
+                let pos = ((scroll as f64 + col * spc) as usize).min(total - 1);
+                let mut path = None;
+                if let Some(m) = doc.markers.get_mut(mi) {
+                    m.position = pos;
+                    doc.dirty = true;
+                    path = doc.path.clone();
+                }
+                if let Some(p) = path {
+                    self.file_panel.mark_dirty(&p, true);
+                }
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.dragging_marker.take().is_some() {
+                    if let Some(doc) = self.documents.get_mut(idx) {
+                        doc.markers.sort_by_key(|m| m.position);
+                    }
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     fn handle_action(&mut self, action: Action) {
         if action == Action::Quit {
-            if self.document.as_ref().is_some_and(|doc| doc.dirty) {
+            // Warn if *any* open buffer is dirty, not just the active one.
+            if self.documents.iter().any(|doc| doc.dirty) {
                 self.quit_confirm = true;
             } else {
                 self.should_quit = true;
@@ -603,6 +933,11 @@ impl App {
             return;
         }
 
+        if action == Action::SaveAll {
+            self.save_all();
+            return;
+        }
+
         if matches!(
             action,
             Action::Cut
@@ -612,16 +947,16 @@ impl App {
                 | Action::Redo
                 | Action::Save
                 | Action::SaveAs
-                | Action::SaveAll
                 | Action::Reverse
                 | Action::Delete
+                | Action::Trim
         ) {
             self.handle_edit_action(action);
             return;
         }
 
         if action == Action::ClearSelection {
-            if let Some(document) = self.document.as_mut() {
+            if let Some(document) = self.active_doc_mut() {
                 document.selection = None;
             }
             return;
@@ -650,40 +985,96 @@ impl App {
             return;
         }
 
+        if matches!(
+            action,
+            Action::InsertMarker
+                | Action::DeleteMarker
+                | Action::JumpPrevMarker
+                | Action::JumpNextMarker
+        ) {
+            self.handle_marker_action(action);
+            return;
+        }
+
         if action == Action::Normalize {
-            if self.document.as_ref().and_then(|d| d.selection).is_some() {
+            if self.active_doc().is_some() {
                 self.dialog = Some(Dialog::Normalize { buffer: String::from("-1.0") });
             }
             return;
         }
 
         if action == Action::Gain {
-            if self.document.as_ref().and_then(|d| d.selection).is_some() {
+            if self.active_doc().is_some() {
                 self.dialog = Some(Dialog::Gain { buffer: String::from("0.0"), tanh_clip: false });
             }
             return;
         }
 
-        // Capture loop state before the mutable borrow of self.document below.
-        let loop_range = if self.loop_playback {
-            self.document.as_ref().and_then(|d| {
-                Some(d.selection.map(|sel| sel.normalized()).unwrap_or((0, d.len_samples())))
-            })
-        } else {
-            None
-        };
-
-        let (Some(document), Some(viewport)) = (self.document.as_mut(), self.viewport.as_mut())
-        else {
+        if action == Action::Resample {
+            if let Some(rate) = self.active_doc().map(|d| d.sample_rate) {
+                self.dialog = Some(Dialog::Resample { buffer: String::new(), current_rate: rate });
+            }
             return;
-        };
+        }
+
+        if action == Action::FadeIn {
+            if self.active_doc().is_some() {
+                self.dialog = Some(Dialog::FadeIn { curve: FadeCurve::Exp });
+            }
+            return;
+        }
+
+        if action == Action::FadeOut {
+            if self.active_doc().is_some() {
+                self.dialog = Some(Dialog::FadeOut { curve: FadeCurve::Exp });
+            }
+            return;
+        }
+
+        if action == Action::CopyToNew {
+            let data = self.active_doc().and_then(|d| {
+                d.selection.map(|sel| {
+                    let (start, end) = sel.normalized();
+                    d.slice(start..end)
+                })
+            });
+            if let Some(samples) = data {
+                let sample_rate = self.active_doc().map(|d| d.sample_rate).unwrap_or(44100);
+                let new_doc = Document {
+                    channels: samples,
+                    sample_rate,
+                    selection: None,
+                    cursor: 0,
+                    dirty: false,
+                    path: None,
+                    markers: Vec::new(),
+                    bext: None,
+                };
+                self.push_document(new_doc);
+                self.viewport = None;
+                self.rebuild_audio();
+                self.rebuild_waveform_caches();
+            }
+            return;
+        }
+
+        let idx = self.active_document;
+        let Some(viewport) = self.viewport.as_mut() else { return };
+        let Some(document) = self.documents.get_mut(idx) else { return };
         let total_len = document.len_samples();
         if total_len == 0 {
             return;
         }
         let width = self.content_width;
         let column_step = viewport.samples_per_column.max(1.0) as usize;
+        let fine_step = (column_step / 4).max(1);
         let span = viewport.span(width);
+        let loop_range = if self.loop_playback {
+            Some(document.selection.map(|sel| sel.normalized()).unwrap_or((0, total_len)))
+        } else {
+            None
+        };
+        let old_cursor = document.cursor;
         match action {
             Action::Quit
             | Action::TogglePlayback
@@ -696,6 +1087,7 @@ impl App {
             | Action::Save
             | Action::Reverse
             | Action::Normalize
+            | Action::Resample
             | Action::Delete
             | Action::ToggleAutoVerticalZoom
             | Action::ToggleZeroSnap
@@ -703,27 +1095,31 @@ impl App {
             | Action::ClearSelection
             | Action::SaveAs
             | Action::SaveAll
-            | Action::Gain => unreachable!(),
-            Action::MoveCursorLeft => {
+            | Action::Gain
+            | Action::CopyToNew
+            | Action::FadeIn
+            | Action::FadeOut
+            | Action::InsertMarker
+            | Action::DeleteMarker
+            | Action::JumpPrevMarker
+            | Action::JumpNextMarker
+            | Action::Trim => unreachable!(),
+            // Cursor movement is identical whether or not it extends a selection; the
+            // selection side-effect is applied in the second match below.
+            Action::MoveCursorLeft | Action::ExtendSelectionLeft => {
                 document.cursor = document.cursor.saturating_sub(column_step.max(1));
             }
-            Action::MoveCursorRight => {
+            Action::MoveCursorRight | Action::ExtendSelectionRight => {
                 document.cursor = (document.cursor + column_step.max(1)).min(total_len - 1);
             }
-            Action::MoveCursorLeftFine => {
-                document.cursor = document.cursor.saturating_sub(1);
+            Action::MoveCursorLeftFine | Action::ExtendSelectionLeftFine => {
+                document.cursor = document.cursor.saturating_sub(fine_step);
             }
-            Action::MoveCursorRightFine => {
-                document.cursor = (document.cursor + 1).min(total_len - 1);
+            Action::MoveCursorRightFine | Action::ExtendSelectionRightFine => {
+                document.cursor = (document.cursor + fine_step).min(total_len - 1);
             }
-            Action::ExtendSelectionLeft => {
-                document.cursor = document.cursor.saturating_sub(column_step.max(1));
-            }
-            Action::ExtendSelectionRight => {
-                document.cursor = (document.cursor + column_step.max(1)).min(total_len - 1);
-            }
-            Action::JumpStart => document.cursor = 0,
-            Action::JumpEnd => document.cursor = total_len - 1,
+            Action::JumpStart | Action::ExtendSelectionToStart => document.cursor = 0,
+            Action::JumpEnd | Action::ExtendSelectionToEnd => document.cursor = total_len - 1,
             Action::PageBack => {
                 document.cursor = document.cursor.saturating_sub(span.max(1));
             }
@@ -736,44 +1132,29 @@ impl App {
             Action::ZoomOutVertical => viewport.zoom_out_vertical(),
         }
 
-        // Selection handling: extend updates the selection, cursor movement clears it,
-        // zoom preserves it so the user can see their selection at different zoom levels.
+        let snap = self.snap_to_zero;
         match action {
-            Action::ExtendSelectionLeft | Action::ExtendSelectionRight => {
-                let snap = self.snap_to_zero;
-                let anchor = document.selection.map(|s| s.start).unwrap_or(document.cursor);
-                let anchor = if snap { document.snap_to_zero_crossing(anchor) } else { anchor };
+            // Extend in either direction with the anchor held fixed (see Selection::extended):
+            // the active edge follows the cursor, so reversing direction shrinks rather than
+            // flips the selection.
+            Action::ExtendSelectionLeft
+            | Action::ExtendSelectionLeftFine
+            | Action::ExtendSelectionRight
+            | Action::ExtendSelectionRightFine => {
                 let cursor = if snap { document.snap_to_zero_crossing(document.cursor) } else { document.cursor };
-                let start = anchor.min(cursor);
-                document.selection = Some(Selection {
-                    start: anchor,
-                    end: cursor,
-                });
-                document.cursor = start;
+                document.selection = Some(Selection::extended(document.selection, old_cursor, cursor));
+                document.cursor = cursor;
             }
-            Action::MoveCursorLeft
-            | Action::MoveCursorRight
-            | Action::MoveCursorLeftFine
-            | Action::MoveCursorRightFine
-            | Action::JumpStart
-            | Action::JumpEnd
-            | Action::PageBack
-            | Action::PageForward
-            | Action::ZoomIn
-            | Action::ZoomOut
-            | Action::ZoomInVertical
-            | Action::ZoomOutVertical => {
-                // Preserve existing selection.
+            Action::ExtendSelectionToStart | Action::ExtendSelectionToEnd => {
+                // cursor is already at 0 / end (the active edge); keep it there.
+                document.selection = Some(Selection::extended(document.selection, old_cursor, document.cursor));
             }
-            Action::SaveAs | Action::SaveAll => {}
-            _ => unreachable!(),
+            // Plain cursor moves, jumps, paging and zoom leave the selection untouched.
+            _ => {}
         }
 
         viewport.ensure_visible(document.cursor, width);
 
-        // Nav/zoom actions can move the cursor while audio is mid-playback (e.g. scrubbing
-        // with arrow keys) — keep the audio thread's position in sync rather than letting
-        // it silently keep playing from the old spot.
         if let Some(audio) = &self.audio {
             if audio.is_playing() {
                 if let Some((ls, le)) = loop_range {
@@ -786,14 +1167,33 @@ impl App {
     }
 
     fn handle_edit_action(&mut self, action: Action) {
-        let Some(document) = self.document.as_mut() else {
+        let idx = self.active_document;
+        if idx >= self.documents.len() {
             return;
-        };
+        }
+        // Preread self fields before the mutable document borrow.
         let mutates_samples = matches!(
             action,
-            Action::Cut | Action::Delete | Action::Paste | Action::Undo | Action::Redo | Action::Reverse
+            Action::Cut | Action::Delete | Action::Paste | Action::Undo | Action::Redo | Action::Reverse | Action::Trim
         );
         let snap = self.snap_to_zero;
+        let content_width = self.content_width;
+        let has_selection = self.documents[idx].selection.is_some();
+
+        match action {
+            Action::Save => {
+                let doc = &self.documents[idx];
+                if doc.path.is_some() {
+                    // Has a path — saved through the mutable path below.
+                } else {
+                    return self.handle_action(Action::SaveAs);
+                }
+            }
+            _ => {}
+        }
+
+        let document = self.documents.get_mut(idx).unwrap();
+
         match action {
             Action::Cut => {
                 if let Some(sel) = document.selection {
@@ -805,7 +1205,7 @@ impl App {
                     };
                     if start < end {
                         self.clipboard.set(document.slice(start..end), document.sample_rate);
-                        self.history.apply(cut_command(start..end), document);
+                        self.histories[idx].apply(cut_command(start..end), document);
                     }
                 }
             }
@@ -818,7 +1218,7 @@ impl App {
                         (start, end)
                     };
                     if start < end {
-                        self.history.apply(delete_command(start..end), document);
+                        self.histories[idx].apply(delete_command(start..end), document);
                     }
                 }
             }
@@ -832,24 +1232,24 @@ impl App {
             }
             Action::Paste => {
                 if !self.clipboard.is_empty() {
-                    // Pasting over an active selection replaces it: delete the selection
-                    // first, then insert at the spot it occupied.
-                    if let Some(sel) = document.selection {
-                        let (start, end) = sel.normalized();
-                        if start < end {
-                            self.history.apply(delete_command(start..end), document);
+                    if has_selection {
+                        if let Some(sel) = document.selection {
+                            let (start, end) = sel.normalized();
+                            if start < end {
+                                self.histories[idx].apply(delete_command(start..end), document);
+                            }
                         }
                     }
                     let at = document.cursor;
                     let data = self.clipboard.channels.clone();
-                    self.history.apply(paste_command(at, data), document);
+                    self.histories[idx].apply(paste_command(at, data), document);
                 }
             }
             Action::Undo => {
-                self.history.undo(document);
+                self.histories[idx].undo(document);
             }
             Action::Redo => {
-                self.history.redo(document);
+                self.histories[idx].redo(document);
             }
             Action::Save => {
                 if let Some(path) = document.path.clone() {
@@ -868,15 +1268,6 @@ impl App {
                     .unwrap_or_else(|| "untitled.wav".to_string());
                 self.save_as_active = true;
             }
-            Action::SaveAll => {
-                // Save current document if dirty
-                if let Some(path) = document.path.clone() {
-                    if save_wav(document, &path).is_ok() {
-                        document.dirty = false;
-                        self.file_panel.mark_dirty(&path, false);
-                    }
-                }
-            }
             Action::Reverse => {
                 if let Some(sel) = document.selection {
                     let (start, end) = sel.normalized();
@@ -886,38 +1277,106 @@ impl App {
                         (start, end)
                     };
                     if start < end {
-                        self.history.apply(reverse_command(start, end), document);
+                        self.histories[idx].apply(reverse_command(start, end), document);
+                    }
+                }
+            }
+            Action::Trim => {
+                if let Some(sel) = document.selection {
+                    let (start, end) = sel.normalized();
+                    if start < end {
+                        self.histories[idx].apply(trim_command(start, end), document);
+                        self.viewport = None;
                     }
                 }
             }
             _ => unreachable!(),
         }
 
+        let cursor = document.cursor;
         if let Some(viewport) = self.viewport.as_mut() {
-            viewport.ensure_visible(document.cursor, self.content_width);
+            viewport.ensure_visible(cursor, content_width);
         }
         if mutates_samples {
-            if let Some(path) = document.path.as_ref() {
-                self.file_panel.mark_dirty(path, true);
+            self.after_sample_mutation(idx);
+        }
+    }
+
+    /// Insert/delete a marker at/near the cursor, or jump the cursor to an adjacent marker.
+    /// Markers are document metadata, not part of the sample-edit undo history.
+    fn handle_marker_action(&mut self, action: Action) {
+        let idx = self.active_document;
+        if idx >= self.documents.len() {
+            return;
+        }
+        let mut moved_cursor = false;
+        let mut changed = false;
+        {
+            let doc = &mut self.documents[idx];
+            match action {
+                Action::InsertMarker => {
+                    let pos = doc.cursor;
+                    if !doc.markers.iter().any(|m| m.position == pos) {
+                        let n = doc.markers.len() + 1;
+                        doc.markers.push(Marker { position: pos, label: format!("Marker {n}") });
+                        doc.markers.sort_by_key(|m| m.position);
+                        doc.dirty = true;
+                        changed = true;
+                    }
+                }
+                Action::DeleteMarker => {
+                    if let Some(i) = nearest_marker(&doc.markers, doc.cursor) {
+                        doc.markers.remove(i);
+                        doc.dirty = true;
+                        changed = true;
+                    }
+                }
+                Action::JumpPrevMarker => {
+                    if let Some(p) = doc
+                        .markers
+                        .iter()
+                        .rev()
+                        .find(|m| m.position < doc.cursor)
+                        .map(|m| m.position)
+                    {
+                        doc.cursor = p;
+                        moved_cursor = true;
+                    }
+                }
+                Action::JumpNextMarker => {
+                    if let Some(p) = doc
+                        .markers
+                        .iter()
+                        .find(|m| m.position > doc.cursor)
+                        .map(|m| m.position)
+                    {
+                        doc.cursor = p;
+                        moved_cursor = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if changed {
+            if let Some(path) = self.documents[idx].path.clone() {
+                self.file_panel.mark_dirty(&path, true);
+            }
+        }
+        if moved_cursor {
+            let cursor = self.documents[idx].cursor;
+            if let Some(viewport) = self.viewport.as_mut() {
+                viewport.ensure_visible(cursor, self.content_width);
             }
             if let Some(audio) = &self.audio {
-                audio.reload(document.channels.clone());
-            }
-            self.rebuild_waveform_caches();
-            // Auto vertical zoom re-fits to the visible peak after edits change the data.
-            if self.viewport.as_ref().is_some_and(|v| v.auto_vertical_zoom) {
-                let peak = self.visible_peak();
-                if peak > 0.0001 {
-                    if let Some(viewport) = self.viewport.as_mut() {
-                        viewport.set_amplitude_scale(0.95 / peak);
-                    }
+                if audio.is_playing() {
+                    audio.seek(cursor);
                 }
             }
         }
     }
 
     fn handle_playback_action(&mut self, action: Action) {
-        let Some(document) = self.document.as_ref() else {
+        let Some(document) = self.active_doc() else {
             return;
         };
         let Some(audio) = self.audio.as_ref() else {
@@ -943,11 +1402,15 @@ impl App {
 
     fn render(&mut self, frame: &mut Frame) {
         let area: Rect = frame.area();
-        let chrome = split_chrome(area);
+        let toolbar_height = self.toolbar.rows_needed(area.width);
+        let chrome = split_chrome(area, toolbar_height);
 
-        // Always render the file panel and chrome.
+        // Render chrome panels.
         self.file_panel.render(frame, chrome.panel);
+        let buf_names = self.buffer_names();
+        self.buffer_panel.render(frame, chrome.buffers, &buf_names, self.active_document);
         self.toolbar.active_actions.clear();
+        self.toolbar.is_playing = self.audio.as_ref().is_some_and(|a| a.is_playing());
         if self.snap_to_zero {
             self.toolbar.active_actions.insert(Action::ToggleZeroSnap);
         }
@@ -960,7 +1423,9 @@ impl App {
         self.toolbar.render(frame, chrome.toolbar);
         self.menu.render(frame, chrome.menu);
 
-        let Some(document) = &self.document else {
+        let doc_idx = self.active_document;
+        let no_doc = self.documents.get(doc_idx).is_none();
+        if no_doc {
             let block = Block::default()
                 .title(" tui-wave ")
                 .borders(Borders::ALL)
@@ -975,7 +1440,7 @@ impl App {
 
         let title_text = format!(
             " tui-wave — {} ",
-            document
+            self.documents[doc_idx]
                 .path
                 .as_ref()
                 .and_then(|p| p.file_name())
@@ -985,7 +1450,7 @@ impl App {
         let title = Line::from(vec![
             Span::styled(title_text, Style::default().fg(theme::BORDER)),
             Span::styled(
-                if document.dirty { "* " } else { "" },
+                if self.documents[doc_idx].dirty { "* " } else { "" },
                 Style::default().fg(theme::DIRTY),
             ),
         ]);
@@ -1010,22 +1475,23 @@ impl App {
 
         self.content_width = inner_waveform_area.width;
         self.waveform_area = inner_waveform_area;
+        let total_len = self.documents[doc_idx].len_samples();
         let viewport = self.viewport.get_or_insert_with(|| {
-            Viewport::fit_to_width(document.len_samples(), inner_waveform_area.width as usize)
+            Viewport::fit_to_width(total_len, inner_waveform_area.width as usize)
         });
-        viewport.total_len = document.len_samples();
+        viewport.total_len = total_len;
 
-        let channel_count = document.channel_count().max(1);
+        let channel_count = self.documents[doc_idx].channel_count().max(1);
         let full_chunks =
             Layout::vertical(vec![Constraint::Fill(1); channel_count]).split(waveform_area);
-        let selection = document.selection.map(|s| s.normalized());
+        let selection = self.documents[doc_idx].selection.map(|s| s.normalized());
 
         // When auto vertical zoom is on, dynamically fit amplitude_scale to the visible
         // window's peak every frame, so scrolling/zooming to a quieter section zooms in to
         // match. The dB scale's reference_amplitude follows the same visible peak.
         let (reference_amplitude, _visible_peak) = if viewport.auto_vertical_zoom {
             let vp = visible_peak_raw(
-                self.document.as_ref(),
+                self.documents.get(doc_idx),
                 Some(viewport),
                 &self.waveform_caches,
                 self.content_width,
@@ -1060,7 +1526,7 @@ impl App {
                 height: channel_full_area.height,
             };
 
-            let samples = document
+            let samples = self.documents[doc_idx]
                 .channels
                 .get(i)
                 .map(|c| c.as_slice())
@@ -1070,7 +1536,7 @@ impl App {
                 viewport,
                 cache: self.waveform_caches.get(i),
                 selection,
-                cursor: document.cursor,
+                cursor: self.documents[doc_idx].cursor,
                 playhead: self.playhead_position,
             };
             frame.render_widget(widget, channel_inner);
@@ -1083,20 +1549,73 @@ impl App {
             frame.render_widget(db_scale, right_gutter);
         }
 
-        frame.render_widget(StatusBar { document, viewport }, status_area);
+        // Marker overlay: a dashed vertical line spanning all channels at each marker's
+        // column, with its label on the top row. Label rects are recorded for double-click
+        // (rename) and the lines for drag (move) hit-testing in `handle_mouse`.
+        let scroll = viewport.scroll_offset;
+        let spc = viewport.samples_per_column.max(f64::MIN_POSITIVE);
+        let wf = self.waveform_area;
+        self.marker_label_rects.clear();
+        let marker_style = Style::default().fg(theme::MARKER).bg(theme::BASE);
+        // Visible markers as (screen x, index), sorted left-to-right so each label can be
+        // clipped at the next marker's line instead of overprinting it.
+        let mut visible: Vec<(u16, usize)> = self.documents[doc_idx]
+            .markers
+            .iter()
+            .enumerate()
+            .filter_map(|(mi, m)| {
+                if m.position < scroll {
+                    return None;
+                }
+                let col = ((m.position - scroll) as f64 / spc) as i64;
+                (0..wf.width as i64).contains(&col).then(|| (wf.x + col as u16, mi))
+            })
+            .collect();
+        visible.sort_by_key(|&(x, _)| x);
+        let buf = frame.buffer_mut();
+        for (k, &(x, mi)) in visible.iter().enumerate() {
+            for y in wf.y..wf.y + wf.height {
+                buf[(x, y)].set_char('┊').set_style(marker_style);
+            }
+            let lx = x + 1;
+            // Stop the label before the next marker's line (or the pane's right edge).
+            let limit = visible.get(k + 1).map(|&(nx, _)| nx).unwrap_or(wf.x + wf.width);
+            let avail = limit.saturating_sub(lx) as usize;
+            let shown: String = self.documents[doc_idx].markers[mi].label.chars().take(avail).collect();
+            let shown_w = shown.chars().count() as u16;
+            if shown_w > 0 {
+                buf.set_string(lx, wf.y, &shown, marker_style);
+            }
+            self.marker_label_rects.push((
+                Rect { x, y: wf.y, width: shown_w + 1, height: 1 },
+                mi,
+            ));
+        }
+
+        frame.render_widget(StatusBar { document: &self.documents[doc_idx], viewport, snap_to_zero: self.snap_to_zero, loop_playback: self.loop_playback, last_action: self.histories[doc_idx].last_label() }, status_area);
 
         if self.quit_confirm {
-            render_quit_confirm(frame, area);
+            let dirty_count = self.documents.iter().filter(|d| d.dirty).count();
+            render_quit_confirm(frame, area, dirty_count);
         }
 
         if self.save_as_active {
-            render_save_as_prompt(frame, area, &self.save_as_path);
+            render_save_as_prompt(frame, area, &self.save_as_path, self.save_as_depth, self.save_as_dither);
         }
 
         if let Some(ref dialog) = self.dialog {
             render_dialog(frame, area, dialog);
         }
     }
+}
+
+/// Index of the marker closest to `pos`, or `None` if there are no markers.
+fn nearest_marker(markers: &[Marker], pos: usize) -> Option<usize> {
+    markers
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, m)| m.position.abs_diff(pos))
+        .map(|(i, _)| i)
 }
 
 /// Peak sample magnitude within the visible window. Takes explicit parameters to avoid
@@ -1124,13 +1643,23 @@ fn visible_peak_raw(
         })
 }
 
-fn render_save_as_prompt(frame: &mut Frame, area: Rect, path: &str) {
-    let text = format!(" Save as: {}_ ", path);
+fn render_save_as_prompt(frame: &mut Frame, area: Rect, path: &str, depth: BitDepth, dither: bool) {
+    let dither_text = if depth.supports_dither() {
+        format!("  Dither: {} (^D)", if dither { "on" } else { "off" })
+    } else {
+        String::new()
+    };
+    let text = format!(
+        " Save as: {}_   Format: {} (Tab){} ",
+        path,
+        depth.label(),
+        dither_text,
+    );
     let width = (text.chars().count() as u16 + 2).min(area.width);
     let height = 3.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + area.height.saturating_sub(height + 1),
+        y: area.y + (area.height.saturating_sub(height)) / 2,
         width,
         height,
     };
@@ -1145,8 +1674,11 @@ fn render_save_as_prompt(frame: &mut Frame, area: Rect, path: &str) {
     frame.render_widget(paragraph, popup);
 }
 
-fn render_quit_confirm(frame: &mut Frame, area: Rect) {
-    let text = " Unsaved changes — quit anyway? (y/n) ";
+fn render_quit_confirm(frame: &mut Frame, area: Rect, dirty_count: usize) {
+    let noun = if dirty_count == 1 { "buffer" } else { "buffers" };
+    let text = format!(
+        " {dirty_count} unsaved {noun} — (s)ave all & quit · (y) quit anyway · (n) cancel ",
+    );
     let width = (text.chars().count() as u16 + 2).min(area.width);
     let height = 3.min(area.height);
     let popup = Rect {
@@ -1175,12 +1707,24 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) {
             let tanh = if *tanh_clip { "ON" } else { "OFF" };
             ("Gain", format!(" Gain (dB): {}_  Tanh: {} (Tab) ", buffer, tanh))
         }
+        Dialog::FadeIn { curve } => {
+            ("Fade In", format!(" Curve: {} (Tab) ", curve.label()))
+        }
+        Dialog::FadeOut { curve } => {
+            ("Fade Out", format!(" Curve: {} (Tab) ", curve.label()))
+        }
+        Dialog::Resample { buffer, current_rate } => {
+            ("Resample", format!(" New rate (current {} Hz): {}_ ", current_rate, buffer))
+        }
+        Dialog::RenameMarker { buffer, .. } => {
+            ("Rename Marker", format!(" Label: {}_ ", buffer))
+        }
     };
     let width = (content_text.chars().count() as u16 + 2).min(area.width);
     let height = 3.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + area.height.saturating_sub(height + 1),
+        y: area.y + (area.height.saturating_sub(height)) / 2,
         width,
         height,
     };
@@ -1193,4 +1737,65 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) {
     let paragraph = Paragraph::new(content_text)
         .block(block);
     frame.render_widget(paragraph, popup);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::delete::delete_command;
+
+    fn doc(val: f32, len: usize) -> Document {
+        Document {
+            channels: vec![vec![val; len]],
+            sample_rate: 44100,
+            selection: None,
+            cursor: 0,
+            dirty: false,
+            path: None,
+            markers: Vec::new(),
+            bext: None,
+        }
+    }
+
+    /// Undo/redo must never cross buffers — applying an edit to one document and then
+    /// undoing while a *different* document is active must not touch the other document.
+    #[test]
+    fn undo_history_is_isolated_per_buffer() {
+        let mut app = App::new(Some(doc(1.0, 10)), None);
+        app.push_document(doc(2.0, 10)); // becomes buffer 1, now active
+
+        // Edit only buffer 1.
+        let idx = 1;
+        app.histories[idx].apply(delete_command(0..5), &mut app.documents[idx]);
+        assert_eq!(app.documents[1].len_samples(), 5);
+        assert_eq!(app.documents[0].len_samples(), 10);
+
+        // Switching to buffer 0 and undoing must be a no-op: its history is empty.
+        app.active_document = 0;
+        assert!(!app.histories[0].undo(&mut app.documents[0]));
+        assert_eq!(app.documents[0].len_samples(), 10);
+
+        // Buffer 1's own undo still restores its edit.
+        assert!(app.histories[1].undo(&mut app.documents[1]));
+        assert_eq!(app.documents[1].len_samples(), 10);
+    }
+
+    /// Several edits on one buffer undo in reverse order, one level at a time.
+    #[test]
+    fn multiple_undo_levels_unwind_in_order() {
+        let mut app = App::new(Some(doc(1.0, 20)), None);
+        let idx = 0;
+        app.histories[idx].apply(delete_command(0..5), &mut app.documents[idx]); // 20 -> 15
+        app.histories[idx].apply(delete_command(0..5), &mut app.documents[idx]); // 15 -> 10
+        app.histories[idx].apply(delete_command(0..5), &mut app.documents[idx]); // 10 -> 5
+        assert_eq!(app.documents[0].len_samples(), 5);
+
+        assert!(app.histories[0].undo(&mut app.documents[0]));
+        assert_eq!(app.documents[0].len_samples(), 10);
+        assert!(app.histories[0].undo(&mut app.documents[0]));
+        assert_eq!(app.documents[0].len_samples(), 15);
+        assert!(app.histories[0].undo(&mut app.documents[0]));
+        assert_eq!(app.documents[0].len_samples(), 20);
+        assert!(!app.histories[0].undo(&mut app.documents[0]));
+    }
 }

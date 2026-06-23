@@ -17,11 +17,14 @@ logic testable without a terminal or audio device. `src/model/command.rs::Comman
 trait object (`Box<dyn Command>`), not an enum — new operations are new files, not new
 variants.
 
-## Keybinding scheme (diverges from Audacity)
+## Keybinding philosophy
 
-Left/Right = move cursor, Ctrl+arrows = fine (single-sample), Shift+arrows = extend
-selection, Up/Down = zoom horizontal, Shift+Up/Down = zoom vertical. Source of truth:
-`src/ui/keymap.rs::map_key`. Menu and toolbar shortcut text must match exactly.
+Two categories:
+
+- **ACTIONS** (Cut, Copy, Paste, Save, Reverse, Normalize, Fade, etc.) use **Ctrl+letter** (or Ctrl+Shift+letter for a related but different action, e.g. Save vs SaveAs, FadeIn vs FadeOut).
+- **OPTIONS** (toggles, dialogs that change behavior, navigation) use **plain letter keys** (no Ctrl). Lowercase letter = one option, Shift+letter = a different option (doubles available keys). CopyToNew uses Shift+`C` because Ctrl+Shift+C is intercepted by the terminal.
+
+Navigation: Left/Right = move cursor, Ctrl+arrows = fine (single-sample), Shift+arrows = extend selection, Up/Down = zoom horizontal, Shift+Up/Down = zoom vertical. Source of truth: `src/ui/keymap.rs::map_key`. Menu and toolbar shortcut text must match exactly.
 
 ## Performance note
 
@@ -61,6 +64,9 @@ selection update.
 - Cut-then-paste-over-selection needs two undos, not one
 - No macOS/CoreAudio testing yet
 - Toolbar buttons beyond 2-row chrome height are silently dropped
+- Fade In dialogs no longer show a percentage field (defaults to 100%)
+- Exp fade curve uses `t^2` (fade-in) / `1 - t^2` (fade-out) for proper slow-start/fast-end exponential behavior
+- Gain uses `Ctrl+g`, Fade In uses `Ctrl+f`, Fade Out uses `Ctrl+o` (Ctrl+i is Tab in terminals)
 
 ## Loop playback
 

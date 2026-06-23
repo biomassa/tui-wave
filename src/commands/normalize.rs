@@ -91,6 +91,8 @@ mod tests {
             cursor: 0,
             dirty: false,
             path: None,
+            markers: Vec::new(),
+            bext: None,
         };
         // target_db = -0.446 → target_linear ≈ 0.95
         let mut cmd = NormalizeCommand::new(0, 5, -0.446);
@@ -110,6 +112,8 @@ mod tests {
             cursor: 0,
             dirty: false,
             path: None,
+            markers: Vec::new(),
+            bext: None,
         };
         let original = doc.channels.clone();
         let mut cmd = NormalizeCommand::new(0, 3, -1.0);

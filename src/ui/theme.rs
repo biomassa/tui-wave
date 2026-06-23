@@ -27,6 +27,8 @@ pub const CURSOR: Color = YELLOW;
 pub const PLAYHEAD: Color = Color::Rgb(0xff, 0xff, 0xff);
 /// dB scale gutter labels.
 pub const DB_SCALE: Color = SUBTEXT0;
+/// Timeline markers (cue points) — vertical line and label.
+pub const MARKER: Color = MAUVE;
 /// Window/pane borders and titles.
 pub const BORDER: Color = LAVENDER;
 /// The unsaved-changes "*" in the title bar.
@@ -37,6 +39,10 @@ pub const DIRTY: Color = RED;
 pub const SHORTCUT: Color = PEACH;
 /// Active / enabled toggle state in the toolbar.
 pub const ACTIVE: Color = Color::Rgb(0xa6, 0xe3, 0xa1);
+/// Toolbar section labels (TRANSPORT, EDIT, …) — muted so they read as headers, not buttons.
+pub const TOOLBAR_GROUP: Color = SUBTEXT0;
+/// Subtle dividers between toolbar groups.
+pub const DIVIDER: Color = SURFACE1;
 /// Default text/background for the menu bar and toolbar chrome.
 pub const CHROME_FG: Color = TEXT;
 pub const CHROME_BG: Color = SURFACE0;

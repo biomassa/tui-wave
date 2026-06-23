@@ -38,11 +38,14 @@ Three layers with a strict one-way dependency, which is the key constraint to pr
 when adding features:
 
 ```
-src/model/    Document, Selection, Command trait, History, Clipboard, WAV I/O
+src/model/    Document (samples + markers + bext), Selection, Command trait, History,
+              Clipboard, WAV I/O (io.rs), BWF cue/bext chunks (bwf.rs)
               -- zero dependency on ratatui/cpal/crossterm; pure logic, fully unit-testable
-src/commands/ Concrete Command impls (Cut, Paste, Delete)
+src/commands/ Concrete Command impls: Cut/Delete (RemoveRangeCommand), Paste, Reverse,
+              Normalize, Gain, Fade, Trim, Resample
 src/audio/    AudioEngine (rodio/cpal), playback thread, sample-position tracking
-src/ui/       ratatui widgets, App event loop, keymap, menu, toolbar, viewport
+src/ui/       ratatui widgets, App event loop, keymap, menu, toolbar, viewport,
+              file_panel (dir browser), buffer_panel (open documents)
 ```
 
 `src/model` must never depend on ratatui, cpal, or crossterm — that's what keeps the
@@ -53,9 +56,11 @@ touching the UI.
 ### Document model (`model/document.rs`)
 
 Audio is stored as deinterleaved `Vec<Vec<f32>>` (one Vec per channel), normalized to
-[-1.0, 1.0] regardless of source bit depth. `Document` also holds `selection`, `playhead`,
-and `dirty`. `slice`/`remove_range`/`insert_range` are the only mutation primitives;
-everything else (cut/paste/delete) is built from them.
+[-1.0, 1.0] regardless of source bit depth. `Document` also holds `selection`, `cursor`,
+`dirty`, `markers` (cue points), and `bext` (preserved BWF metadata bytes).
+`slice`/`remove_range`/`insert_range` are the only mutation primitives; everything else
+(cut/paste/delete) is built from them. `remove_range`/`insert_range` also shift `markers`
+so they stay anchored to the same audio across edits.
 
 ### Command pattern (`model/command.rs`, `model/history.rs`)
 
@@ -65,8 +70,13 @@ operations — including future CDP-process wrappers — are new files with zero
 `RemoveRangeCommand` stores the removed samples). `History::apply` executes and pushes to
 the undo stack, clearing redo; `Cut` and `Delete` share `RemoveRangeCommand` under
 different labels — cut additionally stashes the removed slice into `Clipboard` (which
-lives outside `Document` so paste can eventually target a different open document) before
-applying it.
+lives outside `Document` so paste can target a different open document) before applying it.
+
+History is **per-document**: `App` holds a `Vec<History>` kept index-parallel to
+`documents`, because each command stores sample data from the document it was applied to —
+replaying it against a different buffer would corrupt it. Marker/Save-As/playback actions
+are not undoable; length-changing commands that touch markers (Cut/Delete/Trim/Resample)
+snapshot them for exact undo.
 
 ### Audio engine (`audio/engine.rs`, `audio/source.rs`)
 
@@ -193,8 +203,28 @@ an arrow-key-only scheme suited to a terminal with no reliable mouse/menu access
 move the cursor (Ctrl+ for single-sample, Shift+ to extend selection), Up/Down zoom
 horizontally, Shift+Up/Down zoom vertically.
 
+## Markers (`model/document.rs`, `model/bwf.rs`, marker UI in `ui/app.rs`)
+
+Timeline markers are `Marker { position, label }` on `Document`, persisted as WAV `cue `
+points + `adtl`/`labl` labels (interoperable with Audacity/Sound Forge). `hound` can't
+read/write those chunks, so `bwf.rs` walks the RIFF chunk list to read them and *appends*
+the extra chunks after `hound`'s `fmt `/`data` on save (patching the top-level RIFF size).
+A file's `bext` (broadcast metadata) chunk is read and written back verbatim. Keys: `m`
+insert (auto-named "Marker N"), `M` delete nearest, `[`/`]` jump; mouse drag moves a marker
+line, double-click its label renames it.
+
+## Save formats (`model/io.rs`)
+
+`save_wav` writes 32-bit float (the lossless working format, used by quick Save). Save As
+goes through `save_wav_with`, letting the user pick 16/24-bit int (re-quantized, optional
+TPDF dither — `DitherRng`) or 32-bit float; Tab cycles depth, Ctrl+D toggles dither.
+Resample (`commands/resample.rs`) is a whole-file windowed-sinc conversion; changing the
+rate rebuilds the audio engine (it captures the rate at construction — see
+`App::after_sample_mutation`, which rebuilds rather than reloads when the rate changed).
+
 ## Deferred (architecture supports, not built)
 
 FLAC/MP3 via `symphonia`/`claxon` (new `load_*` functions returning the same `Document`);
 CDP (Composer's Desktop Project) external-process command category (new `Command` impls —
-write selection to temp WAV, shell out, read result, splice in); multi-document support.
+write selection to temp WAV, shell out, read result, splice in). Multi-document support
+and Save As are now built (`App.documents`/`histories`, `file_panel`, `buffer_panel`).

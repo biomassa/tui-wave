@@ -10,6 +10,11 @@ use crate::ui::viewport::Viewport;
 pub struct StatusBar<'a> {
     pub document: &'a Document,
     pub viewport: &'a Viewport,
+    pub snap_to_zero: bool,
+    pub loop_playback: bool,
+    /// Label of the last applied edit (top of the undo stack), shown so the user can
+    /// confirm what an operation/undo just did. `None` when nothing has been edited.
+    pub last_action: Option<&'a str>,
 }
 
 impl<'a> Widget for StatusBar<'a> {
@@ -19,13 +24,19 @@ impl<'a> Widget for StatusBar<'a> {
             Some(sel) if !sel.is_empty() => format!("{} samples", sel.len()),
             _ => "none".to_string(),
         };
+        let snap = if self.snap_to_zero { " Zero x: on " } else { "" };
+        let loop_ = if self.loop_playback { " Loop: on " } else { "" };
+        let last = self.last_action.map(|l| format!(" last: {} ", l)).unwrap_or_default();
         let text = format!(
-            " pos: {} ({:.3}s) | zoom: {:.1} spl/col | amp: {:.2}x | sel: {} ",
+            " pos: {} ({:.3}s) | zoom: {:.1} spl/col | amp: {:.2}x | sel: {} |{}{}{}",
             self.document.cursor,
             seconds,
             self.viewport.samples_per_column,
             self.viewport.amplitude_scale,
-            selection
+            selection,
+            snap,
+            loop_,
+            last,
         );
         Paragraph::new(Line::from(text))
             .style(Style::default().fg(theme::STATUS_FG).bg(theme::STATUS_BG))

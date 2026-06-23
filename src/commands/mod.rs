@@ -1,6 +1,9 @@
 pub mod cut;
 pub mod delete;
+pub mod fade;
 pub mod gain;
 pub mod normalize;
 pub mod paste;
+pub mod resample;
 pub mod reverse;
+pub mod trim;

@@ -158,7 +158,7 @@ impl<'a> Widget for WaveformWidget<'a> {
                 let y = area.y + row;
                 buf[(x, y)]
                     .set_char('│')
-                    .set_style(Style::default().fg(theme::CURSOR).add_modifier(Modifier::BOLD));
+                    .set_style(Style::default().fg(theme::CURSOR).bg(theme::BASE).add_modifier(Modifier::BOLD));
             }
         }
 
@@ -170,7 +170,7 @@ impl<'a> Widget for WaveformWidget<'a> {
                     let y = area.y + row;
                     buf[(x, y)]
                         .set_char('│')
-                        .set_style(Style::default().fg(theme::PLAYHEAD).add_modifier(Modifier::BOLD));
+                        .set_style(Style::default().fg(theme::PLAYHEAD).bg(theme::BASE).add_modifier(Modifier::BOLD));
                 }
             }
         }
