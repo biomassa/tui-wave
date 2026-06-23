@@ -552,8 +552,9 @@ impl App {
                 self.mouse_down_anchor = Some(anchor);
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                document.cursor = target;
                 if let Some(anchor) = self.mouse_down_anchor {
+                    let start = anchor.min(target);
+                    document.cursor = start;
                     document.selection = Some(Selection {
                         start: anchor,
                         end: target,
@@ -561,9 +562,10 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                document.cursor = target;
                 if let Some(anchor) = self.mouse_down_anchor {
                     if anchor != target {
+                        let start = anchor.min(target);
+                        document.cursor = start;
                         document.selection = Some(Selection {
                             start: anchor,
                             end: target,

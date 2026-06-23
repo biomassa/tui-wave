@@ -22,37 +22,75 @@ impl Document {
     /// Adjust `pos` to the nearest zero crossing (sign change or near-zero sample)
     /// within a search window. Returns the original position if no crossing is found
     /// within the window or if the channel data is empty/insufficient.
+    /// Check if ALL channels are satisfied at position `i` (zero, near-zero, or
+    /// crossing) and whether they agree on snapping to `i` or `i+1`. Returns the
+    /// consensus snapped position and whether all channels pass.
+    fn channel_agreement(&self, i: usize) -> (usize, bool) {
+        if self.channels.is_empty() {
+            return (i, false);
+        }
+        // All channels must agree on the same snap target (i or i+1).
+        // None: position is unusable.
+        // Some(true): snap to i+1.
+        // Some(false): snap to i.
+        let mut consensus: Option<bool> = None;
+        for ch in &self.channels {
+            if i >= ch.len() {
+                return (i, false);
+            }
+            if ch[i] == 0.0 {
+                // True zero — always snaps to i regardless of other channels.
+                consensus = Some(false);
+                continue;
+            }
+            let near_zero = ch[i].abs() < 0.001;
+            let is_crossing = i + 1 < ch.len()
+                && (ch[i] > 0.0 && ch[i + 1] <= 0.0
+                    || ch[i] < 0.0 && ch[i + 1] >= 0.0);
+            if is_crossing && !near_zero {
+                // This channel wants i+1. If another channel already said i, fail.
+                if consensus == Some(false) {
+                    return (i, false);
+                }
+                consensus = Some(true);
+            } else if near_zero {
+                // Snaps to i. If another channel already said i+1, fail.
+                if consensus == Some(true) {
+                    return (i, false);
+                }
+                consensus = Some(false);
+            } else {
+                return (i, false);
+            }
+        }
+        match consensus {
+            Some(true) => (i + 1, true),
+            Some(false) => (i, true),
+            None => (i, false),
+        }
+    }
+
     pub fn snap_to_zero_crossing(&self, pos: usize) -> usize {
-        let Some(channel) = self.channels.first() else {
-            return pos;
-        };
-        if channel.is_empty() || pos >= channel.len() {
+        if self.channels.is_empty() || self.channels[0].is_empty()
+            || pos >= self.channels[0].len()
+        {
             return pos;
         }
         let search_start = pos.saturating_sub(ZERO_CROSSING_MAX_OFFSET);
-        let search_end = (pos + ZERO_CROSSING_MAX_OFFSET).min(channel.len());
+        let search_end = (pos + ZERO_CROSSING_MAX_OFFSET).min(self.channels[0].len());
 
         let mut best = pos;
         let mut best_dist = usize::MAX;
         for i in search_start..search_end {
-            // A true zero sample is always a good snap point.
-            if channel[i] == 0.0 {
-                return i;
-            }
-            // A near-zero sample (within 0.1% of full scale).
-            let near_zero = channel[i].abs() < 0.001;
-            // A sign change between consecutive samples.
-            let is_crossing = i + 1 < channel.len()
-                && (channel[i] > 0.0 && channel[i + 1] <= 0.0
-                    || channel[i] < 0.0 && channel[i + 1] >= 0.0);
-            // When a crossing happens between sample i and i+1, snap to i+1
-            // (the first sample on the other side, which is near zero).
-            let snap_i = if is_crossing && !near_zero { i + 1 } else { i };
-            if near_zero || is_crossing {
+            let (snap_i, valid) = self.channel_agreement(i);
+            if valid {
                 let dist = snap_i.abs_diff(pos);
                 if dist < best_dist {
                     best_dist = dist;
                     best = snap_i;
+                }
+                if self.channels.iter().all(|ch| ch[i] == 0.0) {
+                    return i;
                 }
             }
         }
