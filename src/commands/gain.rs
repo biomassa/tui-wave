@@ -82,6 +82,8 @@ mod tests {
             cursor: 0,
             dirty: false,
             path: None,
+            markers: Vec::new(),
+            bext: None,
         };
         // +6.0206 dB → linear 2.0x → 0.5 → 1.0
         let mut cmd = GainCommand::new(0, 3, 6.0206, false);
@@ -99,6 +101,8 @@ mod tests {
             cursor: 0,
             dirty: false,
             path: None,
+            markers: Vec::new(),
+            bext: None,
         };
         // 0 dB = unity gain, but with tanh clip
         let mut cmd = GainCommand::new(0, 3, 0.0, true);
@@ -118,6 +122,8 @@ mod tests {
             cursor: 0,
             dirty: false,
             path: None,
+            markers: Vec::new(),
+            bext: None,
         };
         let original = doc.channels.clone();
         let mut cmd = GainCommand::new(0, 3, 6.0, false);

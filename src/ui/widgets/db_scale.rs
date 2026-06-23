@@ -8,13 +8,12 @@ use crate::ui::theme;
 /// Width reserved on each side of a channel's waveform pane for the dB scale gutter.
 pub const DB_GUTTER_WIDTH: u16 = 4;
 
-const DB_MARKS: [(f32, &str); 6] = [
+const DB_MARKS: [(f32, &str); 5] = [
     (0.0, "0dB"),
     (-3.0, "-3"),
     (-6.0, "-6"),
     (-12.0, "-12"),
     (-18.0, "-18"),
-    (-24.0, "-24"),
 ];
 
 /// Renders the vertical dB axis for one channel's waveform pane. `reference_amplitude` is
@@ -112,8 +111,8 @@ mod tests {
 
     #[test]
     fn colliding_marks_keep_the_first_one_drawn() {
-        // A short pane where -18dB and -24dB round to the same row: the more important
-        // (earlier-listed) -18 mark must win, not get silently overwritten by -24.
+        // A short pane where adjacent marks collide to the same row: the more important
+        // (earlier-listed) mark must win, not get silently overwritten by a later one.
         let widget = DbScaleWidget {
             amplitude_scale: 1.0,
             reference_amplitude: 1.0,

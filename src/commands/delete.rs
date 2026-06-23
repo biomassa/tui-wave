@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use crate::model::command::Command;
-use crate::model::document::Document;
+use crate::model::document::{Document, Marker};
 
 /// Shared by `cut` and `delete` — both just remove a range and restore it on undo; cut's
 /// only difference is that the caller also stashes the removed data in the clipboard before
@@ -10,6 +10,10 @@ use crate::model::document::Document;
 pub struct RemoveRangeCommand {
     range: Range<usize>,
     removed: Option<Vec<Vec<f32>>>,
+    /// Marker snapshot from before the cut. `remove_range` shifts markers live, but a marker
+    /// that fell inside the cut can't be reconstructed from the shift alone, so undo restores
+    /// the exact prior set.
+    markers_before: Option<Vec<Marker>>,
     label: &'static str,
 }
 
@@ -18,6 +22,7 @@ impl RemoveRangeCommand {
         Self {
             range,
             removed: None,
+            markers_before: None,
             label,
         }
     }
@@ -25,6 +30,7 @@ impl RemoveRangeCommand {
 
 impl Command for RemoveRangeCommand {
     fn execute(&mut self, doc: &mut Document) {
+        self.markers_before = Some(doc.markers.clone());
         self.removed = Some(doc.remove_range(self.range.clone()));
         doc.selection = None;
         doc.cursor = self.range.start.min(doc.len_samples());
@@ -34,6 +40,9 @@ impl Command for RemoveRangeCommand {
     fn undo(&mut self, doc: &mut Document) {
         let removed = self.removed.take().expect("undo called before execute");
         doc.insert_range(self.range.start, removed);
+        if let Some(markers) = self.markers_before.take() {
+            doc.markers = markers;
+        }
         doc.cursor = self.range.start;
         doc.dirty = true;
     }
@@ -60,6 +69,8 @@ mod tests {
             cursor: 0,
             dirty: false,
             path: None,
+            markers: Vec::new(),
+            bext: None,
         };
         let original = doc.channels.clone();
 

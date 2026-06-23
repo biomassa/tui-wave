@@ -11,6 +11,8 @@ pub enum Action {
     MoveCursorRightFine,
     ExtendSelectionLeft,
     ExtendSelectionRight,
+    ExtendSelectionLeftFine,
+    ExtendSelectionRightFine,
     JumpStart,
     JumpEnd,
     PageBack,
@@ -30,6 +32,7 @@ pub enum Action {
     ToggleAutoVerticalZoom,
     Reverse,
     Normalize,
+    Resample,
     Delete,
     ClearSelection,
     SaveAs,
@@ -37,6 +40,16 @@ pub enum Action {
     ToggleZeroSnap,
     Gain,
     ToggleLoop,
+    CopyToNew,
+    FadeIn,
+    FadeOut,
+    Trim,
+    ExtendSelectionToStart,
+    ExtendSelectionToEnd,
+    InsertMarker,
+    DeleteMarker,
+    JumpPrevMarker,
+    JumpNextMarker,
 }
 
 pub fn map_key(key: KeyEvent) -> Option<Action> {
@@ -55,8 +68,17 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('l') if ctrl => Some(Action::SaveAll),
         KeyCode::Char('r') if ctrl => Some(Action::Reverse),
         KeyCode::Char('n') if ctrl => Some(Action::Normalize),
+        KeyCode::Char('e') if ctrl => Some(Action::Resample),
+        KeyCode::Char('g') if ctrl => Some(Action::Gain),
+        KeyCode::Char('f') if ctrl => Some(Action::FadeIn),
+        KeyCode::Char('o') if ctrl => Some(Action::FadeOut),
+        KeyCode::Char('t') if ctrl => Some(Action::Trim),
+        KeyCode::Left if shift && ctrl => Some(Action::ExtendSelectionLeftFine),
+        KeyCode::Right if shift && ctrl => Some(Action::ExtendSelectionRightFine),
         KeyCode::Left if shift => Some(Action::ExtendSelectionLeft),
         KeyCode::Right if shift => Some(Action::ExtendSelectionRight),
+        KeyCode::PageUp if shift => Some(Action::ExtendSelectionToStart),
+        KeyCode::PageDown if shift => Some(Action::ExtendSelectionToEnd),
         KeyCode::Left if ctrl => Some(Action::MoveCursorLeftFine),
         KeyCode::Right if ctrl => Some(Action::MoveCursorRightFine),
         KeyCode::Left => Some(Action::MoveCursorLeft),
@@ -75,10 +97,14 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('d') if ctrl => Some(Action::ClearSelection),
         KeyCode::Esc => Some(Action::Stop),
         KeyCode::Delete => Some(Action::Delete),
-        KeyCode::Char('a') | KeyCode::Char('A') => Some(Action::ToggleAutoVerticalZoom),
-        KeyCode::Char('z') | KeyCode::Char('Z') => Some(Action::ToggleZeroSnap),
-        KeyCode::Char('g') | KeyCode::Char('G') => Some(Action::Gain),
-        KeyCode::Char('l') | KeyCode::Char('L') => Some(Action::ToggleLoop),
+        KeyCode::Char('a') => Some(Action::ToggleAutoVerticalZoom),
+        KeyCode::Char('z') => Some(Action::ToggleZeroSnap),
+        KeyCode::Char('C') => Some(Action::CopyToNew),
+        KeyCode::Char('l') => Some(Action::ToggleLoop),
+        KeyCode::Char('m') => Some(Action::InsertMarker),
+        KeyCode::Char('M') => Some(Action::DeleteMarker),
+        KeyCode::Char('[') => Some(Action::JumpPrevMarker),
+        KeyCode::Char(']') => Some(Action::JumpNextMarker),
         _ => None,
     }
 }
@@ -201,7 +227,15 @@ mod tests {
     }
 
     #[test]
-    fn plain_c_does_nothing() {
+    fn copy_to_new_is_shift_c() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('C'), KeyModifiers::NONE)),
+            Some(Action::CopyToNew)
+        );
+    }
+
+    #[test]
+    fn plain_lowercase_c_does_nothing() {
         assert_eq!(map_key(key(KeyCode::Char('c'), KeyModifiers::NONE)), None);
     }
 
@@ -226,19 +260,44 @@ mod tests {
     }
 
     #[test]
-    fn plain_upper_z_toggles_zero_snap() {
+    fn plain_upper_z_does_nothing() {
+        assert_eq!(map_key(key(KeyCode::Char('Z'), KeyModifiers::NONE)), None);
+    }
+
+    #[test]
+    fn ctrl_e_opens_resample_dialog() {
         assert_eq!(
-            map_key(key(KeyCode::Char('Z'), KeyModifiers::NONE)),
-            Some(Action::ToggleZeroSnap)
+            map_key(key(KeyCode::Char('e'), KeyModifiers::CONTROL)),
+            Some(Action::Resample)
         );
     }
 
     #[test]
-    fn plain_g_opens_gain_dialog() {
+    fn ctrl_g_opens_gain_dialog() {
         assert_eq!(
-            map_key(key(KeyCode::Char('g'), KeyModifiers::NONE)),
+            map_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL)),
             Some(Action::Gain)
         );
+    }
+
+    #[test]
+    fn ctrl_f_fades_in_ctrl_o_fades_out() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            Some(Action::FadeIn)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            Some(Action::FadeOut)
+        );
+    }
+
+    #[test]
+    fn marker_keys_map() {
+        assert_eq!(map_key(key(KeyCode::Char('m'), KeyModifiers::NONE)), Some(Action::InsertMarker));
+        assert_eq!(map_key(key(KeyCode::Char('M'), KeyModifiers::NONE)), Some(Action::DeleteMarker));
+        assert_eq!(map_key(key(KeyCode::Char('['), KeyModifiers::NONE)), Some(Action::JumpPrevMarker));
+        assert_eq!(map_key(key(KeyCode::Char(']'), KeyModifiers::NONE)), Some(Action::JumpNextMarker));
     }
 
     #[test]
@@ -247,9 +306,6 @@ mod tests {
             map_key(key(KeyCode::Char('l'), KeyModifiers::NONE)),
             Some(Action::ToggleLoop)
         );
-        assert_eq!(
-            map_key(key(KeyCode::Char('L'), KeyModifiers::NONE)),
-            Some(Action::ToggleLoop)
-        );
+        assert_eq!(map_key(key(KeyCode::Char('L'), KeyModifiers::NONE)), None);
     }
 }

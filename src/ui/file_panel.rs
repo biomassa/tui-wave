@@ -9,8 +9,6 @@ use ratatui::Frame;
 
 use super::theme;
 
-pub const PANEL_WIDTH: u16 = 25;
-
 #[derive(Clone)]
 pub(crate) struct FileEntry {
     name: String,
@@ -69,13 +67,6 @@ impl FilePanel {
         entries
     }
 
-    pub fn set_directory(&mut self, path: PathBuf) {
-        self.directory = path;
-        self.selected = 0;
-        self.scroll_offset = 0;
-        self.scan();
-    }
-
     pub fn mark_dirty(&mut self, path: &Path, dirty: bool) {
         if dirty {
             self.dirty_paths.insert(path.to_path_buf());
@@ -86,10 +77,6 @@ impl FilePanel {
 
     pub fn selected_path(&self) -> Option<PathBuf> {
         self.nth_filtered_entry(self.selected).map(|e| e.path.clone())
-    }
-
-    pub fn selected_name(&self) -> Option<&str> {
-        self.nth_filtered_entry(self.selected).map(|e| e.name.as_str())
     }
 
     fn nth_filtered_entry(&self, n: usize) -> Option<&FileEntry> {
@@ -162,10 +149,15 @@ impl FilePanel {
 
         let title = format!(" Files ({}) ", self.entries.len());
 
+        let border_style = if self.focused {
+            Style::default().fg(theme::ACTIVE)
+        } else {
+            Style::default().fg(theme::BORDER)
+        };
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::BORDER))
+            .border_style(border_style)
             .style(Style::default().bg(theme::BASE));
         let inner = block.inner(area);
 
@@ -254,10 +246,6 @@ impl FilePanel {
         self.rects
             .iter()
             .position(|r| r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height)
-    }
-
-    pub fn entry_count(&self) -> usize {
-        self.entries.len()
     }
 
     /// Handle a mouse click: set selected to the clicked entry. Returns the path

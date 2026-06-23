@@ -40,7 +40,7 @@ impl MenuBar {
                 entries: vec![
                     MenuEntry {
                         label: "Save",
-                        shortcut: "Ctrl+S",
+                        shortcut: "Ctrl+s",
                         action: Action::Save,
                     },
                     MenuEntry {
@@ -50,12 +50,12 @@ impl MenuBar {
                     },
                     MenuEntry {
                         label: "Save All",
-                        shortcut: "Ctrl+L",
+                        shortcut: "Ctrl+l",
                         action: Action::SaveAll,
                     },
                     MenuEntry {
                         label: "Quit",
-                        shortcut: "Q",
+                        shortcut: "q",
                         action: Action::Quit,
                     },
                 ],
@@ -66,13 +66,18 @@ impl MenuBar {
                 entries: vec![
                     MenuEntry {
                         label: "Cut",
-                        shortcut: "Ctrl+X",
+                        shortcut: "Ctrl+x",
                         action: Action::Cut,
                     },
                     MenuEntry {
                         label: "Copy",
-                        shortcut: "Ctrl+C",
+                        shortcut: "Ctrl+c",
                         action: Action::Copy,
+                    },
+                    MenuEntry {
+                        label: "Copy to New",
+                        shortcut: "C",
+                        action: Action::CopyToNew,
                     },
                     MenuEntry {
                         label: "Delete",
@@ -81,37 +86,57 @@ impl MenuBar {
                     },
                     MenuEntry {
                         label: "Paste",
-                        shortcut: "Ctrl+V",
+                        shortcut: "Ctrl+v",
                         action: Action::Paste,
                     },
                     MenuEntry {
                         label: "Undo",
-                        shortcut: "Ctrl+Z",
+                        shortcut: "Ctrl+z",
                         action: Action::Undo,
                     },
                     MenuEntry {
                         label: "Redo",
-                        shortcut: "Ctrl+Y",
+                        shortcut: "Ctrl+y",
                         action: Action::Redo,
                     },
                     MenuEntry {
                         label: "Reverse",
-                        shortcut: "Ctrl+R",
+                        shortcut: "Ctrl+r",
                         action: Action::Reverse,
                     },
                     MenuEntry {
                         label: "Normalize",
-                        shortcut: "Ctrl+N",
+                        shortcut: "Ctrl+n",
                         action: Action::Normalize,
                     },
                     MenuEntry {
                         label: "Gain",
-                        shortcut: "G",
+                        shortcut: "Ctrl+g",
                         action: Action::Gain,
                     },
                     MenuEntry {
+                        label: "Resample",
+                        shortcut: "Ctrl+e",
+                        action: Action::Resample,
+                    },
+                    MenuEntry {
+                        label: "Fade In",
+                        shortcut: "Ctrl+f",
+                        action: Action::FadeIn,
+                    },
+                    MenuEntry {
+                        label: "Fade Out",
+                        shortcut: "Ctrl+o",
+                        action: Action::FadeOut,
+                    },
+                    MenuEntry {
+                        label: "Trim",
+                        shortcut: "Ctrl+t",
+                        action: Action::Trim,
+                    },
+                    MenuEntry {
                         label: "Clear Selection",
-                        shortcut: "Ctrl+D",
+                        shortcut: "Ctrl+d",
                         action: Action::ClearSelection,
                     },
                 ],
@@ -142,13 +167,39 @@ impl MenuBar {
                     },
                     MenuEntry {
                         label: "Auto Vertical Zoom",
-                        shortcut: "A",
+                        shortcut: "a",
                         action: Action::ToggleAutoVerticalZoom,
                     },
                     MenuEntry {
                         label: "Zero-Crossing Snap",
-                        shortcut: "Z",
+                        shortcut: "z",
                         action: Action::ToggleZeroSnap,
+                    },
+                ],
+            },
+            MenuItem {
+                label: "Markers",
+                mnemonic: 'M',
+                entries: vec![
+                    MenuEntry {
+                        label: "Insert Marker",
+                        shortcut: "m",
+                        action: Action::InsertMarker,
+                    },
+                    MenuEntry {
+                        label: "Delete Marker",
+                        shortcut: "M",
+                        action: Action::DeleteMarker,
+                    },
+                    MenuEntry {
+                        label: "Previous Marker",
+                        shortcut: "[",
+                        action: Action::JumpPrevMarker,
+                    },
+                    MenuEntry {
+                        label: "Next Marker",
+                        shortcut: "]",
+                        action: Action::JumpNextMarker,
                     },
                 ],
             },
@@ -168,7 +219,7 @@ impl MenuBar {
                     },
                     MenuEntry {
                         label: "Loop Playback",
-                        shortcut: "L",
+                        shortcut: "l",
                         action: Action::ToggleLoop,
                     },
                 ],

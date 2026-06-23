@@ -69,8 +69,9 @@ impl Viewport {
     /// shift whatever the user is looking at.
     pub fn zoom(&mut self, factor: f64, anchor_sample: usize, width: u16) {
         let anchor_col = (anchor_sample as f64 - self.scroll_offset as f64) / self.samples_per_column;
+        let max_zoom_out = (self.total_len as f64 / width.max(1) as f64).max(1.0);
         self.samples_per_column = (self.samples_per_column / factor)
-            .clamp(self.min_samples_per_column, self.max_samples_per_column);
+            .clamp(self.min_samples_per_column, self.max_samples_per_column.min(max_zoom_out));
         let new_offset = anchor_sample as f64 - anchor_col * self.samples_per_column;
         self.scroll_offset = new_offset.max(0.0) as usize;
         self.ensure_visible(anchor_sample, width);
