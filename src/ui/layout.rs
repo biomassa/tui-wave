@@ -14,7 +14,7 @@ pub struct Chrome {
 /// chrome even on a very narrow terminal. The actual height is computed per-frame from the
 /// toolbar's content and width (see `Toolbar::rows_needed`).
 pub const MIN_TOOLBAR_HEIGHT: u16 = 1;
-pub const MAX_TOOLBAR_HEIGHT: u16 = 4;
+pub const MAX_TOOLBAR_HEIGHT: u16 = 6;
 pub const PANEL_WIDTH: u16 = 25;
 pub const BUFFER_PANEL_WIDTH: u16 = 20;
 
