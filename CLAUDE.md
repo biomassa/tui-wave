@@ -213,8 +213,19 @@ a row win rather than a later, less important mark silently overwriting it.
 shortcut text that matches it exactly (toolbar buttons render as `[Label:Shortcut]`).
 Convention, deliberately diverging from Audacity's Ctrl+1/Ctrl+3 zoom shortcuts in favor of
 an arrow-key-only scheme suited to a terminal with no reliable mouse/menu access: Left/Right
-move the cursor (Ctrl+ for single-sample, Shift+ to extend selection), Up/Down zoom
-horizontally, Shift+Up/Down zoom vertically.
+move the cursor, Shift+Left/Right extend the selection, Up/Down zoom horizontally,
+Shift+Up/Down zoom vertically. **Fine stepping is a modifier-free toggle:** backtick (`` ` ``)
+flips `App.fine_mode` (mirrored in the View menu, the OPTS toolbar group, and a "Fine: on"
+status indicator); while it's on, the same Left/Right and Shift+Left/Right step ~1/8th of a
+column instead of a whole one (`step = (column_step / 8).max(1)`) — finer than coarse but
+still faster than one sample per press, bottoming out at a single sample only when zoomed in
+far enough that an eighth-column rounds down to one.
+This deliberately avoids Ctrl/Alt+arrow: **every** double-modifier+arrow combo is swallowed
+before the app sees it — kitty binds Ctrl+Shift+Left/Right to prev/next-tab, Alt+Shift is a
+common desktop layout-switch shortcut, and Ctrl+Alt+arrow is often the DE's workspace switch.
+A plain key sidesteps all of them. (`ui/terminal.rs` still pushes the kitty keyboard-protocol
+`DISAMBIGUATE_ESCAPE_CODES` flag when supported, which is unrelated but keeps modified keys
+from being mis-decoded as text.)
 
 ## Markers (`model/document.rs`, `model/bwf.rs`, marker UI in `ui/app.rs`)
 
