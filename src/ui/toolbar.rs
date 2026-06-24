@@ -32,7 +32,7 @@ pub struct Toolbar {
 /// Spacing constants, shared by layout (`build`) and measurement (`section_width`) so the
 /// two can never disagree about how wide anything is.
 const GAP: u16 = 1; // trailing space after each button
-const SECTION_GAP: u16 = 2; // blank columns between sections (no divider line)
+const MIN_CELL_W: u16 = 8; // smallest useful grid column width
 
 impl Toolbar {
     pub fn new() -> Self {
@@ -124,73 +124,110 @@ impl Toolbar {
         w
     }
 
-    /// Number of rows the toolbar needs to show every button at `width`, with no truncation.
-    /// `App` uses this to size the toolbar's chrome row so it grows only as far as needed.
-    pub fn rows_needed(&self, width: u16) -> u16 {
-        let (_, _, rows) = self.build(Rect { x: 0, y: 0, width, height: u16::MAX });
-        rows.max(1)
+    /// Packs sections into a fixed grid of `cols` cells (each `cell_w` wide), row-major.
+    /// Returns each section's `(row, start_cell)` and the total row count. Because every
+    /// section begins on a cell boundary, section starts line up vertically across rows.
+    fn pack(&self, cols: u16, cell_w: u16) -> (Vec<(u16, u16)>, u16) {
+        let mut placements = Vec::with_capacity(self.groups.len());
+        let mut row = 0u16;
+        let mut used = 0u16; // cells consumed on the current row
+        for group in &self.groups {
+            let cells = (self.section_width(group).div_ceil(cell_w)).max(1);
+            if used > 0 && used + cells > cols {
+                row += 1;
+                used = 0;
+            }
+            placements.push((row, used));
+            used += cells;
+        }
+        (placements, row + 1)
     }
 
-    /// Packs whole sections left-to-right, wrapping to a new row only at section boundaries.
-    /// Section labels are drawn as a dim accent block (no divider lines); sections are
-    /// separated by blank columns. Returns the rendered lines, per-button clickable rects,
-    /// and rows used. Pure given `self` — drives both render and measurement.
+    /// Chooses the column grid for `width`: the column count (with its derived cell width)
+    /// that fits every section in the fewest rows, preferring more columns on a tie. Aligning
+    /// sections to cell boundaries is what makes their starts line up across wrapped rows.
+    fn grid(&self, width: u16) -> (u16, u16) {
+        let n = self.groups.len() as u16;
+        let max_cols = n.min((width / MIN_CELL_W).max(1));
+        let mut best = (u16::MAX, 1u16, width.max(1)); // (rows, cols, cell_w)
+        for cols in 1..=max_cols {
+            let cell_w = width / cols;
+            if cell_w == 0 {
+                continue;
+            }
+            // Skip configs where some section can't fit within one row of `cols` cells.
+            if cols > 1
+                && self
+                    .groups
+                    .iter()
+                    .any(|g| self.section_width(g).div_ceil(cell_w) > cols)
+            {
+                continue;
+            }
+            let (_, rows) = self.pack(cols, cell_w);
+            if rows < best.0 || (rows == best.0 && cols > best.1) {
+                best = (rows, cols, cell_w);
+            }
+        }
+        (best.1, best.2) // (cols, cell_w)
+    }
+
+    /// Number of rows the toolbar needs at `width`. `App` uses this to size the chrome row.
+    pub fn rows_needed(&self, width: u16) -> u16 {
+        let (cols, cell_w) = self.grid(width);
+        self.pack(cols, cell_w).1.max(1)
+    }
+
+    /// Renders the sections on the column grid from `grid`/`pack`. Section labels are a dim
+    /// accent block (no divider lines); each section starts at its cell's column so starts
+    /// align vertically. Returns the lines, per-button clickable rects, and rows used.
     fn build(&self, area: Rect) -> (Vec<Line<'static>>, Vec<(Rect, Action)>, u16) {
-        let right = area.x + area.width;
         let group_style = Style::default().fg(theme::TOOLBAR_GROUP).bg(theme::TOOLBAR_GROUP_BG);
         let chrome = Style::default().fg(theme::CHROME_FG);
         let shortcut_style = Style::default().fg(theme::SHORTCUT);
 
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        let mut spans: Vec<Span<'static>> = Vec::new();
+        let (cols, cell_w) = self.grid(area.width);
+        let (placements, total_rows) = self.pack(cols, cell_w);
         let mut rects: Vec<(Rect, Action)> = Vec::new();
-        let mut x = area.x;
-        let mut row: u16 = 0;
-        let mut placed_any = false;
+        let mut lines: Vec<Line<'static>> = Vec::new();
 
-        for group in &self.groups {
-            let gap = if x > area.x { SECTION_GAP } else { 0 };
-            // Wrap to a fresh row when this whole section won't fit on the current one.
-            if x > area.x && x + gap + self.section_width(group) > right {
-                lines.push(Line::from(std::mem::take(&mut spans)));
-                row += 1;
-                x = area.x;
-                if row >= area.height {
-                    break;
+        let rows_to_draw = total_rows.min(area.height);
+        for r in 0..rows_to_draw {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut x = area.x;
+            for (group, &(pr, pc)) in self.groups.iter().zip(&placements) {
+                if pr != r {
+                    continue;
+                }
+                // Pad to this section's cell column so starts align across rows.
+                let target_x = area.x + pc * cell_w;
+                if target_x > x {
+                    spans.push(Span::styled(" ".repeat((target_x - x) as usize), chrome));
+                    x = target_x;
+                }
+                if !group.label.is_empty() {
+                    spans.push(Span::styled(format!(" {} ", group.label), group_style));
+                    x += group.label.chars().count() as u16 + 2;
+                }
+                for &(label, shortcut, action) in &group.buttons {
+                    let label = self.button_label(label, action);
+                    let btn_w = label.chars().count() as u16 + 1 + shortcut.chars().count() as u16;
+                    rects.push((Rect { x, y: area.y + r, width: btn_w, height: 1 }, action));
+                    let label_style = if self.active_actions.contains(&action) {
+                        Style::default().fg(theme::ACTIVE)
+                    } else {
+                        chrome
+                    };
+                    spans.push(Span::styled(label.to_string(), label_style));
+                    spans.push(Span::styled(" ", chrome));
+                    spans.push(Span::styled(shortcut.to_string(), shortcut_style));
+                    spans.push(Span::styled(" ".repeat(GAP as usize), chrome));
+                    x += btn_w + GAP;
                 }
             }
-            // Blank-column gap between sections (no divider line); none at a row start.
-            if x > area.x {
-                spans.push(Span::styled(" ".repeat(SECTION_GAP as usize), chrome));
-                x += SECTION_GAP;
-            }
-            if !group.label.is_empty() {
-                spans.push(Span::styled(format!(" {} ", group.label), group_style));
-                x += group.label.chars().count() as u16 + 2;
-            }
-            placed_any = true;
-
-            for &(label, shortcut, action) in &group.buttons {
-                let label = self.button_label(label, action);
-                let btn_w = label.chars().count() as u16 + 1 + shortcut.chars().count() as u16;
-                rects.push((Rect { x, y: area.y + row, width: btn_w, height: 1 }, action));
-                let label_style = if self.active_actions.contains(&action) {
-                    Style::default().fg(theme::ACTIVE)
-                } else {
-                    chrome
-                };
-                spans.push(Span::styled(label.to_string(), label_style));
-                spans.push(Span::styled(" ", chrome));
-                spans.push(Span::styled(shortcut.to_string(), shortcut_style));
-                spans.push(Span::styled(" ".repeat(GAP as usize), chrome));
-                x += btn_w + GAP;
-            }
-        }
-        if !spans.is_empty() {
             lines.push(Line::from(spans));
         }
-        let rows = if placed_any { row + 1 } else { 0 };
-        (lines, rects, rows)
+        (lines, rects, total_rows)
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
