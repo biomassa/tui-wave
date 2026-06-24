@@ -1,1 +1,4 @@
 /target
+
+# Claude Code local settings / session data (CLAUDE.md is intentionally tracked)
+.claude/
