@@ -222,6 +222,36 @@ impl App {
         }
     }
 
+    /// Document indices whose buffer name passes the Buffers-panel search filter.
+    fn filtered_buffer_indices(&self) -> Vec<usize> {
+        let names = self.buffer_names();
+        (0..names.len())
+            .filter(|&i| self.buffer_panel.matches(&names[i]))
+            .collect()
+    }
+
+    /// Moves the Buffers-panel selection cursor by `delta` within the filtered subset.
+    fn move_buffer_selection(&mut self, delta: isize) {
+        let filtered = self.filtered_buffer_indices();
+        if filtered.is_empty() {
+            return;
+        }
+        let cur = filtered
+            .iter()
+            .position(|&i| i == self.buffer_panel.selected)
+            .unwrap_or(0);
+        let next = (cur as isize + delta).clamp(0, filtered.len() as isize - 1) as usize;
+        self.buffer_panel.selected = filtered[next];
+    }
+
+    /// After the buffer filter changes, keep the selection on a still-visible buffer.
+    fn snap_buffer_selection_to_filter(&mut self) {
+        let filtered = self.filtered_buffer_indices();
+        if !filtered.iter().any(|&i| i == self.buffer_panel.selected) {
+            self.buffer_panel.selected = filtered.first().copied().unwrap_or(0);
+        }
+    }
+
     /// Returns the playback loop range: the current selection if one exists, or the full
     /// document if nothing is selected. Returns `None` when loop playback is disabled.
     fn loop_range(&self) -> Option<(usize, usize)> {
@@ -296,7 +326,7 @@ impl App {
             self.menu.open_first();
             return;
         }
-        // File panel filtering
+        // File panel filtering — arrows still navigate the filtered sublist.
         if self.file_panel.filtering {
             match key.code {
                 KeyCode::Esc => {
@@ -306,6 +336,10 @@ impl App {
                 KeyCode::Enter => {
                     self.open_selected_file();
                 }
+                KeyCode::Up => self.file_panel.move_up(),
+                KeyCode::Down => self.file_panel.move_down(),
+                KeyCode::Home => self.file_panel.move_top(),
+                KeyCode::End => self.file_panel.move_bottom(),
                 KeyCode::Backspace => {
                     self.file_panel.filter.pop();
                     self.file_panel.selected = 0;
@@ -350,15 +384,41 @@ impl App {
                 return;
             }
         }
+        // Buffer panel filtering — arrows still navigate the filtered sublist.
+        if self.buffer_panel.filtering {
+            match key.code {
+                KeyCode::Esc => {
+                    self.buffer_panel.filtering = false;
+                    self.buffer_panel.filter.clear();
+                }
+                KeyCode::Enter => {
+                    self.handle_action(Action::SwitchBuffer);
+                    self.buffer_panel.filtering = false;
+                    self.buffer_panel.filter.clear();
+                }
+                KeyCode::Up => self.move_buffer_selection(-1),
+                KeyCode::Down => self.move_buffer_selection(1),
+                KeyCode::Backspace => {
+                    self.buffer_panel.filter.pop();
+                    self.snap_buffer_selection_to_filter();
+                }
+                KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                    self.buffer_panel.filter.push(c);
+                    self.snap_buffer_selection_to_filter();
+                }
+                _ => {}
+            }
+            return;
+        }
         // Buffer panel keyboard focus
         if self.buffer_panel.focused {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-            let count = self.documents.len();
             let handled = match key.code {
                 // Up/Dn move the selection cursor; Enter switches to it (no per-arrow reload).
-                KeyCode::Up => { self.buffer_panel.move_selection(-1, count); true }
-                KeyCode::Down => { self.buffer_panel.move_selection(1, count); true }
+                KeyCode::Up => { self.move_buffer_selection(-1); true }
+                KeyCode::Down => { self.move_buffer_selection(1); true }
                 KeyCode::Enter => { self.handle_action(Action::SwitchBuffer); true }
+                KeyCode::Char('/') => { self.handle_action(Action::SearchBuffers); true }
                 // Contextual buffer commands (^r/^a differ from the global Reverse/SaveAll).
                 KeyCode::Char('s') | KeyCode::Char('S') if ctrl => { self.handle_action(Action::Save); true }
                 KeyCode::Char('w') | KeyCode::Char('W') if ctrl => { self.handle_action(Action::CloseBuffer); true }
@@ -1156,6 +1216,13 @@ impl App {
                 self.switch_to_buffer(self.buffer_panel.selected);
                 return;
             }
+            Action::SearchBuffers => {
+                self.file_panel.focused = false;
+                self.buffer_panel.focused = true;
+                self.buffer_panel.filtering = true;
+                self.buffer_panel.filter.clear();
+                return;
+            }
             Action::CloseBuffer => {
                 self.request_close_buffer(self.active_document);
                 return;
@@ -1360,6 +1427,7 @@ impl App {
             | Action::CloseBuffer
             | Action::RenameBuffer
             | Action::SwitchBuffer
+            | Action::SearchBuffers
             | Action::Trim => unreachable!(),
             // Cursor movement is identical whether or not it extends a selection; the
             // selection side-effect is applied in the second match below.
@@ -2094,6 +2162,28 @@ mod tests {
         app.close_buffer(0);
         assert!(app.documents.is_empty());
         assert_eq!(app.active_document, 0);
+    }
+
+    /// Buffer search filters which buffers Up/Dn navigate, skipping non-matches.
+    #[test]
+    fn buffer_search_filters_navigation() {
+        let mut app = App::new(Some(doc(0.1, 10)), None);
+        app.push_document(doc(0.2, 10));
+        app.push_document(doc(0.3, 10));
+        app.documents[0].path = Some(PathBuf::from("/x/alpha.wav"));
+        app.documents[1].path = Some(PathBuf::from("/x/beta.wav"));
+        app.documents[2].path = Some(PathBuf::from("/x/alphabet.wav"));
+
+        app.buffer_panel.filter = "alpha".to_string();
+        assert_eq!(app.filtered_buffer_indices(), vec![0, 2]); // beta filtered out
+
+        app.buffer_panel.selected = 0;
+        app.move_buffer_selection(1);
+        assert_eq!(app.buffer_panel.selected, 2); // skipped index 1
+        app.move_buffer_selection(1);
+        assert_eq!(app.buffer_panel.selected, 2); // clamped at the last match
+        app.move_buffer_selection(-1);
+        assert_eq!(app.buffer_panel.selected, 0);
     }
 
     /// Undo/redo must never cross buffers — applying an edit to one document and then
