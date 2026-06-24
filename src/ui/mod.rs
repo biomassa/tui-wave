@@ -5,6 +5,7 @@ pub mod keymap;
 pub mod layout;
 pub mod menu;
 pub mod terminal;
+pub mod text_input;
 pub mod theme;
 pub mod toolbar;
 pub mod viewport;
