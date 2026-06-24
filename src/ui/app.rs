@@ -1413,6 +1413,12 @@ impl App {
         }
         self.toolbar.render(frame, chrome.toolbar);
         self.menu.render(frame, chrome.menu);
+        // Fill the spacer row with the base background so it matches the toolbar below it
+        // (rather than showing through to the terminal default).
+        frame.render_widget(
+            Block::default().style(Style::default().bg(theme::BASE)),
+            chrome.spacer,
+        );
 
         let doc_idx = self.active_document;
         let no_doc = self.documents.get(doc_idx).is_none();
@@ -1445,10 +1451,13 @@ impl App {
                 Style::default().fg(theme::DIRTY),
             ),
         ]);
+        // The waveform is "focused" (and gets the accent border) when neither side panel is.
+        let waveform_focused = !self.file_panel.focused && !self.buffer_panel.focused;
+        let border_color = if waveform_focused { theme::FOCUS } else { theme::BORDER };
         let outer = Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::BORDER))
+            .border_style(Style::default().fg(border_color))
             .style(Style::default().bg(theme::BASE));
         let inner = outer.inner(chrome.content);
         frame.render_widget(outer, chrome.content);

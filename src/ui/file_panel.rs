@@ -150,7 +150,7 @@ impl FilePanel {
         let title = format!(" Files ({}) ", self.entries.len());
 
         let border_style = if self.focused {
-            Style::default().fg(theme::ACTIVE)
+            Style::default().fg(theme::FOCUS)
         } else {
             Style::default().fg(theme::BORDER)
         };
