@@ -10,6 +10,9 @@ a file browser, and multi-buffer editing. Edits are saved back to WAV (16/24-bit
 Press `F10` (or `Alt`+a menu letter) to open the menus, `Tab` to move focus between the
 waveform, the file list, and the open buffers, and `q` to quit.
 
+## Status and Disclaimer
+This is developed with the assistance of LLM. I am not a Rust developer, however I have certain expertise in working with audio files. I needed this instrument for my own work.
+
 ## Prerequisites
 
 - **Rust toolchain** (the `cargo` build tool), version **1.85 or newer** — the project uses
@@ -46,10 +49,7 @@ cd tui-wave
 # large files because of the one-time waveform-cache build).
 cargo build --release
 
-# Run it on a WAV file:
-cargo run --release -- path/to/audio.wav
-
-# ...or run the compiled binary directly:
+# Run the compiled binary directly:
 #   Linux/macOS:
 ./target/release/tui-wave path/to/audio.wav
 #   Windows:
