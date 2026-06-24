@@ -9,10 +9,22 @@ use ratatui::Frame;
 
 use super::theme;
 
+/// What a file-panel row represents.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    /// The `..` row — navigates to the parent directory.
+    Parent,
+    /// A subdirectory — navigates into it.
+    Dir,
+    /// A `.wav` file — opens it.
+    File,
+}
+
 #[derive(Clone)]
 pub(crate) struct FileEntry {
     name: String,
     path: PathBuf,
+    kind: EntryKind,
 }
 
 pub struct FilePanel {
@@ -51,19 +63,38 @@ impl FilePanel {
         self.clamp_scroll();
     }
 
+    /// Lists `..` (unless at the filesystem root), then subdirectories, then `.wav` files —
+    /// dirs and files each sorted case-insensitively.
     pub fn scan_dir(dir: &Path) -> Vec<FileEntry> {
-        let mut entries = Vec::new();
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
         if let Ok(readdir) = std::fs::read_dir(dir) {
             for entry in readdir.flatten() {
                 let path = entry.path();
-                if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav")) {
-                    if let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) {
-                        entries.push(FileEntry { name, path });
-                    }
+                let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) else {
+                    continue;
+                };
+                if path.is_dir() {
+                    dirs.push(FileEntry { name, path, kind: EntryKind::Dir });
+                } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav")) {
+                    files.push(FileEntry { name, path, kind: EntryKind::File });
                 }
             }
         }
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        let by_name = |a: &FileEntry, b: &FileEntry| a.name.to_lowercase().cmp(&b.name.to_lowercase());
+        dirs.sort_by(by_name);
+        files.sort_by(by_name);
+
+        let mut entries = Vec::new();
+        if let Some(parent) = dir.parent() {
+            entries.push(FileEntry {
+                name: "..".to_string(),
+                path: parent.to_path_buf(),
+                kind: EntryKind::Parent,
+            });
+        }
+        entries.extend(dirs);
+        entries.extend(files);
         entries
     }
 
@@ -85,8 +116,10 @@ impl FilePanel {
         }
     }
 
-    pub fn selected_path(&self) -> Option<PathBuf> {
-        self.nth_filtered_entry(self.selected).map(|e| e.path.clone())
+    /// The currently-selected entry's path and kind, so the caller can decide whether to
+    /// navigate into a directory or open a file.
+    pub fn selected_entry(&self) -> Option<(PathBuf, EntryKind)> {
+        self.nth_filtered_entry(self.selected).map(|e| (e.path.clone(), e.kind))
     }
 
     fn nth_filtered_entry(&self, n: usize) -> Option<&FileEntry> {
@@ -204,20 +237,26 @@ impl FilePanel {
         let filtered = self.filtered_entries();
         for (idx, entry) in filtered.iter().enumerate().skip(self.scroll_offset).take(inner_height) {
             let is_selected = idx == self.selected;
-            let is_dirty = self.dirty_paths.contains(&entry.path);
+            let is_folder = matches!(entry.kind, EntryKind::Parent | EntryKind::Dir);
+            let is_dirty = !is_folder && self.dirty_paths.contains(&entry.path);
 
-            let name = &entry.name;
-            let display = if is_dirty {
-                format!("*{}", name)
-            } else {
-                name.to_string()
+            // Folders get a trailing "/" (except ".."); dirty files get a "*" prefix.
+            let mut display = match entry.kind {
+                EntryKind::Dir => format!("{}/", entry.name),
+                _ => entry.name.clone(),
             };
+            if is_dirty {
+                display = format!("*{}", display);
+            }
 
-            let display_len = name.len() + if is_dirty { 1 } else { 0 };
-
+            let display_len = display.chars().count();
             let truncated: String = if display_len > inner.width as usize {
                 if display_len > 3 {
-                    format!("…{}", &display[display_len.saturating_sub(inner.width as usize - 1)..])
+                    let tail: String = display
+                        .chars()
+                        .skip(display_len.saturating_sub(inner.width as usize - 1))
+                        .collect();
+                    format!("…{}", tail)
                 } else {
                     display.chars().take(inner.width as usize).collect()
                 }
@@ -229,6 +268,8 @@ impl FilePanel {
                 Style::default().fg(theme::HIGHLIGHT_FG).bg(theme::HIGHLIGHT_BG)
             } else if is_selected {
                 Style::default().fg(theme::TEXT).bg(theme::SURFACE0)
+            } else if is_folder {
+                Style::default().fg(theme::SKY).bg(theme::BASE)
             } else if is_dirty {
                 Style::default().fg(theme::DIRTY).bg(theme::BASE)
             } else {
@@ -258,16 +299,18 @@ impl FilePanel {
             .position(|r| r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height)
     }
 
-    /// Handle a mouse click: set selected to the clicked entry. Returns the path
-    /// so the caller can load it.
-    pub fn handle_click(&mut self, x: u16, y: u16) -> Option<PathBuf> {
-        let rect_idx = self.hit_test(x, y)?;
+    /// Handle a mouse click: select the clicked entry. Returns `true` if a row was hit, so
+    /// the caller can activate it (navigate into a dir / open a file).
+    pub fn handle_click(&mut self, x: u16, y: u16) -> bool {
+        let Some(rect_idx) = self.hit_test(x, y) else {
+            return false;
+        };
         let entry_idx = self.scroll_offset + rect_idx;
         if entry_idx < self.filtered_count() {
             self.selected = entry_idx;
-            self.nth_filtered_entry(entry_idx).map(|e| e.path.clone())
+            true
         } else {
-            None
+            false
         }
     }
 }
@@ -284,5 +327,25 @@ mod tests {
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"mono_sine.wav"));
         assert!(names.contains(&"stereo_sine.wav"));
+    }
+
+    #[test]
+    fn scan_lists_parent_then_dirs_then_files() {
+        use std::fs;
+        let base = std::env::temp_dir().join("tui_wave_dirtest");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("subdir")).unwrap();
+        fs::write(base.join("a.wav"), b"x").unwrap(); // scan only checks the extension
+        let entries = FilePanel::scan_dir(&base);
+
+        assert_eq!(entries[0].name, "..");
+        assert!(matches!(entries[0].kind, EntryKind::Parent));
+        let dir_pos = entries.iter().position(|e| e.name == "subdir").unwrap();
+        let file_pos = entries.iter().position(|e| e.name == "a.wav").unwrap();
+        assert!(matches!(entries[dir_pos].kind, EntryKind::Dir));
+        assert!(matches!(entries[file_pos].kind, EntryKind::File));
+        assert!(dir_pos < file_pos, "directories should sort before files");
+
+        fs::remove_dir_all(&base).unwrap();
     }
 }

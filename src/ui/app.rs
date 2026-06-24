@@ -27,7 +27,7 @@ use crate::model::io::{save_wav, save_wav_with, BitDepth};
 use crate::model::selection::Selection;
 
 use super::buffer_panel::BufferPanel;
-use super::file_panel::FilePanel;
+use super::file_panel::{EntryKind as FileEntryKind, FilePanel};
 use super::keymap::{map_key, Action};
 use super::layout::split_chrome;
 use super::menu::MenuBar;
@@ -787,11 +787,16 @@ impl App {
         self.after_sample_mutation(idx);
     }
 
+    /// Activates the selected file-panel entry: navigate into a directory (or `..`), or open
+    /// a `.wav` file.
     fn open_selected_file(&mut self) {
-        let Some(path) = self.file_panel.selected_path() else {
+        let Some((path, kind)) = self.file_panel.selected_entry() else {
             return;
         };
-        self.load_file(path);
+        match kind {
+            FileEntryKind::Parent | FileEntryKind::Dir => self.file_panel.set_directory(path),
+            FileEntryKind::File => self.load_file(path),
+        }
     }
 
     fn apply_fade(&mut self, fade_in: bool, pct: f32, curve: FadeCurve) {
@@ -876,11 +881,11 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
-        // File panel: click to focus. A follow-up double-click opens the file.
+        // File panel: click selects + activates the entry (navigate dir / open file).
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            if let Some(path) = self.file_panel.handle_click(mouse.column, mouse.row) {
+            if self.file_panel.handle_click(mouse.column, mouse.row) {
                 self.file_panel.focused = true;
-                self.load_file(path);
+                self.open_selected_file();
                 return;
             }
         }
@@ -2026,6 +2031,30 @@ mod tests {
         assert!(app.documents[1].dirty, "copy-to-new buffer should be dirty");
         assert!(app.documents[1].path.is_none());
         assert_eq!(app.documents[1].len_samples(), 30);
+    }
+
+    /// Closing a buffer removes its parallel history and keeps `active_document` valid.
+    #[test]
+    fn close_buffer_fixes_active_index_and_history() {
+        let mut app = App::new(Some(doc(0.1, 10)), None);
+        app.push_document(doc(0.2, 10)); // idx 1
+        app.push_document(doc(0.3, 10)); // idx 2
+        assert_eq!(app.documents.len(), 3);
+        assert_eq!(app.histories.len(), 3);
+
+        app.active_document = 1;
+        app.close_buffer(1); // remove the middle buffer
+        assert_eq!(app.documents.len(), 2);
+        assert_eq!(app.histories.len(), 2, "history must stay index-parallel");
+        assert!(app.active_document < app.documents.len());
+        // Remaining buffers are [0.1, 0.3]; active (still index 1) now points at 0.3.
+        assert_eq!(app.documents[1].channels[0][0], 0.3);
+
+        // Closing down to empty leaves a valid empty state.
+        app.close_buffer(1);
+        app.close_buffer(0);
+        assert!(app.documents.is_empty());
+        assert_eq!(app.active_document, 0);
     }
 
     /// Undo/redo must never cross buffers — applying an edit to one document and then

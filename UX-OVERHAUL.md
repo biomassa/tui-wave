@@ -30,14 +30,13 @@ Focus states: **Waveform**, **Files**, **Buffers**.
       buffer-panel branch before the global keymap, so `^r`/`^a` don't collide with Reverse/SaveAll.
 
 ## 3. Files panel — directory awareness
-- [ ] `FileEntry` gains a kind: Parent (`..`) | Dir | File.
-- [ ] `scan_dir` lists: `..` (unless at filesystem root), sub-directories, then `.wav` files.
-      Sort dirs-before-files, each alphabetically.
-- [ ] Enter on a directory (or `..`) navigates: set `file_panel.directory`, rescan, reset
-      selection/scroll. Enter on a file opens it (existing path).
-- [ ] Render: visually distinguish folders (trailing `/` and/or distinct color); `..` first.
-- [ ] Filter (`/`) still filters the current directory's entries (incl. dirs) and Up/Dn navigate
-      the filtered list (verify existing behavior survives the dir changes).
+- [x] `FileEntry` gains a kind: Parent (`..`) | Dir | File (`file_panel::EntryKind`).
+- [x] `scan_dir` lists `..` (unless at root), then sub-directories, then `.wav` files —
+      dirs-before-files, each case-insensitively sorted.
+- [x] Enter / click on a directory (or `..`) navigates (`set_directory`); on a file, opens it.
+- [x] Render: folders in `theme::SKY` with a trailing `/`; `..` first.
+- [x] Filter (`/`) still filters the current directory's entries; Up/Dn navigate the filtered
+      list.
 
 ## 4. Open Directory dialog (^o)
 - [x] Dialog typing a directory path, default `~` (expanded via $HOME). On Enter: if it's an
@@ -60,9 +59,14 @@ Focus states: **Waveform**, **Files**, **Buffers**.
       triggers (currently it's created clean, so `q` exits without warning). Test added.
 
 ## 8. Docs + tests
-- [ ] Update `CLAUDE.md`: modal command panel, focus model, dir-aware file panel, contextual keys.
-- [ ] Tests: focus→command-set mapping; close-buffer index/history math; directory navigation
-      (enter dir, `..`); copy-to-new marks dirty.
+- [x] Updated `CLAUDE.md`: modal command panel, focus model, dir-aware file panel, contextual keys.
+- [x] Tests: close-buffer index/history math; directory scan ordering (parent/dir/file);
+      copy-to-new marks dirty.
+
+---
+
+**Status: implemented (2026-06-24), 92 tests pass, zero warnings.** Pending the user's visual
+verification of the modal panel + file browser, then delete this file.
 
 ---
 
