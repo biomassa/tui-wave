@@ -32,6 +32,7 @@ use super::keymap::{map_key, Action};
 use super::layout::split_chrome;
 use super::menu::MenuBar;
 use super::terminal::Tui;
+use super::text_input::TextInput;
 use super::theme;
 use super::toolbar::Toolbar;
 use super::viewport::Viewport;
@@ -41,14 +42,14 @@ use super::widgets::statusbar::StatusBar;
 use super::widgets::waveform::WaveformWidget;
 
 enum Dialog {
-    Normalize { buffer: String },
-    Gain { buffer: String, tanh_clip: bool },
+    Normalize { input: TextInput },
+    Gain { input: TextInput, tanh_clip: bool },
     FadeIn { curve: FadeCurve },
     FadeOut { curve: FadeCurve },
-    Resample { buffer: String, current_rate: u32 },
-    RenameMarker { index: usize, buffer: String },
-    OpenDirectory { buffer: String },
-    RenameBuffer { index: usize, buffer: String },
+    Resample { input: TextInput, current_rate: u32 },
+    RenameMarker { index: usize, input: TextInput },
+    OpenDirectory { input: TextInput },
+    RenameBuffer { index: usize, input: TextInput },
 }
 
 /// Which panel currently has focus — the single source of truth for the modal command
@@ -114,8 +115,8 @@ pub struct App {
     pub buffer_panel: BufferPanel,
     /// When true, the user is typing a Save-As path in a prompt overlay.
     pub save_as_active: bool,
-    /// Buffer for the Save-As path being typed.
-    pub save_as_path: String,
+    /// The Save-As filename field being edited.
+    save_as_input: TextInput,
     /// Output bit depth for the pending Save As (Tab cycles it in the prompt).
     pub save_as_depth: BitDepth,
     /// Whether to dither the pending Save As (Ctrl+D toggles; only meaningful for int depths).
@@ -172,7 +173,7 @@ impl App {
             file_panel,
             buffer_panel: BufferPanel::new(),
             save_as_active: false,
-            save_as_path: String::new(),
+            save_as_input: TextInput::new(""),
             save_as_depth: BitDepth::Float32,
             save_as_dither: false,
             snap_to_zero: true,
@@ -436,154 +437,164 @@ impl App {
     fn handle_save_as_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter => {
-                let path = PathBuf::from(&self.save_as_path);
-                let path = if path.is_absolute() {
-                    path
-                } else {
-                    self.file_panel.directory.join(&self.save_as_path)
-                };
-                let depth = self.save_as_depth;
-                let dither = self.save_as_dither && depth.supports_dither();
-                if let Some(document) = self.active_doc_mut() {
-                    if save_wav_with(document, &path, depth, dither).is_ok() {
-                        document.path = Some(path.clone());
-                        document.dirty = false;
-                        self.file_panel.mark_dirty(&path, false);
-                        self.file_panel.scan();
+                // Ensure a .wav extension before resolving the path.
+                let name = ensure_wav_extension(self.save_as_input.value().trim());
+                if !name.is_empty() {
+                    let path = PathBuf::from(&name);
+                    let path = if path.is_absolute() {
+                        path
+                    } else {
+                        self.file_panel.directory.join(&name)
+                    };
+                    let depth = self.save_as_depth;
+                    let dither = self.save_as_dither && depth.supports_dither();
+                    if let Some(document) = self.active_doc_mut() {
+                        if save_wav_with(document, &path, depth, dither).is_ok() {
+                            document.path = Some(path.clone());
+                            document.dirty = false;
+                            self.file_panel.mark_dirty(&path, false);
+                            self.file_panel.scan();
+                        }
                     }
                 }
                 self.save_as_active = false;
-                self.save_as_path.clear();
             }
-            KeyCode::Esc => {
-                self.save_as_active = false;
-                self.save_as_path.clear();
-            }
+            KeyCode::Esc => self.save_as_active = false,
             // Tab cycles bit depth; Ctrl+D toggles dither (Ctrl keeps it out of the path text).
-            KeyCode::Tab => {
-                self.save_as_depth = self.save_as_depth.next();
-            }
+            KeyCode::Tab => self.save_as_depth = self.save_as_depth.next(),
             KeyCode::Char('d') | KeyCode::Char('D') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.save_as_dither = !self.save_as_dither;
             }
-            KeyCode::Backspace => {
-                self.save_as_path.pop();
-            }
+            KeyCode::Left => self.save_as_input.left(),
+            KeyCode::Right => self.save_as_input.right(),
+            KeyCode::Home => self.save_as_input.home(),
+            KeyCode::End => self.save_as_input.end(),
+            KeyCode::Backspace => self.save_as_input.backspace(),
+            KeyCode::Delete => self.save_as_input.delete(),
             KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-                self.save_as_path.push(c);
+                self.save_as_input.insert(c);
             }
             _ => {}
         }
     }
 
+    /// `&mut TextInput` for the active dialog, if it's a text-bearing one.
+    fn dialog_input(&mut self) -> Option<&mut TextInput> {
+        match self.dialog.as_mut()? {
+            Dialog::Normalize { input }
+            | Dialog::Gain { input, .. }
+            | Dialog::Resample { input, .. }
+            | Dialog::RenameMarker { input, .. }
+            | Dialog::OpenDirectory { input }
+            | Dialog::RenameBuffer { input, .. } => Some(input),
+            Dialog::FadeIn { .. } | Dialog::FadeOut { .. } => None,
+        }
+    }
+
+    /// Whether a typed `c` is accepted by the active dialog (numeric dialogs restrict input).
+    fn dialog_accepts(&self, c: char) -> bool {
+        match self.dialog {
+            Some(Dialog::Normalize { .. }) | Some(Dialog::Gain { .. }) => {
+                c.is_ascii_digit() || c == '-' || c == '.'
+            }
+            Some(Dialog::Resample { .. }) => c.is_ascii_digit(),
+            _ => true, // rename / directory dialogs: free text
+        }
+    }
+
     fn handle_dialog_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Enter => {
-                match self.dialog.take() {
-                    Some(Dialog::Normalize { buffer }) => {
-                        let db = buffer.parse::<f32>().unwrap_or(-1.0).min(0.0);
-                        self.apply_normalize(db);
-                    }
-                    Some(Dialog::Gain { buffer, tanh_clip }) => {
-                        let db = buffer.parse::<f32>().unwrap_or(0.0);
-                        self.apply_gain(db, tanh_clip);
-                    }
-                    Some(Dialog::FadeIn { curve }) => self.apply_fade(true, 100.0, curve),
-                    Some(Dialog::FadeOut { curve }) => self.apply_fade(false, 100.0, curve),
-                    Some(Dialog::Resample { buffer, current_rate }) => {
-                        let rate = buffer.trim().parse::<u32>().unwrap_or(current_rate);
-                        self.apply_resample(rate);
-                    }
-                    Some(Dialog::RenameMarker { index, buffer }) => {
-                        if let Some(doc) = self.documents.get_mut(self.active_document) {
-                            if let Some(marker) = doc.markers.get_mut(index) {
-                                marker.label = buffer;
-                                doc.dirty = true;
-                                if let Some(path) = doc.path.clone() {
-                                    self.file_panel.mark_dirty(&path, true);
-                                }
+            KeyCode::Enter => match self.dialog.take() {
+                Some(Dialog::Normalize { input }) => {
+                    let db = input.value().parse::<f32>().unwrap_or(-1.0).min(0.0);
+                    self.apply_normalize(db);
+                }
+                Some(Dialog::Gain { input, tanh_clip }) => {
+                    let db = input.value().parse::<f32>().unwrap_or(0.0);
+                    self.apply_gain(db, tanh_clip);
+                }
+                Some(Dialog::FadeIn { curve }) => self.apply_fade(true, 100.0, curve),
+                Some(Dialog::FadeOut { curve }) => self.apply_fade(false, 100.0, curve),
+                Some(Dialog::Resample { input, current_rate }) => {
+                    let rate = input.value().trim().parse::<u32>().unwrap_or(current_rate);
+                    self.apply_resample(rate);
+                }
+                Some(Dialog::RenameMarker { index, input }) => {
+                    if let Some(doc) = self.documents.get_mut(self.active_document) {
+                        if let Some(marker) = doc.markers.get_mut(index) {
+                            marker.label = input.value().to_string();
+                            doc.dirty = true;
+                            if let Some(path) = doc.path.clone() {
+                                self.file_panel.mark_dirty(&path, true);
                             }
                         }
                     }
-                    Some(Dialog::OpenDirectory { buffer }) => {
-                        self.open_directory(&buffer);
-                    }
-                    Some(Dialog::RenameBuffer { index, buffer }) => {
-                        self.rename_buffer(index, buffer.trim());
-                    }
-                    None => {}
+                }
+                Some(Dialog::OpenDirectory { input }) => self.open_directory(input.value()),
+                Some(Dialog::RenameBuffer { index, input }) => {
+                    self.rename_buffer(index, &ensure_wav_extension(input.value().trim()));
+                }
+                None => {}
+            },
+            KeyCode::Esc => self.dialog = None,
+            KeyCode::Left => {
+                if let Some(input) = self.dialog_input() {
+                    input.left();
+                } else {
+                    self.cycle_dialog_curve(false);
                 }
             }
-            KeyCode::Esc => {
-                self.dialog = None;
+            KeyCode::Right => {
+                if let Some(input) = self.dialog_input() {
+                    input.right();
+                } else {
+                    self.cycle_dialog_curve(true);
+                }
+            }
+            KeyCode::Home => {
+                if let Some(input) = self.dialog_input() {
+                    input.home();
+                }
+            }
+            KeyCode::End => {
+                if let Some(input) = self.dialog_input() {
+                    input.end();
+                }
             }
             KeyCode::Backspace => {
-                if let Some(dialog) = self.dialog.as_mut() {
-                    match dialog {
-                        Dialog::Normalize { buffer } => { buffer.pop(); }
-                        Dialog::Gain { buffer, .. } => { buffer.pop(); }
-                        Dialog::Resample { buffer, .. } => { buffer.pop(); }
-                        Dialog::RenameMarker { buffer, .. } => { buffer.pop(); }
-                        Dialog::OpenDirectory { buffer } => { buffer.pop(); }
-                        Dialog::RenameBuffer { buffer, .. } => { buffer.pop(); }
-                        Dialog::FadeIn { .. } => {}
-                        Dialog::FadeOut { .. } => {}
-                    }
+                if let Some(input) = self.dialog_input() {
+                    input.backspace();
                 }
             }
-            KeyCode::Tab => {
-                if let Some(dialog) = self.dialog.as_mut() {
-                    match dialog {
-                        Dialog::Gain { tanh_clip, .. } => *tanh_clip = !*tanh_clip,
-                        Dialog::FadeIn { curve, .. } => *curve = curve.next(),
-                        Dialog::FadeOut { curve, .. } => *curve = curve.next(),
-                        _ => {}
-                    }
+            KeyCode::Delete => {
+                if let Some(input) = self.dialog_input() {
+                    input.delete();
                 }
             }
-            // Free-text dialogs (marker/buffer rename, directory path) accept any printable char.
+            KeyCode::Tab => match self.dialog.as_mut() {
+                Some(Dialog::Gain { tanh_clip, .. }) => *tanh_clip = !*tanh_clip,
+                Some(Dialog::FadeIn { curve }) | Some(Dialog::FadeOut { curve }) => {
+                    *curve = curve.next()
+                }
+                _ => {}
+            },
             KeyCode::Char(c)
                 if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                    && matches!(
-                        self.dialog,
-                        Some(Dialog::RenameMarker { .. })
-                            | Some(Dialog::RenameBuffer { .. })
-                            | Some(Dialog::OpenDirectory { .. })
-                    ) =>
+                    && self.dialog_accepts(c) =>
             {
-                match self.dialog.as_mut() {
-                    Some(Dialog::RenameMarker { buffer, .. })
-                    | Some(Dialog::RenameBuffer { buffer, .. })
-                    | Some(Dialog::OpenDirectory { buffer }) => buffer.push(c),
-                    _ => {}
-                }
-            }
-            KeyCode::Char(c) if c == '-' || c == '.' || c.is_ascii_digit() => {
-                if let Some(dialog) = self.dialog.as_mut() {
-                    match dialog {
-                        Dialog::Normalize { buffer } => {
-                            if *buffer == "-1.0" { buffer.clear(); }
-                            buffer.push(c);
-                        }
-                        Dialog::Gain { buffer, .. } => {
-                            if *buffer == "0.0" { buffer.clear(); }
-                            buffer.push(c);
-                        }
-                        // Sample rate is a positive integer — accept digits only.
-                        Dialog::Resample { buffer, .. } if c.is_ascii_digit() => {
-                            buffer.push(c);
-                        }
-                        Dialog::Resample { .. } => {}
-                        // These are handled by the free-text arm above.
-                        Dialog::RenameMarker { .. }
-                        | Dialog::RenameBuffer { .. }
-                        | Dialog::OpenDirectory { .. } => {}
-                        Dialog::FadeIn { .. } => {}
-                        Dialog::FadeOut { .. } => {},
-                    }
+                if let Some(input) = self.dialog_input() {
+                    input.insert(c);
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Cycles the fade curve of the active Fade dialog (used by Left/Right when there's no
+    /// text field). `forward` is currently the only direction the curve enum exposes.
+    fn cycle_dialog_curve(&mut self, _forward: bool) {
+        if let Some(Dialog::FadeIn { curve }) | Some(Dialog::FadeOut { curve }) = self.dialog.as_mut() {
+            *curve = curve.next();
         }
     }
 
@@ -1065,7 +1076,7 @@ impl App {
                         .and_then(|d| d.markers.get(mi))
                         .map(|m| m.label.clone())
                     {
-                        self.dialog = Some(Dialog::RenameMarker { index: mi, buffer: label });
+                        self.dialog = Some(Dialog::RenameMarker { index: mi, input: TextInput::fresh(label) });
                     }
                     self.last_click = None;
                     self.dragging_marker = None;
@@ -1131,7 +1142,7 @@ impl App {
             }
             Action::OpenDirectory => {
                 let default = dirs_home().unwrap_or_else(|| "~".to_string());
-                self.dialog = Some(Dialog::OpenDirectory { buffer: default });
+                self.dialog = Some(Dialog::OpenDirectory { input: TextInput::fresh(default) });
                 return;
             }
             Action::SearchFiles => {
@@ -1157,7 +1168,7 @@ impl App {
                         .and_then(|p| p.file_name())
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    self.dialog = Some(Dialog::RenameBuffer { index: idx, buffer: name });
+                    self.dialog = Some(Dialog::RenameBuffer { index: idx, input: TextInput::fresh(name) });
                 }
                 return;
             }
@@ -1234,21 +1245,21 @@ impl App {
 
         if action == Action::Normalize {
             if self.active_doc().is_some() {
-                self.dialog = Some(Dialog::Normalize { buffer: String::from("-1.0") });
+                self.dialog = Some(Dialog::Normalize { input: TextInput::fresh("-1.0") });
             }
             return;
         }
 
         if action == Action::Gain {
             if self.active_doc().is_some() {
-                self.dialog = Some(Dialog::Gain { buffer: String::from("0.0"), tanh_clip: false });
+                self.dialog = Some(Dialog::Gain { input: TextInput::fresh("0.0"), tanh_clip: false });
             }
             return;
         }
 
         if action == Action::Resample {
             if let Some(rate) = self.active_doc().map(|d| d.sample_rate) {
-                self.dialog = Some(Dialog::Resample { buffer: String::new(), current_rate: rate });
+                self.dialog = Some(Dialog::Resample { input: TextInput::new(""), current_rate: rate });
             }
             return;
         }
@@ -1504,12 +1515,13 @@ impl App {
                 }
             }
             Action::SaveAs => {
-                self.save_as_path = document
+                let name = document
                     .path
                     .as_ref()
                     .and_then(|p| p.file_name())
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "untitled.wav".to_string());
+                self.save_as_input = TextInput::fresh(name);
                 self.save_as_active = true;
             }
             Action::Reverse => {
@@ -1855,7 +1867,7 @@ impl App {
         }
 
         if self.save_as_active {
-            render_save_as_prompt(frame, area, &self.save_as_path, self.save_as_depth, self.save_as_dither);
+            render_save_as_prompt(frame, area, &self.save_as_input, self.save_as_depth, self.save_as_dither);
         }
 
         if let Some(ref dialog) = self.dialog {
@@ -1867,6 +1879,20 @@ impl App {
 /// Best-effort home directory as a string (from $HOME), for the Open Directory default.
 fn dirs_home() -> Option<String> {
     std::env::var("HOME").ok().filter(|h| !h.is_empty())
+}
+
+/// Ensures a save/rename target ends in `.wav` (case-insensitive), appending it otherwise.
+/// Empty input is returned unchanged (callers treat empty as "don't save").
+fn ensure_wav_extension(name: &str) -> String {
+    if name.is_empty()
+        || std::path::Path::new(name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+    {
+        name.to_string()
+    } else {
+        format!("{name}.wav")
+    }
 }
 
 /// Index of the marker closest to `pos`, or `None` if there are no markers.
@@ -1903,19 +1929,27 @@ fn visible_peak_raw(
         })
 }
 
-fn render_save_as_prompt(frame: &mut Frame, area: Rect, path: &str, depth: BitDepth, dither: bool) {
+fn render_save_as_prompt(frame: &mut Frame, area: Rect, input: &TextInput, depth: BitDepth, dither: bool) {
     let dither_text = if depth.supports_dither() {
         format!("  Dither: {} (^D)", if dither { "on" } else { "off" })
     } else {
         String::new()
     };
-    let text = format!(
-        " Save as: {}_   Format: {} (Tab){} ",
-        path,
-        depth.label(),
-        dither_text,
-    );
-    let width = (text.chars().count() as u16 + 2).min(area.width);
+    let suffix = format!("   Format: {} (Tab){} ", depth.label(), dither_text);
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let (before, under, after) = input.split_at_cursor();
+    let content_len = " Save as: ".chars().count()
+        + before.chars().count() + under.chars().count() + after.chars().count()
+        + suffix.chars().count();
+    let spans = vec![
+        Span::styled(" Save as: ", base),
+        Span::styled(before, base),
+        Span::styled(under, cursor_style),
+        Span::styled(after, base),
+        Span::styled(suffix, base),
+    ];
+    let width = (content_len as u16 + 2).min(area.width);
     let height = 3.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -1928,10 +1962,8 @@ fn render_save_as_prompt(frame: &mut Frame, area: Rect, path: &str, depth: BitDe
         .title("Save As")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
-        .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE0));
-    let paragraph = Paragraph::new(text)
-        .block(block);
-    frame.render_widget(paragraph, popup);
+        .style(base);
+    frame.render_widget(Paragraph::new(Line::from(spans)).block(block), popup);
 }
 
 fn render_confirm(frame: &mut Frame, area: Rect, text: &str) {
@@ -1955,34 +1987,40 @@ fn render_confirm(frame: &mut Frame, area: Rect, text: &str) {
 }
 
 fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) {
-    let (title, content_text) = match dialog {
-        Dialog::Normalize { buffer } => {
-            ("Normalize", format!(" Target peak (dBFS): {}_ ", buffer))
+    // (title, label before the field, optional text field, suffix after the field).
+    let (title, prefix, input, suffix): (&str, String, Option<&TextInput>, String) = match dialog {
+        Dialog::Normalize { input } => {
+            ("Normalize", " Target peak (dBFS): ".into(), Some(input), " ".into())
         }
-        Dialog::Gain { buffer, tanh_clip } => {
+        Dialog::Gain { input, tanh_clip } => {
             let tanh = if *tanh_clip { "ON" } else { "OFF" };
-            ("Gain", format!(" Gain (dB): {}_  Tanh: {} (Tab) ", buffer, tanh))
+            ("Gain", " Gain (dB): ".into(), Some(input), format!("  Tanh: {tanh} (Tab) "))
         }
-        Dialog::FadeIn { curve } => {
-            ("Fade In", format!(" Curve: {} (Tab) ", curve.label()))
+        Dialog::FadeIn { curve } => ("Fade In", format!(" Curve: {} (Tab/←→) ", curve.label()), None, String::new()),
+        Dialog::FadeOut { curve } => ("Fade Out", format!(" Curve: {} (Tab/←→) ", curve.label()), None, String::new()),
+        Dialog::Resample { input, current_rate } => {
+            ("Resample", format!(" New rate (current {current_rate} Hz): "), Some(input), " ".into())
         }
-        Dialog::FadeOut { curve } => {
-            ("Fade Out", format!(" Curve: {} (Tab) ", curve.label()))
-        }
-        Dialog::Resample { buffer, current_rate } => {
-            ("Resample", format!(" New rate (current {} Hz): {}_ ", current_rate, buffer))
-        }
-        Dialog::RenameMarker { buffer, .. } => {
-            ("Rename Marker", format!(" Label: {}_ ", buffer))
-        }
-        Dialog::OpenDirectory { buffer } => {
-            ("Open Directory", format!(" Path: {}_ ", buffer))
-        }
-        Dialog::RenameBuffer { buffer, .. } => {
-            ("Rename Buffer", format!(" New name: {}_ ", buffer))
-        }
+        Dialog::RenameMarker { input, .. } => ("Rename Marker", " Label: ".into(), Some(input), " ".into()),
+        Dialog::OpenDirectory { input } => ("Open Directory", " Path: ".into(), Some(input), " ".into()),
+        Dialog::RenameBuffer { input, .. } => ("Rename Buffer", " New name: ".into(), Some(input), " ".into()),
     };
-    let width = (content_text.chars().count() as u16 + 2).min(area.width);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let mut spans = vec![Span::styled(prefix.clone(), base)];
+    let mut content_len = prefix.chars().count();
+    if let Some(input) = input {
+        let (before, under, after) = input.split_at_cursor();
+        content_len += before.chars().count() + under.chars().count() + after.chars().count();
+        spans.push(Span::styled(before, base));
+        spans.push(Span::styled(under, cursor_style));
+        spans.push(Span::styled(after, base));
+    }
+    spans.push(Span::styled(suffix.clone(), base));
+    content_len += suffix.chars().count();
+
+    let width = (content_len as u16 + 2).min(area.width);
     let height = 3.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -1995,10 +2033,8 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) {
         .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
-        .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE0));
-    let paragraph = Paragraph::new(content_text)
-        .block(block);
-    frame.render_widget(paragraph, popup);
+        .style(base);
+    frame.render_widget(Paragraph::new(Line::from(spans)).block(block), popup);
 }
 
 #[cfg(test)]
