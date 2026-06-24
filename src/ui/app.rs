@@ -928,7 +928,7 @@ impl App {
             return;
         }
 
-        if matches!(action, Action::TogglePlayback | Action::Stop) {
+        if action == Action::TogglePlayback {
             self.handle_playback_action(action);
             return;
         }
@@ -1078,7 +1078,6 @@ impl App {
         match action {
             Action::Quit
             | Action::TogglePlayback
-            | Action::Stop
             | Action::Cut
             | Action::Copy
             | Action::Paste
@@ -1375,28 +1374,20 @@ impl App {
         }
     }
 
-    fn handle_playback_action(&mut self, action: Action) {
+    fn handle_playback_action(&mut self, _action: Action) {
         let Some(document) = self.active_doc() else {
             return;
         };
         let Some(audio) = self.audio.as_ref() else {
             return;
         };
-        match action {
-            Action::TogglePlayback => {
-                if audio.is_playing() {
-                    audio.pause();
-                } else if let Some((ls, le)) = self.loop_range() {
-                    audio.play_looped(document.cursor, ls, le);
-                } else {
-                    audio.play(document.cursor);
-                }
-            }
-            Action::Stop => {
-                audio.stop();
-                self.playhead_position = None;
-            }
-            _ => unreachable!(),
+        // Space is the only transport command: play from the cursor, or pause if playing.
+        if audio.is_playing() {
+            audio.pause();
+        } else if let Some((ls, le)) = self.loop_range() {
+            audio.play_looped(document.cursor, ls, le);
+        } else {
+            audio.play(document.cursor);
         }
     }
 

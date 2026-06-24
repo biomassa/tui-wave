@@ -22,7 +22,6 @@ pub enum Action {
     ZoomInVertical,
     ZoomOutVertical,
     TogglePlayback,
-    Stop,
     Cut,
     Copy,
     Paste,
@@ -95,7 +94,6 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Down => Some(Action::ZoomOut),
         KeyCode::Char(' ') => Some(Action::TogglePlayback),
         KeyCode::Char('d') if ctrl => Some(Action::ClearSelection),
-        KeyCode::Esc => Some(Action::Stop),
         KeyCode::Delete => Some(Action::Delete),
         KeyCode::Char('a') => Some(Action::ToggleAutoVerticalZoom),
         KeyCode::Char('z') => Some(Action::ToggleZeroSnap),
@@ -240,15 +238,13 @@ mod tests {
     }
 
     #[test]
-    fn space_toggles_playback_and_esc_stops() {
+    fn space_toggles_playback() {
         assert_eq!(
             map_key(key(KeyCode::Char(' '), KeyModifiers::NONE)),
             Some(Action::TogglePlayback)
         );
-        assert_eq!(
-            map_key(key(KeyCode::Esc, KeyModifiers::NONE)),
-            Some(Action::Stop)
-        );
+        // Esc no longer maps to a main-view action (it's reserved for closing menus/dialogs).
+        assert_eq!(map_key(key(KeyCode::Esc, KeyModifiers::NONE)), None);
     }
 
     #[test]

@@ -29,19 +29,24 @@ pub struct Toolbar {
     pub is_playing: bool,
 }
 
-/// Spacing constants, shared by layout (`build`) and measurement (`rows_needed`) so the two
-/// can never disagree about how wide anything is.
-const GAP: u16 = 1; // between buttons
-const SEP_W: u16 = 3; // " │ "
+/// Spacing constants, shared by layout (`build`) and measurement (`section_width`) so the
+/// two can never disagree about how wide anything is.
+const GAP: u16 = 1; // trailing space after each button
+const LEAD_W: u16 = 2; // "│ " divider that prefixes every section
 
 impl Toolbar {
     pub fn new() -> Self {
         let groups = vec![
+            // Play has no section label — play/pause is the whole "transport".
             ToolGroup {
-                label: "TRANSPORT",
+                label: "",
+                buttons: vec![("Play", "Spc", Action::TogglePlayback)],
+            },
+            ToolGroup {
+                label: "FILE",
                 buttons: vec![
-                    ("Play", "Spc", Action::TogglePlayback),
-                    ("Stop", "Esc", Action::Stop),
+                    ("Save", "^s", Action::Save),
+                    ("Quit", "q", Action::Quit),
                 ],
             },
             ToolGroup {
@@ -53,6 +58,16 @@ impl Toolbar {
                     ("Paste", "^v", Action::Paste),
                     ("Undo", "^z", Action::Undo),
                     ("Redo", "^y", Action::Redo),
+                ],
+            },
+            ToolGroup {
+                label: "VIEW",
+                buttons: vec![
+                    ("Zoom+", "Up", Action::ZoomIn),
+                    ("Zoom-", "Dn", Action::ZoomOut),
+                    ("VZoom+", "S+Up", Action::ZoomInVertical),
+                    ("VZoom-", "S+Dn", Action::ZoomOutVertical),
+                    ("Auto", "a", Action::ToggleAutoVerticalZoom),
                 ],
             },
             ToolGroup {
@@ -68,16 +83,6 @@ impl Toolbar {
                 ],
             },
             ToolGroup {
-                label: "VIEW",
-                buttons: vec![
-                    ("Zoom+", "Up", Action::ZoomIn),
-                    ("Zoom-", "Dn", Action::ZoomOut),
-                    ("VZoom+", "S+Up", Action::ZoomInVertical),
-                    ("VZoom-", "S+Dn", Action::ZoomOutVertical),
-                    ("Auto", "a", Action::ToggleAutoVerticalZoom),
-                ],
-            },
-            ToolGroup {
                 label: "MARK",
                 buttons: vec![("Add", "m", Action::InsertMarker)],
             },
@@ -86,13 +91,6 @@ impl Toolbar {
                 buttons: vec![
                     ("Snap", "z", Action::ToggleZeroSnap),
                     ("Loop", "l", Action::ToggleLoop),
-                ],
-            },
-            ToolGroup {
-                label: "FILE",
-                buttons: vec![
-                    ("Save", "^s", Action::Save),
-                    ("Quit", "q", Action::Quit),
                 ],
             },
         ];
@@ -112,6 +110,19 @@ impl Toolbar {
         }
     }
 
+    /// On-screen width of one whole section, including its leading `│ ` divider.
+    fn section_width(&self, group: &ToolGroup) -> u16 {
+        let mut w = LEAD_W;
+        if !group.label.is_empty() {
+            w += group.label.chars().count() as u16 + 1; // label + space
+        }
+        for &(label, shortcut, action) in &group.buttons {
+            let label = self.button_label(label, action);
+            w += label.chars().count() as u16 + 1 + shortcut.chars().count() as u16 + GAP;
+        }
+        w
+    }
+
     /// Number of rows the toolbar needs to show every button at `width`, with no truncation.
     /// `App` uses this to size the toolbar's chrome row so it grows only as far as needed.
     pub fn rows_needed(&self, width: u16) -> u16 {
@@ -119,11 +130,10 @@ impl Toolbar {
         rows.max(1)
     }
 
-    /// Lays the groups out left-to-right, wrapping when something won't fit on the current
-    /// row. Returns the rendered lines, the per-button clickable rects, and the number of
-    /// rows used. A group divider is dropped when it would land at the start of a wrapped
-    /// row. Anything past `area.height` rows is not emitted (the caller sizes the area so
-    /// that doesn't normally happen). Pure given `self` — drives both render and measurement.
+    /// Packs whole sections left-to-right, wrapping to a new row only at section boundaries.
+    /// Every section is prefixed by a `│ ` divider, so each row begins with a divider at the
+    /// same column — the bars line up across rows. Returns the rendered lines, per-button
+    /// clickable rects, and rows used. Pure given `self` — drives both render and measurement.
     fn build(&self, area: Rect) -> (Vec<Line<'static>>, Vec<(Rect, Action)>, u16) {
         let right = area.x + area.width;
         let group_style = Style::default().fg(theme::TOOLBAR_GROUP);
@@ -138,39 +148,28 @@ impl Toolbar {
         let mut row: u16 = 0;
         let mut placed_any = false;
 
-        'groups: for (gi, group) in self.groups.iter().enumerate() {
-            let label_w = group.label.chars().count() as u16 + 1; // label + trailing space
-            let sep_w = if gi > 0 { SEP_W } else { 0 };
-            if x > area.x && x + sep_w + label_w > right {
+        for group in &self.groups {
+            // Wrap to a fresh row when this whole section won't fit on the current one.
+            if x > area.x && x + self.section_width(group) > right {
                 lines.push(Line::from(std::mem::take(&mut spans)));
                 row += 1;
                 x = area.x;
                 if row >= area.height {
                     break;
                 }
-                // Fresh row: drop the leading divider.
-                spans.push(Span::styled(format!("{} ", group.label), group_style));
-            } else {
-                if gi > 0 {
-                    spans.push(Span::styled(" │ ", sep_style));
-                    x += sep_w;
-                }
-                spans.push(Span::styled(format!("{} ", group.label), group_style));
             }
-            x += label_w;
+            // Leading divider before every section, so row starts align column-wise.
+            spans.push(Span::styled("│ ", sep_style));
+            x += LEAD_W;
+            if !group.label.is_empty() {
+                spans.push(Span::styled(format!("{} ", group.label), group_style));
+                x += group.label.chars().count() as u16 + 1;
+            }
             placed_any = true;
 
             for &(label, shortcut, action) in &group.buttons {
                 let label = self.button_label(label, action);
                 let btn_w = label.chars().count() as u16 + 1 + shortcut.chars().count() as u16;
-                if x > area.x && x + btn_w > right {
-                    lines.push(Line::from(std::mem::take(&mut spans)));
-                    row += 1;
-                    x = area.x;
-                    if row >= area.height {
-                        break 'groups;
-                    }
-                }
                 rects.push((Rect { x, y: area.y + row, width: btn_w, height: 1 }, action));
                 let label_style = if self.active_actions.contains(&action) {
                     Style::default().fg(theme::ACTIVE)
