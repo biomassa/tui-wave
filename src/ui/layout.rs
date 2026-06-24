@@ -20,7 +20,9 @@ pub const BUFFER_PANEL_WIDTH: u16 = 20;
 
 pub fn split_chrome(area: Rect, toolbar_height: u16) -> Chrome {
     let toolbar_height = toolbar_height.clamp(MIN_TOOLBAR_HEIGHT, MAX_TOOLBAR_HEIGHT);
-    let [menu, toolbar, content] = Layout::vertical([
+    // A blank spacer row sits between the menu and the toolbar (reserved for future use).
+    let [menu, _spacer, toolbar, content] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(toolbar_height),
         Constraint::Fill(1),

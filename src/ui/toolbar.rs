@@ -32,7 +32,7 @@ pub struct Toolbar {
 /// Spacing constants, shared by layout (`build`) and measurement (`section_width`) so the
 /// two can never disagree about how wide anything is.
 const GAP: u16 = 1; // trailing space after each button
-const LEAD_W: u16 = 2; // "│ " divider that prefixes every section
+const SECTION_GAP: u16 = 2; // blank columns between sections (no divider line)
 
 impl Toolbar {
     pub fn new() -> Self {
@@ -110,11 +110,12 @@ impl Toolbar {
         }
     }
 
-    /// On-screen width of one whole section, including its leading `│ ` divider.
+    /// On-screen width of one whole section's content — its accent label block (` LABEL `)
+    /// plus its buttons. Does not include the inter-section gap (handled by the caller).
     fn section_width(&self, group: &ToolGroup) -> u16 {
-        let mut w = LEAD_W;
+        let mut w = 0;
         if !group.label.is_empty() {
-            w += group.label.chars().count() as u16 + 1; // label + space
+            w += group.label.chars().count() as u16 + 2; // " LABEL " accent block
         }
         for &(label, shortcut, action) in &group.buttons {
             let label = self.button_label(label, action);
@@ -131,13 +132,12 @@ impl Toolbar {
     }
 
     /// Packs whole sections left-to-right, wrapping to a new row only at section boundaries.
-    /// Every section is prefixed by a `│ ` divider, so each row begins with a divider at the
-    /// same column — the bars line up across rows. Returns the rendered lines, per-button
-    /// clickable rects, and rows used. Pure given `self` — drives both render and measurement.
+    /// Section labels are drawn as a dim accent block (no divider lines); sections are
+    /// separated by blank columns. Returns the rendered lines, per-button clickable rects,
+    /// and rows used. Pure given `self` — drives both render and measurement.
     fn build(&self, area: Rect) -> (Vec<Line<'static>>, Vec<(Rect, Action)>, u16) {
         let right = area.x + area.width;
-        let group_style = Style::default().fg(theme::TOOLBAR_GROUP);
-        let sep_style = Style::default().fg(theme::DIVIDER);
+        let group_style = Style::default().fg(theme::TOOLBAR_GROUP).bg(theme::TOOLBAR_GROUP_BG);
         let chrome = Style::default().fg(theme::CHROME_FG);
         let shortcut_style = Style::default().fg(theme::SHORTCUT);
 
@@ -149,8 +149,9 @@ impl Toolbar {
         let mut placed_any = false;
 
         for group in &self.groups {
+            let gap = if x > area.x { SECTION_GAP } else { 0 };
             // Wrap to a fresh row when this whole section won't fit on the current one.
-            if x > area.x && x + self.section_width(group) > right {
+            if x > area.x && x + gap + self.section_width(group) > right {
                 lines.push(Line::from(std::mem::take(&mut spans)));
                 row += 1;
                 x = area.x;
@@ -158,12 +159,14 @@ impl Toolbar {
                     break;
                 }
             }
-            // Leading divider before every section, so row starts align column-wise.
-            spans.push(Span::styled("│ ", sep_style));
-            x += LEAD_W;
+            // Blank-column gap between sections (no divider line); none at a row start.
+            if x > area.x {
+                spans.push(Span::styled(" ".repeat(SECTION_GAP as usize), chrome));
+                x += SECTION_GAP;
+            }
             if !group.label.is_empty() {
-                spans.push(Span::styled(format!("{} ", group.label), group_style));
-                x += group.label.chars().count() as u16 + 1;
+                spans.push(Span::styled(format!(" {} ", group.label), group_style));
+                x += group.label.chars().count() as u16 + 2;
             }
             placed_any = true;
 
