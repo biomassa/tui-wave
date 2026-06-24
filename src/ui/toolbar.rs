@@ -156,7 +156,7 @@ impl Toolbar {
     fn section_width(&self, group: &ToolGroup) -> u16 {
         let mut w = 0;
         if !group.label.is_empty() {
-            w += group.label.chars().count() as u16 + 1; // "LABEL " accent block
+            w += group.label.chars().count() as u16 + 2; // "LABEL: "
         }
         for &(label, shortcut, action) in &group.buttons {
             let label = self.button_label(label, action);
@@ -175,12 +175,12 @@ impl Toolbar {
         spans: &mut Vec<Span<'static>>,
         rects: &mut Vec<(Rect, Action)>,
     ) -> u16 {
-        let group_style = Style::default().fg(theme::TOOLBAR_GROUP).bg(theme::TOOLBAR_GROUP_BG);
+        let group_style = Style::default().fg(theme::TOOLBAR_GROUP);
         let chrome = Style::default().fg(theme::CHROME_FG);
         let shortcut_style = Style::default().fg(theme::SHORTCUT);
         if !group.label.is_empty() {
-            spans.push(Span::styled(format!("{} ", group.label), group_style));
-            x += group.label.chars().count() as u16 + 1;
+            spans.push(Span::styled(format!("{}: ", group.label), group_style));
+            x += group.label.chars().count() as u16 + 2;
         }
         for &(label, shortcut, action) in &group.buttons {
             let label = self.button_label(label, action);

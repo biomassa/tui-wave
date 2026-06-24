@@ -7,7 +7,6 @@ use ratatui::style::Color;
 pub const BASE: Color = Color::Rgb(0x1e, 0x1e, 0x2e);
 pub const SURFACE0: Color = Color::Rgb(0x31, 0x32, 0x44);
 pub const SURFACE1: Color = Color::Rgb(0x45, 0x47, 0x5a);
-pub const SURFACE2: Color = Color::Rgb(0x58, 0x5b, 0x70);
 pub const TEXT: Color = Color::Rgb(0xcd, 0xd6, 0xf4);
 pub const SUBTEXT0: Color = Color::Rgb(0xa6, 0xad, 0xc8);
 pub const SUBTEXT1: Color = Color::Rgb(0xba, 0xc2, 0xde);
@@ -42,10 +41,8 @@ pub const DIRTY: Color = RED;
 pub const SHORTCUT: Color = PEACH;
 /// Active / enabled toggle state in the toolbar.
 pub const ACTIVE: Color = Color::Rgb(0xa6, 0xe3, 0xa1);
-/// Toolbar section labels (EDIT, VIEW, …): text on a dim accent background block so they
-/// read as headers without needing divider lines.
+/// Toolbar section labels (EDIT:, VIEW:, …) — coloured text, no background.
 pub const TOOLBAR_GROUP: Color = SUBTEXT1;
-pub const TOOLBAR_GROUP_BG: Color = SURFACE2;
 /// Default text/background for the menu bar and toolbar chrome.
 pub const CHROME_FG: Color = TEXT;
 pub const CHROME_BG: Color = SURFACE0;
