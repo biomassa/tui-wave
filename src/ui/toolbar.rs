@@ -90,13 +90,19 @@ impl Toolbar {
             },
             ToolGroup {
                 label: "MARK",
-                buttons: vec![("Add", "m", Action::InsertMarker)],
+                buttons: vec![
+                    ("Add", "m", Action::InsertMarker),
+                    ("Del", "M", Action::DeleteMarker),
+                    ("Prev", "[", Action::JumpPrevMarker),
+                    ("Next", "]", Action::JumpNextMarker),
+                ],
             },
             ToolGroup {
                 label: "OPTS",
                 buttons: vec![
                     ("Snap", "z", Action::ToggleZeroSnap),
                     ("Loop", "l", Action::ToggleLoop),
+                    ("Fine", "`", Action::ToggleFineMode),
                 ],
             },
         ];

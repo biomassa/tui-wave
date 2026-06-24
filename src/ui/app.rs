@@ -125,6 +125,10 @@ pub struct App {
     pub snap_to_zero: bool,
     /// When true, playback loops — the full file if no selection, or the selection range.
     pub loop_playback: bool,
+    /// When true, arrows (and Shift+arrows) move/extend by a single sample instead of a whole
+    /// column. Toggled with `~` — a modifier-free fine-step mode, since every Ctrl/Alt+arrow
+    /// combo is intercepted by some terminal or desktop before the app sees it.
+    pub fine_mode: bool,
     /// Active parameter dialog (Normalize or Gain), if any.
     dialog: Option<Dialog>,
     /// The current playback position, set from `AudioEngine.position` during playback.
@@ -178,6 +182,7 @@ impl App {
             save_as_dither: false,
             snap_to_zero: true,
             loop_playback: false,
+            fine_mode: false,
             dialog: None,
             playhead_position: None,
         }
@@ -1032,21 +1037,20 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if mouse.modifiers.contains(KeyModifiers::CONTROL) {
-                    let t = if snap { document.snap_to_zero_crossing(target) } else { target };
-                    if let Some(sel) = document.selection {
+                    // Ctrl extends the existing selection: pin the *far* edge as the drag
+                    // anchor and move the near edge to the click — then the normal Drag branch
+                    // (which reads `mouse_down_anchor`) keeps extending as the mouse moves.
+                    // `target` is already zero-crossing-snapped above.
+                    let anchor = if let Some(sel) = document.selection {
                         let (sel_start, sel_end) = sel.normalized();
-                        if t < sel_start {
-                            document.selection = Some(Selection { start: t, end: sel_end });
-                            document.cursor = t;
-                        } else if t > sel_end {
-                            document.selection = Some(Selection { start: sel_start, end: t });
-                            document.cursor = sel_start;
-                        }
+                        // Keep whichever edge is farther from the click fixed.
+                        if target.abs_diff(sel_start) <= target.abs_diff(sel_end) { sel_end } else { sel_start }
                     } else {
-                        let anchor = document.cursor;
-                        document.selection = Some(Selection { start: anchor, end: t });
-                        document.cursor = anchor.min(t);
-                    }
+                        document.cursor
+                    };
+                    document.selection = Some(Selection { start: anchor, end: target });
+                    document.cursor = anchor.min(target);
+                    self.mouse_down_anchor = Some(anchor);
                 } else {
                     document.selection = None;
                     let anchor = if snap { document.snap_to_zero_crossing(target) } else { target };
@@ -1300,6 +1304,11 @@ impl App {
             return;
         }
 
+        if action == Action::ToggleFineMode {
+            self.fine_mode = !self.fine_mode;
+            return;
+        }
+
         if matches!(
             action,
             Action::InsertMarker
@@ -1383,8 +1392,13 @@ impl App {
             return;
         }
         let width = self.content_width;
-        let column_step = viewport.samples_per_column.max(1.0) as usize;
-        let fine_step = (column_step / 4).max(1);
+        // Cursor/selection step: one whole column normally, or ~1/8th of one while fine mode
+        // (toggled with backtick) is on — fine enough for precise edits but still faster than
+        // crawling one sample per keypress, except when zoomed in so far that an eighth-column
+        // already rounds down to a single sample. Modifier-free fine stepping replaces the old
+        // Ctrl/Alt+arrow scheme, which no terminal/DE would reliably pass through.
+        let column_step = (viewport.samples_per_column.max(1.0) as usize).max(1);
+        let step = if self.fine_mode { (column_step / 8).max(1) } else { column_step };
         let span = viewport.span(width);
         let loop_range = if self.loop_playback {
             Some(document.selection.map(|sel| sel.normalized()).unwrap_or((0, total_len)))
@@ -1408,6 +1422,7 @@ impl App {
             | Action::ToggleAutoVerticalZoom
             | Action::ToggleZeroSnap
             | Action::ToggleLoop
+            | Action::ToggleFineMode
             | Action::ClearSelection
             | Action::SaveAs
             | Action::SaveAll
@@ -1432,16 +1447,10 @@ impl App {
             // Cursor movement is identical whether or not it extends a selection; the
             // selection side-effect is applied in the second match below.
             Action::MoveCursorLeft | Action::ExtendSelectionLeft => {
-                document.cursor = document.cursor.saturating_sub(column_step.max(1));
+                document.cursor = document.cursor.saturating_sub(step);
             }
             Action::MoveCursorRight | Action::ExtendSelectionRight => {
-                document.cursor = (document.cursor + column_step.max(1)).min(total_len - 1);
-            }
-            Action::MoveCursorLeftFine | Action::ExtendSelectionLeftFine => {
-                document.cursor = document.cursor.saturating_sub(fine_step);
-            }
-            Action::MoveCursorRightFine | Action::ExtendSelectionRightFine => {
-                document.cursor = (document.cursor + fine_step).min(total_len - 1);
+                document.cursor = (document.cursor + step).min(total_len - 1);
             }
             Action::JumpStart | Action::ExtendSelectionToStart => document.cursor = 0,
             Action::JumpEnd | Action::ExtendSelectionToEnd => document.cursor = total_len - 1,
@@ -1463,10 +1472,19 @@ impl App {
             // the active edge follows the cursor, so reversing direction shrinks rather than
             // flips the selection.
             Action::ExtendSelectionLeft
-            | Action::ExtendSelectionLeftFine
-            | Action::ExtendSelectionRight
-            | Action::ExtendSelectionRightFine => {
-                let cursor = if snap { document.snap_to_zero_crossing(document.cursor) } else { document.cursor };
+            | Action::ExtendSelectionRight => {
+                // Snap the active edge to a zero crossing, but *directionally*: a plain
+                // nearest-crossing snap pulls a small step (when zoomed in, column_step is one
+                // sample) straight back to the crossing it just left, so the selection appears
+                // frozen. If snapping would erase the step's progress, keep the literal cursor.
+                let raw = document.cursor;
+                let cursor = if snap {
+                    let snapped = document.snap_to_zero_crossing(raw);
+                    let advanced = if raw >= old_cursor { snapped > old_cursor } else { snapped < old_cursor };
+                    if advanced { snapped } else { raw }
+                } else {
+                    raw
+                };
                 document.selection = Some(Selection::extended(document.selection, old_cursor, cursor));
                 document.cursor = cursor;
             }
@@ -1737,6 +1755,9 @@ impl App {
         if self.loop_playback {
             self.toolbar.active_actions.insert(Action::ToggleLoop);
         }
+        if self.fine_mode {
+            self.toolbar.active_actions.insert(Action::ToggleFineMode);
+        }
         if self.viewport.as_ref().is_some_and(|v| v.auto_vertical_zoom) {
             self.toolbar.active_actions.insert(Action::ToggleAutoVerticalZoom);
         }
@@ -1749,13 +1770,18 @@ impl App {
             chrome.spacer,
         );
 
+        // The waveform pane is "focused" (and gets the accent color) when neither side panel
+        // is — true for both the empty placeholder and a loaded document.
+        let waveform_focused = !self.file_panel.focused && !self.buffer_panel.focused;
+        let border_color = if waveform_focused { theme::FOCUS } else { theme::BORDER };
+
         let doc_idx = self.active_document;
         let no_doc = self.documents.get(doc_idx).is_none();
         if no_doc {
             let block = Block::default()
-                .title(" tui-wave ")
+                .title(Span::styled(" tui-wave ", Style::default().fg(border_color)))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::BORDER))
+                .border_style(Style::default().fg(border_color))
                 .style(Style::default().fg(theme::CHROME_FG).bg(theme::BASE));
             let text = Paragraph::new("Select a file from the panel on the left (Tab to focus, / to search)")
                 .alignment(Alignment::Center)
@@ -1773,9 +1799,6 @@ impl App {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "untitled".to_string()),
         );
-        // The waveform is "focused" (and gets the accent color) when neither side panel is.
-        let waveform_focused = !self.file_panel.focused && !self.buffer_panel.focused;
-        let border_color = if waveform_focused { theme::FOCUS } else { theme::BORDER };
         let title = Line::from(vec![
             Span::styled(title_text, Style::default().fg(border_color)),
             Span::styled(
@@ -1921,7 +1944,7 @@ impl App {
             ));
         }
 
-        frame.render_widget(StatusBar { document: &self.documents[doc_idx], viewport, snap_to_zero: self.snap_to_zero, loop_playback: self.loop_playback, last_action: self.histories[doc_idx].last_label() }, status_area);
+        frame.render_widget(StatusBar { document: &self.documents[doc_idx], viewport, snap_to_zero: self.snap_to_zero, loop_playback: self.loop_playback, fine_mode: self.fine_mode, last_action: self.histories[doc_idx].last_label() }, status_area);
 
         if let Some(confirm) = self.confirm {
             let text = match confirm {

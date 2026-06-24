@@ -100,41 +100,6 @@ impl MenuBar {
                         action: Action::Redo,
                     },
                     MenuEntry {
-                        label: "Reverse",
-                        shortcut: "Ctrl+r",
-                        action: Action::Reverse,
-                    },
-                    MenuEntry {
-                        label: "Normalize",
-                        shortcut: "Ctrl+n",
-                        action: Action::Normalize,
-                    },
-                    MenuEntry {
-                        label: "Gain",
-                        shortcut: "Ctrl+g",
-                        action: Action::Gain,
-                    },
-                    MenuEntry {
-                        label: "Resample",
-                        shortcut: "Ctrl+e",
-                        action: Action::Resample,
-                    },
-                    MenuEntry {
-                        label: "Fade In",
-                        shortcut: "Ctrl+f",
-                        action: Action::FadeIn,
-                    },
-                    MenuEntry {
-                        label: "Fade Out",
-                        shortcut: "Ctrl+o",
-                        action: Action::FadeOut,
-                    },
-                    MenuEntry {
-                        label: "Trim",
-                        shortcut: "Ctrl+t",
-                        action: Action::Trim,
-                    },
-                    MenuEntry {
                         label: "Clear Selection",
                         shortcut: "Ctrl+d",
                         action: Action::ClearSelection,
@@ -174,6 +139,52 @@ impl MenuBar {
                         label: "Zero-Crossing Snap",
                         shortcut: "z",
                         action: Action::ToggleZeroSnap,
+                    },
+                    MenuEntry {
+                        label: "Fine Step Mode",
+                        shortcut: "`",
+                        action: Action::ToggleFineMode,
+                    },
+                ],
+            },
+            MenuItem {
+                label: "Process",
+                mnemonic: 'P',
+                entries: vec![
+                    MenuEntry {
+                        label: "Reverse",
+                        shortcut: "Ctrl+r",
+                        action: Action::Reverse,
+                    },
+                    MenuEntry {
+                        label: "Normalize",
+                        shortcut: "Ctrl+n",
+                        action: Action::Normalize,
+                    },
+                    MenuEntry {
+                        label: "Gain",
+                        shortcut: "Ctrl+g",
+                        action: Action::Gain,
+                    },
+                    MenuEntry {
+                        label: "Fade In",
+                        shortcut: "Ctrl+f",
+                        action: Action::FadeIn,
+                    },
+                    MenuEntry {
+                        label: "Fade Out",
+                        shortcut: "Ctrl+o",
+                        action: Action::FadeOut,
+                    },
+                    MenuEntry {
+                        label: "Trim",
+                        shortcut: "Ctrl+t",
+                        action: Action::Trim,
+                    },
+                    MenuEntry {
+                        label: "Resample",
+                        shortcut: "Ctrl+e",
+                        action: Action::Resample,
                     },
                 ],
             },

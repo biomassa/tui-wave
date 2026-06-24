@@ -12,6 +12,7 @@ pub struct StatusBar<'a> {
     pub viewport: &'a Viewport,
     pub snap_to_zero: bool,
     pub loop_playback: bool,
+    pub fine_mode: bool,
     /// Label of the last applied edit (top of the undo stack), shown so the user can
     /// confirm what an operation/undo just did. `None` when nothing has been edited.
     pub last_action: Option<&'a str>,
@@ -26,9 +27,10 @@ impl<'a> Widget for StatusBar<'a> {
         };
         let snap = if self.snap_to_zero { " Zero x: on " } else { "" };
         let loop_ = if self.loop_playback { " Loop: on " } else { "" };
+        let fine = if self.fine_mode { " Fine: on " } else { "" };
         let last = self.last_action.map(|l| format!(" last: {} ", l)).unwrap_or_default();
         let text = format!(
-            " pos: {} ({:.3}s) | zoom: {:.1} spl/col | amp: {:.2}x | sel: {} |{}{}{}",
+            " pos: {} ({:.3}s) | zoom: {:.1} spl/col | amp: {:.2}x | sel: {} |{}{}{}{}",
             self.document.cursor,
             seconds,
             self.viewport.samples_per_column,
@@ -36,6 +38,7 @@ impl<'a> Widget for StatusBar<'a> {
             selection,
             snap,
             loop_,
+            fine,
             last,
         );
         Paragraph::new(Line::from(text))
