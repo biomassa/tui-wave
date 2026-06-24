@@ -49,6 +49,14 @@ pub enum Action {
     DeleteMarker,
     JumpPrevMarker,
     JumpNextMarker,
+    // Panel/modal commands (mostly dispatched contextually, not via the global keymap).
+    Noop,
+    OpenSelected,
+    OpenDirectory,
+    SearchFiles,
+    FocusNext,
+    CloseBuffer,
+    RenameBuffer,
 }
 
 pub fn map_key(key: KeyEvent) -> Option<Action> {

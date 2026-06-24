@@ -47,6 +47,25 @@ enum Dialog {
     FadeOut { curve: FadeCurve },
     Resample { buffer: String, current_rate: u32 },
     RenameMarker { index: usize, buffer: String },
+    OpenDirectory { buffer: String },
+    RenameBuffer { index: usize, buffer: String },
+}
+
+/// Which panel currently has focus — the single source of truth for the modal command
+/// panel, contextual key handling, and the accent on the active panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Waveform,
+    Files,
+    Buffers,
+}
+
+/// A pending y/n confirmation modal. Generalizes the old quit-only prompt so closing a
+/// dirty buffer can reuse the same flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Confirm {
+    Quit,
+    CloseBuffer(usize),
 }
 
 pub struct App {
@@ -78,9 +97,9 @@ pub struct App {
     /// a redraw, so it's cached here instead.
     pub content_width: u16,
     pub waveform_area: Rect,
-    /// Set when Quit is requested with unsaved changes; intercepts the next keypress as a
-    /// y/n confirmation instead of routing it through the normal keymap.
-    pub quit_confirm: bool,
+    /// A pending y/n confirmation (quit, or closing a dirty buffer). Intercepts the next
+    /// keypress as a confirmation instead of routing it through the normal keymap.
+    confirm: Option<Confirm>,
     /// Sample position where the current mouse-down started (for drag-to-select).
     mouse_down_anchor: Option<usize>,
     /// Index of the marker currently being dragged with the mouse, if any.
@@ -145,7 +164,7 @@ impl App {
             waveform_caches,
             content_width: 1,
             waveform_area: Rect::default(),
-            quit_confirm: false,
+            confirm: None,
             mouse_down_anchor: None,
             dragging_marker: None,
             marker_label_rects: Vec::new(),
@@ -249,8 +268,8 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
-        if self.quit_confirm {
-            self.handle_quit_confirm_key(key);
+        if self.confirm.is_some() {
+            self.handle_confirm_key(key);
             return;
         }
         if self.menu.is_open() {
@@ -311,6 +330,13 @@ impl App {
                     self.file_panel.filter.clear();
                     true
                 }
+                // ^o opens the directory dialog (in waveform focus ^o is Fade Out).
+                KeyCode::Char('o') | KeyCode::Char('O')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.handle_action(Action::OpenDirectory);
+                    true
+                }
                 KeyCode::Tab => {
                     self.file_panel.focused = false;
                     self.buffer_panel.focused = true;
@@ -325,6 +351,7 @@ impl App {
         }
         // Buffer panel keyboard focus
         if self.buffer_panel.focused {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             let handled = match key.code {
                 KeyCode::Up => {
                     self.switch_to_buffer(self.active_document.saturating_sub(1));
@@ -335,6 +362,11 @@ impl App {
                     self.switch_to_buffer((self.active_document + 1).min(max));
                     true
                 }
+                // Contextual buffer commands (^r/^a differ from the global Reverse/SaveAll).
+                KeyCode::Char('s') | KeyCode::Char('S') if ctrl => { self.handle_action(Action::Save); true }
+                KeyCode::Char('w') | KeyCode::Char('W') if ctrl => { self.handle_action(Action::CloseBuffer); true }
+                KeyCode::Char('r') | KeyCode::Char('R') if ctrl => { self.handle_action(Action::RenameBuffer); true }
+                KeyCode::Char('a') | KeyCode::Char('A') if ctrl => { self.handle_action(Action::SaveAll); true }
                 KeyCode::Tab => { self.buffer_panel.focused = false; true }
                 KeyCode::Esc => { self.buffer_panel.focused = false; true }
                 _ => false,
@@ -374,16 +406,30 @@ impl App {
         }
     }
 
-    fn handle_quit_confirm_key(&mut self, key: KeyEvent) {
-        match key.code {
-            // Save every dirty buffer that has a path, then quit. Buffers without a path are
-            // left unsaved (Save All can't choose names) — but we still quit.
-            KeyCode::Char('s') | KeyCode::Char('S') => {
-                self.save_all();
+    fn handle_confirm_key(&mut self, key: KeyEvent) {
+        let Some(confirm) = self.confirm else { return };
+        let save = matches!(key.code, KeyCode::Char('s') | KeyCode::Char('S'));
+        let proceed = save || matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
+        if !proceed {
+            // Any other key cancels.
+            self.confirm = None;
+            return;
+        }
+        match confirm {
+            Confirm::Quit => {
+                // (s)ave saves every dirty buffer with a path first; (y) quits regardless.
+                if save {
+                    self.save_all();
+                }
                 self.should_quit = true;
             }
-            KeyCode::Char('y') | KeyCode::Char('Y') => self.should_quit = true,
-            _ => self.quit_confirm = false,
+            Confirm::CloseBuffer(idx) => {
+                if save {
+                    self.save_buffer(idx);
+                }
+                self.confirm = None;
+                self.close_buffer(idx);
+            }
         }
     }
 
@@ -459,6 +505,12 @@ impl App {
                             }
                         }
                     }
+                    Some(Dialog::OpenDirectory { buffer }) => {
+                        self.open_directory(&buffer);
+                    }
+                    Some(Dialog::RenameBuffer { index, buffer }) => {
+                        self.rename_buffer(index, buffer.trim());
+                    }
                     None => {}
                 }
             }
@@ -472,6 +524,8 @@ impl App {
                         Dialog::Gain { buffer, .. } => { buffer.pop(); }
                         Dialog::Resample { buffer, .. } => { buffer.pop(); }
                         Dialog::RenameMarker { buffer, .. } => { buffer.pop(); }
+                        Dialog::OpenDirectory { buffer } => { buffer.pop(); }
+                        Dialog::RenameBuffer { buffer, .. } => { buffer.pop(); }
                         Dialog::FadeIn { .. } => {}
                         Dialog::FadeOut { .. } => {}
                     }
@@ -487,13 +541,21 @@ impl App {
                     }
                 }
             }
-            // Marker rename is free text — accept any printable character.
+            // Free-text dialogs (marker/buffer rename, directory path) accept any printable char.
             KeyCode::Char(c)
                 if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                    && matches!(self.dialog, Some(Dialog::RenameMarker { .. })) =>
+                    && matches!(
+                        self.dialog,
+                        Some(Dialog::RenameMarker { .. })
+                            | Some(Dialog::RenameBuffer { .. })
+                            | Some(Dialog::OpenDirectory { .. })
+                    ) =>
             {
-                if let Some(Dialog::RenameMarker { buffer, .. }) = self.dialog.as_mut() {
-                    buffer.push(c);
+                match self.dialog.as_mut() {
+                    Some(Dialog::RenameMarker { buffer, .. })
+                    | Some(Dialog::RenameBuffer { buffer, .. })
+                    | Some(Dialog::OpenDirectory { buffer }) => buffer.push(c),
+                    _ => {}
                 }
             }
             KeyCode::Char(c) if c == '-' || c == '.' || c.is_ascii_digit() => {
@@ -512,7 +574,10 @@ impl App {
                             buffer.push(c);
                         }
                         Dialog::Resample { .. } => {}
-                        Dialog::RenameMarker { .. } => {} // handled by the free-text arm above
+                        // These are handled by the free-text arm above.
+                        Dialog::RenameMarker { .. }
+                        | Dialog::RenameBuffer { .. }
+                        | Dialog::OpenDirectory { .. } => {}
                         Dialog::FadeIn { .. } => {}
                         Dialog::FadeOut { .. } => {},
                     }
@@ -568,6 +633,130 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The panel that currently has focus — the single source of truth for the modal
+    /// command panel, contextual keys, and the active-panel accent.
+    fn focus(&self) -> Focus {
+        if self.file_panel.focused {
+            Focus::Files
+        } else if self.buffer_panel.focused {
+            Focus::Buffers
+        } else {
+            Focus::Waveform
+        }
+    }
+
+    /// Cycles focus Waveform → Files → Buffers → Waveform.
+    fn cycle_focus(&mut self) {
+        match self.focus() {
+            Focus::Waveform => {
+                self.file_panel.focused = true;
+                self.buffer_panel.focused = false;
+            }
+            Focus::Files => {
+                self.file_panel.focused = false;
+                self.buffer_panel.focused = true;
+            }
+            Focus::Buffers => {
+                self.file_panel.focused = false;
+                self.buffer_panel.focused = false;
+            }
+        }
+    }
+
+    /// Saves buffer `idx` to its existing path (no-op if it has none).
+    fn save_buffer(&mut self, idx: usize) {
+        if let Some(doc) = self.documents.get_mut(idx) {
+            if let Some(path) = doc.path.clone() {
+                if save_wav(doc, &path).is_ok() {
+                    doc.dirty = false;
+                    self.file_panel.mark_dirty(&path, false);
+                }
+            }
+        }
+    }
+
+    /// Closes buffer `idx`, confirming first if it has unsaved changes.
+    fn request_close_buffer(&mut self, idx: usize) {
+        if self.documents.get(idx).is_some_and(|d| d.dirty) {
+            self.confirm = Some(Confirm::CloseBuffer(idx));
+        } else {
+            self.close_buffer(idx);
+        }
+    }
+
+    /// Removes buffer `idx` (and its parallel history), fixes the active index, and rebuilds
+    /// derived state. Closing the last buffer leaves the empty state.
+    fn close_buffer(&mut self, idx: usize) {
+        if idx >= self.documents.len() {
+            return;
+        }
+        self.documents.remove(idx);
+        self.histories.remove(idx);
+        if self.documents.is_empty() {
+            self.active_document = 0;
+            self.viewport = None;
+            self.rebuild_audio();
+            self.rebuild_waveform_caches();
+            return;
+        }
+        // Keep the active index valid; bias toward the buffer that shifted into this slot.
+        if self.active_document >= self.documents.len() {
+            self.active_document = self.documents.len() - 1;
+        } else if self.active_document > idx {
+            self.active_document -= 1;
+        }
+        self.viewport = None;
+        self.rebuild_audio();
+        self.rebuild_waveform_caches();
+    }
+
+    /// Points the file panel at `input` (a directory path; `~` expands to $HOME). No-op if
+    /// the path isn't an existing directory.
+    fn open_directory(&mut self, input: &str) {
+        let input = input.trim();
+        if input.is_empty() {
+            return;
+        }
+        let path = if input == "~" {
+            dirs_home().map(PathBuf::from)
+        } else if let Some(rest) = input.strip_prefix("~/") {
+            dirs_home().map(|h| PathBuf::from(h).join(rest))
+        } else {
+            Some(PathBuf::from(input))
+        };
+        if let Some(path) = path {
+            if path.is_dir() {
+                self.file_panel.set_directory(path);
+                self.file_panel.focused = true;
+            }
+        }
+    }
+
+    /// Renames buffer `idx` to `new_name`, renaming the file on disk if it has one (kept in
+    /// the same directory). For an unsaved buffer it just sets the path for the next save.
+    fn rename_buffer(&mut self, idx: usize, new_name: &str) {
+        if new_name.is_empty() || idx >= self.documents.len() {
+            return;
+        }
+        let old_path = self.documents[idx].path.clone();
+        let parent = old_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.file_panel.directory.clone());
+        let new_path = parent.join(new_name);
+        if let Some(old) = old_path.as_ref() {
+            if old.exists() && std::fs::rename(old, &new_path).is_err() {
+                return; // leave the buffer untouched if the disk rename failed
+            }
+            self.file_panel.mark_dirty(old, false);
+        }
+        let dirty = self.documents[idx].dirty;
+        self.documents[idx].path = Some(new_path.clone());
+        self.file_panel.mark_dirty(&new_path, dirty);
+        self.file_panel.scan();
     }
 
     fn apply_normalize(&mut self, target_db: f32) {
@@ -921,11 +1110,53 @@ impl App {
         if action == Action::Quit {
             // Warn if *any* open buffer is dirty, not just the active one.
             if self.documents.iter().any(|doc| doc.dirty) {
-                self.quit_confirm = true;
+                self.confirm = Some(Confirm::Quit);
             } else {
                 self.should_quit = true;
             }
             return;
+        }
+
+        // Panel/modal commands — work regardless of focus (e.g. a toolbar click).
+        match action {
+            Action::Noop => return,
+            Action::OpenSelected => {
+                self.open_selected_file();
+                return;
+            }
+            Action::OpenDirectory => {
+                let default = dirs_home().unwrap_or_else(|| "~".to_string());
+                self.dialog = Some(Dialog::OpenDirectory { buffer: default });
+                return;
+            }
+            Action::SearchFiles => {
+                self.file_panel.focused = true;
+                self.file_panel.filtering = true;
+                self.file_panel.filter.clear();
+                return;
+            }
+            Action::FocusNext => {
+                self.cycle_focus();
+                return;
+            }
+            Action::CloseBuffer => {
+                self.request_close_buffer(self.active_document);
+                return;
+            }
+            Action::RenameBuffer => {
+                let idx = self.active_document;
+                if let Some(doc) = self.documents.get(idx) {
+                    let name = doc
+                        .path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    self.dialog = Some(Dialog::RenameBuffer { index: idx, buffer: name });
+                }
+                return;
+            }
+            _ => {}
         }
 
         if action == Action::TogglePlayback {
@@ -1045,7 +1276,9 @@ impl App {
                     sample_rate,
                     selection: None,
                     cursor: 0,
-                    dirty: false,
+                    // A copy-to-new buffer holds unsaved data with no path, so it's dirty —
+                    // this makes the quit/close confirmation fire for it.
+                    dirty: true,
                     path: None,
                     markers: Vec::new(),
                     bext: None,
@@ -1102,6 +1335,13 @@ impl App {
             | Action::DeleteMarker
             | Action::JumpPrevMarker
             | Action::JumpNextMarker
+            | Action::Noop
+            | Action::OpenSelected
+            | Action::OpenDirectory
+            | Action::SearchFiles
+            | Action::FocusNext
+            | Action::CloseBuffer
+            | Action::RenameBuffer
             | Action::Trim => unreachable!(),
             // Cursor movement is identical whether or not it extends a selection; the
             // selection side-effect is applied in the second match below.
@@ -1393,7 +1633,8 @@ impl App {
 
     fn render(&mut self, frame: &mut Frame) {
         let area: Rect = frame.area();
-        let toolbar_height = self.toolbar.rows_needed(area.width);
+        let focus = self.focus();
+        let toolbar_height = self.toolbar.rows_needed(area.width, focus);
         let chrome = split_chrome(area, toolbar_height);
 
         // Render chrome panels.
@@ -1411,7 +1652,7 @@ impl App {
         if self.viewport.as_ref().is_some_and(|v| v.auto_vertical_zoom) {
             self.toolbar.active_actions.insert(Action::ToggleAutoVerticalZoom);
         }
-        self.toolbar.render(frame, chrome.toolbar);
+        self.toolbar.render(frame, chrome.toolbar, focus);
         self.menu.render(frame, chrome.menu);
         // Fill the spacer row with the base background so it matches the toolbar below it
         // (rather than showing through to the terminal default).
@@ -1444,16 +1685,16 @@ impl App {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "untitled".to_string()),
         );
+        // The waveform is "focused" (and gets the accent color) when neither side panel is.
+        let waveform_focused = !self.file_panel.focused && !self.buffer_panel.focused;
+        let border_color = if waveform_focused { theme::FOCUS } else { theme::BORDER };
         let title = Line::from(vec![
-            Span::styled(title_text, Style::default().fg(theme::BORDER)),
+            Span::styled(title_text, Style::default().fg(border_color)),
             Span::styled(
                 if self.documents[doc_idx].dirty { "* " } else { "" },
                 Style::default().fg(theme::DIRTY),
             ),
         ]);
-        // The waveform is "focused" (and gets the accent border) when neither side panel is.
-        let waveform_focused = !self.file_panel.focused && !self.buffer_panel.focused;
-        let border_color = if waveform_focused { theme::FOCUS } else { theme::BORDER };
         let outer = Block::default()
             .title(title)
             .borders(Borders::ALL)
@@ -1594,9 +1835,18 @@ impl App {
 
         frame.render_widget(StatusBar { document: &self.documents[doc_idx], viewport, snap_to_zero: self.snap_to_zero, loop_playback: self.loop_playback, last_action: self.histories[doc_idx].last_label() }, status_area);
 
-        if self.quit_confirm {
-            let dirty_count = self.documents.iter().filter(|d| d.dirty).count();
-            render_quit_confirm(frame, area, dirty_count);
+        if let Some(confirm) = self.confirm {
+            let text = match confirm {
+                Confirm::Quit => {
+                    let n = self.documents.iter().filter(|d| d.dirty).count();
+                    let noun = if n == 1 { "buffer" } else { "buffers" };
+                    format!(" {n} unsaved {noun} — (s)ave all & quit · (y) quit anyway · (n) cancel ")
+                }
+                Confirm::CloseBuffer(_) => {
+                    " Unsaved buffer — (s)ave & close · (y) close anyway · (n) cancel ".to_string()
+                }
+            };
+            render_confirm(frame, area, &text);
         }
 
         if self.save_as_active {
@@ -1607,6 +1857,11 @@ impl App {
             render_dialog(frame, area, dialog);
         }
     }
+}
+
+/// Best-effort home directory as a string (from $HOME), for the Open Directory default.
+fn dirs_home() -> Option<String> {
+    std::env::var("HOME").ok().filter(|h| !h.is_empty())
 }
 
 /// Index of the marker closest to `pos`, or `None` if there are no markers.
@@ -1674,11 +1929,7 @@ fn render_save_as_prompt(frame: &mut Frame, area: Rect, path: &str, depth: BitDe
     frame.render_widget(paragraph, popup);
 }
 
-fn render_quit_confirm(frame: &mut Frame, area: Rect, dirty_count: usize) {
-    let noun = if dirty_count == 1 { "buffer" } else { "buffers" };
-    let text = format!(
-        " {dirty_count} unsaved {noun} — (s)ave all & quit · (y) quit anyway · (n) cancel ",
-    );
+fn render_confirm(frame: &mut Frame, area: Rect, text: &str) {
     let width = (text.chars().count() as u16 + 2).min(area.width);
     let height = 3.min(area.height);
     let popup = Rect {
@@ -1719,6 +1970,12 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) {
         Dialog::RenameMarker { buffer, .. } => {
             ("Rename Marker", format!(" Label: {}_ ", buffer))
         }
+        Dialog::OpenDirectory { buffer } => {
+            ("Open Directory", format!(" Path: {}_ ", buffer))
+        }
+        Dialog::RenameBuffer { buffer, .. } => {
+            ("Rename Buffer", format!(" New name: {}_ ", buffer))
+        }
     };
     let width = (content_text.chars().count() as u16 + 2).min(area.width);
     let height = 3.min(area.height);
@@ -1755,6 +2012,20 @@ mod tests {
             markers: Vec::new(),
             bext: None,
         }
+    }
+
+    /// Copy-to-New must create a *dirty* buffer (unsaved data, no path), so the quit/close
+    /// confirmation fires for it instead of the app exiting silently.
+    #[test]
+    fn copy_to_new_marks_buffer_dirty() {
+        let mut d = doc(0.5, 100);
+        d.selection = Some(Selection { start: 10, end: 40 });
+        let mut app = App::new(Some(d), None);
+        app.handle_action(Action::CopyToNew);
+        assert_eq!(app.documents.len(), 2);
+        assert!(app.documents[1].dirty, "copy-to-new buffer should be dirty");
+        assert!(app.documents[1].path.is_none());
+        assert_eq!(app.documents[1].len_samples(), 30);
     }
 
     /// Undo/redo must never cross buffers — applying an edit to one document and then

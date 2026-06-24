@@ -67,6 +67,16 @@ impl FilePanel {
         entries
     }
 
+    /// Repoints the panel at a new directory and rescans, resetting selection/scroll/filter.
+    pub fn set_directory(&mut self, path: PathBuf) {
+        self.directory = path;
+        self.selected = 0;
+        self.scroll_offset = 0;
+        self.filter.clear();
+        self.filtering = false;
+        self.scan();
+    }
+
     pub fn mark_dirty(&mut self, path: &Path, dirty: bool) {
         if dirty {
             self.dirty_paths.insert(path.to_path_buf());

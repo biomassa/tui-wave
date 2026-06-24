@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
+use super::app::Focus;
 use super::keymap::Action;
 use super::theme;
 
@@ -22,7 +23,11 @@ struct ToolGroup {
 /// The toolbar's height is adaptive (see `rows_needed`): it stays compact on a wide terminal
 /// and grows only as far as needed so no button is ever dropped.
 pub struct Toolbar {
-    groups: Vec<ToolGroup>,
+    /// One command set per focus (see `Focus`): the panel is modal and shows only the set
+    /// relevant to the focused panel.
+    waveform: Vec<ToolGroup>,
+    files: Vec<ToolGroup>,
+    buffers: Vec<ToolGroup>,
     /// Per-button clickable rects with the action each triggers, recomputed every render.
     rects: Vec<(Rect, Action)>,
     pub active_actions: HashSet<Action>,
@@ -36,7 +41,8 @@ const SECTION_GAP: u16 = 1; // extra blank columns between sections (on top of a
 
 impl Toolbar {
     pub fn new() -> Self {
-        let groups = vec![
+        // Waveform-focus set: Play prefix + labelled sections.
+        let waveform = vec![
             // Play has no section label — play/pause is the whole "transport".
             ToolGroup {
                 label: "",
@@ -94,11 +100,43 @@ impl Toolbar {
                 ],
             },
         ];
+        // Files-focus set: a flat, unlabelled list of file-browser commands.
+        let files = vec![ToolGroup {
+            label: "",
+            buttons: vec![
+                ("Open", "Enter", Action::OpenSelected),
+                ("OpenDir", "^o", Action::OpenDirectory),
+                ("Select", "Up/Dn", Action::Noop),
+                ("Search", "/", Action::SearchFiles),
+                ("Focus", "Tab", Action::FocusNext),
+                ("Quit", "q", Action::Quit),
+            ],
+        }];
+        // Buffers-focus set.
+        let buffers = vec![ToolGroup {
+            label: "",
+            buttons: vec![
+                ("Save", "^s", Action::Save),
+                ("Close", "^w", Action::CloseBuffer),
+                ("Rename", "^r", Action::RenameBuffer),
+                ("SaveAll", "^a", Action::SaveAll),
+            ],
+        }];
         Self {
-            groups,
+            waveform,
+            files,
+            buffers,
             rects: Vec::new(),
             active_actions: HashSet::new(),
             is_playing: false,
+        }
+    }
+
+    fn groups_for(&self, focus: Focus) -> &[ToolGroup] {
+        match focus {
+            Focus::Waveform => &self.waveform,
+            Focus::Files => &self.files,
+            Focus::Buffers => &self.buffers,
         }
     }
 
@@ -160,8 +198,8 @@ impl Toolbar {
     }
 
     /// Number of rows the toolbar needs at `width`. `App` uses this to size the chrome row.
-    pub fn rows_needed(&self, width: u16) -> u16 {
-        let (_, _, rows) = self.build(Rect { x: 0, y: 0, width, height: u16::MAX });
+    pub fn rows_needed(&self, width: u16, focus: Focus) -> u16 {
+        let (_, _, rows) = self.build(self.groups_for(focus), Rect { x: 0, y: 0, width, height: u16::MAX });
         rows.max(1)
     }
 
@@ -169,10 +207,10 @@ impl Toolbar {
     /// pack tightly left-to-right, and every wrapped row restarts at the same column as the
     /// first section (FILE) — so each row's leading section lines up under FILE, while the
     /// inter-section spacing stays tight. Returns lines, per-button rects, and rows used.
-    fn build(&self, area: Rect) -> (Vec<Line<'static>>, Vec<(Rect, Action)>, u16) {
+    fn build(&self, groups: &[ToolGroup], area: Rect) -> (Vec<Line<'static>>, Vec<(Rect, Action)>, u16) {
         let chrome = Style::default().fg(theme::CHROME_FG);
-        let prefix = &self.groups[0];
-        let grid_groups = &self.groups[1..];
+        let prefix = &groups[0];
+        let grid_groups = &groups[1..];
 
         let prefix_w = self.section_width(prefix);
         let origin = area.x + prefix_w; // FILE's column; wrapped rows restart here
@@ -208,12 +246,12 @@ impl Toolbar {
         (lines, rects, row + 1)
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, focus: Focus) {
         self.rects.clear();
         if area.width == 0 || area.height == 0 {
             return;
         }
-        let (lines, rects, _) = self.build(area);
+        let (lines, rects, _) = self.build(self.groups_for(focus), area);
         self.rects = rects;
         // Toolbar sits on the main app background (theme::BASE), not the menu's chrome color,
         // so it blends with the spacer row and the editor area below it.

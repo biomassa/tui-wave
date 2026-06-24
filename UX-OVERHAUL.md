@@ -9,28 +9,25 @@ Focus states: **Waveform**, **Files**, **Buffers**.
 ---
 
 ## 0. Foundations — explicit focus model
-- [ ] Introduce a single source of truth for focus, e.g. `enum Focus { Waveform, Files, Buffers }`
-      derived from the existing `file_panel.focused` / `buffer_panel.focused` flags (waveform =
-      neither focused). Use it for: modal toolbar, contextual keys, waveform header color.
+- [x] `enum Focus { Waveform, Files, Buffers }` + `App::focus()` derived from the panel
+      `.focused` flags. Drives modal toolbar, contextual keys, waveform header color.
 
 ## 1. Modal command panel (toolbar)
-- [ ] `Toolbar` holds three command sets (groups) keyed by `Focus`; `App` passes the current
-      focus to `Toolbar::render`, which renders the matching set.
-- [ ] Command sets:
+- [x] `Toolbar` holds three command sets keyed by `Focus`; `App::render` passes the current
+      focus to `Toolbar::render`/`rows_needed`, which render the matching set.
+- [x] Command sets:
   - **Waveform** (current): Play · FILE · EDIT · VIEW · PROCESS · MARK · OPTS.
   - **Files**: Open (Enter), Open Directory (^o), Select File (Up/Dn), Search (/), Focus (Tab), Quit (q).
   - **Buffers**: Save (^s), Close (^w), Rename (^r), Save All (^a).
-- [ ] `rows_needed`/adaptive height use the active set's width.
-- [ ] Mouse clicks on modal buttons dispatch the right action for that focus.
+- [x] Adaptive height uses the active set's width.
+- [x] Mouse clicks on modal buttons dispatch their action (handled in `handle_action`).
 
 ## 2. New actions + contextual key handling
-- [ ] Add actions: `OpenDirectory`, `CloseBuffer`, `RenameBuffer` (reuse `Save`/`SaveAll`).
-- [ ] Files-focus keys (handled in the file-panel branch of `handle_key`): `^o` → Open Directory
-      dialog. (Enter / Up / Dn / `/` / Tab already handled.)
-- [ ] Buffers-focus keys (handled in the buffer-panel branch): `^s` Save active, `^w` Close,
-      `^r` Rename, `^a` Save All. NOTE: `^r`/`^a` mean Rename/SaveAll *only while the Buffers
-      panel is focused* — they must not collide with the global Reverse(^r)/SaveAll(^l). Resolve
-      contextually in the focus branch, before falling through to the global keymap.
+- [x] Added actions: `Noop`, `OpenSelected`, `OpenDirectory`, `SearchFiles`, `FocusNext`,
+      `CloseBuffer`, `RenameBuffer` (reuse `Save`/`SaveAll`).
+- [x] Files-focus key: `^o` → Open Directory dialog (in the file-panel branch).
+- [x] Buffers-focus keys: `^s` Save, `^w` Close, `^r` Rename, `^a` Save All — resolved in the
+      buffer-panel branch before the global keymap, so `^r`/`^a` don't collide with Reverse/SaveAll.
 
 ## 3. Files panel — directory awareness
 - [ ] `FileEntry` gains a kind: Parent (`..`) | Dir | File.
@@ -43,25 +40,24 @@ Focus states: **Waveform**, **Files**, **Buffers**.
       the filtered list (verify existing behavior survives the dir changes).
 
 ## 4. Open Directory dialog (^o)
-- [ ] New dialog: type a directory path, default text `~`. Expand `~` to the home dir on submit.
-- [ ] On Enter: if the path is an existing directory, point the file panel at it + rescan; else
-      ignore (or show a brief error). Esc cancels.
+- [x] Dialog typing a directory path, default `~` (expanded via $HOME). On Enter: if it's an
+      existing dir, point the file panel at it + rescan (`FilePanel::set_directory`); else no-op.
 
 ## 5. Buffers panel — Close / Rename / Save All
-- [ ] **Close (^w)**: remove the active document AND its parallel history entry; fix
-      `active_document`; rebuild audio/caches/viewport. If the buffer is dirty, confirm first
-      (reuse/adapt the quit-confirm pattern). Closing the last buffer → empty state.
-- [ ] **Rename (^r)**: dialog for a new name. If the doc has a path, rename the file on disk and
-      update `document.path` + `file_panel` dirty map; if no path, just set the path/name.
-- [ ] **Save All (^a)** and **Save (^s)**: reuse existing `save_all()` / Save.
+- [x] **Close (^w)**: `request_close_buffer` confirms if dirty (generalized `Confirm` modal),
+      then `close_buffer` removes the doc + its parallel history, fixes `active_document`, and
+      rebuilds audio/caches/viewport. Closing the last buffer → empty state.
+- [x] **Rename (^r)**: dialog → `rename_buffer` renames the file on disk (same dir) and updates
+      `document.path` + file-panel dirty map; for an unsaved buffer it just sets the path.
+- [x] **Save All (^a)** / **Save (^s)**: reuse `save_all()` / Save.
 
 ## 6. Waveform header color (quick)
-- [ ] The title text `tui-wave — <name>` uses `theme::FOCUS` (orange) when the waveform is
+- [x] The title text `tui-wave — <name>` uses `theme::FOCUS` (orange) when the waveform is
       focused, matching its border; `theme::BORDER` otherwise.
 
 ## 7. Bugfix: Copy to New must mark the buffer dirty (quick)
-- [ ] In `Action::CopyToNew`, set `new_doc.dirty = true` so the unsaved-changes quit confirmation
-      triggers (currently it's created clean, so `q` exits without warning).
+- [x] In `Action::CopyToNew`, set `new_doc.dirty = true` so the unsaved-changes quit confirmation
+      triggers (currently it's created clean, so `q` exits without warning). Test added.
 
 ## 8. Docs + tests
 - [ ] Update `CLAUDE.md`: modal command panel, focus model, dir-aware file panel, contextual keys.
