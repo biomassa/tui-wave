@@ -118,6 +118,7 @@ impl Toolbar {
             buttons: vec![
                 ("Switch", "Enter", Action::SwitchBuffer),
                 ("Select", "Up/Dn", Action::Noop),
+                ("Search", "/", Action::SearchBuffers),
                 ("Save", "^s", Action::Save),
                 ("Close", "^w", Action::CloseBuffer),
                 ("Rename", "^r", Action::RenameBuffer),

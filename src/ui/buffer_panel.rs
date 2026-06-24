@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem};
+use ratatui::widgets::{List, ListItem, Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use super::theme;
@@ -12,13 +12,28 @@ pub struct BufferPanel {
     /// active buffer to it. Kept synced to `active` while the panel isn't focused.
     pub selected: usize,
     pub focused: bool,
+    /// Search filter (same "/" behaviour as the Files panel) and whether it's being typed.
+    pub filter: String,
+    pub filtering: bool,
     /// (row rect, buffer index) for each visible row, for mouse hit-testing.
     rects: Vec<(Rect, usize)>,
 }
 
 impl BufferPanel {
     pub fn new() -> Self {
-        Self { active: 0, selected: 0, focused: false, rects: Vec::new() }
+        Self {
+            active: 0,
+            selected: 0,
+            focused: false,
+            filter: String::new(),
+            filtering: false,
+            rects: Vec::new(),
+        }
+    }
+
+    /// Whether a buffer name passes the current filter.
+    pub fn matches(&self, name: &str) -> bool {
+        self.filter.is_empty() || name.to_lowercase().contains(&self.filter.to_lowercase())
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, names: &[String], active: usize) {
@@ -42,20 +57,43 @@ impl BufferPanel {
             .style(Style::default().bg(theme::BASE));
         let inner = block.inner(area);
         frame.render_widget(block, area);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
 
-        let display_height = inner.height as usize;
-        // Keep whichever row the user is acting on (selection if focused, else active) in view.
-        let cursor = if self.focused { self.selected } else { active };
-        let scroll = if names.is_empty() {
-            0
-        } else {
-            cursor
-                .saturating_sub(display_height.saturating_sub(1) / 2)
-                .min(names.len().saturating_sub(display_height))
-        };
+        // Optional filter line at the top (like the Files panel).
+        let mut y = inner.y;
+        if self.filtering {
+            let style = Style::default().fg(theme::PEACH).bg(theme::SURFACE0);
+            frame.render_widget(
+                Paragraph::new(format!("/{}_", self.filter)).style(style),
+                Rect { x: inner.x, y, width: inner.width, height: 1 },
+            );
+            y += 1;
+        }
+        let list_height = inner.height.saturating_sub(if self.filtering { 1 } else { 0 }) as usize;
+        if list_height == 0 {
+            return;
+        }
+
+        // Visible buffers = those passing the filter, paired with their real index.
+        let visible: Vec<(usize, &String)> = names
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| self.matches(n))
+            .collect();
+        // Center the row the user is acting on (selection if focused, else active).
+        let cursor_row = visible
+            .iter()
+            .position(|(i, _)| *i == if self.focused { self.selected } else { active })
+            .unwrap_or(0);
+        let scroll = cursor_row
+            .saturating_sub(list_height.saturating_sub(1) / 2)
+            .min(visible.len().saturating_sub(list_height));
 
         let mut items = Vec::new();
-        for (i, name) in names.iter().enumerate().skip(scroll).take(display_height) {
+        for (i, name) in visible.iter().skip(scroll).take(list_height) {
+            let i = *i;
             let is_active = i == active;
             let is_selected = i == self.selected;
             let (fg, bg) = if is_selected && self.focused {
@@ -69,22 +107,16 @@ impl BufferPanel {
             let display = if is_active { format!(">{}", name) } else { format!(" {}", name) };
             items.push(ListItem::new(Line::from(Span::styled(display, Style::default().fg(fg).bg(bg)))));
             self.rects.push((
-                Rect { x: inner.x, y: inner.y + (i - scroll) as u16, width: inner.width, height: 1 },
+                Rect { x: inner.x, y, width: inner.width, height: 1 },
                 i,
             ));
+            y += 1;
         }
 
-        frame.render_widget(List::new(items).style(Style::default().bg(theme::BASE)), inner);
-    }
-
-    /// Moves the selection cursor (while focused), clamped to `count` buffers.
-    pub fn move_selection(&mut self, delta: isize, count: usize) {
-        if count == 0 {
-            return;
-        }
-        let max = count - 1;
-        let next = (self.selected as isize + delta).clamp(0, max as isize) as usize;
-        self.selected = next;
+        frame.render_widget(
+            List::new(items).style(Style::default().bg(theme::BASE)),
+            Rect { x: inner.x, y: inner.y + if self.filtering { 1 } else { 0 }, width: inner.width, height: list_height as u16 },
+        );
     }
 
     /// Buffer index at a screen position, if a row was hit.
