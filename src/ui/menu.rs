@@ -213,11 +213,6 @@ impl MenuBar {
                         action: Action::TogglePlayback,
                     },
                     MenuEntry {
-                        label: "Stop",
-                        shortcut: "Esc",
-                        action: Action::Stop,
-                    },
-                    MenuEntry {
                         label: "Loop Playback",
                         shortcut: "l",
                         action: Action::ToggleLoop,

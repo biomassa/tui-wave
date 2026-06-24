@@ -144,10 +144,6 @@ impl AudioEngine {
         let _ = self.cmd_tx.send(AudioCmd::Pause);
     }
 
-    pub fn stop(&self) {
-        let _ = self.cmd_tx.send(AudioCmd::Stop);
-    }
-
     pub fn seek(&self, frame: usize) {
         let _ = self
             .cmd_tx
