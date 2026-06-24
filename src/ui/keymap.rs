@@ -57,6 +57,7 @@ pub enum Action {
     FocusNext,
     CloseBuffer,
     RenameBuffer,
+    SwitchBuffer,
 }
 
 pub fn map_key(key: KeyEvent) -> Option<Action> {

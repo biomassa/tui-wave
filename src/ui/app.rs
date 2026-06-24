@@ -353,16 +353,12 @@ impl App {
         // Buffer panel keyboard focus
         if self.buffer_panel.focused {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let count = self.documents.len();
             let handled = match key.code {
-                KeyCode::Up => {
-                    self.switch_to_buffer(self.active_document.saturating_sub(1));
-                    true
-                }
-                KeyCode::Down => {
-                    let max = self.documents.len().saturating_sub(1);
-                    self.switch_to_buffer((self.active_document + 1).min(max));
-                    true
-                }
+                // Up/Dn move the selection cursor; Enter switches to it (no per-arrow reload).
+                KeyCode::Up => { self.buffer_panel.move_selection(-1, count); true }
+                KeyCode::Down => { self.buffer_panel.move_selection(1, count); true }
+                KeyCode::Enter => { self.handle_action(Action::SwitchBuffer); true }
                 // Contextual buffer commands (^r/^a differ from the global Reverse/SaveAll).
                 KeyCode::Char('s') | KeyCode::Char('S') if ctrl => { self.handle_action(Action::Save); true }
                 KeyCode::Char('w') | KeyCode::Char('W') if ctrl => { self.handle_action(Action::CloseBuffer); true }
@@ -904,6 +900,7 @@ impl App {
         // Buffer panel: click to switch active buffer.
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             if let Some(idx) = self.buffer_panel.hit_test(mouse.column, mouse.row) {
+                self.buffer_panel.selected = idx;
                 self.switch_to_buffer(idx);
                 return;
             }
@@ -1155,6 +1152,10 @@ impl App {
                 self.cycle_focus();
                 return;
             }
+            Action::SwitchBuffer => {
+                self.switch_to_buffer(self.buffer_panel.selected);
+                return;
+            }
             Action::CloseBuffer => {
                 self.request_close_buffer(self.active_document);
                 return;
@@ -1358,6 +1359,7 @@ impl App {
             | Action::FocusNext
             | Action::CloseBuffer
             | Action::RenameBuffer
+            | Action::SwitchBuffer
             | Action::Trim => unreachable!(),
             // Cursor movement is identical whether or not it extends a selection; the
             // selection side-effect is applied in the second match below.
@@ -1651,7 +1653,8 @@ impl App {
     fn render(&mut self, frame: &mut Frame) {
         let area: Rect = frame.area();
         let focus = self.focus();
-        let toolbar_height = self.toolbar.rows_needed(area.width, focus);
+        // Reserve the tallest set's height for every mode so the layout doesn't jump on Tab.
+        let toolbar_height = self.toolbar.reserved_rows(area.width);
         let chrome = split_chrome(area, toolbar_height);
 
         // Render chrome panels.

@@ -116,6 +116,8 @@ impl Toolbar {
         let buffers = vec![ToolGroup {
             label: "",
             buttons: vec![
+                ("Switch", "Enter", Action::SwitchBuffer),
+                ("Select", "Up/Dn", Action::Noop),
                 ("Save", "^s", Action::Save),
                 ("Close", "^w", Action::CloseBuffer),
                 ("Rename", "^r", Action::RenameBuffer),
@@ -201,6 +203,16 @@ impl Toolbar {
     pub fn rows_needed(&self, width: u16, focus: Focus) -> u16 {
         let (_, _, rows) = self.build(self.groups_for(focus), Rect { x: 0, y: 0, width, height: u16::MAX });
         rows.max(1)
+    }
+
+    /// Rows to reserve for the toolbar regardless of focus — the tallest of the three command
+    /// sets — so the chrome height (and the layout below it) doesn't jump when switching panels.
+    pub fn reserved_rows(&self, width: u16) -> u16 {
+        [Focus::Waveform, Focus::Files, Focus::Buffers]
+            .into_iter()
+            .map(|f| self.rows_needed(width, f))
+            .max()
+            .unwrap_or(1)
     }
 
     /// Renders the toolbar. The first group (Play) is a row-0 prefix; the remaining sections
