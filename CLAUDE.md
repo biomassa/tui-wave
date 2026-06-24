@@ -110,6 +110,19 @@ is defined, not three that can drift apart. `MenuBar` and `Toolbar` are custom w
 (ratatui has no native menu) that record their rendered `Rect`s each frame for mouse
 hit-testing.
 
+**Focus + modal command panel.** `App::focus()` returns `Focus { Waveform, Files, Buffers }`
+(derived from the panel `.focused` flags) — the single source of truth for: which command
+set the toolbar shows, the accent color on the active panel (peach `theme::FOCUS`, incl. the
+waveform title/border), and which contextual keys apply. The toolbar is **modal**: it holds
+three command sets and renders the one for the current focus. Most actions in `handle_action`
+work regardless of focus (so a toolbar click always works); the *contextual keys* are
+resolved in the panel branches of `handle_key` before the global keymap — e.g. `^o` opens a
+directory only when Files is focused (it's Fade Out in waveform focus), and `^s`/`^w`/`^r`/`^a`
+are Save/Close/Rename/SaveAll only when Buffers is focused (so `^r`/`^a` don't clash with the
+global Reverse/SaveAll). The Files panel is directory-aware (`file_panel::EntryKind`
+Parent/Dir/File): Enter navigates into a dir or `..`, or opens a `.wav`. Confirmations
+(quit, close-dirty-buffer) share one `Confirm` modal.
+
 ### Waveform rendering, viewport, and the min/max cache
 
 `Viewport` holds `samples_per_column`/`scroll_offset`/`amplitude_scale` and is pure state —
