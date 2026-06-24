@@ -41,8 +41,9 @@ pub const DIRTY: Color = RED;
 pub const SHORTCUT: Color = PEACH;
 /// Active / enabled toggle state in the toolbar.
 pub const ACTIVE: Color = Color::Rgb(0xa6, 0xe3, 0xa1);
-/// Toolbar section labels (EDIT:, VIEW:, …) — bright coloured text, no background.
-pub const TOOLBAR_GROUP: Color = TEXT;
+/// Toolbar section labels (EDIT:, VIEW:, …) — same hue as the selected-menu highlight
+/// (`HIGHLIGHT_BG`), so the panel's section accents and the menu selection read as one accent.
+pub const TOOLBAR_GROUP: Color = HIGHLIGHT_BG;
 /// Default text/background for the menu bar and toolbar chrome.
 pub const CHROME_FG: Color = TEXT;
 pub const CHROME_BG: Color = SURFACE0;
