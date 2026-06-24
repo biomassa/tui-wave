@@ -1,4 +1,8 @@
 /target
 
-# Claude Code local settings / session data (CLAUDE.md is intentionally tracked)
+# Claude Code local settings / session data
 .claude/
+
+# Agentic / working docs stay local — only README.md is tracked
+*.md
+!README.md
