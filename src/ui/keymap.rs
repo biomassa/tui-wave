@@ -7,12 +7,9 @@ pub enum Action {
     Quit,
     MoveCursorLeft,
     MoveCursorRight,
-    MoveCursorLeftFine,
-    MoveCursorRightFine,
     ExtendSelectionLeft,
     ExtendSelectionRight,
-    ExtendSelectionLeftFine,
-    ExtendSelectionRightFine,
+    ToggleFineMode,
     JumpStart,
     JumpEnd,
     PageBack,
@@ -82,16 +79,17 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('f') if ctrl => Some(Action::FadeIn),
         KeyCode::Char('o') if ctrl => Some(Action::FadeOut),
         KeyCode::Char('t') if ctrl => Some(Action::Trim),
-        KeyCode::Left if shift && ctrl => Some(Action::ExtendSelectionLeftFine),
-        KeyCode::Right if shift && ctrl => Some(Action::ExtendSelectionRightFine),
         KeyCode::Left if shift => Some(Action::ExtendSelectionLeft),
         KeyCode::Right if shift => Some(Action::ExtendSelectionRight),
         KeyCode::PageUp if shift => Some(Action::ExtendSelectionToStart),
         KeyCode::PageDown if shift => Some(Action::ExtendSelectionToEnd),
-        KeyCode::Left if ctrl => Some(Action::MoveCursorLeftFine),
-        KeyCode::Right if ctrl => Some(Action::MoveCursorRightFine),
         KeyCode::Left => Some(Action::MoveCursorLeft),
         KeyCode::Right => Some(Action::MoveCursorRight),
+        // Backtick toggles fine-step mode: while on, the arrows (and Shift+arrows) move/extend
+        // by a fraction of a column instead of a whole one. A plain, unshifted key, deliberately
+        // *not* a modifier — every Ctrl/Alt+arrow combo is intercepted by some terminal (kitty
+        // tabs) or desktop (layout switch / workspace switch) before the app can see it.
+        KeyCode::Char('`') => Some(Action::ToggleFineMode),
         KeyCode::Home => Some(Action::JumpStart),
         KeyCode::End => Some(Action::JumpEnd),
         KeyCode::PageUp => Some(Action::PageBack),
@@ -144,10 +142,24 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_arrows_move_fine() {
+    fn backtick_toggles_fine_mode() {
+        // Fine stepping is a plain unshifted key, not a modifier — no terminal/DE intercepts it.
+        assert_eq!(
+            map_key(key(KeyCode::Char('`'), KeyModifiers::NONE)),
+            Some(Action::ToggleFineMode)
+        );
+    }
+
+    #[test]
+    fn modifier_arrows_are_plain_moves() {
+        // Ctrl/Alt no longer have special arrow meaning — they fall through to plain move/extend.
         assert_eq!(
             map_key(key(KeyCode::Right, KeyModifiers::CONTROL)),
-            Some(Action::MoveCursorRightFine)
+            Some(Action::MoveCursorRight)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Left, KeyModifiers::ALT)),
+            Some(Action::MoveCursorLeft)
         );
     }
 
