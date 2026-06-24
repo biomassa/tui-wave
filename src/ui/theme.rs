@@ -32,6 +32,8 @@ pub const DB_SCALE: Color = SUBTEXT0;
 pub const MARKER: Color = MAUVE;
 /// Window/pane borders and titles.
 pub const BORDER: Color = LAVENDER;
+/// Border accent for the focused panel (file list, buffers, or the waveform when active).
+pub const FOCUS: Color = PEACH;
 /// The unsaved-changes "*" in the title bar.
 pub const DIRTY: Color = RED;
 /// Keyboard shortcut hints in the menu and toolbar — a distinct accent from the action

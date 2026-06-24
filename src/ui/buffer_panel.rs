@@ -22,7 +22,7 @@ impl BufferPanel {
         self.rects.clear();
 
         let border_style = if self.focused {
-            Style::default().fg(theme::ACTIVE)
+            Style::default().fg(theme::FOCUS)
         } else {
             Style::default().fg(theme::BORDER)
         };

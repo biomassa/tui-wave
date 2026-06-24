@@ -4,6 +4,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 /// every render pass so menu/toolbar/content positions never drift relative to each other.
 pub struct Chrome {
     pub menu: Rect,
+    /// Blank row between the menu and the toolbar (reserved for future use).
+    pub spacer: Rect,
     pub toolbar: Rect,
     pub content: Rect,
     pub panel: Rect,
@@ -21,7 +23,7 @@ pub const BUFFER_PANEL_WIDTH: u16 = 20;
 pub fn split_chrome(area: Rect, toolbar_height: u16) -> Chrome {
     let toolbar_height = toolbar_height.clamp(MIN_TOOLBAR_HEIGHT, MAX_TOOLBAR_HEIGHT);
     // A blank spacer row sits between the menu and the toolbar (reserved for future use).
-    let [menu, _spacer, toolbar, content] = Layout::vertical([
+    let [menu, spacer, toolbar, content] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(toolbar_height),
@@ -36,6 +38,7 @@ pub fn split_chrome(area: Rect, toolbar_height: u16) -> Chrome {
         ]).split(content);
         Chrome {
             menu,
+            spacer,
             toolbar,
             content: chunks[2],
             panel: chunks[0],
@@ -45,6 +48,7 @@ pub fn split_chrome(area: Rect, toolbar_height: u16) -> Chrome {
         let chunks = Layout::horizontal([Constraint::Length(PANEL_WIDTH), Constraint::Fill(1)]).split(content);
         Chrome {
             menu,
+            spacer,
             toolbar,
             content: chunks[1],
             panel: chunks[0],
@@ -53,6 +57,7 @@ pub fn split_chrome(area: Rect, toolbar_height: u16) -> Chrome {
     } else {
         Chrome {
             menu,
+            spacer,
             toolbar,
             content,
             panel: Rect::default(),

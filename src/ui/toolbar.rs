@@ -32,7 +32,7 @@ pub struct Toolbar {
 /// Spacing constants, shared by layout (`build`) and measurement (`section_width`) so the
 /// two can never disagree about how wide anything is.
 const GAP: u16 = 1; // trailing space after each button
-const MIN_CELL_W: u16 = 8; // smallest useful grid column width
+const SECTION_GAP: u16 = 1; // extra blank columns between sections (on top of a button's trailing space)
 
 impl Toolbar {
     pub fn new() -> Self {
@@ -110,12 +110,12 @@ impl Toolbar {
         }
     }
 
-    /// On-screen width of one whole section's content — its accent label block (` LABEL `)
-    /// plus its buttons. Does not include the inter-section gap (handled by the caller).
+    /// On-screen width of one whole section's content — its accent label block (`LABEL `)
+    /// plus its buttons. No leading pad: the section starts flush at its column.
     fn section_width(&self, group: &ToolGroup) -> u16 {
         let mut w = 0;
         if !group.label.is_empty() {
-            w += group.label.chars().count() as u16 + 2; // " LABEL " accent block
+            w += group.label.chars().count() as u16 + 1; // "LABEL " accent block
         }
         for &(label, shortcut, action) in &group.buttons {
             let label = self.button_label(label, action);
@@ -124,110 +124,88 @@ impl Toolbar {
         w
     }
 
-    /// Packs sections into a fixed grid of `cols` cells (each `cell_w` wide), row-major.
-    /// Returns each section's `(row, start_cell)` and the total row count. Because every
-    /// section begins on a cell boundary, section starts line up vertically across rows.
-    fn pack(&self, cols: u16, cell_w: u16) -> (Vec<(u16, u16)>, u16) {
-        let mut placements = Vec::with_capacity(self.groups.len());
-        let mut row = 0u16;
-        let mut used = 0u16; // cells consumed on the current row
-        for group in &self.groups {
-            let cells = (self.section_width(group).div_ceil(cell_w)).max(1);
-            if used > 0 && used + cells > cols {
-                row += 1;
-                used = 0;
-            }
-            placements.push((row, used));
-            used += cells;
+    /// Emits one section (accent label block + buttons) starting at column `x` on row `y`,
+    /// recording each button's clickable rect. Returns the column just past the section.
+    fn emit_section(
+        &self,
+        group: &ToolGroup,
+        mut x: u16,
+        y: u16,
+        spans: &mut Vec<Span<'static>>,
+        rects: &mut Vec<(Rect, Action)>,
+    ) -> u16 {
+        let group_style = Style::default().fg(theme::TOOLBAR_GROUP).bg(theme::TOOLBAR_GROUP_BG);
+        let chrome = Style::default().fg(theme::CHROME_FG);
+        let shortcut_style = Style::default().fg(theme::SHORTCUT);
+        if !group.label.is_empty() {
+            spans.push(Span::styled(format!("{} ", group.label), group_style));
+            x += group.label.chars().count() as u16 + 1;
         }
-        (placements, row + 1)
-    }
-
-    /// Chooses the column grid for `width`: the column count (with its derived cell width)
-    /// that fits every section in the fewest rows, preferring more columns on a tie. Aligning
-    /// sections to cell boundaries is what makes their starts line up across wrapped rows.
-    fn grid(&self, width: u16) -> (u16, u16) {
-        let n = self.groups.len() as u16;
-        let max_cols = n.min((width / MIN_CELL_W).max(1));
-        let mut best = (u16::MAX, 1u16, width.max(1)); // (rows, cols, cell_w)
-        for cols in 1..=max_cols {
-            let cell_w = width / cols;
-            if cell_w == 0 {
-                continue;
-            }
-            // Skip configs where some section can't fit within one row of `cols` cells.
-            if cols > 1
-                && self
-                    .groups
-                    .iter()
-                    .any(|g| self.section_width(g).div_ceil(cell_w) > cols)
-            {
-                continue;
-            }
-            let (_, rows) = self.pack(cols, cell_w);
-            if rows < best.0 || (rows == best.0 && cols > best.1) {
-                best = (rows, cols, cell_w);
-            }
+        for &(label, shortcut, action) in &group.buttons {
+            let label = self.button_label(label, action);
+            let btn_w = label.chars().count() as u16 + 1 + shortcut.chars().count() as u16;
+            rects.push((Rect { x, y, width: btn_w, height: 1 }, action));
+            let label_style = if self.active_actions.contains(&action) {
+                Style::default().fg(theme::ACTIVE)
+            } else {
+                chrome
+            };
+            spans.push(Span::styled(label.to_string(), label_style));
+            spans.push(Span::styled(" ", chrome));
+            spans.push(Span::styled(shortcut.to_string(), shortcut_style));
+            spans.push(Span::styled(" ".repeat(GAP as usize), chrome));
+            x += btn_w + GAP;
         }
-        (best.1, best.2) // (cols, cell_w)
+        x
     }
 
     /// Number of rows the toolbar needs at `width`. `App` uses this to size the chrome row.
     pub fn rows_needed(&self, width: u16) -> u16 {
-        let (cols, cell_w) = self.grid(width);
-        self.pack(cols, cell_w).1.max(1)
+        let (_, _, rows) = self.build(Rect { x: 0, y: 0, width, height: u16::MAX });
+        rows.max(1)
     }
 
-    /// Renders the sections on the column grid from `grid`/`pack`. Section labels are a dim
-    /// accent block (no divider lines); each section starts at its cell's column so starts
-    /// align vertically. Returns the lines, per-button clickable rects, and rows used.
+    /// Renders the toolbar. The first group (Play) is a row-0 prefix; the remaining sections
+    /// pack tightly left-to-right, and every wrapped row restarts at the same column as the
+    /// first section (FILE) — so each row's leading section lines up under FILE, while the
+    /// inter-section spacing stays tight. Returns lines, per-button rects, and rows used.
     fn build(&self, area: Rect) -> (Vec<Line<'static>>, Vec<(Rect, Action)>, u16) {
-        let group_style = Style::default().fg(theme::TOOLBAR_GROUP).bg(theme::TOOLBAR_GROUP_BG);
         let chrome = Style::default().fg(theme::CHROME_FG);
-        let shortcut_style = Style::default().fg(theme::SHORTCUT);
+        let prefix = &self.groups[0];
+        let grid_groups = &self.groups[1..];
 
-        let (cols, cell_w) = self.grid(area.width);
-        let (placements, total_rows) = self.pack(cols, cell_w);
+        let prefix_w = self.section_width(prefix);
+        let origin = area.x + prefix_w; // FILE's column; wrapped rows restart here
+        let right = area.x + area.width;
+
         let mut rects: Vec<(Rect, Action)> = Vec::new();
         let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut row = 0u16;
 
-        let rows_to_draw = total_rows.min(area.height);
-        for r in 0..rows_to_draw {
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            let mut x = area.x;
-            for (group, &(pr, pc)) in self.groups.iter().zip(&placements) {
-                if pr != r {
-                    continue;
-                }
-                // Pad to this section's cell column so starts align across rows.
-                let target_x = area.x + pc * cell_w;
-                if target_x > x {
-                    spans.push(Span::styled(" ".repeat((target_x - x) as usize), chrome));
-                    x = target_x;
-                }
-                if !group.label.is_empty() {
-                    spans.push(Span::styled(format!(" {} ", group.label), group_style));
-                    x += group.label.chars().count() as u16 + 2;
-                }
-                for &(label, shortcut, action) in &group.buttons {
-                    let label = self.button_label(label, action);
-                    let btn_w = label.chars().count() as u16 + 1 + shortcut.chars().count() as u16;
-                    rects.push((Rect { x, y: area.y + r, width: btn_w, height: 1 }, action));
-                    let label_style = if self.active_actions.contains(&action) {
-                        Style::default().fg(theme::ACTIVE)
-                    } else {
-                        chrome
-                    };
-                    spans.push(Span::styled(label.to_string(), label_style));
-                    spans.push(Span::styled(" ", chrome));
-                    spans.push(Span::styled(shortcut.to_string(), shortcut_style));
-                    spans.push(Span::styled(" ".repeat(GAP as usize), chrome));
-                    x += btn_w + GAP;
-                }
+        // Row 0: Play at the far left; FILE then begins exactly at `origin`.
+        let mut x = self.emit_section(prefix, area.x, area.y, &mut spans, &mut rects);
+        let mut first_in_row = true;
+
+        for group in grid_groups {
+            let sw = self.section_width(group);
+            if !first_in_row && x + SECTION_GAP + sw > right {
+                lines.push(Line::from(std::mem::take(&mut spans)));
+                row += 1;
+                // Indent the new row to FILE's column.
+                spans.push(Span::styled(" ".repeat(prefix_w as usize), chrome));
+                x = origin;
+                first_in_row = true;
             }
-            lines.push(Line::from(spans));
+            if !first_in_row {
+                spans.push(Span::styled(" ".repeat(SECTION_GAP as usize), chrome));
+                x += SECTION_GAP;
+            }
+            x = self.emit_section(group, x, area.y + row, &mut spans, &mut rects);
+            first_in_row = false;
         }
-        (lines, rects, total_rows)
+        lines.push(Line::from(spans));
+        (lines, rects, row + 1)
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
@@ -237,8 +215,10 @@ impl Toolbar {
         }
         let (lines, rects, _) = self.build(area);
         self.rects = rects;
+        // Toolbar sits on the main app background (theme::BASE), not the menu's chrome color,
+        // so it blends with the spacer row and the editor area below it.
         frame.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(theme::CHROME_BG)),
+            Paragraph::new(lines).style(Style::default().bg(theme::BASE)),
             area,
         );
     }
