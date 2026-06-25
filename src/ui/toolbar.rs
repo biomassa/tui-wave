@@ -119,6 +119,7 @@ impl Toolbar {
                     ("fineNavi", "~", Action::ToggleFineMode),
                     ("insPointFollows", "i", Action::ToggleCursorFollowsPlayback),
                     ("viewFollows", "f", Action::ToggleViewportFollowsPlayback),
+                    ("graphics", "g", Action::ToggleGraphicsMode),
                 ],
             },
         ];

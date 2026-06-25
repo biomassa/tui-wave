@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use ratatui::buffer::CellDiffOption;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -44,6 +45,7 @@ use super::waveform_cache::WaveformCache;
 use super::widgets::db_scale::{DbScaleWidget, DB_GUTTER_WIDTH};
 use super::widgets::statusbar::StatusBar;
 use super::widgets::waveform::WaveformWidget;
+use super::widgets::waveform_image;
 
 enum Dialog {
     Normalize { input: TextInput },
@@ -92,6 +94,24 @@ enum SaveAsQueueThen {
 
 pub struct App {
     pub should_quit: bool,
+    /// Set once at startup via `set_picker` (queried in `terminal::init`, which needs raw
+    /// mode already enabled — before `App::new` runs) if the terminal supports a real
+    /// image-graphics protocol (kitty, Sixel, or iTerm2's). `None` on any terminal that
+    /// doesn't, including inside a detected multiplexer. Never re-queried after startup.
+    picker: Option<ratatui_image::picker::Picker>,
+    /// When true (and `picker` is `Some`), render the waveform via the detected graphics
+    /// protocol instead of character glyphs. Persisted, defaults to `true` — see
+    /// `Config.graphics_mode`. Toggled with `Action::ToggleGraphicsMode`.
+    pub graphics_mode: bool,
+    /// Per-channel graphics-mode image state, index-parallel to the active document's
+    /// channels. Rebuilt fresh every frame from the live `viewport`/`selection`/`cursor`/
+    /// `playhead` (via `Picker::new_resize_protocol`, the crate's intended way to swap in
+    /// new image content — there's no in-place "update this image" method on
+    /// `StatefulProtocol`), since the waveform's pixel content genuinely changes on
+    /// essentially every redraw during scrolling/zooming/playback. Cleared whenever the
+    /// channel count changes (e.g. switching to a document with a different channel
+    /// count), so stale per-channel state from a previous document is never reused.
+    graphics_protocols: Vec<ratatui_image::protocol::StatefulProtocol>,
     /// All open documents (buffers). Index 0 is always the first file loaded; subsequent
     /// entries are created by "Copy to New" or loading additional files.
     pub documents: Vec<Document>,
@@ -229,6 +249,13 @@ impl App {
         Self::new_with_config(document, directory, Config::load())
     }
 
+    /// Sets the graphics-protocol capability detected by `terminal::init()` — called once
+    /// from `main` right after construction, since the detection query itself needs raw
+    /// mode already enabled (done in `terminal::init`, which runs before `App::new`).
+    pub fn set_picker(&mut self, picker: Option<ratatui_image::picker::Picker>) {
+        self.picker = picker;
+    }
+
     /// The real constructor body, parameterized on `Config` so tests can pass
     /// `Config::default()` instead of `Config::load()` — tests must never depend on
     /// whatever happens to be in the user's real `~/.config/tui-wave/config.toml` (or race
@@ -255,6 +282,9 @@ impl App {
         let histories = documents.iter().map(|_| History::new()).collect();
         Self {
             should_quit: false,
+            picker: None,
+            graphics_mode: config.graphics_mode,
+            graphics_protocols: Vec::new(),
             documents,
             active_document: 0,
             viewport: None,
@@ -866,6 +896,7 @@ impl App {
             cursor_follows_playback: self.cursor_follows_playback,
             viewport_follows_playback: self.viewport_follows_playback,
             transient_threshold_db: self.transient_threshold_db,
+            graphics_mode: self.graphics_mode,
         };
         self.config.save();
     }
@@ -1800,6 +1831,12 @@ impl App {
             return;
         }
 
+        if action == Action::ToggleGraphicsMode {
+            self.graphics_mode = !self.graphics_mode;
+            self.save_config();
+            return;
+        }
+
         if matches!(
             action,
             Action::InsertMarker
@@ -1975,6 +2012,7 @@ impl App {
             | Action::ToggleAudition
             | Action::ToggleCursorFollowsPlayback
             | Action::ToggleViewportFollowsPlayback
+            | Action::ToggleGraphicsMode
             | Action::ClearSelection
             | Action::SelectAll
             | Action::SaveAs
@@ -2385,6 +2423,9 @@ impl App {
         if self.viewport_follows_playback {
             self.toolbar.active_actions.insert(Action::ToggleViewportFollowsPlayback);
         }
+        if self.graphics_mode {
+            self.toolbar.active_actions.insert(Action::ToggleGraphicsMode);
+        }
         self.toolbar.render(frame, chrome.toolbar, focus);
         // Fill the spacer row with the base background so it matches the toolbar below it
         // (rather than showing through to the terminal default).
@@ -2464,6 +2505,9 @@ impl App {
         viewport.total_len = total_len;
 
         let channel_count = self.documents[doc_idx].channel_count().max(1);
+        // Drop stale per-channel image state from a previous document with more channels
+        // — never reuse it for a channel index that no longer exists.
+        self.graphics_protocols.truncate(channel_count);
         let full_chunks =
             Layout::vertical(vec![Constraint::Fill(1); channel_count]).split(waveform_area);
         let selection = self.documents[doc_idx].selection.map(|s| s.normalized());
@@ -2487,6 +2531,18 @@ impl App {
         } else {
             (1.0, 0.0)
         };
+
+        let overlay_active =
+            self.confirm.is_some() || self.save_as_active || self.dialog.is_some() || self.menu.is_open();
+        let marker_refs: Vec<(usize, &str)> =
+            self.documents[doc_idx].markers.iter().map(|m| (m.position, m.label.as_str())).collect();
+        // Per-channel terminal row range actually covered by a rendered graphics image this
+        // frame, so the marker overlay below knows which rows already have marker lines baked
+        // into the bitmap (and must not also draw a buffer-cell line there — see the comment
+        // by `overlay_active` above for why mixing the two corrupts the terminal display) vs.
+        // which rows still need the legacy buffer-cell line (text-mode/no-picker/overlay-open
+        // channels, and channel 0's reserved top row — see below).
+        let mut channel_image_rows: Vec<Option<(u16, u16)>> = vec![None; channel_count];
 
         for (i, channel_full_area) in full_chunks.iter().enumerate() {
             let channel_inner = Rect {
@@ -2522,6 +2578,56 @@ impl App {
                 playhead: self.playhead_position,
             };
             frame.render_widget(widget, channel_inner);
+
+            // Graphics mode: when a graphics-capable terminal was detected at startup,
+            // rasterize this channel's waveform into a real bitmap and display it via the
+            // detected protocol (kitty/Sixel/iTerm2), drawn on top of the character-glyph
+            // WaveformWidget just rendered above. Rebuilt fresh every frame from the same
+            // live viewport/selection/cursor/playhead the text widget just used —
+            // `StatefulProtocol` has no in-place "swap this image" method, so
+            // `Picker::new_resize_protocol` (the crate's intended way to give it new
+            // content) is called every frame rather than reused, since the waveform's
+            // pixel content genuinely changes on essentially every redraw during
+            // scrolling/zooming/playback anyway.
+            //
+            // Skipped whenever a menu/dialog overlay is showing: the kitty unicode-placeholder
+            // protocol embeds one escape sequence per row that, once (re-)transmitted, paints
+            // the *entire* row's width directly on the real terminal screen — independent of
+            // ratatui's own cell-diffing, which only knows about the single buffer cell holding
+            // that sequence. Re-transmitting every frame (a fresh id each time, since we never
+            // reuse the previous `StatefulProtocol`) repaints that full row on the real terminal
+            // even where an overlay drew plain text moments earlier in the same buffer, which is
+            // what made dialogs flash and vanish a frame later. Skipping the retransmit while an
+            // overlay is open leaves the text-mode `WaveformWidget` rendered above as the visible
+            // fallback in that area instead.
+            if self.graphics_mode && !overlay_active {
+                if let Some(picker) = &self.picker {
+                    channel_image_rows[i] = Some((channel_inner.y, channel_inner.y + channel_inner.height));
+                    let font = picker.font_size();
+                    let pixel_width = channel_inner.width as u32 * font.width.max(1) as u32;
+                    let pixel_height = channel_inner.height as u32 * font.height.max(1) as u32;
+                    let img = waveform_image::rasterize_waveform(
+                        samples,
+                        viewport,
+                        self.waveform_caches.get(i),
+                        selection,
+                        self.documents[doc_idx].cursor,
+                        self.playhead_position,
+                        &marker_refs,
+                        i == 0,
+                        channel_inner.width,
+                        pixel_width,
+                        pixel_height,
+                    );
+                    let protocol = picker.new_resize_protocol(image::DynamicImage::ImageRgba8(img));
+                    if i < self.graphics_protocols.len() {
+                        self.graphics_protocols[i] = protocol;
+                    } else {
+                        self.graphics_protocols.push(protocol);
+                    }
+                    frame.render_stateful_widget(ratatui_image::StatefulImage::default(), channel_inner, &mut self.graphics_protocols[i]);
+                }
+            }
 
             let db_scale = DbScaleWidget {
                 amplitude_scale: viewport.amplitude_scale,
@@ -2568,7 +2674,16 @@ impl App {
                 marker_style
             };
             for y in wf.y..wf.y + wf.height {
-                buf[(x, y)].set_char('┊').set_style(style);
+                // Rows actually covered by a rendered graphics image already have this
+                // marker's line baked into the bitmap (see `rasterize_waveform`'s `markers`
+                // param) — drawing it again here as a plain character cell would fight the
+                // kitty unicode-placeholder image for control of that row's escape sequence
+                // and corrupt the terminal's cursor-position bookkeeping for the whole row,
+                // which is what caused markers to glitch the display in graphics mode.
+                if channel_image_rows.iter().flatten().any(|&(start, end)| y >= start && y < end) {
+                    continue;
+                }
+                buf[(x, y)].set_char('┊').set_style(style).set_diff_option(CellDiffOption::AlwaysUpdate);
             }
             let lx = x + 1;
             // Stop the label before the next marker's line (or the pane's right edge).
@@ -2576,8 +2691,16 @@ impl App {
             let avail = limit.saturating_sub(lx) as usize;
             let shown: String = self.documents[doc_idx].markers[mi].label.chars().take(avail).collect();
             let shown_w = shown.chars().count() as u16;
-            if shown_w > 0 {
+            // The label row is covered by channel 0's image whenever graphics mode rendered
+            // it (the label text is then rasterized directly into the bitmap instead — see
+            // `show_marker_labels` in `rasterize_waveform`); only draw the buffer-cell text
+            // when that row genuinely has no image underneath it.
+            let label_row_has_image = channel_image_rows.iter().flatten().any(|&(start, end)| wf.y >= start && wf.y < end);
+            if shown_w > 0 && !label_row_has_image {
                 buf.set_string(lx, wf.y, &shown, style);
+                for cx in lx..lx + shown_w {
+                    buf[(cx, wf.y)].set_diff_option(CellDiffOption::AlwaysUpdate);
+                }
             }
             self.marker_label_rects.push((
                 Rect { x, y: wf.y, width: shown_w + 1, height: 1 },
