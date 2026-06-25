@@ -160,6 +160,11 @@ impl MenuBar {
                         shortcut: "f",
                         action: Action::ToggleViewportFollowsPlayback,
                     },
+                    MenuEntry {
+                        label: "Graphics Mode",
+                        shortcut: "g",
+                        action: Action::ToggleGraphicsMode,
+                    },
                 ],
             },
             MenuItem {

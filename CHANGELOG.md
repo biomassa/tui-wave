@@ -58,6 +58,13 @@
   short 5ms ramp): the cache backing the waveform could report a column's level as already
   back at full volume one column early, bleeding in the next bin's content. The fade math
   itself was always correct — this was purely a display-precision bug in the cache, now exact.
+- Added graphics-mode waveform rendering: on terminals that support the kitty (or
+  compatible Sixel/iTerm2) graphics protocol, the waveform now draws as a real bitmap
+  instead of character glyphs, with markers, the insertion point, and the playhead
+  rasterized directly into the image. Falls back automatically (and unconditionally on
+  tmux/screen) to the existing text renderer when no compatible protocol is detected.
+  Toggle with `g`; persists between sessions via `graphics_mode` in the config file,
+  defaulting to on whenever a capable terminal is detected.
 
 ## 2026-06-24
 

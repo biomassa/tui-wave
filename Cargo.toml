@@ -8,8 +8,11 @@ color-eyre = "0.6.5"
 cpal = "0.18.1"
 crossbeam-channel = "0.5.15"
 crossterm = "0.29.0"
+font8x8 = { version = "0.3.1", default-features = false }
 hound = "3.5.1"
+image = { version = "0.25.10", default-features = false }
 ratatui = "0.30.2"
+ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
 rodio = "0.22.2"
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"

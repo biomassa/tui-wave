@@ -35,6 +35,7 @@ pub enum Action {
     ToggleAudition,
     ToggleCursorFollowsPlayback,
     ToggleViewportFollowsPlayback,
+    ToggleGraphicsMode,
     SaveAs,
     SaveAll,
     ToggleZeroSnap,
@@ -135,6 +136,7 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('l') => Some(Action::ToggleLoop),
         KeyCode::Char('i') => Some(Action::ToggleCursorFollowsPlayback),
         KeyCode::Char('f') => Some(Action::ToggleViewportFollowsPlayback),
+        KeyCode::Char('g') => Some(Action::ToggleGraphicsMode),
         KeyCode::Char('m') => Some(Action::InsertMarker),
         KeyCode::Char('t') => Some(Action::AutoInsertMarkers),
         KeyCode::Char('M') => Some(Action::DeleteMarker),
@@ -371,6 +373,18 @@ mod tests {
 
     #[test]
     fn ctrl_g_opens_gain_dialog() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+            Some(Action::Gain)
+        );
+    }
+
+    #[test]
+    fn plain_g_toggles_graphics_mode_not_gain() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('g'), KeyModifiers::NONE)),
+            Some(Action::ToggleGraphicsMode)
+        );
         assert_eq!(
             map_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL)),
             Some(Action::Gain)

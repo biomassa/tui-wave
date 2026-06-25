@@ -29,8 +29,9 @@ fn main() -> color_eyre::Result<()> {
         None => (None, None),
     };
 
-    let mut terminal = ui::terminal::init()?;
+    let (mut terminal, picker) = ui::terminal::init()?;
     let mut app = ui::app::App::new(document, directory);
+    app.set_picker(picker);
     let result = app.run(&mut terminal);
 
     ui::terminal::restore()?;
