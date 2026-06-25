@@ -73,7 +73,7 @@ impl Toolbar {
                     ("Zoom-", "Dn", Action::ZoomOut),
                     ("VZoom+", "S+Up", Action::ZoomInVertical),
                     ("VZoom-", "S+Dn", Action::ZoomOutVertical),
-                    ("Auto", "a", Action::ToggleAutoVerticalZoom),
+                    ("AutoVZoom", "a", Action::ToggleAutoVerticalZoom),
                 ],
             },
             ToolGroup {
@@ -100,9 +100,9 @@ impl Toolbar {
             ToolGroup {
                 label: "OPTS",
                 buttons: vec![
-                    ("Snap", "z", Action::ToggleZeroSnap),
+                    ("zeroXSnap", "z", Action::ToggleZeroSnap),
                     ("Loop", "l", Action::ToggleLoop),
-                    ("Fine", "`", Action::ToggleFineMode),
+                    ("fineNavi", "~", Action::ToggleFineMode),
                 ],
             },
         ];
@@ -113,17 +113,19 @@ impl Toolbar {
                 ("Open", "Enter", Action::OpenSelected),
                 ("OpenDir", "^o", Action::OpenDirectory),
                 ("Select", "Up/Dn", Action::Noop),
+                ("Page", "PgUp/Dn", Action::Noop),
+                ("Audition", "p", Action::ToggleAudition),
                 ("Search", "/", Action::SearchFiles),
                 ("Focus", "Tab", Action::FocusNext),
                 ("Quit", "q", Action::Quit),
             ],
         }];
-        // Buffers-focus set.
+        // Buffers-focus set. Up/Dn both selects and loads the buffer immediately — no
+        // separate "Switch" command, since there's nothing left for Enter to commit.
         let buffers = vec![ToolGroup {
             label: "",
             buttons: vec![
-                ("Switch", "Enter", Action::SwitchBuffer),
-                ("Select", "Up/Dn", Action::Noop),
+                ("Switch", "Up/Dn", Action::Noop),
                 ("Search", "/", Action::SearchBuffers),
                 ("Save", "^s", Action::Save),
                 ("Close", "^w", Action::CloseBuffer),

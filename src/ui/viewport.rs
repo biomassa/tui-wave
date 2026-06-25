@@ -194,6 +194,17 @@ mod tests {
     }
 
     #[test]
+    fn zoom_in_bottoms_out_at_one_sample_per_column() {
+        // Past max zoom, samples_per_column must stay pinned at 1.0 (one terminal column
+        // == one sample) rather than going sub-pixel — further zoom-in attempts are no-ops.
+        let mut viewport = Viewport::fit_to_width(1_000, 80);
+        for _ in 0..100 {
+            viewport.zoom_in(500, 80);
+        }
+        assert_eq!(viewport.samples_per_column, 1.0);
+    }
+
+    #[test]
     fn vertical_zoom_clamps_to_bounds() {
         let mut viewport = Viewport::fit_to_width(1000, 80);
         for _ in 0..100 {

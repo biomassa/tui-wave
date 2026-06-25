@@ -37,6 +37,10 @@ pub struct FilePanel {
     pub focused: bool,
     pub dirty_paths: HashSet<PathBuf>,
     rects: Vec<Rect>,
+    /// Number of entry rows actually visible at last render, used both to clamp scrolling
+    /// and as the page size for `move_page_up`/`move_page_down`. Updated every render, so
+    /// PgUp/PgDn always moves by exactly one screenful regardless of terminal size.
+    visible_rows: usize,
 }
 
 impl FilePanel {
@@ -51,6 +55,7 @@ impl FilePanel {
             focused: false,
             dirty_paths: HashSet::new(),
             rects: Vec::new(),
+            visible_rows: 10,
         };
         panel.scan();
         panel
@@ -153,9 +158,8 @@ impl FilePanel {
         if self.selected < self.scroll_offset {
             self.scroll_offset = self.selected;
         }
-        let max_visible = 30usize;
-        if self.selected >= self.scroll_offset + max_visible {
-            self.scroll_offset = self.selected.saturating_sub(max_visible.saturating_sub(1));
+        if self.selected >= self.scroll_offset + self.visible_rows {
+            self.scroll_offset = self.selected.saturating_sub(self.visible_rows.saturating_sub(1));
         }
     }
 
@@ -183,6 +187,22 @@ impl FilePanel {
         let count = self.filtered_count();
         if count > 0 {
             self.selected = count - 1;
+            self.clamp_scroll();
+        }
+    }
+
+    /// Moves the selection up by one screenful — for browsing directories with many files
+    /// without holding Up.
+    pub fn move_page_up(&mut self) {
+        self.selected = self.selected.saturating_sub(self.visible_rows.max(1));
+        self.clamp_scroll();
+    }
+
+    /// Moves the selection down by one screenful.
+    pub fn move_page_down(&mut self) {
+        let count = self.filtered_count();
+        if count > 0 {
+            self.selected = (self.selected + self.visible_rows.max(1)).min(count - 1);
             self.clamp_scroll();
         }
     }
@@ -232,6 +252,7 @@ impl FilePanel {
         }
 
         let inner_height = inner.height.saturating_sub(filter_line) as usize;
+        self.visible_rows = inner_height.max(1);
         self.clamp_scroll();
 
         let filtered = self.filtered_entries();
@@ -345,6 +366,47 @@ mod tests {
         assert!(matches!(entries[dir_pos].kind, EntryKind::Dir));
         assert!(matches!(entries[file_pos].kind, EntryKind::File));
         assert!(dir_pos < file_pos, "directories should sort before files");
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// PgDn/PgUp must move by a full screenful (`visible_rows`, as set by the last render)
+    /// rather than a single row, and must clamp at the list's ends like Home/End do.
+    #[test]
+    fn page_up_and_down_move_by_a_screenful() {
+        use std::fs;
+        let base = std::env::temp_dir().join("tui_wave_pagetest");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        for i in 0..50 {
+            fs::write(base.join(format!("track_{i:03}.wav")), b"x").unwrap();
+        }
+
+        let mut panel = FilePanel::new(base.clone());
+        panel.visible_rows = 10;
+        assert_eq!(panel.selected, 0);
+
+        panel.move_page_down();
+        assert_eq!(panel.selected, 10);
+        panel.move_page_down();
+        assert_eq!(panel.selected, 20);
+
+        panel.move_page_up();
+        assert_eq!(panel.selected, 10);
+
+        // 51 entries total (50 files + "..") — paging down past the end clamps at the last.
+        panel.selected = 45;
+        panel.move_page_down();
+        assert_eq!(panel.selected, 50);
+        panel.move_page_down();
+        assert_eq!(panel.selected, 50, "paging past the end should clamp, not panic or wrap");
+
+        // Paging up past the start clamps at 0.
+        panel.selected = 5;
+        panel.move_page_up();
+        assert_eq!(panel.selected, 0);
+        panel.move_page_up();
+        assert_eq!(panel.selected, 0, "paging past the start should clamp at 0");
 
         fs::remove_dir_all(&base).unwrap();
     }

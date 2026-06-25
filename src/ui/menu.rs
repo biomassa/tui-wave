@@ -104,6 +104,11 @@ impl MenuBar {
                         shortcut: "Ctrl+d",
                         action: Action::ClearSelection,
                     },
+                    MenuEntry {
+                        label: "Select All",
+                        shortcut: "Ctrl+a",
+                        action: Action::SelectAll,
+                    },
                 ],
             },
             MenuItem {
@@ -142,8 +147,13 @@ impl MenuBar {
                     },
                     MenuEntry {
                         label: "Fine Step Mode",
-                        shortcut: "`",
+                        shortcut: "~",
                         action: Action::ToggleFineMode,
+                    },
+                    MenuEntry {
+                        label: "Audition",
+                        shortcut: "p",
+                        action: Action::ToggleAudition,
                     },
                 ],
             },

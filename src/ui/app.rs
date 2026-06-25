@@ -4,13 +4,14 @@ use std::time::{Duration, Instant};
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::audio::engine::AudioEngine;
+use crate::config::Config;
 use crate::commands::cut::cut_command;
 use crate::commands::delete::delete_command;
 use crate::commands::fade::{fade_command, FadeCurve};
@@ -61,6 +62,11 @@ pub enum Focus {
     Buffers,
 }
 
+/// How long the Files-panel selection must sit still on a file before Audition decodes
+/// and plays it — long enough that arrowing quickly through a list doesn't trigger a
+/// decode-and-play per keystroke, short enough to still feel immediate when browsing.
+const AUDITION_DEBOUNCE: Duration = Duration::from_millis(200);
+
 /// A pending y/n confirmation modal. Generalizes the old quit-only prompt so closing a
 /// dirty buffer can reuse the same flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +104,10 @@ pub struct App {
     /// a redraw, so it's cached here instead.
     pub content_width: u16,
     pub waveform_area: Rect,
+    /// Rendered area of the Files panel, for mouse-click focus hit-testing.
+    file_panel_area: Rect,
+    /// Rendered area of the Buffers panel, for mouse-click focus hit-testing.
+    buffer_panel_area: Rect,
     /// A pending y/n confirmation (quit, or closing a dirty buffer). Intercepts the next
     /// keypress as a confirmation instead of routing it through the normal keymap.
     confirm: Option<Confirm>,
@@ -109,6 +119,10 @@ pub struct App {
     marker_label_rects: Vec<(Rect, usize)>,
     /// Time/cell of the last left mouse-down, used to detect double-clicks.
     last_click: Option<(Instant, u16, u16)>,
+    /// Time/cell of the last left mouse-down *in the waveform background* (not on a marker
+    /// label, which has its own double-click-to-rename handling via `last_click`) — used to
+    /// detect a double-click that should select the region between adjacent markers.
+    last_waveform_click: Option<(Instant, u16, u16)>,
     /// File panel on the left showing WAV files in the current directory.
     pub file_panel: FilePanel,
     /// Buffer panel showing all open documents.
@@ -129,6 +143,34 @@ pub struct App {
     /// column. Toggled with `~` — a modifier-free fine-step mode, since every Ctrl/Alt+arrow
     /// combo is intercepted by some terminal or desktop before the app sees it.
     pub fine_mode: bool,
+    /// When true, navigating to a file in the Files panel (Up/Down or a single click)
+    /// previews it by playing straight from disk, without loading it into a buffer.
+    /// Toggled with `p`.
+    pub audition: bool,
+    /// The audition playback engine, separate from `audio` (the active document's engine)
+    /// since auditioning must not disturb whatever's actually loaded/playing. `None` when
+    /// nothing is being auditioned.
+    audition_audio: Option<AudioEngine>,
+    /// Path of the file `audition_audio` is currently playing, if any.
+    audition_playing_path: Option<PathBuf>,
+    /// A file waiting to start auditioning once `AUDITION_DEBOUNCE` has elapsed since the
+    /// selection landed on it — avoids decoding/playing every file the user arrows past
+    /// while skimming the list quickly.
+    audition_pending: Option<(PathBuf, Instant)>,
+    /// Time/cell of the last left mouse-down on a file-panel entry, used to detect a
+    /// double-click (which opens the file) versus a single click (which only selects it,
+    /// auditioning it if Audition is on).
+    last_file_click: Option<(Instant, u16, u16)>,
+    /// Persisted toggles, loaded at startup and rewritten whenever one changes. The
+    /// snapshot here is what gets written to disk — see `save_config`.
+    config: Config,
+    /// Tracks a held arrow key for nav-step acceleration: the action being repeated and
+    /// when the current hold started. Reset whenever the action changes or the gap since
+    /// the last repeat exceeds `NAV_HOLD_RESET_GAP` (i.e. a fresh keypress, not a hold).
+    nav_hold: Option<(Action, Instant)>,
+    /// Time of the most recent nav-step keypress, used to detect whether the next one is
+    /// a continuation of a hold or a fresh press.
+    last_nav_time: Option<Instant>,
     /// Active parameter dialog (Normalize or Gain), if any.
     dialog: Option<Dialog>,
     /// The current playback position, set from `AudioEngine.position` during playback.
@@ -139,10 +181,14 @@ pub struct App {
 
 impl App {
     pub fn new(document: Option<Document>, directory: Option<PathBuf>) -> Self {
+        let config = Config::load();
         let dir = directory
             .or_else(|| document.as_ref().and_then(|d| d.path.as_ref()).and_then(|p| p.parent().map(|p| p.to_path_buf())))
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        let file_panel = FilePanel::new(dir);
+        let mut file_panel = FilePanel::new(dir);
+        // The Files panel starts focused so the first thing a user does is pick a file to
+        // load, rather than landing on an empty waveform view with nothing to act on.
+        file_panel.focused = true;
 
         let documents = match document {
             Some(doc) => vec![doc],
@@ -169,20 +215,31 @@ impl App {
             waveform_caches,
             content_width: 1,
             waveform_area: Rect::default(),
+            file_panel_area: Rect::default(),
+            buffer_panel_area: Rect::default(),
             confirm: None,
             mouse_down_anchor: None,
             dragging_marker: None,
             marker_label_rects: Vec::new(),
             last_click: None,
+            last_waveform_click: None,
             file_panel,
             buffer_panel: BufferPanel::new(),
             save_as_active: false,
             save_as_input: TextInput::new(""),
             save_as_depth: BitDepth::Float32,
             save_as_dither: false,
-            snap_to_zero: true,
-            loop_playback: false,
-            fine_mode: false,
+            snap_to_zero: config.snap_to_zero,
+            loop_playback: config.loop_playback,
+            fine_mode: config.fine_mode,
+            audition: config.audition,
+            audition_audio: None,
+            audition_playing_path: None,
+            audition_pending: None,
+            last_file_click: None,
+            config,
+            nav_hold: None,
+            last_nav_time: None,
             dialog: None,
             playhead_position: None,
         }
@@ -247,6 +304,9 @@ impl App {
             .unwrap_or(0);
         let next = (cur as isize + delta).clamp(0, filtered.len() as isize - 1) as usize;
         self.buffer_panel.selected = filtered[next];
+        // Navigating to a buffer loads it immediately — like the mouse click handler
+        // already does — so Up/Down previews audio without a separate Enter to commit.
+        self.switch_to_buffer(self.buffer_panel.selected);
     }
 
     /// After the buffer filter changes, keep the selection on a still-visible buffer.
@@ -299,6 +359,7 @@ impl App {
                 }
             }
             self.sync_playhead_from_audio();
+            self.tick_audition();
         }
         Ok(())
     }
@@ -345,6 +406,8 @@ impl App {
                 KeyCode::Down => self.file_panel.move_down(),
                 KeyCode::Home => self.file_panel.move_top(),
                 KeyCode::End => self.file_panel.move_bottom(),
+                KeyCode::PageUp => self.file_panel.move_page_up(),
+                KeyCode::PageDown => self.file_panel.move_page_down(),
                 KeyCode::Backspace => {
                     self.file_panel.filter.pop();
                     self.file_panel.selected = 0;
@@ -364,6 +427,8 @@ impl App {
                 KeyCode::Down => { self.file_panel.move_down(); true }
                 KeyCode::Home => { self.file_panel.move_top(); true }
                 KeyCode::End => { self.file_panel.move_bottom(); true }
+                KeyCode::PageUp => { self.file_panel.move_page_up(); true }
+                KeyCode::PageDown => { self.file_panel.move_page_down(); true }
                 KeyCode::Enter => { self.open_selected_file(); true }
                 KeyCode::Char('/') => {
                     self.file_panel.filtering = true;
@@ -419,7 +484,9 @@ impl App {
         if self.buffer_panel.focused {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             let handled = match key.code {
-                // Up/Dn move the selection cursor; Enter switches to it (no per-arrow reload).
+                // Up/Dn move the selection cursor and immediately switch to it (loading the
+                // buffer's audio as you navigate); Enter is a no-op once already switched,
+                // kept as a binding so it still does something sensible if pressed.
                 KeyCode::Up => { self.move_buffer_selection(-1); true }
                 KeyCode::Down => { self.move_buffer_selection(1); true }
                 KeyCode::Enter => { self.handle_action(Action::SwitchBuffer); true }
@@ -707,6 +774,57 @@ impl App {
         }
     }
 
+    /// Snapshots the current toggle state into `self.config` and writes it to disk.
+    /// Called right after any toggle action so the persisted file never lags behind
+    /// what's actually in effect.
+    fn save_config(&mut self) {
+        self.config = Config {
+            snap_to_zero: self.snap_to_zero,
+            auto_vertical_zoom: self.viewport.as_ref().is_some_and(|v| v.auto_vertical_zoom),
+            fine_mode: self.fine_mode,
+            loop_playback: self.loop_playback,
+            audition: self.audition,
+        };
+        self.config.save();
+    }
+
+    /// Step multiplier for a held arrow key: 1x on a fresh press, staying at 1x for the
+    /// first `NAV_ACCEL_DEBOUNCE` of a hold, then ramping linearly up to
+    /// `NAV_MAX_MULTIPLIER` as the same action keeps repeating. The debounce is what tells
+    /// a genuine hold (the terminal's own key-repeat firing every ~30-50ms) apart from
+    /// someone just tapping the same arrow quickly by hand — a few fast manual taps land
+    /// well under the debounce and never accelerate, only a hold sustained past it does.
+    /// Reset the instant the action changes or the gap between repeats exceeds
+    /// `NAV_HOLD_RESET_GAP` (i.e. the key was released and pressed again rather than held).
+    /// Always 1x in fine mode — fine stepping is for slow, precise movement, not covering
+    /// ground quickly.
+    fn nav_step_multiplier(&mut self, action: Action) -> f64 {
+        const NAV_HOLD_RESET_GAP: Duration = Duration::from_millis(220);
+        const NAV_ACCEL_DEBOUNCE: Duration = Duration::from_millis(200);
+        const NAV_RAMP_DURATION: Duration = Duration::from_millis(1000);
+        const NAV_MAX_MULTIPLIER: f64 = 8.0;
+
+        let now = Instant::now();
+        let continuing_hold = self.nav_hold.is_some_and(|(held_action, _)| held_action == action)
+            && self.last_nav_time.is_some_and(|t| now.duration_since(t) < NAV_HOLD_RESET_GAP);
+        if !continuing_hold {
+            self.nav_hold = Some((action, now));
+        }
+        self.last_nav_time = Some(now);
+
+        if self.fine_mode {
+            return 1.0;
+        }
+        let held_since = self.nav_hold.expect("just set above").1;
+        let elapsed = now.duration_since(held_since);
+        if elapsed < NAV_ACCEL_DEBOUNCE {
+            return 1.0;
+        }
+        let ramp_span = NAV_RAMP_DURATION.saturating_sub(NAV_ACCEL_DEBOUNCE).max(Duration::from_millis(1));
+        let t = ((elapsed - NAV_ACCEL_DEBOUNCE).as_secs_f64() / ramp_span.as_secs_f64()).min(1.0);
+        1.0 + t * (NAV_MAX_MULTIPLIER - 1.0)
+    }
+
     /// The panel that currently has focus — the single source of truth for the modal
     /// command panel, contextual keys, and the active-panel accent.
     fn focus(&self) -> Focus {
@@ -871,6 +989,60 @@ impl App {
         }
     }
 
+    /// Drops any audition playback/pending state. Dropping `AudioEngine` sends it a `Stop`
+    /// and tears down its thread, so this is enough to silence it immediately.
+    fn stop_audition(&mut self) {
+        self.audition_audio = None;
+        self.audition_playing_path = None;
+        self.audition_pending = None;
+    }
+
+    /// Drives the Audition feature: called once per main-loop tick (same cadence as
+    /// `sync_playhead_from_audio`). Watches the Files panel's selected entry and, after it
+    /// settles on a `.wav` file for `AUDITION_DEBOUNCE`, plays that file straight from disk
+    /// without loading it into a buffer — so skimming the list with Up/Down previews each
+    /// file without a full decode-and-play on every single keypress.
+    fn tick_audition(&mut self) {
+        if !self.audition {
+            if self.audition_audio.is_some() || self.audition_pending.is_some() {
+                self.stop_audition();
+            }
+            return;
+        }
+
+        let current = if self.file_panel.focused {
+            self.file_panel
+                .selected_entry()
+                .filter(|(_, kind)| *kind == FileEntryKind::File)
+                .map(|(path, _)| path)
+        } else {
+            None
+        };
+
+        let already_on_target = self.audition_playing_path == current
+            || self.audition_pending.as_ref().map(|(p, _)| p) == current.as_ref();
+        if !already_on_target {
+            // Selection moved to a different file (or off the file panel entirely) — stop
+            // whatever was playing/pending right away; only the *new* target gets debounced.
+            self.audition_audio = None;
+            self.audition_playing_path = None;
+            self.audition_pending = current.clone().map(|path| (path, Instant::now()));
+        }
+
+        if let Some((path, started)) = self.audition_pending.clone() {
+            if Instant::now().duration_since(started) >= AUDITION_DEBOUNCE {
+                self.audition_pending = None;
+                if let Ok(document) = crate::model::io::load_wav(&path) {
+                    self.audition_audio = AudioEngine::try_new(document.channels, document.sample_rate);
+                    if let Some(engine) = &self.audition_audio {
+                        engine.play(0);
+                    }
+                    self.audition_playing_path = Some(path);
+                }
+            }
+        }
+    }
+
     fn apply_fade(&mut self, fade_in: bool, pct: f32, curve: FadeCurve) {
         let idx = self.active_document;
         // Fade deliberately does not snap: the curve is shaped to start/end at zero anyway,
@@ -889,6 +1061,7 @@ impl App {
     }
 
     fn load_file(&mut self, path: PathBuf) {
+        self.stop_audition();
         if let Some(audio) = self.audio.take() {
             drop(audio);
         }
@@ -953,11 +1126,42 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
-        // File panel: click selects + activates the entry (navigate dir / open file).
+        // A left click anywhere focuses whichever panel it landed in — including the
+        // waveform, which has no toggle/key of its own to focus it (Tab cycles forward
+        // through panels, but a direct click should jump straight to the one under the
+        // cursor). Checked before any other handling below so every click path (menu,
+        // toolbar, panel entries, waveform seek/select) starts from the right focus.
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            let pos = Position::new(mouse.column, mouse.row);
+            if self.file_panel_area.contains(pos) {
+                self.file_panel.focused = true;
+                self.buffer_panel.focused = false;
+            } else if self.buffer_panel_area.contains(pos) {
+                self.buffer_panel.focused = true;
+                self.file_panel.focused = false;
+            } else if self.waveform_area.contains(pos) {
+                self.file_panel.focused = false;
+                self.buffer_panel.focused = false;
+            }
+        }
+
+        // File panel: a single click only selects (auditioning it, if Audition is on, via
+        // `tick_audition`); a double-click activates it (navigate dir / open file) — mirrors
+        // the double-click-to-rename convention used for marker labels elsewhere.
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             if self.file_panel.handle_click(mouse.column, mouse.row) {
                 self.file_panel.focused = true;
-                self.open_selected_file();
+                let now = Instant::now();
+                let is_double_click = self.last_file_click.is_some_and(|(t, x, y)| {
+                    now.duration_since(t) < Duration::from_millis(400)
+                        && x.abs_diff(mouse.column) <= 1
+                        && y == mouse.row
+                });
+                self.last_file_click = Some((now, mouse.column, mouse.row));
+                if is_double_click {
+                    self.last_file_click = None;
+                    self.open_selected_file();
+                }
                 return;
             }
         }
@@ -1036,7 +1240,45 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                let now = Instant::now();
+                let is_double_click = self.last_waveform_click.is_some_and(|(t, x, y)| {
+                    now.duration_since(t) < Duration::from_millis(400)
+                        && x.abs_diff(mouse.column) <= 1
+                        && y == mouse.row
+                });
+                self.last_waveform_click = Some((now, mouse.column, mouse.row));
+
+                if is_double_click && !mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                    // Select the region bounded by the nearest marker at-or-before the click
+                    // and the nearest marker after it — or the start/end of the file when
+                    // there's no marker on that side — same as Audacity/Sound Forge's
+                    // double-click-between-markers gesture.
+                    self.last_waveform_click = None;
+                    let region_start = document
+                        .markers
+                        .iter()
+                        .map(|m| m.position)
+                        .filter(|&p| p <= target)
+                        .max()
+                        .unwrap_or(0);
+                    let region_end = document
+                        .markers
+                        .iter()
+                        .map(|m| m.position)
+                        .filter(|&p| p > target)
+                        .min()
+                        .unwrap_or(total_len);
+                    let (region_start, region_end) = if snap {
+                        document.snap_range_to_zero_crossing(region_start, region_end)
+                    } else {
+                        (region_start, region_end)
+                    };
+                    if region_start < region_end {
+                        document.selection = Some(Selection { start: region_start, end: region_end });
+                        document.cursor = region_start;
+                    }
+                    self.mouse_down_anchor = None;
+                } else if mouse.modifiers.contains(KeyModifiers::CONTROL) {
                     // Ctrl extends the existing selection: pin the *far* edge as the drag
                     // anchor and move the near edge to the click — then the normal Drag branch
                     // (which reads `mouse_down_anchor`) keeps extending as the mouse moves.
@@ -1281,6 +1523,17 @@ impl App {
             return;
         }
 
+        if action == Action::SelectAll {
+            if let Some(document) = self.active_doc_mut() {
+                let len = document.len_samples();
+                if len > 0 {
+                    document.selection = Some(Selection { start: 0, end: len });
+                    document.cursor = len - 1;
+                }
+            }
+            return;
+        }
+
         if action == Action::ToggleAutoVerticalZoom {
             let peak = self.visible_peak();
             if let Some(viewport) = self.viewport.as_mut() {
@@ -1291,21 +1544,34 @@ impl App {
                     viewport.set_amplitude_scale(1.0);
                 }
             }
+            self.save_config();
             return;
         }
 
         if action == Action::ToggleZeroSnap {
             self.snap_to_zero = !self.snap_to_zero;
+            self.save_config();
             return;
         }
 
         if action == Action::ToggleLoop {
             self.loop_playback = !self.loop_playback;
+            self.save_config();
             return;
         }
 
         if action == Action::ToggleFineMode {
             self.fine_mode = !self.fine_mode;
+            self.save_config();
+            return;
+        }
+
+        if action == Action::ToggleAudition {
+            self.audition = !self.audition;
+            if !self.audition {
+                self.stop_audition();
+            }
+            self.save_config();
             return;
         }
 
@@ -1322,7 +1588,7 @@ impl App {
 
         if action == Action::Normalize {
             if self.active_doc().is_some() {
-                self.dialog = Some(Dialog::Normalize { input: TextInput::fresh("-1.0") });
+                self.dialog = Some(Dialog::Normalize { input: TextInput::fresh("0.0") });
             }
             return;
         }
@@ -1384,6 +1650,21 @@ impl App {
             return;
         }
 
+        // Holding an arrow key ramps the step up so crossing a long file doesn't mean
+        // hundreds of keypresses; fine mode disables this entirely since its whole point
+        // is slow, precise movement. `nav_step_multiplier` also resets/tracks hold state,
+        // so it must run (exactly once) for every nav action even when not used below.
+        // Computed before the viewport/document borrows below since it needs `&mut self`.
+        let nav_multiplier = matches!(
+            action,
+            Action::MoveCursorLeft
+                | Action::MoveCursorRight
+                | Action::ExtendSelectionLeft
+                | Action::ExtendSelectionRight
+        )
+        .then(|| self.nav_step_multiplier(action))
+        .unwrap_or(1.0);
+
         let idx = self.active_document;
         let Some(viewport) = self.viewport.as_mut() else { return };
         let Some(document) = self.documents.get_mut(idx) else { return };
@@ -1398,7 +1679,8 @@ impl App {
         // already rounds down to a single sample. Modifier-free fine stepping replaces the old
         // Ctrl/Alt+arrow scheme, which no terminal/DE would reliably pass through.
         let column_step = (viewport.samples_per_column.max(1.0) as usize).max(1);
-        let step = if self.fine_mode { (column_step / 8).max(1) } else { column_step };
+        let base_step = if self.fine_mode { (column_step / 8).max(1) } else { column_step };
+        let step = ((base_step as f64 * nav_multiplier).round() as usize).max(1);
         let span = viewport.span(width);
         let loop_range = if self.loop_playback {
             Some(document.selection.map(|sel| sel.normalized()).unwrap_or((0, total_len)))
@@ -1423,7 +1705,9 @@ impl App {
             | Action::ToggleZeroSnap
             | Action::ToggleLoop
             | Action::ToggleFineMode
+            | Action::ToggleAudition
             | Action::ClearSelection
+            | Action::SelectAll
             | Action::SaveAs
             | Action::SaveAll
             | Action::Gain
@@ -1613,16 +1897,17 @@ impl App {
                 self.save_as_active = true;
             }
             Action::Reverse => {
-                if let Some(sel) = document.selection {
-                    let (start, end) = sel.normalized();
-                    let (start, end) = if snap {
-                        document.snap_range_to_zero_crossing(start, end)
-                    } else {
-                        (start, end)
-                    };
-                    if start < end {
-                        self.histories[idx].apply(reverse_command(start, end), document);
-                    }
+                let (start, end) = match document.selection {
+                    Some(sel) => sel.normalized(),
+                    None => (0, document.len_samples()),
+                };
+                let (start, end) = if snap {
+                    document.snap_range_to_zero_crossing(start, end)
+                } else {
+                    (start, end)
+                };
+                if start < end {
+                    self.histories[idx].apply(reverse_command(start, end), document);
                 }
             }
             Action::Trim => {
@@ -1744,6 +2029,8 @@ impl App {
         let chrome = split_chrome(area, toolbar_height);
 
         // Render chrome panels.
+        self.file_panel_area = chrome.panel;
+        self.buffer_panel_area = chrome.buffers;
         self.file_panel.render(frame, chrome.panel);
         let buf_names = self.buffer_names();
         self.buffer_panel.render(frame, chrome.buffers, &buf_names, self.active_document);
@@ -1760,6 +2047,9 @@ impl App {
         }
         if self.viewport.as_ref().is_some_and(|v| v.auto_vertical_zoom) {
             self.toolbar.active_actions.insert(Action::ToggleAutoVerticalZoom);
+        }
+        if self.audition {
+            self.toolbar.active_actions.insert(Action::ToggleAudition);
         }
         self.toolbar.render(frame, chrome.toolbar, focus);
         self.menu.render(frame, chrome.menu);
@@ -1828,8 +2118,11 @@ impl App {
         self.content_width = inner_waveform_area.width;
         self.waveform_area = inner_waveform_area;
         let total_len = self.documents[doc_idx].len_samples();
+        let auto_vertical_zoom_default = self.config.auto_vertical_zoom;
         let viewport = self.viewport.get_or_insert_with(|| {
-            Viewport::fit_to_width(total_len, inner_waveform_area.width as usize)
+            let mut v = Viewport::fit_to_width(total_len, inner_waveform_area.width as usize);
+            v.auto_vertical_zoom = auto_vertical_zoom_default;
+            v
         });
         viewport.total_len = total_len;
 
@@ -2149,6 +2442,272 @@ mod tests {
         }
     }
 
+    /// Double-clicking the waveform background selects the region bounded by the nearest
+    /// marker at-or-before the click and the nearest marker after it.
+    #[test]
+    fn double_click_selects_region_between_markers() {
+        let mut app = App::new(Some(doc(0.5, 1_000)), None);
+        app.snap_to_zero = false;
+        app.documents[0].markers = vec![
+            Marker { position: 200, label: "A".into() },
+            Marker { position: 600, label: "B".into() },
+        ];
+        app.waveform_area = Rect { x: 0, y: 0, width: 1_000, height: 4 };
+        app.viewport = Some(Viewport::fit_to_width(1_000, 1_000)); // 1 sample per column
+
+        let click = |col: u16| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        // Double-click between the two markers selects exactly the span between them.
+        app.handle_mouse(click(400));
+        app.handle_mouse(click(400));
+        assert_eq!(app.documents[0].selection, Some(Selection { start: 200, end: 600 }));
+
+        // Double-click before the first marker selects from the start of the file.
+        app.handle_mouse(click(50));
+        app.handle_mouse(click(50));
+        assert_eq!(app.documents[0].selection, Some(Selection { start: 0, end: 200 }));
+
+        // Double-click past the last marker selects to the end of the file.
+        app.handle_mouse(click(800));
+        app.handle_mouse(click(800));
+        assert_eq!(app.documents[0].selection, Some(Selection { start: 600, end: 1_000 }));
+    }
+
+    /// A left click in the waveform area should focus it (and defocus the Files/Buffers
+    /// panels), even though the waveform has no toggle key of its own to focus it directly.
+    #[test]
+    fn clicking_waveform_focuses_it_and_defocuses_panels() {
+        let mut app = App::new(Some(doc(0.5, 1_000)), None);
+        app.file_panel.focused = true;
+        app.waveform_area = Rect { x: 10, y: 0, width: 50, height: 10 };
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 20,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(!app.file_panel.focused);
+        assert!(!app.buffer_panel.focused);
+    }
+
+    /// A left click inside the Files panel's rendered area focuses it, even when the click
+    /// doesn't land on a specific file entry (e.g. empty space below the list).
+    #[test]
+    fn clicking_files_panel_area_focuses_it() {
+        let mut app = App::new(Some(doc(0.5, 1_000)), None);
+        app.buffer_panel.focused = true;
+        app.file_panel_area = Rect { x: 0, y: 0, width: 20, height: 30 };
+        app.waveform_area = Rect { x: 20, y: 0, width: 50, height: 30 };
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 25,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(app.file_panel.focused);
+        assert!(!app.buffer_panel.focused);
+    }
+
+    /// Ctrl+A selects the whole document's audio, regardless of any prior selection.
+    #[test]
+    fn select_all_selects_the_whole_document() {
+        let mut app = App::new(Some(doc(0.5, 1_000)), None);
+        app.documents[0].selection = Some(Selection { start: 10, end: 20 });
+        app.handle_action(Action::SelectAll);
+        assert_eq!(app.documents[0].selection, Some(Selection { start: 0, end: 1_000 }));
+    }
+
+    /// On startup the Files panel should be focused so the first thing a user does is pick
+    /// Builds an app rooted at the fixtures directory and selects `mono_sine.wav` in the
+    /// Files panel (entries are ordered Parent, then dirs, then files — `tests/fixtures`
+    /// has no subdirectories, so index 1 is the first file alphabetically).
+    fn app_with_fixture_selected() -> App {
+        let mut app = App::new(None, Some(PathBuf::from("tests/fixtures")));
+        app.file_panel.focused = true;
+        app.file_panel.selected = 1;
+        assert!(
+            app.file_panel.selected_entry().unwrap().0.ends_with("mono_sine.wav"),
+            "fixture directory layout changed — update the expected index"
+        );
+        app
+    }
+
+    /// With Audition off, navigating the Files panel must never start decoding/playing —
+    /// the feature should be fully inert until toggled on.
+    #[test]
+    fn audition_off_never_starts_playback() {
+        let mut app = app_with_fixture_selected();
+        assert!(!app.audition);
+        app.tick_audition();
+        std::thread::sleep(Duration::from_millis(250));
+        app.tick_audition();
+        assert!(app.audition_playing_path.is_none());
+        assert!(app.audition_pending.is_none());
+    }
+
+    /// Landing on a file debounces before playing: immediately after selecting it, nothing
+    /// should be considered "playing" yet, only "pending".
+    #[test]
+    fn audition_debounces_before_playing() {
+        let mut app = app_with_fixture_selected();
+        app.audition = true;
+        app.tick_audition();
+        assert!(app.audition_playing_path.is_none(), "must not play before the debounce elapses");
+        assert!(app.audition_pending.is_some());
+    }
+
+    /// After the debounce window elapses, Audition commits to the selected file —
+    /// `audition_playing_path` switches over even if no audio device is available in this
+    /// test environment (engine construction itself is best-effort).
+    #[test]
+    fn audition_plays_after_debounce_elapses() {
+        let mut app = app_with_fixture_selected();
+        app.audition = true;
+        app.tick_audition();
+        std::thread::sleep(Duration::from_millis(250));
+        app.tick_audition();
+        assert!(app.audition_pending.is_none());
+        assert_eq!(app.audition_playing_path, app.file_panel.selected_entry().map(|(p, _)| p));
+    }
+
+    /// Navigating to a different file stops whatever was playing/pending for the old one
+    /// immediately, restarting the debounce for the new selection.
+    #[test]
+    fn audition_switches_targets_on_navigation() {
+        let mut app = app_with_fixture_selected();
+        app.audition = true;
+        app.tick_audition();
+        std::thread::sleep(Duration::from_millis(250));
+        app.tick_audition();
+        assert!(app.audition_playing_path.is_some());
+
+        app.file_panel.selected = 2; // stereo_sine.wav
+        app.tick_audition();
+        assert!(app.audition_playing_path.is_none(), "switching targets should stop the old one right away");
+        assert!(app.audition_pending.is_some());
+    }
+
+    /// Toggling Audition off must immediately silence anything currently playing/pending.
+    #[test]
+    fn toggling_audition_off_stops_playback() {
+        let mut app = app_with_fixture_selected();
+        app.audition = true;
+        app.tick_audition();
+        std::thread::sleep(Duration::from_millis(250));
+        app.tick_audition();
+        assert!(app.audition_playing_path.is_some());
+
+        app.handle_action(Action::ToggleAudition);
+        assert!(!app.audition);
+        assert!(app.audition_playing_path.is_none());
+        assert!(app.audition_pending.is_none());
+    }
+
+    /// Actually opening a file (the real "load it") must stop any audition in progress —
+    /// auditioning and the loaded document's own playback must never overlap.
+    #[test]
+    fn opening_a_file_stops_audition() {
+        let mut app = app_with_fixture_selected();
+        app.audition = true;
+        app.tick_audition();
+        std::thread::sleep(Duration::from_millis(250));
+        app.tick_audition();
+        assert!(app.audition_playing_path.is_some());
+
+        app.open_selected_file();
+        assert!(app.audition_playing_path.is_none());
+        assert!(app.audition_pending.is_none());
+    }
+
+    /// A single click on a file-panel entry only selects it; a double-click is required to
+    /// actually open/load it. Mouse hit-testing reads `FilePanel`'s rendered row rects, so
+    /// this renders once first (via a `TestBackend`) to populate them for real.
+    #[test]
+    fn single_click_selects_double_click_opens() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(None, Some(PathBuf::from("tests/fixtures")));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        // Find the rendered row for mono_sine.wav (index 1: Parent, then files alphabetically)
+        // by hit-testing every cell in the panel without mutating real state.
+        let area = app.file_panel_area;
+        let (col, row) = (area.x..area.x + area.width)
+            .flat_map(|x| (area.y..area.y + area.height).map(move |y| (x, y)))
+            .find(|&(x, y)| app.file_panel.hit_test(x, y) == Some(1))
+            .expect("mono_sine.wav row not found in rendered panel");
+
+        let click = MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: col, row, modifiers: KeyModifiers::NONE };
+
+        // Single click only selects — no document gets loaded.
+        app.handle_mouse(click);
+        assert_eq!(app.documents.len(), 0, "a single click must not open the file");
+        assert!(app.file_panel.selected_entry().unwrap().0.ends_with("mono_sine.wav"));
+
+        // A second click on the same cell within the double-click window opens it.
+        app.handle_mouse(click);
+        assert_eq!(app.documents.len(), 1, "a double-click must open the file");
+    }
+
+    /// On startup the Files panel should be focused so the first thing a user does is pick
+    /// a file, rather than landing on an empty waveform with nothing to act on.
+    #[test]
+    fn files_panel_is_focused_on_startup() {
+        let app = App::new(None, None);
+        assert!(app.file_panel.focused);
+        assert!(!app.buffer_panel.focused);
+    }
+
+    /// Holding the same arrow action ramps the multiplier above 1x; a gap long enough to
+    /// be a fresh keypress resets it; fine mode forces it back to 1x regardless of hold.
+    #[test]
+    fn nav_step_multiplier_ramps_then_resets_and_is_disabled_in_fine_mode() {
+        let mut app = App::new(Some(doc(0.1, 1_000_000)), None);
+
+        let first = app.nav_step_multiplier(Action::MoveCursorRight);
+        assert_eq!(first, 1.0, "a fresh press should not be accelerated");
+
+        // A couple of quick manual taps, each well under the 200ms accel debounce, must
+        // never accelerate — only a hold sustained past the debounce should.
+        std::thread::sleep(Duration::from_millis(80));
+        let tap = app.nav_step_multiplier(Action::MoveCursorRight);
+        assert_eq!(tap, 1.0, "a manual tap inside the debounce window must not accelerate");
+        std::thread::sleep(Duration::from_millis(80));
+        let tap2 = app.nav_step_multiplier(Action::MoveCursorRight);
+        assert_eq!(tap2, 1.0, "repeated manual taps that never sustain past the debounce must not accelerate");
+
+        std::thread::sleep(Duration::from_millis(150));
+        let held = app.nav_step_multiplier(Action::MoveCursorRight);
+        assert!(held > 1.0, "a hold sustained past the debounce should accelerate");
+
+        std::thread::sleep(Duration::from_millis(100));
+        let switched = app.nav_step_multiplier(Action::MoveCursorLeft);
+        assert_eq!(switched, 1.0, "switching to a different action should reset the ramp");
+
+        std::thread::sleep(Duration::from_millis(400));
+        let after_gap = app.nav_step_multiplier(Action::MoveCursorLeft);
+        assert_eq!(after_gap, 1.0, "a gap past the reset window should be treated as a fresh press");
+
+        app.fine_mode = true;
+        app.nav_hold = None;
+        app.last_nav_time = None;
+        let _ = app.nav_step_multiplier(Action::MoveCursorRight);
+        std::thread::sleep(Duration::from_millis(250));
+        let fine = app.nav_step_multiplier(Action::MoveCursorRight);
+        assert_eq!(fine, 1.0, "fine mode must never accelerate");
+    }
+
     /// Copy-to-New must create a *dirty* buffer (unsaved data, no path), so the quit/close
     /// confirmation fires for it instead of the app exiting silently.
     #[test]
@@ -2207,6 +2766,26 @@ mod tests {
         assert_eq!(app.buffer_panel.selected, 2); // clamped at the last match
         app.move_buffer_selection(-1);
         assert_eq!(app.buffer_panel.selected, 0);
+    }
+
+    /// Navigating the Buffers panel with Up/Down must load the buffer immediately —
+    /// no separate Enter keypress required to actually switch to it.
+    #[test]
+    fn moving_buffer_selection_switches_the_active_document_immediately() {
+        let mut app = App::new(Some(doc(0.1, 10)), None);
+        app.push_document(doc(0.2, 10));
+        app.push_document(doc(0.3, 10));
+        app.active_document = 0;
+        app.buffer_panel.selected = 0;
+
+        app.move_buffer_selection(1);
+        assert_eq!(app.active_document, 1, "Down should switch to buffer 1 right away");
+
+        app.move_buffer_selection(1);
+        assert_eq!(app.active_document, 2, "Down should switch to buffer 2 right away");
+
+        app.move_buffer_selection(-1);
+        assert_eq!(app.active_document, 1, "Up should switch back to buffer 1 right away");
     }
 
     /// Undo/redo must never cross buffers — applying an edit to one document and then
