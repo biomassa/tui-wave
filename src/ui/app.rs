@@ -82,6 +82,14 @@ enum Confirm {
     CloseBuffer(usize),
 }
 
+/// What to do once `App::save_as_queue` (buffers waiting for a filename before some other
+/// action can proceed) is empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveAsQueueThen {
+    Quit,
+    CloseBuffer(usize),
+}
+
 pub struct App {
     pub should_quit: bool,
     /// All open documents (buffers). Index 0 is always the first file loaded; subsequent
@@ -145,6 +153,14 @@ pub struct App {
     pub save_as_depth: BitDepth,
     /// Whether to dither the pending Save As (Ctrl+D toggles; only meaningful for int depths).
     pub save_as_dither: bool,
+    /// Buffer indices still waiting for a Save-As filename before `save_as_queue_then` can
+    /// run — e.g. quitting with several never-saved buffers walks through one Save As
+    /// prompt per buffer rather than silently skipping (and losing) them. Popped from the
+    /// back, so it's pushed already reversed (see `queue_save_as`).
+    save_as_queue: Vec<usize>,
+    /// What to do once `save_as_queue` is empty. `None` means the current Save-As prompt
+    /// (if any) is just a plain one-off, not part of a queued sequence.
+    save_as_queue_then: Option<SaveAsQueueThen>,
     /// When true, destructive operations snap selection boundaries to zero crossings.
     pub snap_to_zero: bool,
     /// When true, playback loops — the full file if no selection, or the selection range.
@@ -266,6 +282,8 @@ impl App {
             save_as_input: TextInput::new(""),
             save_as_depth: BitDepth::Float32,
             save_as_dither: false,
+            save_as_queue: Vec::new(),
+            save_as_queue_then: None,
             snap_to_zero: config.snap_to_zero,
             loop_playback: config.loop_playback,
             fine_mode: config.fine_mode,
@@ -588,19 +606,28 @@ impl App {
             self.confirm = None;
             return;
         }
+        self.confirm = None;
         match confirm {
             Confirm::Quit => {
-                // (s)ave saves every dirty buffer with a path first; (y) quits regardless.
+                // (s)ave saves every dirty buffer with a path first, then walks any
+                // never-saved ones through a Save As prompt each before actually quitting;
+                // (y) quits regardless, discarding unsaved changes.
                 if save {
-                    self.save_all();
+                    self.begin_save_all_then_quit();
+                } else {
+                    self.should_quit = true;
                 }
-                self.should_quit = true;
             }
             Confirm::CloseBuffer(idx) => {
                 if save {
+                    if self.documents.get(idx).is_some_and(|d| d.path.is_none()) {
+                        // Never saved — needs a filename before it can actually be saved,
+                        // so defer closing until that Save As prompt is done.
+                        self.queue_save_as(vec![idx], SaveAsQueueThen::CloseBuffer(idx));
+                        return;
+                    }
                     self.save_buffer(idx);
                 }
-                self.confirm = None;
                 self.close_buffer(idx);
             }
         }
@@ -629,9 +656,18 @@ impl App {
                         }
                     }
                 }
-                self.save_as_active = false;
+                // Plain one-off Save As (no pending queue) just closes; mid-queue, this
+                // moves on to the next never-saved buffer, or finishes (e.g. actually quits).
+                self.advance_save_as_queue();
             }
-            KeyCode::Esc => self.save_as_active = false,
+            KeyCode::Esc => {
+                // Backing out cancels the whole pending sequence, not just this one buffer
+                // — if the user meant to quit/close anyway, (y)/(s) without saving is right
+                // there in the confirmation that started this.
+                self.save_as_active = false;
+                self.save_as_queue.clear();
+                self.save_as_queue_then = None;
+            }
             // Tab cycles bit depth; Ctrl+D toggles dither (Ctrl keeps it out of the path text).
             KeyCode::Tab => self.save_as_depth = self.save_as_depth.next(),
             KeyCode::Char('d') | KeyCode::Char('D') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1104,6 +1140,25 @@ impl App {
 
     /// A short exponential fade in at the very start of the file and fade out at the very
     /// end (the standard pre-export "technical fade" to mask the click a hard cut to/from
+    /// Moves the cursor to `pos` (the result of a Next/Previous Rising Edge search) and
+    /// re-centers the viewport on it, rather than just nudging it into view — at any
+    /// meaningful zoom level the edge would otherwise land right at the screen's margin,
+    /// not given the surrounding context a transient-finding jump is actually for.
+    fn jump_to_transient(&mut self, pos: usize) {
+        if let Some(document) = self.active_doc_mut() {
+            document.cursor = pos;
+        }
+        let width = self.content_width;
+        if let Some(viewport) = self.viewport.as_mut() {
+            viewport.center_on(pos, width);
+        }
+        if let Some(audio) = &self.audio {
+            if audio.is_playing() {
+                audio.seek(pos);
+            }
+        }
+    }
+
     /// silence would otherwise leave at the file's boundaries) — fixed at 5ms, no dialog,
     /// always the whole file regardless of any active selection.
     fn apply_technical_fades(&mut self) {
@@ -1158,6 +1213,53 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Saves every dirty buffer that already has a path immediately, then walks any
+    /// never-saved dirty buffers through a Save As prompt each, one at a time, before
+    /// actually quitting — `save_all` alone would otherwise silently skip (and lose) them.
+    fn begin_save_all_then_quit(&mut self) {
+        self.save_all();
+        let unnamed: Vec<usize> =
+            self.documents.iter().enumerate().filter(|(_, d)| d.dirty && d.path.is_none()).map(|(i, _)| i).collect();
+        if unnamed.is_empty() {
+            self.should_quit = true;
+            return;
+        }
+        self.queue_save_as(unnamed, SaveAsQueueThen::Quit);
+    }
+
+    /// Starts (or continues) a queued Save-As sequence: `indices` in the order they should
+    /// be prompted, `then` run once they're all done.
+    fn queue_save_as(&mut self, mut indices: Vec<usize>, then: SaveAsQueueThen) {
+        indices.reverse(); // popped from the back, so store back-to-front for prompt order
+        self.save_as_queue = indices;
+        self.save_as_queue_then = Some(then);
+        self.advance_save_as_queue();
+    }
+
+    /// Opens the Save As prompt for the next buffer in `save_as_queue`, or — once it's
+    /// empty — closes the prompt and runs whatever `save_as_queue_then` says to do next.
+    fn advance_save_as_queue(&mut self) {
+        let Some(idx) = self.save_as_queue.pop() else {
+            self.save_as_active = false;
+            match self.save_as_queue_then.take() {
+                Some(SaveAsQueueThen::Quit) => self.should_quit = true,
+                Some(SaveAsQueueThen::CloseBuffer(idx)) => self.close_buffer(idx),
+                None => {}
+            }
+            return;
+        };
+        self.active_document = idx;
+        let name = self
+            .documents
+            .get(idx)
+            .and_then(|d| d.path.as_ref())
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "untitled.wav".to_string());
+        self.save_as_input = TextInput::fresh(name);
+        self.save_as_active = true;
     }
 
     fn rebuild_audio(&mut self) {
@@ -1724,19 +1826,19 @@ impl App {
         if action == Action::NextRisingEdge {
             let idx = self.active_document;
             let threshold = self.transient_threshold_db;
-            if let Some(document) = self.documents.get_mut(idx) {
-                if let Some(pos) = document.find_next_rising_edge(document.cursor, threshold) {
-                    document.cursor = pos;
-                    let width = self.content_width;
-                    if let Some(viewport) = self.viewport.as_mut() {
-                        viewport.ensure_visible(pos, width);
-                    }
-                    if let Some(audio) = &self.audio {
-                        if audio.is_playing() {
-                            audio.seek(pos);
-                        }
-                    }
-                }
+            let edge = self.documents.get(idx).and_then(|d| d.find_next_rising_edge(d.cursor, threshold));
+            if let Some(pos) = edge {
+                self.jump_to_transient(pos);
+            }
+            return;
+        }
+
+        if action == Action::PrevRisingEdge {
+            let idx = self.active_document;
+            let threshold = self.transient_threshold_db;
+            let edge = self.documents.get(idx).and_then(|d| d.find_previous_rising_edge(d.cursor, threshold));
+            if let Some(pos) = edge {
+                self.jump_to_transient(pos);
             }
             return;
         }
@@ -1887,6 +1989,7 @@ impl App {
             | Action::JumpPrevMarker
             | Action::JumpNextMarker
             | Action::NextRisingEdge
+            | Action::PrevRisingEdge
             | Action::AutoInsertMarkers
             | Action::IncreaseTransientThreshold
             | Action::DecreaseTransientThreshold
@@ -1910,6 +2013,23 @@ impl App {
             }
             Action::JumpStart | Action::ExtendSelectionToStart => document.cursor = 0,
             Action::JumpEnd | Action::ExtendSelectionToEnd => document.cursor = total_len - 1,
+            Action::ExtendSelectionToPrevMarker => {
+                document.cursor = document
+                    .markers
+                    .iter()
+                    .rev()
+                    .find(|m| m.position < old_cursor)
+                    .map(|m| m.position)
+                    .unwrap_or(0);
+            }
+            Action::ExtendSelectionToNextMarker => {
+                document.cursor = document
+                    .markers
+                    .iter()
+                    .find(|m| m.position > old_cursor)
+                    .map(|m| m.position)
+                    .unwrap_or(total_len - 1);
+            }
             Action::PageBack => {
                 document.cursor = document.cursor.saturating_sub(span.max(1));
             }
@@ -1944,8 +2064,11 @@ impl App {
                 document.selection = Some(Selection::extended(document.selection, old_cursor, cursor));
                 document.cursor = cursor;
             }
-            Action::ExtendSelectionToStart | Action::ExtendSelectionToEnd => {
-                // cursor is already at 0 / end (the active edge); keep it there.
+            Action::ExtendSelectionToStart
+            | Action::ExtendSelectionToEnd
+            | Action::ExtendSelectionToPrevMarker
+            | Action::ExtendSelectionToNextMarker => {
+                // cursor is already at the target (0 / end / marker position); keep it there.
                 document.selection = Some(Selection::extended(document.selection, old_cursor, document.cursor));
             }
             // Plain cursor moves, jumps, paging and zoom leave the selection untouched.
@@ -2240,6 +2363,7 @@ impl App {
         self.buffer_panel.render(frame, chrome.buffers, &buf_names, self.active_document);
         self.toolbar.active_actions.clear();
         self.toolbar.is_playing = self.audio.as_ref().is_some_and(|a| a.is_playing());
+        self.toolbar.transient_threshold_db = self.transient_threshold_db;
         if self.snap_to_zero {
             self.toolbar.active_actions.insert(Action::ToggleZeroSnap);
         }
@@ -2736,6 +2860,70 @@ mod tests {
         assert_eq!(app.documents[0].cursor, 20 * 441);
     }
 
+    /// When zoomed in, jumping to a transient must center the viewport on it (not just
+    /// nudge it into view at the screen's edge) so there's context on both sides of the
+    /// new cursor position.
+    #[test]
+    fn next_rising_edge_centers_the_viewport_when_zoomed_in() {
+        let mut app = new_app(Some(doc_with_transient(20, 30)), None);
+        app.content_width = 80;
+        app.viewport = Some(Viewport {
+            samples_per_column: 10.0, // zoomed in: span(80) = 800, far smaller than the file
+            scroll_offset: 0,
+            amplitude_scale: 1.0,
+            min_samples_per_column: 1.0,
+            max_samples_per_column: 1_000_000.0,
+            total_len: app.documents[0].len_samples(),
+            auto_vertical_zoom: false,
+        });
+
+        app.handle_action(Action::NextRisingEdge);
+
+        let edge = 20 * 441;
+        assert_eq!(app.documents[0].cursor, edge);
+        let viewport = app.viewport.as_ref().unwrap();
+        let half_span = viewport.span(80) / 2;
+        assert_eq!(viewport.scroll_offset + half_span, edge, "the edge should sit at the center column");
+    }
+
+    /// Previous Rising Edge searches backward and also centers the viewport.
+    #[test]
+    fn prev_rising_edge_moves_cursor_backward_and_centers_viewport() {
+        let mut app = new_app(Some(doc_with_segments(&[(0.01, 20), (0.5, 20), (5.0, 20)])), None);
+        app.content_width = 80;
+        app.viewport = Some(Viewport {
+            samples_per_column: 10.0,
+            scroll_offset: 0,
+            amplitude_scale: 1.0,
+            min_samples_per_column: 1.0,
+            max_samples_per_column: 1_000_000.0,
+            total_len: app.documents[0].len_samples(),
+            auto_vertical_zoom: false,
+        });
+        app.documents[0].cursor = 45 * 441; // inside the loudest segment
+
+        app.handle_action(Action::PrevRisingEdge);
+
+        let edge = 40 * 441; // the closer of the two earlier transients
+        assert_eq!(app.documents[0].cursor, edge);
+        let viewport = app.viewport.as_ref().unwrap();
+        let half_span = viewport.span(80) / 2;
+        assert_eq!(viewport.scroll_offset + half_span, edge);
+    }
+
+    /// With no transient before the cursor, Previous Rising Edge leaves it untouched.
+    #[test]
+    fn prev_rising_edge_does_nothing_when_none_found() {
+        let mut app = new_app(Some(doc_with_segments(&[(0.3, 50)])), None);
+        app.content_width = 80;
+        app.viewport = Some(Viewport::fit_to_width(app.documents[0].len_samples(), 80));
+        app.documents[0].cursor = 100;
+
+        app.handle_action(Action::PrevRisingEdge);
+
+        assert_eq!(app.documents[0].cursor, 100);
+    }
+
     /// With no transient ahead of the cursor, Next Rising Edge leaves the cursor untouched.
     #[test]
     fn next_rising_edge_does_nothing_when_none_found() {
@@ -2887,6 +3075,110 @@ mod tests {
         assert_eq!(app.documents[0].markers, vec![Marker { position: 200, label: "Verse".to_string() }]);
     }
 
+    /// Quitting with no never-saved buffers (just dirty ones that already have a path)
+    /// saves them all and quits immediately — no Save As prompt needed.
+    #[test]
+    fn save_and_quit_with_only_named_dirty_buffers_quits_immediately() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.documents[0].path = Some(PathBuf::from("/tmp/tui_wave_test_named_only.wav"));
+        app.documents[0].dirty = true;
+        app.confirm = Some(Confirm::Quit);
+
+        app.handle_confirm_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+
+        assert!(app.should_quit);
+        assert!(!app.save_as_active);
+        std::fs::remove_file("/tmp/tui_wave_test_named_only.wav").ok();
+    }
+
+    /// Quitting with several never-saved (no-path) dirty buffers must prompt for a
+    /// filename for each one in turn — not silently skip and lose them — before actually
+    /// quitting.
+    #[test]
+    fn save_and_quit_with_unnamed_buffers_prompts_for_each_name_in_order() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.documents[0].dirty = true; // idx 0: never saved
+        app.push_document(doc(0.2, 10)); // idx 1: never saved
+        app.documents[1].dirty = true;
+        app.confirm = Some(Confirm::Quit);
+
+        app.handle_confirm_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+
+        // Must not quit yet — two buffers still need a filename.
+        assert!(!app.should_quit);
+        assert!(app.save_as_active);
+        assert_eq!(app.active_document, 0, "should prompt for the first buffer first");
+
+        let dir = std::env::temp_dir().join(format!("tui_wave_quit_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        app.file_panel.set_directory(dir.clone());
+
+        app.save_as_input = TextInput::fresh("first.wav".to_string());
+        app.handle_save_as_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // One buffer named and saved; still not done — the second one is up next.
+        assert!(!app.should_quit);
+        assert!(app.save_as_active);
+        assert_eq!(app.active_document, 1);
+        assert!(!app.documents[0].dirty);
+        assert!(app.documents[0].path.is_some());
+
+        app.save_as_input = TextInput::fresh("second.wav".to_string());
+        app.handle_save_as_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Both named and saved — now it actually quits.
+        assert!(app.should_quit);
+        assert!(!app.save_as_active);
+        assert!(!app.documents[1].dirty);
+        assert!(app.documents[1].path.is_some());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Backing out (Esc) of a queued Save-As prompt cancels the whole pending sequence —
+    /// it must not quit, and must not silently move on to the next buffer either.
+    #[test]
+    fn escaping_a_queued_save_as_cancels_the_whole_sequence() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.documents[0].dirty = true;
+        app.push_document(doc(0.2, 10));
+        app.documents[1].dirty = true;
+        app.confirm = Some(Confirm::Quit);
+        app.handle_confirm_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert!(app.save_as_active);
+
+        app.handle_save_as_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(!app.save_as_active);
+        assert!(!app.should_quit);
+        assert!(app.save_as_queue.is_empty(), "the pending sequence must be cleared, not just paused");
+    }
+
+    /// Closing a single never-saved buffer (with "save") must also prompt for a filename
+    /// rather than silently discarding it — the buffer isn't closed until that's done.
+    #[test]
+    fn close_buffer_with_save_on_a_never_saved_buffer_prompts_for_a_name_first() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.push_document(doc(0.2, 10)); // idx 1, never saved
+        app.documents[1].dirty = true;
+        app.confirm = Some(Confirm::CloseBuffer(1));
+
+        app.handle_confirm_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+
+        assert_eq!(app.documents.len(), 2, "must not close until the name is given");
+        assert!(app.save_as_active);
+        assert_eq!(app.active_document, 1);
+
+        let dir = std::env::temp_dir().join(format!("tui_wave_close_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        app.file_panel.set_directory(dir.clone());
+        app.save_as_input = TextInput::fresh("named.wav".to_string());
+        app.handle_save_as_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.documents.len(), 1, "should close only after being named and saved");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Renaming a marker (via the double-click dialog) is undoable.
     #[test]
     fn rename_marker_is_undoable() {
@@ -2946,6 +3238,68 @@ mod tests {
     /// A marker sitting exactly at the insertion point must render in the cursor's accent
     /// color, not the normal marker color — otherwise its dashed line (drawn after, and
     /// so on top of, the waveform's cursor line) silently hides where the cursor actually
+    /// Shift+] (rendered here as '}') selects from the cursor to the next marker, advances
+    /// the cursor to the end of that selection, and scrolls it into view.
+    #[test]
+    fn extend_selection_to_next_marker_selects_and_advances_cursor() {
+        let mut app = new_app(Some(doc(0.1, 10_000)), None);
+        app.documents[0].markers = vec![
+            Marker { position: 1_000, label: "A".to_string() },
+            Marker { position: 5_000, label: "B".to_string() },
+        ];
+        app.documents[0].cursor = 1_000;
+        app.content_width = 80;
+        app.viewport = Some(Viewport::fit_to_width(10_000, 80));
+
+        app.handle_action(Action::ExtendSelectionToNextMarker);
+
+        assert_eq!(app.documents[0].selection, Some(Selection { start: 1_000, end: 5_000 }));
+        assert_eq!(app.documents[0].cursor, 5_000, "cursor should advance to the end of the selection");
+    }
+
+    /// With no marker ahead of the cursor, it selects to the end of the file instead.
+    #[test]
+    fn extend_selection_to_next_marker_falls_back_to_end_of_file() {
+        let mut app = new_app(Some(doc(0.1, 10_000)), None);
+        app.documents[0].markers = vec![Marker { position: 1_000, label: "A".to_string() }];
+        app.documents[0].cursor = 1_000;
+        app.content_width = 80;
+        app.viewport = Some(Viewport::fit_to_width(10_000, 80));
+
+        app.handle_action(Action::ExtendSelectionToNextMarker);
+
+        assert_eq!(app.documents[0].selection, Some(Selection { start: 1_000, end: 9_999 }));
+        assert_eq!(app.documents[0].cursor, 9_999);
+    }
+
+    /// Shift+[ (rendered here as '{') selects backward to the previous marker, or the
+    /// start of the file if there's none — and also advances the cursor to the active
+    /// (now leftmost) edge of the selection.
+    #[test]
+    fn extend_selection_to_prev_marker_selects_and_falls_back_to_start_of_file() {
+        let mut app = new_app(Some(doc(0.1, 10_000)), None);
+        app.documents[0].markers = vec![
+            Marker { position: 1_000, label: "A".to_string() },
+            Marker { position: 5_000, label: "B".to_string() },
+        ];
+        app.documents[0].cursor = 5_000;
+        app.content_width = 80;
+        app.viewport = Some(Viewport::fit_to_width(10_000, 80));
+
+        app.handle_action(Action::ExtendSelectionToPrevMarker);
+        // The anchor (the edge held fixed) is where the cursor started — 5000 — with the
+        // active edge following the cursor backward to 1000; `Selection` isn't normalized.
+        assert_eq!(app.documents[0].selection, Some(Selection { start: 5_000, end: 1_000 }));
+        assert_eq!(app.documents[0].cursor, 1_000);
+
+        // Repeating from there, with no earlier marker, falls back to the start of the
+        // file — the anchor stays at the original 5000 (Selection::extended keeps the
+        // existing selection's start, not the now-stale `old_cursor`).
+        app.handle_action(Action::ExtendSelectionToPrevMarker);
+        assert_eq!(app.documents[0].selection, Some(Selection { start: 5_000, end: 0 }));
+        assert_eq!(app.documents[0].cursor, 0);
+    }
+
     /// is. A marker elsewhere must keep the normal marker color.
     #[test]
     fn marker_at_cursor_position_uses_cursor_accent_color() {
