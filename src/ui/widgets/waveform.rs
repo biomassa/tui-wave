@@ -96,9 +96,6 @@ impl<'a> Widget for WaveformWidget<'a> {
             // are continuous (sub-row) positions, not yet rounded to whole character rows.
             let top_y = (mid_row - scaled_max * half_height).clamp(0.0, area.height as f64);
             let bottom_y = (mid_row - scaled_min * half_height).clamp(0.0, area.height as f64);
-            if bottom_y <= top_y {
-                continue;
-            }
 
             let selected = self
                 .selection
@@ -109,6 +106,33 @@ impl<'a> Widget for WaveformWidget<'a> {
                 theme::WAVEFORM
             };
             let x = area.x + col;
+
+            // A column spanning very few samples — in the limit exactly one, where
+            // min == max — has zero geometric height here and would otherwise render
+            // nothing at all (the bug at high zoom: a 1:1 sample/column view going blank).
+            // Draw it as a single eighth-block sliver positioned at the value's row instead
+            // of skipping — the finest unit this renderer can represent anyway, and the
+            // closest approximation to "a single sample" a character cell allows.
+            const MIN_BAR_HEIGHT: f64 = 1.0 / 8.0;
+            if bottom_y - top_y < MIN_BAR_HEIGHT {
+                // True silence (min == max == 0) stays blank, same as a longer silent span
+                // (which also has zero geometric height and renders nothing) — only a
+                // non-zero degenerate column gets the visibility fix below.
+                if min == 0.0 && max == 0.0 {
+                    continue;
+                }
+                let center = ((top_y + bottom_y) / 2.0).min(area.height as f64 - f64::EPSILON).max(0.0);
+                let row = center.floor() as i64;
+                if row >= 0 && row < area.height as i64 {
+                    let frac_into_row = center - row as f64;
+                    let filled = (((1.0 - frac_into_row) * 8.0).round() as i64).clamp(1, 8) as u8;
+                    if let Some(ch) = lower_eighth(filled) {
+                        let y = area.y + row as u16;
+                        buf[(x, y)].set_char(ch).set_style(Style::default().fg(color));
+                    }
+                }
+                continue;
+            }
 
             let top_row = top_y.floor() as i64;
             let bottom_row_excl = bottom_y.ceil() as i64;
@@ -219,5 +243,78 @@ mod tests {
         assert_eq!(lower_eighth(8), Some('█'));
         assert_eq!(lower_eighth(0), None);
         assert_eq!(lower_eighth(9), None);
+    }
+
+    /// At 1 sample/column (max zoom in), every column spans exactly one sample, so
+    /// min == max and the bar has zero geometric height — the bug being guarded against
+    /// here is that such columns used to render nothing at all. Every column with a
+    /// non-zero sample must now show at least the eighth-block sliver.
+    #[test]
+    fn single_sample_columns_render_a_sliver_instead_of_going_blank() {
+        let samples: Vec<f32> = (0..20).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
+        let area = Rect::new(0, 0, 20, 10);
+        let mut buf = Buffer::empty(area);
+        let widget = WaveformWidget {
+            samples: &samples,
+            viewport: &viewport(0, 1.0),
+            cache: None,
+            selection: None,
+            cursor: usize::MAX, // off-screen, so the cursor line doesn't interfere
+            playhead: None,
+        };
+        widget.render(area, &mut buf);
+
+        for x in 0..20u16 {
+            let has_mark = (0..10u16).any(|y| buf[(x, y)].symbol() != " ");
+            assert!(has_mark, "column {x} rendered nothing for a non-zero single-sample value");
+        }
+    }
+
+    /// Non-integer zoom levels (e.g. 1.5 samples/column) mix degenerate one-sample columns
+    /// with non-degenerate two-sample ones — the one-sample columns used to go blank,
+    /// producing a sparse, inconsistent look. They must render a sliver too.
+    #[test]
+    fn fractional_samples_per_column_has_no_blank_columns_for_nonzero_audio() {
+        let samples: Vec<f32> = (0..40).map(|i| if i % 2 == 0 { 0.3 } else { 0.6 }).collect();
+        let area = Rect::new(0, 0, 26, 10);
+        let mut buf = Buffer::empty(area);
+        let widget = WaveformWidget {
+            samples: &samples,
+            viewport: &viewport(0, 1.5),
+            cache: None,
+            selection: None,
+            cursor: usize::MAX,
+            playhead: None,
+        };
+        widget.render(area, &mut buf);
+
+        for x in 0..26u16 {
+            let has_mark = (0..10u16).any(|y| buf[(x, y)].symbol() != " ");
+            assert!(has_mark, "column {x} rendered nothing at a fractional zoom level");
+        }
+    }
+
+    /// A literally silent (all-zero) single-sample column is the one case that should
+    /// legitimately render nothing — there's no amplitude to show a sliver for.
+    #[test]
+    fn single_sample_silent_column_renders_nothing() {
+        let samples = vec![0.0f32; 5];
+        let area = Rect::new(0, 0, 5, 10);
+        let mut buf = Buffer::empty(area);
+        let widget = WaveformWidget {
+            samples: &samples,
+            viewport: &viewport(0, 1.0),
+            cache: None,
+            selection: None,
+            cursor: usize::MAX,
+            playhead: None,
+        };
+        widget.render(area, &mut buf);
+
+        for x in 0..5u16 {
+            for y in 0..10u16 {
+                assert_eq!(buf[(x, y)].symbol(), " ", "a silent sample should not draw a mark");
+            }
+        }
     }
 }

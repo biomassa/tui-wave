@@ -123,6 +123,84 @@ impl Document {
         self.channels.first().map(|c| c.len()).unwrap_or(0)
     }
 
+    /// Finds the next transient at or after `from` and returns the position to stop right
+    /// before it, or `None` if none is found before end-of-file.
+    ///
+    /// A transient (in DSP terms: the percussive onset of a sound — a drum hit, a plucked
+    /// string's pluck, a plosive consonant) is characterized by a sudden, fast rise in
+    /// amplitude relative to whatever level came just before it. This is a simplified
+    /// two-envelope onset detector, the same family of technique as a hardware "transient
+    /// designer": the signal is divided into `TRANSIENT_FRAME_MS` analysis frames, each
+    /// frame's RMS level (the loudest channel's) is compared in dB against a slow-moving
+    /// background average of recent frames (an exponential moving average with a
+    /// `TRANSIENT_BACKGROUND_TIME_CONSTANT_MS` time constant); the first frame whose level
+    /// exceeds the background by `threshold_db` or more is the transient's onset, and its
+    /// first sample is "right before" the transient — the finest precision a frame-based
+    /// scan can offer without the cost of a per-sample analysis on long files.
+    pub fn find_next_rising_edge(&self, from: usize, threshold_db: f32) -> Option<usize> {
+        const TRANSIENT_FRAME_MS: f64 = 10.0;
+        const TRANSIENT_BACKGROUND_TIME_CONSTANT_MS: f64 = 150.0;
+        const EPS: f32 = 1e-6;
+
+        let total = self.len_samples();
+        if self.channels.is_empty() || from >= total {
+            return None;
+        }
+        let frame_len = ((self.sample_rate as f64 * TRANSIENT_FRAME_MS / 1000.0).round() as usize).max(1);
+        let alpha = (TRANSIENT_FRAME_MS / TRANSIENT_BACKGROUND_TIME_CONSTANT_MS).clamp(0.0, 1.0) as f32;
+
+        let mut pos = from;
+        let mut background: Option<f32> = None;
+        while pos < total {
+            let end = (pos + frame_len).min(total);
+            let frame_level = self.frame_rms(pos, end).max(EPS);
+            match background {
+                None => background = Some(frame_level),
+                Some(bg) => {
+                    let rise_db = 20.0 * (frame_level / bg.max(EPS)).log10();
+                    if rise_db >= threshold_db {
+                        return Some(pos);
+                    }
+                    background = Some(bg * (1.0 - alpha) + frame_level * alpha);
+                }
+            }
+            pos = end;
+        }
+        None
+    }
+
+    /// Finds every transient in the file by repeatedly applying `find_next_rising_edge`
+    /// from each detected position onward — each call starts its background average fresh
+    /// at the position it's given, so resuming from a found edge correctly looks for the
+    /// *next* rise rather than re-triggering on the one just found. Used by "Auto-Insert
+    /// Markers at Transients".
+    pub fn find_all_rising_edges(&self, threshold_db: f32) -> Vec<usize> {
+        let mut edges = Vec::new();
+        let mut pos = 0;
+        while let Some(edge) = self.find_next_rising_edge(pos, threshold_db) {
+            edges.push(edge);
+            pos = edge;
+        }
+        edges
+    }
+
+    /// RMS amplitude within `[start, end)`, taking the loudest channel — a transient in any
+    /// one channel should be found, not averaged away by quieter channels.
+    fn frame_rms(&self, start: usize, end: usize) -> f32 {
+        self.channels
+            .iter()
+            .map(|channel| {
+                let end = end.min(channel.len());
+                if start >= end {
+                    return 0.0;
+                }
+                let slice = &channel[start..end];
+                let sum_sq: f32 = slice.iter().map(|&s| s * s).sum();
+                (sum_sq / slice.len() as f32).sqrt()
+            })
+            .fold(0.0f32, f32::max)
+    }
+
     /// Non-destructive copy of `range` across all channels, clamped to bounds.
     pub fn slice(&self, range: Range<usize>) -> Vec<Vec<f32>> {
         self.channels
@@ -194,6 +272,72 @@ mod tests {
             markers: Vec::new(),
             bext: None,
         }
+    }
+
+    /// Builds a signal of constant-amplitude segments, each `frames` analysis frames long
+    /// (frame = 441 samples at the test's 44100 sample rate / 10ms), so transient tests can
+    /// reason in whole frames instead of raw sample counts.
+    fn segments(segments: &[(f32, usize)]) -> Vec<f32> {
+        const FRAME_LEN: usize = 441;
+        segments
+            .iter()
+            .flat_map(|&(level, frames)| std::iter::repeat(level).take(frames * FRAME_LEN))
+            .collect()
+    }
+
+    #[test]
+    fn find_next_rising_edge_detects_a_loud_transient_after_quiet() {
+        // 20 quiet frames, then a sudden jump to 0.5 — a ~34dB rise, well past the 6dB
+        // default threshold.
+        let d = doc(segments(&[(0.01, 20), (0.5, 30)]));
+        let pos = d.find_next_rising_edge(0, 6.0).expect("should find the transient");
+        assert_eq!(pos, 20 * 441, "should stop right at the start of the loud frame");
+    }
+
+    #[test]
+    fn find_next_rising_edge_ignores_the_starting_level_and_finds_a_later_rise() {
+        // Searching from the start of the medium-loud section: no transient is reported
+        // for entering it (there's no prior baseline to compare against at the search
+        // start), but the later jump to very-loud (a ~12dB rise) is found.
+        let d = doc(segments(&[(0.01, 20), (0.5, 20), (2.0, 30)]));
+        let start_of_medium = 20 * 441;
+        let pos = d.find_next_rising_edge(start_of_medium, 6.0).expect("should find the second rise");
+        assert_eq!(pos, 40 * 441);
+    }
+
+    #[test]
+    fn find_next_rising_edge_returns_none_for_constant_level() {
+        let d = doc(segments(&[(0.3, 50)]));
+        assert_eq!(d.find_next_rising_edge(0, 6.0), None);
+    }
+
+    #[test]
+    fn find_next_rising_edge_respects_the_threshold() {
+        // A ~6dB rise (0.5 -> ~1.0) should clear a 3dB threshold but not a 9dB one.
+        let d = doc(segments(&[(0.5, 20), (1.0, 20)]));
+        assert!(d.find_next_rising_edge(0, 3.0).is_some());
+        assert_eq!(d.find_next_rising_edge(0, 9.0), None);
+    }
+
+    #[test]
+    fn find_next_rising_edge_from_past_end_is_none() {
+        let d = doc(segments(&[(0.5, 5)]));
+        assert_eq!(d.find_next_rising_edge(d.len_samples(), 6.0), None);
+    }
+
+    #[test]
+    fn find_all_rising_edges_finds_every_transient_in_order() {
+        // Three distinct rises: quiet -> medium (20), medium -> loud (40), loud -> very
+        // loud (60), each comfortably above the 6dB default threshold.
+        let d = doc(segments(&[(0.01, 20), (0.1, 20), (1.0, 20), (8.0, 20)]));
+        let edges = d.find_all_rising_edges(6.0);
+        assert_eq!(edges, vec![20 * 441, 40 * 441, 60 * 441]);
+    }
+
+    #[test]
+    fn find_all_rising_edges_is_empty_for_constant_level() {
+        let d = doc(segments(&[(0.3, 50)]));
+        assert!(d.find_all_rising_edges(6.0).is_empty());
     }
 
     #[test]

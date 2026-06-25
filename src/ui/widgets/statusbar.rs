@@ -13,6 +13,9 @@ pub struct StatusBar<'a> {
     pub snap_to_zero: bool,
     pub loop_playback: bool,
     pub fine_mode: bool,
+    /// Next Rising Edge's transient threshold (`+`/`-`), shown so the current dB value is
+    /// always visible — unlike the other toggles here, it's a number, not just on/off.
+    pub transient_threshold_db: f32,
     /// Label of the last applied edit (top of the undo stack), shown so the user can
     /// confirm what an operation/undo just did. `None` when nothing has been edited.
     pub last_action: Option<&'a str>,
@@ -30,12 +33,13 @@ impl<'a> Widget for StatusBar<'a> {
         let fine = if self.fine_mode { " Fine: on " } else { "" };
         let last = self.last_action.map(|l| format!(" last: {} ", l)).unwrap_or_default();
         let text = format!(
-            " pos: {} ({:.3}s) | zoom: {:.1} spl/col | amp: {:.2}x | sel: {} |{}{}{}{}",
+            " pos: {} ({:.3}s) | zoom: {:.1} spl/col | amp: {:.2}x | sel: {} | edge: {:.0}dB |{}{}{}{}",
             self.document.cursor,
             seconds,
             self.viewport.samples_per_column,
             self.viewport.amplitude_scale,
             selection,
+            self.transient_threshold_db,
             snap,
             loop_,
             fine,
