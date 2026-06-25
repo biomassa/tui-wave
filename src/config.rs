@@ -17,6 +17,13 @@ pub struct Config {
     /// Threshold (in dB) a frame's level must rise above the recent background by to count
     /// as a transient — see `Document::find_next_rising_edge`. Adjusted with `+`/`-`.
     pub transient_threshold_db: f32,
+    /// When true, render the waveform as a real bitmap via a detected terminal graphics
+    /// protocol (kitty/Sixel/iTerm2) instead of character glyphs. Defaults to `true` so it
+    /// engages automatically on any terminal where it was detected as supported (see
+    /// `App::picker`) — this toggle exists so a user can opt back out (e.g. on a terminal
+    /// where it renders correctly but feels slower than the text renderer), not as a gate
+    /// to opt in. Has no effect at all on a terminal where graphics mode wasn't detected.
+    pub graphics_mode: bool,
 }
 
 impl Default for Config {
@@ -30,6 +37,7 @@ impl Default for Config {
             cursor_follows_playback: false,
             viewport_follows_playback: false,
             transient_threshold_db: 6.0,
+            graphics_mode: true,
         }
     }
 }
@@ -84,6 +92,7 @@ mod tests {
             cursor_follows_playback: true,
             viewport_follows_playback: true,
             transient_threshold_db: 9.0,
+            graphics_mode: false,
         };
         let toml_string = toml::to_string_pretty(&config).unwrap();
         let parsed: Config = toml::from_str(&toml_string).unwrap();
@@ -116,6 +125,7 @@ mod tests {
             cursor_follows_playback: true,
             viewport_follows_playback: false,
             transient_threshold_db: 12.0,
+            graphics_mode: false,
         };
         config.save();
         assert_eq!(Config::load(), config);
