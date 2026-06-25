@@ -1138,8 +1138,6 @@ impl App {
         self.after_sample_mutation(idx);
     }
 
-    /// A short exponential fade in at the very start of the file and fade out at the very
-    /// end (the standard pre-export "technical fade" to mask the click a hard cut to/from
     /// Moves the cursor to `pos` (the result of a Next/Previous Rising Edge search) and
     /// re-centers the viewport on it, rather than just nudging it into view — at any
     /// meaningful zoom level the edge would otherwise land right at the screen's margin,
@@ -1159,6 +1157,8 @@ impl App {
         }
     }
 
+    /// A short exponential fade in at the very start of the file and fade out at the very
+    /// end (the standard pre-export "technical fade" to mask the click a hard cut to/from
     /// silence would otherwise leave at the file's boundaries) — fixed at 5ms, no dialog,
     /// always the whole file regardless of any active selection.
     fn apply_technical_fades(&mut self) {
