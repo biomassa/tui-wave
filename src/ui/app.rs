@@ -16,6 +16,9 @@ use crate::commands::cut::cut_command;
 use crate::commands::delete::delete_command;
 use crate::commands::fade::{fade_command, FadeCurve};
 use crate::commands::gain::gain_command;
+use crate::commands::marker::{
+    auto_insert_markers_command, delete_marker_command, insert_marker_command, move_marker_command, rename_marker_command,
+};
 use crate::commands::paste::paste_command;
 use crate::commands::normalize::normalize_command;
 use crate::commands::resample::resample_command;
@@ -48,7 +51,7 @@ enum Dialog {
     FadeIn { curve: FadeCurve },
     FadeOut { curve: FadeCurve },
     Resample { input: TextInput, current_rate: u32 },
-    RenameMarker { index: usize, input: TextInput },
+    RenameMarker { position: usize, input: TextInput },
     OpenDirectory { input: TextInput },
     RenameBuffer { index: usize, input: TextInput },
 }
@@ -66,6 +69,10 @@ pub enum Focus {
 /// and plays it — long enough that arrowing quickly through a list doesn't trigger a
 /// decode-and-play per keystroke, short enough to still feel immediate when browsing.
 const AUDITION_DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// Clamp range for the Next Rising Edge transient threshold (`+`/`-`), in dB.
+const TRANSIENT_THRESHOLD_MIN_DB: f32 = 1.0;
+const TRANSIENT_THRESHOLD_MAX_DB: f32 = 24.0;
 
 /// A pending y/n confirmation modal. Generalizes the old quit-only prompt so closing a
 /// dirty buffer can reuse the same flow.
@@ -115,6 +122,9 @@ pub struct App {
     mouse_down_anchor: Option<usize>,
     /// Index of the marker currently being dragged with the mouse, if any.
     dragging_marker: Option<usize>,
+    /// The dragged marker's position when the drag started, so the whole gesture (not each
+    /// intermediate mouse-move) becomes a single undoable `MoveMarkerCommand` at drag-end.
+    dragging_marker_start_position: Option<usize>,
     /// Rendered marker-label rects (label box + marker index) for mouse hit-testing.
     marker_label_rects: Vec<(Rect, usize)>,
     /// Time/cell of the last left mouse-down, used to detect double-clicks.
@@ -147,6 +157,21 @@ pub struct App {
     /// previews it by playing straight from disk, without loading it into a buffer.
     /// Toggled with `p`.
     pub audition: bool,
+    /// When true, pausing playback (Space while playing) snaps the insertion point to
+    /// wherever playback stopped, scrolling it into view. Toggled with `i`.
+    pub cursor_follows_playback: bool,
+    /// When true, once the playhead reaches the right edge of the view during playback,
+    /// the viewport recenters on it and keeps scrolling so the playhead stays in view for
+    /// the rest of that playback run. Toggled with `f`.
+    pub viewport_follows_playback: bool,
+    /// Sticky flag: once the playhead has reached the right edge during the current
+    /// playback run, the viewport keeps recentering on it every frame rather than waiting
+    /// for the edge to be hit again (which would otherwise produce a jumpy step-scroll
+    /// instead of a continuous one). Reset whenever playback stops.
+    viewport_following: bool,
+    /// dB threshold a frame's level must rise above the recent background by to count as a
+    /// transient for "Next Rising Edge" (`/`). Adjusted with `+`/`-`, persisted.
+    pub transient_threshold_db: f32,
     /// The audition playback engine, separate from `audio` (the active document's engine)
     /// since auditioning must not disturb whatever's actually loaded/playing. `None` when
     /// nothing is being auditioned.
@@ -185,7 +210,14 @@ pub struct App {
 
 impl App {
     pub fn new(document: Option<Document>, directory: Option<PathBuf>) -> Self {
-        let config = Config::load();
+        Self::new_with_config(document, directory, Config::load())
+    }
+
+    /// The real constructor body, parameterized on `Config` so tests can pass
+    /// `Config::default()` instead of `Config::load()` — tests must never depend on
+    /// whatever happens to be in the user's real `~/.config/tui-wave/config.toml` (or race
+    /// against other tests that temporarily redirect `XDG_CONFIG_HOME`).
+    fn new_with_config(document: Option<Document>, directory: Option<PathBuf>, config: Config) -> Self {
         let dir = directory
             .or_else(|| document.as_ref().and_then(|d| d.path.as_ref()).and_then(|p| p.parent().map(|p| p.to_path_buf())))
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -224,6 +256,7 @@ impl App {
             confirm: None,
             mouse_down_anchor: None,
             dragging_marker: None,
+            dragging_marker_start_position: None,
             marker_label_rects: Vec::new(),
             last_click: None,
             last_waveform_click: None,
@@ -237,6 +270,10 @@ impl App {
             loop_playback: config.loop_playback,
             fine_mode: config.fine_mode,
             audition: config.audition,
+            cursor_follows_playback: config.cursor_follows_playback,
+            viewport_follows_playback: config.viewport_follows_playback,
+            viewport_following: false,
+            transient_threshold_db: config.transient_threshold_db,
             audition_audio: None,
             audition_playing_path: None,
             audition_pending: None,
@@ -365,6 +402,7 @@ impl App {
             }
             self.sync_playhead_from_audio();
             self.tick_audition();
+            self.tick_viewport_follow();
         }
         Ok(())
     }
@@ -447,6 +485,12 @@ impl App {
                     self.handle_action(Action::OpenDirectory);
                     true
                 }
+                // Plain 'a' toggles Audition here (in waveform focus, plain 'a' is Auto
+                // Vertical Zoom instead) — the same contextual-override pattern as ^o above.
+                KeyCode::Char('a') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.handle_action(Action::ToggleAudition);
+                    true
+                }
                 KeyCode::Tab => {
                     self.file_panel.focused = false;
                     self.buffer_panel.focused = true;
@@ -512,11 +556,6 @@ impl App {
         // Tab when nothing is focused → focus the file panel
         if key.code == KeyCode::Tab {
             self.file_panel.focused = true;
-            return;
-        }
-        if key.code == KeyCode::Char('/') {
-            self.file_panel.filtering = true;
-            self.file_panel.filter.clear();
             return;
         }
         if let Some(action) = map_key(key) {
@@ -652,14 +691,13 @@ impl App {
                     let rate = input.value().trim().parse::<u32>().unwrap_or(current_rate);
                     self.apply_resample(rate);
                 }
-                Some(Dialog::RenameMarker { index, input }) => {
-                    if let Some(doc) = self.documents.get_mut(self.active_document) {
-                        if let Some(marker) = doc.markers.get_mut(index) {
-                            marker.label = input.value().to_string();
-                            doc.dirty = true;
-                            if let Some(path) = doc.path.clone() {
-                                self.file_panel.mark_dirty(&path, true);
-                            }
+                Some(Dialog::RenameMarker { position, input }) => {
+                    let idx = self.active_document;
+                    if let Some(document) = self.documents.get_mut(idx) {
+                        let new_label = input.value().to_string();
+                        self.histories[idx].apply(rename_marker_command(position, new_label), document);
+                        if let Some(path) = document.path.clone() {
+                            self.file_panel.mark_dirty(&path, true);
                         }
                     }
                 }
@@ -789,6 +827,9 @@ impl App {
             fine_mode: self.fine_mode,
             loop_playback: self.loop_playback,
             audition: self.audition,
+            cursor_follows_playback: self.cursor_follows_playback,
+            viewport_follows_playback: self.viewport_follows_playback,
+            transient_threshold_db: self.transient_threshold_db,
         };
         self.config.save();
     }
@@ -1126,6 +1167,48 @@ impl App {
         }
     }
 
+    /// Moves the insertion point (cursor) to `pos` and scrolls it into view — the "Insertion
+    /// Point Follows Playback" snap, factored out so it's testable without a real
+    /// `AudioEngine` (the only other caller, `handle_playback_action`, is gated on one).
+    fn snap_cursor_to(&mut self, pos: usize) {
+        if let Some(document) = self.active_doc_mut() {
+            document.cursor = pos;
+        }
+        let width = self.content_width;
+        if let Some(viewport) = self.viewport.as_mut() {
+            viewport.ensure_visible(pos, width);
+        }
+    }
+
+    /// Drives "Viewport Follows Playback": while playing, once the playhead reaches the
+    /// right edge of the view, recenter on it and keep recentering every frame from then
+    /// on — `viewport_following` is what makes that sticky (continuous scrolling) instead
+    /// of a one-off snap that would otherwise only refire each time the recentered edge is
+    /// reached again. Works at any zoom level since it operates purely in sample space via
+    /// `Viewport::center_on`, not in fixed pixel/column terms.
+    fn tick_viewport_follow(&mut self) {
+        if !self.viewport_follows_playback {
+            self.viewport_following = false;
+            return;
+        }
+        let Some(playhead) = self.playhead_position else {
+            self.viewport_following = false;
+            return;
+        };
+        let width = self.content_width;
+        if !self.viewport_following {
+            let Some(viewport) = self.viewport.as_ref() else { return };
+            let col = (playhead.saturating_sub(viewport.scroll_offset)) as f64 / viewport.samples_per_column;
+            if col + 1.0 < width as f64 {
+                return; // still comfortably inside the view — nothing to do yet
+            }
+            self.viewport_following = true;
+        }
+        if let Some(viewport) = self.viewport.as_mut() {
+            viewport.center_on(playhead, width);
+        }
+    }
+
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         // A left click anywhere focuses whichever panel it landed in — including the
         // waveform, which has no toggle/key of its own to focus it (Tab cycles forward
@@ -1374,18 +1457,18 @@ impl App {
                 self.last_click = Some((now, mouse.column, mouse.row));
                 let Some(mi) = hit else { return false };
                 if is_double {
-                    if let Some(label) = self
-                        .documents
-                        .get(idx)
-                        .and_then(|d| d.markers.get(mi))
-                        .map(|m| m.label.clone())
-                    {
-                        self.dialog = Some(Dialog::RenameMarker { index: mi, input: TextInput::fresh(label) });
+                    if let Some(marker) = self.documents.get(idx).and_then(|d| d.markers.get(mi)) {
+                        self.dialog = Some(Dialog::RenameMarker {
+                            position: marker.position,
+                            input: TextInput::fresh(marker.label.clone()),
+                        });
                     }
                     self.last_click = None;
                     self.dragging_marker = None;
                 } else {
                     self.dragging_marker = Some(mi);
+                    self.dragging_marker_start_position =
+                        self.documents.get(idx).and_then(|d| d.markers.get(mi)).map(|m| m.position);
                 }
                 true
             }
@@ -1414,9 +1497,20 @@ impl App {
                 true
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if self.dragging_marker.take().is_some() {
+                if let Some(mi) = self.dragging_marker.take() {
+                    let start_pos = self.dragging_marker_start_position.take();
                     if let Some(doc) = self.documents.get_mut(idx) {
+                        // Capture the live-dragged-to position before sorting reshuffles
+                        // indices, then collapse the whole drag gesture into one undoable
+                        // `MoveMarkerCommand` — skipped entirely if nothing actually moved
+                        // (e.g. a plain click with no drag in between).
+                        let end_pos = doc.markers.get(mi).map(|m| m.position);
                         doc.markers.sort_by_key(|m| m.position);
+                        if let (Some(from), Some(to)) = (start_pos, end_pos) {
+                            if from != to {
+                                self.histories[idx].apply(move_marker_command(from, to), doc);
+                            }
+                        }
                     }
                     return true;
                 }
@@ -1576,6 +1670,21 @@ impl App {
             return;
         }
 
+        if action == Action::ToggleCursorFollowsPlayback {
+            self.cursor_follows_playback = !self.cursor_follows_playback;
+            self.save_config();
+            return;
+        }
+
+        if action == Action::ToggleViewportFollowsPlayback {
+            self.viewport_follows_playback = !self.viewport_follows_playback;
+            if !self.viewport_follows_playback {
+                self.viewport_following = false;
+            }
+            self.save_config();
+            return;
+        }
+
         if matches!(
             action,
             Action::InsertMarker
@@ -1584,6 +1693,43 @@ impl App {
                 | Action::JumpNextMarker
         ) {
             self.handle_marker_action(action);
+            return;
+        }
+
+        if action == Action::IncreaseTransientThreshold {
+            self.transient_threshold_db = (self.transient_threshold_db + 1.0).min(TRANSIENT_THRESHOLD_MAX_DB);
+            self.save_config();
+            return;
+        }
+
+        if action == Action::DecreaseTransientThreshold {
+            self.transient_threshold_db = (self.transient_threshold_db - 1.0).max(TRANSIENT_THRESHOLD_MIN_DB);
+            self.save_config();
+            return;
+        }
+
+        if action == Action::NextRisingEdge {
+            let idx = self.active_document;
+            let threshold = self.transient_threshold_db;
+            if let Some(document) = self.documents.get_mut(idx) {
+                if let Some(pos) = document.find_next_rising_edge(document.cursor, threshold) {
+                    document.cursor = pos;
+                    let width = self.content_width;
+                    if let Some(viewport) = self.viewport.as_mut() {
+                        viewport.ensure_visible(pos, width);
+                    }
+                    if let Some(audio) = &self.audio {
+                        if audio.is_playing() {
+                            audio.seek(pos);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        if action == Action::AutoInsertMarkers {
+            self.handle_auto_insert_markers();
             return;
         }
 
@@ -1707,6 +1853,8 @@ impl App {
             | Action::ToggleLoop
             | Action::ToggleFineMode
             | Action::ToggleAudition
+            | Action::ToggleCursorFollowsPlayback
+            | Action::ToggleViewportFollowsPlayback
             | Action::ClearSelection
             | Action::SelectAll
             | Action::SaveAs
@@ -1719,6 +1867,10 @@ impl App {
             | Action::DeleteMarker
             | Action::JumpPrevMarker
             | Action::JumpNextMarker
+            | Action::NextRisingEdge
+            | Action::AutoInsertMarkers
+            | Action::IncreaseTransientThreshold
+            | Action::DecreaseTransientThreshold
             | Action::Noop
             | Action::OpenSelected
             | Action::OpenDirectory
@@ -1932,8 +2084,39 @@ impl App {
         }
     }
 
-    /// Insert/delete a marker at/near the cursor, or jump the cursor to an adjacent marker.
-    /// Markers are document metadata, not part of the sample-edit undo history.
+    /// Insert/delete a marker at/near the cursor (both undoable, like any other document
+    /// mutation), or jump the cursor to an adjacent marker (not a mutation, so not
+    /// undoable).
+    /// Scans the whole file for transients (`Document::find_all_rising_edges`, same
+    /// algorithm and threshold as Next Rising Edge) and inserts a marker right before each
+    /// one not already marked — one undo step for the whole batch, not one per marker.
+    fn handle_auto_insert_markers(&mut self) {
+        let idx = self.active_document;
+        let Some(document) = self.documents.get(idx) else {
+            return;
+        };
+        let edges = document.find_all_rising_edges(self.transient_threshold_db);
+        let mut next_n = document.markers.len() + 1;
+        let mut to_insert: Vec<Marker> = Vec::new();
+        for pos in edges {
+            let already_marked =
+                document.markers.iter().any(|m| m.position == pos) || to_insert.iter().any(|m| m.position == pos);
+            if already_marked {
+                continue;
+            }
+            to_insert.push(Marker { position: pos, label: format!("Marker {next_n}") });
+            next_n += 1;
+        }
+        if to_insert.is_empty() {
+            return;
+        }
+        let document = &mut self.documents[idx];
+        self.histories[idx].apply(auto_insert_markers_command(to_insert), document);
+        if let Some(path) = document.path.clone() {
+            self.file_panel.mark_dirty(&path, true);
+        }
+    }
+
     fn handle_marker_action(&mut self, action: Action) {
         let idx = self.active_document;
         if idx >= self.documents.len() {
@@ -1941,51 +2124,41 @@ impl App {
         }
         let mut moved_cursor = false;
         let mut changed = false;
-        {
-            let doc = &mut self.documents[idx];
-            match action {
-                Action::InsertMarker => {
-                    let pos = doc.cursor;
-                    if !doc.markers.iter().any(|m| m.position == pos) {
-                        let n = doc.markers.len() + 1;
-                        doc.markers.push(Marker { position: pos, label: format!("Marker {n}") });
-                        doc.markers.sort_by_key(|m| m.position);
-                        doc.dirty = true;
-                        changed = true;
-                    }
+        match action {
+            Action::InsertMarker => {
+                let doc = &self.documents[idx];
+                let pos = doc.cursor;
+                if !doc.markers.iter().any(|m| m.position == pos) {
+                    let label = format!("Marker {}", doc.markers.len() + 1);
+                    self.histories[idx].apply(insert_marker_command(pos, label), &mut self.documents[idx]);
+                    changed = true;
                 }
-                Action::DeleteMarker => {
-                    if let Some(i) = nearest_marker(&doc.markers, doc.cursor) {
-                        doc.markers.remove(i);
-                        doc.dirty = true;
-                        changed = true;
-                    }
-                }
-                Action::JumpPrevMarker => {
-                    if let Some(p) = doc
-                        .markers
-                        .iter()
-                        .rev()
-                        .find(|m| m.position < doc.cursor)
-                        .map(|m| m.position)
-                    {
-                        doc.cursor = p;
-                        moved_cursor = true;
-                    }
-                }
-                Action::JumpNextMarker => {
-                    if let Some(p) = doc
-                        .markers
-                        .iter()
-                        .find(|m| m.position > doc.cursor)
-                        .map(|m| m.position)
-                    {
-                        doc.cursor = p;
-                        moved_cursor = true;
-                    }
-                }
-                _ => {}
             }
+            Action::DeleteMarker => {
+                let doc = &self.documents[idx];
+                if let Some(i) = nearest_marker(&doc.markers, doc.cursor) {
+                    let pos = doc.markers[i].position;
+                    self.histories[idx].apply(delete_marker_command(pos), &mut self.documents[idx]);
+                    changed = true;
+                }
+            }
+            Action::JumpPrevMarker => {
+                let doc = &mut self.documents[idx];
+                if let Some(p) =
+                    doc.markers.iter().rev().find(|m| m.position < doc.cursor).map(|m| m.position)
+                {
+                    doc.cursor = p;
+                    moved_cursor = true;
+                }
+            }
+            Action::JumpNextMarker => {
+                let doc = &mut self.documents[idx];
+                if let Some(p) = doc.markers.iter().find(|m| m.position > doc.cursor).map(|m| m.position) {
+                    doc.cursor = p;
+                    moved_cursor = true;
+                }
+            }
+            _ => {}
         }
         if changed {
             if let Some(path) = self.documents[idx].path.clone() {
@@ -2006,19 +2179,30 @@ impl App {
     }
 
     fn handle_playback_action(&mut self, _action: Action) {
-        let Some(document) = self.active_doc() else {
-            return;
-        };
         let Some(audio) = self.audio.as_ref() else {
             return;
         };
         // Space is the only transport command: play from the cursor, or pause if playing.
         if audio.is_playing() {
             audio.pause();
-        } else if let Some((ls, le)) = self.loop_range() {
-            audio.play_looped(document.cursor, ls, le);
+            self.viewport_following = false;
+            // "Insertion Point Follows Playback": snap the cursor to wherever playback
+            // actually stopped and scroll it into view, rather than leaving the cursor
+            // wherever it was when playback started.
+            if self.cursor_follows_playback {
+                if let Some(stopped_at) = self.playhead_position {
+                    self.snap_cursor_to(stopped_at);
+                }
+            }
         } else {
-            audio.play(document.cursor);
+            let Some(document) = self.active_doc() else {
+                return;
+            };
+            if let Some((ls, le)) = self.loop_range() {
+                audio.play_looped(document.cursor, ls, le);
+            } else {
+                audio.play(document.cursor);
+            }
         }
     }
 
@@ -2052,8 +2236,13 @@ impl App {
         if self.audition {
             self.toolbar.active_actions.insert(Action::ToggleAudition);
         }
+        if self.cursor_follows_playback {
+            self.toolbar.active_actions.insert(Action::ToggleCursorFollowsPlayback);
+        }
+        if self.viewport_follows_playback {
+            self.toolbar.active_actions.insert(Action::ToggleViewportFollowsPlayback);
+        }
         self.toolbar.render(frame, chrome.toolbar, focus);
-        self.menu.render(frame, chrome.menu);
         // Fill the spacer row with the base background so it matches the toolbar below it
         // (rather than showing through to the terminal default).
         frame.render_widget(
@@ -2078,6 +2267,10 @@ impl App {
                 .alignment(Alignment::Center)
                 .block(block);
             frame.render_widget(text, chrome.content);
+            // Rendered last so an open dropdown (which extends below the menu bar, into
+            // the content area) draws on top of everything instead of being overdrawn by
+            // it — same ordering as the loaded-document path below.
+            self.menu.render(frame, chrome.menu);
             return;
         };
 
@@ -2203,6 +2396,12 @@ impl App {
         let wf = self.waveform_area;
         self.marker_label_rects.clear();
         let marker_style = Style::default().fg(theme::MARKER).bg(theme::BASE);
+        // A marker sitting exactly on the insertion point would otherwise hide it — the
+        // marker's dashed line is drawn after (and on top of) the waveform's cursor line in
+        // the same column. Recoloring that one marker to the cursor's accent keeps "the
+        // insertion point is here" visible instead of silently losing it.
+        let cursor = self.documents[doc_idx].cursor;
+        let marker_at_cursor_style = Style::default().fg(theme::CURSOR).bg(theme::BASE);
         // Visible markers as (screen x, index), sorted left-to-right so each label can be
         // clipped at the next marker's line instead of overprinting it.
         let mut visible: Vec<(u16, usize)> = self.documents[doc_idx]
@@ -2220,8 +2419,13 @@ impl App {
         visible.sort_by_key(|&(x, _)| x);
         let buf = frame.buffer_mut();
         for (k, &(x, mi)) in visible.iter().enumerate() {
+            let style = if self.documents[doc_idx].markers[mi].position == cursor {
+                marker_at_cursor_style
+            } else {
+                marker_style
+            };
             for y in wf.y..wf.y + wf.height {
-                buf[(x, y)].set_char('┊').set_style(marker_style);
+                buf[(x, y)].set_char('┊').set_style(style);
             }
             let lx = x + 1;
             // Stop the label before the next marker's line (or the pane's right edge).
@@ -2230,7 +2434,7 @@ impl App {
             let shown: String = self.documents[doc_idx].markers[mi].label.chars().take(avail).collect();
             let shown_w = shown.chars().count() as u16;
             if shown_w > 0 {
-                buf.set_string(lx, wf.y, &shown, marker_style);
+                buf.set_string(lx, wf.y, &shown, style);
             }
             self.marker_label_rects.push((
                 Rect { x, y: wf.y, width: shown_w + 1, height: 1 },
@@ -2238,7 +2442,12 @@ impl App {
             ));
         }
 
-        frame.render_widget(StatusBar { document: &self.documents[doc_idx], viewport, snap_to_zero: self.snap_to_zero, loop_playback: self.loop_playback, fine_mode: self.fine_mode, last_action: self.histories[doc_idx].last_label() }, status_area);
+        frame.render_widget(StatusBar { document: &self.documents[doc_idx], viewport, snap_to_zero: self.snap_to_zero, loop_playback: self.loop_playback, fine_mode: self.fine_mode, transient_threshold_db: self.transient_threshold_db, last_action: self.histories[doc_idx].last_label() }, status_area);
+
+        // Rendered last (after the waveform, panels, and marker labels) so an open
+        // dropdown — which extends below the menu bar into the content area — draws on
+        // top of everything instead of being overdrawn by it.
+        self.menu.render(frame, chrome.menu);
 
         if let Some(confirm) = self.confirm {
             let text = match confirm {
@@ -2430,6 +2639,14 @@ mod tests {
     use super::*;
     use crate::commands::delete::delete_command;
 
+    /// Builds an `App` with deterministic settings (`Config::default()`), never touching
+    /// the real `~/.config/tui-wave/config.toml` or risking a race against tests elsewhere
+    /// that temporarily redirect `XDG_CONFIG_HOME`. Every test below must use this instead
+    /// of `App::new` directly.
+    fn new_app(document: Option<Document>, directory: Option<PathBuf>) -> App {
+        App::new_with_config(document, directory, Config::default())
+    }
+
     fn doc(val: f32, len: usize) -> Document {
         Document {
             channels: vec![vec![val; len]],
@@ -2443,11 +2660,278 @@ mod tests {
         }
     }
 
+    /// A regression test for a real bug: the menu used to render *before* the waveform
+    /// content, so an open dropdown (which extends below the menu bar into the content
+    /// area) got overdrawn by it — the dropdown's own text never survived to the screen.
+    /// The menu must render last so it stays on top.
+    #[test]
+    fn open_menu_dropdown_survives_on_top_of_waveform_content() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.5, 10_000)), None);
+        app.menu.open_first(); // "File" menu, whose first entry is "Save"
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        // The dropdown's first entry ("Save", the File menu's first item) renders inside
+        // its bordered popup at (popup.x + 1, popup.y + 1) = (1, 2) — row 2 being the
+        // *toolbar's* first row, which is exactly what would have overwritten it under the
+        // old "menu renders before content" ordering. A loose "does 'Save' appear
+        // anywhere on screen" check wouldn't catch that bug: the toolbar has its own Save
+        // button with the same text regardless.
+        let buffer = terminal.backend().buffer();
+        let row: String = (1..6u16).map(|x| buffer[(x, 2)].symbol()).collect();
+        assert_eq!(row, "Save ", "the dropdown's first entry must survive on top of the toolbar row beneath it");
+    }
+
+    /// Builds a mono doc with a quiet section followed by a sudden loud one — a clear
+    /// transient — at 44100Hz, matching `Document`'s own transient test fixtures (441
+    /// samples per 10ms analysis frame).
+    fn doc_with_transient(quiet_frames: usize, loud_frames: usize) -> Document {
+        const FRAME_LEN: usize = 441;
+        let mut channel = vec![0.01f32; quiet_frames * FRAME_LEN];
+        channel.extend(std::iter::repeat(0.5f32).take(loud_frames * FRAME_LEN));
+        Document {
+            channels: vec![channel],
+            sample_rate: 44100,
+            selection: None,
+            cursor: 0,
+            dirty: false,
+            path: None,
+            markers: Vec::new(),
+            bext: None,
+        }
+    }
+
+    /// Next Rising Edge moves the cursor to right before the transient and scrolls it into
+    /// view.
+    #[test]
+    fn next_rising_edge_moves_cursor_to_the_transient() {
+        let mut app = new_app(Some(doc_with_transient(20, 30)), None);
+        app.content_width = 80;
+        app.viewport = Some(Viewport::fit_to_width(app.documents[0].len_samples(), 80));
+
+        app.handle_action(Action::NextRisingEdge);
+
+        assert_eq!(app.documents[0].cursor, 20 * 441);
+    }
+
+    /// With no transient ahead of the cursor, Next Rising Edge leaves the cursor untouched.
+    #[test]
+    fn next_rising_edge_does_nothing_when_none_found() {
+        let mut app = new_app(Some(doc_with_transient(0, 30)), None); // constant level throughout
+        app.content_width = 80;
+        app.viewport = Some(Viewport::fit_to_width(app.documents[0].len_samples(), 80));
+        app.documents[0].cursor = 100;
+
+        app.handle_action(Action::NextRisingEdge);
+
+        assert_eq!(app.documents[0].cursor, 100);
+    }
+
+    /// Builds a mono doc with several constant-level segments (each `frames` analysis
+    /// frames of 441 samples at 44100Hz), for tests with more than one transient.
+    fn doc_with_segments(segments: &[(f32, usize)]) -> Document {
+        const FRAME_LEN: usize = 441;
+        let channel: Vec<f32> =
+            segments.iter().flat_map(|&(level, frames)| std::iter::repeat(level).take(frames * FRAME_LEN)).collect();
+        Document {
+            channels: vec![channel],
+            sample_rate: 44100,
+            selection: None,
+            cursor: 0,
+            dirty: false,
+            path: None,
+            markers: Vec::new(),
+            bext: None,
+        }
+    }
+
+    /// Auto-Insert Markers adds one marker right before each detected transient, all as a
+    /// single undo step (one `Undo` removes the whole batch, not just the last one).
+    #[test]
+    fn auto_insert_markers_adds_one_per_transient_as_a_single_undo_step() {
+        let mut app = new_app(Some(doc_with_segments(&[(0.01, 20), (0.5, 20), (5.0, 20)])), None);
+
+        app.handle_action(Action::AutoInsertMarkers);
+
+        let positions: Vec<usize> = app.documents[0].markers.iter().map(|m| m.position).collect();
+        assert_eq!(positions, vec![20 * 441, 40 * 441]);
+
+        app.handle_action(Action::Undo);
+        assert!(app.documents[0].markers.is_empty(), "one undo should remove the whole batch");
+    }
+
+    /// A transient that already has a marker on it must not get a second, duplicate one.
+    #[test]
+    fn auto_insert_markers_skips_positions_already_marked() {
+        let mut app = new_app(Some(doc_with_segments(&[(0.01, 20), (0.5, 20), (5.0, 20)])), None);
+        app.documents[0].markers = vec![Marker { position: 20 * 441, label: "Already here".to_string() }];
+
+        app.handle_action(Action::AutoInsertMarkers);
+
+        let positions: Vec<usize> = app.documents[0].markers.iter().map(|m| m.position).collect();
+        assert_eq!(positions, vec![20 * 441, 40 * 441]);
+        assert_eq!(app.documents[0].markers[0].label, "Already here", "the existing marker must be untouched");
+    }
+
+    /// With no transients in the file, Auto-Insert Markers does nothing (and records no
+    /// undo step).
+    #[test]
+    fn auto_insert_markers_does_nothing_when_none_found() {
+        let mut app = new_app(Some(doc_with_segments(&[(0.3, 50)])), None);
+
+        app.handle_action(Action::AutoInsertMarkers);
+
+        assert!(app.documents[0].markers.is_empty());
+        assert!(!app.histories[0].undo(&mut app.documents[0]), "no history entry should have been recorded");
+    }
+
+    /// `+`/`-` adjust the transient threshold within the clamp range and persist it.
+    #[test]
+    fn transient_threshold_adjusts_and_clamps() {
+        let mut app = new_app(Some(doc(0.1, 1_000)), None);
+        assert_eq!(app.transient_threshold_db, 6.0);
+
+        app.handle_action(Action::IncreaseTransientThreshold);
+        assert_eq!(app.transient_threshold_db, 7.0);
+        assert_eq!(app.config.transient_threshold_db, 7.0, "should persist immediately");
+
+        app.handle_action(Action::DecreaseTransientThreshold);
+        app.handle_action(Action::DecreaseTransientThreshold);
+        assert_eq!(app.transient_threshold_db, 5.0);
+
+        for _ in 0..40 {
+            app.handle_action(Action::DecreaseTransientThreshold);
+        }
+        assert_eq!(app.transient_threshold_db, TRANSIENT_THRESHOLD_MIN_DB);
+
+        for _ in 0..40 {
+            app.handle_action(Action::IncreaseTransientThreshold);
+        }
+        assert_eq!(app.transient_threshold_db, TRANSIENT_THRESHOLD_MAX_DB);
+    }
+
+    /// Inserting a marker is undoable, like any other document mutation.
+    #[test]
+    fn insert_marker_is_undoable() {
+        let mut app = new_app(Some(doc(0.1, 1_000)), None);
+        app.documents[0].cursor = 100;
+        app.handle_action(Action::InsertMarker);
+        assert_eq!(app.documents[0].markers.len(), 1);
+        assert_eq!(app.documents[0].markers[0].position, 100);
+
+        app.handle_action(Action::Undo);
+        assert!(app.documents[0].markers.is_empty());
+
+        app.handle_action(Action::Redo);
+        assert_eq!(app.documents[0].markers.len(), 1);
+    }
+
+    /// Deleting a marker is undoable — the removed marker (position and label) comes back
+    /// exactly as it was.
+    #[test]
+    fn delete_marker_is_undoable() {
+        let mut app = new_app(Some(doc(0.1, 1_000)), None);
+        app.documents[0].markers = vec![Marker { position: 200, label: "Verse".to_string() }];
+        app.documents[0].cursor = 200;
+
+        app.handle_action(Action::DeleteMarker);
+        assert!(app.documents[0].markers.is_empty());
+
+        app.handle_action(Action::Undo);
+        assert_eq!(app.documents[0].markers, vec![Marker { position: 200, label: "Verse".to_string() }]);
+    }
+
+    /// Renaming a marker (via the double-click dialog) is undoable.
+    #[test]
+    fn rename_marker_is_undoable() {
+        let mut app = new_app(Some(doc(0.1, 1_000)), None);
+        app.documents[0].markers = vec![Marker { position: 200, label: "Old Name".to_string() }];
+        app.dialog =
+            Some(Dialog::RenameMarker { position: 200, input: TextInput::fresh("New Name".to_string()) });
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.documents[0].markers[0].label, "New Name");
+
+        app.handle_action(Action::Undo);
+        assert_eq!(app.documents[0].markers[0].label, "Old Name");
+    }
+
+    /// Dragging a marker (mouse down on its label, drag, release) collapses into a single
+    /// undoable move — undo restores the pre-drag position.
+    #[test]
+    fn dragging_a_marker_is_undoable_as_one_move() {
+        let mut app = new_app(Some(doc(0.1, 1_000)), None);
+        app.documents[0].markers = vec![Marker { position: 100, label: "M".to_string() }];
+        app.content_width = 80;
+        app.waveform_area = Rect { x: 0, y: 0, width: 80, height: 4 };
+        app.viewport = Some(Viewport { samples_per_column: 1.0, scroll_offset: 0, amplitude_scale: 1.0, min_samples_per_column: 1.0, max_samples_per_column: 1_000.0, total_len: 1_000, auto_vertical_zoom: false });
+        app.marker_label_rects = vec![(Rect { x: 5, y: 0, width: 5, height: 1 }, 0)];
+
+        let mouse_at = |col: u16, kind: MouseEventKind| MouseEvent { kind, column: col, row: 0, modifiers: KeyModifiers::NONE };
+        app.handle_mouse(mouse_at(6, MouseEventKind::Down(MouseButton::Left)));
+        app.handle_mouse(mouse_at(50, MouseEventKind::Drag(MouseButton::Left)));
+        app.handle_mouse(mouse_at(50, MouseEventKind::Up(MouseButton::Left)));
+
+        assert_eq!(app.documents[0].markers[0].position, 50);
+        app.handle_action(Action::Undo);
+        assert_eq!(app.documents[0].markers[0].position, 100);
+    }
+
+    /// A plain click on a marker label (mouse down + up, no drag in between) must not push
+    /// a no-op undo entry — there was no actual movement to undo.
+    #[test]
+    fn clicking_a_marker_without_dragging_does_not_record_history() {
+        let mut app = new_app(Some(doc(0.1, 1_000)), None);
+        app.documents[0].markers = vec![Marker { position: 100, label: "M".to_string() }];
+        app.content_width = 80;
+        app.waveform_area = Rect { x: 0, y: 0, width: 80, height: 4 };
+        app.viewport = Some(Viewport { samples_per_column: 1.0, scroll_offset: 0, amplitude_scale: 1.0, min_samples_per_column: 1.0, max_samples_per_column: 1_000.0, total_len: 1_000, auto_vertical_zoom: false });
+        app.marker_label_rects = vec![(Rect { x: 5, y: 0, width: 5, height: 1 }, 0)];
+
+        let mouse_at = |col: u16, kind: MouseEventKind| MouseEvent { kind, column: col, row: 0, modifiers: KeyModifiers::NONE };
+        app.handle_mouse(mouse_at(6, MouseEventKind::Down(MouseButton::Left)));
+        app.handle_mouse(mouse_at(6, MouseEventKind::Up(MouseButton::Left)));
+
+        assert_eq!(app.documents[0].markers[0].position, 100);
+        assert!(!app.histories[0].undo(&mut app.documents[0]), "no history entry should have been recorded");
+    }
+
     /// Double-clicking the waveform background selects the region bounded by the nearest
+    /// A marker sitting exactly at the insertion point must render in the cursor's accent
+    /// color, not the normal marker color — otherwise its dashed line (drawn after, and
+    /// so on top of, the waveform's cursor line) silently hides where the cursor actually
+    /// is. A marker elsewhere must keep the normal marker color.
+    #[test]
+    fn marker_at_cursor_position_uses_cursor_accent_color() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut doc = doc(0.1, 10_000);
+        doc.cursor = 500;
+        doc.markers = vec![
+            Marker { position: 500, label: "Here".to_string() },
+            Marker { position: 2000, label: "Elsewhere".to_string() },
+        ];
+        let mut app = new_app(Some(doc), None);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let wf = app.waveform_area;
+        let at_cursor_col = wf.x + (500.0 / app.viewport.as_ref().unwrap().samples_per_column) as u16;
+        let elsewhere_col = wf.x + (2000.0 / app.viewport.as_ref().unwrap().samples_per_column) as u16;
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(at_cursor_col, wf.y)].fg, theme::CURSOR, "marker at the cursor must use the cursor accent");
+        assert_eq!(buffer[(elsewhere_col, wf.y)].fg, theme::MARKER, "a marker elsewhere must keep the normal marker color");
+    }
+
     /// marker at-or-before the click and the nearest marker after it.
     #[test]
     fn double_click_selects_region_between_markers() {
-        let mut app = App::new(Some(doc(0.5, 1_000)), None);
+        let mut app = new_app(Some(doc(0.5, 1_000)), None);
         app.snap_to_zero = false;
         app.documents[0].markers = vec![
             Marker { position: 200, label: "A".into() },
@@ -2483,7 +2967,7 @@ mod tests {
     /// panels), even though the waveform has no toggle key of its own to focus it directly.
     #[test]
     fn clicking_waveform_focuses_it_and_defocuses_panels() {
-        let mut app = App::new(Some(doc(0.5, 1_000)), None);
+        let mut app = new_app(Some(doc(0.5, 1_000)), None);
         app.file_panel.focused = true;
         app.waveform_area = Rect { x: 10, y: 0, width: 50, height: 10 };
 
@@ -2502,7 +2986,7 @@ mod tests {
     /// doesn't land on a specific file entry (e.g. empty space below the list).
     #[test]
     fn clicking_files_panel_area_focuses_it() {
-        let mut app = App::new(Some(doc(0.5, 1_000)), None);
+        let mut app = new_app(Some(doc(0.5, 1_000)), None);
         app.buffer_panel.focused = true;
         app.file_panel_area = Rect { x: 0, y: 0, width: 20, height: 30 };
         app.waveform_area = Rect { x: 20, y: 0, width: 50, height: 30 };
@@ -2521,7 +3005,7 @@ mod tests {
     /// Ctrl+A selects the whole document's audio, regardless of any prior selection.
     #[test]
     fn select_all_selects_the_whole_document() {
-        let mut app = App::new(Some(doc(0.5, 1_000)), None);
+        let mut app = new_app(Some(doc(0.5, 1_000)), None);
         app.documents[0].selection = Some(Selection { start: 10, end: 20 });
         app.handle_action(Action::SelectAll);
         assert_eq!(app.documents[0].selection, Some(Selection { start: 0, end: 1_000 }));
@@ -2532,7 +3016,7 @@ mod tests {
     /// Files panel (entries are ordered Parent, then dirs, then files — `tests/fixtures`
     /// has no subdirectories, so index 1 is the first file alphabetically).
     fn app_with_fixture_selected() -> App {
-        let mut app = App::new(None, Some(PathBuf::from("tests/fixtures")));
+        let mut app = new_app(None, Some(PathBuf::from("tests/fixtures")));
         app.file_panel.focused = true;
         app.file_panel.selected = 1;
         assert!(
@@ -2540,6 +3024,28 @@ mod tests {
             "fixture directory layout changed — update the expected index"
         );
         app
+    }
+
+    /// The app is modal: plain 'a' toggles Audition while the Files panel is focused, but
+    /// the very same key toggles Auto Vertical Zoom when the Waveform is focused instead —
+    /// each panel's command set can reuse a letter the other panel already claimed.
+    #[test]
+    fn plain_a_is_audition_in_files_focus_but_auto_vzoom_in_waveform_focus() {
+        let mut app = app_with_fixture_selected();
+        assert!(app.file_panel.focused);
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(app.audition, "plain 'a' in Files focus should toggle Audition");
+
+        let mut app = new_app(Some(doc(0.1, 1_000)), None);
+        app.file_panel.focused = false;
+        app.viewport = Some(Viewport::fit_to_width(1_000, 80));
+        assert!(!app.audition);
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(!app.audition, "plain 'a' in Waveform focus must not touch Audition");
+        assert!(
+            app.viewport.as_ref().unwrap().auto_vertical_zoom,
+            "plain 'a' in Waveform focus should toggle Auto Vertical Zoom instead"
+        );
     }
 
     /// With Audition off, navigating the Files panel must never start decoding/playing —
@@ -2637,7 +3143,7 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
-        let mut app = App::new(None, Some(PathBuf::from("tests/fixtures")));
+        let mut app = new_app(None, Some(PathBuf::from("tests/fixtures")));
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
 
@@ -2665,7 +3171,7 @@ mod tests {
     /// a file, rather than landing on an empty waveform with nothing to act on.
     #[test]
     fn files_panel_is_focused_on_startup() {
-        let app = App::new(None, None);
+        let app = new_app(None, None);
         assert!(app.file_panel.focused);
         assert!(!app.buffer_panel.focused);
     }
@@ -2675,7 +3181,7 @@ mod tests {
     /// land in a row, and a gap long enough to be a fresh keypress resets the count.
     #[test]
     fn nav_step_multiplier_ramps_on_a_genuine_hold() {
-        let mut app = App::new(Some(doc(0.1, 1_000_000)), None);
+        let mut app = new_app(Some(doc(0.1, 1_000_000)), None);
 
         let first = app.nav_step_multiplier(Action::MoveCursorRight);
         assert_eq!(first, 1.0, "a fresh press should not be accelerated");
@@ -2704,7 +3210,7 @@ mod tests {
     /// sustained — elapsed wall-clock time alone must not be what acceleration ramps on.
     #[test]
     fn nav_step_multiplier_never_accelerates_from_manual_tapping() {
-        let mut app = App::new(Some(doc(0.1, 1_000_000)), None);
+        let mut app = new_app(Some(doc(0.1, 1_000_000)), None);
 
         // Each tap is 150ms apart — past the 120ms fast-repeat gap — repeated many times
         // (1.35s of sustained tapping). Every single one must stay at 1x.
@@ -2718,7 +3224,7 @@ mod tests {
     /// Fine mode must never accelerate, even mid a genuine tight-gap hold.
     #[test]
     fn nav_step_multiplier_disabled_in_fine_mode() {
-        let mut app = App::new(Some(doc(0.1, 1_000_000)), None);
+        let mut app = new_app(Some(doc(0.1, 1_000_000)), None);
         app.fine_mode = true;
         let mut multiplier = 1.0;
         for _ in 0..10 {
@@ -2728,13 +3234,108 @@ mod tests {
         assert_eq!(multiplier, 1.0, "fine mode must never accelerate");
     }
 
+    /// "Insertion Point Follows Playback": snapping moves the cursor to the given position
+    /// and scrolls it into view, regardless of where the cursor was before.
+    #[test]
+    fn snap_cursor_to_moves_cursor_and_scrolls_into_view() {
+        let mut app = new_app(Some(doc(0.1, 1_000_000)), None);
+        app.content_width = 80;
+        app.viewport = Some(Viewport::fit_to_width(1_000_000, 80));
+        app.documents[0].cursor = 0;
+
+        app.snap_cursor_to(500_000);
+
+        assert_eq!(app.documents[0].cursor, 500_000);
+        let viewport = app.viewport.as_ref().unwrap();
+        let span = viewport.span(80);
+        assert!(
+            viewport.scroll_offset <= 500_000 && 500_000 < viewport.scroll_offset + span,
+            "the snapped-to position must be visible in the viewport"
+        );
+    }
+
+    /// "Viewport Follows Playback": while the playhead is comfortably inside the view,
+    /// nothing happens; once it reaches the right edge, the view recenters on it and keeps
+    /// recentering every subsequent tick (continuous scroll, not a one-off snap).
+    #[test]
+    fn tick_viewport_follow_recenters_once_playhead_reaches_the_edge() {
+        let mut app = new_app(Some(doc(0.1, 1_000_000)), None);
+        app.content_width = 80;
+        // A deliberately zoomed-in viewport (span(80) = 800, far smaller than the
+        // 1,000,000-sample file) so there's real room to scroll, unlike `fit_to_width`
+        // which would fit the whole file into one screen and leave no room to test with.
+        app.viewport = Some(Viewport {
+            samples_per_column: 10.0,
+            scroll_offset: 0,
+            amplitude_scale: 1.0,
+            min_samples_per_column: 1.0,
+            max_samples_per_column: 1_000_000.0,
+            total_len: 1_000_000,
+            auto_vertical_zoom: false,
+        });
+        app.viewport_follows_playback = true;
+
+        // Playhead near the start, comfortably inside the view: no recenter yet.
+        app.playhead_position = Some(100);
+        app.tick_viewport_follow();
+        assert!(!app.viewport_following);
+        assert_eq!(app.viewport.as_ref().unwrap().scroll_offset, 0);
+
+        // Move the playhead to the right edge of the current view — this should trigger
+        // the sticky "following" mode and recenter.
+        let span = app.viewport.as_ref().unwrap().span(80);
+        app.playhead_position = Some(span - 1);
+        app.tick_viewport_follow();
+        assert!(app.viewport_following, "reaching the right edge should engage following");
+        let half = app.viewport.as_ref().unwrap().span(80) / 2;
+        assert_eq!(app.viewport.as_ref().unwrap().scroll_offset, (span - 1).saturating_sub(half));
+
+        // Once following, it keeps recentering on every subsequent tick, even though the
+        // playhead is no longer literally at the edge (it's at the new center).
+        let playhead_2 = span - 1 + 1000;
+        app.playhead_position = Some(playhead_2);
+        app.tick_viewport_follow();
+        let viewport = app.viewport.as_ref().unwrap();
+        assert_eq!(viewport.scroll_offset + viewport.span(80) / 2, playhead_2);
+    }
+
+    /// Pausing playback (handled via `tick_viewport_follow` seeing no playhead) must drop
+    /// out of following mode.
+    #[test]
+    fn viewport_follow_resets_when_playhead_disappears() {
+        let mut app = new_app(Some(doc(0.1, 1_000_000)), None);
+        app.content_width = 80;
+        app.viewport = Some(Viewport::fit_to_width(1_000_000, 80));
+        app.viewport_follows_playback = true;
+        app.viewport_following = true;
+        app.playhead_position = None; // playback stopped
+
+        app.tick_viewport_follow();
+        assert!(!app.viewport_following);
+    }
+
+    /// Toggling the feature off must drop out of following mode immediately, even mid-follow.
+    #[test]
+    fn viewport_follow_resets_when_toggled_off() {
+        let mut app = new_app(Some(doc(0.1, 1_000_000)), None);
+        app.content_width = 80;
+        app.viewport = Some(Viewport::fit_to_width(1_000_000, 80));
+        app.viewport_follows_playback = true;
+        app.viewport_following = true;
+        app.playhead_position = Some(500);
+
+        app.viewport_follows_playback = false;
+        app.tick_viewport_follow();
+        assert!(!app.viewport_following);
+    }
+
     /// Copy-to-New must create a *dirty* buffer (unsaved data, no path), so the quit/close
     /// confirmation fires for it instead of the app exiting silently.
     #[test]
     fn copy_to_new_marks_buffer_dirty() {
         let mut d = doc(0.5, 100);
         d.selection = Some(Selection { start: 10, end: 40 });
-        let mut app = App::new(Some(d), None);
+        let mut app = new_app(Some(d), None);
         app.handle_action(Action::CopyToNew);
         assert_eq!(app.documents.len(), 2);
         assert!(app.documents[1].dirty, "copy-to-new buffer should be dirty");
@@ -2745,7 +3346,7 @@ mod tests {
     /// Closing a buffer removes its parallel history and keeps `active_document` valid.
     #[test]
     fn close_buffer_fixes_active_index_and_history() {
-        let mut app = App::new(Some(doc(0.1, 10)), None);
+        let mut app = new_app(Some(doc(0.1, 10)), None);
         app.push_document(doc(0.2, 10)); // idx 1
         app.push_document(doc(0.3, 10)); // idx 2
         assert_eq!(app.documents.len(), 3);
@@ -2769,7 +3370,7 @@ mod tests {
     /// Buffer search filters which buffers Up/Dn navigate, skipping non-matches.
     #[test]
     fn buffer_search_filters_navigation() {
-        let mut app = App::new(Some(doc(0.1, 10)), None);
+        let mut app = new_app(Some(doc(0.1, 10)), None);
         app.push_document(doc(0.2, 10));
         app.push_document(doc(0.3, 10));
         app.documents[0].path = Some(PathBuf::from("/x/alpha.wav"));
@@ -2792,7 +3393,7 @@ mod tests {
     /// no separate Enter keypress required to actually switch to it.
     #[test]
     fn moving_buffer_selection_switches_the_active_document_immediately() {
-        let mut app = App::new(Some(doc(0.1, 10)), None);
+        let mut app = new_app(Some(doc(0.1, 10)), None);
         app.push_document(doc(0.2, 10));
         app.push_document(doc(0.3, 10));
         app.active_document = 0;
@@ -2812,7 +3413,7 @@ mod tests {
     /// undoing while a *different* document is active must not touch the other document.
     #[test]
     fn undo_history_is_isolated_per_buffer() {
-        let mut app = App::new(Some(doc(1.0, 10)), None);
+        let mut app = new_app(Some(doc(1.0, 10)), None);
         app.push_document(doc(2.0, 10)); // becomes buffer 1, now active
 
         // Edit only buffer 1.
@@ -2834,7 +3435,7 @@ mod tests {
     /// Several edits on one buffer undo in reverse order, one level at a time.
     #[test]
     fn multiple_undo_levels_unwind_in_order() {
-        let mut app = App::new(Some(doc(1.0, 20)), None);
+        let mut app = new_app(Some(doc(1.0, 20)), None);
         let idx = 0;
         app.histories[idx].apply(delete_command(0..5), &mut app.documents[idx]); // 20 -> 15
         app.histories[idx].apply(delete_command(0..5), &mut app.documents[idx]); // 15 -> 10

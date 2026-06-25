@@ -1,8 +1,5 @@
 # Changelog
 
-Notable user-facing changes to tui-wave, newest first. Internal refactors, test-only
-changes, and documentation-only commits are omitted.
-
 ## 2026-06-25
 
 - Added an **Audition** toggle to the Files panel: navigating to a file previews it by
@@ -23,6 +20,24 @@ changes, and documentation-only commits are omitted.
   tapping (not an actual held key) never falsely triggers acceleration.
 - Renamed a few on-screen shortcut legends for clarity (backtick → `~`, Snap/Auto/Fine →
   zeroXSnap/AutoVZoom/fineNavi).
+- Fixed the waveform going blank at high zoom (down to 1 sample/column): a single-sample
+  column now draws a thin mark at its amplitude instead of vanishing.
+- Added **Insertion Point Follows Playback** (`i`): pausing snaps the cursor to wherever
+  playback stopped.
+- Added **Viewport Follows Playback** (`f`): once the playhead reaches the right edge
+  during playback, the view recenters and keeps scrolling so the playhead stays visible.
+- Audition's shortcut moved from `p` to `a` in the Files panel (the same `a` still means
+  Auto Vertical Zoom when the Waveform is focused — the app is modal).
+- Marker insert/delete/rename/drag-move are now all undoable, like any other edit.
+- A marker sitting exactly on the insertion point now renders in the cursor's accent
+  color, so it no longer looks like the cursor has disappeared.
+- Fixed the menu's dropdown rendering underneath the waveform/toolbar instead of on top of it.
+- Added **Next Rising Edge** (`/`): jumps the cursor to right before the next transient
+  (a sudden rise in volume) from the current position onward. The detection threshold
+  defaults to 6dB, is adjustable with `+`/`-`, and persists between sessions.
+- Added **Auto-Insert Markers at Transients** (`t`): scans the whole file and drops a
+  marker before every detected transient, using the same threshold as Next Rising Edge,
+  as a single undoable action.
 
 ## 2026-06-24
 

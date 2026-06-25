@@ -12,6 +12,11 @@ pub struct Config {
     pub fine_mode: bool,
     pub loop_playback: bool,
     pub audition: bool,
+    pub cursor_follows_playback: bool,
+    pub viewport_follows_playback: bool,
+    /// Threshold (in dB) a frame's level must rise above the recent background by to count
+    /// as a transient — see `Document::find_next_rising_edge`. Adjusted with `+`/`-`.
+    pub transient_threshold_db: f32,
 }
 
 impl Default for Config {
@@ -22,6 +27,9 @@ impl Default for Config {
             fine_mode: false,
             loop_playback: false,
             audition: false,
+            cursor_follows_playback: false,
+            viewport_follows_playback: false,
+            transient_threshold_db: 6.0,
         }
     }
 }
@@ -67,8 +75,16 @@ mod tests {
 
     #[test]
     fn round_trips_through_toml() {
-        let config =
-            Config { snap_to_zero: false, auto_vertical_zoom: true, fine_mode: true, loop_playback: true, audition: true };
+        let config = Config {
+            snap_to_zero: false,
+            auto_vertical_zoom: true,
+            fine_mode: true,
+            loop_playback: true,
+            audition: true,
+            cursor_follows_playback: true,
+            viewport_follows_playback: true,
+            transient_threshold_db: 9.0,
+        };
         let toml_string = toml::to_string_pretty(&config).unwrap();
         let parsed: Config = toml::from_str(&toml_string).unwrap();
         assert_eq!(parsed, config);
@@ -91,8 +107,16 @@ mod tests {
             std::env::set_var("XDG_CONFIG_HOME", &temp_dir);
         }
 
-        let config =
-            Config { snap_to_zero: false, auto_vertical_zoom: true, fine_mode: false, loop_playback: true, audition: true };
+        let config = Config {
+            snap_to_zero: false,
+            auto_vertical_zoom: true,
+            fine_mode: false,
+            loop_playback: true,
+            audition: true,
+            cursor_follows_playback: true,
+            viewport_follows_playback: false,
+            transient_threshold_db: 12.0,
+        };
         config.save();
         assert_eq!(Config::load(), config);
 

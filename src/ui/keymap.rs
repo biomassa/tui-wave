@@ -33,6 +33,8 @@ pub enum Action {
     ClearSelection,
     SelectAll,
     ToggleAudition,
+    ToggleCursorFollowsPlayback,
+    ToggleViewportFollowsPlayback,
     SaveAs,
     SaveAll,
     ToggleZeroSnap,
@@ -48,6 +50,10 @@ pub enum Action {
     DeleteMarker,
     JumpPrevMarker,
     JumpNextMarker,
+    NextRisingEdge,
+    AutoInsertMarkers,
+    IncreaseTransientThreshold,
+    DecreaseTransientThreshold,
     // Panel/modal commands (mostly dispatched contextually, not via the global keymap).
     Noop,
     OpenSelected,
@@ -97,8 +103,12 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::End => Some(Action::JumpEnd),
         KeyCode::PageUp => Some(Action::PageBack),
         KeyCode::PageDown => Some(Action::PageForward),
-        KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::ZoomIn),
-        KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::ZoomOut),
+        // '+'/'-' adjust the Next Rising Edge transient threshold rather than zoom — zoom's
+        // documented shortcut is Up/Down (Shift+Up/Down for vertical); these were only ever
+        // an undocumented alias for it, so repurposing them doesn't remove zoom's real binding.
+        KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::IncreaseTransientThreshold),
+        KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::DecreaseTransientThreshold),
+        KeyCode::Char('/') => Some(Action::NextRisingEdge),
         KeyCode::Up if shift => Some(Action::ZoomInVertical),
         KeyCode::Down if shift => Some(Action::ZoomOutVertical),
         KeyCode::Up => Some(Action::ZoomIn),
@@ -110,8 +120,10 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('z') => Some(Action::ToggleZeroSnap),
         KeyCode::Char('C') => Some(Action::CopyToNew),
         KeyCode::Char('l') => Some(Action::ToggleLoop),
-        KeyCode::Char('p') => Some(Action::ToggleAudition),
+        KeyCode::Char('i') => Some(Action::ToggleCursorFollowsPlayback),
+        KeyCode::Char('f') => Some(Action::ToggleViewportFollowsPlayback),
         KeyCode::Char('m') => Some(Action::InsertMarker),
+        KeyCode::Char('t') => Some(Action::AutoInsertMarkers),
         KeyCode::Char('M') => Some(Action::DeleteMarker),
         KeyCode::Char('[') => Some(Action::JumpPrevMarker),
         KeyCode::Char(']') => Some(Action::JumpNextMarker),
@@ -251,6 +263,38 @@ mod tests {
     }
 
     #[test]
+    fn plain_t_auto_inserts_markers() {
+        assert_eq!(map_key(key(KeyCode::Char('t'), KeyModifiers::NONE)), Some(Action::AutoInsertMarkers));
+        // Ctrl+t remains Trim — only the plain, unmodified key is repurposed.
+        assert_eq!(map_key(key(KeyCode::Char('t'), KeyModifiers::CONTROL)), Some(Action::Trim));
+    }
+
+    #[test]
+    fn plain_slash_is_next_rising_edge() {
+        assert_eq!(map_key(key(KeyCode::Char('/'), KeyModifiers::NONE)), Some(Action::NextRisingEdge));
+    }
+
+    #[test]
+    fn plus_minus_adjust_transient_threshold_not_zoom() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('+'), KeyModifiers::NONE)),
+            Some(Action::IncreaseTransientThreshold)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('='), KeyModifiers::NONE)),
+            Some(Action::IncreaseTransientThreshold)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('-'), KeyModifiers::NONE)),
+            Some(Action::DecreaseTransientThreshold)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('_'), KeyModifiers::NONE)),
+            Some(Action::DecreaseTransientThreshold)
+        );
+    }
+
+    #[test]
     fn plain_a_toggles_auto_vertical_zoom() {
         assert_eq!(
             map_key(key(KeyCode::Char('a'), KeyModifiers::NONE)),
@@ -339,12 +383,29 @@ mod tests {
         assert_eq!(map_key(key(KeyCode::Char('L'), KeyModifiers::NONE)), None);
     }
 
+    /// Audition is reachable only as a Files-panel-contextual binding (plain 'a' there,
+    /// handled in `app::handle_key` before falling through to this global keymap) — not a
+    /// global key, since plain 'a' here is Auto Vertical Zoom instead.
     #[test]
-    fn plain_p_toggles_audition() {
+    fn plain_p_is_unbound() {
+        assert_eq!(map_key(key(KeyCode::Char('p'), KeyModifiers::NONE)), None);
+    }
+
+    #[test]
+    fn plain_i_toggles_cursor_follows_playback() {
         assert_eq!(
-            map_key(key(KeyCode::Char('p'), KeyModifiers::NONE)),
-            Some(Action::ToggleAudition)
+            map_key(key(KeyCode::Char('i'), KeyModifiers::NONE)),
+            Some(Action::ToggleCursorFollowsPlayback)
         );
-        assert_eq!(map_key(key(KeyCode::Char('P'), KeyModifiers::NONE)), None);
+        assert_eq!(map_key(key(KeyCode::Char('I'), KeyModifiers::NONE)), None);
+    }
+
+    #[test]
+    fn plain_f_toggles_viewport_follows_playback() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('f'), KeyModifiers::NONE)),
+            Some(Action::ToggleViewportFollowsPlayback)
+        );
+        assert_eq!(map_key(key(KeyCode::Char('F'), KeyModifiers::NONE)), None);
     }
 }
