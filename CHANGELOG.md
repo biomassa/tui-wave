@@ -54,6 +54,10 @@
 - Fixed "Save All & Quit" (and closing a single buffer with unsaved changes) silently
   discarding never-saved buffers instead of asking for a filename — it now prompts for a
   name for each one, in turn, before actually quitting/closing.
+- Fixed a waveform display glitch right after a fade (most visible with Technical Fades'
+  short 5ms ramp): the cache backing the waveform could report a column's level as already
+  back at full volume one column early, bleeding in the next bin's content. The fade math
+  itself was always correct — this was purely a display-precision bug in the cache, now exact.
 
 ## 2026-06-24
 
