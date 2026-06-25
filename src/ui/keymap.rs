@@ -31,6 +31,8 @@ pub enum Action {
     Resample,
     Delete,
     ClearSelection,
+    SelectAll,
+    ToggleAudition,
     SaveAs,
     SaveAll,
     ToggleZeroSnap,
@@ -63,6 +65,7 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') => Some(Action::Quit),
+        KeyCode::Char('a') if ctrl => Some(Action::SelectAll),
         KeyCode::Char('x') if ctrl => Some(Action::Cut),
         KeyCode::Char('c') if ctrl => Some(Action::Copy),
         KeyCode::Char('v') if ctrl => Some(Action::Paste),
@@ -107,6 +110,7 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('z') => Some(Action::ToggleZeroSnap),
         KeyCode::Char('C') => Some(Action::CopyToNew),
         KeyCode::Char('l') => Some(Action::ToggleLoop),
+        KeyCode::Char('p') => Some(Action::ToggleAudition),
         KeyCode::Char('m') => Some(Action::InsertMarker),
         KeyCode::Char('M') => Some(Action::DeleteMarker),
         KeyCode::Char('[') => Some(Action::JumpPrevMarker),
@@ -188,6 +192,14 @@ mod tests {
         assert_eq!(
             map_key(key(KeyCode::Char('v'), KeyModifiers::CONTROL)),
             Some(Action::Paste)
+        );
+    }
+
+    #[test]
+    fn ctrl_a_selects_all() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            Some(Action::SelectAll)
         );
     }
 
@@ -325,5 +337,14 @@ mod tests {
             Some(Action::ToggleLoop)
         );
         assert_eq!(map_key(key(KeyCode::Char('L'), KeyModifiers::NONE)), None);
+    }
+
+    #[test]
+    fn plain_p_toggles_audition() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('p'), KeyModifiers::NONE)),
+            Some(Action::ToggleAudition)
+        );
+        assert_eq!(map_key(key(KeyCode::Char('P'), KeyModifiers::NONE)), None);
     }
 }
