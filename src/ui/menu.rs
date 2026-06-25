@@ -201,6 +201,11 @@ impl MenuBar {
                         shortcut: "Ctrl+e",
                         action: Action::Resample,
                     },
+                    MenuEntry {
+                        label: "Technical Fades",
+                        shortcut: "Ctrl+b",
+                        action: Action::TechnicalFades,
+                    },
                 ],
             },
             MenuItem {

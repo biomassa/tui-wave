@@ -38,6 +38,9 @@
 - Added **Auto-Insert Markers at Transients** (`t`): scans the whole file and drops a
   marker before every detected transient, using the same threshold as Next Rising Edge,
   as a single undoable action.
+- Added **Technical Fades** (`Ctrl+b`): a fixed 5ms exponential fade in at the start and
+  fade out at the end of the whole file — the standard pre-export move to mask the click a
+  hard cut to/from silence would otherwise leave at the file's boundaries.
 
 ## 2026-06-24
 
