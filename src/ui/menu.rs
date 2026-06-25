@@ -233,9 +233,24 @@ impl MenuBar {
                         action: Action::JumpNextMarker,
                     },
                     MenuEntry {
+                        label: "Extend Selection to Previous Marker",
+                        shortcut: "{",
+                        action: Action::ExtendSelectionToPrevMarker,
+                    },
+                    MenuEntry {
+                        label: "Extend Selection to Next Marker",
+                        shortcut: "}",
+                        action: Action::ExtendSelectionToNextMarker,
+                    },
+                    MenuEntry {
                         label: "Next Rising Edge",
                         shortcut: "/",
                         action: Action::NextRisingEdge,
+                    },
+                    MenuEntry {
+                        label: "Previous Rising Edge",
+                        shortcut: "?",
+                        action: Action::PrevRisingEdge,
                     },
                     MenuEntry {
                         label: "Auto-Insert Markers at Transients",

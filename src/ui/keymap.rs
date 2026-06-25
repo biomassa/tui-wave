@@ -47,11 +47,14 @@ pub enum Action {
     Trim,
     ExtendSelectionToStart,
     ExtendSelectionToEnd,
+    ExtendSelectionToPrevMarker,
+    ExtendSelectionToNextMarker,
     InsertMarker,
     DeleteMarker,
     JumpPrevMarker,
     JumpNextMarker,
     NextRisingEdge,
+    PrevRisingEdge,
     AutoInsertMarkers,
     IncreaseTransientThreshold,
     DecreaseTransientThreshold,
@@ -114,6 +117,11 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::IncreaseTransientThreshold),
         KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::DecreaseTransientThreshold),
         KeyCode::Char('/') => Some(Action::NextRisingEdge),
+        // Shift+/ on most layouts sends '?' as the character itself, modifiers aside — bind
+        // the literal resulting key rather than relying on a Shift flag alongside '/' (the
+        // same reasoning that keeps every other shifted-symbol key in this app keyed off
+        // its own character, not a modifier combo a terminal might not report consistently).
+        KeyCode::Char('?') => Some(Action::PrevRisingEdge),
         KeyCode::Up if shift => Some(Action::ZoomInVertical),
         KeyCode::Down if shift => Some(Action::ZoomOutVertical),
         KeyCode::Up => Some(Action::ZoomIn),
@@ -132,6 +140,11 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('M') => Some(Action::DeleteMarker),
         KeyCode::Char('[') => Some(Action::JumpPrevMarker),
         KeyCode::Char(']') => Some(Action::JumpNextMarker),
+        // Shift+[ / Shift+] send '{' / '}' as the character itself on most layouts — bound
+        // directly for the same reason as '?' for Shift+/ above: the literal resulting key,
+        // not a Shift flag alongside '[' / ']', is what's actually portable across terminals.
+        KeyCode::Char('{') => Some(Action::ExtendSelectionToPrevMarker),
+        KeyCode::Char('}') => Some(Action::ExtendSelectionToNextMarker),
         _ => None,
     }
 }
@@ -280,6 +293,11 @@ mod tests {
     }
 
     #[test]
+    fn question_mark_is_prev_rising_edge() {
+        assert_eq!(map_key(key(KeyCode::Char('?'), KeyModifiers::NONE)), Some(Action::PrevRisingEdge));
+    }
+
+    #[test]
     fn plus_minus_adjust_transient_threshold_not_zoom() {
         assert_eq!(
             map_key(key(KeyCode::Char('+'), KeyModifiers::NONE)),
@@ -385,6 +403,14 @@ mod tests {
         assert_eq!(map_key(key(KeyCode::Char('M'), KeyModifiers::NONE)), Some(Action::DeleteMarker));
         assert_eq!(map_key(key(KeyCode::Char('['), KeyModifiers::NONE)), Some(Action::JumpPrevMarker));
         assert_eq!(map_key(key(KeyCode::Char(']'), KeyModifiers::NONE)), Some(Action::JumpNextMarker));
+        assert_eq!(
+            map_key(key(KeyCode::Char('{'), KeyModifiers::NONE)),
+            Some(Action::ExtendSelectionToPrevMarker)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('}'), KeyModifiers::NONE)),
+            Some(Action::ExtendSelectionToNextMarker)
+        );
     }
 
     #[test]

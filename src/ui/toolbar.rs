@@ -32,6 +32,9 @@ pub struct Toolbar {
     rects: Vec<(Rect, Action)>,
     pub active_actions: HashSet<Action>,
     pub is_playing: bool,
+    /// Next Rising Edge's current transient threshold, shown live in place of a static
+    /// "Thresh+"/"Thresh-" label pair (see `button_label`).
+    pub transient_threshold_db: f32,
 }
 
 /// Spacing constants, shared by layout (`build`) and measurement (`section_width`) so the
@@ -64,6 +67,7 @@ impl Toolbar {
                     ("Paste", "^v", Action::Paste),
                     ("Undo", "^z", Action::Undo),
                     ("Redo", "^y", Action::Redo),
+                    ("Deselect", "^d", Action::ClearSelection),
                 ],
             },
             ToolGroup {
@@ -96,10 +100,15 @@ impl Toolbar {
                     ("Del", "M", Action::DeleteMarker),
                     ("Prev", "[", Action::JumpPrevMarker),
                     ("Next", "]", Action::JumpNextMarker),
+                    ("ExtPrev", "{", Action::ExtendSelectionToPrevMarker),
+                    ("ExtNext", "}", Action::ExtendSelectionToNextMarker),
                     ("NextEdge", "/", Action::NextRisingEdge),
+                    ("PrevEdge", "?", Action::PrevRisingEdge),
                     ("AutoMark", "t", Action::AutoInsertMarkers),
-                    ("Thresh+", "+", Action::IncreaseTransientThreshold),
-                    ("Thresh-", "-", Action::DecreaseTransientThreshold),
+                    // Labels are overridden dynamically in `button_label` (the live dB
+                    // value, then the bare +/- shortcuts) — these are just placeholders.
+                    ("", "+", Action::IncreaseTransientThreshold),
+                    ("", "-", Action::DecreaseTransientThreshold),
                 ],
             },
             ToolGroup {
@@ -147,6 +156,7 @@ impl Toolbar {
             rects: Vec::new(),
             active_actions: HashSet::new(),
             is_playing: false,
+            transient_threshold_db: 6.0,
         }
     }
 
@@ -158,11 +168,13 @@ impl Toolbar {
         }
     }
 
-    fn button_label(&self, label: &'static str, action: Action) -> &'static str {
+    fn button_label(&self, label: &'static str, action: Action) -> String {
         if action == Action::TogglePlayback && self.is_playing {
-            "Stop"
+            "Stop".to_string()
+        } else if action == Action::IncreaseTransientThreshold {
+            format!("Thresh {:.0}dB", self.transient_threshold_db)
         } else {
-            label
+            label.to_string()
         }
     }
 
