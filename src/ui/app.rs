@@ -164,12 +164,16 @@ pub struct App {
     /// Persisted toggles, loaded at startup and rewritten whenever one changes. The
     /// snapshot here is what gets written to disk — see `save_config`.
     config: Config,
-    /// Tracks a held arrow key for nav-step acceleration: the action being repeated and
-    /// when the current hold started. Reset whenever the action changes or the gap since
-    /// the last repeat exceeds `NAV_HOLD_RESET_GAP` (i.e. a fresh keypress, not a hold).
-    nav_hold: Option<(Action, Instant)>,
-    /// Time of the most recent nav-step keypress, used to detect whether the next one is
-    /// a continuation of a hold or a fresh press.
+    /// The nav action currently building up a fast-repeat streak (see `nav_step_multiplier`).
+    nav_hold_action: Option<Action>,
+    /// How many consecutive repeats of `nav_hold_action` have landed less than
+    /// `NAV_FAST_REPEAT_GAP` apart. This — not elapsed wall-clock time — is what
+    /// acceleration ramps on, specifically because elapsed time can't tell a held key from
+    /// someone tapping it steadily for a while: both rack up the same wall-clock duration.
+    /// A tight per-event gap requirement is what only a genuine hold (terminal auto-repeat
+    /// fires every ~20-50ms) can sustain for many consecutive events; manual tapping can't.
+    nav_repeat_count: u32,
+    /// Time of the most recent nav-step keypress, used to measure the gap to the next one.
     last_nav_time: Option<Instant>,
     /// Active parameter dialog (Normalize or Gain), if any.
     dialog: Option<Dialog>,
@@ -238,7 +242,8 @@ impl App {
             audition_pending: None,
             last_file_click: None,
             config,
-            nav_hold: None,
+            nav_hold_action: None,
+            nav_repeat_count: 0,
             last_nav_time: None,
             dialog: None,
             playhead_position: None,
@@ -788,40 +793,36 @@ impl App {
         self.config.save();
     }
 
-    /// Step multiplier for a held arrow key: 1x on a fresh press, staying at 1x for the
-    /// first `NAV_ACCEL_DEBOUNCE` of a hold, then ramping linearly up to
-    /// `NAV_MAX_MULTIPLIER` as the same action keeps repeating. The debounce is what tells
-    /// a genuine hold (the terminal's own key-repeat firing every ~30-50ms) apart from
-    /// someone just tapping the same arrow quickly by hand — a few fast manual taps land
-    /// well under the debounce and never accelerate, only a hold sustained past it does.
-    /// Reset the instant the action changes or the gap between repeats exceeds
-    /// `NAV_HOLD_RESET_GAP` (i.e. the key was released and pressed again rather than held).
-    /// Always 1x in fine mode — fine stepping is for slow, precise movement, not covering
-    /// ground quickly.
+    /// Step multiplier for a held arrow key. Ramps on the *count* of consecutive repeats
+    /// landing less than `NAV_FAST_REPEAT_GAP` apart — not on elapsed wall-clock time, which
+    /// can't tell a held key apart from someone tapping it steadily: both rack up the same
+    /// duration if the gaps just happen to all be short enough. A real hold's terminal
+    /// auto-repeat fires every ~20-50ms and easily clears `NAV_ACCEL_START_REPS` within a
+    /// fraction of a second; manual tapping can't sustain that many sub-gap repeats in a
+    /// row, so it never accumulates enough count to ramp. Any repeat with a longer gap (or a
+    /// different action) resets the count to 0. Always 1x in fine mode — fine stepping is
+    /// for slow, precise movement, not covering ground quickly.
     fn nav_step_multiplier(&mut self, action: Action) -> f64 {
-        const NAV_HOLD_RESET_GAP: Duration = Duration::from_millis(220);
-        const NAV_ACCEL_DEBOUNCE: Duration = Duration::from_millis(200);
-        const NAV_RAMP_DURATION: Duration = Duration::from_millis(1000);
+        const NAV_FAST_REPEAT_GAP: Duration = Duration::from_millis(120);
+        const NAV_ACCEL_START_REPS: u32 = 5;
+        const NAV_ACCEL_RAMP_REPS: u32 = 20;
         const NAV_MAX_MULTIPLIER: f64 = 8.0;
 
         let now = Instant::now();
-        let continuing_hold = self.nav_hold.is_some_and(|(held_action, _)| held_action == action)
-            && self.last_nav_time.is_some_and(|t| now.duration_since(t) < NAV_HOLD_RESET_GAP);
-        if !continuing_hold {
-            self.nav_hold = Some((action, now));
+        let is_fast_repeat = self.nav_hold_action == Some(action)
+            && self.last_nav_time.is_some_and(|t| now.duration_since(t) < NAV_FAST_REPEAT_GAP);
+        if is_fast_repeat {
+            self.nav_repeat_count = self.nav_repeat_count.saturating_add(1);
+        } else {
+            self.nav_hold_action = Some(action);
+            self.nav_repeat_count = 0;
         }
         self.last_nav_time = Some(now);
 
-        if self.fine_mode {
+        if self.fine_mode || self.nav_repeat_count < NAV_ACCEL_START_REPS {
             return 1.0;
         }
-        let held_since = self.nav_hold.expect("just set above").1;
-        let elapsed = now.duration_since(held_since);
-        if elapsed < NAV_ACCEL_DEBOUNCE {
-            return 1.0;
-        }
-        let ramp_span = NAV_RAMP_DURATION.saturating_sub(NAV_ACCEL_DEBOUNCE).max(Duration::from_millis(1));
-        let t = ((elapsed - NAV_ACCEL_DEBOUNCE).as_secs_f64() / ramp_span.as_secs_f64()).min(1.0);
+        let t = ((self.nav_repeat_count - NAV_ACCEL_START_REPS) as f64 / NAV_ACCEL_RAMP_REPS as f64).min(1.0);
         1.0 + t * (NAV_MAX_MULTIPLIER - 1.0)
     }
 
@@ -2669,43 +2670,62 @@ mod tests {
         assert!(!app.buffer_panel.focused);
     }
 
-    /// Holding the same arrow action ramps the multiplier above 1x; a gap long enough to
-    /// be a fresh keypress resets it; fine mode forces it back to 1x regardless of hold.
+    /// A genuine hold — repeats landing tightly spaced (simulating terminal auto-repeat,
+    /// which fires every ~20-50ms) — must ramp the multiplier above 1x once enough of them
+    /// land in a row, and a gap long enough to be a fresh keypress resets the count.
     #[test]
-    fn nav_step_multiplier_ramps_then_resets_and_is_disabled_in_fine_mode() {
+    fn nav_step_multiplier_ramps_on_a_genuine_hold() {
         let mut app = App::new(Some(doc(0.1, 1_000_000)), None);
 
         let first = app.nav_step_multiplier(Action::MoveCursorRight);
         assert_eq!(first, 1.0, "a fresh press should not be accelerated");
 
-        // A couple of quick manual taps, each well under the 200ms accel debounce, must
-        // never accelerate — only a hold sustained past the debounce should.
-        std::thread::sleep(Duration::from_millis(80));
-        let tap = app.nav_step_multiplier(Action::MoveCursorRight);
-        assert_eq!(tap, 1.0, "a manual tap inside the debounce window must not accelerate");
-        std::thread::sleep(Duration::from_millis(80));
-        let tap2 = app.nav_step_multiplier(Action::MoveCursorRight);
-        assert_eq!(tap2, 1.0, "repeated manual taps that never sustain past the debounce must not accelerate");
-
-        std::thread::sleep(Duration::from_millis(150));
-        let held = app.nav_step_multiplier(Action::MoveCursorRight);
-        assert!(held > 1.0, "a hold sustained past the debounce should accelerate");
+        // Simulate a held key: many repeats at a tight (~30ms) gap, well under the
+        // 120ms fast-repeat threshold. Acceleration only kicks in once the streak count
+        // clears the start threshold (5).
+        let mut multiplier = 1.0;
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(30));
+            multiplier = app.nav_step_multiplier(Action::MoveCursorRight);
+        }
+        assert!(multiplier > 1.0, "a sustained tight-gap hold should accelerate");
 
         std::thread::sleep(Duration::from_millis(100));
         let switched = app.nav_step_multiplier(Action::MoveCursorLeft);
-        assert_eq!(switched, 1.0, "switching to a different action should reset the ramp");
+        assert_eq!(switched, 1.0, "switching to a different action should reset the streak");
 
         std::thread::sleep(Duration::from_millis(400));
         let after_gap = app.nav_step_multiplier(Action::MoveCursorLeft);
-        assert_eq!(after_gap, 1.0, "a gap past the reset window should be treated as a fresh press");
+        assert_eq!(after_gap, 1.0, "a gap past the fast-repeat threshold should be treated as a fresh press");
+    }
 
+    /// The actual bug report this guards against: tapping the same arrow key repeatedly
+    /// *by hand* (not holding it) must never accelerate, no matter how long the tapping is
+    /// sustained — elapsed wall-clock time alone must not be what acceleration ramps on.
+    #[test]
+    fn nav_step_multiplier_never_accelerates_from_manual_tapping() {
+        let mut app = App::new(Some(doc(0.1, 1_000_000)), None);
+
+        // Each tap is 150ms apart — past the 120ms fast-repeat gap — repeated many times
+        // (1.35s of sustained tapping). Every single one must stay at 1x.
+        for _ in 0..9 {
+            std::thread::sleep(Duration::from_millis(150));
+            let multiplier = app.nav_step_multiplier(Action::MoveCursorRight);
+            assert_eq!(multiplier, 1.0, "a manual tap, however sustained, must never accelerate");
+        }
+    }
+
+    /// Fine mode must never accelerate, even mid a genuine tight-gap hold.
+    #[test]
+    fn nav_step_multiplier_disabled_in_fine_mode() {
+        let mut app = App::new(Some(doc(0.1, 1_000_000)), None);
         app.fine_mode = true;
-        app.nav_hold = None;
-        app.last_nav_time = None;
-        let _ = app.nav_step_multiplier(Action::MoveCursorRight);
-        std::thread::sleep(Duration::from_millis(250));
-        let fine = app.nav_step_multiplier(Action::MoveCursorRight);
-        assert_eq!(fine, 1.0, "fine mode must never accelerate");
+        let mut multiplier = 1.0;
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(30));
+            multiplier = app.nav_step_multiplier(Action::MoveCursorRight);
+        }
+        assert_eq!(multiplier, 1.0, "fine mode must never accelerate");
     }
 
     /// Copy-to-New must create a *dirty* buffer (unsaved data, no path), so the quit/close
