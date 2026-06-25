@@ -41,6 +41,19 @@
 - Added **Technical Fades** (`Ctrl+b`): a fixed 5ms exponential fade in at the start and
   fade out at the end of the whole file — the standard pre-export move to mask the click a
   hard cut to/from silence would otherwise leave at the file's boundaries.
+- Fixed Next Rising Edge stopping well before the actual transient: a faint puff of
+  pre-roll noise rising out of near-silence no longer gets mistaken for the real one.
+- Added **Previous Rising Edge** (`?`): the same transient detection, searching backward.
+- Next/Previous Rising Edge now center the viewport on the new cursor position instead of
+  just nudging it into view, so there's context on both sides at any zoom level.
+- Added Shift+[ / Shift+] (`{` / `}`): selects from the cursor to the previous/next marker
+  (or the start/end of the file if there's none), advancing the cursor to the selection's
+  new edge and scrolling it into view.
+- Added a "Deselect" button to the toolbar's EDIT group.
+- The toolbar's transient threshold now reads "Thresh 6dB" instead of a bare "6dB".
+- Fixed "Save All & Quit" (and closing a single buffer with unsaved changes) silently
+  discarding never-saved buffers instead of asking for a filename — it now prompts for a
+  name for each one, in turn, before actually quitting/closing.
 
 ## 2026-06-24
 

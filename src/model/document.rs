@@ -141,6 +141,12 @@ impl Document {
         const TRANSIENT_FRAME_MS: f64 = 10.0;
         const TRANSIENT_BACKGROUND_TIME_CONSTANT_MS: f64 = 150.0;
         const EPS: f32 = 1e-6;
+        // A frame quieter than this never counts as a transient's onset, no matter how
+        // large its *relative* jump over an even quieter background is. Without this gate,
+        // a faint puff of pre-roll noise rising out of near-digital-silence registers as a
+        // huge nominal dB jump (since the background started near zero) and gets flagged
+        // long before the actual, audibly loud transient — stopping well short of it.
+        const TRANSIENT_MIN_LEVEL: f32 = 0.01; // ~ -40dBFS
 
         let total = self.len_samples();
         if self.channels.is_empty() || from >= total {
@@ -158,7 +164,7 @@ impl Document {
                 None => background = Some(frame_level),
                 Some(bg) => {
                     let rise_db = 20.0 * (frame_level / bg.max(EPS)).log10();
-                    if rise_db >= threshold_db {
+                    if rise_db >= threshold_db && frame_level >= TRANSIENT_MIN_LEVEL {
                         return Some(pos);
                     }
                     background = Some(bg * (1.0 - alpha) + frame_level * alpha);
@@ -182,6 +188,13 @@ impl Document {
             pos = edge;
         }
         edges
+    }
+
+    /// Finds the transient immediately before `before` (searching backward), for "Previous
+    /// Transient" navigation — the same definition of "transient" as `find_next_rising_edge`,
+    /// just picking the closest one behind the cursor rather than ahead of it.
+    pub fn find_previous_rising_edge(&self, before: usize, threshold_db: f32) -> Option<usize> {
+        self.find_all_rising_edges(threshold_db).into_iter().filter(|&pos| pos < before).max()
     }
 
     /// RMS amplitude within `[start, end)`, taking the loudest channel — a transient in any
@@ -317,6 +330,29 @@ mod tests {
         let d = doc(segments(&[(0.5, 20), (1.0, 20)]));
         assert!(d.find_next_rising_edge(0, 3.0).is_some());
         assert_eq!(d.find_next_rising_edge(0, 9.0), None);
+    }
+
+    #[test]
+    fn find_next_rising_edge_skips_quiet_pre_roll_noise_and_finds_the_real_transient() {
+        // The bug this guards against: starting from near-digital-silence, a faint puff of
+        // pre-roll noise (well below -40dBFS) is a *huge* relative jump from near-zero, but
+        // must not be flagged — only the actual loud transient further along should be.
+        let d = doc(segments(&[(0.0, 5), (0.005, 30), (0.3, 20)]));
+        let pos = d.find_next_rising_edge(0, 6.0).expect("should find the real transient");
+        assert_eq!(pos, 35 * 441, "should land on the loud transient, not the quiet pre-roll");
+    }
+
+    #[test]
+    fn find_previous_rising_edge_finds_the_closest_one_behind() {
+        let d = doc(segments(&[(0.01, 20), (0.5, 20), (5.0, 20)]));
+        // From inside the loudest segment, both earlier transients (frame 20 and frame 40)
+        // qualify as "behind" — the closer one (frame 40, the 0.5 -> 5.0 rise) must win,
+        // not the more distant frame-20 one.
+        assert_eq!(d.find_previous_rising_edge(45 * 441, 6.0), Some(40 * 441));
+        // From inside the medium segment, only the frame-20 transient is behind.
+        assert_eq!(d.find_previous_rising_edge(25 * 441, 6.0), Some(20 * 441));
+        // From right at the first transient itself, there's nothing earlier.
+        assert_eq!(d.find_previous_rising_edge(20 * 441, 6.0), None);
     }
 
     #[test]
