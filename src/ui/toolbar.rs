@@ -95,6 +95,10 @@ impl Toolbar {
                     ("Del", "M", Action::DeleteMarker),
                     ("Prev", "[", Action::JumpPrevMarker),
                     ("Next", "]", Action::JumpNextMarker),
+                    ("NextEdge", "/", Action::NextRisingEdge),
+                    ("AutoMark", "t", Action::AutoInsertMarkers),
+                    ("Thresh+", "+", Action::IncreaseTransientThreshold),
+                    ("Thresh-", "-", Action::DecreaseTransientThreshold),
                 ],
             },
             ToolGroup {
@@ -103,6 +107,8 @@ impl Toolbar {
                     ("zeroXSnap", "z", Action::ToggleZeroSnap),
                     ("Loop", "l", Action::ToggleLoop),
                     ("fineNavi", "~", Action::ToggleFineMode),
+                    ("insPointFollows", "i", Action::ToggleCursorFollowsPlayback),
+                    ("viewFollows", "f", Action::ToggleViewportFollowsPlayback),
                 ],
             },
         ];
@@ -114,7 +120,7 @@ impl Toolbar {
                 ("OpenDir", "^o", Action::OpenDirectory),
                 ("Select", "Up/Dn", Action::Noop),
                 ("Page", "PgUp/Dn", Action::Noop),
-                ("Audition", "p", Action::ToggleAudition),
+                ("Audition", "a", Action::ToggleAudition),
                 ("Search", "/", Action::SearchFiles),
                 ("Focus", "Tab", Action::FocusNext),
                 ("Quit", "q", Action::Quit),

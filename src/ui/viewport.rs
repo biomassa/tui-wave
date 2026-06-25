@@ -64,6 +64,16 @@ impl Viewport {
         self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset(width));
     }
 
+    /// Scrolls so `sample` sits at the horizontal center of the view (clamped so the window
+    /// never overhangs past end-of-file, same as `ensure_visible`) — used by "Viewport
+    /// Follows Playback" once the playhead reaches the right edge, so it then stays
+    /// centered while the view scrolls continuously alongside it.
+    pub fn center_on(&mut self, sample: usize, width: u16) {
+        let half_span = self.span(width) as f64 / 2.0;
+        let target = (sample as f64 - half_span).max(0.0) as usize;
+        self.scroll_offset = target.min(self.max_scroll_offset(width));
+    }
+
     /// Zoom by `factor` (>1.0 = zoom in, <1.0 = zoom out) while keeping `anchor_sample`
     /// fixed at the same terminal column — without this, zooming would disorientingly
     /// shift whatever the user is looking at.
@@ -150,6 +160,22 @@ mod tests {
         let span = viewport.span(80);
         viewport.ensure_visible(span + 500, 80);
         assert_eq!(viewport.scroll_offset, span + 500 + 1 - span.max(1));
+    }
+
+    #[test]
+    fn center_on_puts_sample_at_the_middle_column() {
+        let mut viewport = zoomed_in_viewport(1_000_000, 100.0);
+        viewport.center_on(50_000, 80);
+        let span = viewport.span(80);
+        // sample 50_000 should now sit at column span/2 from scroll_offset.
+        assert_eq!(viewport.scroll_offset + span / 2, 50_000);
+    }
+
+    #[test]
+    fn center_on_clamps_to_end_of_file() {
+        let mut viewport = zoomed_in_viewport(10_000, 100.0); // span(80) = 8000
+        viewport.center_on(9_999, 80);
+        assert!(viewport.scroll_offset + viewport.span(80) <= viewport.total_len);
     }
 
     #[test]
