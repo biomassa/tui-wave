@@ -3,6 +3,7 @@
 # Claude Code local settings / session data
 .claude/
 
-# Agentic / working docs stay local — only README.md is tracked
+# Agentic / working docs stay local — only README.md and CHANGELOG.md are tracked
 *.md
 !README.md
+!CHANGELOG.md
