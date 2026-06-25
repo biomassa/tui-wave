@@ -14,7 +14,7 @@ use crate::audio::engine::AudioEngine;
 use crate::config::Config;
 use crate::commands::cut::cut_command;
 use crate::commands::delete::delete_command;
-use crate::commands::fade::{fade_command, FadeCurve};
+use crate::commands::fade::{fade_command, technical_fades_command, FadeCurve};
 use crate::commands::gain::gain_command;
 use crate::commands::marker::{
     auto_insert_markers_command, delete_marker_command, insert_marker_command, move_marker_command, rename_marker_command,
@@ -1102,6 +1102,19 @@ impl App {
         self.after_sample_mutation(idx);
     }
 
+    /// A short exponential fade in at the very start of the file and fade out at the very
+    /// end (the standard pre-export "technical fade" to mask the click a hard cut to/from
+    /// silence would otherwise leave at the file's boundaries) — fixed at 5ms, no dialog,
+    /// always the whole file regardless of any active selection.
+    fn apply_technical_fades(&mut self) {
+        const TECHNICAL_FADE_MS: f64 = 5.0;
+        let idx = self.active_document;
+        let Some(document) = self.active_doc() else { return };
+        let fade_len = ((document.sample_rate as f64 * TECHNICAL_FADE_MS / 1000.0).round() as usize).max(1);
+        self.histories[idx].apply(technical_fades_command(fade_len), &mut self.documents[idx]);
+        self.after_sample_mutation(idx);
+    }
+
     fn load_file(&mut self, path: PathBuf) {
         self.stop_audition();
         if let Some(audio) = self.audio.take() {
@@ -1768,6 +1781,11 @@ impl App {
             return;
         }
 
+        if action == Action::TechnicalFades {
+            self.apply_technical_fades();
+            return;
+        }
+
         if action == Action::CopyToNew {
             let data = self.active_doc().and_then(|d| {
                 d.selection.map(|sel| {
@@ -1863,6 +1881,7 @@ impl App {
             | Action::CopyToNew
             | Action::FadeIn
             | Action::FadeOut
+            | Action::TechnicalFades
             | Action::InsertMarker
             | Action::DeleteMarker
             | Action::JumpPrevMarker
@@ -2786,6 +2805,30 @@ mod tests {
 
         assert!(app.documents[0].markers.is_empty());
         assert!(!app.histories[0].undo(&mut app.documents[0]), "no history entry should have been recorded");
+    }
+
+    /// Technical Fades applies a fixed 5ms exp fade in/out to the whole file in one
+    /// undoable step, regardless of any active selection.
+    #[test]
+    fn technical_fades_applies_5ms_fades_to_the_whole_file() {
+        let mut d = doc(1.0, 44100); // 1 second at 44100Hz
+        d.selection = Some(Selection { start: 1000, end: 2000 });
+        let mut app = new_app(Some(d), None);
+
+        app.handle_action(Action::TechnicalFades);
+
+        let expected_fade_len = (44100.0 * 0.005f64).round() as usize; // 5ms
+        assert!((app.documents[0].channels[0][0]).abs() < 0.01, "should fade in from silence");
+        assert!(
+            (app.documents[0].channels[0][expected_fade_len - 1] - 1.0).abs() < 0.01,
+            "head fade should reach full volume by its end"
+        );
+        assert!((app.documents[0].channels[0][22050] - 1.0).abs() < 0.001, "the middle must be untouched");
+        assert!((*app.documents[0].channels[0].last().unwrap()).abs() < 0.01, "should fade out to silence");
+        assert_eq!(app.documents[0].selection, None, "should clear the selection, not act on it");
+
+        app.handle_action(Action::Undo);
+        assert!((app.documents[0].channels[0][0] - 1.0).abs() < 0.001, "undo should restore the original head");
     }
 
     /// `+`/`-` adjust the transient threshold within the clamp range and persist it.

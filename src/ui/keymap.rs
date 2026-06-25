@@ -43,6 +43,7 @@ pub enum Action {
     CopyToNew,
     FadeIn,
     FadeOut,
+    TechnicalFades,
     Trim,
     ExtendSelectionToStart,
     ExtendSelectionToEnd,
@@ -88,6 +89,10 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('f') if ctrl => Some(Action::FadeIn),
         KeyCode::Char('o') if ctrl => Some(Action::FadeOut),
         KeyCode::Char('t') if ctrl => Some(Action::Trim),
+        // A single modifier, not Ctrl+Shift — double-modifier combos aren't reliably
+        // reported by every terminal without the kitty keyboard protocol's disambiguation,
+        // the same reasoning that keeps fine-step mode off Ctrl/Alt+arrow (see ToggleFineMode).
+        KeyCode::Char('b') if ctrl => Some(Action::TechnicalFades),
         KeyCode::Left if shift => Some(Action::ExtendSelectionLeft),
         KeyCode::Right if shift => Some(Action::ExtendSelectionRight),
         KeyCode::PageUp if shift => Some(Action::ExtendSelectionToStart),
@@ -363,6 +368,14 @@ mod tests {
         assert_eq!(
             map_key(key(KeyCode::Char('o'), KeyModifiers::CONTROL)),
             Some(Action::FadeOut)
+        );
+    }
+
+    #[test]
+    fn ctrl_b_is_technical_fades() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+            Some(Action::TechnicalFades)
         );
     }
 

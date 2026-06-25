@@ -86,6 +86,7 @@ impl Toolbar {
                     ("FadeOut", "^o", Action::FadeOut),
                     ("Trim", "^t", Action::Trim),
                     ("Resamp", "^e", Action::Resample),
+                    ("TechFades", "^b", Action::TechnicalFades),
                 ],
             },
             ToolGroup {
