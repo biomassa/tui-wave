@@ -181,7 +181,7 @@ Settings are saved to `~/.config/tui-wave/config.toml`. Includes: snap-to-zero, 
 
 ## Tips
 
-- **Fine mode** (`` ` ``) + arrow keys = sample-accurate positioning. Great for surgical edits.
+- **Fine mode** (`` ~ ``) + arrow keys = sample-accurate positioning. Great for surgical edits.
 - **Transient detection** (`/` `?` `t`) uses a 10ms sliding RMS window. Adjust sensitivity with `+`/`-`.
 - **Zero-crossing snap** on cuts prevents clicks. Enable with `z` before cutting or deleting.
 - **Graphics mode** (`g`) renders the waveform as a bitmap at pixel resolution in terminal emulators that support kitty-graphics. Falls back to text mode if they do not.
