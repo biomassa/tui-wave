@@ -3424,15 +3424,15 @@ mod tests {
     #[test]
     fn transient_threshold_adjusts_and_clamps() {
         let mut app = new_app(Some(doc(0.1, 1_000)), None);
-        assert_eq!(app.transient_threshold_db, 6.0);
+        assert_eq!(app.transient_threshold_db, 13.0);
 
         app.handle_action(Action::IncreaseTransientThreshold);
-        assert_eq!(app.transient_threshold_db, 7.0);
-        assert_eq!(app.config.transient_threshold_db, 7.0, "should persist immediately");
+        assert_eq!(app.transient_threshold_db, 14.0);
+        assert_eq!(app.config.transient_threshold_db, 14.0, "should persist immediately");
 
         app.handle_action(Action::DecreaseTransientThreshold);
         app.handle_action(Action::DecreaseTransientThreshold);
-        assert_eq!(app.transient_threshold_db, 5.0);
+        assert_eq!(app.transient_threshold_db, 12.0);
 
         for _ in 0..40 {
             app.handle_action(Action::DecreaseTransientThreshold);
