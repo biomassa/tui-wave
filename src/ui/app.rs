@@ -33,7 +33,7 @@ use crate::model::selection::Selection;
 
 use super::buffer_panel::BufferPanel;
 use super::file_panel::{EntryKind as FileEntryKind, FilePanel};
-use super::keymap::{build_key_map, fill_missing_keybindings, map_key, Action};
+use super::keymap::{build_action_display_map, build_key_map, fill_missing_keybindings, map_key, Action};
 use super::layout::split_chrome;
 use super::menu::MenuBar;
 use super::terminal::Tui;
@@ -254,7 +254,11 @@ pub struct App {
 
 impl App {
     pub fn new(document: Option<Document>, directory: Option<PathBuf>) -> Self {
-        Self::new_with_config(document, directory, Config::load())
+        let app = Self::new_with_config(document, directory, Config::load());
+        // Ensure the config file exists from the very first launch so the user can
+        // see all available keybindings without having to trigger a toggle first.
+        app.config.save();
+        app
     }
 
     /// Sets the graphics-protocol capability detected by `terminal::init()` — called once
@@ -291,6 +295,8 @@ impl App {
             .map(|doc| doc.channels.iter().map(|c| WaveformCache::build(c)).collect())
             .unwrap_or_default();
         let histories = documents.iter().map(|_| History::new()).collect();
+        let menu_shortcuts = build_action_display_map(&config.keybindings, false);
+        let toolbar_shortcuts = build_action_display_map(&config.keybindings, true);
         Self {
             should_quit: false,
             key_map,
@@ -304,8 +310,8 @@ impl App {
             audio_sample_rate,
             histories,
             clipboard: Clipboard::default(),
-            menu: MenuBar::new(),
-            toolbar: Toolbar::new(),
+            menu: MenuBar::new(&menu_shortcuts),
+            toolbar: Toolbar::new(&toolbar_shortcuts),
             waveform_caches,
             content_width: 1,
             waveform_area: Rect::default(),

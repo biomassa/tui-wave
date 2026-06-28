@@ -5,8 +5,11 @@
 - All keyboard shortcuts are now configurable via `~/.config/tui-wave/config.toml` under a
   `[keybindings]` section. Every action lists its default key string(s) there on first save.
   Key string format: `"ctrl+x"`, `"shift+left"`, `"L"`, `"space"`, `"delete"`, etc.
-  Menu and toolbar display strings remain as written — if you remap a key, the new key
-  works but the displayed shortcut hint won't update until a future release.
+  Menu and toolbar display strings now reflect the configured binding — remapping a key
+  updates every shortcut hint in the menu and toolbar accordingly.
+- The config file (`~/.config/tui-wave/config.toml`) is now written on the very first
+  launch so all available keybindings are immediately visible without having to trigger a
+  toggle first.
 - Mix to Mono dialog: Tab now only cycles between channel input fields (it no longer toggles
   the tanh checkbox as a side effect). Press Space to toggle the tanh limiter when that row
   is focused.
