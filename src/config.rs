@@ -36,7 +36,7 @@ impl Default for Config {
             audition: false,
             cursor_follows_playback: false,
             viewport_follows_playback: false,
-            transient_threshold_db: 6.0,
+            transient_threshold_db: 13.0,
             graphics_mode: true,
         }
     }
