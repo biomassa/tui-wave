@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -13,7 +13,7 @@ use super::theme;
 /// A labelled group of related toolbar buttons. Each button is `(label, shortcut, action)`.
 struct ToolGroup {
     label: &'static str,
-    buttons: Vec<(&'static str, &'static str, Action)>,
+    buttons: Vec<(&'static str, String, Action)>,
 }
 
 /// Toolbar buttons share the exact same `Action` as menu entries and keyboard shortcuts
@@ -43,119 +43,126 @@ const GAP: u16 = 1; // trailing space after each button
 const SECTION_GAP: u16 = 1; // extra blank columns between sections (on top of a button's trailing space)
 
 impl Toolbar {
-    pub fn new() -> Self {
+    pub fn new(waveform_shortcuts: &HashMap<Action, String>) -> Self {
+        // Shortcut helper: look up from the config-derived map or fall back to the current default.
+        let sc = |action: Action, default: &str| -> String {
+            waveform_shortcuts.get(&action).cloned().unwrap_or_else(|| default.to_string())
+        };
         // Waveform-focus set: Play prefix + labelled sections.
         let waveform = vec![
             // Play has no section label — play/pause is the whole "transport".
             ToolGroup {
                 label: "",
-                buttons: vec![("Play", "Spc", Action::TogglePlayback)],
+                buttons: vec![("Play", sc(Action::TogglePlayback, "Spc"), Action::TogglePlayback)],
             },
             ToolGroup {
                 label: "FILE",
                 buttons: vec![
-                    ("Save", "^s", Action::Save),
-                    ("Quit", "q", Action::Quit),
+                    ("Save", sc(Action::Save,   "^s"), Action::Save),
+                    ("Quit", sc(Action::Quit,   "q"),  Action::Quit),
                 ],
             },
             ToolGroup {
                 label: "EDIT",
                 buttons: vec![
-                    ("Cut", "^x", Action::Cut),
-                    ("Copy", "^c", Action::Copy),
-                    ("copyToNew", "C", Action::CopyToNew),
-                    ("Paste", "^v", Action::Paste),
-                    ("Undo", "^z", Action::Undo),
-                    ("Redo", "^y", Action::Redo),
-                    ("Deselect", "^d", Action::ClearSelection),
+                    ("Cut",       sc(Action::Cut,            "^x"), Action::Cut),
+                    ("Copy",      sc(Action::Copy,           "^c"), Action::Copy),
+                    ("copyToNew", sc(Action::CopyToNew,      "C"),  Action::CopyToNew),
+                    ("Paste",     sc(Action::Paste,          "^v"), Action::Paste),
+                    ("Undo",      sc(Action::Undo,           "^z"), Action::Undo),
+                    ("Redo",      sc(Action::Redo,           "^y"), Action::Redo),
+                    ("Deselect",  sc(Action::ClearSelection, "^d"), Action::ClearSelection),
                 ],
             },
             ToolGroup {
                 label: "VIEW",
                 buttons: vec![
-                    ("Zoom+", "Up", Action::ZoomIn),
-                    ("Zoom-", "Dn", Action::ZoomOut),
-                    ("VZoom+", "S+Up", Action::ZoomInVertical),
-                    ("VZoom-", "S+Dn", Action::ZoomOutVertical),
-                    ("AutoVZoom", "a", Action::ToggleAutoVerticalZoom),
+                    ("Zoom+",   sc(Action::ZoomIn,             "Up"),  Action::ZoomIn),
+                    ("Zoom-",   sc(Action::ZoomOut,            "Dn"),  Action::ZoomOut),
+                    ("VZoom+",  sc(Action::ZoomInVertical,     "S+Up"), Action::ZoomInVertical),
+                    ("VZoom-",  sc(Action::ZoomOutVertical,    "S+Dn"), Action::ZoomOutVertical),
+                    ("AutoVZoom", sc(Action::ToggleAutoVerticalZoom, "a"), Action::ToggleAutoVerticalZoom),
                 ],
             },
             ToolGroup {
                 label: "PROCESS",
                 buttons: vec![
-                    ("Rev", "^r", Action::Reverse),
-                    ("Norm", "^n", Action::Normalize),
-                    ("Gain", "^g", Action::Gain),
-                    ("FadeIn", "^f", Action::FadeIn),
-                    ("FadeOut", "^o", Action::FadeOut),
-                    ("Trim", "^t", Action::Trim),
-                    ("Resamp", "^e", Action::Resample),
-                    ("bothFades", "^b", Action::TechnicalFades),
+                    ("Rev",       sc(Action::Reverse,        "^r"), Action::Reverse),
+                    ("Norm",      sc(Action::Normalize,      "^n"), Action::Normalize),
+                    ("Gain",      sc(Action::Gain,           "^g"), Action::Gain),
+                    ("FadeIn",    sc(Action::FadeIn,         "^f"), Action::FadeIn),
+                    ("FadeOut",   sc(Action::FadeOut,        "^o"), Action::FadeOut),
+                    ("Trim",      sc(Action::Trim,           "^t"), Action::Trim),
+                    ("Resamp",    sc(Action::Resample,       "^e"), Action::Resample),
+                    ("bothFades", sc(Action::TechnicalFades, "^b"), Action::TechnicalFades),
                 ],
             },
             ToolGroup {
                 label: "MARK",
                 buttons: vec![
-                    ("Add", "m", Action::InsertMarker),
-                    ("Del", "M", Action::DeleteMarker),
-                    ("Prev", "[", Action::JumpPrevMarker),
-                    ("Next", "]", Action::JumpNextMarker),
-                    ("ExtPrev", "{", Action::ExtendSelectionToPrevMarker),
-                    ("ExtNext", "}", Action::ExtendSelectionToNextMarker),
-                    ("NextEdge", "/", Action::NextRisingEdge),
-                    ("PrevEdge", "?", Action::PrevRisingEdge),
-                    ("AutoMark", "t", Action::AutoInsertMarkers),
+                    ("Add",      sc(Action::InsertMarker,               "m"), Action::InsertMarker),
+                    ("Del",      sc(Action::DeleteMarker,               "M"), Action::DeleteMarker),
+                    ("Prev",     sc(Action::JumpPrevMarker,             "["), Action::JumpPrevMarker),
+                    ("Next",     sc(Action::JumpNextMarker,             "]"), Action::JumpNextMarker),
+                    ("ExtPrev",  sc(Action::ExtendSelectionToPrevMarker,"{"), Action::ExtendSelectionToPrevMarker),
+                    ("ExtNext",  sc(Action::ExtendSelectionToNextMarker,"}"), Action::ExtendSelectionToNextMarker),
+                    ("NextEdge", sc(Action::NextRisingEdge,             "/"), Action::NextRisingEdge),
+                    ("PrevEdge", sc(Action::PrevRisingEdge,             "?"), Action::PrevRisingEdge),
+                    ("AutoMark", sc(Action::AutoInsertMarkers,          "t"), Action::AutoInsertMarkers),
                     // Labels are overridden dynamically in `button_label` (the live dB
                     // value, then the bare +/- shortcuts) — these are just placeholders.
-                    ("", "+", Action::IncreaseTransientThreshold),
-                    ("", "-", Action::DecreaseTransientThreshold),
+                    ("", sc(Action::IncreaseTransientThreshold, "+"), Action::IncreaseTransientThreshold),
+                    ("", sc(Action::DecreaseTransientThreshold, "-"), Action::DecreaseTransientThreshold),
                 ],
             },
             ToolGroup {
                 label: "CHANNELS",
                 buttons: vec![
-                    ("mixToMono", "^m", Action::MixToMono),
-                    ("newFromLeft", "L", Action::NewFromLeft),
-                    ("newFromRight", "R", Action::NewFromRight),
+                    ("mixToMono",   sc(Action::MixToMono,    "^m"), Action::MixToMono),
+                    ("newFromLeft", sc(Action::NewFromLeft,  "L"),  Action::NewFromLeft),
+                    ("newFromRight",sc(Action::NewFromRight, "R"),  Action::NewFromRight),
                 ],
             },
             ToolGroup {
                 label: "OPTS",
                 buttons: vec![
-                    ("zeroXSnap", "z", Action::ToggleZeroSnap),
-                    ("Loop", "l", Action::ToggleLoop),
-                    ("fineNavi", "~", Action::ToggleFineMode),
-                    ("insPointFollows", "i", Action::ToggleCursorFollowsPlayback),
-                    ("viewFollows", "f", Action::ToggleViewportFollowsPlayback),
-                    ("graphics", "g", Action::ToggleGraphicsMode),
+                    ("zeroXSnap",      sc(Action::ToggleZeroSnap,              "z"), Action::ToggleZeroSnap),
+                    ("Loop",           sc(Action::ToggleLoop,                  "l"), Action::ToggleLoop),
+                    ("fineNavi",       sc(Action::ToggleFineMode,              "`"), Action::ToggleFineMode),
+                    ("insPointFollows",sc(Action::ToggleCursorFollowsPlayback, "i"), Action::ToggleCursorFollowsPlayback),
+                    ("viewFollows",    sc(Action::ToggleViewportFollowsPlayback,"f"), Action::ToggleViewportFollowsPlayback),
+                    ("graphics",       sc(Action::ToggleGraphicsMode,          "g"), Action::ToggleGraphicsMode),
                 ],
             },
         ];
         // Files-focus set: a flat, unlabelled list of file-browser commands.
+        // These use contextual shortcuts (e.g. ^o = OpenDirectory here, FadeOut elsewhere)
+        // so they stay as literal strings, not looked up from the global keybinding map.
         let files = vec![ToolGroup {
             label: "",
             buttons: vec![
-                ("Open", "Enter", Action::OpenSelected),
-                ("OpenDir", "^o", Action::OpenDirectory),
-                ("Select", "Up/Dn", Action::Noop),
-                ("Page", "PgUp/Dn", Action::Noop),
-                ("Audition", "a", Action::ToggleAudition),
-                ("Search", "/", Action::SearchFiles),
-                ("Focus", "Tab", Action::FocusNext),
-                ("Quit", "q", Action::Quit),
+                ("Open",     "Enter".to_string(),  Action::OpenSelected),
+                ("OpenDir",  "^o".to_string(),     Action::OpenDirectory),
+                ("Select",   "Up/Dn".to_string(),  Action::Noop),
+                ("Page",     "PgUp/Dn".to_string(),Action::Noop),
+                ("Audition", "a".to_string(),      Action::ToggleAudition),
+                ("Search",   "/".to_string(),      Action::SearchFiles),
+                ("Focus",    "Tab".to_string(),    Action::FocusNext),
+                ("Quit",     "q".to_string(),      Action::Quit),
             ],
         }];
         // Buffers-focus set. Up/Dn both selects and loads the buffer immediately — no
         // separate "Switch" command, since there's nothing left for Enter to commit.
+        // ^s/^w/^r/^a are contextual (differ from their waveform meanings) — kept literal.
         let buffers = vec![ToolGroup {
             label: "",
             buttons: vec![
-                ("Switch", "Up/Dn", Action::Noop),
-                ("Search", "/", Action::SearchBuffers),
-                ("Save", "^s", Action::Save),
-                ("Close", "^w", Action::CloseBuffer),
-                ("Rename", "^r", Action::RenameBuffer),
-                ("SaveAll", "^a", Action::SaveAll),
+                ("Switch",  "Up/Dn".to_string(), Action::Noop),
+                ("Search",  "/".to_string(),     Action::SearchBuffers),
+                ("Save",    "^s".to_string(),    Action::Save),
+                ("Close",   "^w".to_string(),    Action::CloseBuffer),
+                ("Rename",  "^r".to_string(),    Action::RenameBuffer),
+                ("SaveAll", "^a".to_string(),    Action::SaveAll),
             ],
         }];
         Self {
@@ -177,7 +184,7 @@ impl Toolbar {
         }
     }
 
-    fn button_label(&self, label: &'static str, action: Action) -> String {
+    fn button_label(&self, label: &str, action: Action) -> String {
         if action == Action::TogglePlayback && self.is_playing {
             "Stop".to_string()
         } else if action == Action::IncreaseTransientThreshold {
@@ -194,8 +201,8 @@ impl Toolbar {
         if !group.label.is_empty() {
             w += group.label.chars().count() as u16 + 2; // "LABEL: "
         }
-        for &(label, shortcut, action) in &group.buttons {
-            let label = self.button_label(label, action);
+        for (label, shortcut, action) in &group.buttons {
+            let label = self.button_label(label, *action);
             w += label.chars().count() as u16 + 1 + shortcut.chars().count() as u16 + GAP;
         }
         w
@@ -218,18 +225,18 @@ impl Toolbar {
             spans.push(Span::styled(format!("{}: ", group.label), group_style));
             x += group.label.chars().count() as u16 + 2;
         }
-        for &(label, shortcut, action) in &group.buttons {
-            let label = self.button_label(label, action);
+        for (label, shortcut, action) in &group.buttons {
+            let label = self.button_label(label, *action);
             let btn_w = label.chars().count() as u16 + 1 + shortcut.chars().count() as u16;
-            rects.push((Rect { x, y, width: btn_w, height: 1 }, action));
-            let label_style = if self.active_actions.contains(&action) {
+            rects.push((Rect { x, y, width: btn_w, height: 1 }, *action));
+            let label_style = if self.active_actions.contains(action) {
                 Style::default().fg(theme::ACTIVE)
             } else {
                 chrome
             };
-            spans.push(Span::styled(label.to_string(), label_style));
+            spans.push(Span::styled(label, label_style));
             spans.push(Span::styled(" ", chrome));
-            spans.push(Span::styled(shortcut.to_string(), shortcut_style));
+            spans.push(Span::styled(shortcut.clone(), shortcut_style));
             spans.push(Span::styled(" ".repeat(GAP as usize), chrome));
             x += btn_w + GAP;
         }

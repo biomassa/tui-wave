@@ -262,7 +262,7 @@ pub fn default_keybindings() -> HashMap<String, Vec<String>> {
     bind!("Copy", "ctrl+c");
     bind!("Paste", "ctrl+v");
     bind!("Undo", "ctrl+z");
-    bind!("Redo", "ctrl+shift+z", "ctrl+y");
+    bind!("Redo", "ctrl+y", "ctrl+shift+z");
     bind!("Save", "ctrl+s");
     bind!("SaveAs", "ctrl+shift+s");
     bind!("SaveAll", "ctrl+l");
@@ -371,6 +371,114 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "DecreaseTransientThreshold" => Some(Action::DecreaseTransientThreshold),
         _ => None,
     }
+}
+
+/// Formats a `KeyEvent` as a menu-style shortcut string: `"Ctrl+x"`, `"Shift+Up"`,
+/// `"Del"`, `"Space"`, `"q"`, `"L"`, `"Ctrl+Shift+Z"`, etc.
+pub fn format_menu_key(key: KeyEvent) -> String {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let key_str: String = match key.code {
+        KeyCode::Left => "Left".into(),
+        KeyCode::Right => "Right".into(),
+        KeyCode::Up => "Up".into(),
+        KeyCode::Down => "Down".into(),
+        KeyCode::Home => "Home".into(),
+        KeyCode::End => "End".into(),
+        KeyCode::PageUp => "PgUp".into(),
+        KeyCode::PageDown => "PgDn".into(),
+        KeyCode::Delete => "Del".into(),
+        KeyCode::Backspace => "Backspace".into(),
+        KeyCode::Tab => "Tab".into(),
+        KeyCode::Esc => "Esc".into(),
+        KeyCode::Enter => "Enter".into(),
+        KeyCode::Char(' ') => "Space".into(),
+        KeyCode::Char(c) => {
+            // Ctrl+Shift+lowercase (e.g. Redo = Ctrl+Shift+Z): capitalize to signal Shift.
+            if ctrl && shift && c.is_ascii_lowercase() {
+                c.to_ascii_uppercase().to_string()
+            } else {
+                c.to_string()
+            }
+        }
+        _ => "?".into(),
+    };
+    let mut out = String::new();
+    if ctrl { out.push_str("Ctrl+"); }
+    if shift { out.push_str("Shift+"); }
+    if alt { out.push_str("Alt+"); }
+    out.push_str(&key_str);
+    out
+}
+
+/// Formats a `KeyEvent` as a compact toolbar-style shortcut: `"^x"`, `"S+Up"`, `"Dn"`,
+/// `"Spc"`, `"q"`, `"L"`, etc.
+pub fn format_toolbar_key(key: KeyEvent) -> String {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+    // Named keys use abbreviated names; modifiers add "^" (ctrl) and "S+" (shift) prefixes.
+    let named = |s: &str| -> String {
+        let mut out = String::new();
+        if ctrl { out.push('^'); }
+        if shift { out.push_str("S+"); }
+        out.push_str(s);
+        out
+    };
+
+    match key.code {
+        KeyCode::Left => named("Lt"),
+        KeyCode::Right => named("Rt"),
+        KeyCode::Up => named("Up"),
+        KeyCode::Down => named("Dn"),
+        KeyCode::Home => named("Hm"),
+        KeyCode::End => named("En"),
+        KeyCode::PageUp => named("PgU"),
+        KeyCode::PageDown => named("PgD"),
+        KeyCode::Delete => named("Del"),
+        KeyCode::Backspace => named("Bsp"),
+        KeyCode::Tab => named("Tab"),
+        KeyCode::Esc => named("Esc"),
+        KeyCode::Enter => named("Ret"),
+        KeyCode::Char(' ') => named("Spc"),
+        KeyCode::Char(c) => {
+            if ctrl && shift {
+                let u = if c.is_ascii_lowercase() { c.to_ascii_uppercase() } else { c };
+                format!("^S+{u}")
+            } else if ctrl {
+                format!("^{c}")
+            } else {
+                c.to_string()
+            }
+        }
+        _ => "?".into(),
+    }
+}
+
+/// Builds an `Action → display-string` map from the given keybindings, using the first
+/// configured key per action. `toolbar_format` selects between menu style (`"Ctrl+x"`)
+/// and toolbar style (`"^x"`).
+pub fn build_action_display_map(
+    bindings: &HashMap<String, Vec<String>>,
+    toolbar_format: bool,
+) -> HashMap<Action, String> {
+    let mut map = HashMap::new();
+    for (name, keys) in bindings {
+        if let Some(action) = parse_action_name(name) {
+            if let Some(key_str) = keys.first() {
+                if let Some(key) = parse_key_binding(key_str) {
+                    let display = if toolbar_format {
+                        format_toolbar_key(key)
+                    } else {
+                        format_menu_key(key)
+                    };
+                    map.insert(action, display);
+                }
+            }
+        }
+    }
+    map
 }
 
 /// Builds a `KeyEvent → Action` dispatch map from the given bindings. Unrecognised action
@@ -762,8 +870,8 @@ mod tests {
             (key(KeyCode::Up, KeyModifiers::NONE), Action::ZoomIn),
             (key(KeyCode::Up, KeyModifiers::SHIFT), Action::ZoomInVertical),
             (key(KeyCode::Char('z'), KeyModifiers::CONTROL), Action::Undo),
-            (key(KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT), Action::Redo),
             (key(KeyCode::Char('y'), KeyModifiers::CONTROL), Action::Redo),
+            (key(KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT), Action::Redo),
             (key(KeyCode::Char('m'), KeyModifiers::CONTROL), Action::MixToMono),
         ];
         for (k, expected) in test_cases {
