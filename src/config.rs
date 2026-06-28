@@ -1,10 +1,11 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 /// Persisted toggles/options, round-tripped between sessions. Lives outside `model`/`ui`
 /// since it's neither document logic nor a rendering concern — plain settings data.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub snap_to_zero: bool,
@@ -24,6 +25,13 @@ pub struct Config {
     /// where it renders correctly but feels slower than the text renderer), not as a gate
     /// to opt in. Has no effect at all on a terminal where graphics mode wasn't detected.
     pub graphics_mode: bool,
+    /// Key bindings as `ActionName → [key-string, ...]`. Empty on first launch; the UI layer
+    /// fills in all defaults (via `keymap::fill_missing_keybindings`) before building the
+    /// dispatch map, and writes the completed set back on the first save. Key strings use the
+    /// format `"ctrl+x"`, `"shift+up"`, `"space"`, `"delete"`, plain characters like `"q"`,
+    /// or uppercase characters like `"L"` (equivalent to `"shift+l"`).
+    #[serde(default)]
+    pub keybindings: HashMap<String, Vec<String>>,
 }
 
 impl Default for Config {
@@ -38,6 +46,7 @@ impl Default for Config {
             viewport_follows_playback: false,
             transient_threshold_db: 13.0,
             graphics_mode: true,
+            keybindings: HashMap::new(),
         }
     }
 }
@@ -93,7 +102,19 @@ mod tests {
             viewport_follows_playback: true,
             transient_threshold_db: 9.0,
             graphics_mode: false,
+            keybindings: HashMap::new(),
         };
+        let toml_string = toml::to_string_pretty(&config).unwrap();
+        let parsed: Config = toml::from_str(&toml_string).unwrap();
+        assert_eq!(parsed, config);
+    }
+
+    #[test]
+    fn custom_keybindings_round_trip() {
+        let mut kb = HashMap::new();
+        kb.insert("Cut".to_string(), vec!["ctrl+k".to_string()]);
+        kb.insert("Quit".to_string(), vec!["q".to_string(), "Q".to_string()]);
+        let config = Config { keybindings: kb, ..Config::default() };
         let toml_string = toml::to_string_pretty(&config).unwrap();
         let parsed: Config = toml::from_str(&toml_string).unwrap();
         assert_eq!(parsed, config);
@@ -126,6 +147,7 @@ mod tests {
             viewport_follows_playback: false,
             transient_threshold_db: 12.0,
             graphics_mode: false,
+            keybindings: HashMap::new(),
         };
         config.save();
         assert_eq!(Config::load(), config);

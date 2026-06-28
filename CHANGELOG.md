@@ -2,6 +2,18 @@
 
 ## 2026-06-28
 
+- All keyboard shortcuts are now configurable via `~/.config/tui-wave/config.toml` under a
+  `[keybindings]` section. Every action lists its default key string(s) there on first save.
+  Key string format: `"ctrl+x"`, `"shift+left"`, `"L"`, `"space"`, `"delete"`, etc.
+  Menu and toolbar display strings remain as written — if you remap a key, the new key
+  works but the displayed shortcut hint won't update until a future release.
+- Mix to Mono dialog: Tab now only cycles between channel input fields (it no longer toggles
+  the tanh checkbox as a side effect). Press Space to toggle the tanh limiter when that row
+  is focused.
+- Markers are now preserved when creating new buffers via Copy to New (`C`), New from Left
+  (`L`), New from Right (`R`), and Mix to Mono. If a selection is active, only markers
+  within that range are carried over, with their positions shifted to be relative to the
+  new buffer's start.
 - Fixed Auto-Insert Markers missing a transient at the very start of a file: if the
   opening audio decays significantly into the second analysis frame, position 0 is now
   correctly marked.

@@ -33,7 +33,7 @@ use crate::model::selection::Selection;
 
 use super::buffer_panel::BufferPanel;
 use super::file_panel::{EntryKind as FileEntryKind, FilePanel};
-use super::keymap::{map_key, Action};
+use super::keymap::{build_key_map, fill_missing_keybindings, map_key, Action};
 use super::layout::split_chrome;
 use super::menu::MenuBar;
 use super::terminal::Tui;
@@ -103,6 +103,9 @@ pub struct App {
     /// mode already enabled — before `App::new` runs) if the terminal supports a real
     /// image-graphics protocol (kitty, Sixel, or iTerm2's). `None` on any terminal that
     /// doesn't, including inside a detected multiplexer. Never re-queried after startup.
+    /// Config-derived key dispatch map, built at startup from `Config.keybindings`.
+    /// Consulted first in `handle_key`; `map_key` is the fallback for any key not in here.
+    key_map: std::collections::HashMap<KeyEvent, Action>,
     picker: Option<ratatui_image::picker::Picker>,
     /// When true (and `picker` is `Some`), render the waveform via the detected graphics
     /// protocol instead of character glyphs. Persisted, defaults to `true` — see
@@ -265,7 +268,10 @@ impl App {
     /// `Config::default()` instead of `Config::load()` — tests must never depend on
     /// whatever happens to be in the user's real `~/.config/tui-wave/config.toml` (or race
     /// against other tests that temporarily redirect `XDG_CONFIG_HOME`).
-    fn new_with_config(document: Option<Document>, directory: Option<PathBuf>, config: Config) -> Self {
+    fn new_with_config(document: Option<Document>, directory: Option<PathBuf>, mut config: Config) -> Self {
+        fill_missing_keybindings(&mut config.keybindings);
+        let key_map = build_key_map(&config.keybindings);
+
         let dir = directory
             .or_else(|| document.as_ref().and_then(|d| d.path.as_ref()).and_then(|p| p.parent().map(|p| p.to_path_buf())))
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -287,6 +293,7 @@ impl App {
         let histories = documents.iter().map(|_| History::new()).collect();
         Self {
             should_quit: false,
+            key_map,
             picker: None,
             graphics_mode: config.graphics_mode,
             graphics_protocols: Vec::new(),
@@ -624,7 +631,16 @@ impl App {
             self.file_panel.focused = true;
             return;
         }
-        if let Some(action) = map_key(key) {
+        // Normalise kind/state before lookup so key-repeat events hit the same entry as
+        // initial presses (map_key already ignores kind/state in its match arms).
+        let normalised = KeyEvent {
+            code: key.code,
+            modifiers: key.modifiers,
+            kind: ratatui::crossterm::event::KeyEventKind::Press,
+            state: ratatui::crossterm::event::KeyEventState::NONE,
+        };
+        let action = self.key_map.get(&normalised).copied().or_else(|| map_key(key));
+        if let Some(action) = action {
             self.handle_action(action);
         }
     }
@@ -842,16 +858,20 @@ impl App {
                     input.delete();
                 }
             }
-            KeyCode::Tab => match self.dialog.as_mut() {
-                Some(Dialog::MixToMono { inputs, focused, tanh_clip }) => {
-                    // Slots: 0..n = channel fields, n = tanh row. Tab cycles through all;
-                    // when landing on tanh, toggle it. Space/Enter on any slot applies.
-                    let n = inputs.len();
-                    let next = (*focused + 1) % (n + 1);
-                    *focused = next;
-                    if next == n {
+            KeyCode::Char(' ') => {
+                // In MixToMono, Space toggles the tanh checkbox when that row is focused.
+                if let Some(Dialog::MixToMono { inputs, focused, tanh_clip }) = self.dialog.as_mut() {
+                    if *focused == inputs.len() {
                         *tanh_clip = !*tanh_clip;
                     }
+                }
+            }
+            KeyCode::Tab => match self.dialog.as_mut() {
+                Some(Dialog::MixToMono { inputs, focused, .. }) => {
+                    // Slots: 0..n = channel fields, n = tanh row. Tab cycles through all.
+                    // Space toggles tanh when the tanh row (n) is focused (see Space arm above).
+                    let n = inputs.len();
+                    *focused = (*focused + 1) % (n + 1);
                 }
                 Some(Dialog::Gain { tanh_clip, .. }) => *tanh_clip = !*tanh_clip,
                 Some(Dialog::FadeIn { curve }) | Some(Dialog::FadeOut { curve }) => {
@@ -931,6 +951,7 @@ impl App {
     /// Called right after any toggle action so the persisted file never lags behind
     /// what's actually in effect.
     fn save_config(&mut self) {
+        let keybindings = self.config.keybindings.clone();
         self.config = Config {
             snap_to_zero: self.snap_to_zero,
             auto_vertical_zoom: self.viewport.as_ref().is_some_and(|v| v.auto_vertical_zoom),
@@ -941,6 +962,7 @@ impl App {
             viewport_follows_playback: self.viewport_follows_playback,
             transient_threshold_db: self.transient_threshold_db,
             graphics_mode: self.graphics_mode,
+            keybindings,
         };
         self.config.save();
     }
@@ -1262,6 +1284,11 @@ impl App {
             _ => (0, src.channels[0].len()),
         };
         let sample_rate = src.sample_rate;
+        let range_end = range_start + range_len;
+        let new_markers: Vec<Marker> = src.markers.iter()
+            .filter(|m| m.position >= range_start && m.position < range_end)
+            .map(|m| Marker { position: m.position - range_start, label: m.label.clone() })
+            .collect();
 
         // Parse gains: "-inf" or any parse failure → 0.0 linear (silence that channel).
         let gains: Vec<f32> = inputs
@@ -1304,7 +1331,7 @@ impl App {
             cursor: 0,
             dirty: true,
             path: None,
-            markers: Vec::new(),
+            markers: new_markers,
             bext: None,
         };
         self.dialog = None;
@@ -2055,14 +2082,18 @@ impl App {
         }
 
         if action == Action::CopyToNew {
-            let data = self.active_doc().and_then(|d| {
+            let result = self.active_doc().and_then(|d| {
                 d.selection.map(|sel| {
                     let (start, end) = sel.normalized();
-                    d.slice(start..end)
+                    let samples = d.slice(start..end);
+                    let markers: Vec<Marker> = d.markers.iter()
+                        .filter(|m| m.position >= start && m.position < end)
+                        .map(|m| Marker { position: m.position - start, label: m.label.clone() })
+                        .collect();
+                    (samples, markers, d.sample_rate)
                 })
             });
-            if let Some(samples) = data {
-                let sample_rate = self.active_doc().map(|d| d.sample_rate).unwrap_or(44100);
+            if let Some((samples, markers, sample_rate)) = result {
                 let new_doc = Document {
                     channels: samples,
                     sample_rate,
@@ -2072,7 +2103,7 @@ impl App {
                     // this makes the quit/close confirmation fire for it.
                     dirty: true,
                     path: None,
-                    markers: Vec::new(),
+                    markers,
                     bext: None,
                 };
                 self.push_document(new_doc);
@@ -2098,15 +2129,19 @@ impl App {
 
         if action == Action::NewFromLeft || action == Action::NewFromRight {
             let channel_idx = if action == Action::NewFromLeft { 0 } else { 1 };
-            let data = self.active_doc().and_then(|d| {
+            let result = self.active_doc().and_then(|d| {
                 let (start, end) = match d.selection.map(|s| s.normalized()) {
                     Some((s, e)) if s < e => (s, e),
                     _ => (0, d.channels.get(0).map(|c| c.len()).unwrap_or(0)),
                 };
-                d.channels.get(channel_idx).map(|ch| vec![ch[start..end].to_vec()])
+                let channels = d.channels.get(channel_idx).map(|ch| vec![ch[start..end].to_vec()])?;
+                let markers: Vec<Marker> = d.markers.iter()
+                    .filter(|m| m.position >= start && m.position < end)
+                    .map(|m| Marker { position: m.position - start, label: m.label.clone() })
+                    .collect();
+                Some((channels, markers, d.sample_rate))
             });
-            let sample_rate = self.active_doc().map(|d| d.sample_rate).unwrap_or(44100);
-            if let Some(channels) = data {
+            if let Some((channels, markers, sample_rate)) = result {
                 let new_doc = Document {
                     channels,
                     sample_rate,
@@ -2114,7 +2149,7 @@ impl App {
                     cursor: 0,
                     dirty: true,
                     path: None,
-                    markers: Vec::new(),
+                    markers,
                     bext: None,
                 };
                 self.push_document(new_doc);

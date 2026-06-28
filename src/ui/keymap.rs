@@ -1,4 +1,6 @@
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::HashMap;
+
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
 /// Pure key -> action mapping, independent of `App` state, so the bindings themselves
 /// are unit-testable without spinning up a terminal.
@@ -159,6 +161,233 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('}') => Some(Action::ExtendSelectionToNextMarker),
         _ => None,
     }
+}
+
+/// Parses a key string (e.g. `"ctrl+x"`, `"shift+left"`, `"L"`, `"space"`, `"delete"`)
+/// into a `KeyEvent`. Returns `None` for unrecognised strings.
+///
+/// Rules:
+/// - Modifiers (`ctrl`, `shift`, `alt`) are case-insensitive and joined with `+`.
+/// - `shift+letter` (without ctrl) becomes the uppercase character with no SHIFT modifier,
+///   matching how terminals report unmodified uppercase keystrokes in crossterm.
+/// - `ctrl+shift+letter` keeps both modifier bits and a lowercase character, matching
+///   crossterm's representation for Ctrl+Shift letter combos.
+/// - Uppercase single characters (e.g. `"L"`, `"R"`, `"C"`) are parsed directly as
+///   `Char(uppercase)` with no modifiers.
+pub fn parse_key_binding(s: &str) -> Option<KeyEvent> {
+    let parts: Vec<&str> = s.split('+').collect();
+    let (key_part, mod_parts) = parts.split_last()?;
+
+    let mut modifiers = KeyModifiers::NONE;
+    for &m in mod_parts {
+        match m.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
+            "shift" => modifiers |= KeyModifiers::SHIFT,
+            "alt" => modifiers |= KeyModifiers::ALT,
+            _ => return None,
+        }
+    }
+
+    let key_lower = key_part.to_ascii_lowercase();
+    let code = match key_lower.as_str() {
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "pageup" | "pgup" | "page_up" => KeyCode::PageUp,
+        "pagedown" | "pgdn" | "page_down" => KeyCode::PageDown,
+        "delete" | "del" => KeyCode::Delete,
+        "backspace" => KeyCode::Backspace,
+        "tab" => KeyCode::Tab,
+        "esc" | "escape" => KeyCode::Esc,
+        "space" => KeyCode::Char(' '),
+        "enter" | "return" => KeyCode::Enter,
+        k if k.len() == 1 => {
+            // Use the character from the original (unmodified-case) key_part.
+            let ch = key_part.chars().next()?;
+            let has_shift = modifiers.contains(KeyModifiers::SHIFT);
+            let has_ctrl = modifiers.contains(KeyModifiers::CONTROL);
+            if has_shift && !has_ctrl && ch.is_ascii_alphabetic() {
+                // shift+letter without ctrl → uppercase char, no SHIFT modifier bit.
+                modifiers &= !KeyModifiers::SHIFT;
+                KeyCode::Char(ch.to_ascii_uppercase())
+            } else {
+                KeyCode::Char(ch)
+            }
+        }
+        _ => return None,
+    };
+
+    Some(KeyEvent {
+        code,
+        modifiers,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    })
+}
+
+/// Returns the complete default key bindings, one entry per globally-dispatched action.
+/// Actions with multiple bindings (aliases) list them all in the vec.
+pub fn default_keybindings() -> HashMap<String, Vec<String>> {
+    let mut m: HashMap<String, Vec<String>> = HashMap::new();
+    macro_rules! bind {
+        ($name:expr, $($key:expr),+) => {
+            m.insert($name.to_string(), vec![$($key.to_string()),+]);
+        };
+    }
+    bind!("Quit", "q", "Q");
+    bind!("MoveCursorLeft", "left");
+    bind!("MoveCursorRight", "right");
+    bind!("ExtendSelectionLeft", "shift+left");
+    bind!("ExtendSelectionRight", "shift+right");
+    bind!("ExtendSelectionToStart", "shift+home");
+    bind!("ExtendSelectionToEnd", "shift+end");
+    bind!("ExtendSelectionPageBack", "shift+pageup");
+    bind!("ExtendSelectionPageForward", "shift+pagedown");
+    bind!("ExtendSelectionToPrevMarker", "{");
+    bind!("ExtendSelectionToNextMarker", "}");
+    bind!("ToggleFineMode", "`");
+    bind!("JumpStart", "home");
+    bind!("JumpEnd", "end");
+    bind!("PageBack", "pageup");
+    bind!("PageForward", "pagedown");
+    bind!("ZoomIn", "up");
+    bind!("ZoomOut", "down");
+    bind!("ZoomInVertical", "shift+up");
+    bind!("ZoomOutVertical", "shift+down");
+    bind!("TogglePlayback", "space");
+    bind!("Cut", "ctrl+x");
+    bind!("Copy", "ctrl+c");
+    bind!("Paste", "ctrl+v");
+    bind!("Undo", "ctrl+z");
+    bind!("Redo", "ctrl+shift+z", "ctrl+y");
+    bind!("Save", "ctrl+s");
+    bind!("SaveAs", "ctrl+shift+s");
+    bind!("SaveAll", "ctrl+l");
+    bind!("Delete", "delete");
+    bind!("ClearSelection", "ctrl+d");
+    bind!("SelectAll", "ctrl+a");
+    bind!("CopyToNew", "C");
+    bind!("MixToMono", "ctrl+m");
+    bind!("NewFromLeft", "L");
+    bind!("NewFromRight", "R");
+    bind!("Reverse", "ctrl+r");
+    bind!("Normalize", "ctrl+n");
+    bind!("Resample", "ctrl+e");
+    bind!("Gain", "ctrl+g");
+    bind!("FadeIn", "ctrl+f");
+    bind!("FadeOut", "ctrl+o");
+    bind!("Trim", "ctrl+t");
+    bind!("TechnicalFades", "ctrl+b");
+    bind!("ToggleAutoVerticalZoom", "a");
+    bind!("ToggleZeroSnap", "z");
+    bind!("ToggleLoop", "l");
+    bind!("ToggleCursorFollowsPlayback", "i");
+    bind!("ToggleViewportFollowsPlayback", "f");
+    bind!("ToggleGraphicsMode", "g");
+    bind!("InsertMarker", "m");
+    bind!("DeleteMarker", "M");
+    bind!("JumpPrevMarker", "[");
+    bind!("JumpNextMarker", "]");
+    bind!("NextRisingEdge", "/");
+    bind!("PrevRisingEdge", "?");
+    bind!("AutoInsertMarkers", "t");
+    bind!("IncreaseTransientThreshold", "+", "=");
+    bind!("DecreaseTransientThreshold", "-", "_");
+    m
+}
+
+/// Fills any missing entries in `bindings` with their defaults, so a partial config
+/// (user edited only some bindings, or first launch) still has every action available.
+pub fn fill_missing_keybindings(bindings: &mut HashMap<String, Vec<String>>) {
+    for (name, keys) in default_keybindings() {
+        bindings.entry(name).or_insert(keys);
+    }
+}
+
+/// Maps an action-name string (e.g. `"Cut"`) to the corresponding `Action` variant.
+fn parse_action_name(name: &str) -> Option<Action> {
+    match name {
+        "Quit" => Some(Action::Quit),
+        "MoveCursorLeft" => Some(Action::MoveCursorLeft),
+        "MoveCursorRight" => Some(Action::MoveCursorRight),
+        "ExtendSelectionLeft" => Some(Action::ExtendSelectionLeft),
+        "ExtendSelectionRight" => Some(Action::ExtendSelectionRight),
+        "ExtendSelectionToStart" => Some(Action::ExtendSelectionToStart),
+        "ExtendSelectionToEnd" => Some(Action::ExtendSelectionToEnd),
+        "ExtendSelectionPageBack" => Some(Action::ExtendSelectionPageBack),
+        "ExtendSelectionPageForward" => Some(Action::ExtendSelectionPageForward),
+        "ExtendSelectionToPrevMarker" => Some(Action::ExtendSelectionToPrevMarker),
+        "ExtendSelectionToNextMarker" => Some(Action::ExtendSelectionToNextMarker),
+        "ToggleFineMode" => Some(Action::ToggleFineMode),
+        "JumpStart" => Some(Action::JumpStart),
+        "JumpEnd" => Some(Action::JumpEnd),
+        "PageBack" => Some(Action::PageBack),
+        "PageForward" => Some(Action::PageForward),
+        "ZoomIn" => Some(Action::ZoomIn),
+        "ZoomOut" => Some(Action::ZoomOut),
+        "ZoomInVertical" => Some(Action::ZoomInVertical),
+        "ZoomOutVertical" => Some(Action::ZoomOutVertical),
+        "TogglePlayback" => Some(Action::TogglePlayback),
+        "Cut" => Some(Action::Cut),
+        "Copy" => Some(Action::Copy),
+        "Paste" => Some(Action::Paste),
+        "Undo" => Some(Action::Undo),
+        "Redo" => Some(Action::Redo),
+        "Save" => Some(Action::Save),
+        "SaveAs" => Some(Action::SaveAs),
+        "SaveAll" => Some(Action::SaveAll),
+        "Delete" => Some(Action::Delete),
+        "ClearSelection" => Some(Action::ClearSelection),
+        "SelectAll" => Some(Action::SelectAll),
+        "CopyToNew" => Some(Action::CopyToNew),
+        "MixToMono" => Some(Action::MixToMono),
+        "NewFromLeft" => Some(Action::NewFromLeft),
+        "NewFromRight" => Some(Action::NewFromRight),
+        "Reverse" => Some(Action::Reverse),
+        "Normalize" => Some(Action::Normalize),
+        "Resample" => Some(Action::Resample),
+        "Gain" => Some(Action::Gain),
+        "FadeIn" => Some(Action::FadeIn),
+        "FadeOut" => Some(Action::FadeOut),
+        "Trim" => Some(Action::Trim),
+        "TechnicalFades" => Some(Action::TechnicalFades),
+        "ToggleAutoVerticalZoom" => Some(Action::ToggleAutoVerticalZoom),
+        "ToggleZeroSnap" => Some(Action::ToggleZeroSnap),
+        "ToggleLoop" => Some(Action::ToggleLoop),
+        "ToggleCursorFollowsPlayback" => Some(Action::ToggleCursorFollowsPlayback),
+        "ToggleViewportFollowsPlayback" => Some(Action::ToggleViewportFollowsPlayback),
+        "ToggleGraphicsMode" => Some(Action::ToggleGraphicsMode),
+        "InsertMarker" => Some(Action::InsertMarker),
+        "DeleteMarker" => Some(Action::DeleteMarker),
+        "JumpPrevMarker" => Some(Action::JumpPrevMarker),
+        "JumpNextMarker" => Some(Action::JumpNextMarker),
+        "NextRisingEdge" => Some(Action::NextRisingEdge),
+        "PrevRisingEdge" => Some(Action::PrevRisingEdge),
+        "AutoInsertMarkers" => Some(Action::AutoInsertMarkers),
+        "IncreaseTransientThreshold" => Some(Action::IncreaseTransientThreshold),
+        "DecreaseTransientThreshold" => Some(Action::DecreaseTransientThreshold),
+        _ => None,
+    }
+}
+
+/// Builds a `KeyEvent → Action` dispatch map from the given bindings. Unrecognised action
+/// names and unparseable key strings are silently skipped. The returned map is meant to be
+/// the primary dispatch source, supplemented by `map_key` for any key not found in it.
+pub fn build_key_map(bindings: &HashMap<String, Vec<String>>) -> HashMap<KeyEvent, Action> {
+    let mut map = HashMap::new();
+    for (name, keys) in bindings {
+        if let Some(action) = parse_action_name(name) {
+            for key_str in keys {
+                if let Some(key) = parse_key_binding(key_str) {
+                    map.insert(key, action);
+                }
+            }
+        }
+    }
+    map
 }
 
 #[cfg(test)]
@@ -470,5 +699,75 @@ mod tests {
             Some(Action::ToggleViewportFollowsPlayback)
         );
         assert_eq!(map_key(key(KeyCode::Char('F'), KeyModifiers::NONE)), None);
+    }
+
+    #[test]
+    fn parse_key_binding_ctrl_x() {
+        assert_eq!(
+            parse_key_binding("ctrl+x"),
+            Some(key(KeyCode::Char('x'), KeyModifiers::CONTROL))
+        );
+    }
+
+    #[test]
+    fn parse_key_binding_uppercase_letter_is_no_shift_modifier() {
+        // "L" = shift+l on most keyboards, but crossterm reports it as Char('L') with no SHIFT.
+        assert_eq!(
+            parse_key_binding("L"),
+            Some(key(KeyCode::Char('L'), KeyModifiers::NONE))
+        );
+        // "shift+l" should produce the same result.
+        assert_eq!(
+            parse_key_binding("shift+l"),
+            Some(key(KeyCode::Char('L'), KeyModifiers::NONE))
+        );
+    }
+
+    #[test]
+    fn parse_key_binding_ctrl_shift_z_keeps_both_modifiers() {
+        // Ctrl+Shift+Z in crossterm: Char('z') with CONTROL|SHIFT both set.
+        assert_eq!(
+            parse_key_binding("ctrl+shift+z"),
+            Some(key(KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT))
+        );
+    }
+
+    #[test]
+    fn parse_key_binding_named_keys() {
+        assert_eq!(parse_key_binding("space"), Some(key(KeyCode::Char(' '), KeyModifiers::NONE)));
+        assert_eq!(parse_key_binding("delete"), Some(key(KeyCode::Delete, KeyModifiers::NONE)));
+        assert_eq!(parse_key_binding("left"), Some(key(KeyCode::Left, KeyModifiers::NONE)));
+        assert_eq!(parse_key_binding("shift+up"), Some(key(KeyCode::Up, KeyModifiers::SHIFT)));
+        assert_eq!(parse_key_binding("pageup"), Some(key(KeyCode::PageUp, KeyModifiers::NONE)));
+        assert_eq!(parse_key_binding("home"), Some(key(KeyCode::Home, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn build_key_map_matches_map_key_defaults() {
+        let mut kb = default_keybindings();
+        fill_missing_keybindings(&mut kb);
+        let kmap = build_key_map(&kb);
+
+        // Every binding returned by map_key should also be in the config-driven key_map.
+        let test_cases = [
+            (key(KeyCode::Char('q'), KeyModifiers::NONE), Action::Quit),
+            (key(KeyCode::Char('x'), KeyModifiers::CONTROL), Action::Cut),
+            (key(KeyCode::Char('c'), KeyModifiers::CONTROL), Action::Copy),
+            (key(KeyCode::Char('L'), KeyModifiers::NONE), Action::NewFromLeft),
+            (key(KeyCode::Char('R'), KeyModifiers::NONE), Action::NewFromRight),
+            (key(KeyCode::Char('C'), KeyModifiers::NONE), Action::CopyToNew),
+            (key(KeyCode::Char(' '), KeyModifiers::NONE), Action::TogglePlayback),
+            (key(KeyCode::Left, KeyModifiers::NONE), Action::MoveCursorLeft),
+            (key(KeyCode::Left, KeyModifiers::SHIFT), Action::ExtendSelectionLeft),
+            (key(KeyCode::Up, KeyModifiers::NONE), Action::ZoomIn),
+            (key(KeyCode::Up, KeyModifiers::SHIFT), Action::ZoomInVertical),
+            (key(KeyCode::Char('z'), KeyModifiers::CONTROL), Action::Undo),
+            (key(KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT), Action::Redo),
+            (key(KeyCode::Char('y'), KeyModifiers::CONTROL), Action::Redo),
+            (key(KeyCode::Char('m'), KeyModifiers::CONTROL), Action::MixToMono),
+        ];
+        for (k, expected) in test_cases {
+            assert_eq!(kmap.get(&k).copied(), Some(expected), "failed for key {k:?}");
+        }
     }
 }
