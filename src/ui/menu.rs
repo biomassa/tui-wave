@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -9,7 +11,7 @@ use super::theme;
 
 pub struct MenuEntry {
     pub label: &'static str,
-    pub shortcut: &'static str,
+    pub shortcut: String,
     pub action: Action,
 }
 
@@ -32,303 +34,107 @@ pub struct MenuBar {
 }
 
 impl MenuBar {
-    pub fn new() -> Self {
+    pub fn new(shortcuts: &HashMap<Action, String>) -> Self {
+        // Look up a shortcut from the config-derived map, falling back to the current
+        // hardcoded default so the menu is never blank even if a binding was omitted.
+        let sc = |action: Action, default: &str| -> String {
+            shortcuts.get(&action).cloned().unwrap_or_else(|| default.to_string())
+        };
+        let entry = |label: &'static str, action: Action, default: &str| -> MenuEntry {
+            MenuEntry { label, shortcut: sc(action, default), action }
+        };
         let items = vec![
             MenuItem {
                 label: "File",
                 mnemonic: 'F',
                 entries: vec![
-                    MenuEntry {
-                        label: "Save",
-                        shortcut: "Ctrl+s",
-                        action: Action::Save,
-                    },
-                    MenuEntry {
-                        label: "Save As",
-                        shortcut: "Ctrl+Shift+S",
-                        action: Action::SaveAs,
-                    },
-                    MenuEntry {
-                        label: "Save All",
-                        shortcut: "Ctrl+l",
-                        action: Action::SaveAll,
-                    },
-                    MenuEntry {
-                        label: "Quit",
-                        shortcut: "q",
-                        action: Action::Quit,
-                    },
+                    entry("Save",     Action::Save,    "Ctrl+s"),
+                    entry("Save As",  Action::SaveAs,  "Ctrl+Shift+S"),
+                    entry("Save All", Action::SaveAll, "Ctrl+l"),
+                    entry("Quit",     Action::Quit,    "q"),
                 ],
             },
             MenuItem {
                 label: "Edit",
                 mnemonic: 'E',
                 entries: vec![
-                    MenuEntry {
-                        label: "Cut",
-                        shortcut: "Ctrl+x",
-                        action: Action::Cut,
-                    },
-                    MenuEntry {
-                        label: "Copy",
-                        shortcut: "Ctrl+c",
-                        action: Action::Copy,
-                    },
-                    MenuEntry {
-                        label: "Copy to New",
-                        shortcut: "C",
-                        action: Action::CopyToNew,
-                    },
-                    MenuEntry {
-                        label: "Delete",
-                        shortcut: "Del",
-                        action: Action::Delete,
-                    },
-                    MenuEntry {
-                        label: "Paste",
-                        shortcut: "Ctrl+v",
-                        action: Action::Paste,
-                    },
-                    MenuEntry {
-                        label: "Undo",
-                        shortcut: "Ctrl+z",
-                        action: Action::Undo,
-                    },
-                    MenuEntry {
-                        label: "Redo",
-                        shortcut: "Ctrl+y",
-                        action: Action::Redo,
-                    },
-                    MenuEntry {
-                        label: "Clear Selection",
-                        shortcut: "Ctrl+d",
-                        action: Action::ClearSelection,
-                    },
-                    MenuEntry {
-                        label: "Select All",
-                        shortcut: "Ctrl+a",
-                        action: Action::SelectAll,
-                    },
-                    MenuEntry {
-                        label: "Extend Selection to Start",
-                        shortcut: "Shift+Home",
-                        action: Action::ExtendSelectionToStart,
-                    },
-                    MenuEntry {
-                        label: "Extend Selection to End",
-                        shortcut: "Shift+End",
-                        action: Action::ExtendSelectionToEnd,
-                    },
-                    MenuEntry {
-                        label: "Extend Selection Page Back",
-                        shortcut: "Shift+PgUp",
-                        action: Action::ExtendSelectionPageBack,
-                    },
-                    MenuEntry {
-                        label: "Extend Selection Page Fwd",
-                        shortcut: "Shift+PgDn",
-                        action: Action::ExtendSelectionPageForward,
-                    },
+                    entry("Cut",                           Action::Cut,                      "Ctrl+x"),
+                    entry("Copy",                          Action::Copy,                     "Ctrl+c"),
+                    entry("Copy to New",                   Action::CopyToNew,                "C"),
+                    entry("Delete",                        Action::Delete,                   "Del"),
+                    entry("Paste",                         Action::Paste,                    "Ctrl+v"),
+                    entry("Undo",                          Action::Undo,                     "Ctrl+z"),
+                    entry("Redo",                          Action::Redo,                     "Ctrl+y"),
+                    entry("Clear Selection",               Action::ClearSelection,           "Ctrl+d"),
+                    entry("Select All",                    Action::SelectAll,                "Ctrl+a"),
+                    entry("Extend Selection to Start",     Action::ExtendSelectionToStart,   "Shift+Home"),
+                    entry("Extend Selection to End",       Action::ExtendSelectionToEnd,     "Shift+End"),
+                    entry("Extend Selection Page Back",    Action::ExtendSelectionPageBack,  "Shift+PgUp"),
+                    entry("Extend Selection Page Fwd",     Action::ExtendSelectionPageForward, "Shift+PgDn"),
                 ],
             },
             MenuItem {
                 label: "View",
                 mnemonic: 'V',
                 entries: vec![
-                    MenuEntry {
-                        label: "Zoom In",
-                        shortcut: "Up/+",
-                        action: Action::ZoomIn,
-                    },
-                    MenuEntry {
-                        label: "Zoom Out",
-                        shortcut: "Down/-",
-                        action: Action::ZoomOut,
-                    },
-                    MenuEntry {
-                        label: "Zoom In (Vertical)",
-                        shortcut: "Shift+Up",
-                        action: Action::ZoomInVertical,
-                    },
-                    MenuEntry {
-                        label: "Zoom Out (Vertical)",
-                        shortcut: "Shift+Down",
-                        action: Action::ZoomOutVertical,
-                    },
-                    MenuEntry {
-                        label: "Auto Vertical Zoom",
-                        shortcut: "a",
-                        action: Action::ToggleAutoVerticalZoom,
-                    },
-                    MenuEntry {
-                        label: "Zero-Crossing Snap",
-                        shortcut: "z",
-                        action: Action::ToggleZeroSnap,
-                    },
-                    MenuEntry {
-                        label: "Fine Step Mode",
-                        shortcut: "~",
-                        action: Action::ToggleFineMode,
-                    },
-                    MenuEntry {
-                        label: "Insertion Point Follows Playback",
-                        shortcut: "i",
-                        action: Action::ToggleCursorFollowsPlayback,
-                    },
-                    MenuEntry {
-                        label: "Viewport Follows Playback",
-                        shortcut: "f",
-                        action: Action::ToggleViewportFollowsPlayback,
-                    },
-                    MenuEntry {
-                        label: "Graphics Mode",
-                        shortcut: "g",
-                        action: Action::ToggleGraphicsMode,
-                    },
+                    entry("Zoom In",                          Action::ZoomIn,                      "Up"),
+                    entry("Zoom Out",                         Action::ZoomOut,                     "Down"),
+                    entry("Zoom In (Vertical)",               Action::ZoomInVertical,              "Shift+Up"),
+                    entry("Zoom Out (Vertical)",              Action::ZoomOutVertical,             "Shift+Down"),
+                    entry("Auto Vertical Zoom",               Action::ToggleAutoVerticalZoom,      "a"),
+                    entry("Zero-Crossing Snap",               Action::ToggleZeroSnap,              "z"),
+                    entry("Fine Step Mode",                   Action::ToggleFineMode,              "`"),
+                    entry("Insertion Point Follows Playback", Action::ToggleCursorFollowsPlayback, "i"),
+                    entry("Viewport Follows Playback",        Action::ToggleViewportFollowsPlayback, "f"),
+                    entry("Graphics Mode",                    Action::ToggleGraphicsMode,          "g"),
                 ],
             },
             MenuItem {
                 label: "Process",
                 mnemonic: 'P',
                 entries: vec![
-                    MenuEntry {
-                        label: "Reverse",
-                        shortcut: "Ctrl+r",
-                        action: Action::Reverse,
-                    },
-                    MenuEntry {
-                        label: "Normalize",
-                        shortcut: "Ctrl+n",
-                        action: Action::Normalize,
-                    },
-                    MenuEntry {
-                        label: "Gain",
-                        shortcut: "Ctrl+g",
-                        action: Action::Gain,
-                    },
-                    MenuEntry {
-                        label: "Fade In",
-                        shortcut: "Ctrl+f",
-                        action: Action::FadeIn,
-                    },
-                    MenuEntry {
-                        label: "Fade Out",
-                        shortcut: "Ctrl+o",
-                        action: Action::FadeOut,
-                    },
-                    MenuEntry {
-                        label: "Trim",
-                        shortcut: "Ctrl+t",
-                        action: Action::Trim,
-                    },
-                    MenuEntry {
-                        label: "Resample",
-                        shortcut: "Ctrl+e",
-                        action: Action::Resample,
-                    },
-                    MenuEntry {
-                        label: "Technical Fades",
-                        shortcut: "Ctrl+b",
-                        action: Action::TechnicalFades,
-                    },
+                    entry("Reverse",         Action::Reverse,       "Ctrl+r"),
+                    entry("Normalize",       Action::Normalize,     "Ctrl+n"),
+                    entry("Gain",            Action::Gain,          "Ctrl+g"),
+                    entry("Fade In",         Action::FadeIn,        "Ctrl+f"),
+                    entry("Fade Out",        Action::FadeOut,       "Ctrl+o"),
+                    entry("Trim",            Action::Trim,          "Ctrl+t"),
+                    entry("Resample",        Action::Resample,      "Ctrl+e"),
+                    entry("Technical Fades", Action::TechnicalFades,"Ctrl+b"),
                 ],
             },
             MenuItem {
                 label: "Markers",
                 mnemonic: 'M',
                 entries: vec![
-                    MenuEntry {
-                        label: "Insert Marker",
-                        shortcut: "m",
-                        action: Action::InsertMarker,
-                    },
-                    MenuEntry {
-                        label: "Delete Marker",
-                        shortcut: "M",
-                        action: Action::DeleteMarker,
-                    },
-                    MenuEntry {
-                        label: "Previous Marker",
-                        shortcut: "[",
-                        action: Action::JumpPrevMarker,
-                    },
-                    MenuEntry {
-                        label: "Next Marker",
-                        shortcut: "]",
-                        action: Action::JumpNextMarker,
-                    },
-                    MenuEntry {
-                        label: "Extend Selection to Previous Marker",
-                        shortcut: "{",
-                        action: Action::ExtendSelectionToPrevMarker,
-                    },
-                    MenuEntry {
-                        label: "Extend Selection to Next Marker",
-                        shortcut: "}",
-                        action: Action::ExtendSelectionToNextMarker,
-                    },
-                    MenuEntry {
-                        label: "Next Rising Edge",
-                        shortcut: "/",
-                        action: Action::NextRisingEdge,
-                    },
-                    MenuEntry {
-                        label: "Previous Rising Edge",
-                        shortcut: "?",
-                        action: Action::PrevRisingEdge,
-                    },
-                    MenuEntry {
-                        label: "Auto-Insert Markers at Transients",
-                        shortcut: "t",
-                        action: Action::AutoInsertMarkers,
-                    },
-                    MenuEntry {
-                        label: "Increase Transient Threshold",
-                        shortcut: "+",
-                        action: Action::IncreaseTransientThreshold,
-                    },
-                    MenuEntry {
-                        label: "Decrease Transient Threshold",
-                        shortcut: "-",
-                        action: Action::DecreaseTransientThreshold,
-                    },
+                    entry("Insert Marker",                        Action::InsertMarker,               "m"),
+                    entry("Delete Marker",                        Action::DeleteMarker,               "M"),
+                    entry("Previous Marker",                      Action::JumpPrevMarker,             "["),
+                    entry("Next Marker",                          Action::JumpNextMarker,             "]"),
+                    entry("Extend Selection to Previous Marker",  Action::ExtendSelectionToPrevMarker,"{"),
+                    entry("Extend Selection to Next Marker",      Action::ExtendSelectionToNextMarker,"}"),
+                    entry("Next Rising Edge",                     Action::NextRisingEdge,             "/"),
+                    entry("Previous Rising Edge",                 Action::PrevRisingEdge,             "?"),
+                    entry("Auto-Insert Markers at Transients",    Action::AutoInsertMarkers,          "t"),
+                    entry("Increase Transient Threshold",         Action::IncreaseTransientThreshold, "+"),
+                    entry("Decrease Transient Threshold",         Action::DecreaseTransientThreshold, "-"),
                 ],
             },
             MenuItem {
                 label: "Transport",
                 mnemonic: 'T',
                 entries: vec![
-                    MenuEntry {
-                        label: "Play/Pause",
-                        shortcut: "Space",
-                        action: Action::TogglePlayback,
-                    },
-                    MenuEntry {
-                        label: "Loop Playback",
-                        shortcut: "l",
-                        action: Action::ToggleLoop,
-                    },
+                    entry("Play/Pause",    Action::TogglePlayback, "Space"),
+                    entry("Loop Playback", Action::ToggleLoop,     "l"),
                 ],
             },
             MenuItem {
                 label: "Channels",
                 mnemonic: 'C',
                 entries: vec![
-                    MenuEntry {
-                        label: "Mix to Mono",
-                        shortcut: "Ctrl+m",
-                        action: Action::MixToMono,
-                    },
-                    MenuEntry {
-                        label: "New from Left Channel",
-                        shortcut: "L",
-                        action: Action::NewFromLeft,
-                    },
-                    MenuEntry {
-                        label: "New from Right Channel",
-                        shortcut: "R",
-                        action: Action::NewFromRight,
-                    },
+                    entry("Mix to Mono",            Action::MixToMono,    "Ctrl+m"),
+                    entry("New from Left Channel",  Action::NewFromLeft,  "L"),
+                    entry("New from Right Channel", Action::NewFromRight, "R"),
                 ],
             },
         ];
@@ -487,7 +293,7 @@ impl MenuBar {
                     Line::from(vec![
                         Span::styled(e.label, Style::default().fg(theme::CHROME_FG)),
                         Span::raw(" ".repeat(pad)),
-                        Span::styled(e.shortcut, Style::default().fg(theme::SHORTCUT)),
+                        Span::styled(e.shortcut.clone(), Style::default().fg(theme::SHORTCUT)),
                     ])
                 };
                 ListItem::new(line)
@@ -534,14 +340,14 @@ mod tests {
 
     #[test]
     fn open_by_mnemonic_finds_case_insensitively() {
-        let mut menu = MenuBar::new();
+        let mut menu = MenuBar::new(&HashMap::new());
         assert!(menu.open_by_mnemonic('e'));
         assert!(menu.is_open());
     }
 
     #[test]
     fn move_right_wraps_around() {
-        let mut menu = MenuBar::new();
+        let mut menu = MenuBar::new(&HashMap::new());
         menu.open_first();
         for _ in 0..menu.items.len() {
             menu.move_right();
@@ -552,7 +358,7 @@ mod tests {
 
     #[test]
     fn activate_closes_menu() {
-        let mut menu = MenuBar::new();
+        let mut menu = MenuBar::new(&HashMap::new());
         menu.open_by_mnemonic('E');
         let action = menu.activate();
         assert_eq!(action, Some(Action::Cut));
