@@ -1,4 +1,4 @@
-# tui- — User Guide
+# tui-wave — User Guide
 
 A keyboard-driven terminal audio editor for WAV files. Runs in your terminal on Linux, macOS, or Windows.
 
