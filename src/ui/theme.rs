@@ -19,8 +19,9 @@ pub const LAVENDER: Color = Color::Rgb(0xb4, 0xbe, 0xfe);
 
 /// Normal (unselected) waveform fill.
 pub const WAVEFORM: Color = SKY;
-/// Waveform fill within the active selection range.
-pub const WAVEFORM_SELECTED: Color = YELLOW;
+/// Waveform fill within the active selection range. Dark (BASE) for maximum contrast
+/// against the SKY selection background — the inverted pair reads clearly.
+pub const WAVEFORM_SELECTED: Color = BASE;
 /// The cursor marker (insertion point / playback start).
 pub const CURSOR: Color = YELLOW;
 /// The playhead marker (current playback position, only visible during playback).

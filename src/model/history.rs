@@ -7,6 +7,10 @@ pub struct History {
     undo_stack: Vec<Box<dyn Command>>,
     redo_stack: Vec<Box<dyn Command>>,
     limit: usize,
+    /// Set when this history belongs to a buffer created by CopyToNew. When the undo
+    /// stack is empty and this flag is set, `Action::Undo` closes the buffer silently
+    /// instead of doing nothing — "undoing the creation" of the buffer.
+    pub created_by_copy_to_new: bool,
 }
 
 impl History {
@@ -15,7 +19,12 @@ impl History {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             limit: DEFAULT_LIMIT,
+            created_by_copy_to_new: false,
         }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
     }
 
     pub fn apply(&mut self, mut cmd: Box<dyn Command>, doc: &mut Document) {

@@ -42,12 +42,17 @@ pub enum Action {
     Gain,
     ToggleLoop,
     CopyToNew,
+    MixToMono,
+    NewFromLeft,
+    NewFromRight,
     FadeIn,
     FadeOut,
     TechnicalFades,
     Trim,
     ExtendSelectionToStart,
     ExtendSelectionToEnd,
+    ExtendSelectionPageBack,
+    ExtendSelectionPageForward,
     ExtendSelectionToPrevMarker,
     ExtendSelectionToNextMarker,
     InsertMarker,
@@ -97,10 +102,15 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         // reported by every terminal without the kitty keyboard protocol's disambiguation,
         // the same reasoning that keeps fine-step mode off Ctrl/Alt+arrow (see ToggleFineMode).
         KeyCode::Char('b') if ctrl => Some(Action::TechnicalFades),
+        KeyCode::Char('m') if ctrl => Some(Action::MixToMono),
+        KeyCode::Char('L') => Some(Action::NewFromLeft),
+        KeyCode::Char('R') => Some(Action::NewFromRight),
         KeyCode::Left if shift => Some(Action::ExtendSelectionLeft),
         KeyCode::Right if shift => Some(Action::ExtendSelectionRight),
-        KeyCode::PageUp if shift => Some(Action::ExtendSelectionToStart),
-        KeyCode::PageDown if shift => Some(Action::ExtendSelectionToEnd),
+        KeyCode::Home if shift => Some(Action::ExtendSelectionToStart),
+        KeyCode::End if shift => Some(Action::ExtendSelectionToEnd),
+        KeyCode::PageUp if shift => Some(Action::ExtendSelectionPageBack),
+        KeyCode::PageDown if shift => Some(Action::ExtendSelectionPageForward),
         KeyCode::Left => Some(Action::MoveCursorLeft),
         KeyCode::Right => Some(Action::MoveCursorRight),
         // Backtick toggles fine-step mode: while on, the arrows (and Shift+arrows) move/extend
@@ -433,7 +443,7 @@ mod tests {
             map_key(key(KeyCode::Char('l'), KeyModifiers::NONE)),
             Some(Action::ToggleLoop)
         );
-        assert_eq!(map_key(key(KeyCode::Char('L'), KeyModifiers::NONE)), None);
+        assert_eq!(map_key(key(KeyCode::Char('L'), KeyModifiers::NONE)), Some(Action::NewFromLeft));
     }
 
     /// Audition is reachable only as a Files-panel-contextual binding (plain 'a' there,
