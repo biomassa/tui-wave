@@ -2,6 +2,12 @@
 
 ## 2026-06-28
 
+- Fixed Auto-Insert Markers missing a transient at the very start of a file: if the
+  opening audio decays significantly into the second analysis frame, position 0 is now
+  correctly marked.
+- Fixed the transient threshold not actually defaulting to 13 dB on a fresh install
+  (the toolbar field was updated but the config default wasn't).
+
 - Added a **Channels** menu and toolbar group with three commands: **Mix to Mono**
   (`Ctrl+m`), **New from Left** (`L`), and **New from Right** (`R`). All three are
   selection-aware — if a selection is active, only that range goes into the new buffer;
