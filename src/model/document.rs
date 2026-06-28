@@ -181,7 +181,29 @@ impl Document {
     /// *next* rise rather than re-triggering on the one just found. Used by "Auto-Insert
     /// Markers at Transients".
     pub fn find_all_rising_edges(&self, threshold_db: f32) -> Vec<usize> {
+        const TRANSIENT_FRAME_MS: f64 = 10.0;
+        const TRANSIENT_MIN_LEVEL: f32 = 0.01;
+        const EPS: f32 = 1e-6;
         let mut edges = Vec::new();
+
+        // `find_next_rising_edge` can never return position 0 because it unconditionally
+        // uses the first frame to seed the background level before comparing anything.
+        // For a file that opens with a transient (the signal peaks at frame 0 then decays),
+        // detect this by comparing frame 0 against frame 1: a real transient onset has a
+        // significant drop from one frame to the next; constant-level content doesn't.
+        if !self.channels.is_empty() && self.len_samples() > 0 {
+            let frame_len = ((self.sample_rate as f64 * TRANSIENT_FRAME_MS / 1000.0).round() as usize).max(1);
+            let total = self.len_samples();
+            if total >= 2 * frame_len {
+                let frame0 = self.frame_rms(0, frame_len).max(EPS);
+                let frame1 = self.frame_rms(frame_len, (2 * frame_len).min(total)).max(EPS);
+                let decay_db = 20.0 * (frame0 / frame1).log10();
+                if frame0 >= TRANSIENT_MIN_LEVEL && decay_db >= threshold_db {
+                    edges.push(0);
+                }
+            }
+        }
+
         let mut pos = 0;
         while let Some(edge) = self.find_next_rising_edge(pos, threshold_db) {
             edges.push(edge);
@@ -374,6 +396,16 @@ mod tests {
     fn find_all_rising_edges_is_empty_for_constant_level() {
         let d = doc(segments(&[(0.3, 50)]));
         assert!(d.find_all_rising_edges(6.0).is_empty());
+    }
+
+    #[test]
+    fn find_all_rising_edges_inserts_position_zero_for_file_that_opens_with_transient() {
+        // A loud hit at sample 0 that decays into the second frame by more than the
+        // threshold — the algorithm's normal scan can't catch this because the first
+        // frame is unconditionally used as the background seed, never compared.
+        let d = doc(segments(&[(0.5, 1), (0.05, 49)])); // ~14dB decay in frame 1
+        let edges = d.find_all_rising_edges(6.0);
+        assert_eq!(edges[0], 0, "transient at position 0 must produce a marker at 0");
     }
 
     #[test]
