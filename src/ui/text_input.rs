@@ -2,6 +2,7 @@
 //! Home/End and Delete all work. Pure logic (no ratatui), so the cursor math is unit-tested.
 
 /// A line of editable text with a cursor (a char index in `0..=char_len`).
+#[derive(Clone)]
 pub struct TextInput {
     text: String,
     cursor: usize,

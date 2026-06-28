@@ -63,7 +63,7 @@ impl Toolbar {
                 buttons: vec![
                     ("Cut", "^x", Action::Cut),
                     ("Copy", "^c", Action::Copy),
-                    ("New", "C", Action::CopyToNew),
+                    ("copyToNew", "C", Action::CopyToNew),
                     ("Paste", "^v", Action::Paste),
                     ("Undo", "^z", Action::Undo),
                     ("Redo", "^y", Action::Redo),
@@ -90,7 +90,7 @@ impl Toolbar {
                     ("FadeOut", "^o", Action::FadeOut),
                     ("Trim", "^t", Action::Trim),
                     ("Resamp", "^e", Action::Resample),
-                    ("TechFades", "^b", Action::TechnicalFades),
+                    ("bothFades", "^b", Action::TechnicalFades),
                 ],
             },
             ToolGroup {
@@ -109,6 +109,14 @@ impl Toolbar {
                     // value, then the bare +/- shortcuts) — these are just placeholders.
                     ("", "+", Action::IncreaseTransientThreshold),
                     ("", "-", Action::DecreaseTransientThreshold),
+                ],
+            },
+            ToolGroup {
+                label: "CHANNELS",
+                buttons: vec![
+                    ("mixToMono", "^m", Action::MixToMono),
+                    ("newFromLeft", "L", Action::NewFromLeft),
+                    ("newFromRight", "R", Action::NewFromRight),
                 ],
             },
             ToolGroup {
@@ -157,7 +165,7 @@ impl Toolbar {
             rects: Vec::new(),
             active_actions: HashSet::new(),
             is_playing: false,
-            transient_threshold_db: 6.0,
+            transient_threshold_db: 13.0,
         }
     }
 

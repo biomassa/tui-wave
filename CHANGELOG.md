@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-06-28
+
+- Added a **Channels** menu and toolbar group with three commands: **Mix to Mono**
+  (`Ctrl+m`), **New from Left** (`L`), and **New from Right** (`R`). All three are
+  selection-aware — if a selection is active, only that range goes into the new buffer;
+  otherwise the whole file does.
+- Mix to Mono opens a dialog to set per-channel gain in dB (`0` = unity, `-inf` = silence
+  that channel). Tab cycles through fields and the tanh soft-limiter toggle; Del sets the
+  current field to `-inf`.
+- The selected-range waveform is now rendered as a dark bar on a cyan background instead of
+  yellow-on-dark, giving much higher contrast.
+- The dB scale no longer pins 0 dB to the top row when zoomed in vertically — marks that
+  fall outside the visible amplitude range disappear, so the scale always reflects what's
+  actually on screen.
+- The transient detection threshold defaults to 13 dB (was 6 dB).
+- Added graphics-mode waveform rendering (kitty/Sixel/iTerm2): when a supported terminal
+  is detected, the waveform is drawn as a real bitmap at pixel resolution rather than
+  character blocks. Toggled with `g`; persists between sessions. Falls back to text mode
+  silently in tmux, screen, or unsupported terminals.
+
 ## 2026-06-25
 
 - Added an **Audition** toggle to the Files panel: navigating to a file previews it by

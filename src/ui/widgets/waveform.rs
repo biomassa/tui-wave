@@ -106,6 +106,15 @@ impl<'a> Widget for WaveformWidget<'a> {
                 theme::WAVEFORM
             };
             let x = area.x + col;
+            // Inverted selection: fill the whole column with the waveform color as the
+            // background, so the bar (drawn in WAVEFORM_SELECTED / YELLOW on top of it)
+            // looks like the palette has swapped relative to an unselected column.
+            let bg = if selected { theme::WAVEFORM } else { theme::BASE };
+            if selected {
+                for row in 0..area.height {
+                    buf[(x, area.y + row)].set_bg(theme::WAVEFORM);
+                }
+            }
 
             // A column spanning very few samples — in the limit exactly one, where
             // min == max — has zero geometric height here and would otherwise render
@@ -160,13 +169,14 @@ impl<'a> Widget for WaveformWidget<'a> {
                     let complement = 8 - filled.clamp(0, 8);
                     if let Some(ch) = lower_eighth(complement as u8) {
                         // Swap fg/bg: the glyph's "ink" (bottom complement/8) renders in the
-                        // pane background, while the "non-ink" area (top filled/8 — what we
-                        // actually want colored) renders in the bar's background.
+                        // pane background color, while the "non-ink" area (top filled/8 — what
+                        // we actually want colored) renders in the bar's background. When
+                        // selected the pane background is WAVEFORM (SKY) not BASE.
                         buf[(x, y)]
                             .set_char(ch)
-                            .set_style(Style::default().fg(theme::BASE).bg(color));
+                            .set_style(Style::default().fg(bg).bg(color));
                     } else {
-                        buf[(x, y)].set_char(' ').set_style(Style::default().bg(theme::BASE));
+                        buf[(x, y)].set_char(' ').set_style(Style::default().bg(bg));
                     }
                 } else {
                     buf[(x, y)].set_char('█').set_style(Style::default().fg(color));
