@@ -8,12 +8,13 @@ use crate::ui::theme;
 /// Width reserved on each side of a channel's waveform pane for the dB scale gutter.
 pub const DB_GUTTER_WIDTH: u16 = 4;
 
-const DB_MARKS: [(f32, &str); 5] = [
+const DB_MARKS: [(f32, &str); 6] = [
     (0.0, "0dB"),
     (-3.0, "-3"),
     (-6.0, "-6"),
     (-12.0, "-12"),
     (-18.0, "-18"),
+    (-24.0, "-24"),
 ];
 
 /// Renders the vertical dB axis for one channel's waveform pane. `reference_amplitude` is
@@ -47,7 +48,11 @@ impl Widget for DbScaleWidget {
 
         for &(db, label) in DB_MARKS.iter() {
             let amplitude = self.reference_amplitude * 10f32.powf(db / 20.0);
-            let scaled = (amplitude * self.amplitude_scale).clamp(0.0, 1.0) as f64;
+            // No clamp here — off-screen marks (scaled > 1.0) produce rows < 0 or >= height,
+            // which draw_label already rejects. Clamping to [0,1] was wrong: at 2x vertical
+            // zoom (amplitude_scale=2.0) 0dB, -3dB, and -6dB all clamped to 1.0 and stacked
+            // at row 0, hiding the fact that those levels are above the visible amplitude range.
+            let scaled = (amplitude * self.amplitude_scale) as f64;
 
             let top_row = (mid_row - scaled * half_height).round() as i64;
             draw_label(buf, area, top_row, label, &mut claimed_rows);
@@ -107,6 +112,27 @@ mod tests {
         widget.render(area, &mut buf);
         // mid=10, half=10, amplitude=0.5*1.0=0.5 => top_row = round(10 - 0.5*10) = 5
         assert_eq!(buf[(0, 5)].symbol(), "0");
+    }
+
+    /// When amplitude_scale > 1 (zoomed in vertically), marks above the visible amplitude
+    /// ceiling must NOT be pinned to the top row — they should disappear entirely. The old
+    /// code clamped `scaled` to [0,1], which caused 0dB, -3dB, and -6dB to all pile up at
+    /// row 0 at 2x zoom rather than going off-screen. Removing the clamp fixes this: those
+    /// marks produce negative row indices and are rejected by draw_label's bounds check.
+    #[test]
+    fn at_2x_zoom_off_screen_marks_are_excluded_and_minus_6_leads() {
+        let widget = DbScaleWidget {
+            amplitude_scale: 2.0,
+            reference_amplitude: 1.0,
+        };
+        let area = Rect::new(0, 0, DB_GUTTER_WIDTH, 20);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        // 0dB (scaled = 2.0): row = round(10 - 20.0) = -10 → off-screen, must not appear
+        // -3dB (scaled ≈ 1.42): also off-screen
+        // -6dB (scaled ≈ 1.002): row ≈ round(10 - 10.02) = 0 → topmost visible mark
+        assert_eq!(buf[(0, 0)].symbol(), "-", "row 0 should start with '-6', not '0dB'");
+        assert_eq!(buf[(1, 0)].symbol(), "6");
     }
 
     #[test]

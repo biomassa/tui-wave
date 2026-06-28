@@ -109,6 +109,26 @@ impl MenuBar {
                         shortcut: "Ctrl+a",
                         action: Action::SelectAll,
                     },
+                    MenuEntry {
+                        label: "Extend Selection to Start",
+                        shortcut: "Shift+Home",
+                        action: Action::ExtendSelectionToStart,
+                    },
+                    MenuEntry {
+                        label: "Extend Selection to End",
+                        shortcut: "Shift+End",
+                        action: Action::ExtendSelectionToEnd,
+                    },
+                    MenuEntry {
+                        label: "Extend Selection Page Back",
+                        shortcut: "Shift+PgUp",
+                        action: Action::ExtendSelectionPageBack,
+                    },
+                    MenuEntry {
+                        label: "Extend Selection Page Fwd",
+                        shortcut: "Shift+PgDn",
+                        action: Action::ExtendSelectionPageForward,
+                    },
                 ],
             },
             MenuItem {
@@ -287,6 +307,27 @@ impl MenuBar {
                         label: "Loop Playback",
                         shortcut: "l",
                         action: Action::ToggleLoop,
+                    },
+                ],
+            },
+            MenuItem {
+                label: "Channels",
+                mnemonic: 'C',
+                entries: vec![
+                    MenuEntry {
+                        label: "Mix to Mono",
+                        shortcut: "Ctrl+m",
+                        action: Action::MixToMono,
+                    },
+                    MenuEntry {
+                        label: "New from Left Channel",
+                        shortcut: "L",
+                        action: Action::NewFromLeft,
+                    },
+                    MenuEntry {
+                        label: "New from Right Channel",
+                        shortcut: "R",
+                        action: Action::NewFromRight,
                     },
                 ],
             },

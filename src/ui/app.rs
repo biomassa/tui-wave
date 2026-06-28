@@ -56,6 +56,10 @@ enum Dialog {
     RenameMarker { position: usize, input: TextInput },
     OpenDirectory { input: TextInput },
     RenameBuffer { index: usize, input: TextInput },
+    /// Mix-to-mono: one TextInput per source channel (dB gain, or the literal "-inf" for
+    /// silence). `focused` is the index of the currently-active field; Tab cycles through.
+    /// `tanh_clip` enables a tanh soft-limiter on the mixed output (same as Gain's option).
+    MixToMono { inputs: Vec<TextInput>, focused: usize, tanh_clip: bool },
 }
 
 /// Which panel currently has focus — the single source of truth for the modal command
@@ -91,6 +95,7 @@ enum SaveAsQueueThen {
     Quit,
     CloseBuffer(usize),
 }
+
 
 pub struct App {
     pub should_quit: bool,
@@ -447,6 +452,19 @@ impl App {
                     Event::Mouse(mouse) => self.handle_mouse(mouse),
                     _ => {}
                 }
+                // Drain any additional events that arrived while rendering. Without this,
+                // a slow render (e.g. kitty graphics transmission on macOS) lets key-repeat
+                // events queue up faster than they're consumed, so the cursor keeps moving
+                // for a visible moment after the key is released. Draining here means every
+                // queued event is processed before the next expensive redraw, and the cursor
+                // stops the instant the queue empties (i.e. as soon as release takes effect).
+                while !self.should_quit && event::poll(Duration::from_millis(0))? {
+                    match event::read()? {
+                        Event::Key(key) => self.handle_key(key),
+                        Event::Mouse(mouse) => self.handle_mouse(mouse),
+                        _ => {}
+                    }
+                }
             }
             self.sync_playhead_from_audio();
             self.tick_audition();
@@ -726,6 +744,7 @@ impl App {
             | Dialog::OpenDirectory { input }
             | Dialog::RenameBuffer { input, .. } => Some(input),
             Dialog::FadeIn { .. } | Dialog::FadeOut { .. } => None,
+            Dialog::MixToMono { inputs, focused, .. } => inputs.get_mut(*focused),
         }
     }
 
@@ -736,6 +755,9 @@ impl App {
                 c.is_ascii_digit() || c == '-' || c == '.'
             }
             Some(Dialog::Resample { .. }) => c.is_ascii_digit(),
+            Some(Dialog::MixToMono { .. }) => {
+                c.is_ascii_digit() || matches!(c, '-' | '.' | 'i' | 'n' | 'f')
+            }
             _ => true, // rename / directory dialogs: free text
         }
     }
@@ -771,6 +793,11 @@ impl App {
                 Some(Dialog::RenameBuffer { index, input }) => {
                     self.rename_buffer(index, &ensure_wav_extension(input.value().trim()));
                 }
+                Some(Dialog::MixToMono { inputs, tanh_clip, .. }) => {
+                    let inputs_snapshot = inputs.clone();
+                    let clip = tanh_clip;
+                    self.apply_mix_to_mono(&inputs_snapshot, clip);
+                }
                 None => {}
             },
             KeyCode::Esc => self.dialog = None,
@@ -804,11 +831,28 @@ impl App {
                 }
             }
             KeyCode::Delete => {
-                if let Some(input) = self.dialog_input() {
+                // In MixToMono, Delete is a shortcut for "-inf" (silence that channel).
+                // Only applies when a channel field is focused, not the tanh toggle row.
+                if let Some(Dialog::MixToMono { inputs, focused, .. }) = self.dialog.as_mut() {
+                    let f = *focused;
+                    if f < inputs.len() {
+                        inputs[f] = TextInput::new("-inf");
+                    }
+                } else if let Some(input) = self.dialog_input() {
                     input.delete();
                 }
             }
             KeyCode::Tab => match self.dialog.as_mut() {
+                Some(Dialog::MixToMono { inputs, focused, tanh_clip }) => {
+                    // Slots: 0..n = channel fields, n = tanh row. Tab cycles through all;
+                    // when landing on tanh, toggle it. Space/Enter on any slot applies.
+                    let n = inputs.len();
+                    let next = (*focused + 1) % (n + 1);
+                    *focused = next;
+                    if next == n {
+                        *tanh_clip = !*tanh_clip;
+                    }
+                }
                 Some(Dialog::Gain { tanh_clip, .. }) => *tanh_clip = !*tanh_clip,
                 Some(Dialog::FadeIn { curve }) | Some(Dialog::FadeOut { curve }) => {
                     *curve = curve.next()
@@ -1154,9 +1198,12 @@ impl App {
 
     fn apply_fade(&mut self, fade_in: bool, pct: f32, curve: FadeCurve) {
         let idx = self.active_document;
-        // Fade deliberately does not snap: the curve is shaped to start/end at zero anyway,
-        // so a hard zero crossing at the boundary buys nothing.
-        let Some((start, end)) = self.operation_range(idx, false) else { return };
+        // Snap to zero crossings so the boundary between faded and unfaded audio coincides
+        // with a near-zero sample. Without this, fade-out leaves samples[end] (first unfaded
+        // sample) at its original amplitude while samples[end-1] drops to 0, producing an
+        // audible click and a visible spike in the waveform. The curve reaching zero on the
+        // faded side alone is not enough — the unfaded side must also be near zero.
+        let Some((start, end)) = self.operation_range(idx, true) else { return };
         let fade_samples = ((end - start) as f32 * pct / 100.0).round() as usize;
         let fade_samples = fade_samples.max(1).min(end - start);
         let (fade_start, fade_end) = if fade_in {
@@ -1199,6 +1246,73 @@ impl App {
         let fade_len = ((document.sample_rate as f64 * TECHNICAL_FADE_MS / 1000.0).round() as usize).max(1);
         self.histories[idx].apply(technical_fades_command(fade_len), &mut self.documents[idx]);
         self.after_sample_mutation(idx);
+    }
+
+    /// Mix source channels to a new mono document according to per-channel dB gains.
+    /// "-inf" in a field means that channel contributes nothing to the mix.
+    /// If `tanh_clip` is true, applies a tanh soft-limiter to the mixed output.
+    fn apply_mix_to_mono(&mut self, inputs: &[TextInput], tanh_clip: bool) {
+        let Some(src) = self.active_doc() else { return };
+        if src.channels.is_empty() {
+            return;
+        }
+        // If there's an active selection, operate only on that range.
+        let (range_start, range_len) = match src.selection.map(|s| s.normalized()) {
+            Some((s, e)) if s < e => (s, e - s),
+            _ => (0, src.channels[0].len()),
+        };
+        let sample_rate = src.sample_rate;
+
+        // Parse gains: "-inf" or any parse failure → 0.0 linear (silence that channel).
+        let gains: Vec<f32> = inputs
+            .iter()
+            .enumerate()
+            .map(|(i, ti)| {
+                let raw = ti.value().trim().to_lowercase();
+                if raw == "-inf" || raw.is_empty() {
+                    return 0.0f32;
+                }
+                match raw.parse::<f32>() {
+                    Ok(db) => 10f32.powf(db / 20.0),
+                    Err(_) => if i < src.channels.len() { 1.0 } else { 0.0 },
+                }
+            })
+            .collect();
+
+        let n_ch = src.channels.len().min(gains.len());
+        let mut mixed = vec![0.0f32; range_len];
+        for (ch_idx, gain) in gains.iter().enumerate().take(n_ch) {
+            if *gain == 0.0 {
+                continue;
+            }
+            let ch_slice = &src.channels[ch_idx][range_start..range_start + range_len];
+            for (s, &v) in mixed.iter_mut().zip(ch_slice.iter()) {
+                *s += v * gain;
+            }
+        }
+
+        if tanh_clip {
+            for s in &mut mixed {
+                *s = s.tanh();
+            }
+        }
+
+        let new_doc = Document {
+            channels: vec![mixed],
+            sample_rate,
+            selection: None,
+            cursor: 0,
+            dirty: true,
+            path: None,
+            markers: Vec::new(),
+            bext: None,
+        };
+        self.dialog = None;
+        self.push_document(new_doc);
+        self.histories.last_mut().unwrap().created_by_copy_to_new = true;
+        self.viewport = None;
+        self.rebuild_audio();
+        self.rebuild_waveform_caches();
     }
 
     fn load_file(&mut self, path: PathBuf) {
@@ -1740,6 +1854,21 @@ impl App {
             return;
         }
 
+        // CopyToNew undo: when the user presses Undo on a buffer that was born from
+        // CopyToNew and the undo stack is already empty, silently close the buffer rather
+        // than doing nothing. This "undoes the creation" without triggering the save dialog
+        // — the buffer was never saved to disk and never had an independent existence.
+        if action == Action::Undo {
+            let idx = self.active_document;
+            if idx < self.histories.len()
+                && self.histories[idx].created_by_copy_to_new
+                && !self.histories[idx].can_undo()
+            {
+                self.close_buffer(idx);
+                return;
+            }
+        }
+
         if matches!(
             action,
             Action::Cut
@@ -1947,6 +2076,49 @@ impl App {
                     bext: None,
                 };
                 self.push_document(new_doc);
+                self.histories.last_mut().unwrap().created_by_copy_to_new = true;
+                self.viewport = None;
+                self.rebuild_audio();
+                self.rebuild_waveform_caches();
+            }
+            return;
+        }
+
+        if action == Action::MixToMono {
+            if let Some(doc) = self.active_doc() {
+                let n = doc.channels.len();
+                if n == 0 {
+                    return;
+                }
+                let inputs: Vec<TextInput> = (0..n).map(|_| TextInput::new("0")).collect();
+                self.dialog = Some(Dialog::MixToMono { inputs, focused: 0, tanh_clip: false });
+            }
+            return;
+        }
+
+        if action == Action::NewFromLeft || action == Action::NewFromRight {
+            let channel_idx = if action == Action::NewFromLeft { 0 } else { 1 };
+            let data = self.active_doc().and_then(|d| {
+                let (start, end) = match d.selection.map(|s| s.normalized()) {
+                    Some((s, e)) if s < e => (s, e),
+                    _ => (0, d.channels.get(0).map(|c| c.len()).unwrap_or(0)),
+                };
+                d.channels.get(channel_idx).map(|ch| vec![ch[start..end].to_vec()])
+            });
+            let sample_rate = self.active_doc().map(|d| d.sample_rate).unwrap_or(44100);
+            if let Some(channels) = data {
+                let new_doc = Document {
+                    channels,
+                    sample_rate,
+                    selection: None,
+                    cursor: 0,
+                    dirty: true,
+                    path: None,
+                    markers: Vec::new(),
+                    bext: None,
+                };
+                self.push_document(new_doc);
+                self.histories.last_mut().unwrap().created_by_copy_to_new = true;
                 self.viewport = None;
                 self.rebuild_audio();
                 self.rebuild_waveform_caches();
@@ -2019,6 +2191,9 @@ impl App {
             | Action::SaveAll
             | Action::Gain
             | Action::CopyToNew
+            | Action::MixToMono
+            | Action::NewFromLeft
+            | Action::NewFromRight
             | Action::FadeIn
             | Action::FadeOut
             | Action::TechnicalFades
@@ -2074,6 +2249,12 @@ impl App {
             Action::PageForward => {
                 document.cursor = (document.cursor + span.max(1)).min(total_len - 1);
             }
+            Action::ExtendSelectionPageBack => {
+                document.cursor = document.cursor.saturating_sub(span.max(1));
+            }
+            Action::ExtendSelectionPageForward => {
+                document.cursor = (document.cursor + span.max(1)).min(total_len - 1);
+            }
             Action::ZoomIn => viewport.zoom_in(document.cursor, width),
             Action::ZoomOut => viewport.zoom_out(document.cursor, width),
             Action::ZoomInVertical => viewport.zoom_in_vertical(),
@@ -2105,11 +2286,23 @@ impl App {
             Action::ExtendSelectionToStart
             | Action::ExtendSelectionToEnd
             | Action::ExtendSelectionToPrevMarker
-            | Action::ExtendSelectionToNextMarker => {
-                // cursor is already at the target (0 / end / marker position); keep it there.
+            | Action::ExtendSelectionToNextMarker
+            | Action::ExtendSelectionPageBack
+            | Action::ExtendSelectionPageForward => {
+                // cursor is already at the target; anchor is kept from existing selection or old_cursor.
                 document.selection = Some(Selection::extended(document.selection, old_cursor, document.cursor));
             }
-            // Plain cursor moves, jumps, paging and zoom leave the selection untouched.
+            // Plain cursor moves and jumps clear any active selection (same paradigm as
+            // Word/RX: non-Shift navigation collapses the selection).
+            Action::MoveCursorLeft
+            | Action::MoveCursorRight
+            | Action::JumpStart
+            | Action::JumpEnd
+            | Action::PageBack
+            | Action::PageForward => {
+                document.selection = None;
+            }
+            // Zoom changes don't affect the selection.
             _ => {}
         }
 
@@ -2849,7 +3042,91 @@ fn render_confirm(frame: &mut Frame, area: Rect, text: &str) {
     frame.render_widget(paragraph, popup);
 }
 
+/// Renders the Mix-to-Mono dialog: one row per source channel with a live dB field,
+/// plus a hints row.  Tab cycles focus, Del = -inf, Enter applies, Esc cancels.
+fn render_mix_to_mono_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    inputs: &[TextInput],
+    focused: usize,
+    tanh_clip: bool,
+) {
+    let n = inputs.len();
+    // channel rows + tanh row + blank + hints row = n + 3 rows (plus 2 for border)
+    let inner_h = (n as u16) + 3;
+    let height = (inner_h + 2).min(area.height);
+    let width = 38u16.min(area.width);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, ti) in inputs.iter().enumerate() {
+        let ch_label = if n == 2 {
+            if i == 0 { "L (dB): " } else { "R (dB): " }
+        } else {
+            "Ch (dB): "
+        };
+        let (before, under, after) = ti.split_at_cursor();
+        if i == focused {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {ch_label}"), label_style),
+                Span::styled(before, base),
+                Span::styled(under, cursor_style),
+                Span::styled(after, base),
+                Span::raw("  "),
+            ]));
+        } else {
+            let value = ti.value().to_string();
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {ch_label}"), label_style),
+                Span::styled(value, base),
+            ]));
+        }
+    }
+    // Tanh soft-limiter row — highlighted when focused == n (the tanh slot)
+    let tanh_label = if tanh_clip { " [X] Tanh limiter" } else { " [ ] Tanh limiter" };
+    if focused == n {
+        lines.push(Line::from(vec![
+            Span::styled(tanh_label, cursor_style),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(tanh_label, label_style),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(" Tab", hint_style),
+        Span::styled(":next  ", label_style),
+        Span::styled("Del", hint_style),
+        Span::styled(":-inf  ", label_style),
+        Span::styled("Enter", hint_style),
+        Span::styled(":apply", label_style),
+    ]));
+
+    let block = Block::default()
+        .title("Mix to Mono")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
 fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) {
+    if let Dialog::MixToMono { inputs, focused, tanh_clip } = dialog {
+        return render_mix_to_mono_dialog(frame, area, inputs, *focused, *tanh_clip);
+    }
+
     // (title, label before the field, optional text field, suffix after the field).
     let (title, prefix, input, suffix): (&str, String, Option<&TextInput>, String) = match dialog {
         Dialog::Normalize { input } => {
@@ -2867,6 +3144,7 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) {
         Dialog::RenameMarker { input, .. } => ("Rename Marker", " Label: ".into(), Some(input), " ".into()),
         Dialog::OpenDirectory { input } => ("Open Directory", " Path: ".into(), Some(input), " ".into()),
         Dialog::RenameBuffer { input, .. } => ("Rename Buffer", " New name: ".into(), Some(input), " ".into()),
+        Dialog::MixToMono { .. } => unreachable!("handled by early return above"),
     };
 
     let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
@@ -3969,5 +4247,90 @@ mod tests {
         assert!(app.histories[0].undo(&mut app.documents[0]));
         assert_eq!(app.documents[0].len_samples(), 20);
         assert!(!app.histories[0].undo(&mut app.documents[0]));
+    }
+
+    fn nav_app() -> App {
+        let mut app = new_app(Some(doc(0.5, 1000)), None);
+        app.content_width = 80;
+        app.viewport = Some(Viewport {
+            samples_per_column: 10.0,
+            scroll_offset: 0,
+            amplitude_scale: 1.0,
+            min_samples_per_column: 1.0,
+            max_samples_per_column: 1_000_000.0,
+            total_len: 1000,
+            auto_vertical_zoom: false,
+        });
+        app.documents[0].cursor = 100;
+        app
+    }
+
+    #[test]
+    fn plain_navigation_clears_an_active_selection() {
+        let mut app = nav_app();
+        app.handle_action(Action::ExtendSelectionRight);
+        assert!(app.documents[0].selection.is_some(), "selection should exist after ExtendSelectionRight");
+        app.handle_action(Action::MoveCursorLeft);
+        assert!(app.documents[0].selection.is_none(), "MoveCursorLeft must clear selection");
+    }
+
+    #[test]
+    fn plain_jump_clears_an_active_selection() {
+        let mut app = nav_app();
+        app.handle_action(Action::ExtendSelectionRight);
+        assert!(app.documents[0].selection.is_some());
+        app.handle_action(Action::JumpStart);
+        assert!(app.documents[0].selection.is_none(), "JumpStart must clear selection");
+
+        app.documents[0].cursor = 100;
+        app.handle_action(Action::ExtendSelectionRight);
+        assert!(app.documents[0].selection.is_some());
+        app.handle_action(Action::JumpEnd);
+        assert!(app.documents[0].selection.is_none(), "JumpEnd must clear selection");
+    }
+
+    #[test]
+    fn plain_page_nav_clears_an_active_selection() {
+        let mut app = nav_app();
+        app.handle_action(Action::ExtendSelectionRight);
+        assert!(app.documents[0].selection.is_some());
+        app.handle_action(Action::PageForward);
+        assert!(app.documents[0].selection.is_none(), "PageForward must clear selection");
+
+        app.handle_action(Action::ExtendSelectionRight);
+        assert!(app.documents[0].selection.is_some());
+        app.handle_action(Action::PageBack);
+        assert!(app.documents[0].selection.is_none(), "PageBack must clear selection");
+    }
+
+    #[test]
+    fn shift_page_nav_extends_selection_by_one_viewport() {
+        let mut app = nav_app(); // cursor=100, spc=10, width=80 → span=800
+        // Extend forward by one page (800 samples).
+        app.handle_action(Action::ExtendSelectionPageForward);
+        let sel = app.documents[0].selection.expect("selection should be set after ExtendSelectionPageForward");
+        assert_eq!(sel.start, 100, "anchor stays at pre-move cursor");
+        assert_eq!(sel.end, 900, "active edge moves one page forward");
+
+        // Extend backward from 900 by one page (800 samples) → 100.
+        app.handle_action(Action::ExtendSelectionPageBack);
+        let sel = app.documents[0].selection.expect("selection still set");
+        assert_eq!(sel.start, 100, "anchor is still fixed");
+        assert_eq!(sel.end, 100, "active edge moved back one page, now equals anchor");
+    }
+
+    #[test]
+    fn shift_home_end_extend_to_file_boundaries() {
+        let mut app = nav_app(); // cursor=100
+        app.handle_action(Action::ExtendSelectionToStart);
+        let sel = app.documents[0].selection.expect("selection set after ExtendSelectionToStart");
+        assert_eq!(sel.start, 100, "anchor at cursor position before action");
+        assert_eq!(sel.end, 0, "active edge at file start");
+
+        // Continue extending to end; anchor stays at 100.
+        app.handle_action(Action::ExtendSelectionToEnd);
+        let sel = app.documents[0].selection.expect("selection set after ExtendSelectionToEnd");
+        assert_eq!(sel.start, 100, "anchor kept from previous action");
+        assert_eq!(sel.end, 999, "active edge at last sample");
     }
 }

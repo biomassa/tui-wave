@@ -83,38 +83,89 @@ pub fn rasterize_waveform(
     let half_height = pixel_height as f64 / 2.0;
     let waveform_color = color_to_rgba(theme::WAVEFORM);
     let selected_color = color_to_rgba(theme::WAVEFORM_SELECTED);
-
-    for col in 0..pixel_width {
-        let start = viewport.scroll_offset + (col as f64 * samples_per_pixel_column) as usize;
-        let end = viewport.scroll_offset + ((col + 1) as f64 * samples_per_pixel_column) as usize;
-        let end = end.min(samples.len());
-        if start >= samples.len() || start >= end {
-            continue;
+    // Inverted selection background: fill selected columns with WAVEFORM (SKY) before
+    // drawing the bar, so the bar (in WAVEFORM_SELECTED / YELLOW) appears inverted.
+    if let Some((sel_start, sel_end)) = selection {
+        let selection_bg = color_to_rgba(theme::WAVEFORM);
+        for col in 0..pixel_width {
+            let i0 = (viewport.scroll_offset as f64 + col as f64 * samples_per_pixel_column).floor() as usize;
+            if i0 >= sel_start && i0 < sel_end {
+                for row in 0..pixel_height {
+                    img.put_pixel(col, row, selection_bg);
+                }
+            }
         }
+    }
 
-        let (min, max) = match cache {
-            Some(cache) => cache.min_max(samples, start, end),
-            None => raw_min_max(&samples[start..end]),
-        };
+    // Below ~4 samples per pixel column the filled-bar approach breaks down: bars become
+    // 1-2px tall and look disconnected, and below 1.0 spc integer truncation makes
+    // start==end so every column is silently skipped (blank image). Switch to a connected
+    // polyline that linearly interpolates between adjacent samples, giving the smooth
+    // waveform-trace look that professional editors show at high zoom.
+    if samples_per_pixel_column < 4.0 {
+        let mut prev_y: Option<f64> = None;
+        for col in 0..pixel_width {
+            let sample_f = viewport.scroll_offset as f64 + col as f64 * samples_per_pixel_column;
+            let i0 = sample_f.floor() as usize;
+            if i0 >= samples.len() {
+                break;
+            }
+            let i1 = (i0 + 1).min(samples.len() - 1);
+            let frac = sample_f - i0 as f64;
+            let v = samples[i0] as f64 * (1.0 - frac) + samples[i1] as f64 * frac;
+            let scaled = (v * viewport.amplitude_scale as f64).clamp(-1.0, 1.0);
+            let curr_y = (mid_y - scaled * half_height).clamp(0.0, (pixel_height - 1) as f64);
 
-        let scaled_min = (min * viewport.amplitude_scale).clamp(-1.0, 1.0) as f64;
-        let scaled_max = (max * viewport.amplitude_scale).clamp(-1.0, 1.0) as f64;
+            let selected = selection.is_some_and(|(s, e)| i0 >= s && i0 < e);
+            let color = if selected { selected_color } else { waveform_color };
 
-        // Amplitude 1.0 is the top pixel row, -1.0 the bottom, 0.0 the middle — continuous
-        // (sub-pixel) positions in principle, but at real pixel resolution there's no
-        // eighth-block rounding to do: floor/ceil to whole pixel rows directly, the same
-        // precision loss a real bitmap waveform display would have (a fraction of a pixel
-        // row, not a fraction of an 8-level glyph).
-        let top_y = (mid_y - scaled_max * half_height).clamp(0.0, pixel_height as f64);
-        let bottom_y = (mid_y - scaled_min * half_height).clamp(0.0, pixel_height as f64);
+            // Vertical segment from the previous column's y to this one's y so consecutive
+            // pixel columns are always visually joined — no gaps between sample positions.
+            let (y_lo, y_hi) = match prev_y {
+                Some(py) => (py.min(curr_y), py.max(curr_y)),
+                None => (curr_y, curr_y),
+            };
+            let row_lo = y_lo.floor() as u32;
+            let row_hi = y_hi.ceil() as u32;
+            let row_hi = row_hi.min(pixel_height - 1);
+            for row in row_lo..=row_hi {
+                img.put_pixel(col, row, color);
+            }
+            prev_y = Some(curr_y);
+        }
+    } else {
+        for col in 0..pixel_width {
+            let start = viewport.scroll_offset + (col as f64 * samples_per_pixel_column) as usize;
+            let end = viewport.scroll_offset + ((col + 1) as f64 * samples_per_pixel_column) as usize;
+            let end = end.min(samples.len());
+            if start >= samples.len() || start >= end {
+                continue;
+            }
 
-        let selected = selection.is_some_and(|(sel_start, sel_end)| start < sel_end && end > sel_start);
-        let color = if selected { selected_color } else { waveform_color };
+            let (min, max) = match cache {
+                Some(cache) => cache.min_max(samples, start, end),
+                None => raw_min_max(&samples[start..end]),
+            };
 
-        let top_row = top_y.floor() as u32;
-        let bottom_row_excl = (bottom_y.ceil() as u32).max(top_row + 1).min(pixel_height);
-        for row in top_row..bottom_row_excl {
-            img.put_pixel(col, row, color);
+            let scaled_min = (min * viewport.amplitude_scale).clamp(-1.0, 1.0) as f64;
+            let scaled_max = (max * viewport.amplitude_scale).clamp(-1.0, 1.0) as f64;
+
+            // Amplitude 1.0 is the top pixel row, -1.0 the bottom, 0.0 the middle — continuous
+            // (sub-pixel) positions in principle, but at real pixel resolution there's no
+            // eighth-block rounding to do: floor/ceil to whole pixel rows directly, the same
+            // precision loss a real bitmap waveform display would have (a fraction of a pixel
+            // row, not a fraction of an 8-level glyph).
+            let top_y = (mid_y - scaled_max * half_height).clamp(0.0, pixel_height as f64);
+            let bottom_y = (mid_y - scaled_min * half_height).clamp(0.0, pixel_height as f64);
+
+            let selected = selection.is_some_and(|(sel_start, sel_end)| start < sel_end && end > sel_start);
+            let color = if selected { selected_color } else { waveform_color };
+
+            let top_row = top_y.floor() as u32;
+            let bottom_row_excl = (bottom_y.ceil() as u32).max(top_row + 1).min(pixel_height);
+            for row in top_row..bottom_row_excl {
+                img.put_pixel(col, row, color);
+            }
         }
     }
 
@@ -358,6 +409,34 @@ mod tests {
         let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 999_999, None, &[], false, 80, 160, 40);
         let cursor_color = color_to_rgba(theme::CURSOR);
         assert!(img.pixels().all(|p| *p != cursor_color), "a cursor scrolled out of view must not draw");
+    }
+
+    #[test]
+    fn line_mode_renders_nonblank_at_sub_one_spc() {
+        // At zoom=1.0 spl/col the pixel-column spc is far below 1.0 (many pixels per sample).
+        // The old bar-mode code produced a blank image here because start==end for every column.
+        // Line mode must draw visible waveform pixels instead.
+        //
+        // Geometry: 200 samples, spc=20.0, span=200 → all samples visible; pixel_width=200
+        // → spc_px = 200/200 = 1.0 (still < 4.0, triggers line mode). The ramp goes from
+        // -1.0 (bottom) to +1.0 (top) across the full visible width.
+        let samples: Vec<f32> = (0..200).map(|i| (i as f32 / 199.0) * 2.0 - 1.0).collect();
+        let vp = viewport(0, 20.0); // span = 20 * 10 cols = 200 samples
+        let img = rasterize_waveform(&samples, &vp, None, None, 0, None, &[], false, 10, 200, 80);
+        let bg = color_to_rgba(theme::BASE);
+        let waveform_color = color_to_rgba(theme::WAVEFORM);
+        assert!(
+            img.pixels().any(|p| *p == waveform_color),
+            "line mode must render waveform pixels, not a blank image"
+        );
+        // Ramp goes -1→+1 so the left side should be near the bottom and right side near the top.
+        let top_quarter = img.rows().take(20).flatten().any(|p| *p == waveform_color);
+        let bot_quarter = img.rows().rev().take(20).flatten().any(|p| *p == waveform_color);
+        assert!(top_quarter, "rising ramp must reach the top quarter of the image by the end");
+        assert!(bot_quarter, "rising ramp must start in the bottom quarter of the image");
+        // Very few columns should be fully blank — the old code blanked everything.
+        let blank_columns = (0..200u32).filter(|&x| (0..80u32).all(|y| *img.get_pixel(x, y) == bg)).count();
+        assert!(blank_columns < 10, "line mode should leave very few fully-blank columns (got {blank_columns})");
     }
 
     #[test]
