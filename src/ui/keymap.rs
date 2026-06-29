@@ -66,6 +66,7 @@ pub enum Action {
     AutoInsertMarkers,
     IncreaseTransientThreshold,
     DecreaseTransientThreshold,
+    ResetConfig,
     // Panel/modal commands (mostly dispatched contextually, not via the global keymap).
     Noop,
     OpenSelected,
@@ -369,16 +370,24 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "AutoInsertMarkers" => Some(Action::AutoInsertMarkers),
         "IncreaseTransientThreshold" => Some(Action::IncreaseTransientThreshold),
         "DecreaseTransientThreshold" => Some(Action::DecreaseTransientThreshold),
+        "ResetConfig" => Some(Action::ResetConfig),
         _ => None,
     }
 }
 
 /// Formats a `KeyEvent` as a menu-style shortcut string: `"Ctrl+x"`, `"Shift+Up"`,
-/// `"Del"`, `"Space"`, `"q"`, `"L"`, `"Ctrl+Shift+Z"`, etc.
+/// `"Shift+C"`, `"Del"`, `"Space"`, `"q"`, `"Ctrl+Shift+Z"`, etc.
+///
+/// Shift+letter is represented in crossterm as an uppercase `Char` with no SHIFT modifier
+/// bit, so we detect it here as "uppercase char with no modifier bits" and add the
+/// `"Shift+"` prefix explicitly.
 pub fn format_menu_key(key: KeyEvent) -> String {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    // shift+letter arrives as uppercase Char with no SHIFT bit — detect it explicitly.
+    let implicit_shift = !ctrl && !shift && !alt
+        && matches!(key.code, KeyCode::Char(c) if c.is_ascii_uppercase());
     let key_str: String = match key.code {
         KeyCode::Left => "Left".into(),
         KeyCode::Right => "Right".into(),
@@ -406,7 +415,7 @@ pub fn format_menu_key(key: KeyEvent) -> String {
     };
     let mut out = String::new();
     if ctrl { out.push_str("Ctrl+"); }
-    if shift { out.push_str("Shift+"); }
+    if shift || implicit_shift { out.push_str("Shift+"); }
     if alt { out.push_str("Alt+"); }
     out.push_str(&key_str);
     out
@@ -448,6 +457,9 @@ pub fn format_toolbar_key(key: KeyEvent) -> String {
                 format!("^S+{u}")
             } else if ctrl {
                 format!("^{c}")
+            } else if c.is_ascii_uppercase() {
+                // shift+letter: uppercase char with no modifier bits — show "S+C" not "C".
+                format!("S+{c}")
             } else {
                 c.to_string()
             }

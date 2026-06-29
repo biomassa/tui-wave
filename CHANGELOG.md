@@ -9,7 +9,14 @@
   updates every shortcut hint in the menu and toolbar accordingly.
 - The config file (`~/.config/tui-wave/config.toml`) is now written on the very first
   launch so all available keybindings are immediately visible without having to trigger a
-  toggle first.
+  toggle first. On subsequent launches after an upgrade, any newly-added default bindings
+  are appended automatically without touching existing custom entries.
+- Shift+letter shortcuts now show as `S+C`, `S+L`, `S+M` etc. in the toolbar (and
+  `Shift+C`, `Shift+L`, `Shift+M` in the menus) instead of the bare uppercase letter,
+  making it clear that Shift is required.
+- **File › Reset Config to Defaults**: resets the `[keybindings]` section of the config
+  file to factory defaults while preserving all other settings (snap, zoom, loop, etc.).
+  Takes effect immediately — the key map and all shortcut hints update without restarting.
 - Mix to Mono dialog: Tab now only cycles between channel input fields (it no longer toggles
   the tanh checkbox as a side effect). Press Space to toggle the tanh limiter when that row
   is focused.

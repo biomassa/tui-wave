@@ -50,8 +50,9 @@ impl MenuBar {
                 entries: vec![
                     entry("Save",     Action::Save,    "Ctrl+s"),
                     entry("Save As",  Action::SaveAs,  "Ctrl+Shift+S"),
-                    entry("Save All", Action::SaveAll, "Ctrl+l"),
-                    entry("Quit",     Action::Quit,    "q"),
+                    entry("Save All", Action::SaveAll,     "Ctrl+l"),
+                    entry("Reset Config to Defaults", Action::ResetConfig, ""),
+                    entry("Quit",     Action::Quit,        "q"),
                 ],
             },
             MenuItem {
