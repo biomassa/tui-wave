@@ -39,6 +39,7 @@ pub fn load_wav(path: impl AsRef<Path>) -> color_eyre::Result<Document> {
     Ok(Document {
         channels,
         sample_rate: spec.sample_rate,
+        bits_per_sample: spec.bits_per_sample,
         selection: None,
         cursor: 0,
         dirty: false,
@@ -229,6 +230,7 @@ mod tests {
             dirty: false,
             path: None,
             markers: Vec::new(),
+            bits_per_sample: 32,
             bext: None,
         }
     }

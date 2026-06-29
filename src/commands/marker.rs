@@ -215,6 +215,7 @@ mod tests {
             dirty: false,
             path: None,
             markers,
+            bits_per_sample: 32,
             bext: None,
         }
     }

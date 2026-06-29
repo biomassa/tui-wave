@@ -1393,6 +1393,7 @@ impl App {
             _ => (0, src.channels[0].len()),
         };
         let sample_rate = src.sample_rate;
+        let bits_per_sample = src.bits_per_sample;
         let range_end = range_start + range_len;
         let new_markers: Vec<Marker> = src.markers.iter()
             .filter(|m| m.position >= range_start && m.position < range_end)
@@ -1436,6 +1437,7 @@ impl App {
         let new_doc = Document {
             channels: vec![mixed],
             sample_rate,
+            bits_per_sample,
             selection: None,
             cursor: 0,
             dirty: true,
@@ -2219,13 +2221,14 @@ impl App {
                         .filter(|m| m.position >= start && m.position < end)
                         .map(|m| Marker { position: m.position - start, label: m.label.clone() })
                         .collect();
-                    (samples, markers, d.sample_rate)
+                    (samples, markers, d.sample_rate, d.bits_per_sample)
                 })
             });
-            if let Some((samples, markers, sample_rate)) = result {
+            if let Some((samples, markers, sample_rate, bits_per_sample)) = result {
                 let new_doc = Document {
                     channels: samples,
                     sample_rate,
+                    bits_per_sample,
                     selection: None,
                     cursor: 0,
                     // A copy-to-new buffer holds unsaved data with no path, so it's dirty —
@@ -2268,12 +2271,13 @@ impl App {
                     .filter(|m| m.position >= start && m.position < end)
                     .map(|m| Marker { position: m.position - start, label: m.label.clone() })
                     .collect();
-                Some((channels, markers, d.sample_rate))
+                Some((channels, markers, d.sample_rate, d.bits_per_sample))
             });
-            if let Some((channels, markers, sample_rate)) = result {
+            if let Some((channels, markers, sample_rate, bits_per_sample)) = result {
                 let new_doc = Document {
                     channels,
                     sample_rate,
+                    bits_per_sample,
                     selection: None,
                     cursor: 0,
                     dirty: true,
@@ -3581,6 +3585,7 @@ mod tests {
             dirty: false,
             path: None,
             markers: Vec::new(),
+            bits_per_sample: 32,
             bext: None,
         }
     }
@@ -3625,6 +3630,7 @@ mod tests {
             dirty: false,
             path: None,
             markers: Vec::new(),
+            bits_per_sample: 32,
             bext: None,
         }
     }
@@ -3733,6 +3739,7 @@ mod tests {
             dirty: false,
             path: None,
             markers: Vec::new(),
+            bits_per_sample: 32,
             bext: None,
         }
     }
@@ -4730,6 +4737,7 @@ mod tests {
             dirty: false,
             path: None,
             markers: Vec::new(),
+            bits_per_sample: 32,
             bext: None,
         };
         let mut app = new_app(Some(document), None);
@@ -4759,6 +4767,7 @@ mod tests {
             dirty: false,
             path: None,
             markers: Vec::new(),
+            bits_per_sample: 32,
             bext: None,
         };
         let mut app = new_app(Some(document), None);
