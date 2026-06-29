@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-29
+
+- Fixed Fade In / Fade Out silently doing nothing on small selections. When zero-crossing
+  snap contracted both endpoints of a short selection to the same crossing (making the range
+  degenerate), the fade was skipped with no feedback. The fix falls back to the un-snapped
+  range in that case so the fade always applies over at least the selected samples.
+
 ## 2026-06-28
 
 - All keyboard shortcuts are now configurable via `~/.config/tui-wave/config.toml` under a
@@ -17,6 +24,16 @@
 - **File › Reset Config to Defaults**: resets the `[keybindings]` section of the config
   file to factory defaults while preserving all other settings (snap, zoom, loop, etc.).
   Takes effect immediately — the key map and all shortcut hints update without restarting.
+- All option-bearing dialogs now follow a consistent multi-row UX: checkboxes appear as
+  `[X] Label` rows, cycle selectors show `◄ Label ►`, and a hints bar at the bottom of
+  each popup lists the relevant keys (`Tab:next  Space:check  ←→:change  Enter:apply`).
+  Dialogs are now mouse-aware: clicking a row focuses it; clicking a checkbox row also
+  toggles it; all other mouse events are absorbed while a dialog is open.
+  - **Gain**: text field and `[X] Tanh limiter` checkbox as separate rows; Tab/Space/Enter.
+  - **Fade In / Fade Out**: `◄ Curve ►` cycle row; ←/→ to step through Exp/Log/Linear.
+  - **Save As**: filename field, format cycle row (`◄ Format ►`), and `[X] Dither` checkbox
+    as three distinct rows; Tab to move focus, ←/→ to change format, Space to toggle dither.
+  - **Mix to Mono**: added `Space:check` hint to the existing hints bar.
 - Mix to Mono dialog: Tab now only cycles between channel input fields (it no longer toggles
   the tanh checkbox as a side effect). Press Space to toggle the tanh limiter when that row
   is focused.
