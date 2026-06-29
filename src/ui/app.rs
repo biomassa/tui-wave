@@ -185,6 +185,7 @@ pub struct App {
     save_as_focused: usize,
     /// Clickable row rects from the last dialog render, used for mouse hit-testing.
     dialog_row_rects: Vec<Rect>,
+    dialog_n_interactive: usize,
     /// Buffer indices still waiting for a Save-As filename before `save_as_queue_then` can
     /// run — e.g. quitting with several never-saved buffers walks through one Save As
     /// prompt per buffer rather than silently skipping (and losing) them. Popped from the
@@ -338,6 +339,7 @@ impl App {
             save_as_dither: false,
             save_as_focused: 0,
             dialog_row_rects: Vec::new(),
+            dialog_n_interactive: 0,
             save_as_queue: Vec::new(),
             save_as_queue_then: None,
             snap_to_zero: config.snap_to_zero,
@@ -938,6 +940,18 @@ impl App {
     /// index into `dialog_row_rects` — clicking a row focuses it, and clicking a checkbox
     /// row also toggles it.
     fn handle_dialog_row_click(&mut self, row: usize) {
+        // The hints/apply bar is appended as the last element of dialog_row_rects.
+        // Clicking it (or anything past the interactive rows) submits the dialog.
+        if row >= self.dialog_n_interactive {
+            let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+            if self.save_as_active {
+                self.handle_save_as_key(enter);
+            } else {
+                self.handle_dialog_key(enter);
+            }
+            return;
+        }
+
         if self.save_as_active {
             match row {
                 0 | 1 => self.save_as_focused = row,
@@ -3079,11 +3093,14 @@ impl App {
                 frame, area,
                 &self.save_as_input, self.save_as_depth, self.save_as_dither, self.save_as_focused,
             );
+            // Last element is the apply (hints bar) rect; everything before it is interactive.
+            self.dialog_n_interactive = rects.len().saturating_sub(1);
             self.dialog_row_rects = rects;
         }
 
         let dialog_rects = self.dialog.as_ref().map(|d| render_dialog(frame, area, d)).unwrap_or_default();
         if !dialog_rects.is_empty() {
+            self.dialog_n_interactive = dialog_rects.len().saturating_sub(1);
             self.dialog_row_rects = dialog_rects;
         }
     }
@@ -3232,12 +3249,13 @@ fn render_save_as_dialog(
         popup,
     );
 
-    // Return hit-test rects for the three interactive rows (y+1 for top border)
+    // Return hit-test rects: three interactive rows + apply (hints bar) as last element.
     let row_w = popup.width.saturating_sub(2);
     vec![
         Rect { x: popup.x + 1, y: popup.y + 1, width: row_w, height: 1 },
         Rect { x: popup.x + 1, y: popup.y + 2, width: row_w, height: 1 },
         Rect { x: popup.x + 1, y: popup.y + 4, width: row_w, height: 1 },
+        Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 },
     ]
 }
 
@@ -3345,6 +3363,8 @@ fn render_mix_to_mono_dialog(
         .map(|i| Rect { x: popup.x + 1, y: popup.y + 1 + i as u16, width: row_w, height: 1 })
         .collect();
     rects.push(Rect { x: popup.x + 1, y: popup.y + 2 + n as u16, width: row_w, height: 1 });
+    // Apply (hints bar) rect — last element triggers Enter when clicked.
+    rects.push(Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 });
     rects
 }
 
@@ -3420,6 +3440,8 @@ fn render_gain_dialog(
     vec![
         Rect { x: popup.x + 1, y: popup.y + 1, width: row_w, height: 1 },
         Rect { x: popup.x + 1, y: popup.y + 3, width: row_w, height: 1 },
+        // Apply (hints bar) rect — index == dialog_n_interactive triggers Enter.
+        Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 },
     ]
 }
 
@@ -3466,7 +3488,10 @@ fn render_fade_dialog(frame: &mut Frame, area: Rect, title: &str, curve: FadeCur
     );
 
     let row_w = popup.width.saturating_sub(2);
-    vec![Rect { x: popup.x + 1, y: popup.y + 1, width: row_w, height: 1 }]
+    vec![
+        Rect { x: popup.x + 1, y: popup.y + 1, width: row_w, height: 1 },
+        Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 },
+    ]
 }
 
 fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) -> Vec<Rect> {
