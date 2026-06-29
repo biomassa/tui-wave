@@ -28,14 +28,23 @@ impl<'a> Widget for StatusBar<'a> {
             Some(sel) if !sel.is_empty() => format!("{} samples", sel.len()),
             _ => "none".to_string(),
         };
+        let rate_khz = self.document.sample_rate as f64 / 1000.0;
+        let rate_str = if self.document.sample_rate % 1000 == 0 {
+            format!("{:.0}kHz", rate_khz)
+        } else {
+            format!("{:.1}kHz", rate_khz)
+        };
+        let bits = self.document.bits_per_sample;
         let snap = if self.snap_to_zero { " Zero x: on " } else { "" };
         let loop_ = if self.loop_playback { " Loop: on " } else { "" };
         let fine = if self.fine_mode { " Fine: on " } else { "" };
         let last = self.last_action.map(|l| format!(" last: {} ", l)).unwrap_or_default();
         let text = format!(
-            " pos: {} ({:.3}s) | zoom: {:.1} spl/col | amp: {:.2}x | sel: {} | edge: {:.0}dB |{}{}{}{}",
+            " pos: {} ({:.3}s) | {}/{}-bit | zoom: {:.1} spl/col | amp: {:.2}x | sel: {} | edge: {:.0}dB |{}{}{}{}",
             self.document.cursor,
             seconds,
+            rate_str,
+            bits,
             self.viewport.samples_per_column,
             self.viewport.amplitude_scale,
             selection,

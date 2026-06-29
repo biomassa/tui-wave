@@ -21,6 +21,10 @@ pub struct Document {
     /// Deinterleaved samples, one Vec per channel, normalized to f32 in [-1.0, 1.0].
     pub channels: Vec<Vec<f32>>,
     pub sample_rate: u32,
+    /// Bit depth from the source WAV header (16, 24, or 32). Always 32 for synthesized
+    /// buffers (CopyToNew, MixToMono, etc.) since the working format is f32. Does not
+    /// change when the file is saved at a different depth — it reflects the source.
+    pub bits_per_sample: u16,
     pub selection: Option<Selection>,
     pub cursor: usize,
     pub dirty: bool,
@@ -30,6 +34,22 @@ pub struct Document {
     /// Raw BWF `bext` chunk bytes, preserved verbatim across a load→save round-trip so
     /// editing a broadcast WAV doesn't strip its metadata. `None` for plain WAVs.
     pub bext: Option<Vec<u8>>,
+}
+
+impl Default for Document {
+    fn default() -> Self {
+        Document {
+            channels: Vec::new(),
+            sample_rate: 44100,
+            bits_per_sample: 32,
+            selection: None,
+            cursor: 0,
+            dirty: false,
+            path: None,
+            markers: Vec::new(),
+            bext: None,
+        }
+    }
 }
 
 impl Document {
@@ -305,6 +325,7 @@ mod tests {
             dirty: false,
             path: None,
             markers: Vec::new(),
+            bits_per_sample: 32,
             bext: None,
         }
     }
