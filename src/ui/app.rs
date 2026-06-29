@@ -3151,8 +3151,8 @@ fn render_save_as_dialog(
     focused: usize,
 ) -> Vec<Rect> {
     let width = 52u16.min(area.width);
-    // filename + format + dither + blank + hints = 5 inner rows + 2 border
-    let height = 7u16.min(area.height);
+    // filename + format + blank + dither + blank + hints = 6 inner rows + 2 border
+    let height = 8u16.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -3228,7 +3228,7 @@ fn render_save_as_dialog(
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
     frame.render_widget(
-        Paragraph::new(vec![filename_line, format_line, dither_line, Line::raw(""), hints]).block(block),
+        Paragraph::new(vec![filename_line, format_line, Line::raw(""), dither_line, Line::raw(""), hints]).block(block),
         popup,
     );
 
@@ -3237,7 +3237,7 @@ fn render_save_as_dialog(
     vec![
         Rect { x: popup.x + 1, y: popup.y + 1, width: row_w, height: 1 },
         Rect { x: popup.x + 1, y: popup.y + 2, width: row_w, height: 1 },
-        Rect { x: popup.x + 1, y: popup.y + 3, width: row_w, height: 1 },
+        Rect { x: popup.x + 1, y: popup.y + 4, width: row_w, height: 1 },
     ]
 }
 
@@ -3271,8 +3271,8 @@ fn render_mix_to_mono_dialog(
     tanh_clip: bool,
 ) -> Vec<Rect> {
     let n = inputs.len();
-    // channel rows + tanh row + blank + hints row = n + 3 rows (plus 2 for border)
-    let inner_h = (n as u16) + 3;
+    // channel rows + blank + tanh row + blank + hints row = n + 4 rows (plus 2 for border)
+    let inner_h = (n as u16) + 4;
     let height = (inner_h + 2).min(area.height);
     let width = 48u16.min(area.width);
     let popup = Rect {
@@ -3312,7 +3312,8 @@ fn render_mix_to_mono_dialog(
             ]));
         }
     }
-    // Tanh soft-limiter checkbox row — highlighted when focused == n (the tanh slot)
+    // Blank separator before the checkbox, then tanh soft-limiter checkbox row.
+    lines.push(Line::raw(""));
     let tanh_label = if tanh_clip { " [X] Tanh limiter" } else { " [ ] Tanh limiter" };
     if focused == n {
         lines.push(Line::from(Span::styled(tanh_label, cursor_style)));
@@ -3338,11 +3339,13 @@ fn render_mix_to_mono_dialog(
         .style(base);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 
-    // Return hit-test rects for all interactive rows (channel inputs + tanh checkbox)
+    // Return hit-test rects: channel rows at y+1..y+n, tanh at y+n+2 (blank line at y+n+1).
     let row_w = popup.width.saturating_sub(2);
-    (0..=n)
+    let mut rects: Vec<Rect> = (0..n)
         .map(|i| Rect { x: popup.x + 1, y: popup.y + 1 + i as u16, width: row_w, height: 1 })
-        .collect()
+        .collect();
+    rects.push(Rect { x: popup.x + 1, y: popup.y + 2 + n as u16, width: row_w, height: 1 });
+    rects
 }
 
 fn render_gain_dialog(
@@ -3353,8 +3356,8 @@ fn render_gain_dialog(
     tanh_clip: bool,
 ) -> Vec<Rect> {
     let width = 38u16.min(area.width);
-    // text field + checkbox + blank + hints = 4 inner rows + 2 border
-    let height = 6u16.min(area.height);
+    // text field + blank + checkbox + blank + hints = 5 inner rows + 2 border
+    let height = 7u16.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -3409,14 +3412,14 @@ fn render_gain_dialog(
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
     frame.render_widget(
-        Paragraph::new(vec![field_line, tanh_line, Line::raw(""), hints]).block(block),
+        Paragraph::new(vec![field_line, Line::raw(""), tanh_line, Line::raw(""), hints]).block(block),
         popup,
     );
 
     let row_w = popup.width.saturating_sub(2);
     vec![
         Rect { x: popup.x + 1, y: popup.y + 1, width: row_w, height: 1 },
-        Rect { x: popup.x + 1, y: popup.y + 2, width: row_w, height: 1 },
+        Rect { x: popup.x + 1, y: popup.y + 3, width: row_w, height: 1 },
     ]
 }
 
