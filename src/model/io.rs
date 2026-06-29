@@ -67,12 +67,19 @@ impl BitDepth {
         }
     }
 
-    /// Cycles for a Tab-to-change dialog toggle.
     pub fn next(self) -> Self {
         match self {
             BitDepth::Int16 => BitDepth::Int24,
             BitDepth::Int24 => BitDepth::Float32,
             BitDepth::Float32 => BitDepth::Int16,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            BitDepth::Int16 => BitDepth::Float32,
+            BitDepth::Int24 => BitDepth::Int16,
+            BitDepth::Float32 => BitDepth::Int24,
         }
     }
 
