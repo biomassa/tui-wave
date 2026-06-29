@@ -49,7 +49,7 @@ use super::widgets::waveform_image;
 
 enum Dialog {
     Normalize { input: TextInput },
-    Gain { input: TextInput, tanh_clip: bool },
+    Gain { input: TextInput, tanh_clip: bool, focused: usize },
     FadeIn { curve: FadeCurve },
     FadeOut { curve: FadeCurve },
     Resample { input: TextInput, current_rate: u32 },
@@ -179,8 +179,12 @@ pub struct App {
     save_as_input: TextInput,
     /// Output bit depth for the pending Save As (Tab cycles it in the prompt).
     pub save_as_depth: BitDepth,
-    /// Whether to dither the pending Save As (Ctrl+D toggles; only meaningful for int depths).
+    /// Whether to dither the pending Save As (Space toggles when dither row focused).
     pub save_as_dither: bool,
+    /// Which row has keyboard focus in the Save As dialog (0=filename, 1=format, 2=dither).
+    save_as_focused: usize,
+    /// Clickable row rects from the last dialog render, used for mouse hit-testing.
+    dialog_row_rects: Vec<Rect>,
     /// Buffer indices still waiting for a Save-As filename before `save_as_queue_then` can
     /// run — e.g. quitting with several never-saved buffers walks through one Save As
     /// prompt per buffer rather than silently skipping (and losing) them. Popped from the
@@ -332,6 +336,8 @@ impl App {
             save_as_input: TextInput::new(""),
             save_as_depth: BitDepth::Float32,
             save_as_dither: false,
+            save_as_focused: 0,
+            dialog_row_rects: Vec::new(),
             save_as_queue: Vec::new(),
             save_as_queue_then: None,
             snap_to_zero: config.snap_to_zero,
@@ -740,18 +746,32 @@ impl App {
                 self.save_as_queue.clear();
                 self.save_as_queue_then = None;
             }
-            // Tab cycles bit depth; Ctrl+D toggles dither (Ctrl keeps it out of the path text).
-            KeyCode::Tab => self.save_as_depth = self.save_as_depth.next(),
-            KeyCode::Char('d') | KeyCode::Char('D') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.save_as_dither = !self.save_as_dither;
+            // Tab cycles focus: 0=filename, 1=format, 2=dither.
+            KeyCode::Tab => {
+                self.save_as_focused = (self.save_as_focused + 1) % 3;
             }
-            KeyCode::Left => self.save_as_input.left(),
-            KeyCode::Right => self.save_as_input.right(),
+            KeyCode::Char(' ') => {
+                if self.save_as_focused == 2 && self.save_as_depth.supports_dither() {
+                    self.save_as_dither = !self.save_as_dither;
+                }
+            }
+            KeyCode::Left => match self.save_as_focused {
+                0 => self.save_as_input.left(),
+                1 => self.save_as_depth = self.save_as_depth.prev(),
+                _ => {}
+            },
+            KeyCode::Right => match self.save_as_focused {
+                0 => self.save_as_input.right(),
+                1 => self.save_as_depth = self.save_as_depth.next(),
+                _ => {}
+            },
             KeyCode::Home => self.save_as_input.home(),
             KeyCode::End => self.save_as_input.end(),
             KeyCode::Backspace => self.save_as_input.backspace(),
             KeyCode::Delete => self.save_as_input.delete(),
-            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            KeyCode::Char(c) if self.save_as_focused == 0
+                && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
                 self.save_as_input.insert(c);
             }
             _ => {}
@@ -762,13 +782,18 @@ impl App {
     fn dialog_input(&mut self) -> Option<&mut TextInput> {
         match self.dialog.as_mut()? {
             Dialog::Normalize { input }
-            | Dialog::Gain { input, .. }
             | Dialog::Resample { input, .. }
             | Dialog::RenameMarker { input, .. }
             | Dialog::OpenDirectory { input }
             | Dialog::RenameBuffer { input, .. } => Some(input),
+            Dialog::Gain { input, focused, .. } => {
+                if *focused == 0 { Some(input) } else { None }
+            }
             Dialog::FadeIn { .. } | Dialog::FadeOut { .. } => None,
-            Dialog::MixToMono { inputs, focused, .. } => inputs.get_mut(*focused),
+            Dialog::MixToMono { inputs, focused, .. } => {
+                let f = *focused;
+                inputs.get_mut(f)
+            }
         }
     }
 
@@ -793,7 +818,7 @@ impl App {
                     let db = input.value().parse::<f32>().unwrap_or(-1.0).min(0.0);
                     self.apply_normalize(db);
                 }
-                Some(Dialog::Gain { input, tanh_clip }) => {
+                Some(Dialog::Gain { input, tanh_clip, .. }) => {
                     let db = input.value().parse::<f32>().unwrap_or(0.0);
                     self.apply_gain(db, tanh_clip);
                 }
@@ -867,23 +892,27 @@ impl App {
                 }
             }
             KeyCode::Char(' ') => {
-                // In MixToMono, Space toggles the tanh checkbox when that row is focused.
-                if let Some(Dialog::MixToMono { inputs, focused, tanh_clip }) = self.dialog.as_mut() {
-                    if *focused == inputs.len() {
-                        *tanh_clip = !*tanh_clip;
+                match self.dialog.as_mut() {
+                    Some(Dialog::MixToMono { inputs, focused, tanh_clip }) => {
+                        if *focused == inputs.len() { *tanh_clip = !*tanh_clip; }
                     }
+                    Some(Dialog::Gain { focused, tanh_clip, .. }) => {
+                        if *focused == 1 { *tanh_clip = !*tanh_clip; }
+                    }
+                    _ => {}
                 }
             }
             KeyCode::Tab => match self.dialog.as_mut() {
                 Some(Dialog::MixToMono { inputs, focused, .. }) => {
-                    // Slots: 0..n = channel fields, n = tanh row. Tab cycles through all.
-                    // Space toggles tanh when the tanh row (n) is focused (see Space arm above).
                     let n = inputs.len();
                     *focused = (*focused + 1) % (n + 1);
                 }
-                Some(Dialog::Gain { tanh_clip, .. }) => *tanh_clip = !*tanh_clip,
+                Some(Dialog::Gain { focused, .. }) => {
+                    *focused = (*focused + 1) % 2;
+                }
+                // Tab still cycles the curve for backward compat; ←→ is the documented way.
                 Some(Dialog::FadeIn { curve }) | Some(Dialog::FadeOut { curve }) => {
-                    *curve = curve.next()
+                    *curve = curve.next();
                 }
                 _ => {}
             },
@@ -899,11 +928,46 @@ impl App {
         }
     }
 
-    /// Cycles the fade curve of the active Fade dialog (used by Left/Right when there's no
-    /// text field). `forward` is currently the only direction the curve enum exposes.
-    fn cycle_dialog_curve(&mut self, _forward: bool) {
+    fn cycle_dialog_curve(&mut self, forward: bool) {
         if let Some(Dialog::FadeIn { curve }) | Some(Dialog::FadeOut { curve }) = self.dialog.as_mut() {
-            *curve = curve.next();
+            *curve = if forward { curve.next() } else { curve.prev() };
+        }
+    }
+
+    /// Called when the user left-clicks a row in an open dialog popup. `row` is a 0-based
+    /// index into `dialog_row_rects` — clicking a row focuses it, and clicking a checkbox
+    /// row also toggles it.
+    fn handle_dialog_row_click(&mut self, row: usize) {
+        if self.save_as_active {
+            match row {
+                0 | 1 => self.save_as_focused = row,
+                2 if self.save_as_depth.supports_dither() => {
+                    self.save_as_focused = 2;
+                    self.save_as_dither = !self.save_as_dither;
+                }
+                _ => {}
+            }
+            return;
+        }
+        match self.dialog.as_mut() {
+            Some(Dialog::Gain { focused, tanh_clip, .. }) => match row {
+                0 => *focused = 0,
+                1 => {
+                    *focused = 1;
+                    *tanh_clip = !*tanh_clip;
+                }
+                _ => {}
+            },
+            Some(Dialog::MixToMono { inputs, focused, tanh_clip }) => {
+                let n = inputs.len();
+                if row < n {
+                    *focused = row;
+                } else if row == n {
+                    *focused = n;
+                    *tanh_clip = !*tanh_clip;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1250,12 +1314,13 @@ impl App {
 
     fn apply_fade(&mut self, fade_in: bool, pct: f32, curve: FadeCurve) {
         let idx = self.active_document;
-        // Snap to zero crossings so the boundary between faded and unfaded audio coincides
-        // with a near-zero sample. Without this, fade-out leaves samples[end] (first unfaded
-        // sample) at its original amplitude while samples[end-1] drops to 0, producing an
-        // audible click and a visible spike in the waveform. The curve reaching zero on the
-        // faded side alone is not enough — the unfaded side must also be near zero.
-        let Some((start, end)) = self.operation_range(idx, true) else { return };
+        // Try snapping both endpoints to zero crossings so the boundary between faded and
+        // unfaded audio lands near a near-zero sample (avoids a click where the envelope
+        // hits 0 but the adjacent unfaded sample is still loud). If snapping collapses a
+        // small selection to a degenerate range (both ends snap to the same crossing), fall
+        // back to the un-snapped range — the fade is still applied, just without the snap.
+        let Some((start, end)) = self.operation_range(idx, true)
+            .or_else(|| self.operation_range(idx, false)) else { return };
         let fade_samples = ((end - start) as f32 * pct / 100.0).round() as usize;
         let fade_samples = fade_samples.max(1).min(end - start);
         let (fade_start, fade_end) = if fade_in {
@@ -1461,6 +1526,7 @@ impl App {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "untitled.wav".to_string());
         self.save_as_input = TextInput::fresh(name);
+        self.save_as_focused = 0;
         self.save_as_active = true;
     }
 
@@ -1527,6 +1593,20 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // When a dialog or Save-As prompt is open, absorb all mouse events so clicks on the
+        // waveform/panels behind it don't fire. Route left-clicks that land on an interactive
+        // row to the appropriate handler; everything else is just swallowed.
+        if self.dialog.is_some() || self.save_as_active {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                let pos = Position::new(mouse.column, mouse.row);
+                let hit = self.dialog_row_rects.iter().position(|r| r.contains(pos));
+                if let Some(row) = hit {
+                    self.handle_dialog_row_click(row);
+                }
+            }
+            return;
+        }
+
         // A left click anywhere focuses whichever panel it landed in — including the
         // waveform, which has no toggle/key of its own to focus it (Tab cycles forward
         // through panels, but a direct click should jump straight to the one under the
@@ -2085,7 +2165,7 @@ impl App {
 
         if action == Action::Gain {
             if self.active_doc().is_some() {
-                self.dialog = Some(Dialog::Gain { input: TextInput::fresh("0.0"), tanh_clip: false });
+                self.dialog = Some(Dialog::Gain { input: TextInput::fresh("0.0"), tanh_clip: false, focused: 0 });
             }
             return;
         }
@@ -2491,6 +2571,7 @@ impl App {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "untitled.wav".to_string());
                 self.save_as_input = TextInput::fresh(name);
+                self.save_as_focused = 0;
                 self.save_as_active = true;
             }
             Action::Reverse => {
@@ -2994,11 +3075,16 @@ impl App {
         }
 
         if self.save_as_active {
-            render_save_as_prompt(frame, area, &self.save_as_input, self.save_as_depth, self.save_as_dither);
+            let rects = render_save_as_dialog(
+                frame, area,
+                &self.save_as_input, self.save_as_depth, self.save_as_dither, self.save_as_focused,
+            );
+            self.dialog_row_rects = rects;
         }
 
-        if let Some(ref dialog) = self.dialog {
-            render_dialog(frame, area, dialog);
+        let dialog_rects = self.dialog.as_ref().map(|d| render_dialog(frame, area, d)).unwrap_or_default();
+        if !dialog_rects.is_empty() {
+            self.dialog_row_rects = dialog_rects;
         }
     }
 }
@@ -3056,28 +3142,17 @@ fn visible_peak_raw(
         })
 }
 
-fn render_save_as_prompt(frame: &mut Frame, area: Rect, input: &TextInput, depth: BitDepth, dither: bool) {
-    let dither_text = if depth.supports_dither() {
-        format!("  Dither: {} (^D)", if dither { "on" } else { "off" })
-    } else {
-        String::new()
-    };
-    let suffix = format!("   Format: {} (Tab){} ", depth.label(), dither_text);
-    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
-    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
-    let (before, under, after) = input.split_at_cursor();
-    let content_len = " Save as: ".chars().count()
-        + before.chars().count() + under.chars().count() + after.chars().count()
-        + suffix.chars().count();
-    let spans = vec![
-        Span::styled(" Save as: ", base),
-        Span::styled(before, base),
-        Span::styled(under, cursor_style),
-        Span::styled(after, base),
-        Span::styled(suffix, base),
-    ];
-    let width = (content_len as u16 + 2).min(area.width);
-    let height = 3.min(area.height);
+fn render_save_as_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    input: &TextInput,
+    depth: BitDepth,
+    dither: bool,
+    focused: usize,
+) -> Vec<Rect> {
+    let width = 52u16.min(area.width);
+    // filename + format + dither + blank + hints = 5 inner rows + 2 border
+    let height = 7u16.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -3085,12 +3160,85 @@ fn render_save_as_prompt(frame: &mut Frame, area: Rect, input: &TextInput, depth
         height,
     };
     frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+
+    // Row 0: filename text field
+    let (before, under, after) = input.split_at_cursor();
+    let filename_line = if focused == 0 {
+        Line::from(vec![
+            Span::styled(" Filename: ", label_style),
+            Span::styled(before, base),
+            Span::styled(under, cursor_style),
+            Span::styled(after, base),
+            Span::raw("  "),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" Filename: ", label_style),
+            Span::styled(input.value().to_string(), base),
+        ])
+    };
+
+    // Row 1: format cycle
+    let format_line = if focused == 1 {
+        Line::from(vec![
+            Span::styled(" Format:  ◄ ", label_style),
+            Span::styled(depth.label(), cursor_style),
+            Span::styled(" ►  ", label_style),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" Format:  ", label_style),
+            Span::styled(depth.label(), base),
+        ])
+    };
+
+    // Row 2: dither checkbox (greyed out for float)
+    let dither_line = if !depth.supports_dither() {
+        Line::from(Span::styled(" [ ] Dither  (n/a for float)", dim_style))
+    } else {
+        let label = if dither { " [X] Dither" } else { " [ ] Dither" };
+        if focused == 2 {
+            Line::from(Span::styled(label, cursor_style))
+        } else {
+            Line::from(Span::styled(label, label_style))
+        }
+    };
+
+    // Row 3: blank, Row 4: hints
+    let hints = Line::from(vec![
+        Span::styled(" Tab", hint_style),
+        Span::styled(":next  ", label_style),
+        Span::styled("←→", hint_style),
+        Span::styled(":change  ", label_style),
+        Span::styled("Space", hint_style),
+        Span::styled(":check  ", label_style),
+        Span::styled("Enter", hint_style),
+        Span::styled(":apply", label_style),
+    ]);
+
     let block = Block::default()
         .title("Save As")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
-    frame.render_widget(Paragraph::new(Line::from(spans)).block(block), popup);
+    frame.render_widget(
+        Paragraph::new(vec![filename_line, format_line, dither_line, Line::raw(""), hints]).block(block),
+        popup,
+    );
+
+    // Return hit-test rects for the three interactive rows (y+1 for top border)
+    let row_w = popup.width.saturating_sub(2);
+    vec![
+        Rect { x: popup.x + 1, y: popup.y + 1, width: row_w, height: 1 },
+        Rect { x: popup.x + 1, y: popup.y + 2, width: row_w, height: 1 },
+        Rect { x: popup.x + 1, y: popup.y + 3, width: row_w, height: 1 },
+    ]
 }
 
 fn render_confirm(frame: &mut Frame, area: Rect, text: &str) {
@@ -3121,12 +3269,12 @@ fn render_mix_to_mono_dialog(
     inputs: &[TextInput],
     focused: usize,
     tanh_clip: bool,
-) {
+) -> Vec<Rect> {
     let n = inputs.len();
     // channel rows + tanh row + blank + hints row = n + 3 rows (plus 2 for border)
     let inner_h = (n as u16) + 3;
     let height = (inner_h + 2).min(area.height);
-    let width = 38u16.min(area.width);
+    let width = 48u16.min(area.width);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -3164,21 +3312,19 @@ fn render_mix_to_mono_dialog(
             ]));
         }
     }
-    // Tanh soft-limiter row — highlighted when focused == n (the tanh slot)
+    // Tanh soft-limiter checkbox row — highlighted when focused == n (the tanh slot)
     let tanh_label = if tanh_clip { " [X] Tanh limiter" } else { " [ ] Tanh limiter" };
     if focused == n {
-        lines.push(Line::from(vec![
-            Span::styled(tanh_label, cursor_style),
-        ]));
+        lines.push(Line::from(Span::styled(tanh_label, cursor_style)));
     } else {
-        lines.push(Line::from(vec![
-            Span::styled(tanh_label, label_style),
-        ]));
+        lines.push(Line::from(Span::styled(tanh_label, label_style)));
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
         Span::styled(" Tab", hint_style),
         Span::styled(":next  ", label_style),
+        Span::styled("Space", hint_style),
+        Span::styled(":check  ", label_style),
         Span::styled("Del", hint_style),
         Span::styled(":-inf  ", label_style),
         Span::styled("Enter", hint_style),
@@ -3191,31 +3337,166 @@ fn render_mix_to_mono_dialog(
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
+
+    // Return hit-test rects for all interactive rows (channel inputs + tanh checkbox)
+    let row_w = popup.width.saturating_sub(2);
+    (0..=n)
+        .map(|i| Rect { x: popup.x + 1, y: popup.y + 1 + i as u16, width: row_w, height: 1 })
+        .collect()
 }
 
-fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) {
-    if let Dialog::MixToMono { inputs, focused, tanh_clip } = dialog {
-        return render_mix_to_mono_dialog(frame, area, inputs, *focused, *tanh_clip);
+fn render_gain_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    input: &TextInput,
+    focused: usize,
+    tanh_clip: bool,
+) -> Vec<Rect> {
+    let width = 38u16.min(area.width);
+    // text field + checkbox + blank + hints = 4 inner rows + 2 border
+    let height = 6u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+
+    // Row 0: text field
+    let (before, under, after) = input.split_at_cursor();
+    let field_line = if focused == 0 {
+        Line::from(vec![
+            Span::styled(" Gain (dB): ", label_style),
+            Span::styled(before, base),
+            Span::styled(under, cursor_style),
+            Span::styled(after, base),
+            Span::raw("  "),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" Gain (dB): ", label_style),
+            Span::styled(input.value().to_string(), base),
+        ])
+    };
+
+    // Row 1: tanh checkbox
+    let tanh_label = if tanh_clip { " [X] Tanh limiter" } else { " [ ] Tanh limiter" };
+    let tanh_line = if focused == 1 {
+        Line::from(Span::styled(tanh_label, cursor_style))
+    } else {
+        Line::from(Span::styled(tanh_label, label_style))
+    };
+
+    // Row 2: blank, Row 3: hints
+    let hints = Line::from(vec![
+        Span::styled(" Tab", hint_style),
+        Span::styled(":next  ", label_style),
+        Span::styled("Space", hint_style),
+        Span::styled(":check  ", label_style),
+        Span::styled("Enter", hint_style),
+        Span::styled(":apply", label_style),
+    ]);
+
+    let block = Block::default()
+        .title("Gain")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    frame.render_widget(
+        Paragraph::new(vec![field_line, tanh_line, Line::raw(""), hints]).block(block),
+        popup,
+    );
+
+    let row_w = popup.width.saturating_sub(2);
+    vec![
+        Rect { x: popup.x + 1, y: popup.y + 1, width: row_w, height: 1 },
+        Rect { x: popup.x + 1, y: popup.y + 2, width: row_w, height: 1 },
+    ]
+}
+
+fn render_fade_dialog(frame: &mut Frame, area: Rect, title: &str, curve: FadeCurve) -> Vec<Rect> {
+    let width = 32u16.min(area.width);
+    // curve selector + blank + hints = 3 inner rows + 2 border
+    let height = 5u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+
+    // Row 0: curve selector
+    let curve_line = Line::from(vec![
+        Span::styled(" Curve:  ◄ ", label_style),
+        Span::styled(curve.label(), cursor_style),
+        Span::styled(" ►  ", label_style),
+    ]);
+
+    // Row 1: blank, Row 2: hints
+    let hints = Line::from(vec![
+        Span::styled(" ←→", hint_style),
+        Span::styled(":change  ", label_style),
+        Span::styled("Enter", hint_style),
+        Span::styled(":apply", label_style),
+    ]);
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    frame.render_widget(
+        Paragraph::new(vec![curve_line, Line::raw(""), hints]).block(block),
+        popup,
+    );
+
+    let row_w = popup.width.saturating_sub(2);
+    vec![Rect { x: popup.x + 1, y: popup.y + 1, width: row_w, height: 1 }]
+}
+
+fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) -> Vec<Rect> {
+    match dialog {
+        Dialog::MixToMono { inputs, focused, tanh_clip } => {
+            return render_mix_to_mono_dialog(frame, area, inputs, *focused, *tanh_clip);
+        }
+        Dialog::Gain { input, tanh_clip, focused } => {
+            return render_gain_dialog(frame, area, input, *focused, *tanh_clip);
+        }
+        Dialog::FadeIn { curve } => {
+            return render_fade_dialog(frame, area, "Fade In", *curve);
+        }
+        Dialog::FadeOut { curve } => {
+            return render_fade_dialog(frame, area, "Fade Out", *curve);
+        }
+        _ => {}
     }
 
-    // (title, label before the field, optional text field, suffix after the field).
+    // Simple single-row text dialogs (Normalize, Resample, RenameMarker, OpenDirectory, RenameBuffer).
     let (title, prefix, input, suffix): (&str, String, Option<&TextInput>, String) = match dialog {
         Dialog::Normalize { input } => {
             ("Normalize", " Target peak (dBFS): ".into(), Some(input), " ".into())
         }
-        Dialog::Gain { input, tanh_clip } => {
-            let tanh = if *tanh_clip { "ON" } else { "OFF" };
-            ("Gain", " Gain (dB): ".into(), Some(input), format!("  Tanh: {tanh} (Tab) "))
-        }
-        Dialog::FadeIn { curve } => ("Fade In", format!(" Curve: {} (Tab/←→) ", curve.label()), None, String::new()),
-        Dialog::FadeOut { curve } => ("Fade Out", format!(" Curve: {} (Tab/←→) ", curve.label()), None, String::new()),
         Dialog::Resample { input, current_rate } => {
             ("Resample", format!(" New rate (current {current_rate} Hz): "), Some(input), " ".into())
         }
         Dialog::RenameMarker { input, .. } => ("Rename Marker", " Label: ".into(), Some(input), " ".into()),
         Dialog::OpenDirectory { input } => ("Open Directory", " Path: ".into(), Some(input), " ".into()),
         Dialog::RenameBuffer { input, .. } => ("Rename Buffer", " New name: ".into(), Some(input), " ".into()),
-        Dialog::MixToMono { .. } => unreachable!("handled by early return above"),
+        Dialog::Gain { .. } | Dialog::FadeIn { .. } | Dialog::FadeOut { .. } | Dialog::MixToMono { .. } => {
+            unreachable!("handled by match arms above")
+        }
     };
 
     let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
@@ -3247,6 +3528,7 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) {
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
     frame.render_widget(Paragraph::new(Line::from(spans)).block(block), popup);
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -4403,5 +4685,61 @@ mod tests {
         let sel = app.documents[0].selection.expect("selection set after ExtendSelectionToEnd");
         assert_eq!(sel.start, 100, "anchor kept from previous action");
         assert_eq!(sel.end, 999, "active edge at last sample");
+    }
+
+    /// A very small selection (fewer samples than the zero-crossing search window) must not
+    /// silently skip the fade when snap collapses start and end to the same crossing.
+    #[test]
+    fn fade_in_on_tiny_selection_is_applied_not_silently_skipped() {
+        // Fill with a non-zero constant: every point is equally "bad" for zero-crossing snap,
+        // so snapping always moves both endpoints to the same position → the bug triggers.
+        let samples = vec![0.5f32; 20];
+        let document = Document {
+            channels: vec![samples],
+            sample_rate: 44100,
+            selection: Some(crate::model::selection::Selection { start: 8, end: 12 }),
+            cursor: 8,
+            dirty: false,
+            path: None,
+            markers: Vec::new(),
+            bext: None,
+        };
+        let mut app = new_app(Some(document), None);
+        // Before the fade all selected samples are 0.5.
+        assert!((app.documents[0].channels[0][8] - 0.5).abs() < 1e-6);
+        app.handle_action(Action::FadeIn);
+        // After FadeIn the dialog should open (or if it was already applied, check the result).
+        // FadeIn requires Enter to confirm — open the dialog then confirm.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // The first sample of the selection must now be near 0 (fade-in starts at 0).
+        assert!(
+            app.documents[0].channels[0][8].abs() < 0.1,
+            "fade-in was not applied to small selection: sample[8] = {}",
+            app.documents[0].channels[0][8]
+        );
+    }
+
+    /// Same check for Fade Out — the last sample of the selection must be near zero.
+    #[test]
+    fn fade_out_on_tiny_selection_is_applied_not_silently_skipped() {
+        let samples = vec![0.5f32; 20];
+        let document = Document {
+            channels: vec![samples],
+            sample_rate: 44100,
+            selection: Some(crate::model::selection::Selection { start: 8, end: 12 }),
+            cursor: 8,
+            dirty: false,
+            path: None,
+            markers: Vec::new(),
+            bext: None,
+        };
+        let mut app = new_app(Some(document), None);
+        app.handle_action(Action::FadeOut);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            app.documents[0].channels[0][11].abs() < 0.1,
+            "fade-out was not applied to small selection: sample[11] = {}",
+            app.documents[0].channels[0][11]
+        );
     }
 }

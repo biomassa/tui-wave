@@ -17,6 +17,14 @@ impl FadeCurve {
         }
     }
 
+    pub fn prev(&self) -> Self {
+        match self {
+            FadeCurve::Exp => FadeCurve::Linear,
+            FadeCurve::Log => FadeCurve::Exp,
+            FadeCurve::Linear => FadeCurve::Log,
+        }
+    }
+
     pub fn label(&self) -> &str {
         match self {
             FadeCurve::Exp => "Exp",
