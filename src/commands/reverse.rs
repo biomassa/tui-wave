@@ -63,6 +63,7 @@ mod tests {
             dirty: false,
             path: None,
             markers: Vec::new(),
+            bits_per_sample: 32,
             bext: None,
         };
         let mut cmd = ReverseCommand::new(1, 4);
@@ -81,6 +82,7 @@ mod tests {
             dirty: false,
             path: None,
             markers: Vec::new(),
+            bits_per_sample: 32,
             bext: None,
         };
         let original = doc.channels.clone();

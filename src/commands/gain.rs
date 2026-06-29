@@ -83,6 +83,7 @@ mod tests {
             dirty: false,
             path: None,
             markers: Vec::new(),
+            bits_per_sample: 32,
             bext: None,
         };
         // +6.0206 dB → linear 2.0x → 0.5 → 1.0
@@ -102,6 +103,7 @@ mod tests {
             dirty: false,
             path: None,
             markers: Vec::new(),
+            bits_per_sample: 32,
             bext: None,
         };
         // 0 dB = unity gain, but with tanh clip
@@ -123,6 +125,7 @@ mod tests {
             dirty: false,
             path: None,
             markers: Vec::new(),
+            bits_per_sample: 32,
             bext: None,
         };
         let original = doc.channels.clone();
