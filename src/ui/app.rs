@@ -255,8 +255,10 @@ pub struct App {
 impl App {
     pub fn new(document: Option<Document>, directory: Option<PathBuf>) -> Self {
         let app = Self::new_with_config(document, directory, Config::load());
-        // Ensure the config file exists from the very first launch so the user can
-        // see all available keybindings without having to trigger a toggle first.
+        // Write the merged config on every launch: creates the file on first launch so
+        // all keybindings are immediately visible, and on subsequent launches after an
+        // upgrade appends any newly-added default bindings to the existing file without
+        // touching the user's custom entries (fill_missing_keybindings only inserts).
         app.config.save();
         app
     }
@@ -951,6 +953,28 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Resets keybindings to factory defaults, saves, and rebuilds the key map + UI chrome.
+    /// All other settings (snap, zoom, etc.) are preserved — only the `[keybindings]` table
+    /// is replaced.
+    fn reset_config_to_defaults(&mut self) {
+        let mut keybindings = std::collections::HashMap::new();
+        fill_missing_keybindings(&mut keybindings);
+        self.config.keybindings = keybindings.clone();
+        self.save_config(); // persists; also snapshots current toggle state
+        self.key_map = build_key_map(&keybindings);
+        let menu_shortcuts = build_action_display_map(&keybindings, false);
+        let toolbar_shortcuts = build_action_display_map(&keybindings, true);
+        self.menu = MenuBar::new(&menu_shortcuts);
+        // Preserve runtime toolbar state across the rebuild.
+        let playing = self.toolbar.is_playing;
+        let threshold = self.toolbar.transient_threshold_db;
+        let active = std::mem::take(&mut self.toolbar.active_actions);
+        self.toolbar = Toolbar::new(&toolbar_shortcuts);
+        self.toolbar.is_playing = playing;
+        self.toolbar.transient_threshold_db = threshold;
+        self.toolbar.active_actions = active;
     }
 
     /// Snapshots the current toggle state into `self.config` and writes it to disk.
@@ -1887,6 +1911,11 @@ impl App {
             return;
         }
 
+        if action == Action::ResetConfig {
+            self.reset_config_to_defaults();
+            return;
+        }
+
         // CopyToNew undo: when the user presses Undo on a buffer that was born from
         // CopyToNew and the undo stack is already empty, silently close the buffer rather
         // than doing nothing. This "undoes the creation" without triggering the save dialog
@@ -2256,7 +2285,8 @@ impl App {
             | Action::RenameBuffer
             | Action::SwitchBuffer
             | Action::SearchBuffers
-            | Action::Trim => unreachable!(),
+            | Action::Trim
+            | Action::ResetConfig => unreachable!(),
             // Cursor movement is identical whether or not it extends a selection; the
             // selection side-effect is applied in the second match below.
             Action::MoveCursorLeft | Action::ExtendSelectionLeft => {
