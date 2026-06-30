@@ -98,11 +98,9 @@ impl TextInput {
         let chars: Vec<char> = self.text.chars().collect();
         let before: String = chars[..self.cursor].iter().collect();
         let under: String = chars.get(self.cursor).map(|c| c.to_string()).unwrap_or_else(|| " ".to_string());
-        let after: String = if self.cursor + 1 <= chars.len() {
-            chars.get(self.cursor + 1..).map(|s| s.iter().collect()).unwrap_or_default()
-        } else {
-            String::new()
-        };
+        // `get(cursor+1..)` already yields None past the end (→ empty), so no length guard
+        // is needed: it correctly returns "" when the cursor is at or on the last char.
+        let after: String = chars.get(self.cursor + 1..).map(|s| s.iter().collect()).unwrap_or_default();
         (before, under, after)
     }
 }
