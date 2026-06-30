@@ -49,7 +49,7 @@ impl Command for TrimCommand {
         let after = self.after.take().expect("undo called before execute");
         for (i, channel) in doc.channels.iter_mut().enumerate() {
             let mut restored = before[i].clone();
-            restored.extend_from_slice(&channel);
+            restored.extend_from_slice(channel);
             restored.extend_from_slice(&after[i]);
             *channel = restored;
         }

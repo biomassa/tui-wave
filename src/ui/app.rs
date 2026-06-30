@@ -446,7 +446,7 @@ impl App {
     /// After the buffer filter changes, keep the selection on a still-visible buffer.
     fn snap_buffer_selection_to_filter(&mut self) {
         let filtered = self.filtered_buffer_indices();
-        if !filtered.iter().any(|&i| i == self.buffer_panel.selected) {
+        if !filtered.contains(&self.buffer_panel.selected) {
             self.buffer_panel.selected = filtered.first().copied().unwrap_or(0);
         }
     }
@@ -2496,7 +2496,7 @@ impl App {
             let result = self.active_doc().and_then(|d| {
                 let (start, end) = match d.selection.map(|s| s.normalized()) {
                     Some((s, e)) if s < e => (s, e),
-                    _ => (0, d.channels.get(0).map(|c| c.len()).unwrap_or(0)),
+                    _ => (0, d.channels.first().map(|c| c.len()).unwrap_or(0)),
                 };
                 let channels = d.channels.get(channel_idx).map(|ch| vec![ch[start..end].to_vec()])?;
                 let markers: Vec<Marker> = d.markers.iter()
