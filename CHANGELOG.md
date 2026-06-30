@@ -2,6 +2,15 @@
 
 ## 2026-06-30
 
+- Fixed menu dropdown entries that overlap the Files/Buffers panels being unclickable — the
+  panel underneath was stealing the click. An open menu now takes mouse precedence over the
+  panels beneath it, matching how it already intercepts the keyboard.
+- "Reset Config to Defaults" now backs up the existing `config.toml` to `config.toml.bak`
+  before overwriting it, so a reset can be undone.
+- Playback that reaches the end of a (non-looping) track now actually stops: previously the
+  "playing" state stuck, so the next Space press paused a finished track instead of replaying
+  it. Space now replays from the cursor in one press.
+
 - Fixed zoom (Up/Down) restarting playback from the cursor position instead of continuing
   from the current playhead. Navigation actions seek the audio position only when the
   cursor actually moves; zoom-only actions leave the playhead untouched.
