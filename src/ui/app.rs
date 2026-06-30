@@ -396,15 +396,23 @@ impl App {
         self.active_document = self.documents.len() - 1;
     }
 
+    /// Display name for buffer `idx`: its file name, or `_NEW_NNN` for a never-saved buffer
+    /// (NNN is its 1-based position). No dirty marker — callers add that where appropriate.
+    /// Shared by the Buffers panel and the waveform header so the two can't drift apart.
+    fn buffer_name(&self, idx: usize) -> String {
+        match self.documents.get(idx).and_then(|d| d.path.as_ref()) {
+            Some(p) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "untitled".to_string()),
+            None => format!("_NEW_{:03}", idx + 1),
+        }
+    }
+
     fn buffer_names(&self) -> Vec<String> {
-        self.documents.iter().enumerate().map(|(i, doc)| {
-            let prefix = if doc.dirty { "*" } else { "" };
-            let name = match doc.path.as_ref() {
-                Some(p) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "untitled".to_string()),
-                None => format!("_NEW_{:03}", i + 1),
-            };
-            format!("{}{}", prefix, name)
-        }).collect()
+        (0..self.documents.len())
+            .map(|i| {
+                let prefix = if self.documents[i].dirty { "*" } else { "" };
+                format!("{}{}", prefix, self.buffer_name(i))
+            })
+            .collect()
     }
 
     fn switch_to_buffer(&mut self, index: usize) {
@@ -3119,7 +3127,7 @@ impl App {
         let no_doc = self.documents.get(doc_idx).is_none();
         if no_doc {
             let block = Block::default()
-                .title(Span::styled(" tui-wave ", Style::default().fg(border_color)))
+                .title(Span::styled(" No file loaded ", Style::default().fg(border_color)))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color))
                 .style(Style::default().fg(theme::CHROME_FG).bg(theme::BASE));
@@ -3134,15 +3142,7 @@ impl App {
             return;
         };
 
-        let title_text = format!(
-            " tui-wave — {} ",
-            self.documents[doc_idx]
-                .path
-                .as_ref()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "untitled".to_string()),
-        );
+        let title_text = format!(" {} ", self.buffer_name(doc_idx));
         let title = Line::from(vec![
             Span::styled(title_text, Style::default().fg(border_color)),
             Span::styled(
@@ -4425,6 +4425,18 @@ mod tests {
         // Plain Tab still goes forward (Buffers → Waveform).
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.focus(), Focus::Waveform);
+    }
+
+    /// The shared buffer name (used by both the Buffers panel and the waveform header) is the
+    /// file name when saved, and `_NEW_NNN` (1-based) for a never-saved buffer — never
+    /// "untitled".
+    #[test]
+    fn buffer_name_uses_new_label_for_unsaved_and_filename_for_saved() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.documents.push(doc(0.1, 10));
+        app.documents[1].path = Some(PathBuf::from("/tmp/song.wav"));
+        assert_eq!(app.buffer_name(0), "_NEW_001");
+        assert_eq!(app.buffer_name(1), "song.wav");
     }
 
     /// Quitting with no never-saved buffers (just dirty ones that already have a path)
