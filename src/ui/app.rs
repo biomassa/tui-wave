@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{
@@ -56,6 +56,8 @@ enum Dialog {
     RenameMarker { position: usize, input: TextInput },
     OpenDirectory { input: TextInput },
     RenameBuffer { index: usize, input: TextInput },
+    /// Rename the file at `path` on disk (Files panel `r`). Esc cancels.
+    RenameFile { path: PathBuf, input: TextInput },
     /// Mix-to-mono: one TextInput per source channel (dB gain, or the literal "-inf" for
     /// silence). `focused` is the index of the currently-active field; Tab cycles through.
     /// `tanh_clip` enables a tanh soft-limiter on the mixed output (same as Gain's option).
@@ -98,11 +100,13 @@ const TRANSIENT_THRESHOLD_MAX_DB: f32 = 24.0;
 
 /// A pending y/n confirmation modal. Generalizes the old quit-only prompt so closing a
 /// dirty buffer can reuse the same flow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Confirm {
     Quit,
     CloseBuffer(usize),
     ResetConfig,
+    /// Delete this file from disk (Files panel `Del`). Irreversible, hence the confirm.
+    DeleteFile(PathBuf),
 }
 
 /// What to do once `App::save_as_queue` (buffers waiting for a filename before some other
@@ -625,6 +629,19 @@ impl App {
                     self.handle_action(Action::ToggleAudition);
                     true
                 }
+                // 'r' renames the selected file on disk, Del deletes it (both no-ops unless a
+                // .wav row is selected). Contextual to the Files panel — in waveform focus Del
+                // is Delete-selection and 'r' is unbound globally.
+                KeyCode::Char('r') | KeyCode::Char('R')
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.handle_action(Action::RenameFile);
+                    true
+                }
+                KeyCode::Delete => {
+                    self.handle_action(Action::DeleteFile);
+                    true
+                }
                 // Shift+Tab cycles backward (Files → Waveform); Tab forward (Files → Buffers).
                 // Shift+Tab arrives as BackTab on legacy terminals, or Tab+SHIFT under the
                 // kitty keyboard protocol — accept both.
@@ -745,7 +762,9 @@ impl App {
     }
 
     fn handle_confirm_key(&mut self, key: KeyEvent) {
-        let Some(confirm) = self.confirm else { return };
+        if self.confirm.is_none() {
+            return;
+        }
         let save = matches!(key.code, KeyCode::Char('s') | KeyCode::Char('S'));
         let proceed = save || matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
         if !proceed {
@@ -753,7 +772,7 @@ impl App {
             self.confirm = None;
             return;
         }
-        self.confirm = None;
+        let Some(confirm) = self.confirm.take() else { return };
         match confirm {
             Confirm::Quit => {
                 // (s)ave saves every dirty buffer with a path first, then walks any
@@ -779,6 +798,9 @@ impl App {
             }
             Confirm::ResetConfig => {
                 self.reset_config_to_defaults();
+            }
+            Confirm::DeleteFile(path) => {
+                self.delete_file(&path);
             }
         }
     }
@@ -859,7 +881,8 @@ impl App {
             | Dialog::Resample { input, .. }
             | Dialog::RenameMarker { input, .. }
             | Dialog::OpenDirectory { input }
-            | Dialog::RenameBuffer { input, .. } => Some(input),
+            | Dialog::RenameBuffer { input, .. }
+            | Dialog::RenameFile { input, .. } => Some(input),
             Dialog::Gain { input, focused, .. } => {
                 if *focused == 0 { Some(input) } else { None }
             }
@@ -933,6 +956,9 @@ impl App {
                 Some(Dialog::OpenDirectory { input }) => self.open_directory(input.value()),
                 Some(Dialog::RenameBuffer { index, input }) => {
                     self.rename_buffer(index, &ensure_wav_extension(input.value().trim()));
+                }
+                Some(Dialog::RenameFile { path, input }) => {
+                    self.rename_file(&path, &ensure_wav_extension(input.value().trim()));
                 }
                 Some(Dialog::MixToMono { inputs, tanh_clip, .. }) => {
                     let inputs_snapshot = inputs.clone();
@@ -1380,6 +1406,60 @@ impl App {
         let dirty = self.documents[idx].dirty;
         self.documents[idx].path = Some(new_path.clone());
         self.file_panel.mark_dirty(&new_path, dirty);
+        self.file_panel.scan();
+    }
+
+    /// Opens the rename dialog for the Files-panel selection, if it's a `.wav` file (not the
+    /// `..` row or a subdirectory). Prefills the current name; Esc cancels.
+    fn begin_rename_selected_file(&mut self) {
+        if let Some((path, FileEntryKind::File)) = self.file_panel.selected_entry() {
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            self.dialog = Some(Dialog::RenameFile { path, input: TextInput::fresh(name) });
+        }
+    }
+
+    /// Asks to delete the Files-panel selection (if it's a `.wav` file) — deleting on disk is
+    /// irreversible, so it goes through the confirmation modal rather than acting immediately.
+    fn request_delete_selected_file(&mut self) {
+        if let Some((path, FileEntryKind::File)) = self.file_panel.selected_entry() {
+            self.confirm = Some(Confirm::DeleteFile(path));
+        }
+    }
+
+    /// Renames `old_path` on disk to `new_name` (same directory), repointing any buffer open
+    /// on it. No-op on an empty name, an unchanged name, or a failed rename.
+    fn rename_file(&mut self, old_path: &Path, new_name: &str) {
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            return;
+        }
+        let parent = old_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.file_panel.directory.clone());
+        let new_path = parent.join(new_name);
+        if new_path == old_path || std::fs::rename(old_path, &new_path).is_err() {
+            return;
+        }
+        // Keep any buffer open on this file pointed at the new name, carrying its dirty flag.
+        for doc in &mut self.documents {
+            if doc.path.as_deref() == Some(old_path) {
+                doc.path = Some(new_path.clone());
+            }
+        }
+        let was_dirty = self.file_panel.dirty_paths.contains(old_path);
+        self.file_panel.mark_dirty(old_path, false);
+        self.file_panel.mark_dirty(&new_path, was_dirty);
+        self.file_panel.scan();
+    }
+
+    /// Deletes `path` from disk and refreshes the panel. A buffer open on it is left in memory
+    /// (still re-savable); only its dirty marker is cleared.
+    fn delete_file(&mut self, path: &Path) {
+        if std::fs::remove_file(path).is_err() {
+            return;
+        }
+        self.file_panel.mark_dirty(path, false);
         self.file_panel.scan();
     }
 
@@ -2297,6 +2377,14 @@ impl App {
                 }
                 return;
             }
+            Action::RenameFile => {
+                self.begin_rename_selected_file();
+                return;
+            }
+            Action::DeleteFile => {
+                self.request_delete_selected_file();
+                return;
+            }
             _ => {}
         }
 
@@ -2710,6 +2798,8 @@ impl App {
             | Action::RenameBuffer
             | Action::SwitchBuffer
             | Action::SearchBuffers
+            | Action::RenameFile
+            | Action::DeleteFile
             | Action::Trim
             | Action::ResetConfig
             | Action::ExportRegions => unreachable!(),
@@ -3408,7 +3498,7 @@ impl App {
         // top of everything instead of being overdrawn by it.
         self.menu.render(frame, chrome.menu);
 
-        if let Some(confirm) = self.confirm {
+        if let Some(confirm) = &self.confirm {
             let text = match confirm {
                 Confirm::Quit => {
                     let n = self.documents.iter().filter(|d| d.dirty).count();
@@ -3420,6 +3510,10 @@ impl App {
                 }
                 Confirm::ResetConfig => {
                     " Reset all keybindings to defaults? (existing config saved as .bak) — (y) reset · (Esc) cancel ".to_string()
+                }
+                Confirm::DeleteFile(path) => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    format!(" Delete \"{name}\" from disk? — (y) delete · (Esc) cancel ")
                 }
             };
             render_confirm(frame, area, &text);
@@ -3865,6 +3959,7 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) -> Vec<Rect> {
         Dialog::RenameMarker { input, .. } => ("Rename Marker", " Label: ".into(), Some(input), " ".into()),
         Dialog::OpenDirectory { input } => ("Open Directory", " Path: ".into(), Some(input), " ".into()),
         Dialog::RenameBuffer { input, .. } => ("Rename Buffer", " New name: ".into(), Some(input), " ".into()),
+        Dialog::RenameFile { input, .. } => ("Rename File", " New name: ".into(), Some(input), " ".into()),
         Dialog::Gain { .. }
         | Dialog::FadeIn { .. }
         | Dialog::FadeOut { .. }
@@ -4505,6 +4600,38 @@ mod tests {
         app.dialog = Some(open("regions", "   "));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.dialog.is_some(), "Do! must be inactive with a blank base name");
+    }
+
+    #[test]
+    fn delete_file_removes_it_from_disk() {
+        let mut app = new_app(None, None);
+        let path = std::env::temp_dir().join(format!("tuiwave_del_{}.wav", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        assert!(path.exists());
+        app.delete_file(&path);
+        assert!(!path.exists(), "delete_file should remove the file from disk");
+    }
+
+    #[test]
+    fn rename_file_moves_on_disk_and_repoints_open_buffer() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        let dir = std::env::temp_dir();
+        let old = dir.join(format!("tuiwave_ren_old_{}.wav", std::process::id()));
+        let new = dir.join(format!("tuiwave_ren_new_{}.wav", std::process::id()));
+        std::fs::remove_file(&new).ok();
+        std::fs::write(&old, b"x").unwrap();
+        app.documents[0].path = Some(old.clone());
+
+        app.rename_file(&old, new.file_name().unwrap().to_str().unwrap());
+
+        assert!(!old.exists(), "the old name should be gone");
+        assert!(new.exists(), "the renamed file should exist");
+        assert_eq!(
+            app.documents[0].path.as_deref(),
+            Some(new.as_path()),
+            "a buffer open on the file should follow the rename"
+        );
+        std::fs::remove_file(&new).ok();
     }
 
     /// Quitting with no never-saved buffers (just dirty ones that already have a path)

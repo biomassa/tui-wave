@@ -142,6 +142,8 @@ impl Toolbar {
                 ("Select",   "Up/Dn".to_string(),  Action::Noop),
                 ("Page",     "PgUp/Dn".to_string(),Action::Noop),
                 ("Audition", "a".to_string(),      Action::ToggleAudition),
+                ("Rename",   "r".to_string(),      Action::RenameFile),
+                ("Delete",   "Del".to_string(),    Action::DeleteFile),
                 ("Search",   "/".to_string(),      Action::SearchFiles),
                 ("Focus",    "Tab".to_string(),    Action::FocusNext),
                 ("Quit",     "q".to_string(),      Action::Quit),
