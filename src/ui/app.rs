@@ -483,9 +483,25 @@ impl App {
     }
 
     pub fn run(&mut self, terminal: &mut Tui) -> color_eyre::Result<()> {
+        // Redraw only when something actually changed, rather than unconditionally every
+        // ~60fps tick. When idle the loop still wakes every 16ms (to poll input and advance
+        // the playhead), but skips the expensive `render` — which matters most in graphics
+        // mode, where every draw re-rasterizes the waveform bitmap and re-transmits it to the
+        // terminal (there is no cell-diffing for the embedded image; see `render`). A redraw
+        // is requested on: the initial frame, ANY input event (keys, mouse, and crucially
+        // resize/focus/paste via the catch-all arm — a resize previously repainted only
+        // because the draw was unconditional), and a change to the playhead position (which
+        // is what animates playback; `tick_viewport_follow` only scrolls while the playhead
+        // is advancing, so it is covered by the same signal). `tick_audition` mutates only
+        // off-screen audio state and so deliberately does not request a redraw.
+        let mut needs_redraw = true;
         while !self.should_quit {
-            terminal.draw(|frame| self.render(frame))?;
+            if needs_redraw {
+                terminal.draw(|frame| self.render(frame))?;
+                needs_redraw = false;
+            }
             if event::poll(Duration::from_millis(16))? {
+                needs_redraw = true;
                 match event::read()? {
                     Event::Key(key) => self.handle_key(key),
                     Event::Mouse(mouse) => self.handle_mouse(mouse),
@@ -505,9 +521,13 @@ impl App {
                     }
                 }
             }
+            let playhead_before = self.playhead_position;
             self.sync_playhead_from_audio();
             self.tick_audition();
             self.tick_viewport_follow();
+            if self.playhead_position != playhead_before {
+                needs_redraw = true;
+            }
         }
         Ok(())
     }
