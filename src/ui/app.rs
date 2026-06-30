@@ -61,12 +61,17 @@ enum Dialog {
     /// `tanh_clip` enables a tanh soft-limiter on the mixed output (same as Gain's option).
     MixToMono { inputs: Vec<TextInput>, focused: usize, tanh_clip: bool },
     /// Export Regions to Subfolder — chops file at markers and saves each region.
-    /// `focused`: 0=subfolder, 1=base_name, 2=format, 3=dither.
+    /// `focused`: 0=subfolder, 1=base_name, 2=format, 3=dither,
+    ///            4=fade_in checkbox, 5=fade_in ms, 6=fade_out checkbox, 7=fade_out ms.
     ExportRegions {
         folder_input: TextInput,
         base_name_input: TextInput,
         depth: BitDepth,
         dither: bool,
+        fade_in: bool,
+        fade_in_input: TextInput,
+        fade_out: bool,
+        fade_out_input: TextInput,
         focused: usize,
     },
     /// Generic single-message info/error popup with an Enter/Esc-to-dismiss button.
@@ -807,10 +812,12 @@ impl App {
                 let f = *focused;
                 inputs.get_mut(f)
             }
-            Dialog::ExportRegions { folder_input, base_name_input, focused, .. } => {
+            Dialog::ExportRegions { folder_input, base_name_input, fade_in_input, fade_out_input, focused, .. } => {
                 match *focused {
                     0 => Some(folder_input),
                     1 => Some(base_name_input),
+                    5 => Some(fade_in_input),
+                    7 => Some(fade_out_input),
                     _ => None,
                 }
             }
@@ -828,7 +835,13 @@ impl App {
             Some(Dialog::MixToMono { .. }) => {
                 c.is_ascii_digit() || matches!(c, '-' | '.' | 'i' | 'n' | 'f')
             }
-            Some(Dialog::ExportRegions { .. }) => true, // free text (folder / base name fields)
+            Some(Dialog::ExportRegions { focused, .. }) => {
+                if focused == 5 || focused == 7 {
+                    c.is_ascii_digit() || c == '.'
+                } else {
+                    true // folder / base name: free text
+                }
+            }
             Some(Dialog::Info { .. }) => false,
             _ => true, // rename / directory dialogs: free text
         }
@@ -870,11 +883,18 @@ impl App {
                     let clip = tanh_clip;
                     self.apply_mix_to_mono(&inputs_snapshot, clip);
                 }
-                Some(Dialog::ExportRegions { folder_input, base_name_input, depth, dither, .. }) => {
+                Some(Dialog::ExportRegions {
+                    folder_input, base_name_input, depth, dither,
+                    fade_in, fade_in_input, fade_out, fade_out_input, ..
+                }) => {
                     let folder = folder_input.value().trim().to_string();
                     let base_name = base_name_input.value().trim().to_string();
                     if !folder.is_empty() && !base_name.is_empty() {
-                        self.export_regions(&folder, &base_name, depth, dither);
+                        let fi = fade_in;
+                        let fi_ms = fade_in_input.value().trim().parse::<f32>().unwrap_or(5.0).max(0.0);
+                        let fo = fade_out;
+                        let fo_ms = fade_out_input.value().trim().parse::<f32>().unwrap_or(5.0).max(0.0);
+                        self.export_regions(&folder, &base_name, depth, dither, fi, fi_ms, fo, fo_ms);
                     }
                 }
                 Some(Dialog::Info { .. }) => {} // just dismiss
@@ -936,8 +956,13 @@ impl App {
                     Some(Dialog::Gain { focused, tanh_clip, .. }) => {
                         if *focused == 1 { *tanh_clip = !*tanh_clip; }
                     }
-                    Some(Dialog::ExportRegions { focused, dither, depth, .. }) => {
-                        if *focused == 3 && depth.supports_dither() { *dither = !*dither; }
+                    Some(Dialog::ExportRegions { focused, dither, depth, fade_in, fade_out, .. }) => {
+                        match *focused {
+                            3 => { if depth.supports_dither() { *dither = !*dither; } }
+                            4 => *fade_in = !*fade_in,
+                            6 => *fade_out = !*fade_out,
+                            _ => {}
+                        }
                     }
                     _ => {}
                 }
@@ -955,7 +980,7 @@ impl App {
                     *curve = curve.next();
                 }
                 Some(Dialog::ExportRegions { focused, .. }) => {
-                    *focused = (*focused + 1) % 4;
+                    *focused = (*focused + 1) % 8;
                 }
                 _ => {}
             },
@@ -1022,10 +1047,15 @@ impl App {
                     *tanh_clip = !*tanh_clip;
                 }
             }
-            Some(Dialog::ExportRegions { focused, dither, depth, .. }) => {
-                if row <= 3 {
-                    *focused = row;
-                    if row == 3 && depth.supports_dither() { *dither = !*dither; }
+            Some(Dialog::ExportRegions { focused, dither, depth, fade_in, fade_out, .. }) => {
+                match row {
+                    0..=3 => {
+                        *focused = row;
+                        if row == 3 && depth.supports_dither() { *dither = !*dither; }
+                    }
+                    4 => { *focused = 4; *fade_in = !*fade_in; }
+                    5 => { *focused = 6; *fade_out = !*fade_out; }
+                    _ => {}
                 }
             }
             _ => {}
@@ -1504,7 +1534,19 @@ impl App {
     /// into `subfolder` (created inside the document's directory, or the file panel's current
     /// directory for unsaved buffers). Files are named `{base_name}-001.wav`, `-002.wav`, …
     /// The first region spans [0, first_marker), the last spans [last_marker, end).
-    fn export_regions(&mut self, subfolder: &str, base_name: &str, depth: BitDepth, dither: bool) {
+    /// When `fade_in`/`fade_out` is true, a cosine-curve (exp²) fade of `fade_*_ms` ms is
+    /// applied to the start/end of every region's audio before writing.
+    fn export_regions(
+        &mut self,
+        subfolder: &str,
+        base_name: &str,
+        depth: BitDepth,
+        dither: bool,
+        fade_in: bool,
+        fade_in_ms: f32,
+        fade_out: bool,
+        fade_out_ms: f32,
+    ) {
         let idx = self.active_document;
         let Some(doc) = self.documents.get(idx) else { return };
         if doc.markers.is_empty() { return; }
@@ -1547,13 +1589,42 @@ impl App {
 
         let channels_snapshot: Vec<Vec<f32>> = doc.channels.clone();
 
+        let fade_in_len = if fade_in && fade_in_ms > 0.0 {
+            ((fade_in_ms / 1000.0) * sample_rate as f32).round() as usize
+        } else { 0 };
+        let fade_out_len = if fade_out && fade_out_ms > 0.0 {
+            ((fade_out_ms / 1000.0) * sample_rate as f32).round() as usize
+        } else { 0 };
+
         let mut error: Option<String> = None;
         for (i, (start, end, region_markers)) in regions.iter().enumerate() {
             let file_name = format!("{base_name}-{:03}.wav", i + 1);
             let path = out_dir.join(&file_name);
-            let region_channels: Vec<Vec<f32>> = channels_snapshot.iter()
+            let mut region_channels: Vec<Vec<f32>> = channels_snapshot.iter()
                 .map(|ch| ch[*start..*end].to_vec())
                 .collect();
+            let region_len = end - start;
+            // Apply fade in (exp² ramp: t² gives a convex rise from silence).
+            if fade_in_len > 0 {
+                let len = fade_in_len.min(region_len);
+                for ch in &mut region_channels {
+                    for (i, s) in ch[..len].iter_mut().enumerate() {
+                        let t = i as f32 / len.max(1) as f32;
+                        *s *= t * t;
+                    }
+                }
+            }
+            // Apply fade out (exp² fall: (1-t)² gives a convex fall to silence).
+            if fade_out_len > 0 {
+                let len = fade_out_len.min(region_len);
+                let offset = region_len - len;
+                for ch in &mut region_channels {
+                    for (i, s) in ch[offset..].iter_mut().enumerate() {
+                        let t = i as f32 / len.max(1) as f32;
+                        *s *= (1.0 - t) * (1.0 - t);
+                    }
+                }
+            }
             let region_doc = Document {
                 channels: region_channels,
                 sample_rate,
@@ -2409,6 +2480,10 @@ impl App {
                         base_name_input: TextInput::new(""),
                         depth: default_depth,
                         dither: false,
+                        fade_in: true,
+                        fade_in_input: TextInput::new("5"),
+                        fade_out: true,
+                        fade_out_input: TextInput::new("5"),
                         focused: 0,
                     });
                 }
@@ -3680,8 +3755,8 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) -> Vec<Rect> {
         Dialog::FadeOut { curve } => {
             return render_fade_dialog(frame, area, "Fade Out", *curve);
         }
-        Dialog::ExportRegions { folder_input, base_name_input, depth, dither, focused } => {
-            return render_export_regions_dialog(frame, area, folder_input, base_name_input, *depth, *dither, *focused);
+        Dialog::ExportRegions { folder_input, base_name_input, depth, dither, fade_in, fade_in_input, fade_out, fade_out_input, focused } => {
+            return render_export_regions_dialog(frame, area, folder_input, base_name_input, *depth, *dither, *fade_in, fade_in_input, *fade_out, fade_out_input, *focused);
         }
         Dialog::Info { message } => {
             return render_info_dialog(frame, area, message);
@@ -3749,11 +3824,16 @@ fn render_export_regions_dialog(
     base_name_input: &TextInput,
     depth: BitDepth,
     dither: bool,
+    fade_in: bool,
+    fade_in_input: &TextInput,
+    fade_out: bool,
+    fade_out_input: &TextInput,
     focused: usize,
 ) -> Vec<Rect> {
     let width = 54u16.min(area.width);
-    // subfolder + basename + blank + format + dither + blank + hints = 7 inner rows + 2 border
-    let height = 9u16.min(area.height);
+    // subfolder + basename + blank + format + dither + blank + fade_in + fade_out + blank + hints
+    // = 10 inner rows + 2 border
+    let height = 12u16.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -3813,6 +3893,54 @@ fn render_export_regions_dialog(
         }
     };
 
+    // Fade in row: checkbox + ms value on one line.
+    let fade_in_line = {
+        let cb = if fade_in { "[X]" } else { "[ ]" };
+        let cb_style = if focused == 4 { cursor_style } else if fade_in { label_style } else { dim_style };
+        let ms_label_style = if fade_in { label_style } else { dim_style };
+        let ms_val_style = if fade_in { base } else { dim_style };
+        if focused == 5 {
+            let (before, under, after) = fade_in_input.split_at_cursor();
+            Line::from(vec![
+                Span::styled(format!("   {cb} Fade in at start   "), cb_style),
+                Span::styled(before, base),
+                Span::styled(under, cursor_style),
+                Span::styled(after, base),
+                Span::styled(" ms", ms_label_style),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(format!("   {cb} Fade in at start   "), cb_style),
+                Span::styled(fade_in_input.value().to_string(), ms_val_style),
+                Span::styled(" ms", ms_label_style),
+            ])
+        }
+    };
+
+    // Fade out row: checkbox + ms value on one line.
+    let fade_out_line = {
+        let cb = if fade_out { "[X]" } else { "[ ]" };
+        let cb_style = if focused == 6 { cursor_style } else if fade_out { label_style } else { dim_style };
+        let ms_label_style = if fade_out { label_style } else { dim_style };
+        let ms_val_style = if focused == 7 { cursor_style } else if fade_out { base } else { dim_style };
+        if focused == 7 {
+            let (before, under, after) = fade_out_input.split_at_cursor();
+            Line::from(vec![
+                Span::styled(format!("   {cb} Fade out at end    "), cb_style),
+                Span::styled(before, base),
+                Span::styled(under, cursor_style),
+                Span::styled(after, base),
+                Span::styled(" ms", ms_label_style),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(format!("   {cb} Fade out at end    "), cb_style),
+                Span::styled(fade_out_input.value().to_string(), ms_val_style),
+                Span::styled(" ms", ms_label_style),
+            ])
+        }
+    };
+
     let do_active = !folder_input.value().trim().is_empty() && !base_name_input.value().trim().is_empty();
     let do_style = if do_active { hint_style } else { dim_style };
     let hints = Line::from(vec![
@@ -3833,18 +3961,22 @@ fn render_export_regions_dialog(
         .style(base);
     frame.render_widget(
         Paragraph::new(vec![
-            folder_line, base_line, Line::raw(""), format_line, dither_line, Line::raw(""), hints,
+            folder_line, base_line, Line::raw(""),
+            format_line, dither_line, Line::raw(""),
+            fade_in_line, fade_out_line, Line::raw(""),
+            hints,
         ]).block(block),
         popup,
     );
 
     let row_w = popup.width.saturating_sub(2);
     vec![
-        Rect { x: popup.x + 1, y: popup.y + 1, width: row_w, height: 1 }, // subfolder
-        Rect { x: popup.x + 1, y: popup.y + 2, width: row_w, height: 1 }, // base name
-        Rect { x: popup.x + 1, y: popup.y + 4, width: row_w, height: 1 }, // format
-        Rect { x: popup.x + 1, y: popup.y + 5, width: row_w, height: 1 }, // dither
-        Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 }, // hints/apply
+        Rect { x: popup.x + 1, y: popup.y + 1, width: row_w, height: 1 }, // subfolder (row 0)
+        Rect { x: popup.x + 1, y: popup.y + 2, width: row_w, height: 1 }, // base name (row 1)
+        Rect { x: popup.x + 1, y: popup.y + 4, width: row_w, height: 1 }, // format (row 2)
+        Rect { x: popup.x + 1, y: popup.y + 5, width: row_w, height: 1 }, // dither (row 3)
+        Rect { x: popup.x + 1, y: popup.y + 7, width: row_w, height: 1 }, // fade in (row 4)
+        Rect { x: popup.x + 1, y: popup.y + 8, width: row_w, height: 1 }, // fade out (row 5)
     ]
 }
 
