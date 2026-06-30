@@ -2481,9 +2481,9 @@ impl App {
                         depth: default_depth,
                         dither: false,
                         fade_in: true,
-                        fade_in_input: TextInput::new("5"),
+                        fade_in_input: TextInput::fresh("5"),
                         fade_out: true,
-                        fade_out_input: TextInput::new("5"),
+                        fade_out_input: TextInput::fresh("5"),
                         focused: 0,
                     });
                 }
