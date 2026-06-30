@@ -1134,6 +1134,9 @@ impl App {
     /// All other settings (snap, zoom, etc.) are preserved — only the `[keybindings]` table
     /// is replaced.
     fn reset_config_to_defaults(&mut self) {
+        // Snapshot the current file to `<path>.bak` before overwriting it, so the reset is
+        // recoverable.
+        Config::backup_existing();
         let mut keybindings = std::collections::HashMap::new();
         fill_missing_keybindings(&mut keybindings);
         self.config.keybindings = keybindings.clone();

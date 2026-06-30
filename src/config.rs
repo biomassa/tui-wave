@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -69,6 +69,23 @@ impl Config {
             .ok()
             .and_then(|s| toml::from_str(&s).ok())
             .unwrap_or_default()
+    }
+
+    /// Copies the existing config file to `<path>.bak` (e.g. `config.toml` → `config.toml.bak`),
+    /// so a destructive "Reset Config to Defaults" leaves the previous settings recoverable.
+    /// Best-effort: a missing or unreadable config is simply not backed up. Returns the backup
+    /// path when a copy was actually made.
+    pub fn backup_existing() -> Option<PathBuf> {
+        Self::backup_path(&Self::path())
+    }
+
+    /// Core of `backup_existing`, taking the config path explicitly so it's testable without
+    /// touching the process-global `XDG_CONFIG_HOME` (mirrors `detect_multiplexer`).
+    fn backup_path(path: &Path) -> Option<PathBuf> {
+        let mut bak = path.to_path_buf().into_os_string();
+        bak.push(".bak");
+        let bak = PathBuf::from(bak);
+        std::fs::copy(path, &bak).ok().map(|_| bak)
     }
 
     /// Best-effort save; failures (read-only filesystem, missing permissions) are silently
@@ -156,5 +173,23 @@ mod tests {
             std::env::remove_var("XDG_CONFIG_HOME");
         }
         std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn backup_path_copies_config_to_bak() {
+        // Uses an explicit path (not XDG_CONFIG_HOME) so it can't race the env-mutating test.
+        let dir = std::env::temp_dir().join(format!("tui_wave_bak_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.toml");
+
+        // No file yet → nothing to back up.
+        assert!(Config::backup_path(&cfg).is_none());
+
+        std::fs::write(&cfg, "transient_threshold_db = 7.0\n").unwrap();
+        let bak = Config::backup_path(&cfg).expect("a backup should be made once a config exists");
+        assert_eq!(bak.file_name().unwrap().to_string_lossy(), "config.toml.bak");
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "transient_threshold_db = 7.0\n");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
