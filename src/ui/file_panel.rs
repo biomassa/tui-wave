@@ -136,7 +136,13 @@ impl FilePanel {
     }
 
     pub fn filtered_count(&self) -> usize {
-        self.filtered_entries().len()
+        // Count through the iterator rather than cloning the whole filtered list just to
+        // read its length — this runs every render via `clamp_scroll`.
+        let lower = self.filter.to_lowercase();
+        self.entries
+            .iter()
+            .filter(|e| self.filter.is_empty() || e.name.to_lowercase().contains(&lower))
+            .count()
     }
 
     fn filtered_entries(&self) -> Vec<FileEntry> {
