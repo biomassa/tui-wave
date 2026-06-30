@@ -60,7 +60,7 @@ impl Toolbar {
                 buttons: vec![
                     ("Save",         sc(Action::Save,          "^s"),    Action::Save),
                     ("Quit",         sc(Action::Quit,          "q"),     Action::Quit),
-                    ("regToFolder",  sc(Action::ExportRegions, "^r"),    Action::ExportRegions),
+                    ("regToFolder",  sc(Action::ExportRegions, "S+E"),   Action::ExportRegions),
                     ("newFromLeft",  sc(Action::NewFromLeft,   "L"),     Action::NewFromLeft),
                     ("newFromRight", sc(Action::NewFromRight,  "R"),     Action::NewFromRight),
                 ],
@@ -90,7 +90,7 @@ impl Toolbar {
             ToolGroup {
                 label: "PROCESS",
                 buttons: vec![
-                    ("Rev",       sc(Action::Reverse,        "^S+R"), Action::Reverse),
+                    ("Rev",       sc(Action::Reverse,        "^r"),  Action::Reverse),
                     ("Norm",      sc(Action::Normalize,      "^n"),   Action::Normalize),
                     ("Gain",      sc(Action::Gain,           "^g"),   Action::Gain),
                     ("FadeIn",    sc(Action::FadeIn,         "^f"),   Action::FadeIn),
