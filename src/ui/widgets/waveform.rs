@@ -52,7 +52,7 @@ fn playhead_column(viewport: &Viewport, playhead: usize, width: u16) -> Option<u
         return None;
     }
     let col = ((playhead - viewport.scroll_offset) as f64 / viewport.samples_per_column) as i64;
-    (0..width as i64).contains(&col).then(|| col as u16)
+    (0..width as i64).contains(&col).then_some(col as u16)
 }
 
 impl<'a> Widget for WaveformWidget<'a> {
