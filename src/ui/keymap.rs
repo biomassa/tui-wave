@@ -95,8 +95,7 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('s') if ctrl && shift => Some(Action::SaveAs),
         KeyCode::Char('s') if ctrl => Some(Action::Save),
         KeyCode::Char('l') if ctrl => Some(Action::SaveAll),
-        KeyCode::Char('r') if ctrl && shift => Some(Action::Reverse),
-        KeyCode::Char('r') if ctrl => Some(Action::ExportRegions),
+        KeyCode::Char('r') if ctrl => Some(Action::Reverse),
         KeyCode::Char('n') if ctrl => Some(Action::Normalize),
         KeyCode::Char('e') if ctrl => Some(Action::Resample),
         KeyCode::Char('g') if ctrl => Some(Action::Gain),
@@ -110,6 +109,8 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('m') if ctrl => Some(Action::MixToMono),
         KeyCode::Char('L') => Some(Action::NewFromLeft),
         KeyCode::Char('R') => Some(Action::NewFromRight),
+        // Shift+E (kitty intercepts Ctrl+Shift+key, so Export Regions can't use Ctrl+Shift).
+        KeyCode::Char('E') => Some(Action::ExportRegions),
         KeyCode::Left if shift => Some(Action::ExtendSelectionLeft),
         KeyCode::Right if shift => Some(Action::ExtendSelectionRight),
         KeyCode::Home if shift => Some(Action::ExtendSelectionToStart),
@@ -286,8 +287,8 @@ pub fn default_keybindings() -> HashMap<String, Vec<String>> {
     bind!("MixToMono", "ctrl+m");
     bind!("NewFromLeft", "L");
     bind!("NewFromRight", "R");
-    bind!("Reverse", "ctrl+shift+r");
-    bind!("ExportRegions", "ctrl+r");
+    bind!("Reverse", "ctrl+r");
+    bind!("ExportRegions", "E");
     bind!("Normalize", "ctrl+n");
     bind!("Resample", "ctrl+e");
     bind!("Gain", "ctrl+g");
@@ -912,8 +913,8 @@ mod tests {
             (key(KeyCode::Char('y'), KeyModifiers::CONTROL), Action::Redo),
             (key(KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT), Action::Redo),
             (key(KeyCode::Char('m'), KeyModifiers::CONTROL), Action::MixToMono),
-            (key(KeyCode::Char('r'), KeyModifiers::CONTROL), Action::ExportRegions),
-            (key(KeyCode::Char('r'), KeyModifiers::CONTROL | KeyModifiers::SHIFT), Action::Reverse),
+            (key(KeyCode::Char('r'), KeyModifiers::CONTROL), Action::Reverse),
+            (key(KeyCode::Char('E'), KeyModifiers::NONE), Action::ExportRegions),
         ];
         for (k, expected) in test_cases {
             assert_eq!(kmap.get(&k).copied(), Some(expected), "failed for key {k:?}");

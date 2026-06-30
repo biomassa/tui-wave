@@ -13,10 +13,10 @@
 - **UI restructure**: removed the Channels menu/toolbar section. Mix to Mono moved to
   Process. New from Left / New from Right moved to File. Both menus and the toolbar
   reflect the change.
-- **Reverse** shortcut changed from Ctrl+R to Ctrl+Shift+R (Ctrl+R is now Export Regions).
-- **Export Regions to Subfolder** (Ctrl+R): chops the active buffer at its markers and
+- **Export Regions to Subfolder** (Shift+E): chops the active buffer at its markers and
   saves each region as a numbered WAV file into a new subfolder. Opens a dialog to set the
-  subfolder name, base filename, bit depth, and optional dither. If no markers are present,
+  subfolder name, base filename, bit depth, optional dither, and optional fade in/out (with
+  an editable millisecond length, default 5 ms) applied to each region. If no markers are present,
   shows an info popup. The first region is `[file start → first marker]`, the last is
   `[last marker → file end]`; files are named `{base}-001.wav`, `-002.wav`, etc.
 
