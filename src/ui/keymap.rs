@@ -73,6 +73,8 @@ pub enum Action {
     OpenSelected,
     OpenDirectory,
     SearchFiles,
+    RenameFile,
+    DeleteFile,
     FocusNext,
     CloseBuffer,
     RenameBuffer,
