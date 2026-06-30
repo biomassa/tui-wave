@@ -102,6 +102,7 @@ const TRANSIENT_THRESHOLD_MAX_DB: f32 = 24.0;
 enum Confirm {
     Quit,
     CloseBuffer(usize),
+    ResetConfig,
 }
 
 /// What to do once `App::save_as_queue` (buffers waiting for a filename before some other
@@ -616,6 +617,14 @@ impl App {
                     self.handle_action(Action::ToggleAudition);
                     true
                 }
+                // Shift+Tab cycles backward (Files → Waveform); Tab forward (Files → Buffers).
+                // Shift+Tab arrives as BackTab on legacy terminals, or Tab+SHIFT under the
+                // kitty keyboard protocol — accept both.
+                KeyCode::BackTab => { self.file_panel.focused = false; true }
+                KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.file_panel.focused = false;
+                    true
+                }
                 KeyCode::Tab => {
                     self.file_panel.focused = false;
                     self.buffer_panel.focused = true;
@@ -670,6 +679,13 @@ impl App {
                 KeyCode::Char('w') | KeyCode::Char('W') if ctrl => { self.handle_action(Action::CloseBuffer); true }
                 KeyCode::Char('r') | KeyCode::Char('R') if ctrl => { self.handle_action(Action::RenameBuffer); true }
                 KeyCode::Char('a') | KeyCode::Char('A') if ctrl => { self.handle_action(Action::SaveAll); true }
+                // Shift+Tab cycles backward (Buffers → Files); Tab forward (Buffers → Waveform).
+                KeyCode::BackTab => { self.buffer_panel.focused = false; self.file_panel.focused = true; true }
+                KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.buffer_panel.focused = false;
+                    self.file_panel.focused = true;
+                    true
+                }
                 KeyCode::Tab => { self.buffer_panel.focused = false; true }
                 KeyCode::Esc => { self.buffer_panel.focused = false; true }
                 _ => false,
@@ -678,7 +694,14 @@ impl App {
                 return;
             }
         }
-        // Tab when nothing is focused → focus the file panel
+        // Tab when nothing is focused → focus the file panel (forward); Shift+Tab → the buffer
+        // panel (backward), so the reverse cycle is Waveform → Buffers → Files → Waveform.
+        if key.code == KeyCode::BackTab
+            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
+        {
+            self.buffer_panel.focused = true;
+            return;
+        }
         if key.code == KeyCode::Tab {
             self.file_panel.focused = true;
             return;
@@ -745,6 +768,9 @@ impl App {
                     self.save_buffer(idx);
                 }
                 self.close_buffer(idx);
+            }
+            Confirm::ResetConfig => {
+                self.reset_config_to_defaults();
             }
         }
     }
@@ -2260,7 +2286,7 @@ impl App {
         }
 
         if action == Action::ResetConfig {
-            self.reset_config_to_defaults();
+            self.confirm = Some(Confirm::ResetConfig);
             return;
         }
 
@@ -3370,10 +3396,13 @@ impl App {
                 Confirm::Quit => {
                     let n = self.documents.iter().filter(|d| d.dirty).count();
                     let noun = if n == 1 { "buffer" } else { "buffers" };
-                    format!(" {n} unsaved {noun} — (s)ave all & quit · (y) quit anyway · (n) cancel ")
+                    format!(" {n} unsaved {noun} — (s)ave all & quit · (y) quit anyway · (Esc) cancel ")
                 }
                 Confirm::CloseBuffer(_) => {
-                    " Unsaved buffer — (s)ave & close · (y) close anyway · (n) cancel ".to_string()
+                    " Unsaved buffer — (s)ave & close · (y) close anyway · (Esc) cancel ".to_string()
+                }
+                Confirm::ResetConfig => {
+                    " Reset all keybindings to defaults? (existing config saved as .bak) — (y) reset · (Esc) cancel ".to_string()
                 }
             };
             render_confirm(frame, area, &text);
@@ -4358,6 +4387,44 @@ mod tests {
 
         app.handle_action(Action::Undo);
         assert_eq!(app.documents[0].markers, vec![Marker { position: 200, label: "Verse".to_string() }]);
+    }
+
+    /// Reset Config must ask first rather than wiping keybindings on the spot. (Only the
+    /// open + cancel path is exercised here; confirming would write to the real config file.)
+    #[test]
+    fn reset_config_action_confirms_before_resetting() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.handle_action(Action::ResetConfig);
+        assert!(
+            matches!(app.confirm, Some(Confirm::ResetConfig)),
+            "Reset Config should open a confirmation, not reset immediately"
+        );
+        // Esc cancels without resetting.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.confirm.is_none());
+    }
+
+    /// Shift+Tab cycles panel focus the opposite way to Tab:
+    /// Waveform → Buffers → Files → Waveform. Both the kitty form (Tab+SHIFT) and the legacy
+    /// BackTab form must work, and plain Tab must still cycle forward.
+    #[test]
+    fn shift_tab_cycles_focus_backward() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.file_panel.focused = false;
+        app.buffer_panel.focused = false; // start at the waveform
+
+        for expected in [Focus::Buffers, Focus::Files, Focus::Waveform] {
+            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
+            assert_eq!(app.focus(), expected);
+        }
+
+        // Legacy BackTab form takes the same backward step.
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(app.focus(), Focus::Buffers);
+
+        // Plain Tab still goes forward (Buffers → Waveform).
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.focus(), Focus::Waveform);
     }
 
     /// Quitting with no never-saved buffers (just dirty ones that already have a path)
