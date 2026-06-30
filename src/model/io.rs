@@ -92,6 +92,15 @@ impl BitDepth {
         }
     }
 
+    /// Maps the source file's `bits_per_sample` to the nearest `BitDepth` variant.
+    pub fn from_bits(bits: u16) -> Self {
+        match bits {
+            16 => BitDepth::Int16,
+            24 => BitDepth::Int24,
+            _ => BitDepth::Float32,
+        }
+    }
+
     fn sample_format(self) -> SampleFormat {
         match self {
             BitDepth::Float32 => SampleFormat::Float,
@@ -129,10 +138,10 @@ impl DitherRng {
     }
 }
 
-/// Saves to 32-bit float — the lossless working format. Used by quick Save; Save As goes
-/// through `save_wav_with` so the user can pick a bit depth.
+/// Saves at the document's original bit depth. Used by quick Save to round-trip
+/// the source format; Save As goes through `save_wav_with` so the user can pick a depth.
 pub fn save_wav(doc: &Document, path: impl AsRef<Path>) -> color_eyre::Result<()> {
-    save_wav_with(doc, path, BitDepth::Float32, false)
+    save_wav_with(doc, path, BitDepth::from_bits(doc.bits_per_sample), false)
 }
 
 /// Saves at the requested bit depth. Integer depths re-quantize from f32; `dither` adds

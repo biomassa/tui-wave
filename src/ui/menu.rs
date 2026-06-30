@@ -48,11 +48,14 @@ impl MenuBar {
                 label: "File",
                 mnemonic: 'F',
                 entries: vec![
-                    entry("Save",     Action::Save,    "Ctrl+s"),
-                    entry("Save As",  Action::SaveAs,  "Ctrl+Shift+S"),
-                    entry("Save All", Action::SaveAll,     "Ctrl+l"),
+                    entry("Save",                     Action::Save,        "Ctrl+s"),
+                    entry("Save As",                  Action::SaveAs,      "Ctrl+Shift+S"),
+                    entry("Save All",                 Action::SaveAll,     "Ctrl+l"),
+                    entry("Export Regions to Subfolder", Action::ExportRegions, "Ctrl+r"),
+                    entry("New from Left Channel",    Action::NewFromLeft,  "L"),
+                    entry("New from Right Channel",   Action::NewFromRight, "R"),
                     entry("Reset Config to Defaults", Action::ResetConfig, ""),
-                    entry("Quit",     Action::Quit,        "q"),
+                    entry("Quit",                     Action::Quit,        "q"),
                 ],
             },
             MenuItem {
@@ -94,7 +97,7 @@ impl MenuBar {
                 label: "Process",
                 mnemonic: 'P',
                 entries: vec![
-                    entry("Reverse",         Action::Reverse,       "Ctrl+r"),
+                    entry("Reverse",         Action::Reverse,       "Ctrl+Shift+R"),
                     entry("Normalize",       Action::Normalize,     "Ctrl+n"),
                     entry("Gain",            Action::Gain,          "Ctrl+g"),
                     entry("Fade In",         Action::FadeIn,        "Ctrl+f"),
@@ -102,6 +105,7 @@ impl MenuBar {
                     entry("Trim",            Action::Trim,          "Ctrl+t"),
                     entry("Resample",        Action::Resample,      "Ctrl+e"),
                     entry("Technical Fades", Action::TechnicalFades,"Ctrl+b"),
+                    entry("Mix to Mono",     Action::MixToMono,     "Ctrl+m"),
                 ],
             },
             MenuItem {
@@ -127,15 +131,6 @@ impl MenuBar {
                 entries: vec![
                     entry("Play/Pause",    Action::TogglePlayback, "Space"),
                     entry("Loop Playback", Action::ToggleLoop,     "l"),
-                ],
-            },
-            MenuItem {
-                label: "Channels",
-                mnemonic: 'C',
-                entries: vec![
-                    entry("Mix to Mono",            Action::MixToMono,    "Ctrl+m"),
-                    entry("New from Left Channel",  Action::NewFromLeft,  "L"),
-                    entry("New from Right Channel", Action::NewFromRight, "R"),
                 ],
             },
         ];
