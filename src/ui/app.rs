@@ -60,6 +60,17 @@ enum Dialog {
     /// silence). `focused` is the index of the currently-active field; Tab cycles through.
     /// `tanh_clip` enables a tanh soft-limiter on the mixed output (same as Gain's option).
     MixToMono { inputs: Vec<TextInput>, focused: usize, tanh_clip: bool },
+    /// Export Regions to Subfolder — chops file at markers and saves each region.
+    /// `focused`: 0=subfolder, 1=base_name, 2=format, 3=dither.
+    ExportRegions {
+        folder_input: TextInput,
+        base_name_input: TextInput,
+        depth: BitDepth,
+        dither: bool,
+        focused: usize,
+    },
+    /// Generic single-message info/error popup with an Enter/Esc-to-dismiss button.
+    Info { message: String },
 }
 
 /// Which panel currently has focus — the single source of truth for the modal command
@@ -384,7 +395,7 @@ impl App {
             let prefix = if doc.dirty { "*" } else { "" };
             let name = match doc.path.as_ref() {
                 Some(p) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "untitled".to_string()),
-                None => format!("_UNSAVED_{:03}", i + 1),
+                None => format!("_NEW_{:03}", i + 1),
             };
             format!("{}{}", prefix, name)
         }).collect()
@@ -796,6 +807,14 @@ impl App {
                 let f = *focused;
                 inputs.get_mut(f)
             }
+            Dialog::ExportRegions { folder_input, base_name_input, focused, .. } => {
+                match *focused {
+                    0 => Some(folder_input),
+                    1 => Some(base_name_input),
+                    _ => None,
+                }
+            }
+            Dialog::Info { .. } => None,
         }
     }
 
@@ -809,6 +828,8 @@ impl App {
             Some(Dialog::MixToMono { .. }) => {
                 c.is_ascii_digit() || matches!(c, '-' | '.' | 'i' | 'n' | 'f')
             }
+            Some(Dialog::ExportRegions { .. }) => true, // free text (folder / base name fields)
+            Some(Dialog::Info { .. }) => false,
             _ => true, // rename / directory dialogs: free text
         }
     }
@@ -849,18 +870,32 @@ impl App {
                     let clip = tanh_clip;
                     self.apply_mix_to_mono(&inputs_snapshot, clip);
                 }
+                Some(Dialog::ExportRegions { folder_input, base_name_input, depth, dither, .. }) => {
+                    let folder = folder_input.value().trim().to_string();
+                    let base_name = base_name_input.value().trim().to_string();
+                    if !folder.is_empty() && !base_name.is_empty() {
+                        self.export_regions(&folder, &base_name, depth, dither);
+                    }
+                }
+                Some(Dialog::Info { .. }) => {} // just dismiss
                 None => {}
             },
             KeyCode::Esc => self.dialog = None,
             KeyCode::Left => {
-                if let Some(input) = self.dialog_input() {
+                if let Some(Dialog::ExportRegions { focused, depth, .. }) = self.dialog.as_mut() {
+                    if *focused == 2 { *depth = depth.prev(); }
+                    else if let Some(input) = self.dialog_input() { input.left(); }
+                } else if let Some(input) = self.dialog_input() {
                     input.left();
                 } else {
                     self.cycle_dialog_curve(false);
                 }
             }
             KeyCode::Right => {
-                if let Some(input) = self.dialog_input() {
+                if let Some(Dialog::ExportRegions { focused, depth, .. }) = self.dialog.as_mut() {
+                    if *focused == 2 { *depth = depth.next(); }
+                    else if let Some(input) = self.dialog_input() { input.right(); }
+                } else if let Some(input) = self.dialog_input() {
                     input.right();
                 } else {
                     self.cycle_dialog_curve(true);
@@ -901,6 +936,9 @@ impl App {
                     Some(Dialog::Gain { focused, tanh_clip, .. }) => {
                         if *focused == 1 { *tanh_clip = !*tanh_clip; }
                     }
+                    Some(Dialog::ExportRegions { focused, dither, depth, .. }) => {
+                        if *focused == 3 && depth.supports_dither() { *dither = !*dither; }
+                    }
                     _ => {}
                 }
             }
@@ -915,6 +953,9 @@ impl App {
                 // Tab still cycles the curve for backward compat; ←→ is the documented way.
                 Some(Dialog::FadeIn { curve }) | Some(Dialog::FadeOut { curve }) => {
                     *curve = curve.next();
+                }
+                Some(Dialog::ExportRegions { focused, .. }) => {
+                    *focused = (*focused + 1) % 4;
                 }
                 _ => {}
             },
@@ -979,6 +1020,12 @@ impl App {
                 } else if row == n {
                     *focused = n;
                     *tanh_clip = !*tanh_clip;
+                }
+            }
+            Some(Dialog::ExportRegions { focused, dither, depth, .. }) => {
+                if row <= 3 {
+                    *focused = row;
+                    if row == 3 && depth.supports_dither() { *dither = !*dither; }
                 }
             }
             _ => {}
@@ -1453,6 +1500,90 @@ impl App {
         self.rebuild_waveform_caches();
     }
 
+    /// Chops the active document at its markers and saves each region as a numbered WAV file
+    /// into `subfolder` (created inside the document's directory, or the file panel's current
+    /// directory for unsaved buffers). Files are named `{base_name}-001.wav`, `-002.wav`, …
+    /// The first region spans [0, first_marker), the last spans [last_marker, end).
+    fn export_regions(&mut self, subfolder: &str, base_name: &str, depth: BitDepth, dither: bool) {
+        let idx = self.active_document;
+        let Some(doc) = self.documents.get(idx) else { return };
+        if doc.markers.is_empty() { return; }
+
+        // Determine the output directory: sibling of the document's file, or current panel dir.
+        let parent_dir = doc.path.as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.file_panel.directory.clone());
+
+        let out_dir = parent_dir.join(subfolder);
+        if std::fs::create_dir_all(&out_dir).is_err() {
+            self.dialog = Some(Dialog::Info {
+                message: format!("Could not create folder: {subfolder}"),
+            });
+            return;
+        }
+
+        // Build region boundaries: [0, m0), [m0, m1), …, [m_last, end).
+        let total = doc.len_samples();
+        let mut boundaries: Vec<usize> = vec![0];
+        let mut sorted: Vec<usize> = doc.markers.iter().map(|m| m.position).collect();
+        sorted.sort_unstable();
+        sorted.dedup();
+        boundaries.extend_from_slice(&sorted);
+        boundaries.push(total);
+
+        let sample_rate = doc.sample_rate;
+        let bits = doc.bits_per_sample;
+
+        // Collect (start, end, region_markers) for each segment.
+        let regions: Vec<(usize, usize, Vec<Marker>)> = boundaries.windows(2).map(|w| {
+            let (start, end) = (w[0], w[1]);
+            let region_markers: Vec<Marker> = doc.markers.iter()
+                .filter(|m| m.position > start && m.position < end)
+                .map(|m| Marker { position: m.position - start, label: m.label.clone() })
+                .collect();
+            (start, end, region_markers)
+        }).filter(|(s, e, _)| s < e).collect();
+
+        let channels_snapshot: Vec<Vec<f32>> = doc.channels.clone();
+
+        let mut error: Option<String> = None;
+        for (i, (start, end, region_markers)) in regions.iter().enumerate() {
+            let file_name = format!("{base_name}-{:03}.wav", i + 1);
+            let path = out_dir.join(&file_name);
+            let region_channels: Vec<Vec<f32>> = channels_snapshot.iter()
+                .map(|ch| ch[*start..*end].to_vec())
+                .collect();
+            let region_doc = Document {
+                channels: region_channels,
+                sample_rate,
+                bits_per_sample: bits,
+                selection: None,
+                cursor: 0,
+                dirty: false,
+                path: None,
+                markers: region_markers.clone(),
+                bext: None,
+            };
+            if let Err(e) = crate::model::io::save_wav_with(&region_doc, &path, depth, dither) {
+                error = Some(format!("Save failed: {e}"));
+                break;
+            }
+        }
+
+        self.dialog = None;
+        if let Some(msg) = error {
+            self.dialog = Some(Dialog::Info { message: msg });
+        } else {
+            let n = regions.len();
+            self.dialog = Some(Dialog::Info {
+                message: format!("Saved {n} region{} to {subfolder}/", if n == 1 { "" } else { "s" }),
+            });
+            // Refresh the file panel so the new subfolder appears.
+            self.file_panel.scan();
+        }
+    }
+
     fn load_file(&mut self, path: PathBuf) {
         self.stop_audition();
         if let Some(audio) = self.audio.take() {
@@ -1543,6 +1674,12 @@ impl App {
             .unwrap_or_else(|| "untitled.wav".to_string());
         self.save_as_input = TextInput::fresh(name);
         self.save_as_focused = 0;
+        // Default to the document's original bit depth so a Save As on a 24-bit file
+        // offers 24-bit by default rather than always falling back to 32-bit float.
+        self.save_as_depth = self.documents.get(idx)
+            .map(|d| BitDepth::from_bits(d.bits_per_sample))
+            .unwrap_or(BitDepth::Float32);
+        self.save_as_dither = false;
         self.save_as_active = true;
     }
 
@@ -2259,6 +2396,26 @@ impl App {
             return;
         }
 
+        if action == Action::ExportRegions {
+            if let Some(doc) = self.active_doc() {
+                if doc.markers.is_empty() {
+                    self.dialog = Some(Dialog::Info {
+                        message: "No markers found. Add markers first to define regions.".to_string(),
+                    });
+                } else {
+                    let default_depth = BitDepth::from_bits(doc.bits_per_sample);
+                    self.dialog = Some(Dialog::ExportRegions {
+                        folder_input: TextInput::new(""),
+                        base_name_input: TextInput::new(""),
+                        depth: default_depth,
+                        dither: false,
+                        focused: 0,
+                    });
+                }
+            }
+            return;
+        }
+
         if action == Action::NewFromLeft || action == Action::NewFromRight {
             let channel_idx = if action == Action::NewFromLeft { 0 } else { 1 };
             let result = self.active_doc().and_then(|d| {
@@ -2384,7 +2541,8 @@ impl App {
             | Action::SwitchBuffer
             | Action::SearchBuffers
             | Action::Trim
-            | Action::ResetConfig => unreachable!(),
+            | Action::ResetConfig
+            | Action::ExportRegions => unreachable!(),
             // Cursor movement is identical whether or not it extends a selection; the
             // selection side-effect is applied in the second match below.
             Action::MoveCursorLeft | Action::ExtendSelectionLeft => {
@@ -2477,12 +2635,22 @@ impl App {
 
         viewport.ensure_visible(document.cursor, width);
 
-        if let Some(audio) = &self.audio {
-            if audio.is_playing() {
-                if let Some((ls, le)) = loop_range {
-                    audio.seek_looped(document.cursor, ls, le);
-                } else {
-                    audio.seek(document.cursor);
+        // Seek the playback position to the new cursor only for actions that actually move it.
+        // Zoom actions change the viewport without moving the cursor — seeking during zoom
+        // would restart playback from the cursor position instead of continuing from the
+        // playhead's current location.
+        let cursor_moved = !matches!(
+            action,
+            Action::ZoomIn | Action::ZoomOut | Action::ZoomInVertical | Action::ZoomOutVertical
+        );
+        if cursor_moved {
+            if let Some(audio) = &self.audio {
+                if audio.is_playing() {
+                    if let Some((ls, le)) = loop_range {
+                        audio.seek_looped(document.cursor, ls, le);
+                    } else {
+                        audio.seek(document.cursor);
+                    }
                 }
             }
         }
@@ -3512,6 +3680,12 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) -> Vec<Rect> {
         Dialog::FadeOut { curve } => {
             return render_fade_dialog(frame, area, "Fade Out", *curve);
         }
+        Dialog::ExportRegions { folder_input, base_name_input, depth, dither, focused } => {
+            return render_export_regions_dialog(frame, area, folder_input, base_name_input, *depth, *dither, *focused);
+        }
+        Dialog::Info { message } => {
+            return render_info_dialog(frame, area, message);
+        }
         _ => {}
     }
 
@@ -3526,7 +3700,12 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) -> Vec<Rect> {
         Dialog::RenameMarker { input, .. } => ("Rename Marker", " Label: ".into(), Some(input), " ".into()),
         Dialog::OpenDirectory { input } => ("Open Directory", " Path: ".into(), Some(input), " ".into()),
         Dialog::RenameBuffer { input, .. } => ("Rename Buffer", " New name: ".into(), Some(input), " ".into()),
-        Dialog::Gain { .. } | Dialog::FadeIn { .. } | Dialog::FadeOut { .. } | Dialog::MixToMono { .. } => {
+        Dialog::Gain { .. }
+        | Dialog::FadeIn { .. }
+        | Dialog::FadeOut { .. }
+        | Dialog::MixToMono { .. }
+        | Dialog::ExportRegions { .. }
+        | Dialog::Info { .. } => {
             unreachable!("handled by match arms above")
         }
     };
@@ -3561,6 +3740,147 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) -> Vec<Rect> {
         .style(base);
     frame.render_widget(Paragraph::new(Line::from(spans)).block(block), popup);
     Vec::new()
+}
+
+fn render_export_regions_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    folder_input: &TextInput,
+    base_name_input: &TextInput,
+    depth: BitDepth,
+    dither: bool,
+    focused: usize,
+) -> Vec<Rect> {
+    let width = 54u16.min(area.width);
+    // subfolder + basename + blank + format + dither + blank + hints = 7 inner rows + 2 border
+    let height = 9u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+
+    let make_text_row = |label: &'static str, input: &TextInput, is_focused: bool| {
+        if is_focused {
+            let (before, under, after) = input.split_at_cursor();
+            Line::from(vec![
+                Span::styled(label, label_style),
+                Span::styled(before, base),
+                Span::styled(under, cursor_style),
+                Span::styled(after, base),
+                Span::raw("  "),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(label, label_style),
+                Span::styled(input.value().to_string(), base),
+            ])
+        }
+    };
+
+    let folder_line = make_text_row(" Subfolder: ", folder_input, focused == 0);
+    let base_line   = make_text_row(" Base name: ", base_name_input, focused == 1);
+
+    let format_line = if focused == 2 {
+        Line::from(vec![
+            Span::styled("   Format: ◄ ", label_style),
+            Span::styled(depth.label(), cursor_style),
+            Span::styled(" ►  ", label_style),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("   Format: ", label_style),
+            Span::styled(depth.label(), base),
+        ])
+    };
+
+    let dither_line = if !depth.supports_dither() {
+        Line::from(Span::styled("   [ ] Dither  (n/a for float)", dim_style))
+    } else {
+        let label = if dither { "   [X] Dither" } else { "   [ ] Dither" };
+        if focused == 3 {
+            Line::from(Span::styled(label, cursor_style))
+        } else {
+            Line::from(Span::styled(label, label_style))
+        }
+    };
+
+    let do_active = !folder_input.value().trim().is_empty() && !base_name_input.value().trim().is_empty();
+    let do_style = if do_active { hint_style } else { dim_style };
+    let hints = Line::from(vec![
+        Span::styled(" Tab", hint_style),
+        Span::styled(":next  ", label_style),
+        Span::styled("←→", hint_style),
+        Span::styled(":change  ", label_style),
+        Span::styled("Space", hint_style),
+        Span::styled(":check  ", label_style),
+        Span::styled("Enter", do_style),
+        Span::styled(":Do!", label_style),
+    ]);
+
+    let block = Block::default()
+        .title("Export Regions to Subfolder")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    frame.render_widget(
+        Paragraph::new(vec![
+            folder_line, base_line, Line::raw(""), format_line, dither_line, Line::raw(""), hints,
+        ]).block(block),
+        popup,
+    );
+
+    let row_w = popup.width.saturating_sub(2);
+    vec![
+        Rect { x: popup.x + 1, y: popup.y + 1, width: row_w, height: 1 }, // subfolder
+        Rect { x: popup.x + 1, y: popup.y + 2, width: row_w, height: 1 }, // base name
+        Rect { x: popup.x + 1, y: popup.y + 4, width: row_w, height: 1 }, // format
+        Rect { x: popup.x + 1, y: popup.y + 5, width: row_w, height: 1 }, // dither
+        Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 }, // hints/apply
+    ]
+}
+
+fn render_info_dialog(frame: &mut Frame, area: Rect, message: &str) -> Vec<Rect> {
+    let width = (message.chars().count() as u16 + 4).min(area.width).max(30);
+    let height = 5u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let close_line = Line::from(vec![
+        Span::styled(" Enter", hint_style),
+        Span::styled(":close", label_style),
+    ]);
+    let block = Block::default()
+        .title("Info")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(format!(" {message}"), base)),
+            Line::raw(""),
+            close_line,
+        ]).block(block),
+        popup,
+    );
+    let row_w = popup.width.saturating_sub(2);
+    // hints bar is interactive (closes the dialog).
+    vec![Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 }]
 }
 
 #[cfg(test)]

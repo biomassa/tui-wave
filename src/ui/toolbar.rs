@@ -58,8 +58,11 @@ impl Toolbar {
             ToolGroup {
                 label: "FILE",
                 buttons: vec![
-                    ("Save", sc(Action::Save,   "^s"), Action::Save),
-                    ("Quit", sc(Action::Quit,   "q"),  Action::Quit),
+                    ("Save",         sc(Action::Save,          "^s"),    Action::Save),
+                    ("Quit",         sc(Action::Quit,          "q"),     Action::Quit),
+                    ("regToFolder",  sc(Action::ExportRegions, "^r"),    Action::ExportRegions),
+                    ("newFromLeft",  sc(Action::NewFromLeft,   "L"),     Action::NewFromLeft),
+                    ("newFromRight", sc(Action::NewFromRight,  "R"),     Action::NewFromRight),
                 ],
             },
             ToolGroup {
@@ -87,14 +90,15 @@ impl Toolbar {
             ToolGroup {
                 label: "PROCESS",
                 buttons: vec![
-                    ("Rev",       sc(Action::Reverse,        "^r"), Action::Reverse),
-                    ("Norm",      sc(Action::Normalize,      "^n"), Action::Normalize),
-                    ("Gain",      sc(Action::Gain,           "^g"), Action::Gain),
-                    ("FadeIn",    sc(Action::FadeIn,         "^f"), Action::FadeIn),
-                    ("FadeOut",   sc(Action::FadeOut,        "^o"), Action::FadeOut),
-                    ("Trim",      sc(Action::Trim,           "^t"), Action::Trim),
-                    ("Resamp",    sc(Action::Resample,       "^e"), Action::Resample),
-                    ("bothFades", sc(Action::TechnicalFades, "^b"), Action::TechnicalFades),
+                    ("Rev",       sc(Action::Reverse,        "^S+R"), Action::Reverse),
+                    ("Norm",      sc(Action::Normalize,      "^n"),   Action::Normalize),
+                    ("Gain",      sc(Action::Gain,           "^g"),   Action::Gain),
+                    ("FadeIn",    sc(Action::FadeIn,         "^f"),   Action::FadeIn),
+                    ("FadeOut",   sc(Action::FadeOut,        "^o"),   Action::FadeOut),
+                    ("Trim",      sc(Action::Trim,           "^t"),   Action::Trim),
+                    ("Resamp",    sc(Action::Resample,       "^e"),   Action::Resample),
+                    ("bothFades", sc(Action::TechnicalFades, "^b"),   Action::TechnicalFades),
+                    ("mixToMono", sc(Action::MixToMono,     "^m"),   Action::MixToMono),
                 ],
             },
             ToolGroup {
@@ -113,14 +117,6 @@ impl Toolbar {
                     // value, then the bare +/- shortcuts) — these are just placeholders.
                     ("", sc(Action::IncreaseTransientThreshold, "+"), Action::IncreaseTransientThreshold),
                     ("", sc(Action::DecreaseTransientThreshold, "-"), Action::DecreaseTransientThreshold),
-                ],
-            },
-            ToolGroup {
-                label: "CHANNELS",
-                buttons: vec![
-                    ("mixToMono",   sc(Action::MixToMono,    "^m"), Action::MixToMono),
-                    ("newFromLeft", sc(Action::NewFromLeft,  "L"),  Action::NewFromLeft),
-                    ("newFromRight",sc(Action::NewFromRight, "R"),  Action::NewFromRight),
                 ],
             },
             ToolGroup {

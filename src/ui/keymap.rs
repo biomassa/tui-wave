@@ -67,6 +67,7 @@ pub enum Action {
     IncreaseTransientThreshold,
     DecreaseTransientThreshold,
     ResetConfig,
+    ExportRegions,
     // Panel/modal commands (mostly dispatched contextually, not via the global keymap).
     Noop,
     OpenSelected,
@@ -94,7 +95,8 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('s') if ctrl && shift => Some(Action::SaveAs),
         KeyCode::Char('s') if ctrl => Some(Action::Save),
         KeyCode::Char('l') if ctrl => Some(Action::SaveAll),
-        KeyCode::Char('r') if ctrl => Some(Action::Reverse),
+        KeyCode::Char('r') if ctrl && shift => Some(Action::Reverse),
+        KeyCode::Char('r') if ctrl => Some(Action::ExportRegions),
         KeyCode::Char('n') if ctrl => Some(Action::Normalize),
         KeyCode::Char('e') if ctrl => Some(Action::Resample),
         KeyCode::Char('g') if ctrl => Some(Action::Gain),
@@ -274,7 +276,8 @@ pub fn default_keybindings() -> HashMap<String, Vec<String>> {
     bind!("MixToMono", "ctrl+m");
     bind!("NewFromLeft", "L");
     bind!("NewFromRight", "R");
-    bind!("Reverse", "ctrl+r");
+    bind!("Reverse", "ctrl+shift+r");
+    bind!("ExportRegions", "ctrl+r");
     bind!("Normalize", "ctrl+n");
     bind!("Resample", "ctrl+e");
     bind!("Gain", "ctrl+g");
@@ -371,6 +374,7 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "IncreaseTransientThreshold" => Some(Action::IncreaseTransientThreshold),
         "DecreaseTransientThreshold" => Some(Action::DecreaseTransientThreshold),
         "ResetConfig" => Some(Action::ResetConfig),
+        "ExportRegions" => Some(Action::ExportRegions),
         _ => None,
     }
 }
@@ -885,6 +889,8 @@ mod tests {
             (key(KeyCode::Char('y'), KeyModifiers::CONTROL), Action::Redo),
             (key(KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT), Action::Redo),
             (key(KeyCode::Char('m'), KeyModifiers::CONTROL), Action::MixToMono),
+            (key(KeyCode::Char('r'), KeyModifiers::CONTROL), Action::ExportRegions),
+            (key(KeyCode::Char('r'), KeyModifiers::CONTROL | KeyModifiers::SHIFT), Action::Reverse),
         ];
         for (k, expected) in test_cases {
             assert_eq!(kmap.get(&k).copied(), Some(expected), "failed for key {k:?}");

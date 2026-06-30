@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-06-30
+
+- Fixed zoom (Up/Down) restarting playback from the cursor position instead of continuing
+  from the current playhead. Navigation actions seek the audio position only when the
+  cursor actually moves; zoom-only actions leave the playhead untouched.
+- Quick Save (Ctrl+S) now preserves the source file's original bit depth (16-bit int saves
+  as 16-bit, 24-bit as 24-bit, float as float) instead of always promoting to 32-bit float.
+  Save As now defaults to the document's original bit depth rather than float.
+- Renamed "unsaved" buffers (no path yet) from `_UNSAVED_001` to `_NEW_001` in the Buffers
+  panel for clearer intent.
+- **UI restructure**: removed the Channels menu/toolbar section. Mix to Mono moved to
+  Process. New from Left / New from Right moved to File. Both menus and the toolbar
+  reflect the change.
+- **Reverse** shortcut changed from Ctrl+R to Ctrl+Shift+R (Ctrl+R is now Export Regions).
+- **Export Regions to Subfolder** (Ctrl+R): chops the active buffer at its markers and
+  saves each region as a numbered WAV file into a new subfolder. Opens a dialog to set the
+  subfolder name, base filename, bit depth, and optional dither. If no markers are present,
+  shows an info popup. The first region is `[file start → first marker]`, the last is
+  `[last marker → file end]`; files are named `{base}-001.wav`, `-002.wav`, etc.
+
 ## 2026-06-29
 
 - Fixed Fade In / Fade Out silently doing nothing on small selections. When zero-crossing
