@@ -178,16 +178,26 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
 /// - Uppercase single characters (e.g. `"L"`, `"R"`, `"C"`) are parsed directly as
 ///   `Char(uppercase)` with no modifiers.
 pub fn parse_key_binding(s: &str) -> Option<KeyEvent> {
-    let parts: Vec<&str> = s.split('+').collect();
-    let (key_part, mod_parts) = parts.split_last()?;
+    // The key is the final '+'-separated token. A trailing '+' is the one ambiguous case:
+    // it denotes a literal '+' key (e.g. "+" or "ctrl++"), which a naive split('+') would
+    // turn into an empty final token and fail to parse — silently dropping the binding.
+    let (mod_str, key_part) = if let Some(mods) = s.strip_suffix('+') {
+        (mods.strip_suffix('+').unwrap_or(mods), "+")
+    } else if let Some((mods, key)) = s.rsplit_once('+') {
+        (mods, key)
+    } else {
+        ("", s)
+    };
 
     let mut modifiers = KeyModifiers::NONE;
-    for &m in mod_parts {
-        match m.to_ascii_lowercase().as_str() {
-            "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
-            "shift" => modifiers |= KeyModifiers::SHIFT,
-            "alt" => modifiers |= KeyModifiers::ALT,
-            _ => return None,
+    if !mod_str.is_empty() {
+        for m in mod_str.split('+') {
+            match m.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
+                "shift" => modifiers |= KeyModifiers::SHIFT,
+                "alt" => modifiers |= KeyModifiers::ALT,
+                _ => return None,
+            }
         }
     }
 
@@ -867,6 +877,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_key_binding_handles_literal_plus_key() {
+        // '+' is also the modifier separator, so a literal '+' key needs special handling —
+        // it is the IncreaseTransientThreshold default and must round-trip through the config.
+        assert_eq!(parse_key_binding("+"), Some(key(KeyCode::Char('+'), KeyModifiers::NONE)));
+        assert_eq!(
+            parse_key_binding("ctrl++"),
+            Some(key(KeyCode::Char('+'), KeyModifiers::CONTROL))
+        );
+        // Genuinely malformed input is still rejected (empty modifier token).
+        assert_eq!(parse_key_binding("ctrl++x"), None);
+    }
+
+    #[test]
     fn build_key_map_matches_map_key_defaults() {
         let mut kb = default_keybindings();
         fill_missing_keybindings(&mut kb);
@@ -894,6 +917,30 @@ mod tests {
         ];
         for (k, expected) in test_cases {
             assert_eq!(kmap.get(&k).copied(), Some(expected), "failed for key {k:?}");
+        }
+    }
+
+    #[test]
+    fn every_default_binding_agrees_with_map_key() {
+        // Exhaustive companion to the curated test above. `default_keybindings` holds only
+        // globally-dispatched actions (contextual panel keys are resolved before the global
+        // map and are deliberately absent), so every default binding must: name a real
+        // action, parse to a KeyEvent, and resolve through `map_key` to that same action.
+        // This catches a newly-added action whose default key-string was typo'd or whose
+        // `map_key` arm was forgotten — the single-source-of-truth drift this module forbids.
+        for (name, keys) in default_keybindings() {
+            let action = parse_action_name(&name)
+                .unwrap_or_else(|| panic!("default binding names an unknown action: {name}"));
+            for key_str in &keys {
+                let ev = parse_key_binding(key_str).unwrap_or_else(|| {
+                    panic!("default binding {name} has an unparseable key: {key_str:?}")
+                });
+                assert_eq!(
+                    map_key(ev),
+                    Some(action),
+                    "map_key disagrees with default binding {name} = {key_str:?}",
+                );
+            }
         }
     }
 }
