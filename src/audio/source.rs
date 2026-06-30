@@ -1,5 +1,5 @@
 use std::num::NonZero;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,6 +19,11 @@ pub struct DocumentSource {
     frame_index: usize,
     channel_cursor: usize,
     position: Arc<AtomicUsize>,
+    /// Shared playback flag. Cleared when this source reaches its natural end (rodio has no
+    /// end-of-source callback, and otherwise the flag would stay `true` after a non-looping
+    /// track finished, so the UI thought playback was still running — Space then "paused" a
+    /// stopped track instead of replaying it).
+    playing: Arc<AtomicBool>,
     loop_start: Option<usize>,
     loop_end: Option<usize>,
 }
@@ -29,6 +34,7 @@ impl DocumentSource {
         sample_rate: u32,
         start_frame: usize,
         position: Arc<AtomicUsize>,
+        playing: Arc<AtomicBool>,
         loop_start: Option<usize>,
         loop_end: Option<usize>,
     ) -> Self {
@@ -43,6 +49,7 @@ impl DocumentSource {
             frame_index: start_frame,
             channel_cursor: 0,
             position,
+            playing,
             loop_start,
             loop_end,
         }
@@ -62,9 +69,11 @@ impl Iterator for DocumentSource {
                 if total_frames > 0 && ls < le && le <= total_frames {
                     self.frame_index = ls;
                 } else {
+                    self.playing.store(false, Ordering::Relaxed);
                     return None;
                 }
             } else {
+                self.playing.store(false, Ordering::Relaxed);
                 return None;
             }
         }
@@ -95,5 +104,40 @@ impl Source for DocumentSource {
 
     fn total_duration(&self) -> Option<Duration> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clears_playing_at_natural_end() {
+        let data = Arc::new(vec![vec![0.1f32, 0.2, 0.3]]);
+        let position = Arc::new(AtomicUsize::new(0));
+        let playing = Arc::new(AtomicBool::new(true));
+        let mut source =
+            DocumentSource::new_looped(data, 44100, 0, position, playing.clone(), None, None);
+        let yielded = std::iter::from_fn(|| source.next()).count();
+        assert_eq!(yielded, 3);
+        assert!(
+            !playing.load(Ordering::Relaxed),
+            "a non-looping source must clear `playing` when it reaches the end"
+        );
+    }
+
+    #[test]
+    fn looping_source_keeps_playing_set() {
+        let data = Arc::new(vec![vec![0.1f32, 0.2, 0.3, 0.4]]);
+        let position = Arc::new(AtomicUsize::new(0));
+        let playing = Arc::new(AtomicBool::new(true));
+        let mut source =
+            DocumentSource::new_looped(data, 44100, 0, position, playing.clone(), Some(1), Some(3));
+        // A valid loop never ends; pulling well past the loop region must keep yielding and
+        // must never clear `playing` (the natural-end signal must not fire on a loop wrap).
+        for _ in 0..1000 {
+            assert!(source.next().is_some(), "a looping source should never return None");
+        }
+        assert!(playing.load(Ordering::Relaxed), "looping must leave `playing` true");
     }
 }
