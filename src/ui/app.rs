@@ -1861,6 +1861,30 @@ impl App {
             return;
         }
 
+        // The menu takes precedence over everything beneath it, because it renders on top:
+        // a click on the bar opens (or switches) it, and while it's open a click selects an
+        // entry or dismisses it. This must run before the panel/waveform handlers below — an
+        // open dropdown can overlap the Files/Buffers panels, and without this the panel would
+        // steal a click meant for a menu entry. Mirrors the keyboard precedence, where an open
+        // menu intercepts keys before anything else.
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if let Some(idx) = self.menu.hit_test_bar(mouse.column, mouse.row) {
+                self.menu.toggle_open(idx);
+                return;
+            }
+            if self.menu.is_open() {
+                if let Some(entry_idx) = self.menu.hit_test_entry(mouse.column, mouse.row) {
+                    self.menu.select_entry(entry_idx);
+                    if let Some(action) = self.menu.activate() {
+                        self.handle_action(action);
+                    }
+                } else {
+                    self.menu.close();
+                }
+                return;
+            }
+        }
+
         // A left click anywhere focuses whichever panel it landed in — including the
         // waveform, which has no toggle/key of its own to focus it (Tab cycles forward
         // through panels, but a direct click should jump straight to the one under the
@@ -1910,23 +1934,10 @@ impl App {
             }
         }
 
-        // Menu/toolbar: only handle click (Down) events.
+        // Toolbar: click a button to run its action. (The menu is handled earlier, above the
+        // panels, since an open dropdown can overlap them; the toolbar sits in its own chrome
+        // band and never overlaps a panel, so it's fine to resolve it here.)
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            if let Some(idx) = self.menu.hit_test_bar(mouse.column, mouse.row) {
-                self.menu.toggle_open(idx);
-                return;
-            }
-            if self.menu.is_open() {
-                if let Some(entry_idx) = self.menu.hit_test_entry(mouse.column, mouse.row) {
-                    self.menu.select_entry(entry_idx);
-                    if let Some(action) = self.menu.activate() {
-                        self.handle_action(action);
-                    }
-                } else {
-                    self.menu.close();
-                }
-                return;
-            }
             if let Some(action) = self.toolbar.hit_test(mouse.column, mouse.row) {
                 self.handle_action(action);
                 return;
