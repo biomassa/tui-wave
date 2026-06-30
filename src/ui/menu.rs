@@ -51,7 +51,7 @@ impl MenuBar {
                     entry("Save",                     Action::Save,        "Ctrl+s"),
                     entry("Save As",                  Action::SaveAs,      "Ctrl+Shift+S"),
                     entry("Save All",                 Action::SaveAll,     "Ctrl+l"),
-                    entry("Export Regions to Subfolder", Action::ExportRegions, "Ctrl+r"),
+                    entry("Export Regions to Subfolder", Action::ExportRegions, "Shift+E"),
                     entry("New from Left Channel",    Action::NewFromLeft,  "L"),
                     entry("New from Right Channel",   Action::NewFromRight, "R"),
                     entry("Reset Config to Defaults", Action::ResetConfig, ""),
@@ -97,7 +97,7 @@ impl MenuBar {
                 label: "Process",
                 mnemonic: 'P',
                 entries: vec![
-                    entry("Reverse",         Action::Reverse,       "Ctrl+Shift+R"),
+                    entry("Reverse",         Action::Reverse,       "Ctrl+r"),
                     entry("Normalize",       Action::Normalize,     "Ctrl+n"),
                     entry("Gain",            Action::Gain,          "Ctrl+g"),
                     entry("Fade In",         Action::FadeIn,        "Ctrl+f"),
