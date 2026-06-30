@@ -2,7 +2,7 @@
 
 ## 2026-06-30
 
-- Files panel: **Rename** (`r`) renames the selected `.wav` on disk via a name dialog (Esc
+- Files panel: **Rename** (`Ctrl+r`) renames the selected `.wav` on disk via a name dialog (Esc
   cancels; a buffer open on that file follows the rename), and **Delete** (`Del`) removes it
   from disk after a confirmation (deleting is irreversible). Both also appear in the Files
   toolbar.
