@@ -941,17 +941,23 @@ impl App {
                 }
                 Some(Dialog::ExportRegions {
                     folder_input, base_name_input, depth, dither,
-                    fade_in, fade_in_input, fade_out, fade_out_input, ..
+                    fade_in, fade_in_input, fade_out, fade_out_input, focused,
                 }) => {
                     let folder = folder_input.value().trim().to_string();
                     let base_name = base_name_input.value().trim().to_string();
-                    if !folder.is_empty() && !base_name.is_empty() {
-                        let fi = fade_in;
-                        let fi_ms = fade_in_input.value().trim().parse::<f32>().unwrap_or(5.0).max(0.0);
-                        let fo = fade_out;
-                        let fo_ms = fade_out_input.value().trim().parse::<f32>().unwrap_or(5.0).max(0.0);
-                        self.export_regions(&folder, &base_name, depth, dither, fi, fi_ms, fo, fo_ms);
+                    // "Do!" is inactive until both the subfolder and base name are filled —
+                    // a blank either leaves the dialog open (re-created unchanged) and does
+                    // nothing, matching the dimmed Enter hint the dialog already renders.
+                    if folder.is_empty() || base_name.is_empty() {
+                        self.dialog = Some(Dialog::ExportRegions {
+                            folder_input, base_name_input, depth, dither,
+                            fade_in, fade_in_input, fade_out, fade_out_input, focused,
+                        });
+                        return;
                     }
+                    let fi_ms = fade_in_input.value().trim().parse::<f32>().unwrap_or(5.0).max(0.0);
+                    let fo_ms = fade_out_input.value().trim().parse::<f32>().unwrap_or(5.0).max(0.0);
+                    self.export_regions(&folder, &base_name, depth, dither, fade_in, fi_ms, fade_out, fo_ms);
                 }
                 Some(Dialog::Info { .. }) => {} // just dismiss
                 None => {}
@@ -4470,6 +4476,35 @@ mod tests {
         assert_eq!(focused(&app), 0);
         app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)); // 0 → 2 (wrap)
         assert_eq!(focused(&app), 2);
+    }
+
+    /// Export Regions' "Do!" is inactive until both the subfolder and base name are filled:
+    /// pressing Enter with either blank leaves the dialog open rather than dismissing it.
+    /// (Only the inactive path is exercised — a valid submit would write files to disk.)
+    #[test]
+    fn export_regions_do_inactive_until_names_filled() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let open = |folder: &str, base: &str| Dialog::ExportRegions {
+            folder_input: TextInput::new(folder),
+            base_name_input: TextInput::new(base),
+            depth: BitDepth::Float32,
+            dither: false,
+            fade_in: true,
+            fade_in_input: TextInput::new("5"),
+            fade_out: true,
+            fade_out_input: TextInput::new("5"),
+            focused: 0,
+        };
+
+        // Both blank → Enter is a no-op, dialog stays open.
+        app.dialog = Some(open("", ""));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.dialog.is_some(), "Do! must be inactive with both names blank");
+
+        // Only one filled → still inactive.
+        app.dialog = Some(open("regions", "   "));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.dialog.is_some(), "Do! must be inactive with a blank base name");
     }
 
     /// Quitting with no never-saved buffers (just dirty ones that already have a path)
