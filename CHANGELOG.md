@@ -2,6 +2,9 @@
 
 ## 2026-06-30
 
+- The waveform header now shows the active buffer's real name (e.g. `_NEW_006` for a
+  never-saved buffer, matching the Buffers panel) instead of "untitled", and drops the
+  meaningless "tui-wave —" prefix. The no-file placeholder reads "No file loaded".
 - "Reset Config to Defaults" now asks for confirmation before wiping keybindings (and still
   backs the old config up to `.bak`).
 - Confirmation dialogs now show "(Esc) cancel" instead of "(n) cancel" — Esc is the natural
