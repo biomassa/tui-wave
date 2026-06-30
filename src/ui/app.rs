@@ -1788,7 +1788,17 @@ impl App {
     fn sync_playhead_from_audio(&mut self) {
         let Some(audio) = self.audio.as_ref() else { return };
         if audio.playing.load(std::sync::atomic::Ordering::Relaxed) {
-            self.playhead_position = Some(audio.position.load(std::sync::atomic::Ordering::Relaxed));
+            let pos = audio.position.load(std::sync::atomic::Ordering::Relaxed);
+            // A finished non-looping source leaves the position one past the end
+            // (== len_samples); clamp to the last valid sample index so the playhead never
+            // lands a column past the right edge. Mirrors the total_len-1 clamp the cursor
+            // navigation already uses everywhere else.
+            let total_len = self
+                .documents
+                .get(self.active_document)
+                .map(|d| d.len_samples())
+                .unwrap_or(0);
+            self.playhead_position = Some(pos.min(total_len.saturating_sub(1)));
         } else {
             self.playhead_position = None;
         }
