@@ -9,9 +9,10 @@
   backs the old config up to `.bak`).
 - Confirmation dialogs now show "(Esc) cancel" instead of "(n) cancel" — Esc is the natural
   cancel key (any non-confirming key still cancels).
-- Shift+Tab now cycles panel focus backward (Waveform → Buffers → Files → Waveform), the
-  reverse of Tab. Works under the kitty keyboard protocol (Tab+Shift) and on terminals that
-  send a legacy BackTab.
+- Shift+Tab now cycles backward, the reverse of Tab — both for panel focus (Waveform →
+  Buffers → Files → Waveform) and for fields within a dialog (Save As, Gain, Mix to Mono,
+  Export Regions, Fade). Works under the kitty keyboard protocol (Tab+Shift) and on terminals
+  that send a legacy BackTab.
 - Fixed menu dropdown entries that overlap the Files/Buffers panels being unclickable — the
   panel underneath was stealing the click. An open menu now takes mouse precedence over the
   panels beneath it, matching how it already intercepts the keyboard.

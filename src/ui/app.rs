@@ -818,10 +818,12 @@ impl App {
                 self.save_as_queue.clear();
                 self.save_as_queue_then = None;
             }
-            // Tab cycles focus: 0=filename, 1=format, 2=dither.
-            KeyCode::Tab => {
-                self.save_as_focused = (self.save_as_focused + 1) % 3;
+            // Tab cycles focus forward (0=filename, 1=format, 2=dither); Shift+Tab backward.
+            KeyCode::BackTab => self.save_as_focused = (self.save_as_focused + 2) % 3,
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.save_as_focused = (self.save_as_focused + 2) % 3
             }
+            KeyCode::Tab => self.save_as_focused = (self.save_as_focused + 1) % 3,
             KeyCode::Char(' ') => {
                 if self.save_as_focused == 2 && self.save_as_depth.supports_dither() {
                     self.save_as_dither = !self.save_as_dither;
@@ -1021,23 +1023,13 @@ impl App {
                     _ => {}
                 }
             }
-            KeyCode::Tab => match self.dialog.as_mut() {
-                Some(Dialog::MixToMono { inputs, focused, .. }) => {
-                    let n = inputs.len();
-                    *focused = (*focused + 1) % (n + 1);
-                }
-                Some(Dialog::Gain { focused, .. }) => {
-                    *focused = (*focused + 1) % 2;
-                }
-                // Tab still cycles the curve for backward compat; ←→ is the documented way.
-                Some(Dialog::FadeIn { curve }) | Some(Dialog::FadeOut { curve }) => {
-                    *curve = curve.next();
-                }
-                Some(Dialog::ExportRegions { focused, .. }) => {
-                    *focused = (*focused + 1) % 8;
-                }
-                _ => {}
-            },
+            // Tab cycles dialog focus forward; Shift+Tab (Tab+SHIFT under the kitty protocol,
+            // or BackTab on legacy terminals) cycles it backward.
+            KeyCode::BackTab => self.cycle_dialog_focus(false),
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.cycle_dialog_focus(false)
+            }
+            KeyCode::Tab => self.cycle_dialog_focus(true),
             KeyCode::Char(c)
                 if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                     && self.dialog_accepts(c) =>
@@ -1053,6 +1045,25 @@ impl App {
     fn cycle_dialog_curve(&mut self, forward: bool) {
         if let Some(Dialog::FadeIn { curve }) | Some(Dialog::FadeOut { curve }) = self.dialog.as_mut() {
             *curve = if forward { curve.next() } else { curve.prev() };
+        }
+    }
+
+    /// Moves dialog focus to the next (`forward`) or previous field, wrapping. Shared by Tab
+    /// and Shift+Tab so the two directions can never disagree on the field order.
+    fn cycle_dialog_focus(&mut self, forward: bool) {
+        // Step a 0..n index one slot in either direction, wrapping (n - 1 == one back).
+        let step = |i: usize, n: usize| if forward { (i + 1) % n } else { (i + n - 1) % n };
+        match self.dialog.as_mut() {
+            Some(Dialog::MixToMono { inputs, focused, .. }) => {
+                *focused = step(*focused, inputs.len() + 1);
+            }
+            Some(Dialog::Gain { focused, .. }) => *focused = step(*focused, 2),
+            // Tab cycles the curve here (←→ is the documented way); Shift+Tab steps it back.
+            Some(Dialog::FadeIn { curve }) | Some(Dialog::FadeOut { curve }) => {
+                *curve = if forward { curve.next() } else { curve.prev() };
+            }
+            Some(Dialog::ExportRegions { focused, .. }) => *focused = step(*focused, 8),
+            _ => {}
         }
     }
 
@@ -4437,6 +4448,28 @@ mod tests {
         app.documents[1].path = Some(PathBuf::from("/tmp/song.wav"));
         assert_eq!(app.buffer_name(0), "_NEW_001");
         assert_eq!(app.buffer_name(1), "song.wav");
+    }
+
+    /// In dialogs, Shift+Tab steps focus backward (wrapping), the reverse of Tab — verified
+    /// on Mix to Mono's three slots (two channel inputs + the tanh toggle).
+    #[test]
+    fn dialog_shift_tab_cycles_focus_backward() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.dialog = Some(Dialog::MixToMono {
+            inputs: vec![TextInput::new("0"), TextInput::new("0")],
+            focused: 0,
+            tanh_clip: false,
+        });
+        let focused = |app: &App| match &app.dialog {
+            Some(Dialog::MixToMono { focused, .. }) => *focused,
+            _ => panic!("dialog should still be open"),
+        };
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // 0 → 1
+        assert_eq!(focused(&app), 1);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)); // 1 → 0
+        assert_eq!(focused(&app), 0);
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)); // 0 → 2 (wrap)
+        assert_eq!(focused(&app), 2);
     }
 
     /// Quitting with no never-saved buffers (just dirty ones that already have a path)
