@@ -78,6 +78,7 @@ impl AudioEngine {
                             sample_rate,
                             from_frame,
                             position_for_thread.clone(),
+                            playing_for_thread.clone(),
                             loop_start,
                             loop_end,
                         );
@@ -108,6 +109,7 @@ impl AudioEngine {
                                 sample_rate,
                                 frame,
                                 position_for_thread.clone(),
+                                playing_for_thread.clone(),
                                 loop_start,
                                 loop_end,
                             );
