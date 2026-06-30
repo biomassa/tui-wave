@@ -84,12 +84,16 @@ pub fn init() -> color_eyre::Result<(Tui, Option<Picker>)> {
 
 pub fn restore() -> color_eyre::Result<()> {
     use std::io::Write;
+    // Best-effort teardown: every step runs even if an earlier one errors, so a failed
+    // write can't skip `disable_raw_mode` and leave the shell stuck in raw mode — the exact
+    // lock-up the panic hook exists to prevent. The cosmetic steps (mouse-mode reset, alt
+    // screen) are therefore not allowed to short-circuit the critical raw-mode disable.
     if KBD_ENHANCED.swap(false, Ordering::SeqCst) {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
-    write!(io::stdout(), "\x1b[?1002l\x1b[?1006l")?;
-    io::stdout().flush()?;
-    execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
+    let _ = write!(io::stdout(), "\x1b[?1002l\x1b[?1006l");
+    let _ = io::stdout().flush();
+    let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
     disable_raw_mode()?;
     Ok(())
 }
