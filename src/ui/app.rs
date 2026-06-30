@@ -629,11 +629,11 @@ impl App {
                     self.handle_action(Action::ToggleAudition);
                     true
                 }
-                // 'r' renames the selected file on disk, Del deletes it (both no-ops unless a
-                // .wav row is selected). Contextual to the Files panel — in waveform focus Del
-                // is Delete-selection and 'r' is unbound globally.
+                // ^r renames the selected file on disk, Del deletes it (both no-ops unless a
+                // .wav row is selected). Contextual to the Files panel — in waveform focus ^r
+                // is Reverse and Del is Delete-selection.
                 KeyCode::Char('r') | KeyCode::Char('R')
-                    if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
                     self.handle_action(Action::RenameFile);
                     true
