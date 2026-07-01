@@ -17,6 +17,17 @@ const DB_MARKS: [(f32, &str); 6] = [
     (-24.0, "-24"),
 ];
 
+/// Beyond the fixed marks above, the axis continues in further steps of `DEEP_DB_STEP` dB
+/// (matching the existing -6/-12/-18/-24 pattern, so every generated mark is an even round
+/// number) down to `DEEP_DB_FLOOR`. Without this, zooming in enough to push -24dB near the
+/// edge left everything below it — most of the pane, since amplitude only approaches zero
+/// asymptotically as dB drops — completely blank: the loudest visible sample would show
+/// -24dB with no detail at all for anything quieter. Deep marks near `DEEP_DB_FLOOR` are
+/// generated even when far below the visible range; they just fail `draw_label`'s
+/// bounds/collision check and are silently skipped, so a generous floor costs nothing.
+const DEEP_DB_STEP: f32 = 6.0;
+const DEEP_DB_FLOOR: f32 = -144.0;
+
 /// Renders the vertical dB axis for one channel's waveform pane. The scale is always
 /// absolute dBFS — 0dB means full scale (amplitude 1.0) — and `amplitude_scale` positions
 /// the marks. So when the view is zoomed vertically (manually, or by auto vertical zoom
@@ -46,7 +57,10 @@ impl Widget for DbScaleWidget {
         // rather than a later mark silently overwriting an earlier label.
         let mut claimed_rows = vec![false; area.height as usize];
 
-        for &(db, label) in DB_MARKS.iter() {
+        // Marks are drawn most- to least-important: the fixed set first, then the generated
+        // deep marks continuing downward. `claimed_rows` keeps this priority order — a deep
+        // mark that would land on the same row as an already-drawn one is simply skipped.
+        let mut draw_mark = |db: f32, label: &str, claimed_rows: &mut [bool]| {
             let amplitude = 10f32.powf(db / 20.0);
             // No clamp here — off-screen marks (scaled > 1.0) produce rows < 0 or >= height,
             // which draw_label already rejects. Clamping to [0,1] was wrong: at 2x vertical
@@ -55,12 +69,24 @@ impl Widget for DbScaleWidget {
             let scaled = (amplitude * self.amplitude_scale) as f64;
 
             let top_row = (mid_row - scaled * half_height).round() as i64;
-            draw_label(buf, area, top_row, label, &mut claimed_rows);
+            draw_label(buf, area, top_row, label, claimed_rows);
 
             let bottom_row = (mid_row + scaled * half_height).round() as i64;
             if bottom_row != top_row {
-                draw_label(buf, area, bottom_row, label, &mut claimed_rows);
+                draw_label(buf, area, bottom_row, label, claimed_rows);
             }
+        };
+
+        for &(db, label) in DB_MARKS.iter() {
+            draw_mark(db, label, &mut claimed_rows);
+        }
+
+        // Integer stepping (not repeated f32 subtraction) so every generated label is an
+        // exact whole number ("-30", never "-29.999998" from accumulated float error).
+        let mut db = DB_MARKS[DB_MARKS.len() - 1].0 as i32 - DEEP_DB_STEP as i32;
+        while db as f32 >= DEEP_DB_FLOOR {
+            draw_mark(db as f32, &db.to_string(), &mut claimed_rows);
+            db -= DEEP_DB_STEP as i32;
         }
     }
 }
@@ -143,5 +169,38 @@ mod tests {
         assert_eq!(buf[(0, 8)].symbol(), "-");
         assert_eq!(buf[(1, 8)].symbol(), "1");
         assert_eq!(buf[(2, 8)].symbol(), "8");
+    }
+
+    /// Reported bug: auto vertical zoom fitting a very quiet peak (here ~-24 dBFS) pushed
+    /// amplitude_scale high enough that -24 sat right at the edge with nothing below it —
+    /// the fixed 6-entry mark list stopped there, leaving the rest of the pane (most of it,
+    /// since amplitude only approaches zero asymptotically) completely blank. The axis must
+    /// keep populating detail deeper than -24: at this scale, -30 and -36 should also appear.
+    #[test]
+    fn deep_zoom_populates_marks_below_minus_24() {
+        // peak ~0.063 (-24 dBFS) fit to 0.95 => scale ≈ 15.08, same order of magnitude as
+        // the screenshot that reported this bug (a -24dB peak with nothing else visible).
+        let widget = DbScaleWidget { amplitude_scale: 0.95 / 0.063 };
+        let area = Rect::new(0, 0, DB_GUTTER_WIDTH, 40);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let row_text = |y: u16| -> String {
+            (0..DB_GUTTER_WIDTH).map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' ')).collect::<String>().trim().to_string()
+        };
+        let labels: Vec<String> = (0..40).map(row_text).filter(|s| !s.is_empty()).collect();
+
+        assert!(labels.contains(&"-24".to_string()), "expected -24 near the peak; got {labels:?}");
+        assert!(labels.contains(&"-30".to_string()), "deeper marks must populate past -24; got {labels:?}");
+        assert!(labels.contains(&"-36".to_string()), "deeper marks must populate past -24; got {labels:?}");
+        // Every generated deep label is a whole multiple of 6 (an "even" round number) —
+        // no float-accumulation artifacts like "-29" or "-30.0".
+        for label in &labels {
+            if let Ok(n) = label.parse::<i32>() {
+                if n <= -30 {
+                    assert_eq!(n % 6, 0, "deep mark {n} is not a multiple of 6: {labels:?}");
+                }
+            }
+        }
     }
 }
