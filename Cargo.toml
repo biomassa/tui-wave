@@ -16,3 +16,22 @@ ratatui-image = { version = "11.0.6", default-features = false, features = ["cro
 rodio = "0.22.2"
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"
+
+# AppImage packaging (cargo-appimage). The custom desktop entry sets Terminal=true since
+# this is a TUI. auto_link bundles the one non-core shared lib the binary needs
+# (libasound.so.2, via cpal/rodio) into the AppImage; the exclude list keeps ubiquitous
+# system libs (libc, ld-linux, …) out so they resolve against the host at runtime.
+[package.metadata.appimage]
+icon = "icon.png"
+desktop_entry = "packaging/tui-wave.desktop"
+auto_link = true
+auto_link_exclude_list = [
+    "libc.so*",
+    "libm.so*",
+    "libdl.so*",
+    "librt.so*",
+    "libpthread.so*",
+    "ld-linux*.so*",
+    "libgcc_s.so*",
+    "libstdc++.so*",
+]

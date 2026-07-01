@@ -1,5 +1,10 @@
 /target
 
+# AppImage build artifacts (the release binary is uploaded to GitHub Releases, not tracked)
+/dist/
+/libs/
+*.AppImage
+
 # Claude Code local settings / session data
 .claude/
 
