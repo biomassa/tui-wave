@@ -17,14 +17,14 @@ const DB_MARKS: [(f32, &str); 6] = [
     (-24.0, "-24"),
 ];
 
-/// Renders the vertical dB axis for one channel's waveform pane. `reference_amplitude` is
-/// 1.0 for the absolute dBFS scale (auto vertical zoom off — 0dB always means full scale)
-/// or the document's peak amplitude for the relative scale (auto vertical zoom on — 0dB
-/// tracks wherever the loudest peak actually is).
+/// Renders the vertical dB axis for one channel's waveform pane. The scale is always
+/// absolute dBFS — 0dB means full scale (amplitude 1.0) — and `amplitude_scale` positions
+/// the marks. So when the view is zoomed vertically (manually, or by auto vertical zoom
+/// fitting a quiet peak) 0dB moves off the top edge and the visible marks reflect the true
+/// level of the loudest sample on screen: a −6 dBFS peak shows −6 near the top, not 0dB.
 #[derive(Clone, Copy)]
 pub struct DbScaleWidget {
     pub amplitude_scale: f32,
-    pub reference_amplitude: f32,
 }
 
 impl Widget for DbScaleWidget {
@@ -47,7 +47,7 @@ impl Widget for DbScaleWidget {
         let mut claimed_rows = vec![false; area.height as usize];
 
         for &(db, label) in DB_MARKS.iter() {
-            let amplitude = self.reference_amplitude * 10f32.powf(db / 20.0);
+            let amplitude = 10f32.powf(db / 20.0);
             // No clamp here — off-screen marks (scaled > 1.0) produce rows < 0 or >= height,
             // which draw_label already rejects. Clamping to [0,1] was wrong: at 2x vertical
             // zoom (amplitude_scale=2.0) 0dB, -3dB, and -6dB all clamped to 1.0 and stacked
@@ -88,10 +88,7 @@ mod tests {
 
     #[test]
     fn zero_db_lands_at_the_top_edge_for_absolute_scale() {
-        let widget = DbScaleWidget {
-            amplitude_scale: 1.0,
-            reference_amplitude: 1.0,
-        };
+        let widget = DbScaleWidget { amplitude_scale: 1.0 };
         let area = Rect::new(0, 0, DB_GUTTER_WIDTH, 20);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -99,19 +96,22 @@ mod tests {
         assert_eq!(buf[(0, 0)].symbol(), "0");
     }
 
+    /// Auto vertical zoom fitting a quiet −6 dBFS peak (scale = 0.95 / 0.5 = 1.9): the scale
+    /// stays absolute, so 0dB is pushed off the top and −6 dB sits at the peak. You must never
+    /// see "0dB" on a signal whose loudest sample is −6 dBFS.
     #[test]
-    fn relative_scale_anchors_zero_db_to_peak_not_full_scale() {
-        // A quiet file (peak 0.5) with auto vertical zoom on: 0dB should land wherever the
-        // peak amplitude (0.5) maps to, not where amplitude 1.0 would.
-        let widget = DbScaleWidget {
-            amplitude_scale: 1.0,
-            reference_amplitude: 0.5,
-        };
+    fn auto_zoom_to_quiet_peak_pushes_0db_off_top_and_shows_minus_6() {
+        let widget = DbScaleWidget { amplitude_scale: 0.95 / 0.5 };
         let area = Rect::new(0, 0, DB_GUTTER_WIDTH, 20);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
-        // mid=10, half=10, amplitude=0.5*1.0=0.5 => top_row = round(10 - 0.5*10) = 5
-        assert_eq!(buf[(0, 5)].symbol(), "0");
+        // 0dB (scaled = 1.9) → row round(10 - 19) = -9, off-screen. -6dB (scaled ≈ 0.95) →
+        // row round(10 - 9.5) ≈ 0, the topmost mark. Row 0 must read "-6", not "0".
+        assert_eq!(buf[(0, 0)].symbol(), "-");
+        assert_eq!(buf[(1, 0)].symbol(), "6");
+        // 0dB appears nowhere on the axis.
+        let has_zero_db = (0..20).any(|y| buf[(0, y)].symbol() == "0");
+        assert!(!has_zero_db, "0dB must not be shown when the peak is only -6 dBFS");
     }
 
     /// When amplitude_scale > 1 (zoomed in vertically), marks above the visible amplitude
@@ -121,10 +121,7 @@ mod tests {
     /// marks produce negative row indices and are rejected by draw_label's bounds check.
     #[test]
     fn at_2x_zoom_off_screen_marks_are_excluded_and_minus_6_leads() {
-        let widget = DbScaleWidget {
-            amplitude_scale: 2.0,
-            reference_amplitude: 1.0,
-        };
+        let widget = DbScaleWidget { amplitude_scale: 2.0 };
         let area = Rect::new(0, 0, DB_GUTTER_WIDTH, 20);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -139,10 +136,7 @@ mod tests {
     fn colliding_marks_keep_the_first_one_drawn() {
         // A short pane where adjacent marks collide to the same row: the more important
         // (earlier-listed) mark must win, not get silently overwritten by a later one.
-        let widget = DbScaleWidget {
-            amplitude_scale: 1.0,
-            reference_amplitude: 1.0,
-        };
+        let widget = DbScaleWidget { amplitude_scale: 1.0 };
         let area = Rect::new(0, 0, DB_GUTTER_WIDTH, 18);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);

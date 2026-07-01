@@ -3301,8 +3301,10 @@ impl App {
 
         // When auto vertical zoom is on, dynamically fit amplitude_scale to the visible
         // window's peak every frame, so scrolling/zooming to a quieter section zooms in to
-        // match. The dB scale's reference_amplitude follows the same visible peak.
-        let (reference_amplitude, _visible_peak) = if viewport.auto_vertical_zoom {
+        // match. The dB scale stays absolute dBFS regardless (see DbScaleWidget): fitting a
+        // quiet peak pushes 0dB off the top so the marks read the true level of the loudest
+        // visible sample — a −6 dBFS peak shows −6 near the top, not 0dB.
+        if viewport.auto_vertical_zoom {
             let vp = visible_peak_raw(
                 self.documents.get(doc_idx),
                 Some(viewport),
@@ -3311,13 +3313,8 @@ impl App {
             );
             if vp > 0.0001 {
                 viewport.set_amplitude_scale(0.95 / vp);
-                (vp, vp)
-            } else {
-                (0.0001, 0.0)
             }
-        } else {
-            (1.0, 0.0)
-        };
+        }
 
         let overlay_active =
             self.confirm.is_some() || self.save_as_active || self.dialog.is_some() || self.menu.is_open();
@@ -3416,10 +3413,7 @@ impl App {
                 }
             }
 
-            let db_scale = DbScaleWidget {
-                amplitude_scale: viewport.amplitude_scale,
-                reference_amplitude,
-            };
+            let db_scale = DbScaleWidget { amplitude_scale: viewport.amplitude_scale };
             frame.render_widget(db_scale, left_gutter);
             frame.render_widget(db_scale, right_gutter);
         }
