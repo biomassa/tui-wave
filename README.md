@@ -77,16 +77,23 @@ cargo test       # run the test suite
 A reasonably large terminal is recommended (≈120×40 or more) so the file and buffer side
 panels and the dB gutters all fit.
 
-## Packaging (AppImage)
+## Packaging
 
-A Linux AppImage can be built with [`cargo-appimage`](https://crates.io/crates/cargo-appimage)
-(`appimagetool` must be on `PATH`):
+Build scripts under `packaging/` produce distributable Linux packages into `dist/`. All
+of them share the same `Terminal=true` desktop entry (it's a terminal app) and 512×512
+icon, and are named with the version and target architecture.
 
 ```sh
-./packaging/build-appimage.sh
-# -> dist/tui-wave-<version>-<arch>.AppImage   (e.g. dist/tui-wave-0.1.0-x86_64.AppImage)
+./packaging/build-appimage.sh   # -> dist/tui-wave-<ver>-<arch>.AppImage      (distro-agnostic)
+./packaging/build-pkg.sh        # -> dist/tui-wave-<ver>-1-<arch>.pkg.tar.zst (Arch: pacman -U)
+./packaging/build-deb.sh        # -> dist/tui-wave_<ver>_amd64.deb            (Debian/Ubuntu)
 ```
 
-The wrapper runs `cargo appimage` and names the output with the version and target
-architecture. The `.desktop` entry sets `Terminal=true` (it's a terminal app), and
-`libasound.so.2` is bundled so audio works without a system ALSA runtime.
+- **AppImage** — built with [`cargo-appimage`](https://crates.io/crates/cargo-appimage)
+  (`appimagetool` on `PATH`); bundles `libasound.so.2` so audio works without a system ALSA.
+- **Arch** — `makepkg` packaging the release binary; depends on `gcc-libs` and `alsa-lib`.
+- **Debian** — assembled with `ar`/`tar` (no `dpkg-deb` needed); depends on `libc6`,
+  `libgcc-s1`, `libasound2`.
+
+The native packages link against the build machine's glibc; for a `.deb`/`.pkg` that runs
+on older targets, build inside a matching container.
