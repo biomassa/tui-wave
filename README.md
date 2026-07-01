@@ -76,3 +76,17 @@ cargo test       # run the test suite
 
 A reasonably large terminal is recommended (≈120×40 or more) so the file and buffer side
 panels and the dB gutters all fit.
+
+## Packaging (AppImage)
+
+A Linux AppImage can be built with [`cargo-appimage`](https://crates.io/crates/cargo-appimage)
+(`appimagetool` must be on `PATH`):
+
+```sh
+./packaging/build-appimage.sh
+# -> dist/tui-wave-<version>-<arch>.AppImage   (e.g. dist/tui-wave-0.1.0-x86_64.AppImage)
+```
+
+The wrapper runs `cargo appimage` and names the output with the version and target
+architecture. The `.desktop` entry sets `Terminal=true` (it's a terminal app), and
+`libasound.so.2` is bundled so audio works without a system ALSA runtime.
