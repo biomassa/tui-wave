@@ -36,6 +36,13 @@ const DEEP_DB_FLOOR: f32 = -144.0;
 #[derive(Clone, Copy)]
 pub struct DbScaleWidget {
     pub amplitude_scale: f32,
+    /// The exact dB level of the currently visible peak, when auto vertical zoom is fitting
+    /// to it — `None` otherwise. Without auto zoom, 0dB is always on (or near) the axis as a
+    /// fixed reference; auto zoom moves that reference to wherever the peak actually is, so
+    /// this fills the same role with the true (not rounded-to-the-grid) peak level. Drawn
+    /// with top priority, ahead of the fixed/generated grid marks, so it always shows even
+    /// when it doesn't land on a multiple of 3 or 6 — e.g. "-17", not just "-18" or "-12".
+    pub peak_db: Option<f32>,
 }
 
 impl Widget for DbScaleWidget {
@@ -77,6 +84,13 @@ impl Widget for DbScaleWidget {
             }
         };
 
+        // The exact peak marker goes first (highest priority) so it always wins any collision
+        // with the grid — it's the more important, more precise value at this zoom level.
+        if let Some(peak_db) = self.peak_db {
+            let label = (peak_db.round() as i32).to_string();
+            draw_mark(peak_db, &label, &mut claimed_rows);
+        }
+
         for &(db, label) in DB_MARKS.iter() {
             draw_mark(db, label, &mut claimed_rows);
         }
@@ -114,7 +128,7 @@ mod tests {
 
     #[test]
     fn zero_db_lands_at_the_top_edge_for_absolute_scale() {
-        let widget = DbScaleWidget { amplitude_scale: 1.0 };
+        let widget = DbScaleWidget { amplitude_scale: 1.0, peak_db: None };
         let area = Rect::new(0, 0, DB_GUTTER_WIDTH, 20);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -127,7 +141,7 @@ mod tests {
     /// see "0dB" on a signal whose loudest sample is −6 dBFS.
     #[test]
     fn auto_zoom_to_quiet_peak_pushes_0db_off_top_and_shows_minus_6() {
-        let widget = DbScaleWidget { amplitude_scale: 0.95 / 0.5 };
+        let widget = DbScaleWidget { amplitude_scale: 0.95 / 0.5, peak_db: None };
         let area = Rect::new(0, 0, DB_GUTTER_WIDTH, 20);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -147,7 +161,7 @@ mod tests {
     /// marks produce negative row indices and are rejected by draw_label's bounds check.
     #[test]
     fn at_2x_zoom_off_screen_marks_are_excluded_and_minus_6_leads() {
-        let widget = DbScaleWidget { amplitude_scale: 2.0 };
+        let widget = DbScaleWidget { amplitude_scale: 2.0, peak_db: None };
         let area = Rect::new(0, 0, DB_GUTTER_WIDTH, 20);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -162,7 +176,7 @@ mod tests {
     fn colliding_marks_keep_the_first_one_drawn() {
         // A short pane where adjacent marks collide to the same row: the more important
         // (earlier-listed) mark must win, not get silently overwritten by a later one.
-        let widget = DbScaleWidget { amplitude_scale: 1.0 };
+        let widget = DbScaleWidget { amplitude_scale: 1.0, peak_db: None };
         let area = Rect::new(0, 0, DB_GUTTER_WIDTH, 18);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -180,7 +194,7 @@ mod tests {
     fn deep_zoom_populates_marks_below_minus_24() {
         // peak ~0.063 (-24 dBFS) fit to 0.95 => scale ≈ 15.08, same order of magnitude as
         // the screenshot that reported this bug (a -24dB peak with nothing else visible).
-        let widget = DbScaleWidget { amplitude_scale: 0.95 / 0.063 };
+        let widget = DbScaleWidget { amplitude_scale: 0.95 / 0.063, peak_db: None };
         let area = Rect::new(0, 0, DB_GUTTER_WIDTH, 40);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -202,5 +216,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Auto vertical zoom should show the *exact* peak level, not just the nearest grid
+    /// line — a peak at a non-round dB value (here -17 dBFS, not a multiple of 3 or 6) must
+    /// still appear on the axis, with top priority over any grid mark it collides with.
+    #[test]
+    fn peak_db_shows_the_exact_non_round_peak_level() {
+        let peak_amplitude = 10f32.powf(-17.0 / 20.0); // -17 dBFS, not on the 3/6 grid
+        let widget = DbScaleWidget {
+            amplitude_scale: 0.95 / peak_amplitude,
+            peak_db: Some(20.0 * peak_amplitude.log10()),
+        };
+        let area = Rect::new(0, 0, DB_GUTTER_WIDTH, 20);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        let row_text = |y: u16| -> String {
+            (0..DB_GUTTER_WIDTH).map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' ')).collect::<String>().trim().to_string()
+        };
+        let labels: Vec<String> = (0..20).map(row_text).filter(|s| !s.is_empty()).collect();
+        assert!(labels.contains(&"-17".to_string()), "expected the exact peak -17; got {labels:?}");
+    }
+
+    /// With auto vertical zoom off (`peak_db: None`), no exact-peak marker is drawn — only
+    /// the fixed/generated grid. Guards against a regression where peak_db silently defaults
+    /// to showing something even when the caller has no peak to report.
+    #[test]
+    fn no_peak_db_means_no_extra_marker() {
+        let widget = DbScaleWidget { amplitude_scale: 0.95 / 10f32.powf(-17.0 / 20.0), peak_db: None };
+        let area = Rect::new(0, 0, DB_GUTTER_WIDTH, 20);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        let row_text = |y: u16| -> String {
+            (0..DB_GUTTER_WIDTH).map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' ')).collect::<String>().trim().to_string()
+        };
+        let labels: Vec<String> = (0..20).map(row_text).filter(|s| !s.is_empty()).collect();
+        assert!(!labels.contains(&"-17".to_string()), "no peak marker should appear when peak_db is None; got {labels:?}");
     }
 }

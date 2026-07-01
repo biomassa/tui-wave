@@ -3304,6 +3304,11 @@ impl App {
         // match. The dB scale stays absolute dBFS regardless (see DbScaleWidget): fitting a
         // quiet peak pushes 0dB off the top so the marks read the true level of the loudest
         // visible sample — a −6 dBFS peak shows −6 near the top, not 0dB.
+        // The exact dB level of the visible peak, shown on the dB scale as a precise
+        // reference mark (see DbScaleWidget) — the auto-zoom equivalent of the fixed 0dB
+        // reference always visible without it. `None` when auto zoom is off or the visible
+        // window is silent (no peak to report).
+        let mut peak_db: Option<f32> = None;
         if viewport.auto_vertical_zoom {
             let vp = visible_peak_raw(
                 self.documents.get(doc_idx),
@@ -3313,6 +3318,7 @@ impl App {
             );
             if vp > 0.0001 {
                 viewport.set_amplitude_scale(0.95 / vp);
+                peak_db = Some(20.0 * vp.log10());
             }
         }
 
@@ -3413,7 +3419,7 @@ impl App {
                 }
             }
 
-            let db_scale = DbScaleWidget { amplitude_scale: viewport.amplitude_scale };
+            let db_scale = DbScaleWidget { amplitude_scale: viewport.amplitude_scale, peak_db };
             frame.render_widget(db_scale, left_gutter);
             frame.render_widget(db_scale, right_gutter);
         }
