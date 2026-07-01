@@ -2,15 +2,14 @@
 
 ![tui-wave screenshot](screenshot1.png)
 
-A keyboard-driven **terminal audio editor** for Linux, macOS, and Windows, written in Rust (mouse works too!).
-It opens WAV files and gives you a zoomable waveform you can navigate, play, and edit
-entirely from the keyboard: selection, cut/copy/paste, undo/redo, normalize, gain, fades,
-reverse, trim, resample, and timeline markers — plus a menu bar, a context-aware toolbar,
-a file browser, and multi-buffer editing. Edits are saved back to WAV (16/24-bit int or
-32-bit float), and BWF cue points / broadcast metadata are preserved.
+A keyboard-driven **terminal audio editor** for Linux, macOS, and Windows, written in Rust (mouse works too). It opens WAV files and gives you a zoomable waveform you can navigate,
+play, and edit entirely from the keyboard: selection, cut/copy/paste, undo/redo, normalize, gain, fades, reverse, trim, resample, mix-to-mono, and timeline markers with transient
+detection — plus a menu bar, a context-aware toolbar, fully configurable keyboard shortcuts via .toml config file, a file browser, and multi-buffer editing. Edits are saved back to WAV at 16-bit, 24-bit, or 32-bit float, and BWF cue points / markers are preserved across the round trip. A dedicated command chops a file at its markers and exports each region as a separate WAV.
 
-Press `F10` (or `Alt`+a menu letter) to open the menus, `Tab` to move focus between the
-waveform, the file list, and the open buffers, and `q` to quit.
+Press `F10` (or `Alt`+a menu letter) to open the menus, `Tab` / `Shift+Tab` to move focus
+between the waveform, the file list, and the open buffers, and `q` to quit.
+
+See [USERGUIDE.md](USERGUIDE.md) for the full keybinding reference and workflow tips.
 
 ## Status and Disclaimer
 This is developed with the assistance of LLM. I am not a Rust developer, however I have certain expertise in working with audio files. I needed this instrument for my own work.
@@ -59,7 +58,8 @@ cargo build --release
 ```
 
 Running with no file argument opens an empty editor — focus the file panel with `Tab`,
-browse, and press `Enter` on a `.wav` to open it.
+browse, and press `Enter` on a `.wav` to open it. You can also point it at a directory
+(`tui-wave path/to/folder`) to start browsing there.
 
 To install it onto your `PATH` so you can call `tui-wave` from anywhere:
 
