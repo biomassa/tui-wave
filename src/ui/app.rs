@@ -3246,6 +3246,10 @@ impl App {
             // the content area) draws on top of everything instead of being overdrawn by
             // it — same ordering as the loaded-document path below.
             self.menu.render(frame, chrome.menu);
+            // Modal overlays must still render with no document loaded — otherwise opening a
+            // dialog here (e.g. renaming a file in the Files panel) leaves an invisible modal
+            // that swallows all input, and the app looks frozen.
+            self.render_overlays(frame, area);
             return;
         };
 
@@ -3498,6 +3502,15 @@ impl App {
         // top of everything instead of being overdrawn by it.
         self.menu.render(frame, chrome.menu);
 
+        self.render_overlays(frame, area);
+    }
+
+    /// Renders the modal overlays (quit/close/reset/delete confirm, Save As, and the general
+    /// dialog) on top of whatever is beneath. Called from BOTH the loaded-document path and
+    /// the "no file loaded" placeholder path: a modal absorbs all input, so one that opens
+    /// while no buffer is loaded (e.g. Files-panel rename) must still be drawn — otherwise it
+    /// is invisible and the app looks frozen, escapable only by the Esc/Enter the user can't see.
+    fn render_overlays(&mut self, frame: &mut Frame, area: Rect) {
         if let Some(confirm) = &self.confirm {
             let text = match confirm {
                 Confirm::Quit => {
