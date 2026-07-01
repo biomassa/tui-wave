@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=tui-wave
+GenericName=Terminal WAV Editor
+Comment=Keyboard-driven terminal waveform editor
+Exec=tui-wave %f
+Icon=tui-wave
+Terminal=true
+Categories=AudioVideo;Audio;Utility;
+Keywords=audio;wav;waveform;editor;tui;
