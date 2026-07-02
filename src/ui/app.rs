@@ -3903,6 +3903,7 @@ fn render_mix_to_mono_dialog(
 /// ```text
 /// Gain (dB): 0.0            <- becomes "Left (dB): " when per_channel is on
 ///                            <- becomes "Right (dB): 0.0" when per_channel is on
+///
 /// [ ] Per-channel gain      <- only shown at all when the document is stereo
 ///
 /// [ ] Tanh limiter
@@ -3920,7 +3921,7 @@ fn render_gain_dialog(
     is_stereo: bool,
 ) -> Vec<Rect> {
     let rows = GainRows::new(is_stereo, per_channel);
-    let height = (if is_stereo { 9 } else { 7 }).min(area.height);
+    let height = (if is_stereo { 10 } else { 7 }).min(area.height);
     let width = 38u16.min(area.width);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -3989,11 +3990,20 @@ fn render_gain_dialog(
         if per_channel {
             rects.push(rect_at(1));
         }
-        rects.push(rect_at(2)); // "Per-channel gain" checkbox — always focusable on stereo.
-        rects.push(rect_at(4)); // Tanh limiter checkbox.
+        rects.push(rect_at(3)); // "Per-channel gain" checkbox — always focusable on stereo.
+        rects.push(rect_at(5)); // Tanh limiter checkbox.
 
         (
-            vec![gain_line, right_line, checkbox_line, Line::raw(""), tanh_line, Line::raw(""), hints],
+            vec![
+                gain_line,
+                right_line,
+                Line::raw(""),
+                checkbox_line,
+                Line::raw(""),
+                tanh_line,
+                Line::raw(""),
+                hints,
+            ],
             rects,
         )
     } else {
