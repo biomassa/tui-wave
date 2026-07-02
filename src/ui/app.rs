@@ -1252,6 +1252,29 @@ impl App {
         (start < end).then_some((start, end))
     }
 
+    /// The sample range a fade should act on: the current selection if one exists, otherwise
+    /// a fade-direction-specific default — fade in runs from the start of the file to the
+    /// cursor, fade out from the cursor to the end of the file — rather than
+    /// [`Self::operation_range`]'s whole-file default, which would fade the entire document
+    /// regardless of where the cursor is. Optionally snapped to zero crossings; returns `None`
+    /// for an empty document or a degenerate (empty) range.
+    fn fade_operation_range(&self, idx: usize, fade_in: bool, snap: bool) -> Option<(usize, usize)> {
+        let doc = self.documents.get(idx)?;
+        let total_len = doc.len_samples();
+        if total_len == 0 {
+            return None;
+        }
+        let (start, end) = doc.selection.map(|sel| sel.normalized()).unwrap_or_else(|| {
+            if fade_in { (0, doc.cursor) } else { (doc.cursor, total_len) }
+        });
+        let (start, end) = if snap {
+            doc.snap_range_to_zero_crossing(start, end)
+        } else {
+            (start, end)
+        };
+        (start < end).then_some((start, end))
+    }
+
     /// Shared tail for every operation that mutates sample data on `idx` (which is always
     /// the active document): mark the file dirty, hand the new buffer to the audio engine,
     /// rebuild the waveform caches, and re-fit auto vertical zoom if it's on.
@@ -1636,8 +1659,8 @@ impl App {
         // hits 0 but the adjacent unfaded sample is still loud). If snapping collapses a
         // small selection to a degenerate range (both ends snap to the same crossing), fall
         // back to the un-snapped range — the fade is still applied, just without the snap.
-        let Some((start, end)) = self.operation_range(idx, true)
-            .or_else(|| self.operation_range(idx, false)) else { return };
+        let Some((start, end)) = self.fade_operation_range(idx, fade_in, true)
+            .or_else(|| self.fade_operation_range(idx, fade_in, false)) else { return };
         let fade_samples = ((end - start) as f32 * pct / 100.0).round() as usize;
         let fade_samples = fade_samples.max(1).min(end - start);
         let (fade_start, fade_end) = if fade_in {
@@ -5817,6 +5840,54 @@ mod tests {
             app.documents[0].channels[0][11].abs() < 0.1,
             "fade-out was not applied to small selection: sample[11] = {}",
             app.documents[0].channels[0][11]
+        );
+    }
+
+    /// With no selection, Fade In must run from the start of the file to the cursor — not
+    /// the whole file — so audio past the insertion point is left untouched.
+    #[test]
+    fn fade_in_with_no_selection_runs_from_start_to_cursor() {
+        let mut document = doc(0.5, 100);
+        document.cursor = 40;
+        let mut app = new_app(Some(document), None);
+        app.handle_action(Action::FadeIn);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            app.documents[0].channels[0][0].abs() < 0.1,
+            "fade-in should start near silence at sample 0"
+        );
+        assert!(
+            (app.documents[0].channels[0][39] - 0.5).abs() < 0.1,
+            "fade-in should reach full volume by the cursor"
+        );
+        assert!(
+            (app.documents[0].channels[0][60] - 0.5).abs() < 1e-6,
+            "audio past the cursor must be untouched by fade-in: sample[60] = {}",
+            app.documents[0].channels[0][60]
+        );
+    }
+
+    /// With no selection, Fade Out must run from the cursor to the end of the file — not
+    /// the whole file — so audio before the insertion point is left untouched.
+    #[test]
+    fn fade_out_with_no_selection_runs_from_cursor_to_end() {
+        let mut document = doc(0.5, 100);
+        document.cursor = 60;
+        let mut app = new_app(Some(document), None);
+        app.handle_action(Action::FadeOut);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            (app.documents[0].channels[0][30] - 0.5).abs() < 1e-6,
+            "audio before the cursor must be untouched by fade-out: sample[30] = {}",
+            app.documents[0].channels[0][30]
+        );
+        assert!(
+            (app.documents[0].channels[0][60] - 0.5).abs() < 0.1,
+            "fade-out should start at full volume at the cursor"
+        );
+        assert!(
+            app.documents[0].channels[0][99].abs() < 0.1,
+            "fade-out should reach near silence by the last sample"
         );
     }
 }
