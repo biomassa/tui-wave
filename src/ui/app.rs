@@ -93,36 +93,36 @@ enum Dialog {
     Info { message: String },
 }
 
-/// Row layout for the Gain dialog. It grows by one row when the active document is stereo
-/// (the "Per-channel gain" checkbox) and by another when that checkbox is on (the single
-/// Gain field splits into Left/Right). Centralizing the arithmetic here keeps the five call
-/// sites that need to know "which row is which" — input routing, Enter, Space, Tab, mouse
-/// click, and render — from drifting out of sync with each other.
+/// Focus-order layout for the Gain dialog's interactive rows. The Gain/Left field is always
+/// focus index 0. On a stereo document, a "Per-channel gain" checkbox and (when checked) a
+/// Right field follow it, in that order, before the Tanh checkbox. Centralizing the
+/// arithmetic here keeps the five call sites that need to know "which focus index is
+/// which" — input routing, Enter, Space, Tab, mouse click, and render — from drifting out
+/// of sync with each other.
+///
+/// This is a *focus* order, not a visual line order: the dialog's line layout is fixed
+/// (see `render_gain_dialog`) so toggling per-channel never resizes or reflows the popup —
+/// the Right field simply appears in a line that's blank when per-channel is off. Only the
+/// Right field's presence in the focus cycle depends on `per_channel`.
 struct GainRows {
     checkbox: Option<usize>,
-    left: Option<usize>,
     right: Option<usize>,
-    gain: Option<usize>,
     tanh: usize,
     total: usize,
 }
 
 impl GainRows {
     fn new(is_stereo: bool, per_channel: bool) -> Self {
-        let mut next = 0;
+        let mut next = 1; // index 0 is always the Gain/Left field.
         let mut take = || {
             let row = next;
             next += 1;
             row
         };
+        let right = (is_stereo && per_channel).then(&mut take);
         let checkbox = is_stereo.then(&mut take);
-        let (left, right, gain) = if is_stereo && per_channel {
-            (Some(take()), Some(take()), None)
-        } else {
-            (None, None, Some(take()))
-        };
         let tanh = take();
-        GainRows { checkbox, left, right, gain, tanh, total: next }
+        GainRows { checkbox, right, tanh, total: next }
     }
 }
 
@@ -932,7 +932,7 @@ impl App {
             Dialog::Gain { input, right_input, focused, per_channel, is_stereo, .. } => {
                 let rows = GainRows::new(*is_stereo, *per_channel);
                 let f = *focused;
-                if Some(f) == rows.gain || Some(f) == rows.left {
+                if f == 0 {
                     Some(input)
                 } else if Some(f) == rows.right {
                     Some(right_input)
@@ -3895,6 +3895,20 @@ fn render_mix_to_mono_dialog(
 /// Renders the Gain dialog. The layout grows with `GainRows`: a mono/multi-channel document
 /// shows just the Gain field and the Tanh checkbox; a stereo document additionally shows the
 /// "Per-channel gain" checkbox, and checking it splits the single Gain field into Left/Right.
+/// Renders the Gain dialog. Layout is a *fixed* size regardless of `per_channel` — a stereo
+/// document always reserves a line for the Right field and one for the "Per-channel gain"
+/// checkbox (blank/unfocusable when not applicable), so checking the box never resizes or
+/// reflows the popup:
+///
+/// ```text
+/// Gain (dB): 0.0            <- becomes "Left (dB): " when per_channel is on
+///                            <- becomes "Right (dB): 0.0" when per_channel is on
+/// [ ] Per-channel gain      <- only shown at all when the document is stereo
+///
+/// [ ] Tanh limiter
+///
+/// Tab:next  Space:check  Enter:apply
+/// ```
 fn render_gain_dialog(
     frame: &mut Frame,
     area: Rect,
@@ -3906,10 +3920,7 @@ fn render_gain_dialog(
     is_stereo: bool,
 ) -> Vec<Rect> {
     let rows = GainRows::new(is_stereo, per_channel);
-    // Interactive rows before the tanh row (checkbox + gain field(s)).
-    let n = rows.tanh;
-    // n rows + blank + tanh row + blank + hints = n + 4 inner rows, + 2 border.
-    let height = (n as u16 + 6).min(area.height);
+    let height = (if is_stereo { 9 } else { 7 }).min(area.height);
     let width = 38u16.min(area.width);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -3942,34 +3953,52 @@ fn render_gain_dialog(
         }
     };
 
-    let mut lines: Vec<Line> = Vec::new();
-    if let Some(checkbox_row) = rows.checkbox {
-        let label = if per_channel { " [X] Per-channel gain" } else { " [ ] Per-channel gain" };
-        let style = if focused == checkbox_row { cursor_style } else { label_style };
-        lines.push(Line::from(Span::styled(label, style)));
-    }
-    if let (Some(left_row), Some(right_row)) = (rows.left, rows.right) {
-        lines.push(field_line("Left (dB): ", input, left_row));
-        lines.push(field_line("Right (dB): ", right_input, right_row));
-    } else if let Some(gain_row) = rows.gain {
-        lines.push(field_line("Gain (dB): ", input, gain_row));
-    }
+    let gain_label = if is_stereo && per_channel { "Left (dB): " } else { "Gain (dB): " };
+    let gain_line = field_line(gain_label, input, 0);
 
-    // Blank separator before the tanh checkbox, then a blank before the hints — mirrors
-    // Mix to Mono's layout.
-    lines.push(Line::raw(""));
     let tanh_label = if tanh_clip { " [X] Tanh limiter" } else { " [ ] Tanh limiter" };
     let tanh_style = if focused == rows.tanh { cursor_style } else { label_style };
-    lines.push(Line::from(Span::styled(tanh_label, tanh_style)));
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
+    let tanh_line = Line::from(Span::styled(tanh_label, tanh_style));
+
+    let hints = Line::from(vec![
         Span::styled(" Tab", hint_style),
         Span::styled(":next  ", label_style),
         Span::styled("Space", hint_style),
         Span::styled(":check  ", label_style),
         Span::styled("Enter", hint_style),
         Span::styled(":apply", label_style),
-    ]));
+    ]);
+
+    // Hit-test rects are placed at fixed lines per role (not packed sequentially), so the
+    // reserved-but-blank Right/checkbox lines don't shift the tanh row's position — only
+    // whether the Right rect exists in the list depends on `per_channel`.
+    let row_w = popup.width.saturating_sub(2);
+    let rect_at = |line: u16| Rect { x: popup.x + 1, y: popup.y + 1 + line, width: row_w, height: 1 };
+
+    let (lines, mut rects): (Vec<Line>, Vec<Rect>) = if is_stereo {
+        let right_line = if per_channel {
+            field_line("Right (dB): ", right_input, rows.right.expect("right is focusable when per_channel is on"))
+        } else {
+            Line::raw("")
+        };
+        let checkbox_label = if per_channel { " [X] Per-channel gain" } else { " [ ] Per-channel gain" };
+        let checkbox_style = if Some(focused) == rows.checkbox { cursor_style } else { label_style };
+        let checkbox_line = Line::from(Span::styled(checkbox_label, checkbox_style));
+
+        let mut rects = vec![rect_at(0)];
+        if per_channel {
+            rects.push(rect_at(1));
+        }
+        rects.push(rect_at(2)); // "Per-channel gain" checkbox — always focusable on stereo.
+        rects.push(rect_at(4)); // Tanh limiter checkbox.
+
+        (
+            vec![gain_line, right_line, checkbox_line, Line::raw(""), tanh_line, Line::raw(""), hints],
+            rects,
+        )
+    } else {
+        (vec![gain_line, Line::raw(""), tanh_line, Line::raw(""), hints], vec![rect_at(0), rect_at(2)])
+    };
 
     let block = Block::default()
         .title("Gain")
@@ -3978,12 +4007,6 @@ fn render_gain_dialog(
         .style(base);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 
-    // Hit-test rects: interactive rows at y+1..y+n, tanh at y+n+2 (blank line at y+n+1).
-    let row_w = popup.width.saturating_sub(2);
-    let mut rects: Vec<Rect> = (0..n)
-        .map(|i| Rect { x: popup.x + 1, y: popup.y + 1 + i as u16, width: row_w, height: 1 })
-        .collect();
-    rects.push(Rect { x: popup.x + 1, y: popup.y + 2 + n as u16, width: row_w, height: 1 });
     // Apply (hints bar) rect — index == dialog_n_interactive triggers Enter.
     rects.push(Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 });
     rects
@@ -4908,8 +4931,36 @@ mod tests {
         }
     }
 
-    /// Space on the "Per-channel gain" checkbox (row 0, since the document is stereo) toggles
-    /// it on.
+    /// The Gain popup on a stereo document must be the same fixed size whether or not
+    /// per-channel is checked — a resizing/reflowing popup was reported as looking ugly.
+    /// The Right field and "Per-channel gain" checkbox lines are always reserved, so
+    /// checking the box only fills in a line that was previously blank.
+    #[test]
+    fn gain_dialog_popup_size_is_fixed_regardless_of_per_channel() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        fn popup_rect(app: &mut App) -> Rect {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            app.dialog_row_rects[0]
+        }
+
+        let mut app = new_app(Some(stereo_doc(0.5, 0.25, 100)), None);
+        app.handle_action(Action::Gain);
+        let before = popup_rect(&mut app);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::Gain { per_channel: true, .. })));
+        let after = popup_rect(&mut app);
+
+        assert_eq!(before, after, "the Gain field's row must not move when per-channel is toggled");
+    }
+
+    /// Space on the "Per-channel gain" checkbox toggles it on. Its focus index is 1 (right
+    /// after the Gain field, which is always focus index 0) when per-channel is off, since
+    /// the Right field isn't in the focus cycle yet.
     #[test]
     fn gain_dialog_space_toggles_per_channel_checkbox() {
         let mut app = new_app(Some(stereo_doc(0.5, 0.25, 100)), None);
@@ -4919,7 +4970,7 @@ mod tests {
             tanh_clip: false,
             per_channel: false,
             is_stereo: true,
-            focused: 0,
+            focused: 1,
         });
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         assert!(matches!(app.dialog, Some(Dialog::Gain { per_channel: true, .. })));
