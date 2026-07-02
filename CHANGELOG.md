@@ -2,6 +2,13 @@
 
 ## 2026-07-02
 
+- Fade In/Out with no active selection now defaults to a cursor-relative range instead of
+  the whole file: Fade In runs from the start of the file to the insertion point, Fade Out
+  runs from the insertion point to the end of the file. Other operations that share the
+  same "act on the whole file when nothing's selected" default (Normalize, Gain) are
+  unaffected — this is fade-specific, since a fade's direction gives it an obvious anchor
+  the others don't have.
+
 - The Gain dialog now offers **per-channel gain** on stereo buffers: a "Per-channel gain"
   checkbox (only shown when the active document has exactly 2 channels) splits the single
   Gain field into separate Left/Right dB fields when checked, so each channel can be
