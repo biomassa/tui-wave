@@ -134,11 +134,20 @@ pub fn rasterize_waveform(
             prev_y = Some(curr_y);
         }
     } else {
+        // Row range the previous column actually drew, used to keep the trace connected.
+        // Adjacent columns min/max *disjoint* sample ranges, so the inter-sample step across
+        // the column boundary belongs to neither column's bar; at mid zoom (only a handful
+        // of samples per column) on a steep slope that missed step — plus the floor/ceil
+        // rounding below — spans several pixel rows, and the trace visibly breaks into
+        // dashes. Extending each bar to overlap its predecessor by at least one row is the
+        // bar-mode equivalent of the polyline branch's prev_y connection above.
+        let mut prev_rows: Option<(u32, u32)> = None; // (top_row, bottom_row_excl) as drawn
         for col in 0..pixel_width {
             let start = viewport.scroll_offset + (col as f64 * samples_per_pixel_column) as usize;
             let end = viewport.scroll_offset + ((col + 1) as f64 * samples_per_pixel_column) as usize;
             let end = end.min(samples.len());
             if start >= samples.len() || start >= end {
+                prev_rows = None;
                 continue;
             }
 
@@ -161,11 +170,21 @@ pub fn rasterize_waveform(
             let selected = selection.is_some_and(|(sel_start, sel_end)| start < sel_end && end > sel_start);
             let color = if selected { selected_color } else { waveform_color };
 
-            let top_row = top_y.floor() as u32;
-            let bottom_row_excl = (bottom_y.ceil() as u32).max(top_row + 1).min(pixel_height);
+            let mut top_row = top_y.floor() as u32;
+            let mut bottom_row_excl = (bottom_y.ceil() as u32).max(top_row + 1).min(pixel_height);
+            if let Some((prev_top, prev_bottom_excl)) = prev_rows {
+                if top_row >= prev_bottom_excl {
+                    // Entirely below the previous bar — extend up to its bottom row.
+                    top_row = prev_bottom_excl - 1;
+                } else if bottom_row_excl <= prev_top {
+                    // Entirely above the previous bar — extend down to its top row.
+                    bottom_row_excl = prev_top + 1;
+                }
+            }
             for row in top_row..bottom_row_excl {
                 img.put_pixel(col, row, color);
             }
+            prev_rows = Some((top_row, bottom_row_excl));
         }
     }
 
@@ -437,6 +456,42 @@ mod tests {
         // Very few columns should be fully blank — the old code blanked everything.
         let blank_columns = (0..200u32).filter(|&x| (0..80u32).all(|y| *img.get_pixel(x, y) == bg)).count();
         assert!(blank_columns < 10, "line mode should leave very few fully-blank columns (got {blank_columns})");
+    }
+
+    #[test]
+    fn bar_mode_trace_is_vertically_connected_on_steep_slopes() {
+        // A sine whose period is ~8 pixel columns at this zoom: near each zero crossing the
+        // signal moves most of a column-bar's height *between* the last sample of one column
+        // and the first sample of the next — the regime where independent per-column min/max
+        // bars leave multi-pixel vertical gaps and the trace breaks into dashes.
+        let samples: Vec<f32> = (0..2000)
+            .map(|i| (2.0 * std::f32::consts::PI * i as f32 / 48.0).sin())
+            .collect();
+        // cell_width=100 at 12 spl/col -> span 1200 samples over 200px -> 6 samples per
+        // pixel column (bar mode, above the 4.0 polyline threshold).
+        let vp = viewport(0, 12.0);
+        let img = rasterize_waveform(&samples, &vp, None, None, 0, None, &[], false, 100, 200, 200);
+        let waveform_color = color_to_rgba(theme::WAVEFORM);
+
+        let rows_of = |x: u32| -> Vec<u32> {
+            (0..img.height()).filter(|&y| *img.get_pixel(x, y) == waveform_color).collect()
+        };
+        // Skip column 0/1 (the cursor line at sample 0 recolors column 0).
+        for x in 2..img.width() - 1 {
+            let a = rows_of(x);
+            let b = rows_of(x + 1);
+            if a.is_empty() || b.is_empty() {
+                continue;
+            }
+            let (a_lo, a_hi) = (*a.first().unwrap(), *a.last().unwrap());
+            let (b_lo, b_hi) = (*b.first().unwrap(), *b.last().unwrap());
+            assert!(
+                a_lo <= b_hi && b_lo <= a_hi,
+                "columns {x} and {} must share at least one row (got [{a_lo},{a_hi}] vs [{b_lo},{b_hi}]) — \
+                 the trace visibly breaks apart otherwise",
+                x + 1
+            );
+        }
     }
 
     #[test]
