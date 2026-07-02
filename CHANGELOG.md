@@ -2,6 +2,12 @@
 
 ## 2026-07-02
 
+- Pressing Enter on a buffer in the Buffers panel now hands focus to the waveform after
+  switching to it (both the plain-Enter and filter-search Enter paths), instead of leaving
+  the Buffers panel focused — picking a buffer to work on is almost always followed by
+  editing it. The Files panel keeps its existing behavior of staying focused after Enter,
+  since browsing to open several files in a row shouldn't require re-focusing in between.
+
 - Fade In/Out with no active selection now defaults to a cursor-relative range instead of
   the whole file: Fade In runs from the start of the file to the insertion point, Fade Out
   runs from the insertion point to the end of the file. Other operations that share the

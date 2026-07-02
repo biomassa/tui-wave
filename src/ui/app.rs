@@ -719,6 +719,7 @@ impl App {
                     self.handle_action(Action::SwitchBuffer);
                     self.buffer_panel.filtering = false;
                     self.buffer_panel.filter.clear();
+                    self.buffer_panel.focused = false;
                 }
                 KeyCode::Up => self.move_buffer_selection(-1),
                 KeyCode::Down => self.move_buffer_selection(1),
@@ -743,7 +744,15 @@ impl App {
                 // kept as a binding so it still does something sensible if pressed.
                 KeyCode::Up => { self.move_buffer_selection(-1); true }
                 KeyCode::Down => { self.move_buffer_selection(1); true }
-                KeyCode::Enter => { self.handle_action(Action::SwitchBuffer); true }
+                // Enter commits the selection and hands focus to the waveform, since picking
+                // a buffer is almost always followed by editing it (unlike the Files panel's
+                // Enter, which stays focused so browsing to open several files in a row
+                // doesn't require re-focusing between each one).
+                KeyCode::Enter => {
+                    self.handle_action(Action::SwitchBuffer);
+                    self.buffer_panel.focused = false;
+                    true
+                }
                 KeyCode::Char('/') => { self.handle_action(Action::SearchBuffers); true }
                 // Contextual buffer commands (^r/^a differ from the global Reverse/SaveAll).
                 KeyCode::Char('s') | KeyCode::Char('S') if ctrl => { self.handle_action(Action::Save); true }
@@ -5249,6 +5258,43 @@ mod tests {
 
         assert!(app.file_panel.focused);
         assert!(!app.buffer_panel.focused);
+    }
+
+    /// Pressing Enter on a buffer in the Buffers panel commits the switch and hands focus to
+    /// the waveform — picking a buffer is almost always followed by editing it, unlike the
+    /// Files panel's Enter (browsing to open several files shouldn't require re-focusing
+    /// between each one).
+    #[test]
+    fn enter_on_buffers_panel_switches_focus_to_waveform() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.push_document(doc(0.2, 10));
+        app.file_panel.focused = false;
+        app.buffer_panel.focused = true;
+        app.buffer_panel.selected = 1;
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.active_document, 1, "Enter should switch to the selected buffer");
+        assert!(!app.buffer_panel.focused, "focus should leave the Buffers panel");
+        assert_eq!(app.focus(), Focus::Waveform);
+    }
+
+    /// Same check when Enter confirms a Buffers-panel filter search — the filter-mode Enter
+    /// path is separate code from the plain-Enter path above, so it needs its own coverage.
+    #[test]
+    fn enter_while_filtering_buffers_switches_focus_to_waveform() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.push_document(doc(0.2, 10));
+        app.file_panel.focused = false;
+        app.buffer_panel.focused = true;
+        app.buffer_panel.filtering = true;
+        app.buffer_panel.selected = 1;
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.active_document, 1);
+        assert!(!app.buffer_panel.focused);
+        assert!(!app.buffer_panel.filtering);
     }
 
     /// Ctrl+A selects the whole document's audio, regardless of any prior selection.
