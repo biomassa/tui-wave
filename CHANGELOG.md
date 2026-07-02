@@ -2,6 +2,12 @@
 
 ## 2026-07-02
 
+- The Gain dialog now offers **per-channel gain** on stereo buffers: a "Per-channel gain"
+  checkbox (only shown when the active document has exactly 2 channels) splits the single
+  Gain field into separate Left/Right dB fields when checked, so each channel can be
+  boosted or attenuated independently. Unchecked (the default), Gain behaves exactly as
+  before — one value applied uniformly to every channel.
+
 - Graphics-mode waveform is now anti-aliased. Span edges stay in continuous sub-pixel
   coordinates and the fractional first/last pixel of each column blends against the
   background, so sub-pixel amplitude changes render as a smooth curve instead of flat runs
