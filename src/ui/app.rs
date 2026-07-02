@@ -49,7 +49,20 @@ use super::widgets::waveform_image;
 
 enum Dialog {
     Normalize { input: TextInput },
-    Gain { input: TextInput, tanh_clip: bool, focused: usize },
+    /// `input` holds the single overall gain when `per_channel` is off, or the Left
+    /// channel's gain when it's on; `right_input` holds the Right channel's gain and is
+    /// only used/shown when both `is_stereo` and `per_channel` are true. `is_stereo` is
+    /// captured once at dialog-open time from the active document's channel count (the
+    /// document can't change while the dialog is up), since `render_dialog` has no document
+    /// access to recompute it.
+    Gain {
+        input: TextInput,
+        right_input: TextInput,
+        tanh_clip: bool,
+        per_channel: bool,
+        is_stereo: bool,
+        focused: usize,
+    },
     FadeIn { curve: FadeCurve },
     FadeOut { curve: FadeCurve },
     Resample { input: TextInput, current_rate: u32 },
@@ -78,6 +91,39 @@ enum Dialog {
     },
     /// Generic single-message info/error popup with an Enter/Esc-to-dismiss button.
     Info { message: String },
+}
+
+/// Row layout for the Gain dialog. It grows by one row when the active document is stereo
+/// (the "Per-channel gain" checkbox) and by another when that checkbox is on (the single
+/// Gain field splits into Left/Right). Centralizing the arithmetic here keeps the five call
+/// sites that need to know "which row is which" — input routing, Enter, Space, Tab, mouse
+/// click, and render — from drifting out of sync with each other.
+struct GainRows {
+    checkbox: Option<usize>,
+    left: Option<usize>,
+    right: Option<usize>,
+    gain: Option<usize>,
+    tanh: usize,
+    total: usize,
+}
+
+impl GainRows {
+    fn new(is_stereo: bool, per_channel: bool) -> Self {
+        let mut next = 0;
+        let mut take = || {
+            let row = next;
+            next += 1;
+            row
+        };
+        let checkbox = is_stereo.then(&mut take);
+        let (left, right, gain) = if is_stereo && per_channel {
+            (Some(take()), Some(take()), None)
+        } else {
+            (None, None, Some(take()))
+        };
+        let tanh = take();
+        GainRows { checkbox, left, right, gain, tanh, total: next }
+    }
 }
 
 /// Which panel currently has focus — the single source of truth for the modal command
@@ -883,8 +929,16 @@ impl App {
             | Dialog::OpenDirectory { input }
             | Dialog::RenameBuffer { input, .. }
             | Dialog::RenameFile { input, .. } => Some(input),
-            Dialog::Gain { input, focused, .. } => {
-                if *focused == 0 { Some(input) } else { None }
+            Dialog::Gain { input, right_input, focused, per_channel, is_stereo, .. } => {
+                let rows = GainRows::new(*is_stereo, *per_channel);
+                let f = *focused;
+                if Some(f) == rows.gain || Some(f) == rows.left {
+                    Some(input)
+                } else if Some(f) == rows.right {
+                    Some(right_input)
+                } else {
+                    None
+                }
             }
             Dialog::FadeIn { .. } | Dialog::FadeOut { .. } => None,
             Dialog::MixToMono { inputs, focused, .. } => {
@@ -933,9 +987,17 @@ impl App {
                     let db = input.value().parse::<f32>().unwrap_or(-1.0).min(0.0);
                     self.apply_normalize(db);
                 }
-                Some(Dialog::Gain { input, tanh_clip, .. }) => {
-                    let db = input.value().parse::<f32>().unwrap_or(0.0);
-                    self.apply_gain(db, tanh_clip);
+                Some(Dialog::Gain { input, right_input, tanh_clip, per_channel, is_stereo, .. }) => {
+                    let gains = if is_stereo && per_channel {
+                        let left = input.value().parse::<f32>().unwrap_or(0.0);
+                        let right = right_input.value().parse::<f32>().unwrap_or(0.0);
+                        vec![left, right]
+                    } else {
+                        let db = input.value().parse::<f32>().unwrap_or(0.0);
+                        let n_channels = self.active_doc().map(|d| d.channels.len()).unwrap_or(1).max(1);
+                        vec![db; n_channels]
+                    };
+                    self.apply_gain(gains, tanh_clip);
                 }
                 Some(Dialog::FadeIn { curve }) => self.apply_fade(true, 100.0, curve),
                 Some(Dialog::FadeOut { curve }) => self.apply_fade(false, 100.0, curve),
@@ -1041,8 +1103,13 @@ impl App {
                     Some(Dialog::MixToMono { inputs, focused, tanh_clip }) => {
                         if *focused == inputs.len() { *tanh_clip = !*tanh_clip; }
                     }
-                    Some(Dialog::Gain { focused, tanh_clip, .. }) => {
-                        if *focused == 1 { *tanh_clip = !*tanh_clip; }
+                    Some(Dialog::Gain { focused, tanh_clip, per_channel, is_stereo, .. }) => {
+                        let rows = GainRows::new(*is_stereo, *per_channel);
+                        if Some(*focused) == rows.checkbox {
+                            *per_channel = !*per_channel;
+                        } else if *focused == rows.tanh {
+                            *tanh_clip = !*tanh_clip;
+                        }
                     }
                     Some(Dialog::ExportRegions { focused, dither, depth, fade_in, fade_out, .. }) => {
                         match *focused {
@@ -1089,7 +1156,10 @@ impl App {
             Some(Dialog::MixToMono { inputs, focused, .. }) => {
                 *focused = step(*focused, inputs.len() + 1);
             }
-            Some(Dialog::Gain { focused, .. }) => *focused = step(*focused, 2),
+            Some(Dialog::Gain { focused, per_channel, is_stereo, .. }) => {
+                let rows = GainRows::new(*is_stereo, *per_channel);
+                *focused = step(*focused, rows.total);
+            }
             // Tab cycles the curve here (←→ is the documented way); Shift+Tab steps it back.
             Some(Dialog::FadeIn { curve }) | Some(Dialog::FadeOut { curve }) => {
                 *curve = if forward { curve.next() } else { curve.prev() };
@@ -1127,14 +1197,16 @@ impl App {
             return;
         }
         match self.dialog.as_mut() {
-            Some(Dialog::Gain { focused, tanh_clip, .. }) => match row {
-                0 => *focused = 0,
-                1 => {
-                    *focused = 1;
+            Some(Dialog::Gain { focused, tanh_clip, per_channel, is_stereo, .. }) => {
+                let rows = GainRows::new(*is_stereo, *per_channel);
+                if row >= rows.total { return; }
+                *focused = row;
+                if Some(row) == rows.checkbox {
+                    *per_channel = !*per_channel;
+                } else if row == rows.tanh {
                     *tanh_clip = !*tanh_clip;
                 }
-                _ => {}
-            },
+            }
             Some(Dialog::MixToMono { inputs, focused, tanh_clip }) => {
                 let n = inputs.len();
                 if row < n {
@@ -1470,10 +1542,10 @@ impl App {
         self.after_sample_mutation(idx);
     }
 
-    fn apply_gain(&mut self, gain_db: f32, tanh_clip: bool) {
+    fn apply_gain(&mut self, gains_db: Vec<f32>, tanh_clip: bool) {
         let idx = self.active_document;
         let Some((start, end)) = self.operation_range(idx, self.snap_to_zero) else { return };
-        self.histories[idx].apply(gain_command(start, end, gain_db, tanh_clip), &mut self.documents[idx]);
+        self.histories[idx].apply(gain_command(start, end, gains_db, tanh_clip), &mut self.documents[idx]);
         self.after_sample_mutation(idx);
     }
 
@@ -2571,8 +2643,16 @@ impl App {
         }
 
         if action == Action::Gain {
-            if self.active_doc().is_some() {
-                self.dialog = Some(Dialog::Gain { input: TextInput::fresh("0.0"), tanh_clip: false, focused: 0 });
+            if let Some(doc) = self.active_doc() {
+                let is_stereo = doc.channels.len() == 2;
+                self.dialog = Some(Dialog::Gain {
+                    input: TextInput::fresh("0.0"),
+                    right_input: TextInput::fresh("0.0"),
+                    tanh_clip: false,
+                    per_channel: false,
+                    is_stereo,
+                    focused: 0,
+                });
             }
             return;
         }
@@ -3812,16 +3892,25 @@ fn render_mix_to_mono_dialog(
     rects
 }
 
+/// Renders the Gain dialog. The layout grows with `GainRows`: a mono/multi-channel document
+/// shows just the Gain field and the Tanh checkbox; a stereo document additionally shows the
+/// "Per-channel gain" checkbox, and checking it splits the single Gain field into Left/Right.
 fn render_gain_dialog(
     frame: &mut Frame,
     area: Rect,
     input: &TextInput,
+    right_input: &TextInput,
     focused: usize,
     tanh_clip: bool,
+    per_channel: bool,
+    is_stereo: bool,
 ) -> Vec<Rect> {
+    let rows = GainRows::new(is_stereo, per_channel);
+    // Interactive rows before the tanh row (checkbox + gain field(s)).
+    let n = rows.tanh;
+    // n rows + blank + tanh row + blank + hints = n + 4 inner rows, + 2 border.
+    let height = (n as u16 + 6).min(area.height);
     let width = 38u16.min(area.width);
-    // text field + blank + checkbox + blank + hints = 5 inner rows + 2 border
-    let height = 7u16.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -3835,58 +3924,69 @@ fn render_gain_dialog(
     let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
     let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
 
-    // Row 0: text field
-    let (before, under, after) = input.split_at_cursor();
-    let field_line = if focused == 0 {
-        Line::from(vec![
-            Span::styled(" Gain (dB): ", label_style),
-            Span::styled(before, base),
-            Span::styled(under, cursor_style),
-            Span::styled(after, base),
-            Span::raw("  "),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled(" Gain (dB): ", label_style),
-            Span::styled(input.value().to_string(), base),
-        ])
+    let field_line = |label: &str, ti: &TextInput, row: usize| -> Line<'static> {
+        if focused == row {
+            let (before, under, after) = ti.split_at_cursor();
+            Line::from(vec![
+                Span::styled(format!(" {label}"), label_style),
+                Span::styled(before, base),
+                Span::styled(under, cursor_style),
+                Span::styled(after, base),
+                Span::raw("  "),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(format!(" {label}"), label_style),
+                Span::styled(ti.value().to_string(), base),
+            ])
+        }
     };
 
-    // Row 1: tanh checkbox
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(checkbox_row) = rows.checkbox {
+        let label = if per_channel { " [X] Per-channel gain" } else { " [ ] Per-channel gain" };
+        let style = if focused == checkbox_row { cursor_style } else { label_style };
+        lines.push(Line::from(Span::styled(label, style)));
+    }
+    if let (Some(left_row), Some(right_row)) = (rows.left, rows.right) {
+        lines.push(field_line("Left (dB): ", input, left_row));
+        lines.push(field_line("Right (dB): ", right_input, right_row));
+    } else if let Some(gain_row) = rows.gain {
+        lines.push(field_line("Gain (dB): ", input, gain_row));
+    }
+
+    // Blank separator before the tanh checkbox, then a blank before the hints — mirrors
+    // Mix to Mono's layout.
+    lines.push(Line::raw(""));
     let tanh_label = if tanh_clip { " [X] Tanh limiter" } else { " [ ] Tanh limiter" };
-    let tanh_line = if focused == 1 {
-        Line::from(Span::styled(tanh_label, cursor_style))
-    } else {
-        Line::from(Span::styled(tanh_label, label_style))
-    };
-
-    // Row 2: blank, Row 3: hints
-    let hints = Line::from(vec![
+    let tanh_style = if focused == rows.tanh { cursor_style } else { label_style };
+    lines.push(Line::from(Span::styled(tanh_label, tanh_style)));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
         Span::styled(" Tab", hint_style),
         Span::styled(":next  ", label_style),
         Span::styled("Space", hint_style),
         Span::styled(":check  ", label_style),
         Span::styled("Enter", hint_style),
         Span::styled(":apply", label_style),
-    ]);
+    ]));
 
     let block = Block::default()
         .title("Gain")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
-    frame.render_widget(
-        Paragraph::new(vec![field_line, Line::raw(""), tanh_line, Line::raw(""), hints]).block(block),
-        popup,
-    );
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
 
+    // Hit-test rects: interactive rows at y+1..y+n, tanh at y+n+2 (blank line at y+n+1).
     let row_w = popup.width.saturating_sub(2);
-    vec![
-        Rect { x: popup.x + 1, y: popup.y + 1, width: row_w, height: 1 },
-        Rect { x: popup.x + 1, y: popup.y + 3, width: row_w, height: 1 },
-        // Apply (hints bar) rect — index == dialog_n_interactive triggers Enter.
-        Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 },
-    ]
+    let mut rects: Vec<Rect> = (0..n)
+        .map(|i| Rect { x: popup.x + 1, y: popup.y + 1 + i as u16, width: row_w, height: 1 })
+        .collect();
+    rects.push(Rect { x: popup.x + 1, y: popup.y + 2 + n as u16, width: row_w, height: 1 });
+    // Apply (hints bar) rect — index == dialog_n_interactive triggers Enter.
+    rects.push(Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 });
+    rects
 }
 
 fn render_fade_dialog(frame: &mut Frame, area: Rect, title: &str, curve: FadeCurve) -> Vec<Rect> {
@@ -3943,8 +4043,8 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) -> Vec<Rect> {
         Dialog::MixToMono { inputs, focused, tanh_clip } => {
             return render_mix_to_mono_dialog(frame, area, inputs, *focused, *tanh_clip);
         }
-        Dialog::Gain { input, tanh_clip, focused } => {
-            return render_gain_dialog(frame, area, input, *focused, *tanh_clip);
+        Dialog::Gain { input, right_input, tanh_clip, per_channel, is_stereo, focused } => {
+            return render_gain_dialog(frame, area, input, right_input, *focused, *tanh_clip, *per_channel, *is_stereo);
         }
         Dialog::FadeIn { curve } => {
             return render_fade_dialog(frame, area, "Fade In", *curve);
@@ -4229,6 +4329,20 @@ mod tests {
     fn doc(val: f32, len: usize) -> Document {
         Document {
             channels: vec![vec![val; len]],
+            sample_rate: 44100,
+            selection: None,
+            cursor: 0,
+            dirty: false,
+            path: None,
+            markers: Vec::new(),
+            bits_per_sample: 32,
+            bext: None,
+        }
+    }
+
+    fn stereo_doc(left: f32, right: f32, len: usize) -> Document {
+        Document {
+            channels: vec![vec![left; len], vec![right; len]],
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -4764,6 +4878,88 @@ mod tests {
 
         app.handle_action(Action::Undo);
         assert_eq!(app.documents[0].markers[0].label, "Old Name");
+    }
+
+    /// Opening the Gain dialog on a stereo document must record `is_stereo: true` so the
+    /// "Per-channel gain" checkbox appears — it's captured once at open time since
+    /// `render_dialog` has no document access to recompute it every frame.
+    #[test]
+    fn gain_dialog_is_stereo_aware_when_opened_on_a_two_channel_document() {
+        let mut app = new_app(Some(stereo_doc(0.5, 0.25, 100)), None);
+        app.handle_action(Action::Gain);
+        match app.dialog {
+            Some(Dialog::Gain { is_stereo, per_channel, .. }) => {
+                assert!(is_stereo, "a 2-channel document must be flagged stereo");
+                assert!(!per_channel, "per-channel gain must default to off");
+            }
+            _ => panic!("expected Dialog::Gain to be open"),
+        }
+    }
+
+    /// A mono document must not offer the per-channel option — there's only one channel to
+    /// split gain across.
+    #[test]
+    fn gain_dialog_is_not_stereo_aware_on_a_mono_document() {
+        let mut app = new_app(Some(doc(0.5, 100)), None);
+        app.handle_action(Action::Gain);
+        match app.dialog {
+            Some(Dialog::Gain { is_stereo, .. }) => assert!(!is_stereo),
+            _ => panic!("expected Dialog::Gain to be open"),
+        }
+    }
+
+    /// Space on the "Per-channel gain" checkbox (row 0, since the document is stereo) toggles
+    /// it on.
+    #[test]
+    fn gain_dialog_space_toggles_per_channel_checkbox() {
+        let mut app = new_app(Some(stereo_doc(0.5, 0.25, 100)), None);
+        app.dialog = Some(Dialog::Gain {
+            input: TextInput::fresh("0.0"),
+            right_input: TextInput::fresh("0.0"),
+            tanh_clip: false,
+            per_channel: false,
+            is_stereo: true,
+            focused: 0,
+        });
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::Gain { per_channel: true, .. })));
+    }
+
+    /// With per-channel gain on, Enter applies the Left and Right fields independently —
+    /// this is the whole point of the feature.
+    #[test]
+    fn gain_dialog_per_channel_applies_independent_gain_to_each_channel() {
+        let mut app = new_app(Some(stereo_doc(0.5, 0.5, 4)), None);
+        app.dialog = Some(Dialog::Gain {
+            input: TextInput::new("6.0206"), // Left: +6dB -> 2.0x
+            right_input: TextInput::new("-6.0206"), // Right: -6dB -> 0.5x
+            tanh_clip: false,
+            per_channel: true,
+            is_stereo: true,
+            focused: 0,
+        });
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!((app.documents[0].channels[0][0] - 1.0).abs() < 0.001, "left channel should double");
+        assert!((app.documents[0].channels[1][0] - 0.25).abs() < 0.001, "right channel should halve");
+    }
+
+    /// With per-channel gain off (the default, even on a stereo document), Enter applies the
+    /// single Gain field uniformly to every channel — unchanged behavior from before this
+    /// feature existed.
+    #[test]
+    fn gain_dialog_uniform_applies_the_same_gain_to_every_channel() {
+        let mut app = new_app(Some(stereo_doc(0.5, 0.25, 4)), None);
+        app.dialog = Some(Dialog::Gain {
+            input: TextInput::new("6.0206"), // +6dB -> 2.0x
+            right_input: TextInput::fresh("0.0"),
+            tanh_clip: false,
+            per_channel: false,
+            is_stereo: true,
+            focused: 0,
+        });
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!((app.documents[0].channels[0][0] - 1.0).abs() < 0.001);
+        assert!((app.documents[0].channels[1][0] - 0.5).abs() < 0.001);
     }
 
     /// Dragging a marker (mouse down on its label, drag, release) collapses into a single
@@ -5563,3 +5759,4 @@ mod tests {
         );
     }
 }
+

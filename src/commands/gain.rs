@@ -5,16 +5,19 @@ use crate::model::document::Document;
 pub struct GainCommand {
     range: (usize, usize),
     original: Option<Vec<Vec<f32>>>,
-    gain_db: f32,
+    /// One gain in dB per channel. The caller (the UI layer, which knows the document's
+    /// channel count) is responsible for building this with the right length — a single
+    /// overall gain is just the same value repeated for every channel.
+    gains_db: Vec<f32>,
     tanh_clip: bool,
 }
 
 impl GainCommand {
-    pub fn new(start: usize, end: usize, gain_db: f32, tanh_clip: bool) -> Self {
+    pub fn new(start: usize, end: usize, gains_db: Vec<f32>, tanh_clip: bool) -> Self {
         Self {
             range: (start.min(end), start.max(end)),
             original: None,
-            gain_db,
+            gains_db,
             tanh_clip,
         }
     }
@@ -26,12 +29,15 @@ impl Command for GainCommand {
         if start >= end {
             return;
         }
-        let linear = 10.0f32.powf(self.gain_db / 20.0);
         let mut original = Vec::with_capacity(doc.channels.len());
-        for channel in &mut doc.channels {
+        for (i, channel) in doc.channels.iter_mut().enumerate() {
             let end = end.min(channel.len());
             let start = start.min(end);
             original.push(channel[start..end].to_vec());
+            // Fall back to the last provided gain if a channel has no matching entry
+            // (shouldn't happen given how the caller builds this, but avoids a panic).
+            let gain_db = self.gains_db.get(i).or_else(|| self.gains_db.last()).copied().unwrap_or(0.0);
+            let linear = 10.0f32.powf(gain_db / 20.0);
             for s in &mut channel[start..end] {
                 *s *= linear;
                 if self.tanh_clip {
@@ -65,8 +71,8 @@ impl Command for GainCommand {
     }
 }
 
-pub fn gain_command(start: usize, end: usize, gain_db: f32, tanh_clip: bool) -> Box<dyn Command> {
-    Box::new(GainCommand::new(start, end, gain_db, tanh_clip))
+pub fn gain_command(start: usize, end: usize, gains_db: Vec<f32>, tanh_clip: bool) -> Box<dyn Command> {
+    Box::new(GainCommand::new(start, end, gains_db, tanh_clip))
 }
 
 #[cfg(test)]
@@ -87,7 +93,7 @@ mod tests {
             bext: None,
         };
         // +6.0206 dB → linear 2.0x → 0.5 → 1.0
-        let mut cmd = GainCommand::new(0, 3, 6.0206, false);
+        let mut cmd = GainCommand::new(0, 3, vec![6.0206], false);
         cmd.execute(&mut doc);
         assert!((doc.channels[0][0] - 1.0).abs() < 0.001);
         assert!((doc.channels[0][1] - 0.6).abs() < 0.001);
@@ -107,7 +113,7 @@ mod tests {
             bext: None,
         };
         // 0 dB = unity gain, but with tanh clip
-        let mut cmd = GainCommand::new(0, 3, 0.0, true);
+        let mut cmd = GainCommand::new(0, 3, vec![0.0], true);
         cmd.execute(&mut doc);
         // tanh(2.0) ≈ 0.964, tanh(-2.0) ≈ -0.964, tanh(0.5) ≈ 0.462
         assert!((doc.channels[0][0] - 0.964).abs() < 0.001);
@@ -129,7 +135,7 @@ mod tests {
             bext: None,
         };
         let original = doc.channels.clone();
-        let mut cmd = GainCommand::new(0, 3, 6.0, false);
+        let mut cmd = GainCommand::new(0, 3, vec![6.0], false);
         cmd.execute(&mut doc);
         cmd.undo(&mut doc);
         assert_eq!(doc.channels, original);
