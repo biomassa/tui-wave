@@ -77,12 +77,22 @@ enum Dialog {
     MixToMono { inputs: Vec<TextInput>, focused: usize, tanh_clip: bool },
     /// Export Regions to Subfolder — chops file at markers and saves each region.
     /// `focused`: 0=subfolder, 1=base_name, 2=format, 3=dither,
-    ///            4=fade_in checkbox, 5=fade_in ms, 6=fade_out checkbox, 7=fade_out ms.
+    ///            4=limit_length checkbox, 5=limit_length ms,
+    ///            6=normalize checkbox, 7=normalize dB,
+    ///            8=fade_in checkbox, 9=fade_in ms, 10=fade_out checkbox, 11=fade_out ms.
+    /// Per-region processing order (see `App::export_regions`) is limit length, then
+    /// normalize, then fades — trimming before normalizing means the peak measurement
+    /// reflects the audio that's actually kept, and fading last means the envelope taper
+    /// is never itself included in that peak measurement.
     ExportRegions {
         folder_input: TextInput,
         base_name_input: TextInput,
         depth: BitDepth,
         dither: bool,
+        limit_length: bool,
+        limit_length_input: TextInput,
+        normalize: bool,
+        normalize_input: TextInput,
         fade_in: bool,
         fade_in_input: TextInput,
         fade_out: bool,
@@ -954,12 +964,17 @@ impl App {
                 let f = *focused;
                 inputs.get_mut(f)
             }
-            Dialog::ExportRegions { folder_input, base_name_input, fade_in_input, fade_out_input, focused, .. } => {
+            Dialog::ExportRegions {
+                folder_input, base_name_input, limit_length_input, normalize_input,
+                fade_in_input, fade_out_input, focused, ..
+            } => {
                 match *focused {
                     0 => Some(folder_input),
                     1 => Some(base_name_input),
-                    5 => Some(fade_in_input),
-                    7 => Some(fade_out_input),
+                    5 => Some(limit_length_input),
+                    7 => Some(normalize_input),
+                    9 => Some(fade_in_input),
+                    11 => Some(fade_out_input),
                     _ => None,
                 }
             }
@@ -978,10 +993,10 @@ impl App {
                 c.is_ascii_digit() || matches!(c, '-' | '.' | 'i' | 'n' | 'f')
             }
             Some(Dialog::ExportRegions { focused, .. }) => {
-                if focused == 5 || focused == 7 {
-                    c.is_ascii_digit() || c == '.'
-                } else {
-                    true // folder / base name: free text
+                match focused {
+                    5 | 9 | 11 => c.is_ascii_digit() || c == '.', // ms fields: no sign
+                    7 => c.is_ascii_digit() || c == '-' || c == '.', // dB: can be negative
+                    _ => true, // folder / base name: free text
                 }
             }
             Some(Dialog::Info { .. }) => false,
@@ -1038,6 +1053,7 @@ impl App {
                 }
                 Some(Dialog::ExportRegions {
                     folder_input, base_name_input, depth, dither,
+                    limit_length, limit_length_input, normalize, normalize_input,
                     fade_in, fade_in_input, fade_out, fade_out_input, focused,
                 }) => {
                     let folder = folder_input.value().trim().to_string();
@@ -1048,13 +1064,20 @@ impl App {
                     if folder.is_empty() || base_name.is_empty() {
                         self.dialog = Some(Dialog::ExportRegions {
                             folder_input, base_name_input, depth, dither,
+                            limit_length, limit_length_input, normalize, normalize_input,
                             fade_in, fade_in_input, fade_out, fade_out_input, focused,
                         });
                         return;
                     }
+                    let limit_ms = limit_length_input.value().trim().parse::<f32>().unwrap_or(0.0).max(0.0);
+                    let norm_db = normalize_input.value().trim().parse::<f32>().unwrap_or(0.0).min(0.0);
                     let fi_ms = fade_in_input.value().trim().parse::<f32>().unwrap_or(5.0).max(0.0);
                     let fo_ms = fade_out_input.value().trim().parse::<f32>().unwrap_or(5.0).max(0.0);
-                    self.export_regions(&folder, &base_name, depth, dither, fade_in, fi_ms, fade_out, fo_ms);
+                    self.export_regions(
+                        &folder, &base_name, depth, dither,
+                        limit_length, limit_ms, normalize, norm_db,
+                        fade_in, fi_ms, fade_out, fo_ms,
+                    );
                 }
                 Some(Dialog::Info { .. }) => {} // just dismiss
                 None => {}
@@ -1120,11 +1143,15 @@ impl App {
                             *tanh_clip = !*tanh_clip;
                         }
                     }
-                    Some(Dialog::ExportRegions { focused, dither, depth, fade_in, fade_out, .. }) => {
+                    Some(Dialog::ExportRegions {
+                        focused, dither, depth, limit_length, normalize, fade_in, fade_out, ..
+                    }) => {
                         match *focused {
                             3 => { if depth.supports_dither() { *dither = !*dither; } }
-                            4 => *fade_in = !*fade_in,
-                            6 => *fade_out = !*fade_out,
+                            4 => *limit_length = !*limit_length,
+                            6 => *normalize = !*normalize,
+                            8 => *fade_in = !*fade_in,
+                            10 => *fade_out = !*fade_out,
                             _ => {}
                         }
                     }
@@ -1173,7 +1200,7 @@ impl App {
             Some(Dialog::FadeIn { curve }) | Some(Dialog::FadeOut { curve }) => {
                 *curve = if forward { curve.next() } else { curve.prev() };
             }
-            Some(Dialog::ExportRegions { focused, .. }) => *focused = step(*focused, 8),
+            Some(Dialog::ExportRegions { focused, .. }) => *focused = step(*focused, 12),
             _ => {}
         }
     }
@@ -1225,14 +1252,18 @@ impl App {
                     *tanh_clip = !*tanh_clip;
                 }
             }
-            Some(Dialog::ExportRegions { focused, dither, depth, fade_in, fade_out, .. }) => {
+            Some(Dialog::ExportRegions {
+                focused, dither, depth, limit_length, normalize, fade_in, fade_out, ..
+            }) => {
                 match row {
                     0..=3 => {
                         *focused = row;
                         if row == 3 && depth.supports_dither() { *dither = !*dither; }
                     }
-                    4 => { *focused = 4; *fade_in = !*fade_in; }
-                    5 => { *focused = 6; *fade_out = !*fade_out; }
+                    4 => { *focused = 4; *limit_length = !*limit_length; }
+                    5 => { *focused = 6; *normalize = !*normalize; }
+                    6 => { *focused = 8; *fade_in = !*fade_in; }
+                    7 => { *focused = 10; *fade_out = !*fade_out; }
                     _ => {}
                 }
             }
@@ -1792,14 +1823,25 @@ impl App {
     /// into `subfolder` (created inside the document's directory, or the file panel's current
     /// directory for unsaved buffers). Files are named `{base_name}-001.wav`, `-002.wav`, …
     /// The first region spans [0, first_marker), the last spans [last_marker, end).
-    /// When `fade_in`/`fade_out` is true, a cosine-curve (exp²) fade of `fade_*_ms` ms is
-    /// applied to the start/end of every region's audio before writing.
+    ///
+    /// Per-region processing, in order:
+    /// 1. Limit length (`limit_length`/`limit_length_ms`): truncates the region's end so it's
+    ///    no longer than the given duration. Done first so a shorter region is what actually
+    ///    gets normalized/faded, rather than measuring/tapering audio that's about to be cut.
+    /// 2. Normalize (`normalize`/`normalize_db`): scales the region so its peak sample hits
+    ///    the target dBFS, independently per region (each region can have a different peak).
+    /// 3. Fade in/out (`fade_*`/`fade_*_ms`): a cosine-curve (exp²) fade applied last, so the
+    ///    envelope taper itself is never included in the length/peak measurements above.
     fn export_regions(
         &mut self,
         subfolder: &str,
         base_name: &str,
         depth: BitDepth,
         dither: bool,
+        limit_length: bool,
+        limit_length_ms: f32,
+        normalize: bool,
+        normalize_db: f32,
         fade_in: bool,
         fade_in_ms: f32,
         fade_out: bool,
@@ -1847,6 +1889,9 @@ impl App {
 
         let channels_snapshot: Vec<Vec<f32>> = doc.channels.clone();
 
+        let limit_length_samples = if limit_length && limit_length_ms > 0.0 {
+            Some(((limit_length_ms / 1000.0) * sample_rate as f32).round() as usize)
+        } else { None };
         let fade_in_len = if fade_in && fade_in_ms > 0.0 {
             ((fade_in_ms / 1000.0) * sample_rate as f32).round() as usize
         } else { 0 };
@@ -1861,7 +1906,39 @@ impl App {
             let mut region_channels: Vec<Vec<f32>> = channels_snapshot.iter()
                 .map(|ch| ch[*start..*end].to_vec())
                 .collect();
-            let region_len = end - start;
+            let mut region_len = end - start;
+            let mut region_markers = region_markers.clone();
+
+            // Limit length: trim the end so the region can't exceed the given duration —
+            // done before normalize/fades so both act on the audio that's actually kept.
+            if let Some(max_len) = limit_length_samples {
+                if region_len > max_len {
+                    for ch in &mut region_channels {
+                        ch.truncate(max_len);
+                    }
+                    region_len = max_len;
+                    region_markers.retain(|m| m.position < region_len);
+                }
+            }
+            // Normalize this region independently to its own peak, before fades — a fade
+            // only ever attenuates, so measuring the peak after fading would risk chasing a
+            // peak the fade itself just reduced instead of the region's true loudest sample.
+            if normalize {
+                let mut peak = 0.0f32;
+                for ch in &region_channels {
+                    for &s in ch {
+                        peak = peak.max(s.abs());
+                    }
+                }
+                if peak > 0.0001 {
+                    let gain = 10.0f32.powf(normalize_db / 20.0) / peak;
+                    for ch in &mut region_channels {
+                        for s in ch.iter_mut() {
+                            *s *= gain;
+                        }
+                    }
+                }
+            }
             // Apply fade in (exp² ramp: t² gives a convex rise from silence).
             if fade_in_len > 0 {
                 let len = fade_in_len.min(region_len);
@@ -1891,7 +1968,7 @@ impl App {
                 cursor: 0,
                 dirty: false,
                 path: None,
-                markers: region_markers.clone(),
+                markers: region_markers,
                 bext: None,
             };
             if let Err(e) = crate::model::io::save_wav_with(&region_doc, &path, depth, dither) {
@@ -2775,6 +2852,10 @@ impl App {
                         base_name_input: TextInput::new(""),
                         depth: default_depth,
                         dither: false,
+                        limit_length: false,
+                        limit_length_input: TextInput::fresh("1000"),
+                        normalize: false,
+                        normalize_input: TextInput::fresh("0.0"),
                         fade_in: true,
                         fade_in_input: TextInput::fresh("5"),
                         fade_out: true,
@@ -4117,8 +4198,16 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) -> Vec<Rect> {
         Dialog::FadeOut { curve } => {
             return render_fade_dialog(frame, area, "Fade Out", *curve);
         }
-        Dialog::ExportRegions { folder_input, base_name_input, depth, dither, fade_in, fade_in_input, fade_out, fade_out_input, focused } => {
-            return render_export_regions_dialog(frame, area, folder_input, base_name_input, *depth, *dither, *fade_in, fade_in_input, *fade_out, fade_out_input, *focused);
+        Dialog::ExportRegions {
+            folder_input, base_name_input, depth, dither,
+            limit_length, limit_length_input, normalize, normalize_input,
+            fade_in, fade_in_input, fade_out, fade_out_input, focused,
+        } => {
+            return render_export_regions_dialog(
+                frame, area, folder_input, base_name_input, *depth, *dither,
+                *limit_length, limit_length_input, *normalize, normalize_input,
+                *fade_in, fade_in_input, *fade_out, fade_out_input, *focused,
+            );
         }
         Dialog::Info { message } => {
             return render_info_dialog(frame, area, message);
@@ -4187,6 +4276,10 @@ fn render_export_regions_dialog(
     base_name_input: &TextInput,
     depth: BitDepth,
     dither: bool,
+    limit_length: bool,
+    limit_length_input: &TextInput,
+    normalize: bool,
+    normalize_input: &TextInput,
     fade_in: bool,
     fade_in_input: &TextInput,
     fade_out: bool,
@@ -4194,9 +4287,9 @@ fn render_export_regions_dialog(
     focused: usize,
 ) -> Vec<Rect> {
     let width = 54u16.min(area.width);
-    // subfolder + basename + blank + format + dither + blank + fade_in + fade_out + blank + hints
-    // = 10 inner rows + 2 border
-    let height = 12u16.min(area.height);
+    // subfolder + basename + blank + format + dither + blank + limit_length + normalize +
+    // blank + fade_in + fade_out + blank + hints = 14 inner rows + 2 border
+    let height = 16u16.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -4256,53 +4349,47 @@ fn render_export_regions_dialog(
         }
     };
 
-    // Fade in row: checkbox + ms value on one line.
-    let fade_in_line = {
-        let cb = if fade_in { "[X]" } else { "[ ]" };
-        let cb_style = if focused == 4 { cursor_style } else if fade_in { label_style } else { dim_style };
-        let ms_label_style = if fade_in { label_style } else { dim_style };
-        let ms_val_style = if fade_in { base } else { dim_style };
-        if focused == 5 {
-            let (before, under, after) = fade_in_input.split_at_cursor();
+    // A "[ ] Label   <value><suffix>" row shared by limit length, normalize, and the two
+    // fades — a checkbox gates a text field, and `cb_idx`/`val_idx` are that row's two
+    // focus indices (the checkbox and the value field are separately focusable/tabbable).
+    // `label` is padded to a fixed width so all four rows' value fields land in the same
+    // column regardless of how long each row's label text is.
+    const ROW_LABEL_WIDTH: usize = 16;
+    let checkbox_value_row = |label: &str, checked: bool, cb_idx: usize, val_idx: usize, input: &TextInput, suffix: &str| {
+        let cb = if checked { "[X]" } else { "[ ]" };
+        let cb_style = if focused == cb_idx { cursor_style } else if checked { label_style } else { dim_style };
+        let suffix_style = if checked { label_style } else { dim_style };
+        if focused == val_idx {
+            let (before, under, after) = input.split_at_cursor();
             Line::from(vec![
-                Span::styled(format!("   {cb} Fade in at start   "), cb_style),
+                Span::styled(format!("   {cb} {label:<ROW_LABEL_WIDTH$} "), cb_style),
                 Span::styled(before, base),
                 Span::styled(under, cursor_style),
                 Span::styled(after, base),
-                Span::styled(" ms", ms_label_style),
+                Span::styled(suffix.to_string(), suffix_style),
             ])
         } else {
+            let val_style = if checked { base } else { dim_style };
             Line::from(vec![
-                Span::styled(format!("   {cb} Fade in at start   "), cb_style),
-                Span::styled(fade_in_input.value().to_string(), ms_val_style),
-                Span::styled(" ms", ms_label_style),
+                Span::styled(format!("   {cb} {label:<ROW_LABEL_WIDTH$} "), cb_style),
+                Span::styled(input.value().to_string(), val_style),
+                Span::styled(suffix.to_string(), suffix_style),
             ])
         }
     };
 
-    // Fade out row: checkbox + ms value on one line.
-    let fade_out_line = {
-        let cb = if fade_out { "[X]" } else { "[ ]" };
-        let cb_style = if focused == 6 { cursor_style } else if fade_out { label_style } else { dim_style };
-        let ms_label_style = if fade_out { label_style } else { dim_style };
-        let ms_val_style = if focused == 7 { cursor_style } else if fade_out { base } else { dim_style };
-        if focused == 7 {
-            let (before, under, after) = fade_out_input.split_at_cursor();
-            Line::from(vec![
-                Span::styled(format!("   {cb} Fade out at end    "), cb_style),
-                Span::styled(before, base),
-                Span::styled(under, cursor_style),
-                Span::styled(after, base),
-                Span::styled(" ms", ms_label_style),
-            ])
-        } else {
-            Line::from(vec![
-                Span::styled(format!("   {cb} Fade out at end    "), cb_style),
-                Span::styled(fade_out_input.value().to_string(), ms_val_style),
-                Span::styled(" ms", ms_label_style),
-            ])
-        }
-    };
+    let limit_length_line = checkbox_value_row(
+        "Limit length to", limit_length, 4, 5, limit_length_input, " ms",
+    );
+    let normalize_line = checkbox_value_row(
+        "Normalize to", normalize, 6, 7, normalize_input, " dB",
+    );
+    let fade_in_line = checkbox_value_row(
+        "Fade in at start", fade_in, 8, 9, fade_in_input, " ms",
+    );
+    let fade_out_line = checkbox_value_row(
+        "Fade out at end", fade_out, 10, 11, fade_out_input, " ms",
+    );
 
     let do_active = !folder_input.value().trim().is_empty() && !base_name_input.value().trim().is_empty();
     let do_style = if do_active { hint_style } else { dim_style };
@@ -4326,6 +4413,7 @@ fn render_export_regions_dialog(
         Paragraph::new(vec![
             folder_line, base_line, Line::raw(""),
             format_line, dither_line, Line::raw(""),
+            limit_length_line, normalize_line, Line::raw(""),
             fade_in_line, fade_out_line, Line::raw(""),
             hints,
         ]).block(block),
@@ -4334,12 +4422,17 @@ fn render_export_regions_dialog(
 
     let row_w = popup.width.saturating_sub(2);
     vec![
-        Rect { x: popup.x + 1, y: popup.y + 1, width: row_w, height: 1 }, // subfolder (row 0)
-        Rect { x: popup.x + 1, y: popup.y + 2, width: row_w, height: 1 }, // base name (row 1)
-        Rect { x: popup.x + 1, y: popup.y + 4, width: row_w, height: 1 }, // format (row 2)
-        Rect { x: popup.x + 1, y: popup.y + 5, width: row_w, height: 1 }, // dither (row 3)
-        Rect { x: popup.x + 1, y: popup.y + 7, width: row_w, height: 1 }, // fade in (row 4)
-        Rect { x: popup.x + 1, y: popup.y + 8, width: row_w, height: 1 }, // fade out (row 5)
+        Rect { x: popup.x + 1, y: popup.y + 1, width: row_w, height: 1 },  // subfolder (row 0)
+        Rect { x: popup.x + 1, y: popup.y + 2, width: row_w, height: 1 },  // base name (row 1)
+        Rect { x: popup.x + 1, y: popup.y + 4, width: row_w, height: 1 },  // format (row 2)
+        Rect { x: popup.x + 1, y: popup.y + 5, width: row_w, height: 1 },  // dither (row 3)
+        Rect { x: popup.x + 1, y: popup.y + 7, width: row_w, height: 1 },  // limit length (row 4)
+        Rect { x: popup.x + 1, y: popup.y + 8, width: row_w, height: 1 },  // normalize (row 5)
+        Rect { x: popup.x + 1, y: popup.y + 10, width: row_w, height: 1 }, // fade in (row 6)
+        Rect { x: popup.x + 1, y: popup.y + 11, width: row_w, height: 1 }, // fade out (row 7)
+        // Hints/apply bar — clicking it (or anywhere past row 7) submits, matching
+        // handle_dialog_row_click's `row >= dialog_n_interactive` convention.
+        Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 },
     ]
 }
 
@@ -4776,6 +4869,10 @@ mod tests {
             base_name_input: TextInput::new(base),
             depth: BitDepth::Float32,
             dither: false,
+            limit_length: false,
+            limit_length_input: TextInput::new("1000"),
+            normalize: false,
+            normalize_input: TextInput::new("0.0"),
             fade_in: true,
             fade_in_input: TextInput::new("5"),
             fade_out: true,
@@ -4792,6 +4889,159 @@ mod tests {
         app.dialog = Some(open("regions", "   "));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.dialog.is_some(), "Do! must be inactive with a blank base name");
+    }
+
+    /// Export Regions' "Normalize regions" option scales each region independently to the
+    /// target dB peak — a quiet region and a loud region in the same file must both end up
+    /// at the target, not share one gain computed from the whole document's peak.
+    #[test]
+    fn export_regions_normalizes_each_region_independently() {
+        let mut samples = vec![0.2f32; 50];
+        samples.extend(vec![0.8f32; 50]);
+        let dir = std::env::temp_dir().join(format!("tuiwave_export_norm_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let document = Document {
+            channels: vec![samples],
+            sample_rate: 44100,
+            selection: None,
+            cursor: 0,
+            dirty: false,
+            path: Some(dir.join("src.wav")),
+            markers: vec![Marker { position: 50, label: "m".into() }],
+            bits_per_sample: 32,
+            bext: None,
+        };
+        let mut app = new_app(Some(document), None);
+        app.export_regions(
+            "out", "r", BitDepth::Float32, false,
+            false, 0.0,   // limit length: off
+            true, 0.0,    // normalize to 0 dBFS
+            false, 0.0, false, 0.0, // fades: off
+        );
+
+        let peak = |path: &std::path::Path| {
+            let doc = crate::model::io::load_wav(path).unwrap();
+            doc.channels[0].iter().fold(0.0f32, |m, &s| m.max(s.abs()))
+        };
+        assert!(
+            (peak(&dir.join("out/r-001.wav")) - 1.0).abs() < 0.01,
+            "the quiet region should be normalized up to 0dBFS on its own"
+        );
+        assert!(
+            (peak(&dir.join("out/r-002.wav")) - 1.0).abs() < 0.01,
+            "the loud region should be normalized to 0dBFS independently of the first region"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// "Limit length" trims a region's end before fades are applied — trimming first means
+    /// the fade-out ramp lands on the tail of the *shortened* region. If fades ran first (on
+    /// the original length) and were trimmed away afterward, this region would come out with
+    /// no audible fade at all, since the faded samples would all fall past the cut point.
+    #[test]
+    fn export_regions_limit_length_trims_before_fade_out() {
+        // sample_rate=1000 makes 1 sample == 1 ms, so lengths are easy to reason about.
+        let samples = vec![1.0f32; 100];
+        let dir = std::env::temp_dir().join(format!("tuiwave_export_limit_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let document = Document {
+            channels: vec![samples],
+            sample_rate: 1000,
+            selection: None,
+            cursor: 0,
+            dirty: false,
+            path: Some(dir.join("src.wav")),
+            markers: vec![Marker { position: 100, label: "m".into() }], // single region [0,100)
+            bits_per_sample: 32,
+            bext: None,
+        };
+        let mut app = new_app(Some(document), None);
+        app.export_regions(
+            "out", "r", BitDepth::Float32, false,
+            true, 50.0,   // limit length to 50 ms (50 samples)
+            false, 0.0,   // normalize: off
+            false, 0.0,   // fade in: off
+            true, 10.0,   // fade out over the last 10 ms (10 samples)
+        );
+
+        let doc = crate::model::io::load_wav(&dir.join("out/r-001.wav")).unwrap();
+        assert_eq!(doc.channels[0].len(), 50, "the region must be trimmed to the limit");
+        assert!(
+            (doc.channels[0][39] - 1.0).abs() < 0.01,
+            "audio before the trimmed region's fade-out window must be untouched"
+        );
+        assert!(
+            doc.channels[0][49] < 0.05,
+            "the fade-out must ramp down over the trimmed region's own tail, not the \
+             original (now-discarded) tail: sample[49] = {}",
+            doc.channels[0][49]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A region shorter than the length limit is left alone — "limit length" only ever
+    /// trims, it never pads a short region out to the limit.
+    #[test]
+    fn export_regions_limit_length_leaves_shorter_regions_untouched() {
+        let samples = vec![1.0f32; 110]; // regions of 30 and 80 samples once split at 30
+        let dir = std::env::temp_dir().join(format!("tuiwave_export_limit_short_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let document = Document {
+            channels: vec![samples],
+            sample_rate: 1000,
+            selection: None,
+            cursor: 0,
+            dirty: false,
+            path: Some(dir.join("src.wav")),
+            markers: vec![Marker { position: 30, label: "m".into() }],
+            bits_per_sample: 32,
+            bext: None,
+        };
+        let mut app = new_app(Some(document), None);
+        app.export_regions(
+            "out", "r", BitDepth::Float32, false,
+            true, 50.0, // limit length to 50 ms
+            false, 0.0, false, 0.0, false, 0.0,
+        );
+
+        let r1 = crate::model::io::load_wav(&dir.join("out/r-001.wav")).unwrap();
+        let r2 = crate::model::io::load_wav(&dir.join("out/r-002.wav")).unwrap();
+        assert_eq!(r1.channels[0].len(), 30, "a region shorter than the limit must be untouched");
+        assert_eq!(r2.channels[0].len(), 50, "a region longer than the limit must be trimmed to it");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Tab must cycle through all 12 Export Regions fields (subfolder, base name, format,
+    /// dither, limit-length checkbox + ms, normalize checkbox + dB, fade-in checkbox + ms,
+    /// fade-out checkbox + ms) and wrap back to 0.
+    #[test]
+    fn export_regions_dialog_tab_cycles_through_all_twelve_fields() {
+        let mut app = new_app(Some(doc(0.1, 200)), None);
+        app.dialog = Some(Dialog::ExportRegions {
+            folder_input: TextInput::new("out"),
+            base_name_input: TextInput::new("r"),
+            depth: BitDepth::Float32,
+            dither: false,
+            limit_length: false,
+            limit_length_input: TextInput::fresh("1000"),
+            normalize: false,
+            normalize_input: TextInput::fresh("0.0"),
+            fade_in: true,
+            fade_in_input: TextInput::fresh("5"),
+            fade_out: true,
+            fade_out_input: TextInput::fresh("5"),
+            focused: 0,
+        });
+        let focused = |app: &App| match &app.dialog {
+            Some(Dialog::ExportRegions { focused, .. }) => *focused,
+            _ => panic!("expected Dialog::ExportRegions to be open"),
+        };
+        for expected in 1..=11 {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+            assert_eq!(focused(&app), expected);
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(focused(&app), 0, "Tab from the last field must wrap back to the first");
     }
 
     #[test]
