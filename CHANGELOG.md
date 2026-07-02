@@ -7,9 +7,9 @@
   Gain field into separate Left/Right dB fields when checked, so each channel can be
   boosted or attenuated independently. Unchecked (the default), Gain behaves exactly as
   before — one value applied uniformly to every channel. Vertical order is Gain/Left, then
-  Right (blank until checked), then the checkbox, then Tanh limiter; the popup is a fixed
-  size whether or not the box is checked, so toggling it never resizes or reflows the
-  dialog.
+  Right (blank until checked), a blank separator, then the checkbox, then Tanh limiter; the
+  popup is a fixed size whether or not the box is checked, so toggling it never resizes or
+  reflows the dialog.
 
 - Graphics-mode waveform is now anti-aliased. Span edges stay in continuous sub-pixel
   coordinates and the fractional first/last pixel of each column blends against the
