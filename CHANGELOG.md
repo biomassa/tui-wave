@@ -2,6 +2,14 @@
 
 ## 2026-07-02
 
+- Export Regions to Subfolder gained two more per-region options, both off by default:
+  **Limit length** (ms) truncates the end of each region so it can't exceed the given
+  duration, and **Normalize regions** (dB) scales each region independently to a target
+  peak level. Per-region processing order is limit length, then normalize, then fades — a
+  region is trimmed to size before its peak is measured for normalization, and fades are
+  applied last so the envelope taper is never itself part of that peak measurement or of
+  what gets cut off by the length limit.
+
 - Pressing Enter on a buffer in the Buffers panel now hands focus to the waveform after
   switching to it (both the plain-Enter and filter-search Enter paths), instead of leaving
   the Buffers panel focused — picking a buffer to work on is almost always followed by
