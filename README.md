@@ -13,6 +13,7 @@ See [USERGUIDE.md](USERGUIDE.md) for the full keybinding reference and workflow 
 
 ## Status and Disclaimer
 This is developed with the assistance of LLM. I am not a Rust developer, however I have certain expertise in working with audio files. I needed this instrument for my own work.
+I am providing release builds for Linux but please build with cargo for the most feature-complete executables (see below).
 
 ## Prerequisites
 
