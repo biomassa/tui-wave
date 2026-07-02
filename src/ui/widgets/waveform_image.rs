@@ -5,8 +5,10 @@
 //! [`rasterize_waveform`] mirrors [`super::waveform::WaveformWidget`]'s per-column min/max
 //! downsampling exactly — same `WaveformCache` lookups, same theme colors, same
 //! cursor/playhead/selection logic — just at real pixel resolution instead of one glyph per
-//! character cell, so there's no eighth-block sub-row rounding to reason about: a pixel row
-//! either is or isn't inside the bar's continuous `[top_y, bottom_y)` span.
+//! character cell. Span edges stay in continuous (sub-pixel) coordinates all the way to
+//! [`draw_vspan_aa`], which blends the fractional first/last row of each column's span
+//! against the pixel underneath — snapping edges to whole rows instead turned sub-pixel
+//! amplitude changes into flat runs with hard 1px jumps (a visibly staircased trace).
 
 use image::{Rgba, RgbaImage};
 use ratatui::style::Color;
@@ -44,6 +46,49 @@ fn color_to_rgba(color: Color) -> Rgba<u8> {
     match color {
         Color::Rgb(r, g, b) => Rgba([r, g, b, 255]),
         _ => Rgba([0, 0, 0, 255]),
+    }
+}
+
+/// Blends `color` over the pixel at `(x, y)` with the given coverage in `[0, 1]` —
+/// coverage 1.0 writes the color exactly, fractional coverage mixes toward whatever is
+/// already there (the plain background, or the inverted-selection fill).
+fn blend_pixel(img: &mut RgbaImage, x: u32, y: u32, color: Rgba<u8>, coverage: f64) {
+    let c = coverage.clamp(0.0, 1.0);
+    let under = *img.get_pixel(x, y);
+    let mix = |u: u8, o: u8| (u as f64 + (o as f64 - u as f64) * c).round() as u8;
+    img.put_pixel(
+        x,
+        y,
+        Rgba([mix(under[0], color[0]), mix(under[1], color[1]), mix(under[2], color[2]), 255]),
+    );
+}
+
+/// Draws a vertical span covering the continuous range `[y0, y1]` in pixel column `col`,
+/// anti-aliased: fully-covered rows get the color exactly, the fractional first/last rows
+/// get a blend proportional to how much of them the span covers. A span thinner than one
+/// pixel is widened to 1px around its center (and shifted back inside the image if that
+/// pushes past an edge) so the trace never fades out entirely.
+fn draw_vspan_aa(img: &mut RgbaImage, col: u32, y0: f64, y1: f64, color: Rgba<u8>) {
+    let h = img.height() as f64;
+    let (mut lo, mut hi) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
+    if hi - lo < 1.0 {
+        let mid = (lo + hi) / 2.0;
+        lo = mid - 0.5;
+        hi = mid + 0.5;
+    }
+    if lo < 0.0 {
+        hi = (hi - lo).min(h);
+        lo = 0.0;
+    }
+    if hi > h {
+        lo = (lo - (hi - h)).max(0.0);
+        hi = h;
+    }
+    let first = lo.floor() as u32;
+    let last_excl = (hi.ceil() as u32).min(img.height());
+    for row in first..last_excl {
+        let coverage = hi.min(row as f64 + 1.0) - lo.max(row as f64);
+        blend_pixel(img, col, row, color, coverage);
     }
 }
 
@@ -114,7 +159,7 @@ pub fn rasterize_waveform(
             let frac = sample_f - i0 as f64;
             let v = samples[i0] as f64 * (1.0 - frac) + samples[i1] as f64 * frac;
             let scaled = (v * viewport.amplitude_scale as f64).clamp(-1.0, 1.0);
-            let curr_y = (mid_y - scaled * half_height).clamp(0.0, (pixel_height - 1) as f64);
+            let curr_y = mid_y - scaled * half_height;
 
             let selected = selection.is_some_and(|(s, e)| i0 >= s && i0 < e);
             let color = if selected { selected_color } else { waveform_color };
@@ -125,29 +170,24 @@ pub fn rasterize_waveform(
                 Some(py) => (py.min(curr_y), py.max(curr_y)),
                 None => (curr_y, curr_y),
             };
-            let row_lo = y_lo.floor() as u32;
-            let row_hi = y_hi.ceil() as u32;
-            let row_hi = row_hi.min(pixel_height - 1);
-            for row in row_lo..=row_hi {
-                img.put_pixel(col, row, color);
-            }
+            draw_vspan_aa(&mut img, col, y_lo, y_hi, color);
             prev_y = Some(curr_y);
         }
     } else {
-        // Row range the previous column actually drew, used to keep the trace connected.
+        // Span the previous column actually drew, used to keep the trace connected.
         // Adjacent columns min/max *disjoint* sample ranges, so the inter-sample step across
         // the column boundary belongs to neither column's bar; at mid zoom (only a handful
-        // of samples per column) on a steep slope that missed step — plus the floor/ceil
-        // rounding below — spans several pixel rows, and the trace visibly breaks into
-        // dashes. Extending each bar to overlap its predecessor by at least one row is the
+        // of samples per column) on a steep slope that missed step spans several pixel rows
+        // and the trace visibly breaks into dashes. Extending each bar to overlap its
+        // predecessor by half a pixel (so the two columns always share a row) is the
         // bar-mode equivalent of the polyline branch's prev_y connection above.
-        let mut prev_rows: Option<(u32, u32)> = None; // (top_row, bottom_row_excl) as drawn
+        let mut prev_span: Option<(f64, f64)> = None; // (top_y, bottom_y) as drawn
         for col in 0..pixel_width {
             let start = viewport.scroll_offset + (col as f64 * samples_per_pixel_column) as usize;
             let end = viewport.scroll_offset + ((col + 1) as f64 * samples_per_pixel_column) as usize;
             let end = end.min(samples.len());
             if start >= samples.len() || start >= end {
-                prev_rows = None;
+                prev_span = None;
                 continue;
             }
 
@@ -159,32 +199,22 @@ pub fn rasterize_waveform(
             let scaled_min = (min * viewport.amplitude_scale).clamp(-1.0, 1.0) as f64;
             let scaled_max = (max * viewport.amplitude_scale).clamp(-1.0, 1.0) as f64;
 
-            // Amplitude 1.0 is the top pixel row, -1.0 the bottom, 0.0 the middle — continuous
-            // (sub-pixel) positions in principle, but at real pixel resolution there's no
-            // eighth-block rounding to do: floor/ceil to whole pixel rows directly, the same
-            // precision loss a real bitmap waveform display would have (a fraction of a pixel
-            // row, not a fraction of an 8-level glyph).
-            let top_y = (mid_y - scaled_max * half_height).clamp(0.0, pixel_height as f64);
-            let bottom_y = (mid_y - scaled_min * half_height).clamp(0.0, pixel_height as f64);
+            // Amplitude 1.0 is the top pixel row, -1.0 the bottom, 0.0 the middle. The span
+            // stays in continuous (sub-pixel) coordinates; draw_vspan_aa blends the
+            // fractional edge rows rather than snapping to whole rows, which is what keeps
+            // sub-pixel amplitude changes from rendering as a staircase.
+            let mut top_y = (mid_y - scaled_max * half_height).clamp(0.0, pixel_height as f64);
+            let mut bottom_y = (mid_y - scaled_min * half_height).clamp(0.0, pixel_height as f64);
 
             let selected = selection.is_some_and(|(sel_start, sel_end)| start < sel_end && end > sel_start);
             let color = if selected { selected_color } else { waveform_color };
 
-            let mut top_row = top_y.floor() as u32;
-            let mut bottom_row_excl = (bottom_y.ceil() as u32).max(top_row + 1).min(pixel_height);
-            if let Some((prev_top, prev_bottom_excl)) = prev_rows {
-                if top_row >= prev_bottom_excl {
-                    // Entirely below the previous bar — extend up to its bottom row.
-                    top_row = prev_bottom_excl - 1;
-                } else if bottom_row_excl <= prev_top {
-                    // Entirely above the previous bar — extend down to its top row.
-                    bottom_row_excl = prev_top + 1;
-                }
+            if let Some((prev_top, prev_bottom)) = prev_span {
+                top_y = top_y.min(prev_bottom - 0.5).max(0.0);
+                bottom_y = bottom_y.max(prev_top + 0.5).min(pixel_height as f64);
             }
-            for row in top_row..bottom_row_excl {
-                img.put_pixel(col, row, color);
-            }
-            prev_rows = Some((top_row, bottom_row_excl));
+            draw_vspan_aa(&mut img, col, top_y, bottom_y, color);
+            prev_span = Some((top_y, bottom_y));
         }
     }
 
@@ -443,14 +473,13 @@ mod tests {
         let vp = viewport(0, 20.0); // span = 20 * 10 cols = 200 samples
         let img = rasterize_waveform(&samples, &vp, None, None, 0, None, &[], false, 10, 200, 80);
         let bg = color_to_rgba(theme::BASE);
-        let waveform_color = color_to_rgba(theme::WAVEFORM);
         assert!(
-            img.pixels().any(|p| *p == waveform_color),
+            img.pixels().any(|p| *p != bg),
             "line mode must render waveform pixels, not a blank image"
         );
         // Ramp goes -1→+1 so the left side should be near the bottom and right side near the top.
-        let top_quarter = img.rows().take(20).flatten().any(|p| *p == waveform_color);
-        let bot_quarter = img.rows().rev().take(20).flatten().any(|p| *p == waveform_color);
+        let top_quarter = img.rows().take(20).flatten().any(|p| *p != bg);
+        let bot_quarter = img.rows().rev().take(20).flatten().any(|p| *p != bg);
         assert!(top_quarter, "rising ramp must reach the top quarter of the image by the end");
         assert!(bot_quarter, "rising ramp must start in the bottom quarter of the image");
         // Very few columns should be fully blank — the old code blanked everything.
@@ -471,10 +500,12 @@ mod tests {
         // pixel column (bar mode, above the 4.0 polyline threshold).
         let vp = viewport(0, 12.0);
         let img = rasterize_waveform(&samples, &vp, None, None, 0, None, &[], false, 100, 200, 200);
-        let waveform_color = color_to_rgba(theme::WAVEFORM);
+        let bg = color_to_rgba(theme::BASE);
 
+        // Any non-background pixel counts as trace coverage — anti-aliased edge pixels are
+        // blends, not the exact waveform color.
         let rows_of = |x: u32| -> Vec<u32> {
-            (0..img.height()).filter(|&y| *img.get_pixel(x, y) == waveform_color).collect()
+            (0..img.height()).filter(|&y| *img.get_pixel(x, y) != bg).collect()
         };
         // Skip column 0/1 (the cursor line at sample 0 recolors column 0).
         for x in 2..img.width() - 1 {
@@ -492,6 +523,31 @@ mod tests {
                 x + 1
             );
         }
+    }
+
+    #[test]
+    fn sub_pixel_amplitudes_render_anti_aliased_not_staircased() {
+        // A slow, quiet ripple whose per-column amplitude change is a fraction of a pixel
+        // row. Snapping spans to whole rows renders this as flat runs with hard 1px jumps
+        // (a staircase); anti-aliasing must instead express the sub-pixel positions as
+        // partially-covered edge pixels — blends strictly between background and the
+        // waveform color.
+        let samples: Vec<f32> = (0..4000)
+            .map(|i| 0.05 * (2.0 * std::f32::consts::PI * i as f32 / 1200.0).sin())
+            .collect();
+        let vp = viewport(0, 12.0); // 6 samples per pixel column -> bar mode
+        let img = rasterize_waveform(&samples, &vp, None, None, 0, None, &[], false, 100, 200, 200);
+        let bg = color_to_rgba(theme::BASE);
+        let waveform_color = color_to_rgba(theme::WAVEFORM);
+        let cursor_color = color_to_rgba(theme::CURSOR);
+        let blended = img
+            .pixels()
+            .filter(|p| **p != bg && **p != waveform_color && **p != cursor_color)
+            .count();
+        assert!(
+            blended > 0,
+            "sub-pixel span edges must produce blended (anti-aliased) pixels, not snap to whole rows"
+        );
     }
 
     #[test]
@@ -514,3 +570,4 @@ mod tests {
         );
     }
 }
+

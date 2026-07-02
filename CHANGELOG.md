@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-07-02
+
+- Graphics-mode waveform is now anti-aliased. Span edges stay in continuous sub-pixel
+  coordinates and the fractional first/last pixel of each column blends against the
+  background, so sub-pixel amplitude changes render as a smooth curve instead of flat runs
+  with hard one-pixel jumps (the staircase visible at some zoom levels). Applies to both
+  the mid-zoom min/max bars and the high-zoom polyline.
+
 ## 2026-07-01
 
 - Fixed the graphics-mode waveform breaking into dashes at mid zoom levels. Each pixel
