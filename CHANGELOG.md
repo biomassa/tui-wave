@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-07-01
+
+- Fixed the graphics-mode waveform breaking into dashes at mid zoom levels. Each pixel
+  column's min/max bar covered only its own samples, so on steep slopes the inter-sample
+  step across a column boundary fell between adjacent bars and the trace visibly
+  disconnected. Bars now extend to overlap the previous column's bar by at least one pixel
+  row — the bar-mode counterpart of the connection the high-zoom polyline mode already had.
+
 ## 2026-06-30
 
 - Files panel: **Rename** (`Ctrl+r`) renames the selected `.wav` on disk via a name dialog (Esc
