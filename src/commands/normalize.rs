@@ -1,5 +1,6 @@
 use crate::model::command::Command;
 use crate::model::document::Document;
+use crate::model::dsp;
 
 #[derive(Debug)]
 pub struct NormalizeCommand {
@@ -34,11 +35,9 @@ impl Command for NormalizeCommand {
                 peak = peak.max(s.abs());
             }
         }
-        if peak < 0.0001 {
+        let Some(gain) = dsp::normalize_gain(peak, self.target_db) else {
             return;
-        }
-        let target_linear = 10.0f32.powf(self.target_db / 20.0);
-        let gain = target_linear / peak;
+        };
         let mut original = Vec::with_capacity(doc.channels.len());
         for channel in &mut doc.channels {
             let end = end.min(channel.len());
