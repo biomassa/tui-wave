@@ -3,6 +3,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::Widget;
 
+use crate::model::dsp;
 use crate::ui::theme;
 
 /// Width reserved on each side of a channel's waveform pane for the dB scale gutter.
@@ -68,7 +69,7 @@ impl Widget for DbScaleWidget {
         // deep marks continuing downward. `claimed_rows` keeps this priority order — a deep
         // mark that would land on the same row as an already-drawn one is simply skipped.
         let mut draw_mark = |db: f32, label: &str, claimed_rows: &mut [bool]| {
-            let amplitude = 10f32.powf(db / 20.0);
+            let amplitude = dsp::db_to_linear(db);
             // No clamp here — off-screen marks (scaled > 1.0) produce rows < 0 or >= height,
             // which draw_label already rejects. Clamping to [0,1] was wrong: at 2x vertical
             // zoom (amplitude_scale=2.0) 0dB, -3dB, and -6dB all clamped to 1.0 and stacked
