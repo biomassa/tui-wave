@@ -1,5 +1,6 @@
 use crate::model::command::Command;
 use crate::model::document::Document;
+use crate::model::dsp;
 
 #[derive(Debug)]
 pub struct GainCommand {
@@ -37,7 +38,7 @@ impl Command for GainCommand {
             // Fall back to the last provided gain if a channel has no matching entry
             // (shouldn't happen given how the caller builds this, but avoids a panic).
             let gain_db = self.gains_db.get(i).or_else(|| self.gains_db.last()).copied().unwrap_or(0.0);
-            let linear = 10.0f32.powf(gain_db / 20.0);
+            let linear = dsp::db_to_linear(gain_db);
             for s in &mut channel[start..end] {
                 *s *= linear;
                 if self.tanh_clip {

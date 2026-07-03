@@ -27,6 +27,7 @@ use crate::commands::reverse::reverse_command;
 use crate::commands::trim::trim_command;
 use crate::model::clipboard::Clipboard;
 use crate::model::document::{Document, Marker};
+use crate::model::dsp;
 use crate::model::history::History;
 use crate::model::io::{save_wav, save_wav_with, BitDepth};
 use crate::model::selection::Selection;
@@ -46,6 +47,68 @@ use super::widgets::db_scale::{DbScaleWidget, DB_GUTTER_WIDTH};
 use super::widgets::statusbar::StatusBar;
 use super::widgets::waveform::WaveformWidget;
 use super::widgets::waveform_image;
+
+/// Focus indices and row geometry for the Export Regions dialog, shared by every site that
+/// needs to know "which focus index is which": input routing (`dialog_input`), the char
+/// filter (`dialog_accepts`), Enter validation, Space toggles, Tab wrapping, mouse row
+/// clicks, and the render fn. Wire any new field through these constants — the mapping
+/// used to be repeated as bare literals at each of those sites, and a missed edit
+/// compiled cleanly while toggling the wrong checkbox.
+mod er_focus {
+    pub const SUBFOLDER: usize = 0;
+    pub const BASE_NAME: usize = 1;
+    pub const FORMAT: usize = 2;
+    pub const DITHER: usize = 3;
+    pub const LIMIT_CB: usize = 4;
+    pub const LIMIT_MS: usize = 5;
+    pub const NORMALIZE_CB: usize = 6;
+    pub const NORMALIZE_DB: usize = 7;
+    pub const FADE_IN_CB: usize = 8;
+    pub const FADE_IN_MS: usize = 9;
+    pub const FADE_OUT_CB: usize = 10;
+    pub const FADE_OUT_MS: usize = 11;
+    pub const COUNT: usize = 12;
+
+    /// First index (into `dialog_row_rects`) of the four checkbox+value rows — the rows
+    /// before it (subfolder, base name, format, dither) have focus index == row index.
+    pub const FIRST_CHECKBOX_ROW: usize = 4;
+
+    /// Maps a checkbox+value mouse row (`FIRST_CHECKBOX_ROW`..=7) to its
+    /// (checkbox, value field) focus-index pair.
+    pub fn checkbox_row_focus(row: usize) -> (usize, usize) {
+        let cb = LIMIT_CB + (row - FIRST_CHECKBOX_ROW) * 2;
+        (cb, cb + 1)
+    }
+
+    /// Width the checkbox rows' labels are padded to, so all four value fields start in
+    /// the same column.
+    pub const ROW_LABEL_WIDTH: usize = 16;
+
+    /// Column within a checkbox+value row's Rect where the value text starts:
+    /// `"   [X] "` (7 chars) + the padded label + one space. Clicks left of this toggle
+    /// the checkbox; clicks on/after it focus the value field for editing.
+    pub const VALUE_COL: u16 = (3 + 3 + 1 + ROW_LABEL_WIDTH + 1) as u16;
+}
+
+/// Optional per-region processing for [`App::export_regions`], one field per Export
+/// Regions dialog checkbox: `None` means the option is off, `Some(value)` enables it.
+/// (The dialog validates values before building this, but `export_regions` still guards
+/// against nonsensical ones — tests call it directly.)
+struct RegionExportOptions {
+    /// Cap each region's duration at this many milliseconds (must be > 0 to apply).
+    limit_length_ms: Option<f32>,
+    /// Normalize each region's peak to this dBFS target, independently per region.
+    normalize_db: Option<f32>,
+    /// Exp² fade-in over this many milliseconds at each region's start.
+    fade_in_ms: Option<f32>,
+    /// Exp² fade-out over this many milliseconds at each region's end.
+    fade_out_ms: Option<f32>,
+}
+
+/// Number of samples covered by `ms` milliseconds at `sample_rate` (rounded).
+fn ms_to_samples(ms: f32, sample_rate: u32) -> usize {
+    ((ms / 1000.0) * sample_rate as f32).round() as usize
+}
 
 enum Dialog {
     Normalize { input: TextInput },
@@ -76,10 +139,9 @@ enum Dialog {
     /// `tanh_clip` enables a tanh soft-limiter on the mixed output (same as Gain's option).
     MixToMono { inputs: Vec<TextInput>, focused: usize, tanh_clip: bool },
     /// Export Regions to Subfolder — chops file at markers and saves each region.
-    /// `focused`: 0=subfolder, 1=base_name, 2=format, 3=dither,
-    ///            4=limit_length checkbox, 5=limit_length ms,
-    ///            6=normalize checkbox, 7=normalize dB,
-    ///            8=fade_in checkbox, 9=fade_in ms, 10=fade_out checkbox, 11=fade_out ms.
+    /// `focused` is one of the [`er_focus`] indices (subfolder, base name, format, dither,
+    /// then a checkbox + value-field pair for each of limit length/normalize/fade in/fade
+    /// out).
     /// Per-region processing order (see `App::export_regions`) is limit length, then
     /// normalize, then fades — trimming before normalizing means the peak measurement
     /// reflects the audio that's actually kept, and fading last means the envelope taper
@@ -969,12 +1031,12 @@ impl App {
                 fade_in_input, fade_out_input, focused, ..
             } => {
                 match *focused {
-                    0 => Some(folder_input),
-                    1 => Some(base_name_input),
-                    5 => Some(limit_length_input),
-                    7 => Some(normalize_input),
-                    9 => Some(fade_in_input),
-                    11 => Some(fade_out_input),
+                    er_focus::SUBFOLDER => Some(folder_input),
+                    er_focus::BASE_NAME => Some(base_name_input),
+                    er_focus::LIMIT_MS => Some(limit_length_input),
+                    er_focus::NORMALIZE_DB => Some(normalize_input),
+                    er_focus::FADE_IN_MS => Some(fade_in_input),
+                    er_focus::FADE_OUT_MS => Some(fade_out_input),
                     _ => None,
                 }
             }
@@ -994,8 +1056,12 @@ impl App {
             }
             Some(Dialog::ExportRegions { focused, .. }) => {
                 match focused {
-                    5 | 9 | 11 => c.is_ascii_digit() || c == '.', // ms fields: no sign
-                    7 => c.is_ascii_digit() || c == '-' || c == '.', // dB: can be negative
+                    // ms fields: no sign
+                    er_focus::LIMIT_MS | er_focus::FADE_IN_MS | er_focus::FADE_OUT_MS => {
+                        c.is_ascii_digit() || c == '.'
+                    }
+                    // dB: can be negative
+                    er_focus::NORMALIZE_DB => c.is_ascii_digit() || c == '-' || c == '.',
                     _ => true, // folder / base name: free text
                 }
             }
@@ -1058,25 +1124,47 @@ impl App {
                 }) => {
                     let folder = folder_input.value().trim().to_string();
                     let base_name = base_name_input.value().trim().to_string();
+                    let parse = |input: &TextInput| input.value().trim().parse::<f32>().ok();
+                    let limit_ms = parse(&limit_length_input).map(|v| v.max(0.0));
+                    let norm_db = parse(&normalize_input).map(|v| v.min(0.0));
+                    let fi_ms = parse(&fade_in_input).map(|v| v.max(0.0));
+                    let fo_ms = parse(&fade_out_input).map(|v| v.max(0.0));
+                    // A checked option whose value field is empty/unparseable (or a limit
+                    // of 0 ms) blocks the submit and focuses the offending field. Silent
+                    // fallbacks here were destructive: a blank Normalize field used to
+                    // become 0 dBFS (boost every region to full scale), and a blank limit
+                    // silently disabled a cap the checkbox said was on.
+                    let invalid_field = if limit_length && !limit_ms.is_some_and(|v| v > 0.0) {
+                        Some(er_focus::LIMIT_MS)
+                    } else if normalize && norm_db.is_none() {
+                        Some(er_focus::NORMALIZE_DB)
+                    } else if fade_in && fi_ms.is_none() {
+                        Some(er_focus::FADE_IN_MS)
+                    } else if fade_out && fo_ms.is_none() {
+                        Some(er_focus::FADE_OUT_MS)
+                    } else {
+                        None
+                    };
                     // "Do!" is inactive until both the subfolder and base name are filled —
                     // a blank either leaves the dialog open (re-created unchanged) and does
                     // nothing, matching the dimmed Enter hint the dialog already renders.
-                    if folder.is_empty() || base_name.is_empty() {
+                    if folder.is_empty() || base_name.is_empty() || invalid_field.is_some() {
                         self.dialog = Some(Dialog::ExportRegions {
                             folder_input, base_name_input, depth, dither,
                             limit_length, limit_length_input, normalize, normalize_input,
-                            fade_in, fade_in_input, fade_out, fade_out_input, focused,
+                            fade_in, fade_in_input, fade_out, fade_out_input,
+                            focused: invalid_field.unwrap_or(focused),
                         });
                         return;
                     }
-                    let limit_ms = limit_length_input.value().trim().parse::<f32>().unwrap_or(0.0).max(0.0);
-                    let norm_db = normalize_input.value().trim().parse::<f32>().unwrap_or(0.0).min(0.0);
-                    let fi_ms = fade_in_input.value().trim().parse::<f32>().unwrap_or(5.0).max(0.0);
-                    let fo_ms = fade_out_input.value().trim().parse::<f32>().unwrap_or(5.0).max(0.0);
                     self.export_regions(
                         &folder, &base_name, depth, dither,
-                        limit_length, limit_ms, normalize, norm_db,
-                        fade_in, fi_ms, fade_out, fo_ms,
+                        RegionExportOptions {
+                            limit_length_ms: limit_ms.filter(|_| limit_length),
+                            normalize_db: norm_db.filter(|_| normalize),
+                            fade_in_ms: fi_ms.filter(|_| fade_in),
+                            fade_out_ms: fo_ms.filter(|_| fade_out),
+                        },
                     );
                 }
                 Some(Dialog::Info { .. }) => {} // just dismiss
@@ -1085,7 +1173,7 @@ impl App {
             KeyCode::Esc => self.dialog = None,
             KeyCode::Left => {
                 if let Some(Dialog::ExportRegions { focused, depth, .. }) = self.dialog.as_mut() {
-                    if *focused == 2 { *depth = depth.prev(); }
+                    if *focused == er_focus::FORMAT { *depth = depth.prev(); }
                     else if let Some(input) = self.dialog_input() { input.left(); }
                 } else if let Some(input) = self.dialog_input() {
                     input.left();
@@ -1095,7 +1183,7 @@ impl App {
             }
             KeyCode::Right => {
                 if let Some(Dialog::ExportRegions { focused, depth, .. }) = self.dialog.as_mut() {
-                    if *focused == 2 { *depth = depth.next(); }
+                    if *focused == er_focus::FORMAT { *depth = depth.next(); }
                     else if let Some(input) = self.dialog_input() { input.right(); }
                 } else if let Some(input) = self.dialog_input() {
                     input.right();
@@ -1147,11 +1235,11 @@ impl App {
                         focused, dither, depth, limit_length, normalize, fade_in, fade_out, ..
                     }) => {
                         match *focused {
-                            3 => { if depth.supports_dither() { *dither = !*dither; } }
-                            4 => *limit_length = !*limit_length,
-                            6 => *normalize = !*normalize,
-                            8 => *fade_in = !*fade_in,
-                            10 => *fade_out = !*fade_out,
+                            er_focus::DITHER => { if depth.supports_dither() { *dither = !*dither; } }
+                            er_focus::LIMIT_CB => *limit_length = !*limit_length,
+                            er_focus::NORMALIZE_CB => *normalize = !*normalize,
+                            er_focus::FADE_IN_CB => *fade_in = !*fade_in,
+                            er_focus::FADE_OUT_CB => *fade_out = !*fade_out,
                             _ => {}
                         }
                     }
@@ -1200,15 +1288,16 @@ impl App {
             Some(Dialog::FadeIn { curve }) | Some(Dialog::FadeOut { curve }) => {
                 *curve = if forward { curve.next() } else { curve.prev() };
             }
-            Some(Dialog::ExportRegions { focused, .. }) => *focused = step(*focused, 12),
+            Some(Dialog::ExportRegions { focused, .. }) => *focused = step(*focused, er_focus::COUNT),
             _ => {}
         }
     }
 
     /// Called when the user left-clicks a row in an open dialog popup. `row` is a 0-based
     /// index into `dialog_row_rects` — clicking a row focuses it, and clicking a checkbox
-    /// row also toggles it.
-    fn handle_dialog_row_click(&mut self, row: usize) {
+    /// row also toggles it. `x_in_row` is the click's column within that row's Rect, used
+    /// by rows that hold both a checkbox and a value field to tell the two targets apart.
+    fn handle_dialog_row_click(&mut self, row: usize, x_in_row: u16) {
         // The hints/apply bar is appended as the last element of dialog_row_rects.
         // Clicking it (or anything past the interactive rows) submits the dialog.
         if row >= self.dialog_n_interactive {
@@ -1258,12 +1347,24 @@ impl App {
                 match row {
                     0..=3 => {
                         *focused = row;
-                        if row == 3 && depth.supports_dither() { *dither = !*dither; }
+                        if row == er_focus::DITHER && depth.supports_dither() { *dither = !*dither; }
                     }
-                    4 => { *focused = 4; *limit_length = !*limit_length; }
-                    5 => { *focused = 6; *normalize = !*normalize; }
-                    6 => { *focused = 8; *fade_in = !*fade_in; }
-                    7 => { *focused = 10; *fade_out = !*fade_out; }
+                    4..=7 => {
+                        let (cb, val) = er_focus::checkbox_row_focus(row);
+                        if x_in_row >= er_focus::VALUE_COL {
+                            // A click on the value text focuses the field for editing;
+                            // it must not flip the checkbox the same row happens to hold.
+                            *focused = val;
+                        } else {
+                            *focused = cb;
+                            match cb {
+                                er_focus::LIMIT_CB => *limit_length = !*limit_length,
+                                er_focus::NORMALIZE_CB => *normalize = !*normalize,
+                                er_focus::FADE_IN_CB => *fade_in = !*fade_in,
+                                _ => *fade_out = !*fade_out,
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1776,7 +1877,7 @@ impl App {
                     return 0.0f32;
                 }
                 match raw.parse::<f32>() {
-                    Ok(db) => 10f32.powf(db / 20.0),
+                    Ok(db) => dsp::db_to_linear(db),
                     Err(_) => if i < src.channels.len() { 1.0 } else { 0.0 },
                 }
             })
@@ -1824,13 +1925,15 @@ impl App {
     /// directory for unsaved buffers). Files are named `{base_name}-001.wav`, `-002.wav`, …
     /// The first region spans [0, first_marker), the last spans [last_marker, end).
     ///
+    /// See [`RegionExportOptions`] for the optional per-region processing.
+    ///
     /// Per-region processing, in order:
-    /// 1. Limit length (`limit_length`/`limit_length_ms`): truncates the region's end so it's
-    ///    no longer than the given duration. Done first so a shorter region is what actually
+    /// 1. Limit length (`opts.limit_length_ms`): truncates the region's end so it's no
+    ///    longer than the given duration. Done first so a shorter region is what actually
     ///    gets normalized/faded, rather than measuring/tapering audio that's about to be cut.
-    /// 2. Normalize (`normalize`/`normalize_db`): scales the region so its peak sample hits
-    ///    the target dBFS, independently per region (each region can have a different peak).
-    /// 3. Fade in/out (`fade_*`/`fade_*_ms`): a cosine-curve (exp²) fade applied last, so the
+    /// 2. Normalize (`opts.normalize_db`): scales the region so its peak sample hits the
+    ///    target dBFS, independently per region (each region can have a different peak).
+    /// 3. Fade in/out (`opts.fade_*_ms`): a cosine-curve (exp²) fade applied last, so the
     ///    envelope taper itself is never included in the length/peak measurements above.
     fn export_regions(
         &mut self,
@@ -1838,14 +1941,7 @@ impl App {
         base_name: &str,
         depth: BitDepth,
         dither: bool,
-        limit_length: bool,
-        limit_length_ms: f32,
-        normalize: bool,
-        normalize_db: f32,
-        fade_in: bool,
-        fade_in_ms: f32,
-        fade_out: bool,
-        fade_out_ms: f32,
+        opts: RegionExportOptions,
     ) {
         let idx = self.active_document;
         let Some(doc) = self.documents.get(idx) else { return };
@@ -1889,49 +1985,38 @@ impl App {
 
         let channels_snapshot: Vec<Vec<f32>> = doc.channels.clone();
 
-        let limit_length_samples = if limit_length && limit_length_ms > 0.0 {
-            Some(((limit_length_ms / 1000.0) * sample_rate as f32).round() as usize)
-        } else { None };
-        let fade_in_len = if fade_in && fade_in_ms > 0.0 {
-            ((fade_in_ms / 1000.0) * sample_rate as f32).round() as usize
-        } else { 0 };
-        let fade_out_len = if fade_out && fade_out_ms > 0.0 {
-            ((fade_out_ms / 1000.0) * sample_rate as f32).round() as usize
-        } else { 0 };
+        let limit_length_samples = opts
+            .limit_length_ms
+            .filter(|&ms| ms > 0.0)
+            // A sub-sample limit (e.g. 0.01 ms at 44.1 kHz) rounds to 0 samples, which
+            // would truncate every region to an empty WAV while still reporting success —
+            // keep at least one sample.
+            .map(|ms| ms_to_samples(ms, sample_rate).max(1));
+        let fade_in_len = opts.fade_in_ms.map_or(0, |ms| ms_to_samples(ms, sample_rate));
+        let fade_out_len = opts.fade_out_ms.map_or(0, |ms| ms_to_samples(ms, sample_rate));
 
         let mut error: Option<String> = None;
         for (i, (start, end, region_markers)) in regions.iter().enumerate() {
             let file_name = format!("{base_name}-{:03}.wav", i + 1);
             let path = out_dir.join(&file_name);
-            let mut region_channels: Vec<Vec<f32>> = channels_snapshot.iter()
-                .map(|ch| ch[*start..*end].to_vec())
-                .collect();
-            let mut region_len = end - start;
-            let mut region_markers = region_markers.clone();
-
             // Limit length: trim the end so the region can't exceed the given duration —
             // done before normalize/fades so both act on the audio that's actually kept.
-            if let Some(max_len) = limit_length_samples {
-                if region_len > max_len {
-                    for ch in &mut region_channels {
-                        ch.truncate(max_len);
-                    }
-                    region_len = max_len;
-                    region_markers.retain(|m| m.position < region_len);
-                }
-            }
+            // Applied by clamping the copy itself: copying the whole region only to
+            // truncate it would move (and keep allocated) the potentially huge cut-off
+            // part for nothing.
+            let copy_end = limit_length_samples.map_or(*end, |max_len| (*start + max_len).min(*end));
+            let mut region_channels: Vec<Vec<f32>> = channels_snapshot.iter()
+                .map(|ch| ch[*start..copy_end].to_vec())
+                .collect();
+            let region_len = copy_end - start;
+            let mut region_markers = region_markers.clone();
+            region_markers.retain(|m| m.position < region_len);
+
             // Normalize this region independently to its own peak, before fades — a fade
             // only ever attenuates, so measuring the peak after fading would risk chasing a
             // peak the fade itself just reduced instead of the region's true loudest sample.
-            if normalize {
-                let mut peak = 0.0f32;
-                for ch in &region_channels {
-                    for &s in ch {
-                        peak = peak.max(s.abs());
-                    }
-                }
-                if peak > 0.0001 {
-                    let gain = 10.0f32.powf(normalize_db / 20.0) / peak;
+            if let Some(target_db) = opts.normalize_db {
+                if let Some(gain) = dsp::normalize_gain(dsp::peak(&region_channels), target_db) {
                     for ch in &mut region_channels {
                         for s in ch.iter_mut() {
                             *s *= gain;
@@ -2168,9 +2253,14 @@ impl App {
         if self.dialog.is_some() || self.save_as_active {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 let pos = Position::new(mouse.column, mouse.row);
-                let hit = self.dialog_row_rects.iter().position(|r| r.contains(pos));
-                if let Some(row) = hit {
-                    self.handle_dialog_row_click(row);
+                let hit = self
+                    .dialog_row_rects
+                    .iter()
+                    .enumerate()
+                    .find(|(_, r)| r.contains(pos))
+                    .map(|(row, r)| (row, pos.x.saturating_sub(r.x)));
+                if let Some((row, x_in_row)) = hit {
+                    self.handle_dialog_row_click(row, x_in_row);
                 }
             }
             return;
@@ -4314,8 +4404,9 @@ fn render_export_regions_dialog(
 ) -> Vec<Rect> {
     let width = 54u16.min(area.width);
     // subfolder + basename + blank + format + dither + blank + limit_length + normalize +
-    // blank + fade_in + fade_out + blank + hints = 14 inner rows + 2 border
-    let height = 16u16.min(area.height);
+    // blank + fade_in + fade_out + blank + hints = 13 inner rows + 2 border
+    const FULL_HEIGHT: u16 = 15;
+    let height = FULL_HEIGHT.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -4348,10 +4439,10 @@ fn render_export_regions_dialog(
         }
     };
 
-    let folder_line = make_text_row(" Subfolder: ", folder_input, focused == 0);
-    let base_line   = make_text_row(" Base name: ", base_name_input, focused == 1);
+    let folder_line = make_text_row(" Subfolder: ", folder_input, focused == er_focus::SUBFOLDER);
+    let base_line   = make_text_row(" Base name: ", base_name_input, focused == er_focus::BASE_NAME);
 
-    let format_line = if focused == 2 {
+    let format_line = if focused == er_focus::FORMAT {
         Line::from(vec![
             Span::styled("   Format: ◄ ", label_style),
             Span::styled(depth.label(), cursor_style),
@@ -4368,7 +4459,7 @@ fn render_export_regions_dialog(
         Line::from(Span::styled("   [ ] Dither  (n/a for float)", dim_style))
     } else {
         let label = if dither { "   [X] Dither" } else { "   [ ] Dither" };
-        if focused == 3 {
+        if focused == er_focus::DITHER {
             Line::from(Span::styled(label, cursor_style))
         } else {
             Line::from(Span::styled(label, label_style))
@@ -4379,8 +4470,9 @@ fn render_export_regions_dialog(
     // fades — a checkbox gates a text field, and `cb_idx`/`val_idx` are that row's two
     // focus indices (the checkbox and the value field are separately focusable/tabbable).
     // `label` is padded to a fixed width so all four rows' value fields land in the same
-    // column regardless of how long each row's label text is.
-    const ROW_LABEL_WIDTH: usize = 16;
+    // column regardless of how long each row's label text is — which is also what lets
+    // `handle_dialog_row_click` split clicks at `er_focus::VALUE_COL`.
+    const ROW_LABEL_WIDTH: usize = er_focus::ROW_LABEL_WIDTH;
     let checkbox_value_row = |label: &str, checked: bool, cb_idx: usize, val_idx: usize, input: &TextInput, suffix: &str| {
         let cb = if checked { "[X]" } else { "[ ]" };
         let cb_style = if focused == cb_idx { cursor_style } else if checked { label_style } else { dim_style };
@@ -4405,16 +4497,16 @@ fn render_export_regions_dialog(
     };
 
     let limit_length_line = checkbox_value_row(
-        "Limit length to", limit_length, 4, 5, limit_length_input, " ms",
+        "Limit length to", limit_length, er_focus::LIMIT_CB, er_focus::LIMIT_MS, limit_length_input, " ms",
     );
     let normalize_line = checkbox_value_row(
-        "Normalize to", normalize, 6, 7, normalize_input, " dB",
+        "Normalize to", normalize, er_focus::NORMALIZE_CB, er_focus::NORMALIZE_DB, normalize_input, " dB",
     );
     let fade_in_line = checkbox_value_row(
-        "Fade in at start", fade_in, 8, 9, fade_in_input, " ms",
+        "Fade in at start", fade_in, er_focus::FADE_IN_CB, er_focus::FADE_IN_MS, fade_in_input, " ms",
     );
     let fade_out_line = checkbox_value_row(
-        "Fade out at end", fade_out, 10, 11, fade_out_input, " ms",
+        "Fade out at end", fade_out, er_focus::FADE_OUT_CB, er_focus::FADE_OUT_MS, fade_out_input, " ms",
     );
 
     let do_active = !folder_input.value().trim().is_empty() && !base_name_input.value().trim().is_empty();
@@ -4446,19 +4538,39 @@ fn render_export_regions_dialog(
         popup,
     );
 
-    let row_w = popup.width.saturating_sub(2);
+    // Each interactive row's Rect is clipped to the popup's inner area: on a terminal
+    // shorter than FULL_HEIGHT the bottom rows aren't drawn, and an unclipped Rect there
+    // would still catch clicks — worse, the hints Rect (placed relative to popup.height)
+    // would collide with whichever field row happens to render at that offset, making a
+    // "submit" click toggle that row's checkbox instead.
+    let inner = Rect {
+        x: popup.x + 1,
+        y: popup.y + 1,
+        width: popup.width.saturating_sub(2),
+        height: popup.height.saturating_sub(2),
+    };
+    let row = |y_offset: u16| {
+        Rect { x: popup.x + 1, y: popup.y + y_offset, width: inner.width, height: 1 }.intersection(inner)
+    };
     vec![
-        Rect { x: popup.x + 1, y: popup.y + 1, width: row_w, height: 1 },  // subfolder (row 0)
-        Rect { x: popup.x + 1, y: popup.y + 2, width: row_w, height: 1 },  // base name (row 1)
-        Rect { x: popup.x + 1, y: popup.y + 4, width: row_w, height: 1 },  // format (row 2)
-        Rect { x: popup.x + 1, y: popup.y + 5, width: row_w, height: 1 },  // dither (row 3)
-        Rect { x: popup.x + 1, y: popup.y + 7, width: row_w, height: 1 },  // limit length (row 4)
-        Rect { x: popup.x + 1, y: popup.y + 8, width: row_w, height: 1 },  // normalize (row 5)
-        Rect { x: popup.x + 1, y: popup.y + 10, width: row_w, height: 1 }, // fade in (row 6)
-        Rect { x: popup.x + 1, y: popup.y + 11, width: row_w, height: 1 }, // fade out (row 7)
+        row(1),  // subfolder (row 0)
+        row(2),  // base name (row 1)
+        row(4),  // format (row 2)
+        row(5),  // dither (row 3)
+        row(7),  // limit length (row 4)
+        row(8),  // normalize (row 5)
+        row(10), // fade in (row 6)
+        row(11), // fade out (row 7)
         // Hints/apply bar — clicking it (or anywhere past row 7) submits, matching
-        // handle_dialog_row_click's `row >= dialog_n_interactive` convention.
-        Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 },
+        // handle_dialog_row_click's `row >= dialog_n_interactive` convention. Only
+        // present when the popup is full-height: when clamped, the row at
+        // popup.height - 2 shows a clipped field line, not the hints bar (Enter still
+        // submits — this only drops the mouse target, never the action).
+        if popup.height == FULL_HEIGHT {
+            Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: inner.width, height: 1 }
+        } else {
+            Rect::default()
+        },
     ]
 }
 
@@ -4940,9 +5052,12 @@ mod tests {
         let mut app = new_app(Some(document), None);
         app.export_regions(
             "out", "r", BitDepth::Float32, false,
-            false, 0.0,   // limit length: off
-            true, 0.0,    // normalize to 0 dBFS
-            false, 0.0, false, 0.0, // fades: off
+            RegionExportOptions {
+                limit_length_ms: None,
+                normalize_db: Some(0.0), // normalize to 0 dBFS
+                fade_in_ms: None,
+                fade_out_ms: None,
+            },
         );
 
         let peak = |path: &std::path::Path| {
@@ -4984,10 +5099,12 @@ mod tests {
         let mut app = new_app(Some(document), None);
         app.export_regions(
             "out", "r", BitDepth::Float32, false,
-            true, 50.0,   // limit length to 50 ms (50 samples)
-            false, 0.0,   // normalize: off
-            false, 0.0,   // fade in: off
-            true, 10.0,   // fade out over the last 10 ms (10 samples)
+            RegionExportOptions {
+                limit_length_ms: Some(50.0), // limit length to 50 ms (50 samples)
+                normalize_db: None,
+                fade_in_ms: None,
+                fade_out_ms: Some(10.0), // fade out over the last 10 ms (10 samples)
+            },
         );
 
         let doc = crate::model::io::load_wav(&dir.join("out/r-001.wav")).unwrap();
@@ -5026,8 +5143,12 @@ mod tests {
         let mut app = new_app(Some(document), None);
         app.export_regions(
             "out", "r", BitDepth::Float32, false,
-            true, 50.0, // limit length to 50 ms
-            false, 0.0, false, 0.0, false, 0.0,
+            RegionExportOptions {
+                limit_length_ms: Some(50.0), // limit length to 50 ms
+                normalize_db: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+            },
         );
 
         let r1 = crate::model::io::load_wav(&dir.join("out/r-001.wav")).unwrap();
@@ -5068,6 +5189,209 @@ mod tests {
         }
         app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(focused(&app), 0, "Tab from the last field must wrap back to the first");
+    }
+
+    /// Builds an Export Regions dialog with the given per-option (checkbox, field text)
+    /// states — the shape every validation test below needs.
+    fn export_regions_dialog(
+        limit: (bool, &str),
+        normalize: (bool, &str),
+        fade_in: (bool, &str),
+        fade_out: (bool, &str),
+    ) -> Dialog {
+        Dialog::ExportRegions {
+            folder_input: TextInput::new("out"),
+            base_name_input: TextInput::new("r"),
+            depth: BitDepth::Float32,
+            dither: false,
+            limit_length: limit.0,
+            limit_length_input: TextInput::new(limit.1),
+            normalize: normalize.0,
+            normalize_input: TextInput::new(normalize.1),
+            fade_in: fade_in.0,
+            fade_in_input: TextInput::new(fade_in.1),
+            fade_out: fade_out.0,
+            fade_out_input: TextInput::new(fade_out.1),
+            focused: 0,
+        }
+    }
+
+    /// Regression test: a checked option whose value field doesn't parse must block the
+    /// submit and focus the offending field. A blank Normalize field used to fall back to
+    /// 0 dBFS — silently boosting every exported region to full scale — and a blank limit
+    /// silently disabled a cap the checkbox said was on.
+    #[test]
+    fn export_regions_enter_with_invalid_checked_field_keeps_dialog_open_and_focuses_it() {
+        let cases = [
+            (export_regions_dialog((true, ""), (false, "0"), (false, "5"), (false, "5")), er_focus::LIMIT_MS),
+            (export_regions_dialog((true, "0"), (false, "0"), (false, "5"), (false, "5")), er_focus::LIMIT_MS),
+            (export_regions_dialog((false, "1000"), (true, "-"), (false, "5"), (false, "5")), er_focus::NORMALIZE_DB),
+            (export_regions_dialog((false, "1000"), (false, "0"), (true, ""), (false, "5")), er_focus::FADE_IN_MS),
+            (export_regions_dialog((false, "1000"), (false, "0"), (false, "5"), (true, "6.-")), er_focus::FADE_OUT_MS),
+        ];
+        for (dialog, expected_focus) in cases {
+            let mut app = new_app(Some(doc(0.5, 200)), None);
+            app.documents[0].markers = vec![Marker { position: 100, label: "m".into() }];
+            app.dialog = Some(dialog);
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            match &app.dialog {
+                Some(Dialog::ExportRegions { focused, .. }) => assert_eq!(
+                    *focused, expected_focus,
+                    "the dialog must stay open with focus moved to the invalid field"
+                ),
+                other => panic!(
+                    "expected the dialog to stay open on an invalid field (focus {expected_focus}), got {}",
+                    if other.is_some() { "another dialog" } else { "no dialog" },
+                ),
+            }
+        }
+    }
+
+    /// An *unchecked* option's field content is irrelevant — garbage there must not block
+    /// the export.
+    #[test]
+    fn export_regions_enter_ignores_invalid_fields_of_unchecked_options() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_export_unchecked_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = new_app(Some(doc(0.5, 200)), None);
+        app.documents[0].markers = vec![Marker { position: 100, label: "m".into() }];
+        app.documents[0].path = Some(dir.join("src.wav"));
+        app.dialog = Some(export_regions_dialog((false, ""), (false, "-"), (false, ""), (false, "x")));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(app.dialog, Some(Dialog::Info { .. })),
+            "the export must run (success popup) despite unparseable fields on unchecked options"
+        );
+        assert!(dir.join("out/r-001.wav").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Regression test: a sub-sample length limit (rounds to 0 samples) must not truncate
+    /// every region to an empty WAV — at least one sample is always kept.
+    #[test]
+    fn export_regions_sub_sample_limit_keeps_at_least_one_sample() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_export_subsample_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let document = Document {
+            channels: vec![vec![0.5f32; 100]],
+            sample_rate: 44100,
+            selection: None,
+            cursor: 0,
+            dirty: false,
+            path: Some(dir.join("src.wav")),
+            markers: vec![Marker { position: 50, label: "m".into() }],
+            bits_per_sample: 32,
+            bext: None,
+        };
+        let mut app = new_app(Some(document), None);
+        app.export_regions(
+            "out", "r", BitDepth::Float32, false,
+            RegionExportOptions {
+                limit_length_ms: Some(0.01), // 0.441 samples at 44.1 kHz — rounds to 0
+                normalize_db: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+            },
+        );
+        let r1 = crate::model::io::load_wav(dir.join("out/r-001.wav")).unwrap();
+        assert_eq!(r1.channels[0].len(), 1, "a sub-sample limit must clamp to one sample, not zero");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Regression test: the clickable hints/apply Rect must sit on the row where the
+    /// "Enter:Do!" bar actually renders. It used to be placed one row below it (the dialog
+    /// height over-counted its 13 content lines as 14), so clicking the visible hints bar
+    /// hit nothing and the submit was silently swallowed.
+    #[test]
+    fn export_regions_hints_rect_sits_on_the_rendered_hints_row() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.5, 200)), None);
+        app.documents[0].markers = vec![Marker { position: 100, label: "m".into() }];
+        app.dialog = Some(export_regions_dialog((false, "1000"), (false, "0"), (true, "5"), (true, "5")));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let hints = *app.dialog_row_rects.last().unwrap();
+        // Find the row where "Do!" is rendered and compare.
+        let buffer = terminal.backend().buffer();
+        let hints_row = (0..24u16)
+            .find(|&y| {
+                let line: String = (0..80u16).map(|x| buffer[(x, y)].symbol()).collect();
+                line.contains(":Do!")
+            })
+            .expect("the hints bar must be rendered somewhere");
+        assert_eq!(hints.y, hints_row, "the clickable apply Rect must cover the visible hints bar");
+        assert!(hints.width > 0);
+    }
+
+    /// On a terminal too short for the full dialog, the hints/apply Rect is dropped
+    /// (zero-sized) instead of landing on top of whichever field row renders at
+    /// popup.height - 2 — a "submit" click there used to toggle that row's checkbox.
+    #[test]
+    fn export_regions_clipped_dialog_drops_the_hints_rect_instead_of_colliding() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.5, 200)), None);
+        app.documents[0].markers = vec![Marker { position: 100, label: "m".into() }];
+        app.dialog = Some(export_regions_dialog((false, "1000"), (false, "0"), (true, "5"), (true, "5")));
+        let mut terminal = Terminal::new(TestBackend::new(80, 13)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let rects = &app.dialog_row_rects;
+        let hints = *rects.last().unwrap();
+        assert_eq!(hints.width, 0, "a clipped dialog must not offer a mis-placed mouse submit target");
+        for (i, r) in rects[..rects.len() - 1].iter().enumerate() {
+            for (j, other) in rects[..rects.len() - 1].iter().enumerate().skip(i + 1) {
+                assert!(
+                    r.width == 0 || other.width == 0 || r.y != other.y,
+                    "field rows {i} and {j} must never overlap ({r:?} vs {other:?})"
+                );
+            }
+        }
+    }
+
+    /// Clicking the value text of a checkbox+value row must focus the value field for
+    /// editing; only clicks on the label/checkbox part toggle. It used to be impossible
+    /// to reach the ms/dB fields by mouse — any click on the row flipped the checkbox.
+    #[test]
+    fn export_regions_click_on_value_text_focuses_the_field_without_toggling() {
+        let mut app = new_app(Some(doc(0.5, 200)), None);
+        app.dialog = Some(export_regions_dialog((true, "1000"), (false, "0"), (true, "5"), (true, "5")));
+        // Normally set at render time: 8 interactive rows before the hints/apply bar.
+        app.dialog_n_interactive = 8;
+
+        // Row 4 is the limit-length row; a click at the value column focuses the ms field.
+        app.handle_dialog_row_click(4, er_focus::VALUE_COL);
+        match &app.dialog {
+            Some(Dialog::ExportRegions { focused, limit_length, .. }) => {
+                assert_eq!(*focused, er_focus::LIMIT_MS, "the value field must receive focus");
+                assert!(*limit_length, "the checkbox must not be toggled by a value click");
+            }
+            _ => panic!("expected Dialog::ExportRegions to be open"),
+        }
+
+        // A click left of the value column still toggles (and focuses) the checkbox.
+        app.handle_dialog_row_click(4, er_focus::VALUE_COL - 1);
+        match &app.dialog {
+            Some(Dialog::ExportRegions { focused, limit_length, .. }) => {
+                assert_eq!(*focused, er_focus::LIMIT_CB);
+                assert!(!*limit_length, "a label/checkbox click must toggle");
+            }
+            _ => panic!("expected Dialog::ExportRegions to be open"),
+        }
+
+        // Same split on the fade-out row (row 7 → focus indices 10/11).
+        app.handle_dialog_row_click(7, er_focus::VALUE_COL + 3);
+        match &app.dialog {
+            Some(Dialog::ExportRegions { focused, fade_out, .. }) => {
+                assert_eq!(*focused, er_focus::FADE_OUT_MS);
+                assert!(*fade_out, "the fade-out checkbox must not be toggled by a value click");
+            }
+            _ => panic!("expected Dialog::ExportRegions to be open"),
+        }
     }
 
     #[test]
