@@ -2298,6 +2298,15 @@ impl App {
         let target = target.min(total_len - 1);
         let snap = self.snap_to_zero;
         let target = if snap { document.snap_to_zero_crossing(target) } else { target };
+        // Selection bounds are exclusive-end ([start, end) everywhere), so when the pointer
+        // sits in the column that visually contains end-of-file, the selection edge must be
+        // total_len — with the plain `target` (the column's *first* sample, further clamped
+        // to the last sample index) a mouse selection could never include the file's final
+        // samples, and "select to the end, delete" left an orphaned sliver behind. The
+        // cursor keeps using `target`: it's a sample index, not a bound.
+        let col_end =
+            (viewport.scroll_offset as f64 + (col + 1.0) * viewport.samples_per_column) as usize;
+        let sel_edge = if col_end >= total_len { total_len } else { target };
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -2351,7 +2360,7 @@ impl App {
                     } else {
                         document.cursor
                     };
-                    document.selection = Some(Selection { start: anchor, end: target });
+                    document.selection = Some(Selection { start: anchor, end: sel_edge });
                     document.cursor = anchor.min(target);
                     self.mouse_down_anchor = Some(anchor);
                 } else {
@@ -2367,7 +2376,7 @@ impl App {
                     document.cursor = start;
                     document.selection = Some(Selection {
                         start: anchor,
-                        end: target,
+                        end: sel_edge,
                     });
                 }
             }
@@ -2378,7 +2387,7 @@ impl App {
                         document.cursor = start;
                         document.selection = Some(Selection {
                             start: anchor,
-                            end: target,
+                            end: sel_edge,
                         });
                     }
                 }
@@ -3042,6 +3051,12 @@ impl App {
         }
 
         let snap = self.snap_to_zero;
+        // The cursor is a sample index and clamps to the last sample (total_len - 1), but
+        // selection bounds are exclusive-end everywhere (delete/cut/trim take [start, end)).
+        // A selection edge or anchor sitting on the last sample therefore counts as
+        // total_len — otherwise "select to the end, delete" silently leaves the final
+        // sample behind as an orphaned click at end-of-file.
+        let sel_edge = |pos: usize| if pos == total_len - 1 { total_len } else { pos };
         match action {
             // Extend in either direction with the anchor held fixed (see Selection::extended):
             // the active edge follows the cursor, so reversing direction shrinks rather than
@@ -3060,7 +3075,8 @@ impl App {
                 } else {
                     raw
                 };
-                document.selection = Some(Selection::extended(document.selection, old_cursor, cursor));
+                document.selection =
+                    Some(Selection::extended(document.selection, sel_edge(old_cursor), sel_edge(cursor)));
                 document.cursor = cursor;
             }
             Action::ExtendSelectionToStart
@@ -3070,7 +3086,11 @@ impl App {
             | Action::ExtendSelectionPageBack
             | Action::ExtendSelectionPageForward => {
                 // cursor is already at the target; anchor is kept from existing selection or old_cursor.
-                document.selection = Some(Selection::extended(document.selection, old_cursor, document.cursor));
+                document.selection = Some(Selection::extended(
+                    document.selection,
+                    sel_edge(old_cursor),
+                    sel_edge(document.cursor),
+                ));
             }
             // Plain cursor moves and jumps clear any active selection (same paradigm as
             // Word/RX: non-Shift navigation collapses the selection).
@@ -3240,7 +3260,13 @@ impl App {
         }
 
         let cursor = document.cursor;
+        let new_len = document.len_samples();
         if let Some(viewport) = self.viewport.as_mut() {
+            // Sync before clamping: the edit may have shrunk the document, and total_len is
+            // otherwise only refreshed at render time — ensure_visible would clamp
+            // scroll_offset against the stale (longer) length and leave the view
+            // overhanging past the new end-of-file.
+            viewport.total_len = new_len;
             viewport.ensure_visible(cursor, content_width);
         }
         if mutates_samples {
@@ -5379,8 +5405,66 @@ mod tests {
 
         app.handle_action(Action::ExtendSelectionToNextMarker);
 
-        assert_eq!(app.documents[0].selection, Some(Selection { start: 1_000, end: 9_999 }));
+        // The selection extends *through* end-of-file (exclusive end == total_len), not
+        // just to the last sample index — see the sel_edge regression tests below.
+        assert_eq!(app.documents[0].selection, Some(Selection { start: 1_000, end: 10_000 }));
         assert_eq!(app.documents[0].cursor, 9_999);
+    }
+
+    /// Regression test: Shift+End must select *through* end-of-file. The selection end is
+    /// an exclusive bound, so an edge clamped to the last sample index (total_len - 1)
+    /// meant Delete/Cut always left the file's final sample behind — an orphaned stray
+    /// value rendering as a spike at the end of the waveform.
+    #[test]
+    fn extend_selection_to_end_then_delete_removes_everything_to_eof() {
+        let mut app = new_app(Some(doc(0.1, 10_000)), None);
+        app.documents[0].cursor = 5_000;
+        app.content_width = 80;
+        app.viewport = Some(Viewport::fit_to_width(10_000, 80));
+
+        app.handle_action(Action::ExtendSelectionToEnd);
+        assert_eq!(app.documents[0].selection, Some(Selection { start: 5_000, end: 10_000 }));
+
+        app.handle_action(Action::Delete);
+        assert_eq!(app.documents[0].len_samples(), 5_000, "no orphan samples may survive past the deleted tail");
+    }
+
+    /// Same off-by-one from the other side: starting at the end (Shift+Left from the last
+    /// sample) must anchor the selection at total_len so the final sample is included.
+    #[test]
+    fn extend_selection_left_from_the_end_includes_the_last_sample() {
+        let mut app = new_app(Some(doc(0.1, 10_000)), None);
+        app.documents[0].cursor = 9_999;
+        app.content_width = 80;
+        app.viewport = Some(Viewport::fit_to_width(10_000, 80));
+
+        app.handle_action(Action::ExtendSelectionToStart);
+
+        assert_eq!(app.documents[0].selection, Some(Selection { start: 10_000, end: 0 }));
+        assert_eq!(app.documents[0].selection.unwrap().normalized(), (0, 10_000));
+    }
+
+    /// Regression test: a mouse drag into the column that visually contains end-of-file
+    /// must select through total_len. The pointer's sample position is clamped to the last
+    /// sample *index*, so a drag to the right edge could never include the file's final
+    /// samples and deleting the "selected tail" left a sliver behind.
+    #[test]
+    fn mouse_drag_to_the_right_edge_selects_through_eof() {
+        let mut app = new_app(Some(doc(0.1, 1_000)), None);
+        app.content_width = 80;
+        app.waveform_area = Rect { x: 0, y: 0, width: 80, height: 4 };
+        // fit-to-width: 12.5 samples per column, so column 79 covers samples 987..1000.
+        app.viewport = Some(Viewport::fit_to_width(1_000, 80));
+
+        let mouse_at = |col: u16, kind: MouseEventKind| MouseEvent { kind, column: col, row: 1, modifiers: KeyModifiers::NONE };
+        app.handle_mouse(mouse_at(20, MouseEventKind::Down(MouseButton::Left)));
+        app.handle_mouse(mouse_at(79, MouseEventKind::Drag(MouseButton::Left)));
+        app.handle_mouse(mouse_at(79, MouseEventKind::Up(MouseButton::Left)));
+
+        assert_eq!(app.documents[0].selection, Some(Selection { start: 250, end: 1_000 }));
+
+        app.handle_action(Action::Delete);
+        assert_eq!(app.documents[0].len_samples(), 250, "deleting a drag-to-the-end selection must not leave a sliver");
     }
 
     /// Shift+[ (rendered here as '{') selects backward to the previous marker, or the
@@ -6078,7 +6162,7 @@ mod tests {
         app.handle_action(Action::ExtendSelectionToEnd);
         let sel = app.documents[0].selection.expect("selection set after ExtendSelectionToEnd");
         assert_eq!(sel.start, 100, "anchor kept from previous action");
-        assert_eq!(sel.end, 999, "active edge at last sample");
+        assert_eq!(sel.end, 1000, "active edge extends through end-of-file (exclusive bound), not just to the last sample");
     }
 
     /// A very small selection (fewer samples than the zero-crossing search window) must not
