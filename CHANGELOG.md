@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-07-03
+
+- Export Regions' Limit length/Normalize options (added 2026-07-02) gained the validation,
+  layout, and mouse fixes a code review turned up: a checked option with a blank or
+  unparseable value now blocks "Do!" and focuses the offending field instead of silently
+  falling back to a value (a blank Normalize field used to boost every exported region to
+  0 dBFS; a blank limit used to silently disable a cap the checkbox said was on); a
+  sub-millisecond length limit no longer rounds down to an empty WAV; the dialog's
+  clickable "Do!" row now lines up with the rendered hints bar (it was one row off) and
+  never collides with a field row on a short terminal; and clicking a checkbox+value row's
+  value text now focuses that field for editing instead of only ever toggling the checkbox.
+  Also extracted the peak/dB-gain math shared by Normalize, Gain, mix-to-mono, and the
+  dB-scale axis into one `model::dsp` module so it can't drift between call sites again.
+
+- Fixed selecting to the end of the file (Shift+End, Shift+`]` past the last marker, and a
+  mouse drag into the last visible column) excluding the file's actual last sample —
+  selection bounds are exclusive-end everywhere, but these paths clamped to the last
+  sample's *index* rather than one past it, so deleting or trimming a "select to end"
+  selection always left a sliver of the original ending behind.
+
 ## 2026-07-02
 
 - Export Regions to Subfolder gained two more per-region options, both off by default:
