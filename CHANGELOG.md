@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-07-07
+
+- **CDP (Composer's Desktop Project) integration.** A new dialog-driven front-end to the CDP
+  suite of external command-line sound-transformation tools, reachable with `Ctrl+P` or
+  **Process → CDP Process…**. Browse/search a catalog of ~120 processes, edit their
+  parameters in a generated form, Preview the result through the speakers without touching
+  the document, then Apply it to the selection (or whole file) with full undo. Spectral
+  processes are wrapped transparently in phase-vocoder analysis/resynthesis; dual-input
+  processes (combine/morph/vocode) take a second open buffer via a picker row; synthesis
+  processes insert at the cursor. The external binaries run on a background thread so the UI
+  never blocks, with a cancellable progress dialog and CDP's own error text surfaced in a
+  scrollable viewer. CDP isn't bundled — configure the binaries directory on first use or via
+  the new **Options → Configure CDP Directory…** menu. Custom/override process definitions can
+  be dropped into `$XDG_CONFIG_HOME/tui-wave/cdp/*.toml` (see
+  `docs/cdp-custom-process-example.toml`). The built-in catalog is derived from SoundThread
+  (MIT — see `THIRD_PARTY_NOTICES.md`).
+
 ## 2026-07-03
 
 - Export Regions' Limit length/Normalize options (added 2026-07-02) gained the validation,

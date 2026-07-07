@@ -110,6 +110,103 @@ fn ms_to_samples(ms: f32, sample_rate: u32) -> usize {
     ((ms / 1000.0) * sample_rate as f32).round() as usize
 }
 
+/// One-line message for a `PlanError`, shown inline in `Dialog::CdpParams`. Every case
+/// here is otherwise prevented by the UI (the browser hides dual-input processes, a
+/// document is always available once the dialog is open) except `ParamCountMismatch`,
+/// which would indicate a catalog/UI mismatch bug rather than a user-fixable condition.
+fn cdp_plan_error_message(err: &crate::model::cdp::PlanError) -> String {
+    use crate::model::cdp::PlanError;
+    match err {
+        PlanError::UnsupportedInV1 { reason } => format!("not supported yet: {reason}"),
+        PlanError::MissingInput => "no audio to process".into(),
+        PlanError::ParamCountMismatch { expected, actual } => {
+            format!("internal error: expected {expected} params, got {actual}")
+        }
+        PlanError::InputCountMismatch { expected, actual } => {
+            format!("internal error: expected {expected} inputs, got {actual}")
+        }
+        PlanError::SampleRateMismatch { first, second } => {
+            format!("second input is {second} Hz, selection is {first} Hz — resample one first")
+        }
+    }
+}
+
+/// Splits a `CdpError` into display lines for `Dialog::CdpOutput`: a short summary line
+/// followed by the captured process output (if any), one line per line of output so the
+/// dialog can scroll it.
+fn cdp_error_lines(err: &crate::cdp::CdpError) -> Vec<String> {
+    use crate::cdp::CdpError;
+    match err {
+        CdpError::Spawn { step, message } => {
+            vec![format!("Failed to start '{step}': {message}")]
+        }
+        CdpError::NonZeroExit { step, code, output } => {
+            let mut lines = vec![format!(
+                "'{step}' exited with {}",
+                code.map(|c| c.to_string()).unwrap_or_else(|| "no exit code (killed?)".into())
+            )];
+            lines.extend(output.lines().map(str::to_string));
+            lines
+        }
+        CdpError::NoOutput { step } => vec![format!("'{step}' produced no output file")],
+        CdpError::OutputRead { path, message } => {
+            vec![format!("Failed to read '{path}': {message}")]
+        }
+        CdpError::Cancelled => vec!["Cancelled.".into()],
+    }
+}
+
+/// One editable field in the `Dialog::CdpParams` form, mirroring a `ParamKind` from the
+/// catalog. Built fresh (from each param's default value) whenever a `CdpBrowser` selection
+/// is opened.
+#[derive(Clone)]
+enum CdpField {
+    /// `min`/`max`/`step` are cloned from the `ParamKind::Number` at construction time so
+    /// Up/Down nudging (`cdp_nudge_number`) never needs a catalog lookup back through
+    /// `CdpParams::catalog_index` — same rationale as `Choice::options` below.
+    Number { input: TextInput, min: f64, max: f64, step: f64 },
+    Toggle { on: bool },
+    /// `options` is cloned from the `ParamKind::Choice` at construction time so cycling it
+    /// (Left/Right) never needs a catalog lookup back through `CdpParams::catalog_index`.
+    Choice { options: Vec<String>, selected: usize },
+}
+
+impl CdpField {
+    fn from_default(kind: &crate::model::cdp::ParamKind) -> Self {
+        use crate::model::cdp::ParamKind;
+        match kind {
+            ParamKind::Number { default, min, max, step, .. } => {
+                CdpField::Number { input: TextInput::fresh(format!("{default}")), min: *min, max: *max, step: *step }
+            }
+            ParamKind::Toggle { default } => CdpField::Toggle { on: *default },
+            ParamKind::Choice { options, default } => {
+                CdpField::Choice { options: options.clone(), selected: *default }
+            }
+        }
+    }
+
+    fn to_value(&self) -> crate::model::cdp::ParamValue {
+        use crate::model::cdp::ParamValue;
+        match self {
+            CdpField::Number { input, .. } => {
+                ParamValue::Number(input.value().trim().parse::<f64>().unwrap_or(0.0))
+            }
+            CdpField::Toggle { on } => ParamValue::Toggle(*on),
+            CdpField::Choice { selected, .. } => ParamValue::Choice(*selected),
+        }
+    }
+}
+
+/// Nudges a focused `CdpField::Number` by `sign * step`, clamped to its range — Up/Down's
+/// role in the params dialog (Left/Right is reserved for the field's own text cursor, or
+/// for cycling a `Choice`). No-op for any other field kind.
+fn cdp_nudge_number(field: Option<&mut CdpField>, sign: f64) {
+    let Some(CdpField::Number { input, min, max, step }) = field else { return };
+    let current = input.value().trim().parse::<f64>().unwrap_or(*min);
+    let next = (current + sign * *step).clamp(*min, *max);
+    *input = TextInput::new(format!("{next}"));
+}
+
 enum Dialog {
     Normalize { input: TextInput },
     /// `input` holds the single overall gain when `per_channel` is off, or the Left
@@ -161,8 +258,105 @@ enum Dialog {
         fade_out_input: TextInput,
         focused: usize,
     },
+    /// First-run prompt for the CDP (Composer's Desktop Project) binaries directory —
+    /// opened whenever `Action::CdpProcess` fires and `config.cdp_dir` is unset or fails
+    /// `cdp::validate_cdp_dir`. Enter re-validates and, on success, proceeds straight to
+    /// `CdpBrowser`; the menu entry stays always-enabled rather than being conditionally
+    /// greyed out, so a bad/missing path is discovered here rather than silently.
+    CdpSetup { input: TextInput, error: Option<String> },
+    /// Searchable list of CDP processes. `entries` are indices into the loaded
+    /// `CdpCatalog::processes`, filtered by `search`'s text (case-insensitive substring over
+    /// key/title/short_description) and re-filtered on every keystroke. `selected` indexes
+    /// into `entries`, not the catalog directly.
+    CdpBrowser { search: TextInput, entries: Vec<usize>, selected: usize },
+    /// Parameter-editing form for the process at `catalog_index` (an index into
+    /// `CdpCatalog::processes`, stable for the dialog's lifetime since the catalog doesn't
+    /// change while it's open). `fields` are index-parallel to that process's `params`;
+    /// the focus order continues past them with a second-input picker row (dual-input
+    /// processes only), then Preview, then Apply — see `cdp_params_preview_focus`/
+    /// `cdp_params_apply_focus`. `second_input` is `Some` exactly when the process is
+    /// dual-input (`IoKind::DualWav`/`DualAna`). `error` is a validation message shown
+    /// inline (e.g. "value out of range") *before* any process runs; a failure *during* a
+    /// run instead replaces this dialog outright with `CdpOutput`/`Info`, mirroring how
+    /// `export_regions` replaces `ExportRegions` with `Info` on a failure rather than
+    /// returning to it. `preview` caches the most recent successful Preview run so Apply can
+    /// splice it straight in without re-running CDP when parameters haven't changed since —
+    /// see `App::cdp_preview_matches`.
+    CdpParams {
+        catalog_index: usize,
+        fields: Vec<CdpField>,
+        second_input: Option<CdpSecondInput>,
+        focused: usize,
+        error: Option<String>,
+        preview: Option<CdpPreview>,
+    },
+    /// Hard-modal progress display while a `CdpRunner` job is in flight — deliberately
+    /// blocks all other input (Esc cancels) because the job captured a snapshot of the
+    /// active document's range/samples at launch; any concurrent edit/undo/buffer-close
+    /// would leave nothing sane for the eventual splice to land in. Esc requests
+    /// cancellation but does *not* itself close the dialog — only `App::tick_cdp` does,
+    /// once the runner's `Finished(Err(Cancelled))` event actually arrives, so the modal
+    /// never lies about a job still technically in flight.
+    CdpRunning {
+        job_id: u64,
+        title: String,
+        step_label: String,
+        step_index: usize,
+        step_total: usize,
+        started: std::time::Instant,
+        purpose: crate::cdp::JobPurpose,
+    },
+    /// Scrollable viewer for a CDP process's captured stdout+stderr after a failed run.
+    CdpOutput { title: String, lines: Vec<String>, scroll: usize },
     /// Generic single-message info/error popup with an Enter/Esc-to-dismiss button.
     Info { message: String },
+}
+
+/// The second-input picker state for a dual-input CDP process (combine/morph/vocode/...):
+/// which open buffer provides the second file. `doc_indices`/`names` are captured at
+/// dialog-open time — safe because the dialog is modal, so buffers can't be opened, closed,
+/// or renamed while it's up — and include every open buffer (processing a selection against
+/// its own document, e.g. self-convolution, is legitimate).
+#[derive(Clone)]
+struct CdpSecondInput {
+    doc_indices: Vec<usize>,
+    names: Vec<String>,
+    selected: usize,
+}
+
+impl CdpSecondInput {
+    fn selected_doc_index(&self) -> Option<usize> {
+        self.doc_indices.get(self.selected).copied()
+    }
+    fn selected_name(&self) -> &str {
+        self.names.get(self.selected).map(String::as_str).unwrap_or("")
+    }
+}
+
+/// A cached successful Preview run, kept alongside `Dialog::CdpParams` so an unchanged-
+/// parameter Apply can splice the already-computed audio instead of re-running CDP.
+/// Invalidated (set back to `None`) by any field edit.
+struct CdpPreview {
+    values: Vec<crate::model::cdp::ParamValue>,
+    range: (usize, usize),
+    channels: Vec<Vec<f32>>,
+    sample_rate: u32,
+}
+
+/// `Dialog::CdpParams`'s focus range is dynamic (one index per param field, then a
+/// second-input picker row for dual-input processes, then two trailing action buttons)
+/// rather than a fixed `er_focus`-style constant set, since the field count varies per
+/// process. These helpers compute the trailing indices from `fields.len()` +
+/// `second_input.is_some()` at every call site so they can't drift out of sync with each
+/// other.
+fn cdp_params_second_input_focus(field_count: usize) -> usize {
+    field_count
+}
+fn cdp_params_preview_focus(field_count: usize, has_second_input: bool) -> usize {
+    field_count + has_second_input as usize
+}
+fn cdp_params_apply_focus(field_count: usize, has_second_input: bool) -> usize {
+    cdp_params_preview_focus(field_count, has_second_input) + 1
 }
 
 /// Focus-order layout for the Gain dialog's interactive rows. The Gain/Left field is always
@@ -388,22 +582,67 @@ pub struct App {
     nav_repeat_count: u32,
     /// Time of the most recent nav-step keypress, used to measure the gap to the next one.
     last_nav_time: Option<Instant>,
-    /// Active parameter dialog (Normalize or Gain), if any.
+    /// Active parameter dialog (Normalize, Gain, or one of the CDP dialogs), if any.
     dialog: Option<Dialog>,
     /// The current playback position, set from `AudioEngine.position` during playback.
     /// `None` when playback is stopped. This is the visual playhead only — the cursor
     /// (insertion point) lives on `Document.cursor`.
     playhead_position: Option<usize>,
+    /// CDP process catalog, loaded once at startup (built-ins plus any user-authored
+    /// `$XDG_CONFIG_HOME/tui-wave/cdp/*.toml` overrides/additions).
+    cdp_catalog: crate::model::cdp::CdpCatalog,
+    /// Parse warnings from loading `cdp_catalog`'s user-directory files, surfaced once via
+    /// an `Info` dialog on startup rather than blocking it (mirrors `Config::load`).
+    cdp_catalog_warnings: Vec<String>,
+    /// Background worker for running CDP binaries — see `cdp::runner`. Always present
+    /// (spawning its thread can't fail); only one job is ever in flight at a time in v1
+    /// since `Dialog::CdpRunning` is hard-modal.
+    cdp_runner: crate::cdp::CdpRunner,
+    /// Monotonic id for the next submitted `cdp::Job`, so a `CdpEvent` can be matched back
+    /// to the run that produced it.
+    cdp_next_job_id: u64,
+    /// Context for the in-flight CDP job, stashed at submit time so `tick_cdp` knows what
+    /// to do with the result: which document/range to splice into (Apply) or audition
+    /// (Preview), and the label for the eventual undo entry.
+    cdp_pending: Option<CdpPending>,
+    /// Second, independent audio engine for auditioning a `Preview` result without
+    /// disturbing whatever's loaded/playing — mirrors `audition_audio`.
+    cdp_preview_audio: Option<AudioEngine>,
+}
+
+/// Context for the CDP job currently running in `cdp_runner`, stashed when it's submitted
+/// so `App::tick_cdp` knows what to do once the matching `CdpEvent::Finished` arrives.
+/// `catalog_index`/`fields`/`focused` are only needed for a `Preview` job: the dialog is
+/// `Dialog::CdpRunning` (not `CdpParams`) while the job is in flight, so this is the only
+/// place that state survives long enough to rebuild `CdpParams` (with the new preview
+/// attached) once the job completes.
+struct CdpPending {
+    doc_index: usize,
+    range: (usize, usize),
+    label: String,
+    catalog_index: usize,
+    fields: Vec<CdpField>,
+    second_input: Option<CdpSecondInput>,
+    focused: usize,
 }
 
 impl App {
     pub fn new(document: Option<Document>, directory: Option<PathBuf>) -> Self {
-        let app = Self::new_with_config(document, directory, Config::load());
+        let mut app = Self::new_with_config(document, directory, Config::load());
         // Write the merged config on every launch: creates the file on first launch so
         // all keybindings are immediately visible, and on subsequent launches after an
         // upgrade appends any newly-added default bindings to the existing file without
         // touching the user's custom entries (fill_missing_keybindings only inserts).
         app.config.save();
+        // A malformed user CDP catalog file shouldn't be silently swallowed (the user would
+        // otherwise have no way to discover why a hand-authored process definition never
+        // showed up in the browser), but it also shouldn't block startup — surfaced once,
+        // here, rather than failing to load.
+        if !app.cdp_catalog_warnings.is_empty() {
+            app.dialog = Some(Dialog::Info {
+                message: format!("CDP catalog warnings:\n{}", app.cdp_catalog_warnings.join("\n")),
+            });
+        }
         app
     }
 
@@ -443,6 +682,9 @@ impl App {
         let histories = documents.iter().map(|_| History::new()).collect();
         let menu_shortcuts = build_action_display_map(&config.keybindings, false);
         let toolbar_shortcuts = build_action_display_map(&config.keybindings, true);
+        let user_cdp_dir = crate::model::cdp::CdpCatalog::user_dir();
+        let (cdp_catalog, cdp_catalog_warnings) =
+            crate::model::cdp::CdpCatalog::load(Some(&user_cdp_dir));
         Self {
             should_quit: false,
             key_map,
@@ -499,6 +741,12 @@ impl App {
             last_nav_time: None,
             dialog: None,
             playhead_position: None,
+            cdp_catalog,
+            cdp_catalog_warnings,
+            cdp_runner: crate::cdp::CdpRunner::new(),
+            cdp_next_job_id: 0,
+            cdp_pending: None,
+            cdp_preview_audio: None,
         }
     }
 
@@ -655,8 +903,20 @@ impl App {
             let playhead_before = self.playhead_position;
             self.sync_playhead_from_audio();
             self.tick_audition();
+            // A drained CDP event may have replaced/closed the dialog (job finished) with
+            // no input event to trigger the repaint — without this the finished dialog
+            // sits stale on screen until the next keypress.
+            if self.tick_cdp() {
+                needs_redraw = true;
+            }
             self.tick_viewport_follow();
             if self.playhead_position != playhead_before {
+                needs_redraw = true;
+            }
+            // The `CdpRunning` spinner and step label are time-/event-driven, not input-
+            // driven, so (unlike the rest of this idle tick) they need an unconditional
+            // redraw every loop iteration to actually animate while the user isn't typing.
+            if matches!(self.dialog, Some(Dialog::CdpRunning { .. })) {
                 needs_redraw = true;
             }
         }
@@ -1040,13 +1300,20 @@ impl App {
                     _ => None,
                 }
             }
+            Dialog::CdpSetup { input, .. } => Some(input),
+            Dialog::CdpBrowser { search, .. } => Some(search),
+            Dialog::CdpParams { fields, focused, .. } => match fields.get_mut(*focused) {
+                Some(CdpField::Number { input, .. }) => Some(input),
+                _ => None,
+            },
+            Dialog::CdpRunning { .. } | Dialog::CdpOutput { .. } => None,
             Dialog::Info { .. } => None,
         }
     }
 
     /// Whether a typed `c` is accepted by the active dialog (numeric dialogs restrict input).
     fn dialog_accepts(&self, c: char) -> bool {
-        match self.dialog {
+        match &self.dialog {
             Some(Dialog::Normalize { .. }) | Some(Dialog::Gain { .. }) => {
                 c.is_ascii_digit() || c == '-' || c == '.'
             }
@@ -1055,7 +1322,7 @@ impl App {
                 c.is_ascii_digit() || matches!(c, '-' | '.' | 'i' | 'n' | 'f')
             }
             Some(Dialog::ExportRegions { focused, .. }) => {
-                match focused {
+                match *focused {
                     // ms fields: no sign
                     er_focus::LIMIT_MS | er_focus::FADE_IN_MS | er_focus::FADE_OUT_MS => {
                         c.is_ascii_digit() || c == '.'
@@ -1065,8 +1332,15 @@ impl App {
                     _ => true, // folder / base name: free text
                 }
             }
+            Some(Dialog::CdpParams { fields, focused, .. }) => match fields.get(*focused) {
+                Some(CdpField::Number { .. }) => c.is_ascii_digit() || c == '-' || c == '.',
+                // Toggle/Choice fields aren't typed into, and the trailing Preview/Apply
+                // pseudo-fields (focused >= fields.len()) accept nothing either.
+                _ => false,
+            },
+            Some(Dialog::CdpRunning { .. }) | Some(Dialog::CdpOutput { .. }) => false,
             Some(Dialog::Info { .. }) => false,
-            _ => true, // rename / directory dialogs: free text
+            _ => true, // rename / directory / CDP setup / CDP search: free text
         }
     }
 
@@ -1167,14 +1441,64 @@ impl App {
                         },
                     );
                 }
+                Some(Dialog::CdpSetup { input, .. }) => {
+                    self.confirm_cdp_setup(input.value().to_string());
+                }
+                Some(Dialog::CdpBrowser { entries, selected, .. }) => {
+                    if let Some(&catalog_index) = entries.get(selected) {
+                        self.open_cdp_params(catalog_index);
+                    }
+                }
+                Some(Dialog::CdpParams { catalog_index, fields, second_input, focused, error, preview }) => {
+                    // Enter's default action is Apply; it's Preview only when the user has
+                    // explicitly tabbed to the Preview button. `cdp_run` re-takes the dialog
+                    // itself, so it's restored here first rather than passed directly.
+                    let purpose = if focused == cdp_params_preview_focus(fields.len(), second_input.is_some()) {
+                        crate::cdp::JobPurpose::Preview
+                    } else {
+                        crate::cdp::JobPurpose::Apply
+                    };
+                    self.dialog = Some(Dialog::CdpParams {
+                        catalog_index, fields, second_input, focused, error, preview,
+                    });
+                    self.cdp_run(purpose);
+                }
+                Some(d @ Dialog::CdpRunning { .. }) => {
+                    // Hard-modal: a job is in flight, Enter does nothing (only Esc/cancel
+                    // has any effect while this dialog is showing).
+                    self.dialog = Some(d);
+                }
+                Some(Dialog::CdpOutput { .. }) => {} // just dismiss
                 Some(Dialog::Info { .. }) => {} // just dismiss
                 None => {}
             },
-            KeyCode::Esc => self.dialog = None,
+            KeyCode::Esc => {
+                if let Some(Dialog::CdpRunning { .. }) = &self.dialog {
+                    // Cancellation is best-effort and takes a poll tick to land; the modal
+                    // stays up (and `Esc` stays a no-op beyond re-requesting cancel) until
+                    // `tick_cdp` sees the runner's `Finished(Err(Cancelled))` event, so the
+                    // dialog never claims a job has stopped before it actually has.
+                    self.cdp_runner.cancel();
+                } else {
+                    self.stop_cdp_preview_audio();
+                    self.dialog = None;
+                }
+            }
             KeyCode::Left => {
                 if let Some(Dialog::ExportRegions { focused, depth, .. }) = self.dialog.as_mut() {
                     if *focused == er_focus::FORMAT { *depth = depth.prev(); }
                     else if let Some(input) = self.dialog_input() { input.left(); }
+                } else if let Some(Dialog::CdpParams { fields, second_input, focused, .. }) = self.dialog.as_mut() {
+                    if *focused == cdp_params_second_input_focus(fields.len()) {
+                        if let Some(second) = second_input {
+                            second.selected = second.selected.saturating_sub(1);
+                        }
+                    } else {
+                        match fields.get_mut(*focused) {
+                            Some(CdpField::Choice { selected, .. }) => *selected = selected.saturating_sub(1),
+                            _ => { if let Some(input) = self.dialog_input() { input.left(); } }
+                        }
+                    }
                 } else if let Some(input) = self.dialog_input() {
                     input.left();
                 } else {
@@ -1185,10 +1509,63 @@ impl App {
                 if let Some(Dialog::ExportRegions { focused, depth, .. }) = self.dialog.as_mut() {
                     if *focused == er_focus::FORMAT { *depth = depth.next(); }
                     else if let Some(input) = self.dialog_input() { input.right(); }
+                } else if let Some(Dialog::CdpParams { fields, second_input, focused, .. }) = self.dialog.as_mut() {
+                    if *focused == cdp_params_second_input_focus(fields.len()) {
+                        if let Some(second) = second_input {
+                            second.selected =
+                                (second.selected + 1).min(second.doc_indices.len().saturating_sub(1));
+                        }
+                    } else {
+                        match fields.get_mut(*focused) {
+                            Some(CdpField::Choice { options, selected }) => {
+                                *selected = (*selected + 1).min(options.len().saturating_sub(1));
+                            }
+                            _ => { if let Some(input) = self.dialog_input() { input.right(); } }
+                        }
+                    }
                 } else if let Some(input) = self.dialog_input() {
                     input.right();
                 } else {
                     self.cycle_dialog_curve(true);
+                }
+            }
+            KeyCode::Up => {
+                match self.dialog.as_mut() {
+                    Some(Dialog::CdpBrowser { entries, selected, .. }) => {
+                        *selected = selected.saturating_sub(1);
+                        let _ = entries;
+                    }
+                    Some(Dialog::CdpParams { fields, focused, .. }) => {
+                        cdp_nudge_number(fields.get_mut(*focused), 1.0);
+                    }
+                    Some(Dialog::CdpOutput { scroll, .. }) => *scroll = scroll.saturating_sub(1),
+                    _ => {}
+                }
+            }
+            KeyCode::Down => {
+                match self.dialog.as_mut() {
+                    Some(Dialog::CdpBrowser { entries, selected, .. }) => {
+                        if !entries.is_empty() {
+                            *selected = (*selected + 1).min(entries.len() - 1);
+                        }
+                    }
+                    Some(Dialog::CdpParams { fields, focused, .. }) => {
+                        cdp_nudge_number(fields.get_mut(*focused), -1.0);
+                    }
+                    Some(Dialog::CdpOutput { scroll, lines, .. }) => {
+                        *scroll = (*scroll + 1).min(lines.len().saturating_sub(1));
+                    }
+                    _ => {}
+                }
+            }
+            KeyCode::PageUp => {
+                if let Some(Dialog::CdpOutput { scroll, .. }) = self.dialog.as_mut() {
+                    *scroll = scroll.saturating_sub(10);
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(Dialog::CdpOutput { scroll, lines, .. }) = self.dialog.as_mut() {
+                    *scroll = (*scroll + 10).min(lines.len().saturating_sub(1));
                 }
             }
             KeyCode::Home => {
@@ -1205,6 +1582,7 @@ impl App {
                 if let Some(input) = self.dialog_input() {
                     input.backspace();
                 }
+                self.refresh_cdp_browser_filter();
             }
             KeyCode::Delete => {
                 // In MixToMono, Delete is a shortcut for "-inf" (silence that channel).
@@ -1217,6 +1595,7 @@ impl App {
                 } else if let Some(input) = self.dialog_input() {
                     input.delete();
                 }
+                self.refresh_cdp_browser_filter();
             }
             KeyCode::Char(' ') => {
                 match self.dialog.as_mut() {
@@ -1243,6 +1622,11 @@ impl App {
                             _ => {}
                         }
                     }
+                    Some(Dialog::CdpParams { fields, focused, .. }) => {
+                        if let Some(CdpField::Toggle { on }) = fields.get_mut(*focused) {
+                            *on = !*on;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1260,8 +1644,22 @@ impl App {
                 if let Some(input) = self.dialog_input() {
                     input.insert(c);
                 }
+                self.refresh_cdp_browser_filter();
             }
             _ => {}
+        }
+    }
+
+    /// Re-filters `Dialog::CdpBrowser`'s entries after its search field changes, resetting
+    /// `selected` to 0 (the old index's meaning doesn't survive a changed filter). A no-op
+    /// for every other dialog, so it's safe to call unconditionally after any text edit.
+    fn refresh_cdp_browser_filter(&mut self) {
+        let Some(Dialog::CdpBrowser { search, .. }) = &self.dialog else { return };
+        let query = search.value().to_string();
+        let new_entries = self.cdp_filter_entries(&query);
+        if let Some(Dialog::CdpBrowser { entries, selected, .. }) = &mut self.dialog {
+            *entries = new_entries;
+            *selected = 0;
         }
     }
 
@@ -1289,6 +1687,11 @@ impl App {
                 *curve = if forward { curve.next() } else { curve.prev() };
             }
             Some(Dialog::ExportRegions { focused, .. }) => *focused = step(*focused, er_focus::COUNT),
+            // Fields, then the second-input picker (dual-input processes only), then
+            // Preview, then Apply (see cdp_params_{second_input,preview,apply}_focus).
+            Some(Dialog::CdpParams { fields, second_input, focused, .. }) => {
+                *focused = step(*focused, cdp_params_apply_focus(fields.len(), second_input.is_some()) + 1);
+            }
             _ => {}
         }
     }
@@ -1443,6 +1846,390 @@ impl App {
         }
     }
 
+    /// Entry point for `Action::CdpProcess` (Ctrl+P / Process menu): opens the setup prompt
+    /// if `config.cdp_dir` is unset or no longer validates, otherwise goes straight to the
+    /// process browser. The menu entry is always enabled rather than conditionally greyed
+    /// out — an invalid path is discovered here, on demand, instead of silently.
+    fn open_cdp_entry(&mut self) {
+        let dir = std::path::PathBuf::from(&self.config.cdp_dir);
+        if self.config.cdp_dir.is_empty() || crate::cdp::validate_cdp_dir(&dir).is_err() {
+            self.dialog = Some(Dialog::CdpSetup {
+                input: TextInput::new(self.config.cdp_dir.clone()),
+                error: None,
+            });
+        } else {
+            self.open_cdp_browser();
+        }
+    }
+
+    /// Re-validates the path typed into `Dialog::CdpSetup`. On success, persists it and
+    /// proceeds straight to the browser; on failure, reopens the setup prompt with the
+    /// reason shown inline.
+    fn confirm_cdp_setup(&mut self, path: String) {
+        let trimmed = path.trim().to_string();
+        match crate::cdp::validate_cdp_dir(std::path::Path::new(&trimmed)) {
+            Ok(()) => {
+                self.config.cdp_dir = trimmed;
+                self.save_config();
+                self.open_cdp_browser();
+            }
+            Err(reason) => {
+                self.dialog = Some(Dialog::CdpSetup { input: TextInput::new(trimmed), error: Some(reason) });
+            }
+        }
+    }
+
+    /// Entries matching `query` (case-insensitive substring over key/title/short
+    /// description), as indices into `cdp_catalog.processes`. Catalog order (alphabetical
+    /// by key, from the conversion script) is preserved rather than re-sorted, so results
+    /// don't reshuffle confusingly as the user types.
+    fn cdp_filter_entries(&self, query: &str) -> Vec<usize> {
+        let query = query.to_lowercase();
+        self.cdp_catalog
+            .processes
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                query.is_empty()
+                    || p.key.to_lowercase().contains(&query)
+                    || p.title.to_lowercase().contains(&query)
+                    || p.short_description.to_lowercase().contains(&query)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn open_cdp_browser(&mut self) {
+        let entries = self.cdp_filter_entries("");
+        self.dialog = Some(Dialog::CdpBrowser { search: TextInput::new(""), entries, selected: 0 });
+    }
+
+    fn open_cdp_params(&mut self, catalog_index: usize) {
+        use crate::model::cdp::IoKind;
+        let Some(def) = self.cdp_catalog.processes.get(catalog_index) else { return };
+        let mut fields: Vec<CdpField> =
+            def.params.iter().map(|p| CdpField::from_default(&p.kind)).collect();
+        // Synthesis processes carry a Sample Rate choice — preselect the option matching
+        // the active document so the generated audio splices in at the right speed by
+        // default (Apply hard-rejects a mismatch; see tick_cdp). Matched generically by
+        // option text rather than param name so hand-authored defs benefit too.
+        if def.input == IoKind::None {
+            if let Some(doc_rate) = self.active_doc().map(|d| d.sample_rate.to_string()) {
+                for field in &mut fields {
+                    if let CdpField::Choice { options, selected } = field {
+                        if let Some(pos) = options.iter().position(|o| *o == doc_rate) {
+                            *selected = pos;
+                        }
+                    }
+                }
+            }
+        }
+        let second_input = matches!(def.input, IoKind::DualWav | IoKind::DualAna).then(|| {
+            let doc_indices: Vec<usize> = (0..self.documents.len()).collect();
+            let names = doc_indices.iter().map(|&i| self.buffer_name(i)).collect();
+            // Default to the first buffer that isn't the one being processed — the common
+            // case is combining against different material; processing against itself
+            // (self-convolution etc.) stays one Left-press away.
+            let selected = doc_indices
+                .iter()
+                .position(|&i| i != self.active_document)
+                .unwrap_or(0);
+            CdpSecondInput { doc_indices, names, selected }
+        });
+        self.dialog = Some(Dialog::CdpParams {
+            catalog_index,
+            fields,
+            second_input,
+            focused: 0,
+            error: None,
+            preview: None,
+        });
+    }
+
+    /// Whether `preview` was computed from exactly `values`/`range` (at the document's
+    /// current sample rate) and can be spliced in directly instead of re-running CDP.
+    /// Structural equality on `ParamValue` — a `TextInput` re-parsed to the same number
+    /// counts as "unchanged" even if e.g. trailing whitespace differed, which is the right
+    /// call since it's the *value* that matters. The sample-rate check guards against the
+    /// (currently impossible, since no v1 CDP process changes rate) case of the document's
+    /// rate having changed since Preview ran, which would otherwise splice audio recorded
+    /// at the wrong speed.
+    fn cdp_preview_matches(
+        preview: &CdpPreview,
+        values: &[crate::model::cdp::ParamValue],
+        range: (usize, usize),
+        sample_rate: u32,
+    ) -> bool {
+        preview.range == range && preview.values == values && preview.sample_rate == sample_rate
+    }
+
+    /// Validates every field against its `ParamKind` range, returning the index of the
+    /// first invalid one. `None` means all fields are in range and safe to run.
+    fn cdp_validate_fields(
+        def: &crate::model::cdp::ProcessDef,
+        fields: &[CdpField],
+    ) -> Option<usize> {
+        use crate::model::cdp::ParamKind;
+        for (i, (param, field)) in def.params.iter().zip(fields).enumerate() {
+            if let (ParamKind::Number { min, max, .. }, CdpField::Number { input, .. }) = (&param.kind, field) {
+                match input.value().trim().parse::<f64>() {
+                    Ok(v) if v >= *min && v <= *max => {}
+                    _ => return Some(i),
+                }
+            }
+        }
+        None
+    }
+
+    /// Runs (or re-splices a matching cached Preview for) the process currently shown in
+    /// `Dialog::CdpParams`. Shared by both the Preview and Apply actions — they differ only
+    /// in `purpose` and in what `tick_cdp` does once the job finishes.
+    fn cdp_run(&mut self, purpose: crate::cdp::JobPurpose) {
+        use crate::model::cdp::IoKind;
+        let Some(Dialog::CdpParams { catalog_index, fields, second_input, focused, preview, .. }) =
+            self.dialog.take()
+        else {
+            return;
+        };
+        let Some(def) = self.cdp_catalog.processes.get(catalog_index).cloned() else { return };
+
+        // Every early-return below re-creates the dialog with an error; this closure keeps
+        // those sites from each hand-copying the full field list (a missed field there
+        // would silently drop e.g. the second-input selection on a validation error).
+        let reopen = |focused: usize, error: String, fields: Vec<CdpField>, second_input: Option<CdpSecondInput>, preview: Option<CdpPreview>| {
+            Dialog::CdpParams { catalog_index, fields, second_input, focused, error: Some(error), preview }
+        };
+
+        if let Some(bad) = Self::cdp_validate_fields(&def, &fields) {
+            self.dialog = Some(reopen(bad, "value out of range".into(), fields, second_input, preview));
+            return;
+        }
+
+        let values: Vec<_> = fields.iter().map(CdpField::to_value).collect();
+        let idx = self.active_document;
+        let Some(doc) = self.documents.get(idx) else { return };
+
+        let range = if def.input == IoKind::None {
+            (doc.cursor, doc.cursor)
+        } else {
+            match self.operation_range(idx, self.snap_to_zero) {
+                Some(r) => r,
+                None => {
+                    self.dialog = Some(reopen(focused, "no audio to process".into(), fields, second_input, preview));
+                    return;
+                }
+            }
+        };
+
+        // An unchanged-parameter Apply after a successful Preview splices the cached
+        // result instead of re-running CDP.
+        if matches!(purpose, crate::cdp::JobPurpose::Apply) {
+            if let Some(cached) = &preview {
+                if Self::cdp_preview_matches(cached, &values, range, doc.sample_rate) {
+                    let label = format!("CDP: {}", def.title);
+                    let channels = cached.channels.clone();
+                    self.histories[idx].apply(
+                        crate::commands::cdp::cdp_process_command(label, range, channels),
+                        &mut self.documents[idx],
+                    );
+                    self.viewport = None;
+                    self.after_sample_mutation(idx);
+                    return;
+                }
+            }
+        }
+
+        // The second input (dual-input processes) is another open buffer, used whole — it's
+        // source material, not a timeline being edited, so its selection is ignored.
+        let second_doc_index = second_input.as_ref().and_then(CdpSecondInput::selected_doc_index);
+        let mut input_specs = Vec::new();
+        if def.input != IoKind::None {
+            input_specs.push(crate::model::cdp::InputSpec {
+                channels: doc.channel_count(),
+                sample_rate: doc.sample_rate,
+                len_samples: range.1 - range.0,
+            });
+        }
+        if matches!(def.input, IoKind::DualWav | IoKind::DualAna) {
+            let Some(doc_b) = second_doc_index.and_then(|i| self.documents.get(i)) else {
+                self.dialog = Some(reopen(focused, "no second input buffer".into(), fields, second_input, preview));
+                return;
+            };
+            input_specs.push(crate::model::cdp::InputSpec {
+                channels: doc_b.channel_count(),
+                sample_rate: doc_b.sample_rate,
+                len_samples: doc_b.len_samples(),
+            });
+        }
+
+        let planned = crate::model::cdp::plan_job(&def, &values, &input_specs, &crate::model::cdp::PvocSettings::default());
+        let planned = match planned {
+            Ok(p) => p,
+            Err(err) => {
+                self.dialog = Some(reopen(focused, cdp_plan_error_message(&err), fields, second_input, preview));
+                return;
+            }
+        };
+
+        let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
+        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+            self.dialog = Some(Dialog::CdpSetup { input: TextInput::new(self.config.cdp_dir.clone()), error: Some("CDP directory no longer valid".into()) });
+            return;
+        }
+
+        let mut inputs = Vec::new();
+        if def.input != IoKind::None {
+            inputs.push(doc.slice(range.0..range.1));
+        }
+        if let Some(doc_b) = second_doc_index.and_then(|i| self.documents.get(i)) {
+            if matches!(def.input, IoKind::DualWav | IoKind::DualAna) {
+                inputs.push(doc_b.channels.clone());
+            }
+        }
+        let input_sample_rate = doc.sample_rate;
+        let job_id = self.cdp_next_job_id;
+        self.cdp_next_job_id += 1;
+        let step_total = planned.steps.len();
+
+        if let Some(audio) = self.audio.as_ref() {
+            if audio.is_playing() {
+                audio.pause();
+            }
+        }
+
+        self.cdp_pending = Some(CdpPending {
+            doc_index: idx,
+            range,
+            label: format!("CDP: {}", def.title),
+            catalog_index,
+            fields: fields.clone(),
+            second_input,
+            focused,
+        });
+        self.cdp_runner.submit(crate::cdp::Job {
+            id: job_id,
+            cdp_dir,
+            planned,
+            inputs,
+            input_sample_rate,
+            purpose,
+        });
+        self.dialog = Some(Dialog::CdpRunning {
+            job_id,
+            title: def.title.clone(),
+            step_label: "Starting…".into(),
+            step_index: 0,
+            step_total,
+            started: std::time::Instant::now(),
+            purpose,
+        });
+    }
+
+    /// Drops the preview audition engine, if any — mirrors `stop_audition`. Called whenever
+    /// the CDP dialog closes or a field edit invalidates the cached preview.
+    fn stop_cdp_preview_audio(&mut self) {
+        self.cdp_preview_audio = None;
+    }
+
+    /// Drains completed/in-progress events from `cdp_runner`, advancing `Dialog::CdpRunning`
+    /// or (on completion) applying/auditioning the result. Called once per frame from the
+    /// main loop, alongside `tick_audition`/`sync_playhead_from_audio` — the same pattern
+    /// every other background-thread integration in this app uses to avoid blocking the UI
+    /// thread on external work.
+    ///
+    /// Returns whether any event was processed — i.e. whether dialog/document state may
+    /// have just changed without any input event. The run loop must redraw on `true`:
+    /// its other redraw triggers are all input- or playhead-driven, so the frame where a
+    /// finished job replaces `CdpRunning` with the result would otherwise sit stale on
+    /// screen until the next keypress.
+    fn tick_cdp(&mut self) -> bool {
+        let mut processed_any = false;
+        while let Ok(event) = self.cdp_runner.events.try_recv() {
+            processed_any = true;
+            match event {
+                crate::cdp::CdpEvent::StepStarted { job, index, total, label } => {
+                    if let Some(Dialog::CdpRunning { job_id, step_label, step_index, step_total, .. }) =
+                        self.dialog.as_mut()
+                    {
+                        if *job_id == job {
+                            *step_label = label;
+                            *step_index = index;
+                            *step_total = total;
+                        }
+                    }
+                }
+                crate::cdp::CdpEvent::Finished { job, purpose, result } => {
+                    let Some(pending) = self.cdp_pending.take() else { continue };
+                    // Only act on the job the currently-shown `CdpRunning` dialog is
+                    // actually waiting on — guards against a stray event arriving after the
+                    // dialog has already moved on for any reason.
+                    if !matches!(self.dialog, Some(Dialog::CdpRunning { job_id, .. }) if job_id == job) {
+                        continue;
+                    }
+
+                    match result {
+                        Ok(output) => match purpose {
+                            crate::cdp::JobPurpose::Apply => {
+                                // Splicing raw samples at a different rate would play the
+                                // result at the wrong speed — only reachable if the user
+                                // overrode a synthesis process's Sample Rate away from the
+                                // document's (no processing job changes rate).
+                                let doc_rate =
+                                    self.documents.get(pending.doc_index).map(|d| d.sample_rate);
+                                if doc_rate != Some(output.sample_rate) {
+                                    self.dialog = Some(Dialog::Info {
+                                        message: format!(
+                                            "Output is {} Hz but the document is {} Hz — set the process's sample rate to match.",
+                                            output.sample_rate,
+                                            doc_rate.unwrap_or(0)
+                                        ),
+                                    });
+                                    continue;
+                                }
+                                self.histories[pending.doc_index].apply(
+                                    crate::commands::cdp::cdp_process_command(pending.label, pending.range, output.channels),
+                                    &mut self.documents[pending.doc_index],
+                                );
+                                self.viewport = None;
+                                self.after_sample_mutation(pending.doc_index);
+                                self.dialog = None;
+                            }
+                            crate::cdp::JobPurpose::Preview => {
+                                self.cdp_preview_audio =
+                                    AudioEngine::try_new(output.channels.clone(), output.sample_rate);
+                                if let Some(audio) = &self.cdp_preview_audio {
+                                    audio.play(0);
+                                }
+                                let values = pending.fields.iter().map(CdpField::to_value).collect();
+                                self.dialog = Some(Dialog::CdpParams {
+                                    catalog_index: pending.catalog_index,
+                                    fields: pending.fields,
+                                    second_input: pending.second_input,
+                                    focused: pending.focused,
+                                    error: None,
+                                    preview: Some(CdpPreview {
+                                        values,
+                                        range: pending.range,
+                                        channels: output.channels,
+                                        sample_rate: output.sample_rate,
+                                    }),
+                                });
+                            }
+                        },
+                        Err(err) => {
+                            self.dialog = Some(Dialog::CdpOutput {
+                                title: "CDP Error".into(),
+                                lines: cdp_error_lines(&err),
+                                scroll: 0,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        processed_any
+    }
+
     /// Resets keybindings to factory defaults, saves, and rebuilds the key map + UI chrome.
     /// All other settings (snap, zoom, etc.) are preserved — only the `[keybindings]` table
     /// is replaced.
@@ -1473,6 +2260,7 @@ impl App {
     /// what's actually in effect.
     fn save_config(&mut self) {
         let keybindings = self.config.keybindings.clone();
+        let cdp_dir = self.config.cdp_dir.clone();
         self.config = Config {
             snap_to_zero: self.snap_to_zero,
             auto_vertical_zoom: self.viewport.as_ref().is_some_and(|v| v.auto_vertical_zoom),
@@ -1483,6 +2271,7 @@ impl App {
             viewport_follows_playback: self.viewport_follows_playback,
             transient_threshold_db: self.transient_threshold_db,
             graphics_mode: self.graphics_mode,
+            cdp_dir,
             keybindings,
         };
         self.config.save();
@@ -2966,6 +3755,22 @@ impl App {
             return;
         }
 
+        if action == Action::CdpProcess {
+            self.open_cdp_entry();
+            return;
+        }
+
+        if action == Action::ConfigureCdpDirectory {
+            // Unlike `open_cdp_entry` (validate-first, only prompts when broken), this is an
+            // explicit "let me view/change this setting" entry point from the Options menu —
+            // it always opens the setup prompt, prefilled with whatever's currently
+            // configured (even if empty/invalid), rather than jumping straight to the browser
+            // when the path happens to already be valid.
+            self.dialog =
+                Some(Dialog::CdpSetup { input: TextInput::new(self.config.cdp_dir.clone()), error: None });
+            return;
+        }
+
         if action == Action::NewFromLeft || action == Action::NewFromRight {
             let channel_idx = if action == Action::NewFromLeft { 0 } else { 1 };
             let result = self.active_doc().and_then(|d| {
@@ -3094,7 +3899,9 @@ impl App {
             | Action::DeleteFile
             | Action::Trim
             | Action::ResetConfig
-            | Action::ExportRegions => unreachable!(),
+            | Action::ExportRegions
+            | Action::CdpProcess
+            | Action::ConfigureCdpDirectory => unreachable!(),
             // Cursor movement is identical whether or not it extends a selection; the
             // selection side-effect is applied in the second match below.
             Action::MoveCursorLeft | Action::ExtendSelectionLeft => {
@@ -3851,7 +4658,11 @@ impl App {
             self.dialog_row_rects = rects;
         }
 
-        let dialog_rects = self.dialog.as_ref().map(|d| render_dialog(frame, area, d)).unwrap_or_default();
+        let dialog_rects = self
+            .dialog
+            .as_ref()
+            .map(|d| render_dialog(frame, area, d, &self.cdp_catalog))
+            .unwrap_or_default();
         if !dialog_rects.is_empty() {
             self.dialog_n_interactive = dialog_rects.len().saturating_sub(1);
             self.dialog_row_rects = dialog_rects;
@@ -4300,7 +5111,7 @@ fn render_fade_dialog(frame: &mut Frame, area: Rect, title: &str, curve: FadeCur
     ]
 }
 
-fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) -> Vec<Rect> {
+fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, catalog: &crate::model::cdp::CdpCatalog) -> Vec<Rect> {
     match dialog {
         Dialog::MixToMono { inputs, focused, tanh_clip } => {
             return render_mix_to_mono_dialog(frame, area, inputs, *focused, *tanh_clip);
@@ -4328,6 +5139,25 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) -> Vec<Rect> {
         Dialog::Info { message } => {
             return render_info_dialog(frame, area, message);
         }
+        Dialog::CdpBrowser { search, entries, selected } => {
+            return render_cdp_browser_dialog(frame, area, search, entries, *selected, catalog);
+        }
+        Dialog::CdpParams { catalog_index, fields, second_input, focused, error, preview } => {
+            return render_cdp_params_dialog(
+                frame, area, *catalog_index, fields, second_input.as_ref(), *focused, error, preview, catalog,
+            );
+        }
+        Dialog::CdpRunning { title, step_label, step_index, step_total, started, purpose, .. } => {
+            return render_cdp_running_dialog(
+                frame, area, title, step_label, *step_index, *step_total, started.elapsed(), *purpose,
+            );
+        }
+        Dialog::CdpOutput { title, lines, scroll } => {
+            return render_cdp_output_dialog(frame, area, title, lines, *scroll);
+        }
+        Dialog::CdpSetup { input, error } => {
+            return render_cdp_setup_dialog(frame, area, input, error.as_deref());
+        }
         _ => {}
     }
 
@@ -4348,7 +5178,12 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog) -> Vec<Rect> {
         | Dialog::FadeOut { .. }
         | Dialog::MixToMono { .. }
         | Dialog::ExportRegions { .. }
-        | Dialog::Info { .. } => {
+        | Dialog::Info { .. }
+        | Dialog::CdpSetup { .. }
+        | Dialog::CdpBrowser { .. }
+        | Dialog::CdpParams { .. }
+        | Dialog::CdpRunning { .. }
+        | Dialog::CdpOutput { .. } => {
             unreachable!("handled by match arms above")
         }
     };
@@ -4572,6 +5407,376 @@ fn render_export_regions_dialog(
             Rect::default()
         },
     ]
+}
+
+/// The CDP process browser: a search field over a scrollable, filtered list of catalog
+/// entries. Keyboard-only in v1 (returns no interactive rects) — the other dialogs in this
+/// app that support mouse row-clicks (`ExportRegions`, `Gain`, `MixToMono`) are exactly the
+/// ones with checkboxes/cyclers a click meaningfully shortcuts; a plain filtered list is
+/// just as fast to drive from the keyboard, so mouse support was left for a follow-up
+/// rather than adding `dialog_row_rects` plumbing this pass didn't strictly need.
+/// The CDP-directory setup prompt. Fixed-width (unlike the generic single-row dialog path,
+/// which sizes to its content and so would visibly grow column-by-column as the user types
+/// a path) with the validation error on its own line instead of hijacking the title.
+fn render_cdp_setup_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    input: &TextInput,
+    error: Option<&str>,
+) -> Vec<Rect> {
+    let width = 72u16.min(area.width);
+    let height = 7u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let error_style = Style::default().fg(theme::RED).bg(theme::SURFACE0);
+
+    let (before, under, after) = input.split_at_cursor();
+    let lines = vec![
+        Line::from(Span::styled(" Directory containing the CDP binaries:", label_style)),
+        Line::from(vec![
+            Span::styled(" ", base),
+            Span::styled(before, base),
+            Span::styled(under, cursor_style),
+            Span::styled(after, base),
+        ]),
+        match error {
+            Some(msg) => Line::from(Span::styled(format!(" ! {msg}"), error_style)),
+            None => Line::raw(""),
+        },
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(" Enter", hint_style),
+            Span::styled(":save & continue  ", label_style),
+            Span::styled("Esc", hint_style),
+            Span::styled(":cancel", label_style),
+        ]),
+    ];
+
+    let block = Block::default()
+        .title("CDP Directory")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    Vec::new()
+}
+
+fn render_cdp_browser_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    search: &TextInput,
+    entries: &[usize],
+    selected: usize,
+    catalog: &crate::model::cdp::CdpCatalog,
+) -> Vec<Rect> {
+    let width = 60u16.min(area.width);
+    let height = 20u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+
+    let (before, under, after) = search.split_at_cursor();
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(" Search: ", label_style),
+            Span::styled(before, base),
+            Span::styled(under, cursor_style),
+            Span::styled(after, base),
+        ]),
+        Line::raw(""),
+    ];
+
+    // Rows left for the list after search/blank/blank/footer/hints.
+    let list_rows = (popup.height as usize).saturating_sub(6).max(1);
+    let scroll_top = selected.saturating_sub(list_rows.saturating_sub(1));
+
+    let mut rendered_rows = 0;
+    if entries.is_empty() {
+        lines.push(Line::from(Span::styled(" No matches", dim_style)));
+        rendered_rows = 1;
+    } else {
+        for (row, &catalog_idx) in entries.iter().enumerate().skip(scroll_top).take(list_rows) {
+            let Some(def) = catalog.processes.get(catalog_idx) else { continue };
+            let text = format!(" {}", def.title);
+            let style = if row == selected { cursor_style } else { base };
+            lines.push(Line::from(Span::styled(text, style)));
+            rendered_rows += 1;
+        }
+    }
+    for _ in rendered_rows..list_rows {
+        lines.push(Line::raw(""));
+    }
+
+    lines.push(Line::raw(""));
+    let footer = entries
+        .get(selected)
+        .and_then(|&i| catalog.processes.get(i))
+        .map(|def| def.short_description.as_str())
+        .unwrap_or("");
+    lines.push(Line::from(Span::styled(format!(" {footer}"), dim_style)));
+
+    lines.push(Line::from(vec![
+        Span::styled(" ↑↓", hint_style),
+        Span::styled(":select  ", label_style),
+        Span::styled("Enter", hint_style),
+        Span::styled(":open  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
+    ]));
+
+    let block = Block::default()
+        .title("CDP Process")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+
+    Vec::new()
+}
+
+/// The parameter-editing form for one CDP process. One row per param (Number/Toggle/Choice,
+/// per `CdpField`), then Preview/Apply pseudo-buttons (see `cdp_params_{preview,apply}_focus`)
+/// and an inline validation error line, if any.
+fn render_cdp_params_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    catalog_index: usize,
+    fields: &[CdpField],
+    second_input: Option<&CdpSecondInput>,
+    focused: usize,
+    error: &Option<String>,
+    preview: &Option<CdpPreview>,
+    catalog: &crate::model::cdp::CdpCatalog,
+) -> Vec<Rect> {
+    let Some(def) = catalog.processes.get(catalog_index) else { return Vec::new() };
+
+    let width = 60u16.min(area.width);
+    // description + blank + one row per param (or one "(no parameters)" row) + optional
+    // second-input row + blank + buttons + error/blank + hints = params.len().max(1) +
+    // second_input + 6, plus 2 border rows.
+    let height = (def.params.len().max(1) as u16 + second_input.is_some() as u16 + 8).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+    let error_style = Style::default().fg(theme::RED).bg(theme::SURFACE0);
+
+    const LABEL_WIDTH: usize = 20;
+    let mut lines = vec![
+        Line::from(Span::styled(format!(" {}", def.short_description), dim_style)),
+        Line::raw(""),
+    ];
+
+    for (i, (param, field)) in def.params.iter().zip(fields).enumerate() {
+        let is_focused = i == focused;
+        let label = format!(" {:<LABEL_WIDTH$}", param.name);
+        let label_style_here = if is_focused { cursor_style } else { label_style };
+        let line = match field {
+            CdpField::Number { input, .. } => {
+                if is_focused {
+                    let (before, under, after) = input.split_at_cursor();
+                    Line::from(vec![
+                        Span::styled(label, label_style_here),
+                        Span::styled(before, base),
+                        Span::styled(under, cursor_style),
+                        Span::styled(after, base),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::styled(label, label_style_here),
+                        Span::styled(input.value().to_string(), base),
+                    ])
+                }
+            }
+            CdpField::Toggle { on } => {
+                let text = if *on { "[X]" } else { "[ ]" };
+                Line::from(vec![Span::styled(label, label_style_here), Span::styled(text, base)])
+            }
+            CdpField::Choice { options, selected } => {
+                let text = options.get(*selected).map(String::as_str).unwrap_or("");
+                let value = if is_focused { format!("◄ {text} ►") } else { text.to_string() };
+                Line::from(vec![Span::styled(label, label_style_here), Span::styled(value, base)])
+            }
+        };
+        lines.push(line);
+    }
+    if def.params.is_empty() {
+        lines.push(Line::from(Span::styled(" (no parameters)", dim_style)));
+    }
+    if let Some(second) = second_input {
+        let is_focused = focused == cdp_params_second_input_focus(fields.len());
+        let label = format!(" {:<LABEL_WIDTH$}", "Second input");
+        let name = second.selected_name();
+        let value = if is_focused { format!("◄ {name} ►") } else { name.to_string() };
+        lines.push(Line::from(vec![
+            Span::styled(label, if is_focused { cursor_style } else { label_style }),
+            Span::styled(value, base),
+        ]));
+    }
+    lines.push(Line::raw(""));
+
+    let preview_focus = cdp_params_preview_focus(fields.len(), second_input.is_some());
+    let apply_focus = cdp_params_apply_focus(fields.len(), second_input.is_some());
+    let preview_label = if preview.is_some() { " [Preview \u{2713}]" } else { " [Preview]" };
+    let preview_style = if focused == preview_focus { cursor_style } else { hint_style };
+    let apply_style = if focused == apply_focus { cursor_style } else { hint_style };
+    lines.push(Line::from(vec![
+        Span::styled(preview_label, preview_style),
+        Span::raw("  "),
+        Span::styled("[Apply]", apply_style),
+    ]));
+
+    match error {
+        Some(msg) => lines.push(Line::from(Span::styled(format!(" ! {msg}"), error_style))),
+        None => lines.push(Line::raw("")),
+    }
+
+    lines.push(Line::from(vec![
+        Span::styled(" Tab", hint_style),
+        Span::styled(":next  ", label_style),
+        Span::styled("\u{2191}\u{2193}", hint_style),
+        Span::styled(":nudge  ", label_style),
+        Span::styled("Space", hint_style),
+        Span::styled(":toggle  ", label_style),
+        Span::styled("Enter", hint_style),
+        Span::styled(":run", label_style),
+    ]));
+
+    let block = Block::default()
+        .title(def.title.as_str())
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+
+    Vec::new()
+}
+
+/// Hard-modal progress display for an in-flight CDP job. The spinner frame is derived from
+/// `elapsed` (rather than a persisted counter) so this stays a pure function of the
+/// dialog's state, matching every other renderer in this file.
+fn render_cdp_running_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    step_label: &str,
+    step_index: usize,
+    step_total: usize,
+    elapsed: std::time::Duration,
+    purpose: crate::cdp::JobPurpose,
+) -> Vec<Rect> {
+    let width = 50u16.min(area.width);
+    let height = 6u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+
+    const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
+    let spinner = SPINNER[(elapsed.as_millis() / 120) as usize % SPINNER.len()];
+    let progress = if step_total > 0 {
+        format!(" {spinner} Step {}/{}: {step_label}", step_index + 1, step_total)
+    } else {
+        format!(" {spinner} {step_label}")
+    };
+    let verb = match purpose {
+        crate::cdp::JobPurpose::Apply => "Running",
+        crate::cdp::JobPurpose::Preview => "Previewing",
+    };
+
+    let lines = vec![
+        Line::from(Span::styled(format!(" {verb} {title}\u{2026}"), base)),
+        Line::raw(""),
+        Line::from(Span::styled(progress, base)),
+        Line::raw(""),
+        Line::from(vec![Span::styled(" Esc", hint_style), Span::styled(":cancel", label_style)]),
+    ];
+
+    let block = Block::default()
+        .title("CDP")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    Vec::new()
+}
+
+/// Scrollable viewer for a failed CDP run's captured stdout+stderr.
+fn render_cdp_output_dialog(frame: &mut Frame, area: Rect, title: &str, lines_text: &[String], scroll: usize) -> Vec<Rect> {
+    let width = 70u16.min(area.width);
+    let height = 20u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+
+    let visible_rows = (popup.height as usize).saturating_sub(3).max(1);
+    let mut rendered: Vec<Line> = lines_text
+        .iter()
+        .skip(scroll)
+        .take(visible_rows)
+        .map(|l| Line::from(Span::styled(format!(" {l}"), base)))
+        .collect();
+    for _ in rendered.len()..visible_rows {
+        rendered.push(Line::raw(""));
+    }
+    rendered.push(Line::from(vec![
+        Span::styled(" \u{2191}\u{2193}/PgUp/PgDn", hint_style),
+        Span::styled(":scroll  ", label_style),
+        Span::styled("Enter/Esc", hint_style),
+        Span::styled(":close", label_style),
+    ]));
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    frame.render_widget(Paragraph::new(rendered).block(block), popup);
+    Vec::new()
 }
 
 fn render_info_dialog(frame: &mut Frame, area: Rect, message: &str) -> Vec<Rect> {
@@ -4937,6 +6142,64 @@ mod tests {
         // Esc cancels without resetting.
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.confirm.is_none());
+    }
+
+    /// `Action::CdpProcess` (Ctrl+p / Process menu) opens the setup prompt when
+    /// `config.cdp_dir` is unset, rather than the browser — there's nothing to browse until
+    /// a valid directory is configured.
+    #[test]
+    fn cdp_process_action_opens_setup_when_dir_unset() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        assert_eq!(app.config.cdp_dir, "");
+        app.handle_action(Action::CdpProcess);
+        assert!(
+            matches!(app.dialog, Some(Dialog::CdpSetup { .. })),
+            "expected CdpSetup when cdp_dir is unset, got {:?}",
+            std::mem::discriminant(app.dialog.as_ref().unwrap())
+        );
+    }
+
+    /// With a valid `cdp_dir` already configured, `Action::CdpProcess` skips straight to the
+    /// browser instead of re-prompting for a path the user already set correctly.
+    #[test]
+    fn cdp_process_action_opens_browser_when_dir_valid() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp");
+        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+            eprintln!("skipping: no real CDP install found in this checkout");
+            return;
+        }
+        app.config.cdp_dir = cdp_dir.to_string_lossy().to_string();
+        app.handle_action(Action::CdpProcess);
+        assert!(
+            matches!(app.dialog, Some(Dialog::CdpBrowser { .. })),
+            "expected CdpBrowser when cdp_dir is already valid"
+        );
+    }
+
+    /// `Action::ConfigureCdpDirectory` (Options menu) always opens the setup prompt,
+    /// prefilled with the current value, even when that value is already valid — unlike
+    /// `Action::CdpProcess`'s validate-first shortcut, this is an explicit "let me look at
+    /// or change this setting" entry point and must never silently skip past it.
+    #[test]
+    fn configure_cdp_directory_action_always_opens_setup_prefilled() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp");
+        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+            eprintln!("skipping: no real CDP install found in this checkout");
+            return;
+        }
+        let cdp_dir_str = cdp_dir.to_string_lossy().to_string();
+        app.config.cdp_dir = cdp_dir_str.clone();
+
+        app.handle_action(Action::ConfigureCdpDirectory);
+        match &app.dialog {
+            Some(Dialog::CdpSetup { input, error }) => {
+                assert_eq!(input.value(), cdp_dir_str);
+                assert!(error.is_none());
+            }
+            _ => panic!("expected CdpSetup prefilled with the current path"),
+        }
     }
 
     /// Shift+Tab cycles panel focus the opposite way to Tab:
