@@ -68,6 +68,8 @@ pub enum Action {
     DecreaseTransientThreshold,
     ResetConfig,
     ExportRegions,
+    CdpProcess,
+    ConfigureCdpDirectory,
     // Panel/modal commands (mostly dispatched contextually, not via the global keymap).
     Noop,
     OpenSelected,
@@ -104,6 +106,7 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('f') if ctrl => Some(Action::FadeIn),
         KeyCode::Char('o') if ctrl => Some(Action::FadeOut),
         KeyCode::Char('t') if ctrl => Some(Action::Trim),
+        KeyCode::Char('p') if ctrl => Some(Action::CdpProcess),
         // A single modifier, not Ctrl+Shift — double-modifier combos aren't reliably
         // reported by every terminal without the kitty keyboard protocol's disambiguation,
         // the same reasoning that keeps fine-step mode off Ctrl/Alt+arrow (see ToggleFineMode).
@@ -291,6 +294,7 @@ pub fn default_keybindings() -> HashMap<String, Vec<String>> {
     bind!("NewFromRight", "R");
     bind!("Reverse", "ctrl+r");
     bind!("ExportRegions", "E");
+    bind!("CdpProcess", "ctrl+p");
     bind!("Normalize", "ctrl+n");
     bind!("Resample", "ctrl+e");
     bind!("Gain", "ctrl+g");
@@ -388,6 +392,8 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "DecreaseTransientThreshold" => Some(Action::DecreaseTransientThreshold),
         "ResetConfig" => Some(Action::ResetConfig),
         "ExportRegions" => Some(Action::ExportRegions),
+        "CdpProcess" => Some(Action::CdpProcess),
+        "ConfigureCdpDirectory" => Some(Action::ConfigureCdpDirectory),
         _ => None,
     }
 }
