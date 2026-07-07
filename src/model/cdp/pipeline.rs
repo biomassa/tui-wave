@@ -83,6 +83,13 @@ pub struct OutputWavSpec {
 /// `pvoc anal` runs. The runner parses `ana_relative_name`'s header for `decfactor` after
 /// that step completes, computes the window count, formats the final argv token, and
 /// patches `steps[step_index].args[arg_index]` before spawning that step.
+///
+/// One entry per (channel lane, deferred param) — a stereo file run through a spectral
+/// process with this scale produces one entry per channel, since each lane analyzes its
+/// own `.ana` file and gets its own real window count. A single `Option` here was the bug
+/// behind "blur gives an error" on stereo input: only the last lane's entry survived a
+/// plain overwrite, so every earlier channel's argv kept the unresolved "0" placeholder,
+/// which CDP rejects as out of range.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeferredWindowParam {
     pub ana_relative_name: String,
@@ -98,7 +105,7 @@ pub struct PlannedJob {
     pub input_files: Vec<TempWavSpec>,
     pub output_files: Vec<OutputWavSpec>,
     pub brk_files: Vec<(String, String)>,
-    pub deferred_window_param: Option<DeferredWindowParam>,
+    pub deferred_window_params: Vec<DeferredWindowParam>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -245,8 +252,11 @@ fn plan_param(
 }
 
 /// Appends `def`'s positional args (subprog, mode) then param args, resolving scales
-/// against `duration_secs`/`pvoc`. `brk_files`/`deferred` accumulate side effects that
-/// apply to the whole job, not just this one invocation.
+/// against `duration_secs`/`pvoc`. `brk_files` accumulates side effects that apply to the
+/// whole job, not just this one invocation. The returned `Vec` holds one
+/// `(arg_index, flag, percent)` entry per deferred (`PercentOfAnaWindowCount`) param this
+/// invocation's args reference — almost always 0 or 1 in practice (only one catalog param
+/// uses that scale today), but a process could in principle carry more than one.
 fn build_process_args(
     def: &ProcessDef,
     values: &[ParamValue],
@@ -255,7 +265,7 @@ fn build_process_args(
     duration_secs: f64,
     pvoc: &PvocSettings,
     brk_files: &mut Vec<(String, String)>,
-) -> Result<(Vec<String>, Option<(usize, Option<String>, f64)>), PlanError> {
+) -> Result<(Vec<String>, Vec<(usize, Option<String>, f64)>), PlanError> {
     if values.len() != def.params.len() {
         return Err(PlanError::ParamCountMismatch { expected: def.params.len(), actual: values.len() });
     }
@@ -270,18 +280,18 @@ fn build_process_args(
     args.extend(infiles.iter().map(|s| s.to_string()));
     args.push(outfile.to_string());
 
-    let mut deferred_at = None;
+    let mut deferred = Vec::new();
     for (i, (param, value)) in def.params.iter().zip(values).enumerate() {
         let plan = plan_param(param, value, duration_secs, pvoc, brk_files, i);
         if let Some(token) = plan.arg {
             if let Some((flag, percent)) = plan.deferred {
-                deferred_at = Some((args.len(), flag, percent));
+                deferred.push((args.len(), flag, percent));
             }
             args.push(token);
         }
     }
 
-    Ok((args, deferred_at))
+    Ok((args, deferred))
 }
 
 fn channel_label(index: usize, total: usize) -> String {
@@ -357,7 +367,7 @@ fn plan_synthesis(
     let mut brk_files = Vec::new();
     let (args, deferred) =
         build_process_args(def, values, &[], "out.wav", 0.0, pvoc, &mut brk_files)?;
-    debug_assert!(deferred.is_none(), "synthesis processes have no ana-window-count params");
+    debug_assert!(deferred.is_empty(), "synthesis processes have no ana-window-count params");
 
     let dest_channels = if def.output_is_stereo { vec![0, 1] } else { vec![0] };
     Ok(PlannedJob {
@@ -370,7 +380,7 @@ fn plan_synthesis(
         input_files: Vec::new(),
         output_files: vec![OutputWavSpec { relative_name: "out.wav".into(), dest_channels }],
         brk_files,
-        deferred_window_param: None,
+        deferred_window_params: Vec::new(),
     })
 }
 
@@ -387,7 +397,7 @@ fn plan_wav(
         let source_channels: Vec<usize> = (0..input.channels.max(1)).collect();
         let (args, deferred) =
             build_process_args(def, values, &["in.wav"], "out.wav", duration, pvoc, &mut brk_files)?;
-        debug_assert!(deferred.is_none(), "wav processes never carry ana-window-count params");
+        debug_assert!(deferred.is_empty(), "wav processes never carry ana-window-count params");
         let dest_channels = source_channels.clone();
         return Ok(PlannedJob {
             steps: vec![Invocation {
@@ -403,7 +413,7 @@ fn plan_wav(
             }],
             output_files: vec![OutputWavSpec { relative_name: "out.wav".into(), dest_channels }],
             brk_files,
-            deferred_window_param: None,
+            deferred_window_params: Vec::new(),
         });
     }
 
@@ -423,14 +433,14 @@ fn plan_wav(
             pvoc,
             &mut brk_files,
         )?;
-        debug_assert!(deferred.is_none());
+        debug_assert!(deferred.is_empty());
         let label = format!("{}{}", process_label(def), channel_label(ch, input.channels));
         steps.push(Invocation { bin: def.bin.clone(), args, label, expected_output: outfile.clone() });
         input_files.push(TempWavSpec { relative_name: infile, input_index: 0, source_channels: vec![ch] });
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, brk_files, deferred_window_param: None })
+    Ok(PlannedJob { steps, input_files, output_files, brk_files, deferred_window_params: Vec::new() })
 }
 
 /// Dual-input time-domain process: `bin subprog [mode] inA inB out params...`. Lanes work
@@ -459,7 +469,7 @@ fn plan_dual_wav(
             pvoc,
             &mut brk_files,
         )?;
-        debug_assert!(deferred.is_none());
+        debug_assert!(deferred.is_empty());
         return Ok(PlannedJob {
             steps: vec![Invocation {
                 bin: def.bin.clone(),
@@ -484,7 +494,7 @@ fn plan_dual_wav(
                 dest_channels: (0..a.channels.max(1)).collect(),
             }],
             brk_files,
-            deferred_window_param: None,
+            deferred_window_params: Vec::new(),
         });
     }
 
@@ -504,7 +514,7 @@ fn plan_dual_wav(
             pvoc,
             &mut brk_files,
         )?;
-        debug_assert!(deferred.is_none());
+        debug_assert!(deferred.is_empty());
         let label = format!("{}{}", process_label(def), channel_label(ch, lanes));
         steps.push(Invocation { bin: def.bin.clone(), args, label, expected_output: outfile.clone() });
         input_files.push(TempWavSpec {
@@ -520,7 +530,7 @@ fn plan_dual_wav(
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, brk_files, deferred_window_param: None })
+    Ok(PlannedJob { steps, input_files, output_files, brk_files, deferred_window_params: Vec::new() })
 }
 
 /// Dual-input spectral process: per channel lane, `pvoc anal` both inputs, run the process
@@ -586,7 +596,7 @@ fn plan_dual_ana(
             pvoc,
             &mut brk_files,
         )?;
-        debug_assert!(deferred.is_none(), "no dual-input process uses the ana-window-count scale");
+        debug_assert!(deferred.is_empty(), "no dual-input process uses the ana-window-count scale");
         steps.push(Invocation {
             bin: def.bin.clone(),
             args,
@@ -603,7 +613,7 @@ fn plan_dual_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, brk_files, deferred_window_param: None })
+    Ok(PlannedJob { steps, input_files, output_files, brk_files, deferred_window_params: Vec::new() })
 }
 
 fn plan_ana(
@@ -619,7 +629,7 @@ fn plan_ana(
     let mut steps = Vec::new();
     let mut input_files = Vec::new();
     let mut output_files = Vec::new();
-    let mut deferred_window_param = None;
+    let mut deferred_window_params = Vec::new();
 
     for ch in 0..channels {
         let label_suffix = channel_label(ch, channels);
@@ -654,15 +664,17 @@ fn plan_ana(
             pvoc,
             &mut brk_files,
         )?;
-        if let Some((arg_index, flag, percent)) = deferred {
-            deferred_window_param = Some(DeferredWindowParam {
-                ana_relative_name: ana_in,
+        // Every lane analyzes its own .ana file, so each accumulates its own entry rather
+        // than overwriting a job-wide slot (see DeferredWindowParam's doc comment).
+        deferred_window_params.extend(deferred.into_iter().map(|(arg_index, flag, percent)| {
+            DeferredWindowParam {
+                ana_relative_name: ana_in.clone(),
                 step_index: process_step_index,
                 arg_index,
                 flag,
                 percent,
-            });
-        }
+            }
+        }));
         steps.push(Invocation {
             bin: def.bin.clone(),
             args,
@@ -679,7 +691,7 @@ fn plan_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, brk_files, deferred_window_param })
+    Ok(PlannedJob { steps, input_files, output_files, brk_files, deferred_window_params })
 }
 
 #[cfg(test)]
@@ -894,11 +906,38 @@ mod tests {
         let job = plan_job(&def, &[ParamValue::Number(20.0)], std::slice::from_ref(&input), &PvocSettings::default())
             .unwrap();
 
-        let deferred = job.deferred_window_param.expect("expected a deferred window param");
+        assert_eq!(job.deferred_window_params.len(), 1, "expected exactly one deferred window param");
+        let deferred = &job.deferred_window_params[0];
         assert_eq!(deferred.ana_relative_name, "a1.ana");
         assert_eq!(deferred.percent, 20.0);
         assert_eq!(deferred.flag, None);
         assert_eq!(job.steps[deferred.step_index].args[deferred.arg_index], "0");
+    }
+
+    /// Regression test for the bug behind "blur gives an error" on a stereo file: with two
+    /// channel lanes, both must get their own resolved deferred param — not just the last
+    /// lane, which a single-`Option` field silently produced (leaving lane 1's argv stuck
+    /// on the unresolved "0" placeholder, which CDP rejects as out of range).
+    #[test]
+    fn percent_of_ana_window_count_produces_one_deferred_entry_per_stereo_lane() {
+        let mut def = base_def(IoKind::Ana, IoKind::Ana);
+        def.bin = "blur".into();
+        def.subprog = Some("blur".into());
+        def.mode = None;
+        def.params = vec![number_param("Blurring", 0.1, 100.0, 20.0, NumberScale::PercentOfAnaWindowCount)];
+        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100 };
+
+        let job = plan_job(&def, &[ParamValue::Number(20.0)], std::slice::from_ref(&input), &PvocSettings::default())
+            .unwrap();
+
+        assert_eq!(job.deferred_window_params.len(), 2, "expected one deferred entry per channel lane");
+        let names: Vec<&str> = job.deferred_window_params.iter().map(|d| d.ana_relative_name.as_str()).collect();
+        assert_eq!(names, vec!["a1.ana", "a2.ana"]);
+        // Both lanes' argv still carry the unresolved placeholder at plan time — the runner
+        // patches each independently right before spawning that lane's process step.
+        for deferred in &job.deferred_window_params {
+            assert_eq!(job.steps[deferred.step_index].args[deferred.arg_index], "0");
+        }
     }
 
     #[test]

@@ -190,39 +190,44 @@ fn write_brk_files(job: &Job, temp_dir: &Path) -> Result<(), CdpError> {
     Ok(())
 }
 
-/// Patches the placeholder token for the `PercentOfAnaWindowCount` param (see
-/// CDP-PLAN.md Phase 0 spike S5) with the real value, computed from the `.ana` file the
-/// preceding `pvoc anal` step just produced. A no-op for every job except the one process
-/// in the catalog that uses this scale (`blur_blur`'s "Blurring" param).
+/// Patches the placeholder token(s) for `PercentOfAnaWindowCount` params (see
+/// CDP-PLAN.md Phase 0 spike S5) with their real values, computed from the `.ana` file each
+/// entry's preceding `pvoc anal` step produced. A no-op for every job except the one process
+/// in the catalog that uses this scale (`blur_blur`'s "Blurring" param). Iterates every
+/// entry matching `step_index` rather than a single slot — a stereo file produces one entry
+/// per channel lane (each analyzing its own `.ana` file), and patching only one of them was
+/// the bug behind "blur gives an error" on stereo input: the other channel's argv kept the
+/// unresolved "0" placeholder, which CDP rejects as out of range.
 fn resolve_deferred_window_param(
     job: &Job,
     step_index: usize,
     temp_dir: &Path,
     args: &mut [String],
 ) -> Result<(), CdpError> {
-    let Some(deferred) = &job.planned.deferred_window_param else { return Ok(()) };
-    if deferred.step_index != step_index {
-        return Ok(());
-    }
+    for deferred in &job.planned.deferred_window_params {
+        if deferred.step_index != step_index {
+            continue;
+        }
 
-    let ana_path = temp_dir.join(&deferred.ana_relative_name);
-    let bytes = std::fs::read(&ana_path).map_err(|e| CdpError::OutputRead {
-        path: ana_path.display().to_string(),
-        message: e.to_string(),
-    })?;
-    let decfactor = parse_ana_decfactor(&bytes).ok_or_else(|| CdpError::OutputRead {
-        path: ana_path.display().to_string(),
-        message: "could not find decfactor in .ana header".into(),
-    })?;
-    let len_samples =
-        job.inputs.first().and_then(|chs| chs.first()).map(|c| c.len()).unwrap_or(0);
-    let window_count = window_count_from_decfactor(len_samples, decfactor);
-    let scaled = (f64::from(window_count) * deferred.percent / 100.0).max(1.0).round();
-    let value_text = format!("{scaled}");
-    args[deferred.arg_index] = match &deferred.flag {
-        Some(flag) => format!("{flag}{value_text}"),
-        None => value_text,
-    };
+        let ana_path = temp_dir.join(&deferred.ana_relative_name);
+        let bytes = std::fs::read(&ana_path).map_err(|e| CdpError::OutputRead {
+            path: ana_path.display().to_string(),
+            message: e.to_string(),
+        })?;
+        let decfactor = parse_ana_decfactor(&bytes).ok_or_else(|| CdpError::OutputRead {
+            path: ana_path.display().to_string(),
+            message: "could not find decfactor in .ana header".into(),
+        })?;
+        let len_samples =
+            job.inputs.first().and_then(|chs| chs.first()).map(|c| c.len()).unwrap_or(0);
+        let window_count = window_count_from_decfactor(len_samples, decfactor);
+        let scaled = (f64::from(window_count) * deferred.percent / 100.0).max(1.0).round();
+        let value_text = format!("{scaled}");
+        args[deferred.arg_index] = match &deferred.flag {
+            Some(flag) => format!("{flag}{value_text}"),
+            None => value_text,
+        };
+    }
     Ok(())
 }
 
@@ -354,7 +359,7 @@ mod tests {
                 dest_channels: vec![0],
             }],
             brk_files: Vec::new(),
-            deferred_window_param: None,
+            deferred_window_params: Vec::new(),
         }
     }
 
@@ -595,6 +600,54 @@ mod tests {
         assert_eq!(output.sample_rate, sample_rate);
         let ratio = output.channels[0].len() as f64 / len_samples as f64;
         assert!((ratio - 1.0).abs() < 0.1, "expected ~same duration after pvoc round-trip, got ratio {ratio}");
+    }
+
+    fn stereo_sine_channels() -> (Vec<Vec<f32>>, u32) {
+        let doc = crate::model::io::load_wav("tests/fixtures/stereo_sine.wav").unwrap();
+        (doc.channels, doc.sample_rate)
+    }
+
+    /// Regression test for the real bug behind "blur gives an error": `blur_blur` is the
+    /// one catalog process using `PercentOfAnaWindowCount`, which can't be resolved until
+    /// each channel lane's own `.ana` file exists (Phase 0 spike S5). On a stereo file this
+    /// used to leave every lane but the last with an unresolved "0" placeholder — CDP
+    /// rejects a blurring count of 0 as out of range — so this specifically exercises two
+    /// lanes against the real binary, not just one.
+    #[test]
+    fn blur_blur_on_stereo_input_resolves_every_lanes_window_count() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = stereo_sine_channels();
+        let len_samples = channels[0].len();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("blur_blur").expect("blur_blur in catalog");
+
+        let input = crate::model::cdp::InputSpec { channels: 2, sample_rate, len_samples };
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &[crate::model::cdp::ParamValue::Number(20.0)],
+            std::slice::from_ref(&input),
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(planned.deferred_window_params.len(), 2, "expected one deferred entry per channel");
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 104,
+            cdp_dir,
+            planned,
+            inputs: vec![channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(30))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("blur blur should succeed on both stereo lanes");
+        assert_eq!(output.channels.len(), 2);
     }
 
     #[test]
