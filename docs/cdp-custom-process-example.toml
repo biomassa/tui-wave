@@ -1,0 +1,98 @@
+# Worked example: adding a custom CDP process to tui-wave.
+#
+# Copy this file (or your own version of it) into
+#   $XDG_CONFIG_HOME/tui-wave/cdp/        (usually ~/.config/tui-wave/cdp/)
+# and it will appear in the CDP process browser (Ctrl+P) the next time you launch the app.
+# Any number of *.toml files can live in that directory; each may contain one or more
+# [[process]] tables. A process whose `key` matches a built-in one REPLACES the built-in
+# definition (handy for fixing a range or default); a new `key` ADDS a process.
+#
+# This example adds "modify speed 1" — CDP's plain tape-style speed/pitch multiplier. The
+# built-in catalog only ships modify speed's semitone mode (mode 2); this exposes mode 1,
+# where the parameter is a raw playback-rate multiplier (0.5 = an octave down at half
+# speed, 2.0 = an octave up at double speed).
+
+[[process]]
+# Stable identifier. Convention is family_subprog[_mode]; it only needs to be unique.
+key = "modify_speed_1"
+
+# The CDP binary and its leading positional arguments. The final command line is:
+#   <cdp_dir>/modify speed 1 <infile> <outfile> <params...>
+bin = "modify"
+subprog = "speed"
+mode = "1"
+
+# Shown in the browser and the parameter dialog's title.
+title = "Vari-Speed"
+
+# category is "time" (time-domain, runs directly) or "pvoc" (spectral — the app wraps it in
+# pvoc analysis/resynthesis automatically). subcategory only groups the browser list.
+category = "time"
+subcategory = "pitch"
+
+short_description = "Change speed and pitch by a raw playback-rate multiplier"
+description = """
+Plays the sound faster or slower like changing the speed of a tape, altering pitch and \
+duration together. 0.5 is half speed (an octave down and twice as long); 2.0 is double \
+speed (an octave up and half as long); 1.0 is unchanged.
+"""
+
+# I/O kinds: none | wav | ana | dual_wav | dual_ana.
+#   wav        = time-domain audio in and out (this process)
+#   ana        = spectral; the app inserts pvoc anal/synth around it automatically
+#   dual_*     = takes a second input (another open buffer)
+#   none (in)  = a synthesis process that generates audio
+input = "wav"
+output = "wav"
+
+# stereo_native = true means the binary handles a stereo file directly; false makes the app
+# split stereo into two mono passes and re-merge. modify speed handles multichannel itself.
+stereo_native = true
+output_is_stereo = false
+
+# Parameters, in the exact order they appear on the command line. One [[process.params]]
+# table each. Omit the whole section for a process that takes no parameters.
+[[process.params]]
+name = "Speed"
+description = "Playback-rate multiplier: 0.5 = half speed/octave down, 2 = double/octave up"
+# kind = "number" | "toggle" | "choice"
+kind = "number"
+min = 0.05
+max = 20.0
+step = 0.01
+default = 1.0
+# exponential = true gives finer control near the low end when nudging with the arrow keys.
+exponential = true
+# scale = "plain" | "percent_of_input_duration" | "percent_of_fft_size" |
+#         "percent_of_ana_window_count" | "output_duration_seconds"
+# "plain" passes the value straight through. The percent/window scales are for parameters
+# CDP documents as "time in seconds" or "number of analysis windows"; they let the dialog
+# show a friendly 0-100% while emitting the real value.
+scale = "plain"
+# automatable marks a parameter CDP can drive with a breakpoint envelope. The envelope
+# editor isn't built yet, so this is informational for now — leave it false unless you know
+# the parameter accepts a breakpoint file.
+automatable = false
+
+# --- Field reference for the other parameter kinds -----------------------------------------
+#
+# A toggle (an on/off flag, emitted only when on):
+#
+#   [[process.params]]
+#   name = "Extra Precision"
+#   description = "..."
+#   kind = "toggle"
+#   default = false
+#   flag = "-p"          # emitted verbatim when the toggle is on; omit for a bare positional
+#
+# A choice (pick one of a fixed set; the chosen text is emitted as the argument):
+#
+#   [[process.params]]
+#   name = "Sample Rate"
+#   description = "..."
+#   kind = "choice"
+#   options = ["44100", "48000", "88200", "96000"]
+#   default = 0          # 0-based index into options
+#
+# `flag` works on any kind: with `flag = "-x"`, a number 0.5 is emitted as the single token
+# "-x0.5" instead of a bare "0.5". Leave `flag` out for a plain positional argument.

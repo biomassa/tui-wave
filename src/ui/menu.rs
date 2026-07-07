@@ -97,6 +97,7 @@ impl MenuBar {
                 label: "Process",
                 mnemonic: 'P',
                 entries: vec![
+                    entry("CDP Process...",  Action::CdpProcess,    "Ctrl+p"),
                     entry("Reverse",         Action::Reverse,       "Ctrl+r"),
                     entry("Normalize",       Action::Normalize,     "Ctrl+n"),
                     entry("Gain",            Action::Gain,          "Ctrl+g"),
@@ -131,6 +132,13 @@ impl MenuBar {
                 entries: vec![
                     entry("Play/Pause",    Action::TogglePlayback, "Space"),
                     entry("Loop Playback", Action::ToggleLoop,     "l"),
+                ],
+            },
+            MenuItem {
+                label: "Options",
+                mnemonic: 'O',
+                entries: vec![
+                    entry("Configure CDP Directory...", Action::ConfigureCdpDirectory, ""),
                 ],
             },
         ];

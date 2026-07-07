@@ -25,6 +25,11 @@ pub struct Config {
     /// where it renders correctly but feels slower than the text renderer), not as a gate
     /// to opt in. Has no effect at all on a terminal where graphics mode wasn't detected.
     pub graphics_mode: bool,
+    /// Path to the directory containing CDP (Composer's Desktop Project) binaries. Empty
+    /// when unset — the CDP process dialog prompts for it on first use rather than the menu
+    /// entry being conditionally disabled, matching this file's "never block startup on a
+    /// missing/invalid setting" philosophy. See `cdp::validate_cdp_dir`.
+    pub cdp_dir: String,
     /// Key bindings as `ActionName → [key-string, ...]`. Empty on first launch; the UI layer
     /// fills in all defaults (via `keymap::fill_missing_keybindings`) before building the
     /// dispatch map, and writes the completed set back on the first save. Key strings use the
@@ -46,6 +51,7 @@ impl Default for Config {
             viewport_follows_playback: false,
             transient_threshold_db: 13.0,
             graphics_mode: true,
+            cdp_dir: String::new(),
             keybindings: HashMap::new(),
         }
     }
@@ -119,6 +125,7 @@ mod tests {
             viewport_follows_playback: true,
             transient_threshold_db: 9.0,
             graphics_mode: false,
+            cdp_dir: "/opt/cdp/bin".into(),
             keybindings: HashMap::new(),
         };
         let toml_string = toml::to_string_pretty(&config).unwrap();
@@ -164,6 +171,7 @@ mod tests {
             viewport_follows_playback: false,
             transient_threshold_db: 12.0,
             graphics_mode: false,
+            cdp_dir: String::new(),
             keybindings: HashMap::new(),
         };
         config.save();
