@@ -190,14 +190,21 @@ fn write_brk_files(job: &Job, temp_dir: &Path) -> Result<(), CdpError> {
     Ok(())
 }
 
-/// Patches the placeholder token(s) for `PercentOfAnaWindowCount` params (see
-/// CDP-PLAN.md Phase 0 spike S5) with their real values, computed from the `.ana` file each
-/// entry's preceding `pvoc anal` step produced. A no-op for every job except the one process
-/// in the catalog that uses this scale (`blur_blur`'s "Blurring" param). Iterates every
-/// entry matching `step_index` rather than a single slot — a stereo file produces one entry
-/// per channel lane (each analyzing its own `.ana` file), and patching only one of them was
-/// the bug behind "blur gives an error" on stereo input: the other channel's argv kept the
+/// Patches the placeholder(s) for `PercentOfAnaWindowCount` params (see CDP-PLAN.md Phase 0
+/// spike S5) with their real values, computed from the `.ana` file each entry's preceding
+/// `pvoc anal` step produced. A no-op for every job except the one process in the catalog
+/// that uses this scale (`blur_blur`'s "Blurring" param). Iterates every entry matching
+/// `step_index` rather than a single slot — a stereo file produces one entry per channel
+/// lane (each analyzing its own `.ana` file), and patching only one of them was the bug
+/// behind "blur gives an error" on stereo input: the other channel's argv kept the
 /// unresolved "0" placeholder, which CDP rejects as out of range.
+///
+/// A constant value (`DeferredWindowTarget::Arg`) patches one argv token; an automated
+/// value (`DeferredWindowTarget::BrkFile`) instead rewrites the `.brk` file's per-point
+/// values in place — that file was written with placeholder values at plan time since the
+/// real window count wasn't known yet. Regression fix: an envelope on this param used to
+/// leave the `.brk` file holding raw 0-100 percent values, which CDP rejected as literal
+/// (and far too small) window counts.
 fn resolve_deferred_window_param(
     job: &Job,
     step_index: usize,
@@ -221,12 +228,29 @@ fn resolve_deferred_window_param(
         let len_samples =
             job.inputs.first().and_then(|chs| chs.first()).map(|c| c.len()).unwrap_or(0);
         let window_count = window_count_from_decfactor(len_samples, decfactor);
-        let scaled = (f64::from(window_count) * deferred.percent / 100.0).max(1.0).round();
-        let value_text = format!("{scaled}");
-        args[deferred.arg_index] = match &deferred.flag {
-            Some(flag) => format!("{flag}{value_text}"),
-            None => value_text,
-        };
+        let scale_percent = |percent: f64| (f64::from(window_count) * percent / 100.0).max(1.0).round();
+
+        match &deferred.target {
+            crate::model::cdp::pipeline::DeferredWindowTarget::Arg { arg_index, flag, percent } => {
+                let value_text = format!("{}", scale_percent(*percent));
+                args[*arg_index] = match flag {
+                    Some(flag) => format!("{flag}{value_text}"),
+                    None => value_text,
+                };
+            }
+            crate::model::cdp::pipeline::DeferredWindowTarget::BrkFile { relative_name, points } => {
+                let contents = points
+                    .iter()
+                    .map(|&(t, percent)| format!("{t} {}", scale_percent(percent)))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let brk_path = temp_dir.join(relative_name);
+                std::fs::write(&brk_path, contents).map_err(|e| CdpError::Spawn {
+                    step: format!("rewrite {relative_name}"),
+                    message: e.to_string(),
+                })?;
+            }
+        }
     }
     Ok(())
 }
@@ -648,6 +672,48 @@ mod tests {
         };
         let output = result.expect("blur blur should succeed on both stereo lanes");
         assert_eq!(output.channels.len(), 2);
+    }
+
+    /// Regression test for the actual reported bug: automating (enveloping) `blur_blur`'s
+    /// "Blurring" param used to reject with "Value (0.100000) out of range (1.0 to 1632.0)"
+    /// — the `.brk` file held the raw 0-100 percent values verbatim instead of being scaled
+    /// to real window counts the way a constant value already was. Deliberately includes
+    /// 0.1 (the exact value from the report) as a breakpoint value to pin this down against
+    /// the real binary, not just the planning logic.
+    #[test]
+    fn blur_blur_with_an_automated_blurring_value_resolves_the_brk_file() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("blur_blur").expect("blur_blur in catalog");
+
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &[crate::model::cdp::ParamValue::Breakpoints(vec![(0.0, 0.1), (1.0, 50.0)])],
+            std::slice::from_ref(&input),
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(planned.deferred_window_params.len(), 1);
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 105,
+            cdp_dir,
+            planned,
+            inputs: vec![channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(30))
+        else {
+            unreachable!()
+        };
+        result.expect("blur blur should succeed with an automated Blurring value, not reject 0.1 as an out-of-range window count");
     }
 
     #[test]
