@@ -6753,17 +6753,22 @@ fn render_cdp_browser_dialog(
     frame.render_widget(Paragraph::new(lines), left);
 
     // ---- Right column: the selected process's full description, word-wrapped ----
+    // A 1-column margin baked into the *Rect* (not a leading space in the text) so it
+    // applies uniformly to every wrapped row, not just each logical line's first visual
+    // row — a leading `" "` in the text only padded the row `Wrap` happened to start on.
+    let right_padded =
+        Rect { x: right.x + 1, y: right.y, width: right.width.saturating_sub(2), height: right.height };
     let right_lines = match def {
         Some(d) => vec![
             Line::raw(""),
-            Line::from(Span::styled(format!(" {}", d.title), label_style)),
-            Line::from(Span::styled(format!(" {}", "\u{2500}".repeat((right.width as usize).saturating_sub(2))), dim_style)),
+            Line::from(Span::styled(d.title.as_str(), label_style)),
+            Line::from(Span::styled("\u{2500}".repeat(right_padded.width as usize), dim_style)),
             Line::raw(""),
-            Line::from(Span::styled(format!(" {}", d.description.trim()), base)),
+            Line::from(Span::styled(d.description.trim(), base)),
         ],
-        None => vec![Line::raw(""), Line::from(Span::styled(" No matches", dim_style))],
+        None => vec![Line::raw(""), Line::from(Span::styled("No matches", dim_style))],
     };
-    frame.render_widget(Paragraph::new(right_lines).wrap(Wrap { trim: false }), right);
+    frame.render_widget(Paragraph::new(right_lines).wrap(Wrap { trim: false }), right_padded);
 
     row_rects
 }
