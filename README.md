@@ -2,15 +2,6 @@
 
 ![tui-wave screenshot](screenshot1.png)
 
-CDP process browser, parameter form with automatable (green) fields and presets, and the
-breakpoint envelope editor:
-
-<p>
-  <img src="CDP1.png" alt="CDP process browser" width="32%" />
-  <img src="CDP2.png" alt="CDP parameter form with presets and automatable fields" width="32%" />
-  <img src="CDP3.png" alt="CDP breakpoint envelope editor" width="32%" />
-</p>
-
 A keyboard-driven **terminal audio editor** for Linux, macOS, and Windows, written in Rust (mouse works too). It opens WAV files and gives you a zoomable waveform you can navigate,
 play, and edit entirely from the keyboard: selection, cut/copy/paste, undo/redo, normalize, gain, fades, reverse, trim, resample, mix-to-mono, and timeline markers with transient
 detection — plus a menu bar, a context-aware toolbar, fully configurable keyboard shortcuts via .toml config file, a file browser, and multi-buffer editing. Edits are saved back to WAV at 16-bit, 24-bit, or 32-bit float, and BWF cue points / markers are preserved across the round trip. A dedicated command chops a file at its markers and exports each region as a separate WAV.
@@ -24,6 +15,15 @@ Press `F10` (or `Alt`+a menu letter) to open the menus, `Tab` / `Shift+Tab` to m
 between the waveform, the file list, and the open buffers, and `q` to quit.
 
 See [USERGUIDE.md](USERGUIDE.md) for the full keybinding reference and workflow tips.
+
+CDP process browser, parameter form with automatable (green) fields and presets, and the
+breakpoint envelope editor:
+
+<p>
+  <img src="CDP1.png" alt="CDP process browser" width="32%" />
+  <img src="CDP2.png" alt="CDP parameter form with presets and automatable fields" width="32%" />
+  <img src="CDP3.png" alt="CDP breakpoint envelope editor" width="32%" />
+</p>
 
 ## Status and Disclaimer
 This is developed with the assistance of LLM. I am not a Rust developer, however I have certain expertise in working with audio files. I needed this instrument for my own work.
