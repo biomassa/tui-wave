@@ -4,6 +4,7 @@
 pub mod catalog;
 pub mod def;
 pub mod pipeline;
+pub mod preset;
 
 pub use catalog::CdpCatalog;
 pub use def::{IoKind, ParamKind, ParamValue, ProcessDef};
