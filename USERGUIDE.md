@@ -111,27 +111,64 @@ marker still gets its intro/outro captured as their own regions.
 ### CDP processes
 
 `Ctrl+P` (or **Process → CDP Process…**) opens a dialog-driven front-end to the
-[Composer's Desktop Project](https://www.composersdesktop.com) — a large suite of external
-command-line sound-transformation tools (blur, stretch, morph, spectral filtering, granular
-processing, and much more). CDP is not bundled; you install it separately and point the app
-at its binaries.
+[Composer's Desktop Project](https://www.composersdesktop.com) (CDP) — a large, decades-old
+suite of external command-line sound-transformation tools (blur, stretch, morph, spectral
+filtering, granular processing, and hundreds more). CDP itself is free software maintained by
+the Composer's Desktop Project, not bundled with tui-wave — see
+[README.md § Optional: CDP support](README.md#optional-cdp-composers-desktop-project-support)
+for what it is, full credits, and how to install or build it. tui-wave's built-in catalog of
+process definitions is adapted from [SoundThread](https://github.com/j-p-higgins/SoundThread)
+(MIT license, see `THIRD_PARTY_NOTICES.md`).
 
 **First run.** If no CDP directory is configured, the dialog asks for one — enter the path
 to the folder containing the CDP binaries (e.g. `pvoc`, `modify`, `blur`). You can change it
 later from **Options → Configure CDP Directory…**. The setting is saved in your config file
 (`cdp_dir`).
 
-**Browsing.** Type to filter the process list (matches the title, id, and description); `↑`/`↓`
-select; `Enter` opens the chosen process's parameter form; `Esc` backs out. The line under the
-list shows the selected process's one-line description.
+**Browsing.** A dedicated, fixed-size dialog (it doesn't resize as you scroll) lists every
+matching process with the highlighted one's description alongside it. Type to filter (matches
+the title, id, and short description); `↑`/`↓` selects one at a time, `PgUp`/`PgDn` a page at a
+time; `Enter`, or clicking a process's name, opens its parameter form; `Esc` backs out.
 
-**Parameters.** Each process shows a form of its parameters:
+**Parameters.** Selecting a process opens a second dialog — sized to fit that process's own
+parameters, scrolling if there are more than fit your terminal — with a form of its controls:
 
 - **Number** fields — type a value, or nudge by the parameter's step with `↑`/`↓`. Out-of-range
   values are rejected on run with an inline message.
 - **Toggle** fields — `Space` flips them.
 - **Choice** fields — `←`/`→` cycle the options.
-- `Tab` / `Shift+Tab` move between fields (and the Preview/Apply buttons).
+- `Tab` / `Shift+Tab` move between fields (and the preset row, Preview, and Apply).
+- A parameter's label is shown in **green** when it can be automated with a breakpoint envelope
+  instead of a fixed value — see below.
+
+**Automating a parameter (breakpoint envelopes).** With a green (automatable) Number field
+focused, press `e` to open its envelope editor — a graph of value against time, seeded with two
+flat points at the field's current value. In terminals that support kitty/Sixel/iTerm2 graphics
+it renders as a real curve over a dimmed reference waveform of the audio being processed;
+otherwise it falls back to an ASCII staircase.
+
+| Key | What it does |
+|-----|-------------|
+| `←` / `→` | Select the previous / next point |
+| `Shift+←` / `→` | Move the selected point's time |
+| `↑` / `↓` | Change the selected point's value (coarse) |
+| `Shift+↑` / `↓` | Change the selected point's value (fine, exact parameter step) |
+| `n` | Insert a new point |
+| `Delete` | Remove the selected point |
+| `c` | Discard the envelope, back to a plain constant value |
+| `Enter` | Save the envelope and close the editor |
+| `Esc` | Discard changes made this session and close the editor |
+
+Mouse: click selects the nearest point, double-click inserts one, drag moves the selected
+point, `Shift`+drag moves it at reduced (fine) speed, and `Shift`+click deletes the nearest
+point. A field showing an envelope reads "envelope (N pts, e to edit)" in place of its value;
+running the process on it emits a CDP breakpoint (`.brk`) file instead of a constant.
+
+**Presets.** The parameter dialog has a preset row above the fields: `←`/`→` cycles through
+presets saved for *this* process (loading the selected one's values immediately), `s` opens a
+name prompt to save the current values (prefilled with the current preset's name, so re-saving
+is just `Enter`), and `d` deletes the selected preset. Presets are stored per process as
+`$XDG_CONFIG_HOME/tui-wave/cdp_presets/<process-key>.toml`.
 
 **Preview and Apply.** `Enter` runs the process on the current selection (or the whole file if
 nothing is selected) and splices the result back in — fully undoable with `Ctrl+Z`. Tab to
@@ -141,12 +178,11 @@ of running CDP again. After a process is applied the selection is cleared and th
 at the start of the result, so `Space` plays it straight away.
 
 **Spectral processes** (blur, morph, spectral filtering, …) are wrapped automatically: the app
-runs CDP's phase-vocoder analysis and resynthesis around them, so you just pick the process and
-never deal with `.ana` files by hand. Two extra dialog fields, FFT points and overlap, control
-the analysis resolution.
+runs CDP's phase-vocoder analysis and resynthesis around them at a sensible default resolution,
+so you just pick the process and never deal with `.ana` files or FFT settings by hand.
 
 **Dual-input processes** (combine, morph, vocode, …) take a second sound. The parameter form
-gains a **Second input** row — `←`/`→` picks which open buffer supplies it (open the other file
+gains a **2nd input** row — `←`/`→` picks which open buffer supplies it (open the other file
 in another buffer first). The second buffer is used whole; both inputs must share a sample rate.
 
 **Errors.** If CDP rejects the input or parameters, its own error text is shown in a scrollable
