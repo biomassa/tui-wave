@@ -1,4 +1,5 @@
 mod audio;
+mod cdp;
 mod commands;
 mod config;
 mod model;
