@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-07-08
+
+- **CDP: breakpoint automation, a two-step browser/params flow, and per-process presets.**
+  Any automatable parameter — shown in **green** in the parameter form — can now be driven
+  by a breakpoint envelope instead of a fixed value: press `e` on it to open a dedicated
+  editor (insert/delete/drag points, coarse and fine nudging, a graphics-mode curve overlay
+  with a reference waveform in terminals that support kitty/Sixel/iTerm2 graphics). The
+  process browser is a fixed-size list+description dialog again — it no longer resizes as
+  you scroll — with working PageUp/PageDown and click-to-open; selecting a process opens a
+  separate parameter dialog sized for just that process, with its own scroll if the process
+  has more parameters than fit. That dialog also gained a preset row: `s` saves the current
+  values under a name, `d` deletes the selected preset, `←`/`→` cycles through saved ones —
+  stored per process under `$XDG_CONFIG_HOME/tui-wave/cdp_presets/`. Also fixes a real bug
+  where automating certain parameters (e.g. `blur_blur`'s "Blurring") made CDP reject the
+  run with an out-of-range error, and tightens up the parameter form's column alignment and
+  the browser's description-text margins.
+
 ## 2026-07-07
 
 - **CDP (Composer's Desktop Project) integration.** A new dialog-driven front-end to the CDP
