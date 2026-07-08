@@ -76,6 +76,38 @@ fn draw_disc(img: &mut RgbaImage, cx: f64, cy: f64, radius: f64, color: Rgba<u8>
     }
 }
 
+/// The reference-waveform equivalent of `draw_vspan_aa`: same continuous-range, same
+/// fractional-edge anti-aliasing and same "widen to at least 1px" treatment for a silent
+/// span, but every row's coverage is additionally scaled by a constant `alpha` — a flat,
+/// capped-opacity wash rather than `draw_vspan_aa`'s full-strength fill, which is what keeps
+/// this reading as a pale backdrop no matter how loud the underlying audio gets.
+fn draw_low_alpha_vspan(img: &mut RgbaImage, col: u32, y0: f64, y1: f64, color: Rgba<u8>, alpha: f64) {
+    if alpha <= 0.0 {
+        return;
+    }
+    let h = img.height() as f64;
+    let (mut lo, mut hi) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
+    if hi - lo < 1.0 {
+        let mid = (lo + hi) / 2.0;
+        lo = mid - 0.5;
+        hi = mid + 0.5;
+    }
+    if lo < 0.0 {
+        hi = (hi - lo).min(h);
+        lo = 0.0;
+    }
+    if hi > h {
+        lo = (lo - (hi - h)).max(0.0);
+        hi = h;
+    }
+    let first = lo.floor() as u32;
+    let last_excl = (hi.ceil() as u32).min(img.height());
+    for row in first..last_excl {
+        let coverage = hi.min(row as f64 + 1.0) - lo.max(row as f64);
+        super::waveform_image::blend_pixel(img, col, row, color, coverage * alpha);
+    }
+}
+
 /// Rasterizes a breakpoint envelope into a `pixel_width` x `pixel_height` RGBA image. The
 /// time/value → pixel mapping is the continuous analog of the ASCII renderer's
 /// `cdp_envelope_value_to_row` (row 0 = `max`, last row = `min`) and the mouse handler's
@@ -88,6 +120,7 @@ pub fn rasterize_cdp_envelope(
     time_max: f64,
     min: f64,
     max: f64,
+    waveform_ref: &[f32],
     pixel_width: u32,
     pixel_height: u32,
 ) -> RgbaImage {
@@ -97,6 +130,30 @@ pub fn rasterize_cdp_envelope(
     let background = color_to_rgba(theme::SURFACE0);
     for pixel in img.pixels_mut() {
         *pixel = background;
+    }
+
+    // Pale reference waveform (the actual audio the envelope will apply to), drawn first so
+    // the curve/points always render crisply on top of it — bottom-anchored (silence = the
+    // very bottom row, full-scale = the very top), low-alpha, not meant to be read
+    // precisely, just to show *where* in time the sound has content — the same shape the
+    // main waveform panel would show, just rectified to one lobe instead of bipolar. Unlike
+    // `rasterize_waveform`'s bar mode, no inter-column overlap-extension is needed here:
+    // every column's span shares the same fixed `bottom` anchor, so adjacent spans always
+    // overlap there regardless of how much their tops differ — a real gap (the thing that
+    // trick exists to prevent) simply can't occur. `waveform_ref` is expected at
+    // (near-)pixel resolution (see `App::cdp_envelope_waveform_ref`) so there's genuine
+    // per-column variation for the top edge to trace — coarser cell-resolution data
+    // upsampled by nearest-neighbor is what made this read as blocky bars before.
+    if !waveform_ref.is_empty() {
+        let ref_color = color_to_rgba(theme::WAVEFORM);
+        const REF_MAX_ALPHA: f64 = 0.35;
+        let bottom = pixel_height as f64;
+        for col in 0..pixel_width {
+            let cell = ((col as f64 / pixel_width as f64) * waveform_ref.len() as f64) as usize;
+            let peak = waveform_ref.get(cell).copied().unwrap_or(0.0).clamp(0.0, 1.0) as f64;
+            let top = bottom - peak * bottom;
+            draw_low_alpha_vspan(&mut img, col, top, bottom, ref_color, peak * REF_MAX_ALPHA);
+        }
     }
 
     if points.is_empty() || time_max <= 0.0 {
@@ -133,9 +190,11 @@ pub fn rasterize_cdp_envelope(
     }
 
     // Breakpoint markers on top of the curve; the selected one drawn last (and larger) so
-    // it's never partly hidden under an adjacent point's disc.
-    let point_color = color_to_rgba(theme::FOCUS);
-    let selected_color = color_to_rgba(theme::TEXT);
+    // it's never partly hidden under an adjacent point's disc. The active point is the
+    // accent color (FOCUS/orange, matching the ASCII editor's reverse-video selection);
+    // inactive points are pale (SUBTEXT0) so the selected one is unambiguous at a glance.
+    let point_color = color_to_rgba(theme::SUBTEXT0);
+    let selected_color = color_to_rgba(theme::FOCUS);
     for (i, &(t, v)) in points.iter().enumerate() {
         if i == selected {
             continue;
@@ -164,7 +223,7 @@ mod tests {
 
     #[test]
     fn empty_points_renders_background_only() {
-        let img = rasterize_cdp_envelope(&[], 0, 1.0, 0.0, 100.0, 40, 20);
+        let img = rasterize_cdp_envelope(&[], 0, 1.0, 0.0, 100.0, &[], 40, 20);
         let bg = color_to_rgba(theme::SURFACE0);
         assert!(img.pixels().all(|&p| p == bg));
     }
@@ -172,7 +231,7 @@ mod tests {
     #[test]
     fn image_has_the_requested_dimensions() {
         let points = vec![(0.0, 0.0), (1.0, 100.0)];
-        let img = rasterize_cdp_envelope(&points, 0, 1.0, 0.0, 100.0, 64, 32);
+        let img = rasterize_cdp_envelope(&points, 0, 1.0, 0.0, 100.0, &[], 64, 32);
         assert_eq!(img.width(), 64);
         assert_eq!(img.height(), 32);
     }
@@ -180,7 +239,7 @@ mod tests {
     #[test]
     fn zero_dimensions_clamp_to_one_pixel() {
         let points = vec![(0.0, 0.0), (1.0, 100.0)];
-        let img = rasterize_cdp_envelope(&points, 0, 1.0, 0.0, 100.0, 0, 0);
+        let img = rasterize_cdp_envelope(&points, 0, 1.0, 0.0, 100.0, &[], 0, 0);
         assert_eq!(img.width(), 1);
         assert_eq!(img.height(), 1);
     }
@@ -191,7 +250,7 @@ mod tests {
     #[test]
     fn flat_envelope_draws_a_horizontal_line_at_the_value_row() {
         let points = vec![(0.0, 50.0), (1.0, 50.0)];
-        let img = rasterize_cdp_envelope(&points, 0, 1.0, 0.0, 100.0, 50, 20);
+        let img = rasterize_cdp_envelope(&points, 0, 1.0, 0.0, 100.0, &[], 50, 20);
         let bg = color_to_rgba(theme::SURFACE0);
         let expected_row: u32 = 9; // midpoint of a 0..100 range over 20 rows, value 50 -> ~row 9-10
         for col in [0u32, 25, 49] {
@@ -206,7 +265,7 @@ mod tests {
     #[test]
     fn point_marker_draws_a_filled_disc() {
         let points = vec![(0.0, 0.0), (0.5, 100.0), (1.0, 0.0)];
-        let img = rasterize_cdp_envelope(&points, 1, 1.0, 0.0, 100.0, 60, 30);
+        let img = rasterize_cdp_envelope(&points, 1, 1.0, 0.0, 100.0, &[], 60, 30);
         let bg = color_to_rgba(theme::SURFACE0);
         // The selected (middle) point sits at col ~29-30, row 0 (value=100=max=top row).
         let mut nonbg = 0;
@@ -218,5 +277,42 @@ mod tests {
             }
         }
         assert!(nonbg > 4, "expected a filled disc (several non-background pixels), got {nonbg}");
+    }
+
+    /// The reference waveform is a *pale* backdrop: a loud column should tint noticeably
+    /// more of its bottom rows than a quiet one, but nowhere near full curve/point contrast
+    /// (`REF_MAX_ALPHA` caps it well under 1.0 coverage).
+    #[test]
+    fn reference_waveform_draws_taller_bars_for_louder_columns() {
+        let points = vec![(0.0, 0.0), (1.0, 0.0)]; // flat at the bottom, out of the way
+        let waveform_ref = vec![0.0f32, 1.0f32]; // silent then full-scale
+        let img = rasterize_cdp_envelope(&points, 0, 1.0, 0.0, 100.0, &waveform_ref, 40, 20);
+        let bg = color_to_rgba(theme::SURFACE0);
+
+        // Column in the silent half (excluding the curve's own bottom row) should be
+        // background; a column in the loud half should have a tinted bottom row.
+        let quiet_col_bg = (0..15).all(|row| img.get_pixel(5, row) != &color_to_rgba(theme::TEXT))
+            && img.get_pixel(5, 5) == &bg;
+        assert!(quiet_col_bg, "silent portion should have no reference-waveform tint away from the curve");
+
+        let loud_bottom_row = img.height() - 1;
+        assert_ne!(img.get_pixel(35, loud_bottom_row - 3), &bg, "loud portion should tint rows well above the very bottom");
+    }
+
+    /// The reference waveform must never fully saturate — it's a backdrop, not competing
+    /// visual content — even at peak amplitude.
+    #[test]
+    fn reference_waveform_never_reaches_full_contrast() {
+        let points = vec![(0.0, 0.0), (1.0, 0.0)];
+        let waveform_ref = vec![1.0f32; 10];
+        let img = rasterize_cdp_envelope(&points, 0, 1.0, 0.0, 100.0, &waveform_ref, 40, 20);
+        let bg = color_to_rgba(theme::SURFACE0);
+        let full_color = color_to_rgba(theme::WAVEFORM);
+        let bottom_row = img.height() - 1;
+        for x in 0..img.width() {
+            let px = img.get_pixel(x, bottom_row);
+            assert_ne!(px, &full_color, "reference waveform should never blend at full strength");
+            assert_ne!(px, &bg, "a peak-amplitude column should still show *some* tint");
+        }
     }
 }
