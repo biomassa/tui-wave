@@ -108,6 +108,57 @@ The first region always runs from the start of the file to the first marker, and
 last from the last marker to the end of the file — so a file with no leading/trailing
 marker still gets its intro/outro captured as their own regions.
 
+### CDP processes
+
+`Ctrl+P` (or **Process → CDP Process…**) opens a dialog-driven front-end to the
+[Composer's Desktop Project](https://www.composersdesktop.com) — a large suite of external
+command-line sound-transformation tools (blur, stretch, morph, spectral filtering, granular
+processing, and much more). CDP is not bundled; you install it separately and point the app
+at its binaries.
+
+**First run.** If no CDP directory is configured, the dialog asks for one — enter the path
+to the folder containing the CDP binaries (e.g. `pvoc`, `modify`, `blur`). You can change it
+later from **Options → Configure CDP Directory…**. The setting is saved in your config file
+(`cdp_dir`).
+
+**Browsing.** Type to filter the process list (matches the title, id, and description); `↑`/`↓`
+select; `Enter` opens the chosen process's parameter form; `Esc` backs out. The line under the
+list shows the selected process's one-line description.
+
+**Parameters.** Each process shows a form of its parameters:
+
+- **Number** fields — type a value, or nudge by the parameter's step with `↑`/`↓`. Out-of-range
+  values are rejected on run with an inline message.
+- **Toggle** fields — `Space` flips them.
+- **Choice** fields — `←`/`→` cycle the options.
+- `Tab` / `Shift+Tab` move between fields (and the Preview/Apply buttons).
+
+**Preview and Apply.** `Enter` runs the process on the current selection (or the whole file if
+nothing is selected) and splices the result back in — fully undoable with `Ctrl+Z`. Tab to
+**Preview** first to hear the result through your speakers *without* modifying the document;
+if you then Apply without changing any parameter, it reuses the already-rendered audio instead
+of running CDP again. After a process is applied the selection is cleared and the cursor sits
+at the start of the result, so `Space` plays it straight away.
+
+**Spectral processes** (blur, morph, spectral filtering, …) are wrapped automatically: the app
+runs CDP's phase-vocoder analysis and resynthesis around them, so you just pick the process and
+never deal with `.ana` files by hand. Two extra dialog fields, FFT points and overlap, control
+the analysis resolution.
+
+**Dual-input processes** (combine, morph, vocode, …) take a second sound. The parameter form
+gains a **Second input** row — `←`/`→` picks which open buffer supplies it (open the other file
+in another buffer first). The second buffer is used whole; both inputs must share a sample rate.
+
+**Errors.** If CDP rejects the input or parameters, its own error text is shown in a scrollable
+viewer (`↑`/`↓`/`PgUp`/`PgDn` to scroll, `Enter`/`Esc` to dismiss). A long-running process shows
+a progress dialog with a step counter; `Esc` cancels it.
+
+**Adding processes.** The built-in catalog covers ~120 common CDP processes. To add or override
+one, drop a `*.toml` file (same schema as the built-in catalog) into
+`$XDG_CONFIG_HOME/tui-wave/cdp/` — see `docs/cdp-custom-process-example.toml` in the source tree
+for a worked example. A file reusing an existing process's `key` replaces the built-in
+definition; a new key adds a process.
+
 ---
 
 ## Playback
