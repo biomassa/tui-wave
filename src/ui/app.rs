@@ -44,6 +44,7 @@ use super::toolbar::Toolbar;
 use super::viewport::Viewport;
 use super::waveform_cache::WaveformCache;
 use super::widgets::db_scale::{DbScaleWidget, DB_GUTTER_WIDTH};
+use super::widgets::cdp_envelope_image::{self, interp_cdp_envelope};
 use super::widgets::statusbar::StatusBar;
 use super::widgets::waveform::WaveformWidget;
 use super::widgets::waveform_image;
@@ -530,6 +531,13 @@ pub struct App {
     /// channel count changes (e.g. switching to a document with a different channel
     /// count), so stale per-channel state from a previous document is never reused.
     graphics_protocols: Vec<ratatui_image::protocol::StatefulProtocol>,
+    /// The CDP envelope editor's own graphics-mode protocol slot — deliberately separate
+    /// from `graphics_protocols` (the per-channel waveform ones): the waveform's own
+    /// graphics rendering is skipped entirely while any dialog is open (`overlay_active`,
+    /// see the waveform's render block), so this never competes with it for a slot, and a
+    /// stale image here is harmless (it's simply not drawn) rather than needing the same
+    /// channel-count-driven `truncate` the waveform's Vec does.
+    cdp_envelope_graphics_protocol: Option<ratatui_image::protocol::StatefulProtocol>,
     /// All open documents (buffers). Index 0 is always the first file loaded; subsequent
     /// entries are created by "Copy to New" or loading additional files.
     pub documents: Vec<Document>,
@@ -782,6 +790,7 @@ impl App {
             picker: None,
             graphics_mode: config.graphics_mode,
             graphics_protocols: Vec::new(),
+            cdp_envelope_graphics_protocol: None,
             documents,
             active_document: 0,
             viewport: None,
@@ -5153,6 +5162,45 @@ impl App {
             self.dialog_n_interactive = dialog_rects.len().saturating_sub(1);
             self.dialog_row_rects = dialog_rects;
         }
+
+        // Graphics-mode envelope curve: `render_cdp_envelope_editor` (inside `render_dialog`
+        // above) always draws the ASCII staircase into the grid's `Rect` first — cheap, and
+        // the correct fallback when there's no picker. When a real terminal graphics
+        // protocol is available, draw a bitmap (true diagonal line segments + filled-disc
+        // points, `cdp_envelope_image::rasterize_cdp_envelope`) directly over that same
+        // `Rect`, which simply occludes the ASCII version underneath — no special-casing
+        // needed inside the ASCII renderer itself. Mirrors the waveform's own graphics
+        // block, just for the editor's grid instead of a whole channel pane; unlike that
+        // block there's no `overlay_active` guard to worry about, since a dialog being open
+        // is exactly the precondition for this branch running at all.
+        let envelope_curve = match &self.dialog {
+            Some(Dialog::CdpBrowser { envelope: Some(edit), fields, .. }) => {
+                fields.get(edit.field_index).and_then(|f| match f {
+                    CdpField::Number { min, max, .. } => {
+                        Some((edit.points.clone(), edit.selected, edit.time_max, *min, *max))
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        };
+        if let Some((points, selected, time_max, min, max)) = envelope_curve {
+            if self.graphics_mode {
+                if let (Some(picker), Some(&grid)) = (&self.picker, self.dialog_row_rects.first()) {
+                    let font = picker.font_size();
+                    let pixel_width = grid.width as u32 * font.width.max(1) as u32;
+                    let pixel_height = grid.height as u32 * font.height.max(1) as u32;
+                    let img = cdp_envelope_image::rasterize_cdp_envelope(
+                        &points, selected, time_max, min, max, pixel_width, pixel_height,
+                    );
+                    let protocol = picker.new_resize_protocol(image::DynamicImage::ImageRgba8(img));
+                    self.cdp_envelope_graphics_protocol = Some(protocol);
+                    if let Some(protocol) = self.cdp_envelope_graphics_protocol.as_mut() {
+                        frame.render_stateful_widget(ratatui_image::StatefulImage::default(), grid, protocol);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -5985,32 +6033,6 @@ fn format_cdp_range(min: f64, max: f64) -> String {
     format!("[{}-{}]", format_cdp_float_for_display(min), format_cdp_float_for_display(max))
 }
 
-/// The value CDP's own breakpoint automation would produce at time `t`: piecewise-linear
-/// interpolation between `points` (sorted by time, as `CdpEnvelopeEdit.points` always is),
-/// clamped to the first/last point's value outside their time range. Pure and unit-tested
-/// since it's exactly what a `.brk` file means — matching CDP's own interpretation is the
-/// whole point of drawing this curve at all, not just an approximation of it.
-fn interp_cdp_envelope(points: &[(f64, f64)], t: f64) -> f64 {
-    let Some(&(first_t, first_v)) = points.first() else { return 0.0 };
-    if t <= first_t {
-        return first_v;
-    }
-    let Some(&(last_t, last_v)) = points.last() else { return first_v };
-    if t >= last_t {
-        return last_v;
-    }
-    for pair in points.windows(2) {
-        let (t0, v0) = pair[0];
-        let (t1, v1) = pair[1];
-        if t >= t0 && t <= t1 {
-            if t1 > t0 {
-                return v0 + (v1 - v0) * (t - t0) / (t1 - t0);
-            }
-            return v0;
-        }
-    }
-    last_v
-}
 
 /// Maps a value in `[min, max]` to a grid row in `[0, height-1]`, row 0 being the *top* of
 /// the grid (the max end) — matches how the waveform/dB-scale widgets orient their vertical
