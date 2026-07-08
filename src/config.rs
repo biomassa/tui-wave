@@ -109,6 +109,18 @@ impl Config {
     }
 }
 
+/// Serializes every test in the crate that mutates the process-global `XDG_CONFIG_HOME` env
+/// var — `config.rs`'s own round-trip test below, and the CDP preset save/delete tests in
+/// `ui/app.rs` (`App`'s preset methods always resolve the directory via the real
+/// `$XDG_CONFIG_HOME`, unlike `model::cdp::preset`'s own directory-parameterized `_in` tests,
+/// which don't need this at all). `std::env::set_var` affects the whole process, so without
+/// this lock, parallel test threads mutating it concurrently would race and silently corrupt
+/// each other's expected state. Lives here (not e.g. a shared test-utils module) since this
+/// is the file the *first* such test was already in — every other module's test just imports
+/// it.
+#[cfg(test)]
+pub(crate) static XDG_CONFIG_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,9 +166,11 @@ mod tests {
     /// the actual disk path, not just the TOML (de)serialization in isolation.
     #[test]
     fn save_then_load_round_trips_through_the_filesystem() {
+        let _guard = XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp_dir = std::env::temp_dir().join(format!("tui_wave_config_test_{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
-        // SAFETY: no other test reads/writes XDG_CONFIG_HOME, so this doesn't race.
+        // SAFETY: XDG_CONFIG_HOME_TEST_LOCK held above serializes every test in the crate
+        // that mutates this process-global var.
         unsafe {
             std::env::set_var("XDG_CONFIG_HOME", &temp_dir);
         }

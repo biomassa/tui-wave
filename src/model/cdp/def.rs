@@ -45,10 +45,13 @@ pub enum NumberScale {
     OutputDurationSeconds,
 }
 
-/// A concrete value for one parameter, as edited in the UI. `Breakpoints` is a V2 hook —
-/// `pipeline::plan_job` already knows how to emit a `.brk` file for it (tested), but no v1
-/// UI constructs one yet.
-#[derive(Debug, Clone, PartialEq)]
+/// A concrete value for one parameter, as edited in the UI. Also the shape a saved CDP
+/// preset's per-param values take (`model::cdp::preset`) — `Serialize`/`Deserialize` exist
+/// for that, not for the catalog itself (which only ever deserializes `ParamKind`). Default
+/// (externally tagged) enum representation, not `ParamKind`'s internally-tagged one — these
+/// are tuple variants (`Number(f64)`, not `Number { .. }`), which internal tagging can't
+/// represent (there's no map to merge a "kind" field into).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ParamValue {
     Number(f64),
     Toggle(bool),
