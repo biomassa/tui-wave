@@ -99,6 +99,11 @@ impl CdpCatalog {
         config_home.join("tui-wave").join("cdp")
     }
 
+    /// Looks up a process by its stable key. Test-only: production code always already has
+    /// a `catalog_index` in hand (from the browser's filtered `entries` list) and indexes
+    /// `processes` directly rather than searching by key; tests use this to grab a specific
+    /// named process (e.g. `"blur_avrg"`) without hardcoding its index.
+    #[cfg(test)]
     pub fn find(&self, key: &str) -> Option<&ProcessDef> {
         self.processes.iter().find(|p| p.key == key)
     }

@@ -80,17 +80,6 @@ pub enum ParamKind {
     },
 }
 
-impl ParamKind {
-    /// The value this parameter starts at when a process dialog is first opened.
-    pub fn default_value(&self) -> ParamValue {
-        match self {
-            ParamKind::Number { default, .. } => ParamValue::Number(*default),
-            ParamKind::Toggle { default } => ParamValue::Toggle(*default),
-            ParamKind::Choice { default, .. } => ParamValue::Choice(*default),
-        }
-    }
-}
-
 /// One parameter of a CDP process: what to call it, how to edit it, and how it's placed on
 /// the command line.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -167,20 +156,6 @@ mod tests {
                 scale: NumberScale::Plain,
             },
         }
-    }
-
-    #[test]
-    fn default_value_matches_kind() {
-        assert_eq!(sample_number().kind.default_value(), ParamValue::Number(5.0));
-        assert_eq!(
-            ParamKind::Toggle { default: true }.default_value(),
-            ParamValue::Toggle(true)
-        );
-        assert_eq!(
-            ParamKind::Choice { options: vec!["a".into(), "b".into()], default: 1 }
-                .default_value(),
-            ParamValue::Choice(1)
-        );
     }
 
     #[test]
