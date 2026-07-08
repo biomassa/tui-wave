@@ -25,6 +25,11 @@ pub struct Config {
     /// where it renders correctly but feels slower than the text renderer), not as a gate
     /// to opt in. Has no effect at all on a terminal where graphics mode wasn't detected.
     pub graphics_mode: bool,
+    /// Path to the directory containing CDP (Composer's Desktop Project) binaries. Empty
+    /// when unset — the CDP process dialog prompts for it on first use rather than the menu
+    /// entry being conditionally disabled, matching this file's "never block startup on a
+    /// missing/invalid setting" philosophy. See `cdp::validate_cdp_dir`.
+    pub cdp_dir: String,
     /// Key bindings as `ActionName → [key-string, ...]`. Empty on first launch; the UI layer
     /// fills in all defaults (via `keymap::fill_missing_keybindings`) before building the
     /// dispatch map, and writes the completed set back on the first save. Key strings use the
@@ -46,6 +51,7 @@ impl Default for Config {
             viewport_follows_playback: false,
             transient_threshold_db: 13.0,
             graphics_mode: true,
+            cdp_dir: String::new(),
             keybindings: HashMap::new(),
         }
     }
@@ -103,6 +109,18 @@ impl Config {
     }
 }
 
+/// Serializes every test in the crate that mutates the process-global `XDG_CONFIG_HOME` env
+/// var — `config.rs`'s own round-trip test below, and the CDP preset save/delete tests in
+/// `ui/app.rs` (`App`'s preset methods always resolve the directory via the real
+/// `$XDG_CONFIG_HOME`, unlike `model::cdp::preset`'s own directory-parameterized `_in` tests,
+/// which don't need this at all). `std::env::set_var` affects the whole process, so without
+/// this lock, parallel test threads mutating it concurrently would race and silently corrupt
+/// each other's expected state. Lives here (not e.g. a shared test-utils module) since this
+/// is the file the *first* such test was already in — every other module's test just imports
+/// it.
+#[cfg(test)]
+pub(crate) static XDG_CONFIG_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,6 +137,7 @@ mod tests {
             viewport_follows_playback: true,
             transient_threshold_db: 9.0,
             graphics_mode: false,
+            cdp_dir: "/opt/cdp/bin".into(),
             keybindings: HashMap::new(),
         };
         let toml_string = toml::to_string_pretty(&config).unwrap();
@@ -147,9 +166,11 @@ mod tests {
     /// the actual disk path, not just the TOML (de)serialization in isolation.
     #[test]
     fn save_then_load_round_trips_through_the_filesystem() {
+        let _guard = XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp_dir = std::env::temp_dir().join(format!("tui_wave_config_test_{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
-        // SAFETY: no other test reads/writes XDG_CONFIG_HOME, so this doesn't race.
+        // SAFETY: XDG_CONFIG_HOME_TEST_LOCK held above serializes every test in the crate
+        // that mutates this process-global var.
         unsafe {
             std::env::set_var("XDG_CONFIG_HOME", &temp_dir);
         }
@@ -164,6 +185,7 @@ mod tests {
             viewport_follows_playback: false,
             transient_threshold_db: 12.0,
             graphics_mode: false,
+            cdp_dir: String::new(),
             keybindings: HashMap::new(),
         };
         config.save();

@@ -109,6 +109,14 @@ impl MenuBar {
                 ],
             },
             MenuItem {
+                label: "CDP",
+                mnemonic: 'C',
+                entries: vec![
+                    entry("CDP Process...",             Action::CdpProcess,            "Ctrl+p"),
+                    entry("Configure CDP Directory...",  Action::ConfigureCdpDirectory, ""),
+                ],
+            },
+            MenuItem {
                 label: "Markers",
                 mnemonic: 'M',
                 entries: vec![
