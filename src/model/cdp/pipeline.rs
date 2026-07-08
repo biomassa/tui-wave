@@ -81,8 +81,8 @@ pub struct OutputWavSpec {
 /// exists — see CDP-PLAN.md Phase 0 spike finding S5: CDP recalculates the actual analysis
 /// window length from the requested overlap factor in a way that can't be predicted before
 /// `pvoc anal` runs. The runner parses `ana_relative_name`'s header for `decfactor` after
-/// that step completes, computes the window count, formats the final argv token, and
-/// patches `steps[step_index].args[arg_index]` before spawning that step.
+/// that step completes, computes the window count, and patches `target` before spawning
+/// that step.
 ///
 /// One entry per (channel lane, deferred param) — a stereo file run through a spectral
 /// process with this scale produces one entry per channel, since each lane analyzes its
@@ -94,9 +94,22 @@ pub struct OutputWavSpec {
 pub struct DeferredWindowParam {
     pub ana_relative_name: String,
     pub step_index: usize,
-    pub arg_index: usize,
-    pub flag: Option<String>,
-    pub percent: f64,
+    pub target: DeferredWindowTarget,
+}
+
+/// What a deferred `PercentOfAnaWindowCount` value patches once the real window count is
+/// known — a plain constant patches one argv token; an automated (`ParamValue::Breakpoints`)
+/// value instead rewrites a `.brk` file's per-point *values* (never their times, which are
+/// already real seconds), since CDP reads breakpoint values in the same units a constant
+/// would use. Regression fix: before this existed, an envelope on this one param wrote its
+/// raw 0-100 percent values straight into the `.brk` file — CDP then rejected them as
+/// literal (and far too small) window counts, e.g. "Value (0.100000) out of range (1.0 to
+/// 1632.0)". The `.brk` file is written with placeholder values at plan time (the real
+/// count isn't known yet) and rewritten in place once it is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeferredWindowTarget {
+    Arg { arg_index: usize, flag: Option<String>, percent: f64 },
+    BrkFile { relative_name: String, points: Vec<(f64, f64)> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -182,13 +195,38 @@ fn format_arg(flag: &Option<String>, value_text: &str) -> Option<String> {
     })
 }
 
+/// Resolves every `NumberScale` variant *except* `PercentOfAnaWindowCount`, which can't be
+/// resolved at plan time at all (see `DeferredWindowTarget`'s doc comment) — shared between
+/// a plain constant `Number` value and each point's *value* in an automated `Breakpoints`
+/// envelope, so both take exactly the same percent-of-duration/percent-of-fft-size math.
+fn scale_number_value(scale: NumberScale, raw: f64, duration_secs: f64, pvoc: &PvocSettings) -> f64 {
+    match scale {
+        NumberScale::Plain | NumberScale::OutputDurationSeconds => raw,
+        NumberScale::PercentOfInputDuration => {
+            if raw >= 100.0 { duration_secs - 0.1 } else { duration_secs * raw / 100.0 }
+        }
+        NumberScale::PercentOfFftSize => (pvoc.points as f64 * raw / 100.0).max(1.0).round(),
+        NumberScale::PercentOfAnaWindowCount => {
+            unreachable!("PercentOfAnaWindowCount is deferred, never resolved here")
+        }
+    }
+}
+
+/// What a param still needs once its argv token (or, for an automated value, a `.brk` file)
+/// has already been emitted — `None` for everything resolved outright; `Some` only for the
+/// one scale (`PercentOfAnaWindowCount`) that can't be computed until the real `.ana` file
+/// exists.
+enum DeferredParamKind {
+    Arg { flag: Option<String>, percent: f64 },
+    BrkFile { relative_name: String, points: Vec<(f64, f64)> },
+}
+
 struct ParamPlan {
     /// Fully-resolved argv token to append, in order; `None` for a false Toggle (contributes
-    /// no token). For the one deferred `PercentOfAnaWindowCount` param, this is a
-    /// placeholder ("0") that the caller records in `deferred_window_param` for the runner
-    /// to patch later.
+    /// no token). For a deferred `PercentOfAnaWindowCount` param, this is a placeholder
+    /// token/file the caller records via `deferred` for the runner to patch later.
     arg: Option<String>,
-    deferred: Option<(Option<String>, f64)>, // (flag, percent) when this param needs runtime resolution
+    deferred: Option<DeferredParamKind>,
 }
 
 fn plan_param(
@@ -217,36 +255,49 @@ fn plan_param(
                 unreachable!("Number value paired with non-Number ParamKind")
             };
             match scale {
-                NumberScale::Plain | NumberScale::OutputDurationSeconds => {
-                    ParamPlan { arg: format_arg(&param.flag, &format_number(*raw)), deferred: None }
-                }
-                NumberScale::PercentOfInputDuration => {
-                    let seconds = if *raw >= 100.0 {
-                        duration_secs - 0.1
-                    } else {
-                        duration_secs * raw / 100.0
-                    };
-                    ParamPlan { arg: format_arg(&param.flag, &format_number(seconds)), deferred: None }
-                }
-                NumberScale::PercentOfFftSize => {
-                    let scaled = (pvoc.points as f64 * raw / 100.0).max(1.0).round();
-                    ParamPlan { arg: format_arg(&param.flag, &format_number(scaled)), deferred: None }
-                }
                 NumberScale::PercentOfAnaWindowCount => ParamPlan {
                     arg: format_arg(&param.flag, "0"),
-                    deferred: Some((param.flag.clone(), *raw)),
+                    deferred: Some(DeferredParamKind::Arg { flag: param.flag.clone(), percent: *raw }),
                 },
+                other => {
+                    let value = scale_number_value(*other, *raw, duration_secs, pvoc);
+                    ParamPlan { arg: format_arg(&param.flag, &format_number(value)), deferred: None }
+                }
             }
         }
         ParamValue::Breakpoints(points) => {
-            let contents = points
-                .iter()
-                .map(|(t, v)| format!("{t} {v}"))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let super::def::ParamKind::Number { scale, .. } = &param.kind else {
+                unreachable!("Breakpoints value paired with non-Number ParamKind")
+            };
             let relative_name = format!("brk_{brk_index}.txt");
-            brk_files.push((relative_name.clone(), contents));
-            ParamPlan { arg: format_arg(&param.flag, &relative_name), deferred: None }
+            match scale {
+                // Regression fix: an envelope on this scale used to write its raw 0-100
+                // percent values straight into the .brk file — CDP then rejected them as
+                // literal (and far too small) window counts. The real count isn't known
+                // until the .ana file exists, so write a placeholder now and let the
+                // runner rewrite every point's value once it is (`DeferredWindowTarget`).
+                NumberScale::PercentOfAnaWindowCount => {
+                    let placeholder =
+                        points.iter().map(|(t, _)| format!("{t} 0")).collect::<Vec<_>>().join("\n");
+                    brk_files.push((relative_name.clone(), placeholder));
+                    ParamPlan {
+                        arg: format_arg(&param.flag, &relative_name),
+                        deferred: Some(DeferredParamKind::BrkFile {
+                            relative_name,
+                            points: points.clone(),
+                        }),
+                    }
+                }
+                other => {
+                    let contents = points
+                        .iter()
+                        .map(|&(t, v)| format!("{t} {}", scale_number_value(*other, v, duration_secs, pvoc)))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    brk_files.push((relative_name.clone(), contents));
+                    ParamPlan { arg: format_arg(&param.flag, &relative_name), deferred: None }
+                }
+            }
         }
     }
 }
@@ -254,9 +305,9 @@ fn plan_param(
 /// Appends `def`'s positional args (subprog, mode) then param args, resolving scales
 /// against `duration_secs`/`pvoc`. `brk_files` accumulates side effects that apply to the
 /// whole job, not just this one invocation. The returned `Vec` holds one
-/// `(arg_index, flag, percent)` entry per deferred (`PercentOfAnaWindowCount`) param this
-/// invocation's args reference — almost always 0 or 1 in practice (only one catalog param
-/// uses that scale today), but a process could in principle carry more than one.
+/// `DeferredWindowTarget` per deferred (`PercentOfAnaWindowCount`) param this invocation's
+/// args (or `.brk` files) reference — almost always 0 or 1 in practice (only one catalog
+/// param uses that scale today), but a process could in principle carry more than one.
 fn build_process_args(
     def: &ProcessDef,
     values: &[ParamValue],
@@ -265,7 +316,7 @@ fn build_process_args(
     duration_secs: f64,
     pvoc: &PvocSettings,
     brk_files: &mut Vec<(String, String)>,
-) -> Result<(Vec<String>, Vec<(usize, Option<String>, f64)>), PlanError> {
+) -> Result<(Vec<String>, Vec<DeferredWindowTarget>), PlanError> {
     if values.len() != def.params.len() {
         return Err(PlanError::ParamCountMismatch { expected: def.params.len(), actual: values.len() });
     }
@@ -284,8 +335,14 @@ fn build_process_args(
     for (i, (param, value)) in def.params.iter().zip(values).enumerate() {
         let plan = plan_param(param, value, duration_secs, pvoc, brk_files, i);
         if let Some(token) = plan.arg {
-            if let Some((flag, percent)) = plan.deferred {
-                deferred.push((args.len(), flag, percent));
+            match plan.deferred {
+                Some(DeferredParamKind::Arg { flag, percent }) => {
+                    deferred.push(DeferredWindowTarget::Arg { arg_index: args.len(), flag, percent });
+                }
+                Some(DeferredParamKind::BrkFile { relative_name, points }) => {
+                    deferred.push(DeferredWindowTarget::BrkFile { relative_name, points });
+                }
+                None => {}
             }
             args.push(token);
         }
@@ -666,14 +723,10 @@ fn plan_ana(
         )?;
         // Every lane analyzes its own .ana file, so each accumulates its own entry rather
         // than overwriting a job-wide slot (see DeferredWindowParam's doc comment).
-        deferred_window_params.extend(deferred.into_iter().map(|(arg_index, flag, percent)| {
-            DeferredWindowParam {
-                ana_relative_name: ana_in.clone(),
-                step_index: process_step_index,
-                arg_index,
-                flag,
-                percent,
-            }
+        deferred_window_params.extend(deferred.into_iter().map(|target| DeferredWindowParam {
+            ana_relative_name: ana_in.clone(),
+            step_index: process_step_index,
+            target,
         }));
         steps.push(Invocation {
             bin: def.bin.clone(),
@@ -909,9 +962,12 @@ mod tests {
         assert_eq!(job.deferred_window_params.len(), 1, "expected exactly one deferred window param");
         let deferred = &job.deferred_window_params[0];
         assert_eq!(deferred.ana_relative_name, "a1.ana");
-        assert_eq!(deferred.percent, 20.0);
-        assert_eq!(deferred.flag, None);
-        assert_eq!(job.steps[deferred.step_index].args[deferred.arg_index], "0");
+        let DeferredWindowTarget::Arg { arg_index, flag, percent } = &deferred.target else {
+            panic!("expected an Arg target for a constant Number value")
+        };
+        assert_eq!(*percent, 20.0);
+        assert_eq!(*flag, None);
+        assert_eq!(job.steps[deferred.step_index].args[*arg_index], "0");
     }
 
     /// Regression test for the bug behind "blur gives an error" on a stereo file: with two
@@ -936,8 +992,49 @@ mod tests {
         // Both lanes' argv still carry the unresolved placeholder at plan time — the runner
         // patches each independently right before spawning that lane's process step.
         for deferred in &job.deferred_window_params {
-            assert_eq!(job.steps[deferred.step_index].args[deferred.arg_index], "0");
+            let DeferredWindowTarget::Arg { arg_index, .. } = &deferred.target else {
+                panic!("expected an Arg target for a constant Number value")
+            };
+            assert_eq!(job.steps[deferred.step_index].args[*arg_index], "0");
         }
+    }
+
+    /// Regression test for the actual reported bug: an *automated* (envelope) value on
+    /// `blur_blur`'s "Blurring" param used to write its raw 0-100 percent values straight
+    /// into the `.brk` file — CDP then rejected them as literal (and far too small) window
+    /// counts, e.g. "Value (0.100000) out of range (1.0 to 1632.0)". A `Breakpoints` value on
+    /// this scale must defer too, targeting the `.brk` file rather than an argv token.
+    #[test]
+    fn percent_of_ana_window_count_breakpoints_defer_to_a_brk_file() {
+        let mut def = base_def(IoKind::Ana, IoKind::Ana);
+        def.bin = "blur".into();
+        def.subprog = Some("blur".into());
+        def.mode = None;
+        def.params = vec![number_param("Blurring", 0.1, 100.0, 20.0, NumberScale::PercentOfAnaWindowCount)];
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let points = vec![(0.0, 0.1), (1.0, 50.0)];
+
+        let job = plan_job(
+            &def,
+            &[ParamValue::Breakpoints(points.clone())],
+            std::slice::from_ref(&input),
+            &PvocSettings::default(),
+        )
+        .unwrap();
+
+        assert_eq!(job.deferred_window_params.len(), 1);
+        let deferred = &job.deferred_window_params[0];
+        assert_eq!(deferred.ana_relative_name, "a1.ana");
+        let DeferredWindowTarget::BrkFile { relative_name, points: deferred_points } = &deferred.target else {
+            panic!("expected a BrkFile target for an automated (Breakpoints) value")
+        };
+        assert_eq!(deferred_points, &points, "raw percent points must be preserved for the runner to rescale");
+
+        // The .brk file emitted at plan time is a placeholder — the runner rewrites it once
+        // the real window count is known, so it must NOT hold the raw (out-of-range) percents.
+        let (name, contents) = job.brk_files.iter().find(|(n, _)| n == relative_name).unwrap();
+        assert_eq!(name, relative_name);
+        assert!(!contents.contains("0.1") && !contents.contains("50"), "plan-time file must be a placeholder, not the real percents: {contents:?}");
     }
 
     #[test]

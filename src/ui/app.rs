@@ -6842,6 +6842,7 @@ fn render_cdp_params_dialog(
     let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
     let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
     let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let automatable_label_style = Style::default().fg(theme::ACTIVE).bg(theme::SURFACE0);
     let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
     let error_style = Style::default().fg(theme::RED).bg(theme::SURFACE0);
     let range_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
@@ -6859,7 +6860,7 @@ fn render_cdp_params_dialog(
 
     // ---- Preset row ----
     let preset_focused = focus == CDP_PRESET_FOCUS;
-    let preset_label = format!(" {:<label_width$}", "Preset");
+    let preset_label = format!(" {:<label_width$}  ", "Preset");
     let preset_line = if let Some(input) = save_prompt {
         let (before, under, after) = input.split_at_cursor();
         Line::from(vec![
@@ -6896,8 +6897,17 @@ fn render_cdp_params_dialog(
     };
     for (i, (param, field)) in def.params.iter().zip(fields).enumerate().skip(scroll_top).take(visible_field_rows) {
         let is_focused = focus == i + 1;
-        let label = format!(" {:<label_width$}", param.name);
-        let label_style_here = if is_focused { cursor_style } else { label_style };
+        let label = format!(" {:<label_width$}  ", param.name);
+        // Automatable params (the ones 'e' can open the envelope editor on) get a green
+        // label so it's visible at a glance which params accept a `.brk` curve, without
+        // having to focus each one to see the "(e:envelope)" hint.
+        let label_style_here = if is_focused {
+            cursor_style
+        } else if param.automatable {
+            automatable_label_style
+        } else {
+            label_style
+        };
         let line = match field {
             CdpField::Number { envelope: Some(points), .. } => Line::from(vec![
                 Span::styled(label, label_style_here),
@@ -6960,7 +6970,7 @@ fn render_cdp_params_dialog(
 
     if let Some(second) = second_input {
         let is_focused = focus == cdp_params_focus_second_input(fields.len());
-        let label = format!(" {:<label_width$}", "2nd input");
+        let label = format!(" {:<label_width$}  ", "2nd input");
         let name = second.selected_name();
         let value = if is_focused { format!(" \u{25c4} {name} \u{25ba}") } else { format!(" {name}") };
         lines.push(Line::from(vec![
