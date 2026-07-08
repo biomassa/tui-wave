@@ -111,7 +111,7 @@ fn ms_to_samples(ms: f32, sample_rate: u32) -> usize {
     ((ms / 1000.0) * sample_rate as f32).round() as usize
 }
 
-/// One-line message for a `PlanError`, shown inline in `Dialog::CdpBrowser`. Every case
+/// One-line message for a `PlanError`, shown inline in `Dialog::CdpParams`. Every case
 /// here is otherwise prevented by the UI (the browser hides dual-input processes, a
 /// document is always available once the dialog is open) except `ParamCountMismatch`,
 /// which would indicate a catalog/UI mismatch bug rather than a user-fixable condition.
@@ -157,16 +157,16 @@ fn cdp_error_lines(err: &crate::cdp::CdpError) -> Vec<String> {
     }
 }
 
-/// One editable field in the `Dialog::CdpBrowser` form, mirroring a `ParamKind` from the
-/// catalog. Built fresh (from each param's default value) whenever a `CdpBrowser` selection
-/// is opened.
+/// One editable field in the `Dialog::CdpParams` form, mirroring a `ParamKind` from the
+/// catalog. Built fresh (from each param's default value) whenever `CdpParams` opens for a
+/// process, or loaded from a saved preset (`CdpField::from_value`).
 #[derive(Clone)]
 enum CdpField {
     /// `min`/`max`/`step` are cloned from the `ParamKind::Number` at construction time so
     /// Up/Down nudging (`cdp_nudge_number`) never needs a catalog lookup — same rationale
     /// as `Choice::options` below. `envelope` is `Some` exactly when this field has been
     /// switched from a constant value to time-varying automation via the envelope editor
-    /// (`Dialog::CdpBrowser.envelope`, `App::open_cdp_envelope_editor`) — `to_value` returns
+    /// (`Dialog::CdpParams.envelope`, `App::open_cdp_envelope_editor`) — `to_value` returns
     /// `ParamValue::Breakpoints` instead of parsing `input` whenever it's set. `input` keeps
     /// whatever constant value was last live so switching back to constant mode (the
     /// editor's 'c' key) doesn't lose it.
@@ -194,6 +194,40 @@ impl CdpField {
             ParamKind::Choice { options, default } => {
                 CdpField::Choice { options: options.clone(), selected: *default }
             }
+        }
+    }
+
+    /// Builds a field from a saved preset's value rather than the catalog default —
+    /// `App::cdp_params_cycle_preset`'s load path. Falls back to `from_default` on a
+    /// kind/value mismatch (the catalog def changed a param's *type*, not just its count,
+    /// since the file was saved — `preset::load_presets` already filters out a *count*
+    /// mismatch, but a same-length type change would slip through that check) rather than
+    /// panicking on a saved preset that no longer lines up with the live catalog.
+    fn from_value(kind: &crate::model::cdp::ParamKind, value: &crate::model::cdp::ParamValue) -> Self {
+        use crate::model::cdp::{ParamKind, ParamValue};
+        match (kind, value) {
+            (ParamKind::Number { min, max, step, .. }, ParamValue::Number(v)) => CdpField::Number {
+                input: TextInput::fresh(format_cdp_float_for_display(*v)),
+                min: *min,
+                max: *max,
+                step: *step,
+                envelope: None,
+            },
+            (ParamKind::Number { min, max, step, .. }, ParamValue::Breakpoints(points)) => CdpField::Number {
+                input: TextInput::fresh(format_cdp_float_for_display(
+                    points.first().map(|&(_, v)| v).unwrap_or(0.0),
+                )),
+                min: *min,
+                max: *max,
+                step: *step,
+                envelope: Some(points.clone()),
+            },
+            (ParamKind::Toggle { .. }, ParamValue::Toggle(on)) => CdpField::Toggle { on: *on },
+            (ParamKind::Choice { options, .. }, ParamValue::Choice(i)) => CdpField::Choice {
+                options: options.clone(),
+                selected: (*i).min(options.len().saturating_sub(1)),
+            },
+            _ => CdpField::from_default(kind),
         }
     }
 
@@ -289,49 +323,72 @@ enum Dialog {
     /// `CdpBrowser`; the menu entry stays always-enabled rather than being conditionally
     /// greyed out, so a bad/missing path is discovered here rather than silently.
     CdpSetup { input: TextInput, error: Option<String> },
-    /// The unified CDP process browser: a searchable process list and its parameter form
-    /// live side by side in one dialog (list+controls on the left, the selected process's
-    /// full `description` on the right — see `render_cdp_browser_dialog`) rather than as two
-    /// separate browse-then-configure screens, so a param edit is never more than a Tab away
-    /// from the list and changing the list selection is never more than a Tab away from the
-    /// last field. `entries` are indices into the loaded `CdpCatalog::processes`, filtered by
-    /// `search`'s text (case-insensitive substring over key/title/short_description) and
-    /// re-filtered on every keystroke; `list_selected` indexes into `entries`, not the
-    /// catalog directly. `fields` are index-parallel to `entries[list_selected]`'s `params`
-    /// and are rebuilt from that process's defaults every time `list_selected` changes (see
-    /// `App::rebuild_cdp_fields`) — there's deliberately no per-process memory of edited
-    /// values across a list navigation, matching "extensive description of the *currently
-    /// selected* one" from the process list being a live, browsable thing, not a series of
-    /// independently configured processes.
-    ///
-    /// `focus` is `CDP_LIST_FOCUS` (0) for the process list itself, or `field_index + 1` for
-    /// the field at that index in `fields`, continuing past them with a second-input picker
-    /// row (dual-input processes only), then Preview, then Apply — see
-    /// `cdp_browser_second_input_focus`/`cdp_browser_preview_focus`/`cdp_browser_apply_focus`
-    /// (thin `+1`-shifted wrappers around the plain field-index-space helpers below, so both
-    /// old and new focus math share one source of truth for the trailing rows' positions).
-    /// `second_input` is `Some` exactly when the process is dual-input (`IoKind::DualWav`/
-    /// `DualAna`). `error` is a validation message shown inline (e.g. "value out of range")
-    /// *before* any process runs; a failure *during* a run instead replaces this dialog
-    /// outright with `CdpOutput`/`Info`, mirroring how `export_regions` replaces
-    /// `ExportRegions` with `Info` on a failure rather than returning to it. `preview` caches
-    /// the most recent successful Preview run so Apply can splice it straight in without
-    /// re-running CDP when parameters haven't changed since — see `App::cdp_preview_matches`.
-    /// `envelope` is `Some` while the ASCII breakpoint-curve editor
-    /// (`render_cdp_envelope_editor`) is open for one of `fields`' automatable Number
-    /// params — it takes over the whole popup and all key handling until committed ('c'/
-    /// Enter-on-Done) or cancelled (Esc), at which point it goes back to `None` and the
-    /// normal list/controls view resumes.
+    /// Searchable list of CDP processes — the list on the left, the highlighted process's
+    /// full `description` on the right (`render_cdp_browser_dialog`). Deliberately a
+    /// *fixed* size regardless of scroll position or which process is highlighted: params
+    /// live in the separate `CdpParams` dialog now, so nothing here varies per process —
+    /// this is what stops the dialog resizing itself as you browse (the thing the
+    /// browser/params split exists to fix; they used to be one merged dialog). `entries` are
+    /// indices into the loaded `CdpCatalog::processes`, filtered by `search`'s text
+    /// (case-insensitive substring over key/title/short_description) and re-filtered on
+    /// every keystroke; `selected` indexes into `entries`, not the catalog directly. Enter
+    /// or a mouse click on an entry opens `Dialog::CdpParams` for that process
+    /// (`App::open_cdp_params`, via `handle_dialog_row_click` for the mouse path); arrow
+    /// keys/PageUp/PageDown just move `selected` (updating the description), staying in
+    /// this dialog.
     CdpBrowser {
         search: TextInput,
         entries: Vec<usize>,
-        list_selected: usize,
+        selected: usize,
+    },
+    /// The parameter-editing form for one CDP process, opened from `Dialog::CdpBrowser`
+    /// (`App::open_cdp_params`). Esc closes this dialog outright — there is no "back to the
+    /// browser," cancelling means cancelling the whole flow, matching how every other CDP
+    /// dialog's Esc behaves. `catalog_index` is stable for this dialog's lifetime (the
+    /// catalog doesn't change while it's open). `fields` are index-parallel to
+    /// `catalog_processes[catalog_index].params`, built once at open time — there's no
+    /// per-process rebuilding to worry about since this dialog only ever shows one process.
+    /// Sized to fit every field, scrolling (`scroll`) if the terminal is too short to show
+    /// them all at once, with column widths computed per-process from the actual longest
+    /// label/range text (`cdp_params_column_widths`) rather than a fixed guess — the fixed
+    /// guess was what let a long param name collide with its own range/value.
+    ///
+    /// `focus` is `CDP_PRESET_FOCUS` (0) for the preset row, or `field_index + 1` for the
+    /// field at that index in `fields`, continuing past them with a second-input picker row
+    /// (dual-input processes only), then Preview, then Apply — see
+    /// `cdp_params_focus_second_input`/`cdp_params_focus_preview`/`cdp_params_focus_apply`
+    /// (thin `+1`-shifted wrappers around the plain field-index-space helpers below, so both
+    /// spaces share one source of truth for the trailing rows' positions). `second_input` is
+    /// `Some` exactly when the process is dual-input (`IoKind::DualWav`/`DualAna`). `error`
+    /// is a validation message shown inline (e.g. "value out of range") *before* any process
+    /// runs; a failure *during* a run instead replaces this dialog outright with
+    /// `CdpOutput`/`Info`, mirroring how `export_regions` replaces `ExportRegions` with
+    /// `Info` on a failure rather than returning to it. `preview` caches the most recent
+    /// successful Preview run so Apply can splice it straight in without re-running CDP when
+    /// parameters haven't changed since — see `App::cdp_preview_matches`. `envelope` is
+    /// `Some` while the ASCII/bitmap breakpoint-curve editor (`render_cdp_envelope_editor`)
+    /// is open for one of `fields`' automatable Number params — it takes over the whole
+    /// popup and all key handling until committed ('c'/Enter) or cancelled (Esc).
+    ///
+    /// `presets`/`preset_selected` are this process's saved presets (`model::cdp::preset`),
+    /// loaded once when the dialog opens; Left/Right on the preset row (`focus ==
+    /// CDP_PRESET_FOCUS`) cycles `preset_selected` and immediately loads that preset's
+    /// values into `fields`. `save_prompt`, when `Some`, takes over key handling the same
+    /// way `envelope` does — typing a name and pressing Enter saves the current field values
+    /// under that name (prefilled with `preset_selected`'s name, if any, so re-saving over
+    /// the same preset is just Enter); Esc cancels without saving.
+    CdpParams {
+        catalog_index: usize,
         fields: Vec<CdpField>,
         second_input: Option<CdpSecondInput>,
         focus: usize,
         error: Option<String>,
         preview: Option<CdpPreview>,
         envelope: Option<CdpEnvelopeEdit>,
+        presets: Vec<crate::model::cdp::preset::CdpPreset>,
+        preset_selected: Option<usize>,
+        save_prompt: Option<TextInput>,
+        scroll: usize,
     },
     /// Hard-modal progress display while a `CdpRunner` job is in flight — deliberately
     /// blocks all other input (Esc cancels) because the job captured a snapshot of the
@@ -376,7 +433,7 @@ impl CdpSecondInput {
     }
 }
 
-/// State for the ASCII breakpoint-curve editor, active while `Dialog::CdpBrowser.envelope`
+/// State for the ASCII breakpoint-curve editor, active while `Dialog::CdpParams.envelope`
 /// is `Some`. `points` are `(time_secs, value)` pairs, always kept sorted by time and with
 /// at least 2 entries (a single point isn't a meaningful automation curve) — this is the
 /// exact shape `ParamValue::Breakpoints` and the `.brk`-file writer in
@@ -399,7 +456,7 @@ struct CdpEnvelopeEdit {
     range: (usize, usize),
 }
 
-/// A cached successful Preview run, kept alongside `Dialog::CdpBrowser` so an unchanged-
+/// A cached successful Preview run, kept alongside `Dialog::CdpParams` so an unchanged-
 /// parameter Apply can splice the already-computed audio instead of re-running CDP.
 /// Invalidated (set back to `None`) by any field edit.
 struct CdpPreview {
@@ -414,7 +471,7 @@ struct CdpPreview {
 /// rather than a fixed `er_focus`-style constant set, since the field count varies per
 /// process. These helpers compute the trailing indices from `fields.len()` +
 /// `second_input.is_some()` at every call site so they can't drift out of sync with each
-/// other. They operate in plain 0-based field-index space; `CDP_LIST_FOCUS` and the
+/// other. They operate in plain 0-based field-index space; `CDP_PRESET_FOCUS` and the
 /// `cdp_browser_*_focus` wrappers below shift into the dialog's actual `focus` space, which
 /// reserves index 0 for the process list itself.
 fn cdp_params_second_input_focus(field_count: usize) -> usize {
@@ -427,19 +484,22 @@ fn cdp_params_apply_focus(field_count: usize, has_second_input: bool) -> usize {
     cdp_params_preview_focus(field_count, has_second_input) + 1
 }
 
-/// `Dialog::CdpBrowser.focus` reserves 0 for the process list; a field's own focus value is
+/// `Dialog::CdpParams.focus` reserves 0 for the preset row; a field's own focus value is
 /// `field_index + 1`. These three wrap the plain field-index-space helpers above with that
 /// `+1` shift so both spaces share one source of truth for the trailing rows' positions.
-const CDP_LIST_FOCUS: usize = 0;
-fn cdp_browser_second_input_focus(field_count: usize) -> usize {
+const CDP_PRESET_FOCUS: usize = 0;
+fn cdp_params_focus_second_input(field_count: usize) -> usize {
     cdp_params_second_input_focus(field_count) + 1
 }
-fn cdp_browser_preview_focus(field_count: usize, has_second_input: bool) -> usize {
+fn cdp_params_focus_preview(field_count: usize, has_second_input: bool) -> usize {
     cdp_params_preview_focus(field_count, has_second_input) + 1
 }
-fn cdp_browser_apply_focus(field_count: usize, has_second_input: bool) -> usize {
+fn cdp_params_focus_apply(field_count: usize, has_second_input: bool) -> usize {
     cdp_params_apply_focus(field_count, has_second_input) + 1
 }
+
+/// PageUp/PageDown step size for `Dialog::CdpBrowser`'s process list.
+const CDP_BROWSER_PAGE_SIZE: usize = 10;
 
 /// Focus-order layout for the Gain dialog's interactive rows. The Gain/Left field is always
 /// focus index 0. On a stereo document, a "Per-channel gain" checkbox and (when checked) a
@@ -713,20 +773,20 @@ pub struct App {
 
 /// Context for the CDP job currently running in `cdp_runner`, stashed when it's submitted
 /// so `App::tick_cdp` knows what to do once the matching `CdpEvent::Finished` arrives.
-/// `search`/`entries`/`list_selected`/`fields`/`second_input`/`focus` are only needed for a
-/// `Preview` job: the dialog is `Dialog::CdpRunning` (not `CdpBrowser`) while the job is in
-/// flight, so this is the only place that state survives long enough to rebuild
-/// `CdpBrowser` (with the new preview attached) once the job completes.
+/// `catalog_index`/`fields`/`second_input`/`focus`/`presets`/`preset_selected` are only
+/// needed for a `Preview` job: the dialog is `Dialog::CdpRunning` (not `CdpParams`) while
+/// the job is in flight, so this is the only place that state survives long enough to
+/// rebuild `CdpParams` (with the new preview attached) once the job completes.
 struct CdpPending {
     doc_index: usize,
     range: (usize, usize),
     label: String,
-    search: TextInput,
-    entries: Vec<usize>,
-    list_selected: usize,
+    catalog_index: usize,
     fields: Vec<CdpField>,
     second_input: Option<CdpSecondInput>,
     focus: usize,
+    presets: Vec<crate::model::cdp::preset::CdpPreset>,
+    preset_selected: Option<usize>,
 }
 
 impl App {
@@ -1408,9 +1468,11 @@ impl App {
                 }
             }
             Dialog::CdpSetup { input, .. } => Some(input),
-            Dialog::CdpBrowser { search, fields, focus, .. } => {
-                if *focus == CDP_LIST_FOCUS {
-                    Some(search)
+            Dialog::CdpBrowser { search, .. } => Some(search),
+            Dialog::CdpParams { save_prompt: Some(input), .. } => Some(input),
+            Dialog::CdpParams { fields, focus, .. } => {
+                if *focus == CDP_PRESET_FOCUS {
+                    None
                 } else {
                     match fields.get_mut(*focus - 1) {
                         Some(CdpField::Number { input, .. }) => Some(input),
@@ -1444,7 +1506,8 @@ impl App {
                     _ => true, // folder / base name: free text
                 }
             }
-            Some(Dialog::CdpBrowser { fields, focus, .. }) if *focus != CDP_LIST_FOCUS => {
+            Some(Dialog::CdpParams { save_prompt: Some(_), .. }) => true, // preset name: free text
+            Some(Dialog::CdpParams { fields, focus, .. }) if *focus != CDP_PRESET_FOCUS => {
                 match fields.get(*focus - 1) {
                     Some(CdpField::Number { .. }) => c.is_ascii_digit() || c == '-' || c == '.',
                     // Toggle/Choice fields aren't typed into, and the trailing
@@ -1452,8 +1515,12 @@ impl App {
                     _ => false,
                 }
             }
-            // CdpBrowser with focus == CDP_LIST_FOCUS is the search field: free text,
-            // falls through to the catch-all below.
+            // CdpParams with focus == CDP_PRESET_FOCUS: the preset row has no free-text
+            // field of its own ('s'/'d' are dedicated key arms in handle_dialog_key,
+            // checked before the generic accepts-a-char path this function gates).
+            Some(Dialog::CdpParams { .. }) => false,
+            // CdpBrowser is always search-typable regardless of focus: falls through to the
+            // catch-all below.
             Some(Dialog::CdpRunning { .. }) | Some(Dialog::CdpOutput { .. }) => false,
             Some(Dialog::Info { .. }) => false,
             _ => true, // rename / directory / CDP setup / CDP search: free text
@@ -1461,8 +1528,12 @@ impl App {
     }
 
     fn handle_dialog_key(&mut self, key: KeyEvent) {
-        if let Some(Dialog::CdpBrowser { envelope: Some(_), .. }) = &self.dialog {
+        if let Some(Dialog::CdpParams { envelope: Some(_), .. }) = &self.dialog {
             self.handle_cdp_envelope_key(key);
+            return;
+        }
+        if let Some(Dialog::CdpParams { save_prompt: Some(_), .. }) = &self.dialog {
+            self.handle_cdp_preset_save_prompt_key(key);
             return;
         }
         match key.code {
@@ -1564,28 +1635,32 @@ impl App {
                 Some(Dialog::CdpSetup { input, .. }) => {
                     self.confirm_cdp_setup(input.value().to_string());
                 }
-                Some(Dialog::CdpBrowser {
-                    search, entries, list_selected, fields, second_input, focus, error, preview, envelope,
-                }) => {
-                    if entries.is_empty() {
-                        // No matches: nothing to run, just leave the dialog as-is.
-                        self.dialog = Some(Dialog::CdpBrowser {
-                            search, entries, list_selected, fields, second_input, focus, error, preview, envelope,
-                        });
-                        return;
+                Some(Dialog::CdpBrowser { search, entries, selected }) => {
+                    // No matches: nothing to open, just leave the dialog as-is.
+                    if let Some(&catalog_index) = entries.get(selected) {
+                        self.dialog = Some(Dialog::CdpBrowser { search, entries, selected });
+                        self.open_cdp_params(catalog_index);
+                    } else {
+                        self.dialog = Some(Dialog::CdpBrowser { search, entries, selected });
                     }
-                    // Enter's default action is Apply (from anywhere, including the process
-                    // list itself — a highlighted process's defaults are always valid); it's
-                    // Preview only when the user has explicitly tabbed to the Preview button.
-                    // `cdp_run` re-takes the dialog itself, so it's restored here first rather
-                    // than passed directly.
-                    let purpose = if focus == cdp_browser_preview_focus(fields.len(), second_input.is_some()) {
+                }
+                Some(Dialog::CdpParams {
+                    catalog_index, fields, second_input, focus, error, preview, envelope,
+                    presets, preset_selected, save_prompt, scroll,
+                }) => {
+                    // Enter's default action is Apply (from anywhere, including the preset
+                    // row — a highlighted preset's values, or the process's defaults, are
+                    // always valid); it's Preview only when the user has explicitly tabbed
+                    // to the Preview button. `cdp_run` re-takes the dialog itself, so it's
+                    // restored here first rather than passed directly.
+                    let purpose = if focus == cdp_params_focus_preview(fields.len(), second_input.is_some()) {
                         crate::cdp::JobPurpose::Preview
                     } else {
                         crate::cdp::JobPurpose::Apply
                     };
-                    self.dialog = Some(Dialog::CdpBrowser {
-                        search, entries, list_selected, fields, second_input, focus, error, preview, envelope,
+                    self.dialog = Some(Dialog::CdpParams {
+                        catalog_index, fields, second_input, focus, error, preview, envelope,
+                        presets, preset_selected, save_prompt, scroll,
                     });
                     self.cdp_run(purpose);
                 }
@@ -1614,20 +1689,10 @@ impl App {
                 if let Some(Dialog::ExportRegions { focused, depth, .. }) = self.dialog.as_mut() {
                     if *focused == er_focus::FORMAT { *depth = depth.prev(); }
                     else if let Some(input) = self.dialog_input() { input.left(); }
-                } else if let Some(Dialog::CdpBrowser { fields, second_input, focus, .. }) = self.dialog.as_mut() {
-                    if *focus == CDP_LIST_FOCUS {
-                        // No-op: Left/Right is reserved for the field cursor/Choice cycling
-                        // once focus has moved off the process list.
-                    } else if *focus == cdp_browser_second_input_focus(fields.len()) {
-                        if let Some(second) = second_input {
-                            second.selected = second.selected.saturating_sub(1);
-                        }
-                    } else {
-                        match fields.get_mut(*focus - 1) {
-                            Some(CdpField::Choice { selected, .. }) => *selected = selected.saturating_sub(1),
-                            _ => { if let Some(input) = self.dialog_input() { input.left(); } }
-                        }
-                    }
+                } else if let Some(Dialog::CdpBrowser { .. }) = self.dialog.as_mut() {
+                    if let Some(input) = self.dialog_input() { input.left(); }
+                } else if let Some(Dialog::CdpParams { .. }) = self.dialog.as_mut() {
+                    self.cdp_params_cycle_left_right(false);
                 } else if let Some(input) = self.dialog_input() {
                     input.left();
                 } else {
@@ -1638,74 +1703,58 @@ impl App {
                 if let Some(Dialog::ExportRegions { focused, depth, .. }) = self.dialog.as_mut() {
                     if *focused == er_focus::FORMAT { *depth = depth.next(); }
                     else if let Some(input) = self.dialog_input() { input.right(); }
-                } else if let Some(Dialog::CdpBrowser { fields, second_input, focus, .. }) = self.dialog.as_mut() {
-                    if *focus == CDP_LIST_FOCUS {
-                        // No-op: see the mirrored comment in the Left arm above.
-                    } else if *focus == cdp_browser_second_input_focus(fields.len()) {
-                        if let Some(second) = second_input {
-                            second.selected =
-                                (second.selected + 1).min(second.doc_indices.len().saturating_sub(1));
-                        }
-                    } else {
-                        match fields.get_mut(*focus - 1) {
-                            Some(CdpField::Choice { options, selected }) => {
-                                *selected = (*selected + 1).min(options.len().saturating_sub(1));
-                            }
-                            _ => { if let Some(input) = self.dialog_input() { input.right(); } }
-                        }
-                    }
+                } else if let Some(Dialog::CdpBrowser { .. }) = self.dialog.as_mut() {
+                    if let Some(input) = self.dialog_input() { input.right(); }
+                } else if let Some(Dialog::CdpParams { .. }) = self.dialog.as_mut() {
+                    self.cdp_params_cycle_left_right(true);
                 } else if let Some(input) = self.dialog_input() {
                     input.right();
                 } else {
                     self.cycle_dialog_curve(true);
                 }
             }
-            KeyCode::Up => {
-                let mut list_moved = false;
-                match self.dialog.as_mut() {
-                    Some(Dialog::CdpBrowser { list_selected, focus, .. }) if *focus == CDP_LIST_FOCUS => {
-                        *list_selected = list_selected.saturating_sub(1);
-                        list_moved = true;
+            KeyCode::PageUp => {
+                if let Some(Dialog::CdpBrowser { selected, .. }) = self.dialog.as_mut() {
+                    *selected = selected.saturating_sub(CDP_BROWSER_PAGE_SIZE);
+                } else if let Some(Dialog::CdpOutput { scroll, .. }) = self.dialog.as_mut() {
+                    *scroll = scroll.saturating_sub(10);
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(Dialog::CdpBrowser { entries, selected, .. }) = self.dialog.as_mut() {
+                    if !entries.is_empty() {
+                        *selected = (*selected + CDP_BROWSER_PAGE_SIZE).min(entries.len() - 1);
                     }
-                    Some(Dialog::CdpBrowser { fields, focus, .. }) => {
+                } else if let Some(Dialog::CdpOutput { scroll, lines, .. }) = self.dialog.as_mut() {
+                    *scroll = (*scroll + 10).min(lines.len().saturating_sub(1));
+                }
+            }
+            KeyCode::Up => {
+                match self.dialog.as_mut() {
+                    Some(Dialog::CdpBrowser { selected, .. }) => {
+                        *selected = selected.saturating_sub(1);
+                    }
+                    Some(Dialog::CdpParams { fields, focus, .. }) if *focus != CDP_PRESET_FOCUS => {
                         cdp_nudge_number(fields.get_mut(*focus - 1), 1.0);
                     }
                     Some(Dialog::CdpOutput { scroll, .. }) => *scroll = scroll.saturating_sub(1),
                     _ => {}
                 }
-                if list_moved {
-                    self.rebuild_cdp_fields();
-                }
             }
             KeyCode::Down => {
-                let mut list_moved = false;
                 match self.dialog.as_mut() {
-                    Some(Dialog::CdpBrowser { entries, list_selected, focus, .. }) if *focus == CDP_LIST_FOCUS => {
+                    Some(Dialog::CdpBrowser { entries, selected, .. }) => {
                         if !entries.is_empty() {
-                            *list_selected = (*list_selected + 1).min(entries.len() - 1);
+                            *selected = (*selected + 1).min(entries.len() - 1);
                         }
-                        list_moved = true;
                     }
-                    Some(Dialog::CdpBrowser { fields, focus, .. }) => {
+                    Some(Dialog::CdpParams { fields, focus, .. }) if *focus != CDP_PRESET_FOCUS => {
                         cdp_nudge_number(fields.get_mut(*focus - 1), -1.0);
                     }
                     Some(Dialog::CdpOutput { scroll, lines, .. }) => {
                         *scroll = (*scroll + 1).min(lines.len().saturating_sub(1));
                     }
                     _ => {}
-                }
-                if list_moved {
-                    self.rebuild_cdp_fields();
-                }
-            }
-            KeyCode::PageUp => {
-                if let Some(Dialog::CdpOutput { scroll, .. }) = self.dialog.as_mut() {
-                    *scroll = scroll.saturating_sub(10);
-                }
-            }
-            KeyCode::PageDown => {
-                if let Some(Dialog::CdpOutput { scroll, lines, .. }) = self.dialog.as_mut() {
-                    *scroll = (*scroll + 10).min(lines.len().saturating_sub(1));
                 }
             }
             KeyCode::Home => {
@@ -1762,7 +1811,7 @@ impl App {
                             _ => {}
                         }
                     }
-                    Some(Dialog::CdpBrowser { fields, focus, .. }) if *focus != CDP_LIST_FOCUS => {
+                    Some(Dialog::CdpParams { fields, focus, .. }) if *focus != CDP_PRESET_FOCUS => {
                         if let Some(CdpField::Toggle { on }) = fields.get_mut(*focus - 1) {
                             *on = !*on;
                         }
@@ -1792,6 +1841,30 @@ impl App {
                     self.refresh_cdp_browser_filter();
                 }
             }
+            // 's' opens the preset-name prompt (prefilled with the currently-loaded
+            // preset's name, if any); 'd' deletes it. Both are `Dialog::CdpParams`-only and,
+            // like 'e' above, free to repurpose since a focused Number field's
+            // `dialog_accepts` already rejects letters.
+            KeyCode::Char('s')
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if !self.open_cdp_preset_save_prompt() && self.dialog_accepts('s') {
+                    if let Some(input) = self.dialog_input() {
+                        input.insert('s');
+                    }
+                    self.refresh_cdp_browser_filter();
+                }
+            }
+            KeyCode::Char('d')
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if !self.delete_selected_cdp_preset() && self.dialog_accepts('d') {
+                    if let Some(input) = self.dialog_input() {
+                        input.insert('d');
+                    }
+                    self.refresh_cdp_browser_filter();
+                }
+            }
             KeyCode::Char(c)
                 if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                     && self.dialog_accepts(c) =>
@@ -1806,23 +1879,16 @@ impl App {
     }
 
     /// Re-filters `Dialog::CdpBrowser`'s entries after its search field changes, resetting
-    /// `list_selected` to 0 (the old index's meaning doesn't survive a changed filter) and
-    /// rebuilding `fields` for whatever process that now points at. A no-op for every other
-    /// dialog (and a no-op on `entries` if focus isn't on the search field, so text typed
-    /// into a param field never touches the list), so it's safe to call unconditionally
-    /// after any text edit.
+    /// `selected` to 0 (the old index's meaning doesn't survive a changed filter). A no-op
+    /// for every other dialog, so it's safe to call unconditionally after any text edit.
     fn refresh_cdp_browser_filter(&mut self) {
-        let Some(Dialog::CdpBrowser { search, focus, .. }) = &self.dialog else { return };
-        if *focus != CDP_LIST_FOCUS {
-            return;
-        }
+        let Some(Dialog::CdpBrowser { search, .. }) = &self.dialog else { return };
         let query = search.value().to_string();
         let new_entries = self.cdp_filter_entries(&query);
-        if let Some(Dialog::CdpBrowser { entries, list_selected, .. }) = &mut self.dialog {
+        if let Some(Dialog::CdpBrowser { entries, selected, .. }) = &mut self.dialog {
             *entries = new_entries;
-            *list_selected = 0;
+            *selected = 0;
         }
-        self.rebuild_cdp_fields();
     }
 
     fn cycle_dialog_curve(&mut self, forward: bool) {
@@ -1849,11 +1915,14 @@ impl App {
                 *curve = if forward { curve.next() } else { curve.prev() };
             }
             Some(Dialog::ExportRegions { focused, .. }) => *focused = step(*focused, er_focus::COUNT),
-            // The process list, then fields, then the second-input picker (dual-input
+            // The preset row, then fields, then the second-input picker (dual-input
             // processes only), then Preview, then Apply (see
-            // cdp_browser_{second_input,preview,apply}_focus).
-            Some(Dialog::CdpBrowser { fields, second_input, focus, .. }) => {
-                *focus = step(*focus, cdp_browser_apply_focus(fields.len(), second_input.is_some()) + 1);
+            // cdp_params_focus_{second_input,preview,apply}). `render_cdp_params_dialog`
+            // computes the visible scroll window fresh from `focus` every frame (mirroring
+            // `Dialog::CdpBrowser`'s own on-the-fly `scroll_top` from `selected`), so there's
+            // nothing to update here beyond `focus` itself.
+            Some(Dialog::CdpParams { fields, second_input, focus, .. }) => {
+                *focus = step(*focus, cdp_params_focus_apply(fields.len(), second_input.is_some()) + 1);
             }
             _ => {}
         }
@@ -1932,6 +2001,20 @@ impl App {
                         }
                     }
                     _ => {}
+                }
+            }
+            // A click on a process name selects *and* opens it in one step (matching
+            // Enter's behavior on the currently-selected entry) — clicking is how a mouse
+            // user "commits" a choice, there's no separate confirm step the way there is
+            // for e.g. a checkbox row elsewhere in this function. `row` is 0-based into the
+            // *visible* window (`render_cdp_browser_dialog`'s own scroll_top math, mirrored
+            // here so the two can't disagree about which entry a given row means).
+            Some(Dialog::CdpBrowser { entries, selected, .. }) => {
+                let scroll_top = selected.saturating_sub(CDP_BROWSER_LIST_ROWS.saturating_sub(1));
+                let clicked = scroll_top + row;
+                if clicked < entries.len() {
+                    *selected = clicked;
+                    self.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                 }
             }
             _ => {}
@@ -2062,31 +2145,37 @@ impl App {
             .collect()
     }
 
-    /// Opens the unified CDP browser: process list and parameter controls in one dialog,
-    /// list focus first. `list_selected` starts at 0, so `fields`/`second_input` are built
-    /// for whichever process an empty search puts first.
+    /// Opens the CDP process browser: a plain searchable list, no controls — see
+    /// `Dialog::CdpBrowser`'s doc comment for why that's now a fixed-size dialog rather than
+    /// something that grows/shrinks per process.
     fn open_cdp_browser(&mut self) {
         let entries = self.cdp_filter_entries("");
-        let (fields, second_input) = entries
-            .first()
-            .map(|&i| self.cdp_fields_for(i))
-            .unwrap_or_default();
-        self.dialog = Some(Dialog::CdpBrowser {
-            search: TextInput::new(""),
-            entries,
-            list_selected: 0,
+        self.dialog = Some(Dialog::CdpBrowser { search: TextInput::new(""), entries, selected: 0 });
+    }
+
+    /// Opens `Dialog::CdpParams` for the process at `catalog_index`, building fresh
+    /// default-valued fields and loading any presets saved for it from disk.
+    fn open_cdp_params(&mut self, catalog_index: usize) {
+        let Some(def) = self.cdp_catalog.processes.get(catalog_index) else { return };
+        let (fields, second_input) = self.cdp_fields_for(catalog_index);
+        let presets = crate::model::cdp::preset::load_presets(&def.key, def.params.len());
+        self.dialog = Some(Dialog::CdpParams {
+            catalog_index,
             fields,
             second_input,
-            focus: CDP_LIST_FOCUS,
+            focus: CDP_PRESET_FOCUS,
             error: None,
             preview: None,
             envelope: None,
+            presets,
+            preset_selected: None,
+            save_prompt: None,
+            scroll: 0,
         });
     }
 
     /// Builds fresh default-valued `fields`/`second_input` for the catalog process at
-    /// `catalog_index` — shared by `open_cdp_browser` (initial selection) and
-    /// `rebuild_cdp_fields` (every subsequent list navigation).
+    /// `catalog_index` — used by `open_cdp_params` to seed a freshly opened dialog.
     fn cdp_fields_for(&self, catalog_index: usize) -> (Vec<CdpField>, Option<CdpSecondInput>) {
         use crate::model::cdp::IoKind;
         let Some(def) = self.cdp_catalog.processes.get(catalog_index) else {
@@ -2130,24 +2219,6 @@ impl App {
     /// selected process. Called after every change to `entries`/`list_selected` (arrow
     /// navigation, a search edit that reshuffles the filtered list) — a no-op if no dialog
     /// is open or it isn't `CdpBrowser`.
-    fn rebuild_cdp_fields(&mut self) {
-        let Some(Dialog::CdpBrowser { entries, list_selected, .. }) = &self.dialog else { return };
-        let (fields, second_input) = entries
-            .get(*list_selected)
-            .map(|&i| self.cdp_fields_for(i))
-            .unwrap_or_default();
-        if let Some(Dialog::CdpBrowser {
-            fields: f, second_input: si, focus, error, preview, ..
-        }) = &mut self.dialog
-        {
-            *f = fields;
-            *si = second_input;
-            *focus = CDP_LIST_FOCUS;
-            *error = None;
-            *preview = None;
-        }
-    }
-
     /// Opens the breakpoint-curve editor for whichever `CdpField::Number` is currently
     /// focused in `Dialog::CdpBrowser` ('e' key), if that's actually possible right now —
     /// returns `false` (a no-op) when there's no such dialog, focus isn't on a field, the
@@ -2156,17 +2227,17 @@ impl App {
     /// key handler falls through to typing 'e' as ordinary text when this returns `false`,
     /// so every one of these guards has to hold before touching the dialog.
     fn open_cdp_envelope_editor(&mut self) -> bool {
-        let Some(Dialog::CdpBrowser { entries, list_selected, fields, focus, .. }) = &self.dialog else {
+        let Some(Dialog::CdpParams { catalog_index, fields, focus, .. }) = &self.dialog else {
             return false;
         };
-        if *focus == CDP_LIST_FOCUS {
+        if *focus == CDP_PRESET_FOCUS {
             return false;
         }
         let field_index = *focus - 1;
         let Some(CdpField::Number { input, min, max, envelope, .. }) = fields.get(field_index) else {
             return false;
         };
-        let Some(def) = entries.get(*list_selected).and_then(|&i| self.cdp_catalog.processes.get(i)) else {
+        let Some(def) = self.cdp_catalog.processes.get(*catalog_index) else {
             return false;
         };
         if !def.params.get(field_index).is_some_and(|p| p.automatable) {
@@ -2187,22 +2258,22 @@ impl App {
             .clone()
             .unwrap_or_else(|| vec![(0.0, current_value), (time_max, current_value)]);
 
-        let Some(Dialog::CdpBrowser { envelope: dialog_envelope, .. }) = self.dialog.as_mut() else {
+        let Some(Dialog::CdpParams { envelope: dialog_envelope, .. }) = self.dialog.as_mut() else {
             return false;
         };
         *dialog_envelope = Some(CdpEnvelopeEdit { field_index, points, selected: 0, original, time_max, range });
         true
     }
 
-    /// All key handling while `Dialog::CdpBrowser.envelope` is `Some` — a completely
+    /// All key handling while `Dialog::CdpParams.envelope` is `Some` — a completely
     /// separate routing path from the rest of `handle_dialog_key` (dispatched at its very
     /// top), so the two never interleave. See `CdpEnvelopeEdit`'s doc comment for what each
     /// action does; `Esc`/`c`/`Enter` all *close* the editor and so need the mutable borrow
-    /// of `edit` to have ended before they touch `Dialog::CdpBrowser.envelope` itself
+    /// of `edit` to have ended before they touch `Dialog::CdpParams.envelope` itself
     /// (can't null out the `Option` while something still borrows its contents) — every
     /// value they need is captured into plain owned locals up front for exactly that reason.
     fn handle_cdp_envelope_key(&mut self, key: KeyEvent) {
-        let Some(Dialog::CdpBrowser { envelope: Some(edit), fields, .. }) = self.dialog.as_mut() else { return };
+        let Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) = self.dialog.as_mut() else { return };
         let field_index = edit.field_index;
         let Some(CdpField::Number { min, max, step, .. }) = fields.get(field_index) else { return };
         let (min, max, step) = (*min, *max, *step);
@@ -2284,7 +2355,7 @@ impl App {
         // longer borrowed past this point, so `self.dialog` can be freely re-borrowed.
         match key.code {
             KeyCode::Esc => {
-                if let Some(Dialog::CdpBrowser { fields, envelope, .. }) = self.dialog.as_mut() {
+                if let Some(Dialog::CdpParams { fields, envelope, .. }) = self.dialog.as_mut() {
                     if let Some(CdpField::Number { envelope: field_env, .. }) = fields.get_mut(field_index) {
                         *field_env = original;
                     }
@@ -2292,7 +2363,7 @@ impl App {
                 }
             }
             KeyCode::Char('c') => {
-                if let Some(Dialog::CdpBrowser { fields, envelope, .. }) = self.dialog.as_mut() {
+                if let Some(Dialog::CdpParams { fields, envelope, .. }) = self.dialog.as_mut() {
                     if let Some(CdpField::Number { envelope: field_env, .. }) = fields.get_mut(field_index) {
                         *field_env = None;
                     }
@@ -2300,7 +2371,7 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if let Some(Dialog::CdpBrowser { fields, envelope, .. }) = self.dialog.as_mut() {
+                if let Some(Dialog::CdpParams { fields, envelope, .. }) = self.dialog.as_mut() {
                     if let Some(CdpField::Number { envelope: field_env, .. }) = fields.get_mut(field_index) {
                         *field_env = Some(committed_points);
                     }
@@ -2309,6 +2380,205 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Left (`forward = false`)/Right (`forward = true`) within `Dialog::CdpParams`: on the
+    /// preset row, cycles through saved presets (`cdp_params_cycle_preset`); on the second-
+    /// input row, cycles which open buffer is selected; on a focused `Choice` field, cycles
+    /// its option; otherwise, moves that field's text cursor. Each case returns as soon as
+    /// it's handled so `Dialog::CdpParams`'s borrow from the initial match never overlaps
+    /// with the final case's `self.dialog_input()` call (a fresh, separate borrow of
+    /// `self.dialog`) — see this file's other `handle_*_key` functions for the same pattern.
+    fn cdp_params_cycle_left_right(&mut self, forward: bool) {
+        let Some(Dialog::CdpParams { fields, second_input, focus, .. }) = self.dialog.as_mut() else { return };
+        let focus_val = *focus;
+        if focus_val == CDP_PRESET_FOCUS {
+            self.cdp_params_cycle_preset(forward);
+            return;
+        }
+        if focus_val == cdp_params_focus_second_input(fields.len()) {
+            if let Some(second) = second_input {
+                second.selected = if forward {
+                    (second.selected + 1).min(second.doc_indices.len().saturating_sub(1))
+                } else {
+                    second.selected.saturating_sub(1)
+                };
+            }
+            return;
+        }
+        if let Some(CdpField::Choice { options, selected }) = fields.get_mut(focus_val - 1) {
+            *selected = if forward {
+                (*selected + 1).min(options.len().saturating_sub(1))
+            } else {
+                selected.saturating_sub(1)
+            };
+            return;
+        }
+        if let Some(input) = self.dialog_input() {
+            if forward { input.right(); } else { input.left(); }
+        }
+    }
+
+    /// Cycles `preset_selected` through the saved presets for the process currently open in
+    /// `Dialog::CdpParams` (wrapping; starting from `None`, Right lands on the first preset
+    /// and Left on the last), loading the newly selected preset's values into `fields`
+    /// immediately — see `Dialog::CdpParams`'s doc comment. A no-op if there are no saved
+    /// presets.
+    fn cdp_params_cycle_preset(&mut self, forward: bool) {
+        let (catalog_index, new_index) = {
+            let Some(Dialog::CdpParams { catalog_index, presets, preset_selected, .. }) = &self.dialog else {
+                return;
+            };
+            if presets.is_empty() {
+                return;
+            }
+            let len = presets.len();
+            let new_index = match (*preset_selected, forward) {
+                (None, true) => 0,
+                (None, false) => len - 1,
+                (Some(i), true) => (i + 1) % len,
+                (Some(i), false) => (i + len - 1) % len,
+            };
+            (*catalog_index, new_index)
+        };
+        let Some(def) = self.cdp_catalog.processes.get(catalog_index) else { return };
+        let kinds: Vec<_> = def.params.iter().map(|p| p.kind.clone()).collect();
+
+        let Some(Dialog::CdpParams { presets, preset_selected, fields, .. }) = self.dialog.as_mut() else {
+            return;
+        };
+        let Some(preset) = presets.get(new_index) else { return };
+        *fields = kinds.iter().zip(preset.values.iter()).map(|(k, v)| CdpField::from_value(k, v)).collect();
+        *preset_selected = Some(new_index);
+    }
+
+    /// Opens the preset-name prompt ('s' key), prefilled with the currently-loaded preset's
+    /// name if any (so re-saving over it is just Enter) — returns `false` (a no-op, falling
+    /// through to typing 's' as ordinary text) when there's no `Dialog::CdpParams` open, or
+    /// another sub-mode (envelope editor, an already-open save prompt) is active.
+    fn open_cdp_preset_save_prompt(&mut self) -> bool {
+        let Some(Dialog::CdpParams { presets, preset_selected, envelope, save_prompt, .. }) =
+            self.dialog.as_mut()
+        else {
+            return false;
+        };
+        if envelope.is_some() || save_prompt.is_some() {
+            return false;
+        }
+        let prefill = preset_selected.and_then(|i| presets.get(i)).map(|p| p.name.clone()).unwrap_or_default();
+        *save_prompt = Some(TextInput::fresh(prefill));
+        true
+    }
+
+    /// All key handling while `Dialog::CdpParams.save_prompt` is `Some` — mirrors
+    /// `handle_cdp_envelope_key`'s isolation (dispatched at the very top of
+    /// `handle_dialog_key`, before anything else sees the key). Enter commits: saves the
+    /// current field values under the typed name (overwriting an existing preset of that
+    /// name), reloads the preset list from disk, and selects the newly saved preset. An
+    /// empty/whitespace-only name is treated as "cancel" (nothing worth saving under no
+    /// name), matching Esc.
+    fn handle_cdp_preset_save_prompt_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(Dialog::CdpParams { save_prompt, .. }) = self.dialog.as_mut() {
+                    *save_prompt = None;
+                }
+            }
+            KeyCode::Enter => {
+                let Some(Dialog::CdpParams { catalog_index, fields, save_prompt, .. }) = self.dialog.as_mut()
+                else {
+                    return;
+                };
+                let name = save_prompt.as_ref().map(|i| i.value().trim().to_string()).unwrap_or_default();
+                if name.is_empty() {
+                    *save_prompt = None;
+                    return;
+                }
+                let values: Vec<_> = fields.iter().map(CdpField::to_value).collect();
+                let catalog_index = *catalog_index;
+                let Some(def) = self.cdp_catalog.processes.get(catalog_index) else { return };
+                let key_str = def.key.clone();
+                let param_count = def.params.len();
+                crate::model::cdp::preset::save_preset(
+                    &key_str,
+                    crate::model::cdp::preset::CdpPreset { name: name.clone(), values },
+                );
+                let new_presets = crate::model::cdp::preset::load_presets(&key_str, param_count);
+                let new_selected = new_presets.iter().position(|p| p.name == name);
+                if let Some(Dialog::CdpParams { presets, preset_selected, save_prompt, .. }) =
+                    self.dialog.as_mut()
+                {
+                    *presets = new_presets;
+                    *preset_selected = new_selected;
+                    *save_prompt = None;
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(Dialog::CdpParams { save_prompt: Some(input), .. }) = self.dialog.as_mut() {
+                    input.backspace();
+                }
+            }
+            KeyCode::Delete => {
+                if let Some(Dialog::CdpParams { save_prompt: Some(input), .. }) = self.dialog.as_mut() {
+                    input.delete();
+                }
+            }
+            KeyCode::Left => {
+                if let Some(Dialog::CdpParams { save_prompt: Some(input), .. }) = self.dialog.as_mut() {
+                    input.left();
+                }
+            }
+            KeyCode::Right => {
+                if let Some(Dialog::CdpParams { save_prompt: Some(input), .. }) = self.dialog.as_mut() {
+                    input.right();
+                }
+            }
+            KeyCode::Home => {
+                if let Some(Dialog::CdpParams { save_prompt: Some(input), .. }) = self.dialog.as_mut() {
+                    input.home();
+                }
+            }
+            KeyCode::End => {
+                if let Some(Dialog::CdpParams { save_prompt: Some(input), .. }) = self.dialog.as_mut() {
+                    input.end();
+                }
+            }
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                if let Some(Dialog::CdpParams { save_prompt: Some(input), .. }) = self.dialog.as_mut() {
+                    input.insert(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Deletes the currently-selected preset ('d' key) from disk and the in-memory list,
+    /// leaving the field values untouched (only the "this came from a saved preset" label
+    /// goes away) — a no-op (returning `false`, falling through to typing 'd' as text) when
+    /// there's no `Dialog::CdpParams` open, another sub-mode is active, or no preset is
+    /// currently selected.
+    fn delete_selected_cdp_preset(&mut self) -> bool {
+        let Some(Dialog::CdpParams { catalog_index, presets, preset_selected, envelope, save_prompt, .. }) =
+            self.dialog.as_mut()
+        else {
+            return false;
+        };
+        if envelope.is_some() || save_prompt.is_some() {
+            return false;
+        }
+        let Some(index) = *preset_selected else { return false };
+        let Some(name) = presets.get(index).map(|p| p.name.clone()) else { return false };
+        let catalog_index = *catalog_index;
+        let Some(def) = self.cdp_catalog.processes.get(catalog_index) else { return false };
+        let key = def.key.clone();
+        let param_count = def.params.len();
+        crate::model::cdp::preset::delete_preset(&key, &name);
+        let new_presets = crate::model::cdp::preset::load_presets(&key, param_count);
+        if let Some(Dialog::CdpParams { presets, preset_selected, .. }) = self.dialog.as_mut() {
+            *presets = new_presets;
+            *preset_selected = None;
+        }
+        true
     }
 
     /// Whether `preview` was computed from exactly `values`/`range` (at the document's
@@ -2347,29 +2617,32 @@ impl App {
     }
 
     /// Runs (or re-splices a matching cached Preview for) the process currently shown in
-    /// `Dialog::CdpBrowser`. Shared by both the Preview and Apply actions — they differ only
+    /// `Dialog::CdpParams`. Shared by both the Preview and Apply actions — they differ only
     /// in `purpose` and in what `tick_cdp` does once the job finishes.
     fn cdp_run(&mut self, purpose: crate::cdp::JobPurpose) {
         use crate::model::cdp::IoKind;
-        let Some(Dialog::CdpBrowser { search, entries, list_selected, fields, second_input, focus, preview, .. }) =
-            self.dialog.take()
+        let Some(Dialog::CdpParams {
+            catalog_index, fields, second_input, focus, preview, presets, preset_selected, ..
+        }) = self.dialog.take()
         else {
             return;
         };
-        let Some(&catalog_index) = entries.get(list_selected) else { return };
         let Some(def) = self.cdp_catalog.processes.get(catalog_index).cloned() else { return };
 
         // Every early-return below re-creates the dialog with an error; this closure keeps
         // those sites from each hand-copying the full field list (a missed field there
         // would silently drop e.g. the second-input selection on a validation error).
-        // `envelope` is always `None` here — `handle_dialog_key` intercepts every key while
-        // the envelope editor is open, so `cdp_run` can never be reached mid-edit.
-        let reopen = |search: TextInput, entries: Vec<usize>, focus: usize, error: String, fields: Vec<CdpField>, second_input: Option<CdpSecondInput>, preview: Option<CdpPreview>| {
-            Dialog::CdpBrowser { search, entries, list_selected, fields, second_input, focus, error: Some(error), preview, envelope: None }
+        // `envelope`/`save_prompt` are always `None` here — `handle_dialog_key` intercepts
+        // every key while either sub-mode is open, so `cdp_run` can never be reached mid-edit.
+        let reopen = |focus: usize, error: String, fields: Vec<CdpField>, second_input: Option<CdpSecondInput>, preview: Option<CdpPreview>, presets: Vec<crate::model::cdp::preset::CdpPreset>, preset_selected: Option<usize>| {
+            Dialog::CdpParams {
+                catalog_index, fields, second_input, focus, error: Some(error), preview,
+                envelope: None, presets, preset_selected, save_prompt: None, scroll: 0,
+            }
         };
 
         if let Some(bad) = Self::cdp_validate_fields(&def, &fields) {
-            self.dialog = Some(reopen(search, entries, bad + 1, "value out of range".into(), fields, second_input, preview));
+            self.dialog = Some(reopen(bad + 1, "value out of range".into(), fields, second_input, preview, presets, preset_selected));
             return;
         }
 
@@ -2383,7 +2656,7 @@ impl App {
             match self.operation_range(idx, self.snap_to_zero) {
                 Some(r) => r,
                 None => {
-                    self.dialog = Some(reopen(search, entries, focus, "no audio to process".into(), fields, second_input, preview));
+                    self.dialog = Some(reopen(focus, "no audio to process".into(), fields, second_input, preview, presets, preset_selected));
                     return;
                 }
             }
@@ -2420,7 +2693,7 @@ impl App {
         }
         if matches!(def.input, IoKind::DualWav | IoKind::DualAna) {
             let Some(doc_b) = second_doc_index.and_then(|i| self.documents.get(i)) else {
-                self.dialog = Some(reopen(search, entries, focus, "no second input buffer".into(), fields, second_input, preview));
+                self.dialog = Some(reopen(focus, "no second input buffer".into(), fields, second_input, preview, presets, preset_selected));
                 return;
             };
             input_specs.push(crate::model::cdp::InputSpec {
@@ -2434,7 +2707,7 @@ impl App {
         let planned = match planned {
             Ok(p) => p,
             Err(err) => {
-                self.dialog = Some(reopen(search, entries, focus, cdp_plan_error_message(&err), fields, second_input, preview));
+                self.dialog = Some(reopen(focus, cdp_plan_error_message(&err), fields, second_input, preview, presets, preset_selected));
                 return;
             }
         };
@@ -2469,12 +2742,12 @@ impl App {
             doc_index: idx,
             range,
             label: format!("CDP: {}", def.title),
-            search,
-            entries,
-            list_selected,
+            catalog_index,
             fields: fields.clone(),
             second_input,
             focus,
+            presets,
+            preset_selected,
         });
         self.cdp_runner.submit(crate::cdp::Job {
             id: job_id,
@@ -2571,10 +2844,8 @@ impl App {
                                     audio.play(0);
                                 }
                                 let values = pending.fields.iter().map(CdpField::to_value).collect();
-                                self.dialog = Some(Dialog::CdpBrowser {
-                                    search: pending.search,
-                                    entries: pending.entries,
-                                    list_selected: pending.list_selected,
+                                self.dialog = Some(Dialog::CdpParams {
+                                    catalog_index: pending.catalog_index,
                                     fields: pending.fields,
                                     second_input: pending.second_input,
                                     focus: pending.focus,
@@ -2586,6 +2857,10 @@ impl App {
                                         sample_rate: output.sample_rate,
                                     }),
                                     envelope: None,
+                                    presets: pending.presets,
+                                    preset_selected: pending.preset_selected,
+                                    save_prompt: None,
+                                    scroll: 0,
                                 });
                             }
                         },
@@ -3676,7 +3951,7 @@ impl App {
     /// Returns `false` immediately when the editor isn't open, so `handle_mouse` falls
     /// through to its normal dialog-click handling for every other dialog unaffected by this.
     fn try_handle_cdp_envelope_mouse(&mut self, mouse: MouseEvent) -> bool {
-        if !matches!(self.dialog, Some(Dialog::CdpBrowser { envelope: Some(_), .. })) {
+        if !matches!(self.dialog, Some(Dialog::CdpParams { envelope: Some(_), .. })) {
             return false;
         }
         // The grid rect is stashed via `render_cdp_envelope_editor`'s return value (see
@@ -3690,11 +3965,10 @@ impl App {
                     && mouse.column < grid.x + grid.width
                     && mouse.row >= grid.y
                     && mouse.row < grid.y + grid.height;
-                eprintln!("DEBUG click at ({},{}) grid={:?} in_grid={}", mouse.column, mouse.row, grid, in_grid);
                 if !in_grid {
                     return true;
                 }
-                let Some(Dialog::CdpBrowser { envelope: Some(edit), fields, .. }) = self.dialog.as_mut() else {
+                let Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) = self.dialog.as_mut() else {
                     return true;
                 };
                 let Some(CdpField::Number { min, max, .. }) = fields.get(edit.field_index) else { return true };
@@ -3708,7 +3982,7 @@ impl App {
                         && y0.abs_diff(mouse.row) <= 1
                 });
 
-                let Some(Dialog::CdpBrowser { envelope: Some(edit), .. }) = self.dialog.as_mut() else {
+                let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() else {
                     return true;
                 };
                 if is_double {
@@ -3745,7 +4019,7 @@ impl App {
                 let Some((anchor_col, anchor_row, anchor_t, anchor_v)) = self.dragging_cdp_point_anchor else {
                     return true;
                 };
-                let Some(Dialog::CdpBrowser { envelope: Some(edit), fields, .. }) = self.dialog.as_mut() else {
+                let Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) = self.dialog.as_mut() else {
                     return true;
                 };
                 let Some(CdpField::Number { min, max, .. }) = fields.get(edit.field_index) else { return true };
@@ -5178,7 +5452,7 @@ impl App {
         // block there's no `overlay_active` guard to worry about, since a dialog being open
         // is exactly the precondition for this branch running at all.
         let envelope_curve = match &self.dialog {
-            Some(Dialog::CdpBrowser { envelope: Some(edit), fields, .. }) => {
+            Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) => {
                 fields.get(edit.field_index).and_then(|f| match f {
                     CdpField::Number { min, max, .. } => {
                         Some((edit.points.clone(), edit.selected, edit.time_max, *min, *max, edit.range))
@@ -5735,14 +6009,20 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, catalog: &crate
         Dialog::Info { message } => {
             return render_info_dialog(frame, area, message);
         }
-        Dialog::CdpBrowser { search, entries, list_selected, fields, second_input, focus, error, preview, envelope } => {
+        Dialog::CdpBrowser { search, entries, selected } => {
+            return render_cdp_browser_dialog(frame, area, search, entries, *selected, catalog);
+        }
+        Dialog::CdpParams {
+            catalog_index, fields, second_input, focus, error, preview, envelope,
+            presets, preset_selected, save_prompt, scroll,
+        } => {
+            let def = catalog.processes.get(*catalog_index);
             if let Some(edit) = envelope {
-                let def = entries.get(*list_selected).and_then(|&i| catalog.processes.get(i));
                 return render_cdp_envelope_editor(frame, area, fields, edit, def);
             }
-            return render_cdp_browser_dialog(
-                frame, area, search, entries, *list_selected, fields, second_input.as_ref(), *focus, error,
-                preview, catalog,
+            return render_cdp_params_dialog(
+                frame, area, def, fields, second_input.as_ref(), *focus, error, preview,
+                presets, *preset_selected, save_prompt.as_ref(), *scroll,
             );
         }
         Dialog::CdpRunning { title, step_label, step_index, step_total, started, purpose, .. } => {
@@ -5779,6 +6059,7 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, catalog: &crate
         | Dialog::Info { .. }
         | Dialog::CdpSetup { .. }
         | Dialog::CdpBrowser { .. }
+        | Dialog::CdpParams { .. }
         | Dialog::CdpRunning { .. }
         | Dialog::CdpOutput { .. } => {
             unreachable!("handled by match arms above")
@@ -6364,30 +6645,186 @@ fn render_cdp_envelope_editor(
 /// Preview/Apply), while the right column shows the selected process's full `description`
 /// (word-wrapped) — see `Dialog::CdpBrowser`'s doc comment for the interaction model.
 /// Keyboard-only (returns no interactive rects), matching the two dialogs this one merges.
+/// Visible process-list rows in `Dialog::CdpBrowser` — a fixed constant (not
+/// content-dependent) shared between the renderer and `App::handle_dialog_row_click`'s
+/// scroll-position math, so a click can never disagree with what's actually on screen.
+const CDP_BROWSER_LIST_ROWS: usize = 24;
+
+/// The CDP process browser: a plain searchable list on the left, the highlighted process's
+/// full `description` on the right. Deliberately a *fixed*-size popup (width and height are
+/// constants, independent of `entries`/the selected process) — see `Dialog::CdpBrowser`'s
+/// doc comment for why. Returns one `Rect` per *visible* list row (for
+/// `App::handle_dialog_row_click`'s click-to-select-and-open) plus a trailing hints-bar
+/// `Rect`, matching every other dialog's row-click convention in this file.
 fn render_cdp_browser_dialog(
     frame: &mut Frame,
     area: Rect,
     search: &TextInput,
     entries: &[usize],
-    list_selected: usize,
+    selected: usize,
+    catalog: &crate::model::cdp::CdpCatalog,
+) -> Vec<Rect> {
+    let def = entries.get(selected).and_then(|&i| catalog.processes.get(i));
+
+    let width = 130u16.min(area.width);
+    // header spacer + search + blank + LIST_ROWS + blank + hints, + 2 border.
+    let height = (1 + 1 + 1 + CDP_BROWSER_LIST_ROWS as u16 + 1 + 1 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+
+    let block = Block::default()
+        .title("CDP Process")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    const LEFT_WIDTH: u16 = 56;
+    let cols = Layout::horizontal([Constraint::Length(LEFT_WIDTH), Constraint::Min(10)]).split(inner);
+    let left = cols[0];
+    let right_block = Block::default().borders(Borders::LEFT).border_style(Style::default().fg(theme::BORDER));
+    let right = right_block.inner(cols[1]);
+    frame.render_widget(right_block, cols[1]);
+
+    // ---- Left column: search + process list ----
+    let (before, under, after) = search.split_at_cursor();
+    let mut lines = vec![
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(" Search: ", label_style),
+            Span::styled(before, base),
+            Span::styled(under, cursor_style),
+            Span::styled(after, base),
+        ]),
+        Line::raw(""),
+    ];
+
+    // Fixed at the constant (not clamped to `inner.height`) so `App::handle_dialog_row_click`
+    // — which can't see `inner.height` — computes the exact same `scroll_top` a click needs
+    // to land on the right entry; on a terminal too short to show all of them, the popup's
+    // own height clamp (above) simply crops the bottom of the list, matching how every other
+    // dialog in this file that doesn't have real scroll support handles overflow.
+    let list_rows = CDP_BROWSER_LIST_ROWS;
+    let scroll_top = selected.saturating_sub(list_rows.saturating_sub(1));
+    let mut row_rects = Vec::with_capacity(list_rows + 1);
+    let mut rendered_rows = 0;
+    if entries.is_empty() {
+        lines.push(Line::from(Span::styled(" No matches", dim_style)));
+        rendered_rows = 1;
+    } else {
+        for (row, &catalog_idx) in entries.iter().enumerate().skip(scroll_top).take(list_rows) {
+            let Some(d) = catalog.processes.get(catalog_idx) else { continue };
+            let text = format!(" {}", d.title);
+            let style = if row == selected { cursor_style } else { base };
+            lines.push(Line::from(Span::styled(text, style)));
+            row_rects.push(Rect { x: left.x, y: left.y + 1 + rendered_rows as u16, width: left.width, height: 1 });
+            rendered_rows += 1;
+        }
+    }
+    for _ in rendered_rows..list_rows {
+        lines.push(Line::raw(""));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(" \u{2191}\u{2193}", hint_style),
+        Span::styled(":select  ", label_style),
+        Span::styled("PgUp/PgDn", hint_style),
+        Span::styled(":page  ", label_style),
+        Span::styled("Enter", hint_style),
+        Span::styled(":open  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
+    ]));
+    let hints_row = left.y + inner.height.saturating_sub(1);
+    row_rects.push(Rect { x: left.x, y: hints_row, width: left.width, height: 1 });
+
+    frame.render_widget(Paragraph::new(lines), left);
+
+    // ---- Right column: the selected process's full description, word-wrapped ----
+    let right_lines = match def {
+        Some(d) => vec![
+            Line::raw(""),
+            Line::from(Span::styled(format!(" {}", d.title), label_style)),
+            Line::from(Span::styled(format!(" {}", "\u{2500}".repeat((right.width as usize).saturating_sub(2))), dim_style)),
+            Line::raw(""),
+            Line::from(Span::styled(format!(" {}", d.description.trim()), base)),
+        ],
+        None => vec![Line::raw(""), Line::from(Span::styled(" No matches", dim_style))],
+    };
+    frame.render_widget(Paragraph::new(right_lines).wrap(Wrap { trim: false }), right);
+
+    row_rects
+}
+
+/// The longest label and Number-range text across `def`'s params, used as fixed column
+/// widths so every row's value lands in the same place regardless of how long any other
+/// row's label happens to be — a long param name used to run straight into its own range
+/// text with no separating space (`"Grain Size Limit[2.0-200.0]"`) because the old fixed
+/// 14-column guess didn't account for names longer than that.
+fn cdp_params_column_widths(def: &crate::model::cdp::ProcessDef) -> (usize, usize) {
+    use crate::model::cdp::ParamKind;
+    let label_width = def.params.iter().map(|p| p.name.chars().count()).max().unwrap_or(0).max(9);
+    let range_width = def
+        .params
+        .iter()
+        .map(|p| match &p.kind {
+            ParamKind::Number { min, max, .. } => format_cdp_range(*min, *max).chars().count(),
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0);
+    (label_width, range_width)
+}
+
+/// The parameter-editing form for one CDP process, opened from `Dialog::CdpBrowser`. Sized
+/// to fit every field up to the terminal's height; past that, the field list scrolls to
+/// keep the focused field visible (`visible_field_rows`/`scroll_top` below) while the
+/// preset row, second-input row, buttons, and hints stay pinned. Column widths are computed
+/// fresh from `def.params` (`cdp_params_column_widths`) rather than a fixed guess — see that
+/// function's doc comment.
+fn render_cdp_params_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    def: Option<&crate::model::cdp::ProcessDef>,
     fields: &[CdpField],
     second_input: Option<&CdpSecondInput>,
     focus: usize,
     error: &Option<String>,
     preview: &Option<CdpPreview>,
-    catalog: &crate::model::cdp::CdpCatalog,
+    presets: &[crate::model::cdp::preset::CdpPreset],
+    preset_selected: Option<usize>,
+    save_prompt: Option<&TextInput>,
+    _scroll: usize,
 ) -> Vec<Rect> {
-    let def = entries.get(list_selected).and_then(|&i| catalog.processes.get(i));
+    let Some(def) = def else { return Vec::new() };
+    let (label_width, range_width) = cdp_params_column_widths(def);
 
-    let width = 130u16.min(area.width);
-    const LIST_ROWS: usize = 8;
-    // header spacer + search + blank + LIST_ROWS + blank + one row per param (or one
-    // "(no parameters)" row) + optional second-input row + blank + buttons + error/blank
-    // + hints.
-    let field_rows = def.map(|d| d.params.len()).unwrap_or(0).max(1);
+    let width = (14 + label_width + range_width + 24).clamp(50, 110) as u16;
+    let width = width.min(area.width);
     let has_second_input = second_input.is_some() as usize;
-    let inner_rows = 1 + 1 + 1 + LIST_ROWS + 1 + field_rows + has_second_input + 1 + 1 + 1 + 1;
-    let height = (inner_rows as u16 + 2).min(area.height);
+    // header spacer + preset row + blank + [fields] + second-input? + blank + buttons +
+    // error/blank + hints, + 2 border.
+    let overhead = 1 + 1 + 1 + has_second_input + 1 + 1 + 1 + 1;
+    let content_field_rows = fields.len().max(1);
+    let ideal_height = overhead + content_field_rows + 2;
+    let height = (ideal_height as u16).min(area.height);
+    let visible_field_rows = (height as usize)
+        .saturating_sub(2)
+        .saturating_sub(overhead)
+        .max(1)
+        .min(content_field_rows);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -6406,152 +6843,148 @@ fn render_cdp_browser_dialog(
     let point_style = Style::default().fg(theme::FOCUS).bg(theme::SURFACE0);
 
     let block = Block::default()
-        .title(def.map(|d| d.title.as_str()).unwrap_or("CDP Process"))
+        .title(def.title.as_str())
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    // Wide enough for the longest thing the left column ever renders: the hints row and a
-    // focused automatable field's trailing "(e:envelope)" hint both run to ~48-50 cols.
-    const LEFT_WIDTH: u16 = 56;
-    let cols = Layout::horizontal([Constraint::Length(LEFT_WIDTH), Constraint::Min(10)]).split(inner);
-    let left = cols[0];
-    let right_block = Block::default().borders(Borders::LEFT).border_style(Style::default().fg(theme::BORDER));
-    let right = right_block.inner(cols[1]);
-    frame.render_widget(right_block, cols[1]);
+    let mut lines = vec![Line::raw("")];
 
-    // ---- Left column: search, process list, this process's parameter controls ----
-    let list_focused = focus == CDP_LIST_FOCUS;
-    let (before, under, after) = search.split_at_cursor();
-    let mut lines = vec![
-        Line::raw(""),
+    // ---- Preset row ----
+    let preset_focused = focus == CDP_PRESET_FOCUS;
+    let preset_label = format!(" {:<label_width$}", "Preset");
+    let preset_line = if let Some(input) = save_prompt {
+        let (before, under, after) = input.split_at_cursor();
         Line::from(vec![
-            Span::styled(" Search: ", label_style),
+            Span::styled(" Save as: ", label_style),
             Span::styled(before, base),
-            Span::styled(under, if list_focused { cursor_style } else { base }),
+            Span::styled(under, cursor_style),
             Span::styled(after, base),
-        ]),
-        Line::raw(""),
-    ];
-
-    let scroll_top = list_selected.saturating_sub(LIST_ROWS.saturating_sub(1));
-    let mut rendered_rows = 0;
-    if entries.is_empty() {
-        lines.push(Line::from(Span::styled(" No matches", dim_style)));
-        rendered_rows = 1;
+        ])
+    } else if presets.is_empty() {
+        Line::from(vec![
+            Span::styled(preset_label, if preset_focused { cursor_style } else { label_style }),
+            Span::styled("(none saved)", dim_style),
+            Span::styled("  s:save", hint_style),
+        ])
     } else {
-        for (row, &catalog_idx) in entries.iter().enumerate().skip(scroll_top).take(LIST_ROWS) {
-            let Some(d) = catalog.processes.get(catalog_idx) else { continue };
-            let text = format!(" {}", d.title);
-            let style = if list_focused && row == list_selected { cursor_style } else { base };
-            lines.push(Line::from(Span::styled(text, style)));
-            rendered_rows += 1;
-        }
+        let name = preset_selected.and_then(|i| presets.get(i)).map(|p| p.name.as_str()).unwrap_or("(custom)");
+        let value = if preset_focused { format!("\u{25c4} {name} \u{25ba}") } else { name.to_string() };
+        Line::from(vec![
+            Span::styled(preset_label, if preset_focused { cursor_style } else { label_style }),
+            Span::styled(value, base),
+            Span::styled("  s:save  d:delete", hint_style),
+        ])
+    };
+    lines.push(preset_line);
+    lines.push(Line::raw(""));
+
+    // ---- Field rows (scrolled window) ----
+    let focus_field_row = (focus >= 1 && focus <= fields.len()).then(|| focus - 1);
+    let scroll_top = match focus_field_row {
+        Some(row) => row
+            .saturating_sub(visible_field_rows.saturating_sub(1))
+            .min(content_field_rows.saturating_sub(visible_field_rows)),
+        None => 0,
+    };
+    for (i, (param, field)) in def.params.iter().zip(fields).enumerate().skip(scroll_top).take(visible_field_rows) {
+        let is_focused = focus == i + 1;
+        let label = format!(" {:<label_width$}", param.name);
+        let label_style_here = if is_focused { cursor_style } else { label_style };
+        let line = match field {
+            CdpField::Number { envelope: Some(points), .. } => Line::from(vec![
+                Span::styled(label, label_style_here),
+                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(format!(" envelope ({} pts, e to edit)", points.len()), point_style),
+            ]),
+            CdpField::Number { input, min, max, .. } => {
+                let range = format!("{:<range_width$}", format_cdp_range(*min, *max));
+                if is_focused {
+                    let (before, under, after) = input.split_at_cursor();
+                    let mut spans = vec![
+                        Span::styled(label, label_style_here),
+                        Span::styled(range, range_style),
+                        Span::styled(" ", base),
+                        Span::styled(before, base),
+                        Span::styled(under, cursor_style),
+                        Span::styled(after, base),
+                    ];
+                    if param.automatable {
+                        spans.push(Span::styled("  (e:envelope)", dim_style));
+                    }
+                    Line::from(spans)
+                } else {
+                    Line::from(vec![
+                        Span::styled(label, label_style_here),
+                        Span::styled(range, range_style),
+                        Span::styled(format!(" {}", input.value()), base),
+                    ])
+                }
+            }
+            CdpField::Toggle { on } => {
+                let text = if *on { "[X]" } else { "[ ]" };
+                Line::from(vec![
+                    Span::styled(label, label_style_here),
+                    Span::styled(format!("{:<range_width$}", ""), range_style),
+                    Span::styled(format!(" {text}"), base),
+                ])
+            }
+            CdpField::Choice { options, selected } => {
+                let text = options.get(*selected).map(String::as_str).unwrap_or("");
+                let value = if is_focused { format!(" \u{25c4} {text} \u{25ba}") } else { format!(" {text}") };
+                Line::from(vec![
+                    Span::styled(label, label_style_here),
+                    Span::styled(format!("{:<range_width$}", ""), range_style),
+                    Span::styled(value, base),
+                ])
+            }
+        };
+        lines.push(line);
     }
-    for _ in rendered_rows..LIST_ROWS {
+    if fields.is_empty() {
+        lines.push(Line::from(Span::styled(" (no parameters)", dim_style)));
+    }
+    // Pad up to `visible_field_rows` so the trailing chrome (second-input/buttons/hints)
+    // lands at the same row every frame regardless of the current scroll window's fill.
+    let rendered_field_rows = fields.len().min(visible_field_rows).max(fields.is_empty() as usize);
+    for _ in rendered_field_rows..visible_field_rows {
         lines.push(Line::raw(""));
+    }
+
+    if let Some(second) = second_input {
+        let is_focused = focus == cdp_params_focus_second_input(fields.len());
+        let label = format!(" {:<label_width$}", "2nd input");
+        let name = second.selected_name();
+        let value = if is_focused { format!(" \u{25c4} {name} \u{25ba}") } else { format!(" {name}") };
+        lines.push(Line::from(vec![
+            Span::styled(label, if is_focused { cursor_style } else { label_style }),
+            Span::styled(format!("{:<range_width$}", ""), range_style),
+            Span::styled(value, base),
+        ]));
     }
     lines.push(Line::raw(""));
 
-    const LABEL_WIDTH: usize = 14;
-    const RANGE_WIDTH: usize = 14;
-    if let Some(def) = def {
-        for (i, (param, field)) in def.params.iter().zip(fields).enumerate() {
-            let is_focused = focus == i + 1;
-            let label = format!(" {:<LABEL_WIDTH$}", param.name);
-            let label_style_here = if is_focused { cursor_style } else { label_style };
-            let line = match field {
-                CdpField::Number { envelope: Some(points), .. } => Line::from(vec![
-                    Span::styled(label, label_style_here),
-                    Span::styled(format!("{:<RANGE_WIDTH$}", ""), range_style),
-                    Span::styled(format!("envelope ({} pts, e to edit)", points.len()), point_style),
-                ]),
-                CdpField::Number { input, min, max, .. } => {
-                    let range = format!("{:<RANGE_WIDTH$}", format_cdp_range(*min, *max));
-                    let automatable = param.automatable;
-                    if is_focused {
-                        let (before, under, after) = input.split_at_cursor();
-                        let mut spans = vec![
-                            Span::styled(label, label_style_here),
-                            Span::styled(range, range_style),
-                            Span::styled(before, base),
-                            Span::styled(under, cursor_style),
-                            Span::styled(after, base),
-                        ];
-                        if automatable {
-                            spans.push(Span::styled("  (e:envelope)", dim_style));
-                        }
-                        Line::from(spans)
-                    } else {
-                        Line::from(vec![
-                            Span::styled(label, label_style_here),
-                            Span::styled(range, range_style),
-                            Span::styled(input.value().to_string(), base),
-                        ])
-                    }
-                }
-                CdpField::Toggle { on } => {
-                    let text = if *on { "[X]" } else { "[ ]" };
-                    Line::from(vec![
-                        Span::styled(label, label_style_here),
-                        Span::styled(format!("{:<RANGE_WIDTH$}", ""), range_style),
-                        Span::styled(text, base),
-                    ])
-                }
-                CdpField::Choice { options, selected } => {
-                    let text = options.get(*selected).map(String::as_str).unwrap_or("");
-                    let value = if is_focused { format!("\u{25c4} {text} \u{25ba}") } else { text.to_string() };
-                    Line::from(vec![
-                        Span::styled(label, label_style_here),
-                        Span::styled(format!("{:<RANGE_WIDTH$}", ""), range_style),
-                        Span::styled(value, base),
-                    ])
-                }
-            };
-            lines.push(line);
-        }
-        if def.params.is_empty() {
-            lines.push(Line::from(Span::styled(" (no parameters)", dim_style)));
-        }
-        if let Some(second) = second_input {
-            let is_focused = focus == cdp_browser_second_input_focus(fields.len());
-            let label = format!(" {:<LABEL_WIDTH$}", "2nd input");
-            let name = second.selected_name();
-            let value = if is_focused { format!("\u{25c4} {name} \u{25ba}") } else { name.to_string() };
-            lines.push(Line::from(vec![
-                Span::styled(label, if is_focused { cursor_style } else { label_style }),
-                Span::styled(format!("{:<RANGE_WIDTH$}", ""), range_style),
-                Span::styled(value, base),
-            ]));
-        }
-        lines.push(Line::raw(""));
+    let preview_focus = cdp_params_focus_preview(fields.len(), second_input.is_some());
+    let apply_focus = cdp_params_focus_apply(fields.len(), second_input.is_some());
+    let preview_label = if preview.is_some() { " [Preview \u{2713}]" } else { " [Preview]" };
+    let preview_style = if focus == preview_focus { cursor_style } else { hint_style };
+    let apply_style = if focus == apply_focus { cursor_style } else { hint_style };
+    lines.push(Line::from(vec![
+        Span::styled(preview_label, preview_style),
+        Span::raw("  "),
+        Span::styled("[Apply]", apply_style),
+    ]));
 
-        let preview_focus = cdp_browser_preview_focus(fields.len(), second_input.is_some());
-        let apply_focus = cdp_browser_apply_focus(fields.len(), second_input.is_some());
-        let preview_label = if preview.is_some() { " [Preview \u{2713}]" } else { " [Preview]" };
-        let preview_style = if focus == preview_focus { cursor_style } else { hint_style };
-        let apply_style = if focus == apply_focus { cursor_style } else { hint_style };
-        lines.push(Line::from(vec![
-            Span::styled(preview_label, preview_style),
-            Span::raw("  "),
-            Span::styled("[Apply]", apply_style),
-        ]));
-
-        match error {
-            Some(msg) => lines.push(Line::from(Span::styled(format!(" ! {msg}"), error_style))),
-            None => lines.push(Line::raw("")),
-        }
-    } else {
-        for _ in 0..(field_rows + has_second_input + 2) {
-            lines.push(Line::raw(""));
-        }
+    match error {
+        Some(msg) => lines.push(Line::from(Span::styled(format!(" ! {msg}"), error_style))),
+        None => lines.push(Line::raw("")),
     }
 
     lines.push(Line::from(vec![
         Span::styled(" \u{2191}\u{2193}", hint_style),
-        Span::styled(":list/nudge  ", label_style),
+        Span::styled(":nudge  ", label_style),
         Span::styled("Tab", hint_style),
         Span::styled(":next  ", label_style),
         Span::styled("Enter", hint_style),
@@ -6560,21 +6993,7 @@ fn render_cdp_browser_dialog(
         Span::styled(":cancel", label_style),
     ]));
 
-    frame.render_widget(Paragraph::new(lines), left);
-
-    // ---- Right column: the selected process's full description, word-wrapped ----
-    let right_lines = match def {
-        Some(d) => vec![
-            Line::raw(""),
-            Line::from(Span::styled(format!(" {}", d.title), label_style)),
-            Line::from(Span::styled(format!(" {}", "\u{2500}".repeat((right.width as usize).saturating_sub(2))), dim_style)),
-            Line::raw(""),
-            Line::from(Span::styled(format!(" {}", d.description.trim()), base)),
-        ],
-        None => vec![Line::raw(""), Line::from(Span::styled(" No matches", dim_style))],
-    };
-    frame.render_widget(Paragraph::new(right_lines).wrap(Wrap { trim: false }), right);
-
+    frame.render_widget(Paragraph::new(lines), inner);
     Vec::new()
 }
 
@@ -7103,97 +7522,163 @@ mod tests {
         }
     }
 
-    /// `open_cdp_browser` builds the merged dialog list-focused, with `fields` already
-    /// populated for whichever process an empty search puts first — the whole point of
-    /// merging the browser and params screens is that controls are visible immediately,
-    /// not only after a separate "open" step.
+    /// `open_cdp_browser` builds a plain, list-only dialog — no fields, no per-process
+    /// state to react to (that's `Dialog::CdpParams`'s job now).
     #[test]
-    fn open_cdp_browser_prebuilds_fields_for_the_first_entry() {
+    fn open_cdp_browser_builds_a_plain_entry_list() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
         app.open_cdp_browser();
         match &app.dialog {
-            Some(Dialog::CdpBrowser { entries, list_selected, fields, focus, .. }) => {
-                assert_eq!(*list_selected, 0);
-                assert_eq!(*focus, CDP_LIST_FOCUS);
-                let catalog_index = entries[0];
-                let expected_params = app.cdp_catalog.processes[catalog_index].params.len();
-                assert_eq!(fields.len(), expected_params);
+            Some(Dialog::CdpBrowser { entries, selected, .. }) => {
+                assert!(!entries.is_empty(), "an empty search should match every catalog entry");
+                assert_eq!(*selected, 0);
             }
             _ => panic!("expected Dialog::CdpBrowser"),
         }
     }
 
-    /// Navigating the process list (Up/Down while list-focused) advances `list_selected`
-    /// and rebuilds `fields` for the newly selected process — this is the behavior that
-    /// makes "extensive description of the currently selected one" live rather than static:
-    /// the params panel always reflects whatever the list is highlighting right now, with
-    /// no separate "open"/commit step. Regression coverage for the merge of the old
-    /// CdpBrowser/CdpParams dialogs into one.
+    /// Down/Up move `selected` (clamped to the filtered entry list); PageDown/PageUp move it
+    /// by a full page (`CDP_BROWSER_PAGE_SIZE`) — both stay within `Dialog::CdpBrowser`,
+    /// never touching a `Dialog::CdpParams` that doesn't exist yet.
     #[test]
-    fn cdp_browser_down_advances_selection_and_rebuilds_fields() {
+    fn cdp_browser_arrow_and_page_keys_move_selection() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
         app.open_cdp_browser();
-        let Some(Dialog::CdpBrowser { entries, .. }) = &app.dialog else { panic!("no dialog") };
-        assert!(entries.len() >= 2, "need at least two catalog entries for this test to mean anything");
-        let second_catalog_index = entries[1];
-        let expected_params = app.cdp_catalog.processes[second_catalog_index].params.len();
+        let entry_count = match &app.dialog {
+            Some(Dialog::CdpBrowser { entries, .. }) => entries.len(),
+            _ => panic!("no dialog"),
+        };
+        assert!(entry_count > CDP_BROWSER_PAGE_SIZE, "need enough entries for a page move to mean anything");
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { selected, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*selected, 1);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { selected, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*selected, 1 + CDP_BROWSER_PAGE_SIZE);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { selected, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*selected, 1);
+    }
+
+    /// Enter on the browser opens `Dialog::CdpParams` for the currently-selected process —
+    /// the two-dialog flow's whole point: browsing never grows/shrinks a params form live,
+    /// it commits to a completely separate dialog sized for that one process.
+    #[test]
+    fn enter_on_browser_opens_params_for_the_selected_process() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_browser();
+        let (catalog_index, expected_params) = match &app.dialog {
+            Some(Dialog::CdpBrowser { entries, selected, .. }) => {
+                let ci = entries[*selected];
+                (ci, app.cdp_catalog.processes[ci].params.len())
+            }
+            _ => panic!("no dialog"),
+        };
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         match &app.dialog {
-            Some(Dialog::CdpBrowser { list_selected, fields, focus, .. }) => {
-                assert_eq!(*list_selected, 1);
-                assert_eq!(*focus, CDP_LIST_FOCUS, "list nav must not move focus off the list");
-                assert_eq!(fields.len(), expected_params, "fields must be rebuilt for the newly selected process");
+            Some(Dialog::CdpParams { catalog_index: ci, fields, focus, presets, preset_selected, .. }) => {
+                assert_eq!(*ci, catalog_index);
+                assert_eq!(fields.len(), expected_params);
+                assert_eq!(*focus, CDP_PRESET_FOCUS);
+                assert!(presets.is_empty(), "a fresh process (never had presets saved) should show none");
+                assert!(preset_selected.is_none());
             }
-            _ => panic!("expected Dialog::CdpBrowser"),
+            _ => panic!("expected Dialog::CdpParams after Enter"),
         }
     }
 
-    /// Tab from the process list moves focus into the first field (or straight to
-    /// Preview/Apply for a process with none); a further Tab past the last control wraps
-    /// back around to the list, closing the cycle.
+    /// A mouse click on a process row in the browser selects *and* opens it in one step —
+    /// clicking is how a mouse user commits a choice, matching Enter's behavior on the
+    /// already-selected entry (see `App::handle_dialog_row_click`'s `Dialog::CdpBrowser` arm).
     #[test]
-    fn tab_cycles_from_cdp_list_into_fields_and_back() {
+    fn clicking_a_browser_row_selects_and_opens_it() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
         let mut app = new_app(Some(doc(0.1, 100)), None);
         app.open_cdp_browser();
-        let Some(Dialog::CdpBrowser { focus, .. }) = &app.dialog else { panic!("no dialog") };
-        assert_eq!(*focus, CDP_LIST_FOCUS);
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        // Row 1 (0-based) in the rendered list is the second filtered entry.
+        let catalog_index = match &app.dialog {
+            Some(Dialog::CdpBrowser { entries, .. }) => entries[1],
+            _ => panic!("no dialog"),
+        };
+        app.handle_dialog_row_click(1, 0);
+
+        match &app.dialog {
+            Some(Dialog::CdpParams { catalog_index: ci, .. }) => assert_eq!(*ci, catalog_index),
+            _ => panic!("expected a click to open Dialog::CdpParams"),
+        }
+    }
+
+    /// `cdp_params_column_widths` sizes both columns to the *longest* label/range in the
+    /// process's own params, not a fixed guess — the fix for labels colliding with their own
+    /// range text when a name ran past a fixed-width guess (e.g. "Grain Size Limit").
+    #[test]
+    fn cdp_params_column_widths_fit_the_longest_label_and_range() {
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("blur_avrg").expect("blur_avrg in catalog");
+        let (label_width, range_width) = cdp_params_column_widths(def);
+        assert!(label_width >= "Channels".chars().count());
+        assert!(range_width >= format_cdp_range(1.0, 200.0).chars().count());
+    }
+
+    /// Opens `Dialog::CdpParams` directly for `blur_avrg` ("Average"), focused on its one
+    /// param, "Channels" — automatable, so the envelope editor can open on it. Shared setup
+    /// for the envelope/preset tests below.
+    fn open_blur_avrg_with_field_focused(app: &mut App) {
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "blur_avrg")
+            .expect("blur_avrg should be in the catalog");
+        let _ = catalog;
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = 1; // the one field, "Channels"
+        }
+    }
+
+    /// Tab from the preset row moves focus into the first field (or straight to
+    /// Preview/Apply for a process with none); a further Tab past the last control wraps
+    /// back around to the preset row, closing the cycle.
+    #[test]
+    fn tab_cycles_from_preset_row_into_fields_and_back() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "blur_avrg")
+            .expect("blur_avrg should be in the catalog");
+        app.open_cdp_params(catalog_index);
+        let Some(Dialog::CdpParams { focus, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*focus, CDP_PRESET_FOCUS);
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        let Some(Dialog::CdpBrowser { focus, fields, second_input, .. }) = &app.dialog else { panic!("no dialog") };
-        assert_eq!(*focus, 1, "Tab from the list should land on the first control");
-        let apply_focus = cdp_browser_apply_focus(fields.len(), second_input.is_some());
+        let Some(Dialog::CdpParams { focus, fields, second_input, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*focus, 1, "Tab from the preset row should land on the first control");
+        let apply_focus = cdp_params_focus_apply(fields.len(), second_input.is_some());
 
         // Already at focus 1 (the first control); apply_focus - 1 more tabs lands on Apply.
         for _ in 0..apply_focus.saturating_sub(1) {
             app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         }
-        let Some(Dialog::CdpBrowser { focus, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(Dialog::CdpParams { focus, .. }) = &app.dialog else { panic!("no dialog") };
         assert_eq!(*focus, apply_focus, "should now be sitting on Apply");
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        let Some(Dialog::CdpBrowser { focus, .. }) = &app.dialog else { panic!("no dialog") };
-        assert_eq!(*focus, CDP_LIST_FOCUS, "Tab past Apply should wrap back to the list");
-    }
-
-    /// Selects `blur_avrg` ("Average") in an already-open `Dialog::CdpBrowser` and moves
-    /// focus onto its one param, "Channels" — automatable, so the envelope editor can open
-    /// on it. Shared setup for the envelope tests below.
-    fn open_blur_avrg_with_field_focused(app: &mut App) {
-        app.open_cdp_browser();
-        let Some(Dialog::CdpBrowser { entries, .. }) = &app.dialog else { panic!("no dialog") };
-        let target = entries
-            .iter()
-            .position(|&i| app.cdp_catalog.processes[i].key == "blur_avrg")
-            .expect("blur_avrg should be in the catalog");
-        if let Some(Dialog::CdpBrowser { list_selected, .. }) = app.dialog.as_mut() {
-            *list_selected = target;
-        }
-        app.rebuild_cdp_fields();
-        if let Some(Dialog::CdpBrowser { focus, .. }) = app.dialog.as_mut() {
-            *focus = 1; // the one field, "Channels"
-        }
+        let Some(Dialog::CdpParams { focus, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*focus, CDP_PRESET_FOCUS, "Tab past Apply should wrap back to the preset row");
     }
 
     /// 'e' on an automatable Number field opens the envelope editor seeded with two flat
@@ -7206,7 +7691,7 @@ mod tests {
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
 
-        let Some(Dialog::CdpBrowser { envelope: Some(edit), fields, .. }) = &app.dialog else {
+        let Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) = &app.dialog else {
             panic!("expected the envelope editor to be open");
         };
         let Some(CdpField::Number { input, .. }) = fields.get(edit.field_index) else {
@@ -7232,12 +7717,12 @@ mod tests {
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
-        let Some(Dialog::CdpBrowser { envelope, fields, focus, .. }) = &app.dialog else {
-            panic!("expected CdpBrowser to still be open (Esc closes the editor, not the dialog)");
+        let Some(Dialog::CdpParams { envelope, fields, focus, .. }) = &app.dialog else {
+            panic!("expected CdpParams to still be open (Esc closes the editor, not the dialog)");
         };
         assert!(envelope.is_none(), "editor should be closed");
         assert_eq!(*focus, 1, "should be back on the Channels field");
-        let Some(CdpField::Number { envelope, .. }) = fields.get(0) else { panic!("expected a Number field") };
+        let Some(CdpField::Number { envelope, .. }) = fields.first() else { panic!("expected a Number field") };
         assert!(envelope.is_none(), "field must stay a plain constant after Esc");
     }
 
@@ -7254,11 +7739,11 @@ mod tests {
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-        let Some(Dialog::CdpBrowser { envelope, fields, .. }) = &app.dialog else {
-            panic!("expected CdpBrowser still open");
+        let Some(Dialog::CdpParams { envelope, fields, .. }) = &app.dialog else {
+            panic!("expected CdpParams still open");
         };
         assert!(envelope.is_none(), "editor should be closed after commit");
-        let field = fields.get(0).expect("Channels field");
+        let field = fields.first().expect("Channels field");
         match field.to_value() {
             crate::model::cdp::ParamValue::Breakpoints(points) => assert_eq!(points.len(), 3),
             _ => panic!("expected Breakpoints after committing an envelope"),
@@ -7329,7 +7814,7 @@ mod tests {
         terminal.draw(|frame| app.render(frame)).unwrap();
         let grid = *app.dialog_row_rects.first().expect("envelope editor should return its grid rect");
 
-        let Some(Dialog::CdpBrowser { envelope: Some(edit), fields, .. }) = &app.dialog else {
+        let Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) = &app.dialog else {
             panic!("expected the envelope editor to be open");
         };
         let Some(CdpField::Number { min, max, .. }) = fields.get(edit.field_index) else {
@@ -7354,7 +7839,7 @@ mod tests {
         let (mut app, _grid, cell0, _cell1) = open_cdp_envelope_editor_for_mouse_tests();
         app.handle_mouse(cdp_mouse_at(cell0.0, cell0.1, MouseEventKind::Down(MouseButton::Left), KeyModifiers::NONE));
         app.handle_mouse(cdp_mouse_at(cell0.0, cell0.1, MouseEventKind::Up(MouseButton::Left), KeyModifiers::NONE));
-        let Some(Dialog::CdpBrowser { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
         assert_eq!(edit.selected, 0, "click near the first point should select it");
     }
 
@@ -7370,7 +7855,7 @@ mod tests {
         assert!(click_col.abs_diff(cell0.0) > 1 && click_col.abs_diff(cell1.0) > 1, "click column must miss both existing points");
 
         let before = {
-            let Some(Dialog::CdpBrowser { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
             edit.points.len()
         };
         app.handle_mouse(cdp_mouse_at(click_col, click_row, MouseEventKind::Down(MouseButton::Left), KeyModifiers::NONE));
@@ -7379,7 +7864,7 @@ mod tests {
         app.handle_mouse(cdp_mouse_at(click_col, click_row, MouseEventKind::Down(MouseButton::Left), KeyModifiers::NONE));
         app.handle_mouse(cdp_mouse_at(click_col, click_row, MouseEventKind::Up(MouseButton::Left), KeyModifiers::NONE));
 
-        let Some(Dialog::CdpBrowser { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
         assert_eq!(edit.points.len(), before + 1, "double-click should insert exactly one new point");
     }
 
@@ -7391,7 +7876,7 @@ mod tests {
         let (mut app, grid, _cell0, cell1) = open_cdp_envelope_editor_for_mouse_tests();
         app.handle_mouse(cdp_mouse_at(cell1.0, cell1.1, MouseEventKind::Down(MouseButton::Left), KeyModifiers::NONE));
         let value_before = {
-            let Some(Dialog::CdpBrowser { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
             edit.points[edit.selected].1
         };
 
@@ -7399,7 +7884,7 @@ mod tests {
         app.handle_mouse(cdp_mouse_at(cell1.0, drag_row, MouseEventKind::Drag(MouseButton::Left), KeyModifiers::NONE));
         app.handle_mouse(cdp_mouse_at(cell1.0, drag_row, MouseEventKind::Up(MouseButton::Left), KeyModifiers::NONE));
 
-        let Some(Dialog::CdpBrowser { envelope: Some(edit), fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) = &app.dialog else { panic!("no dialog") };
         let Some(CdpField::Number { max, .. }) = fields.get(edit.field_index) else { panic!("expected Number") };
         let value_after = edit.points[edit.selected].1;
         assert!(value_after > value_before, "dragging toward the top should raise the value");
@@ -7413,14 +7898,14 @@ mod tests {
         let (mut app, _grid, _cell0, cell1) = open_cdp_envelope_editor_for_mouse_tests();
         app.handle_mouse(cdp_mouse_at(cell1.0, cell1.1, MouseEventKind::Down(MouseButton::Left), KeyModifiers::NONE));
         let value_before = {
-            let Some(Dialog::CdpBrowser { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
             edit.points[edit.selected].1
         };
         // Drag the mouse up by the same number of rows with and without Shift, from two
         // otherwise-identical sessions, and compare the resulting deltas.
         app.handle_mouse(cdp_mouse_at(cell1.0, cell1.1.saturating_sub(4), MouseEventKind::Drag(MouseButton::Left), KeyModifiers::SHIFT));
         let value_after_shift = {
-            let Some(Dialog::CdpBrowser { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
             edit.points[edit.selected].1
         };
 
@@ -7428,7 +7913,7 @@ mod tests {
         app2.handle_mouse(cdp_mouse_at(cell1b.0, cell1b.1, MouseEventKind::Down(MouseButton::Left), KeyModifiers::NONE));
         app2.handle_mouse(cdp_mouse_at(cell1b.0, cell1b.1.saturating_sub(4), MouseEventKind::Drag(MouseButton::Left), KeyModifiers::NONE));
         let value_after_plain = {
-            let Some(Dialog::CdpBrowser { envelope: Some(edit), .. }) = &app2.dialog else { panic!("no dialog") };
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app2.dialog else { panic!("no dialog") };
             edit.points[edit.selected].1
         };
 
@@ -7442,12 +7927,12 @@ mod tests {
     fn shift_click_deletes_nearest_point() {
         let (mut app, _grid, _cell0, cell1) = open_cdp_envelope_editor_for_mouse_tests();
         let before = {
-            let Some(Dialog::CdpBrowser { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
             edit.points.len()
         };
         app.handle_mouse(cdp_mouse_at(cell1.0, cell1.1, MouseEventKind::Down(MouseButton::Left), KeyModifiers::SHIFT));
         app.handle_mouse(cdp_mouse_at(cell1.0, cell1.1, MouseEventKind::Up(MouseButton::Left), KeyModifiers::SHIFT));
-        let Some(Dialog::CdpBrowser { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
         assert_eq!(edit.points.len(), before - 1, "shift+click should delete exactly one point");
     }
 
@@ -7466,37 +7951,153 @@ mod tests {
     #[test]
     fn plain_up_down_is_coarse_shift_up_down_is_fine() {
         let mut app = new_app(Some(doc(0.1, 44100)), None);
-        app.open_cdp_browser();
-        let Some(Dialog::CdpBrowser { entries, .. }) = &app.dialog else { panic!("no dialog") };
-        let target = entries
+        let catalog_index = app
+            .cdp_catalog
+            .processes
             .iter()
-            .position(|&i| app.cdp_catalog.processes[i].key == "blur_blur")
+            .position(|p| p.key == "blur_blur")
             .expect("blur_blur should be in the catalog");
-        if let Some(Dialog::CdpBrowser { list_selected, .. }) = app.dialog.as_mut() {
-            *list_selected = target;
-        }
-        app.rebuild_cdp_fields();
-        if let Some(Dialog::CdpBrowser { focus, .. }) = app.dialog.as_mut() {
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
             *focus = 1;
         }
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
-        let Some(Dialog::CdpBrowser { envelope: Some(edit), .. }) = &app.dialog else {
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else {
             panic!("expected the envelope editor to be open");
         };
         let start = edit.points[edit.selected].1;
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        let Some(Dialog::CdpBrowser { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
         let after_coarse = edit.points[edit.selected].1;
         let coarse_delta = after_coarse - start;
         assert!(coarse_delta > 0.5, "plain Up should move by a visibly large amount, got {coarse_delta}");
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
-        let Some(Dialog::CdpBrowser { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
         let after_fine = edit.points[edit.selected].1;
         let fine_delta = after_coarse - after_fine;
         assert!((fine_delta - 0.01).abs() < 1e-9, "Shift+Down should move by exactly the catalog step (0.01), got {fine_delta}");
     }
+
+    /// Left/Right on the preset row cycles `preset_selected` (wrapping) and immediately
+    /// loads that preset's values into `fields` — the live-preview-while-cycling behavior
+    /// the merged browser's own list navigation established the pattern for.
+    #[test]
+    fn cdp_params_cycle_preset_loads_saved_values() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_preset_cycle_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        crate::model::cdp::preset::save_preset(
+            "blur_avrg",
+            crate::model::cdp::preset::CdpPreset { name: "Wide".into(), values: vec![crate::model::cdp::ParamValue::Number(42.0)] },
+        );
+        crate::model::cdp::preset::save_preset(
+            "blur_avrg",
+            crate::model::cdp::preset::CdpPreset { name: "Narrow".into(), values: vec![crate::model::cdp::ParamValue::Number(3.0)] },
+        );
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let catalog_index = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").unwrap();
+        app.open_cdp_params(catalog_index);
+        let Some(Dialog::CdpParams { presets, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(presets.len(), 2, "both saved presets should load");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { preset_selected, fields, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*preset_selected, Some(0));
+        let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected Number field") };
+        let first_loaded: f64 = input.value().parse().unwrap();
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { preset_selected, fields, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*preset_selected, Some(1));
+        let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected Number field") };
+        let second_loaded: f64 = input.value().parse().unwrap();
+        assert_ne!(first_loaded, second_loaded, "cycling to the next preset should load different values");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// 's' opens the save-name prompt (prefilled empty for a fresh dialog); typing a name
+    /// and pressing Enter persists it to disk and selects it as the active preset —
+    /// end-to-end through the actual `App` key-handling path, not just the lower-level
+    /// `model::cdp::preset` functions those handlers call.
+    #[test]
+    fn save_preset_via_s_key_persists_and_selects_it() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_preset_save_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let catalog_index = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").unwrap();
+        app.open_cdp_params(catalog_index);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert!(
+            matches!(&app.dialog, Some(Dialog::CdpParams { save_prompt: Some(_), .. })),
+            "'s' should open the save-name prompt"
+        );
+        for c in "My Preset".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        match &app.dialog {
+            Some(Dialog::CdpParams { save_prompt, presets, preset_selected, .. }) => {
+                assert!(save_prompt.is_none(), "Enter should close the prompt");
+                assert_eq!(presets.len(), 1);
+                assert_eq!(presets[0].name, "My Preset");
+                assert_eq!(*preset_selected, Some(0), "the newly saved preset should be selected");
+            }
+            _ => panic!("expected CdpParams still open"),
+        }
+        // Also verify it actually reached disk, not just in-memory dialog state.
+        let on_disk = crate::model::cdp::preset::load_presets("blur_avrg", 1);
+        assert_eq!(on_disk.len(), 1);
+        assert_eq!(on_disk[0].name, "My Preset");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// 'd' deletes the currently-selected preset from both disk and the in-memory list.
+    #[test]
+    fn delete_preset_via_d_key_removes_it_from_disk_and_list() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_preset_delete_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        crate::model::cdp::preset::save_preset(
+            "blur_avrg",
+            crate::model::cdp::preset::CdpPreset { name: "ToDelete".into(), values: vec![crate::model::cdp::ParamValue::Number(7.0)] },
+        );
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let catalog_index = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").unwrap();
+        app.open_cdp_params(catalog_index);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)); // select "ToDelete"
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+
+        match &app.dialog {
+            Some(Dialog::CdpParams { presets, preset_selected, .. }) => {
+                assert!(presets.is_empty(), "the deleted preset should be gone from the in-memory list");
+                assert!(preset_selected.is_none());
+            }
+            _ => panic!("expected CdpParams still open"),
+        }
+        assert!(crate::model::cdp::preset::load_presets("blur_avrg", 1).is_empty(), "should be gone from disk too");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
 
     /// Shift+Tab cycles panel focus the opposite way to Tab:
     /// Waveform → Buffers → Files → Waveform. Both the kitty form (Tab+SHIFT) and the legacy
