@@ -393,6 +393,10 @@ struct CdpEnvelopeEdit {
     selected: usize,
     original: Option<Vec<(f64, f64)>>,
     time_max: f64,
+    /// The same sample range `time_max` was derived from — kept alongside it so the
+    /// graphics-mode renderer can look up the actual audio for that span to draw as a pale
+    /// reference waveform behind the curve, without recomputing the selection.
+    range: (usize, usize),
 }
 
 /// A cached successful Preview run, kept alongside `Dialog::CdpBrowser` so an unchanged-
@@ -2172,11 +2176,11 @@ impl App {
         let current_value = input.value().trim().parse::<f64>().unwrap_or(*min).clamp(*min, *max);
         let original = envelope.clone();
         let idx = self.active_document;
+        let range = self.operation_range(idx, self.snap_to_zero).unwrap_or((0, 0));
         let time_max = self
             .documents
             .get(idx)
-            .zip(self.operation_range(idx, self.snap_to_zero))
-            .map(|(doc, (start, end))| (end - start) as f64 / doc.sample_rate as f64)
+            .map(|doc| (range.1 - range.0) as f64 / doc.sample_rate as f64)
             .filter(|&d| d > 0.0)
             .unwrap_or(1.0);
         let points = original
@@ -2186,7 +2190,7 @@ impl App {
         let Some(Dialog::CdpBrowser { envelope: dialog_envelope, .. }) = self.dialog.as_mut() else {
             return false;
         };
-        *dialog_envelope = Some(CdpEnvelopeEdit { field_index, points, selected: 0, original, time_max });
+        *dialog_envelope = Some(CdpEnvelopeEdit { field_index, points, selected: 0, original, time_max, range });
         true
     }
 
@@ -5177,21 +5181,22 @@ impl App {
             Some(Dialog::CdpBrowser { envelope: Some(edit), fields, .. }) => {
                 fields.get(edit.field_index).and_then(|f| match f {
                     CdpField::Number { min, max, .. } => {
-                        Some((edit.points.clone(), edit.selected, edit.time_max, *min, *max))
+                        Some((edit.points.clone(), edit.selected, edit.time_max, *min, *max, edit.range))
                     }
                     _ => None,
                 })
             }
             _ => None,
         };
-        if let Some((points, selected, time_max, min, max)) = envelope_curve {
+        if let Some((points, selected, time_max, min, max, range)) = envelope_curve {
             if self.graphics_mode {
                 if let (Some(picker), Some(&grid)) = (&self.picker, self.dialog_row_rects.first()) {
                     let font = picker.font_size();
                     let pixel_width = grid.width as u32 * font.width.max(1) as u32;
                     let pixel_height = grid.height as u32 * font.height.max(1) as u32;
+                    let waveform_ref = self.cdp_envelope_waveform_ref(range, pixel_width as usize);
                     let img = cdp_envelope_image::rasterize_cdp_envelope(
-                        &points, selected, time_max, min, max, pixel_width, pixel_height,
+                        &points, selected, time_max, min, max, &waveform_ref, pixel_width, pixel_height,
                     );
                     let protocol = picker.new_resize_protocol(image::DynamicImage::ImageRgba8(img));
                     self.cdp_envelope_graphics_protocol = Some(protocol);
@@ -5201,6 +5206,51 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Rectified (abs-value) peak amplitude per *pixel* column across `range`, using the
+    /// active document's own `WaveformCache` (the same multi-resolution pyramid the
+    /// waveform view itself reads — and the same one-`min_max`-call-per-pixel-column
+    /// technique `waveform_image::rasterize_waveform`'s bar mode uses, so this stays cheap
+    /// regardless of how long `range` is, no raw per-frame scan needed) rather than a fresh
+    /// linear scan. Drawn as a pale reference waveform behind the envelope curve in graphics
+    /// mode, so the user can see which parts of the sound the automation will actually
+    /// touch. Combines channels by taking the loudest one at each column (a peak-across-
+    /// channels envelope, not a true mixdown) — plenty for a soft visual guide, not a
+    /// precise measurement. Pixel resolution (not the coarser character-cell grid) matters
+    /// here specifically so the traced shape reads as a real waveform silhouette rather than
+    /// a blocky staircase of ~8px-wide flat steps.
+    fn cdp_envelope_waveform_ref(&self, range: (usize, usize), cells: usize) -> Vec<f32> {
+        let cells = cells.max(1);
+        let mut peaks = vec![0.0f32; cells];
+        let Some(doc) = self.documents.get(self.active_document) else { return peaks };
+        let (start, end) = range;
+        let span = end.saturating_sub(start);
+        if span == 0 {
+            return peaks;
+        }
+        for (col, peak) in peaks.iter_mut().enumerate() {
+            let col_start = start + (col as f64 / cells as f64 * span as f64) as usize;
+            let col_end_raw = start + ((col + 1) as f64 / cells as f64 * span as f64) as usize;
+            let col_end = col_end_raw.max(col_start + 1).min(end);
+            if col_start >= col_end {
+                continue;
+            }
+            let mut column_peak = 0.0f32;
+            for (ch_i, channel) in doc.channels.iter().enumerate() {
+                let ch_end = col_end.min(channel.len());
+                if col_start >= ch_end {
+                    continue;
+                }
+                let (mn, mx) = match self.waveform_caches.get(ch_i) {
+                    Some(cache) => cache.min_max(channel, col_start, ch_end),
+                    None => crate::ui::waveform_cache::raw_min_max(&channel[col_start..ch_end]),
+                };
+                column_peak = column_peak.max(mn.abs()).max(mx.abs());
+            }
+            *peak = column_peak;
+        }
+        peaks
     }
 }
 
@@ -7226,6 +7276,38 @@ mod tests {
         assert_eq!(interp_cdp_envelope(&points, 1.0), 10.0);
         assert_eq!(interp_cdp_envelope(&points, 1.5), 5.0, "linear midpoint of the second segment");
         assert_eq!(interp_cdp_envelope(&points, 3.0), 0.0, "past the last point clamps flat");
+    }
+
+    /// `cdp_envelope_waveform_ref` (the graphics-mode reference-waveform data source) must
+    /// reflect where the actual audio is quiet vs. loud, not just return a flat/empty Vec —
+    /// otherwise the whole point of the feature (showing the user where the envelope will
+    /// actually apply) silently does nothing.
+    #[test]
+    fn cdp_envelope_waveform_ref_reflects_quiet_and_loud_regions() {
+        let mut channel = vec![0.01f32; 1000];
+        for s in channel.iter_mut().skip(500) {
+            *s = 0.9;
+        }
+        let document = Document {
+            channels: vec![channel],
+            sample_rate: 44100,
+            selection: None,
+            cursor: 0,
+            dirty: false,
+            path: None,
+            markers: Vec::new(),
+            bits_per_sample: 32,
+            bext: None,
+        };
+        let app = new_app(Some(document), None);
+        let peaks = app.cdp_envelope_waveform_ref((0, 1000), 10);
+        assert_eq!(peaks.len(), 10);
+        for (i, &p) in peaks.iter().enumerate().take(4) {
+            assert!(p < 0.1, "cell {i} in the quiet half should have a low peak, got {p}");
+        }
+        for (i, &p) in peaks.iter().enumerate().skip(6) {
+            assert!(p > 0.5, "cell {i} in the loud half should have a high peak, got {p}");
+        }
     }
 
     /// Opens the envelope editor for `blur_avrg`'s "Channels" field, inserts a second point
