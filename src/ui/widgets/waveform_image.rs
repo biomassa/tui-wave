@@ -42,7 +42,7 @@ pub fn smoke_test_image(width: u32, height: u32) -> image::DynamicImage {
 /// `Color::Rgb` constant (see `ui::theme`) — falls back to opaque black for any other
 /// variant, which should never actually occur given how every color passed in here is one
 /// of `theme`'s own constants.
-fn color_to_rgba(color: Color) -> Rgba<u8> {
+pub(crate) fn color_to_rgba(color: Color) -> Rgba<u8> {
     match color {
         Color::Rgb(r, g, b) => Rgba([r, g, b, 255]),
         _ => Rgba([0, 0, 0, 255]),
@@ -52,7 +52,7 @@ fn color_to_rgba(color: Color) -> Rgba<u8> {
 /// Blends `color` over the pixel at `(x, y)` with the given coverage in `[0, 1]` —
 /// coverage 1.0 writes the color exactly, fractional coverage mixes toward whatever is
 /// already there (the plain background, or the inverted-selection fill).
-fn blend_pixel(img: &mut RgbaImage, x: u32, y: u32, color: Rgba<u8>, coverage: f64) {
+pub(crate) fn blend_pixel(img: &mut RgbaImage, x: u32, y: u32, color: Rgba<u8>, coverage: f64) {
     let c = coverage.clamp(0.0, 1.0);
     let under = *img.get_pixel(x, y);
     let mix = |u: u8, o: u8| (u as f64 + (o as f64 - u as f64) * c).round() as u8;
@@ -68,7 +68,7 @@ fn blend_pixel(img: &mut RgbaImage, x: u32, y: u32, color: Rgba<u8>, coverage: f
 /// get a blend proportional to how much of them the span covers. A span thinner than one
 /// pixel is widened to 1px around its center (and shifted back inside the image if that
 /// pushes past an edge) so the trace never fades out entirely.
-fn draw_vspan_aa(img: &mut RgbaImage, col: u32, y0: f64, y1: f64, color: Rgba<u8>) {
+pub(crate) fn draw_vspan_aa(img: &mut RgbaImage, col: u32, y0: f64, y1: f64, color: Rgba<u8>) {
     let h = img.height() as f64;
     let (mut lo, mut hi) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
     if hi - lo < 1.0 {
