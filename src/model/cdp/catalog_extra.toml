@@ -774,3 +774,3204 @@ kind = "choice"
 options = ["44100", "48000", "88200", "96000"]
 default = 0
 flag = "-s"
+
+# ---- Tier 0 batch 2 (2026-07-09) ------------------------------------------------------
+
+[[process]]
+key = "grainex_extend"
+bin = "grainex"
+subprog = "extend"
+title = "Extend Grain Area"
+category = "time"
+subcategory = "texture"
+short_description = "Finds grains in a sound and extends the area that contains them"
+description = """
+Locates grains (bursts of sound between troughs) within a chosen span of the source and \
+extends that span, stretching the material that contains the grains.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Window Size"
+description = "Size of the window used to find grains, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 1000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Trough Height"
+description = "Acceptable trough height relative to adjacent peaks (0 to 1, exclusive)"
+automatable = false
+kind = "number"
+min = 0.01
+max = 0.99
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Duration To Add"
+description = "How much duration to add to the source, in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 60.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Start Time"
+description = "Start time of the grain material within the source, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 3600.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "End Time"
+description = "End time of the grain material within the source, in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 3600.0
+step = 0.01
+default = 0.5
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "distrep_distrep_1"
+bin = "distrep"
+subprog = "distrep"
+mode = "1"
+title = "Waveset Repeat (Stretch)"
+category = "time"
+subcategory = "distort"
+short_description = "Time-stretches by repeating groups of wavesets, with brief splices"
+description = """
+Stretches duration by repeating groups of wavesets a number of times, joined with brief \
+splices — a distortion-flavoured alternative to phase-vocoder time-stretching.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Multiplier"
+description = "Number of times each waveset group repeats"
+automatable = true
+kind = "number"
+min = 1.0
+max = 20.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Count"
+description = "Number of wavesets in each repeated group"
+automatable = true
+kind = "number"
+min = 1.0
+max = 20.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Skip Cycles"
+description = "Number of cycles to skip at the start of the file"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-k"
+
+[[process.params]]
+name = "Splice Length"
+description = "Length of the splice between repeated blocks, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 100.0
+step = 1.0
+default = 15.0
+exponential = false
+scale = "plain"
+flag = "-s"
+
+[[process]]
+key = "distrep_distrep_2"
+bin = "distrep"
+subprog = "distrep"
+mode = "2"
+title = "Waveset Repeat (No Stretch)"
+category = "time"
+subcategory = "distort"
+short_description = "Repeats groups of wavesets, then skips cycles to avoid time-stretching"
+description = """
+Repeats groups of wavesets like "Waveset Repeat (Stretch)", but then skips cycles to keep \
+the overall duration close to the original — a repetition texture without lengthening.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Multiplier"
+description = "Number of times each waveset group repeats"
+automatable = true
+kind = "number"
+min = 1.0
+max = 20.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Count"
+description = "Number of wavesets in each repeated group"
+automatable = true
+kind = "number"
+min = 1.0
+max = 20.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Skip Cycles"
+description = "Number of cycles to skip at the start of the file"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-k"
+
+[[process.params]]
+name = "Splice Length"
+description = "Length of the splice between repeated blocks, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 100.0
+step = 1.0
+default = 15.0
+exponential = false
+scale = "plain"
+flag = "-s"
+
+[[process]]
+key = "distshift_distshift_1"
+bin = "distshift"
+subprog = "distshift"
+mode = "1"
+title = "Waveset Shift"
+category = "time"
+subcategory = "distort"
+short_description = "Shifts alternate groups of half-wavesets forward in time"
+description = """
+Shifts alternate groups of half-wavesets forward in time, wrapping back around the start \
+if pushed beyond the end of the sound — a rhythmic, glitchy distortion.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Group Count"
+description = "Size of the half-waveset groups to operate on (1 = single half-wavesets)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 20.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Shift"
+description = "Move alternate groups forward by this many waveset groups"
+automatable = false
+kind = "number"
+min = 1.0
+max = 20.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "distshift_distshift_2"
+bin = "distshift"
+subprog = "distshift"
+mode = "2"
+title = "Waveset Swap"
+category = "time"
+subcategory = "distort"
+short_description = "Swaps alternate groups of half-wavesets"
+description = """
+Swaps alternate groups of half-wavesets with their neighbours — a simple, glitchy \
+scrambling distortion.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Group Count"
+description = "Size of the half-waveset groups to operate on (1 = single half-wavesets)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 20.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "envel_impose_1"
+bin = "envel"
+subprog = "impose"
+mode = "1"
+title = "Impose Envelope From Sound"
+category = "time"
+subcategory = "envelope"
+short_description = "Imposes the amplitude envelope of a second sound onto this one"
+description = """
+Extracts the amplitude envelope from a second sound (another open buffer) and imposes it \
+onto this one, replacing its own dynamics with the second sound's shape.
+"""
+input = "dual_wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Window Size"
+description = "Window size for scanning the envelope, in milliseconds"
+automatable = false
+kind = "number"
+min = 5.0
+max = 5000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "envel_replace_1"
+bin = "envel"
+subprog = "replace"
+mode = "1"
+title = "Replace Envelope From Sound"
+category = "time"
+subcategory = "envelope"
+short_description = "Replaces the amplitude envelope with one extracted from a second sound"
+description = """
+Extracts the amplitude envelope from a second sound (another open buffer) and replaces \
+this sound's own envelope with it entirely — useful for restoring a natural amplitude \
+contour after time-varying filtering flattens it.
+"""
+input = "dual_wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Window Size"
+description = "Window size for scanning the envelope, in milliseconds"
+automatable = false
+kind = "number"
+min = 5.0
+max = 5000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "envel_tremolo_1"
+bin = "envel"
+subprog = "tremolo"
+mode = "1"
+title = "Tremolo"
+category = "time"
+subcategory = "modulation"
+short_description = "Applies a simple linearly-interpolated tremolo"
+description = "Applies a straightforward amplitude tremolo, interpolating linearly between frequency values."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Frequency"
+description = "Tremolo frequency, in Hz"
+automatable = true
+kind = "number"
+min = 0.0
+max = 500.0
+step = 0.1
+default = 8.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Depth"
+description = "Depth of the tremolo effect"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.25
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Overall signal gain"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "envel_swell"
+bin = "envel"
+subprog = "swell"
+title = "Swell"
+category = "time"
+subcategory = "envelope"
+short_description = "Fades the sound in to and out from a single peak moment"
+description = """
+Reshapes the sound's dynamics into a single swell: a fade in that builds to a chosen peak \
+moment, then a fade back out.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Peak Time"
+description = "Time of the peak moment, in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 3600.0
+step = 0.01
+default = 0.5
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Peak Type"
+description = "Shape of the fades either side of the peak: 0 = linear, 1 = exponential"
+automatable = false
+kind = "choice"
+options = ["0", "1"]
+default = 1
+
+[[process]]
+key = "envel_attack_4"
+bin = "envel"
+subprog = "attack"
+mode = "4"
+title = "Emphasise Attack (At Peak)"
+category = "time"
+subcategory = "envelope"
+short_description = "Emphasises the sound's attack at its point of maximum level"
+description = """
+Finds the moment of maximum level in the sound and emphasises it as an attack transient, \
+with a controllable onset and decay shape.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Gain"
+description = "Amplification applied to the attack point"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.1
+default = 1.5
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Onset"
+description = "Attack onset duration, in milliseconds"
+automatable = false
+kind = "number"
+min = 5.0
+max = 32767.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Decay"
+description = "Attack decay duration, in milliseconds"
+automatable = false
+kind = "number"
+min = 5.0
+max = 5000.0
+step = 1.0
+default = 100.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "envel_pluck"
+bin = "envel"
+subprog = "pluck"
+title = "Pluck Start"
+category = "time"
+subcategory = "envelope"
+short_description = "Adds a plucked-string-style attack to the start of a mono sound"
+description = """
+Replaces the start of a mono sound with a synthesised "pluck" attack matched to the \
+source's own wavelength, useful for giving a soft or edited-in sound a percussive onset.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Start Sample"
+description = "Sample (at a zero-crossing) at which the pluck attack ends"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1000000.0
+step = 1.0
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Wave Length"
+description = "Length of the pluck wavelength, in samples (should match the source's own wavelength here)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 10000.0
+step = 1.0
+default = 100.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Attack Cycles"
+description = "Number of wave cycles in the pluck attack"
+automatable = false
+kind = "number"
+min = 2.0
+max = 200.0
+step = 1.0
+default = 32.0
+exponential = true
+scale = "plain"
+flag = "-a"
+
+[[process.params]]
+name = "Decay Rate"
+description = "Rate of decay of the pluck attack"
+automatable = false
+kind = "number"
+min = 1.0
+max = 64.0
+step = 1.0
+default = 48.0
+exponential = false
+scale = "plain"
+flag = "-d"
+
+[[process]]
+key = "envel_dovetail_1"
+bin = "envel"
+subprog = "dovetail"
+mode = "1"
+title = "Dovetail"
+category = "time"
+subcategory = "envelope"
+short_description = "Fades in the start and fades out the end of a sound"
+description = """
+Applies independent fade-in and fade-out envelopes to the start and end of the sound — a \
+more controllable alternative to the toolbar's fixed Fade In/Fade Out.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "In Fade Duration"
+description = "Duration of the fade-in at the start, in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 60.0
+step = 0.01
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Out Fade Duration"
+description = "Duration of the fade-out at the end, in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 60.0
+step = 0.01
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "In Fade Type"
+description = "Shape of the fade-in: 0 = linear, 1 = exponential"
+automatable = false
+kind = "choice"
+options = ["0", "1"]
+default = 1
+
+[[process.params]]
+name = "Out Fade Type"
+description = "Shape of the fade-out: 0 = linear, 1 = exponential"
+automatable = false
+kind = "choice"
+options = ["0", "1"]
+default = 1
+
+[[process]]
+key = "envel_curtail_3"
+bin = "envel"
+subprog = "curtail"
+mode = "3"
+title = "Curtail"
+category = "time"
+subcategory = "envelope"
+short_description = "Fades the sound to zero starting at a chosen time, to the end of the file"
+description = """
+Curtails the sound by fading it to silence starting at a chosen time and continuing to the \
+end of the file — a fade-out with a precise, explicit start point.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Fade Start"
+description = "Time at which the fade to silence begins, in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 3600.0
+step = 0.01
+default = 0.5
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Envelope Type"
+description = "Shape of the fade: 0 = linear, 1 = exponential"
+automatable = false
+kind = "choice"
+options = ["0", "1"]
+default = 1
+
+[[process]]
+key = "envel_warp_1"
+bin = "envel"
+subprog = "warp"
+mode = "1"
+title = "Normalise Envelope"
+category = "time"
+subcategory = "envelope"
+short_description = "Expands the envelope so its highest point reaches full scale"
+description = "Rescales the sound's amplitude envelope so its highest point reaches the maximum possible level, without changing its overall shape."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Window Size"
+description = "Duration of the enveloping window, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 1000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "envel_warp_2"
+bin = "envel"
+subprog = "warp"
+mode = "2"
+title = "Reverse Envelope"
+category = "time"
+subcategory = "envelope"
+short_description = "Time-reverses the sound's amplitude envelope"
+description = "Reverses the sound's amplitude envelope in time, without reversing the sound itself."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Window Size"
+description = "Duration of the enveloping window, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 1000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "spec_grab"
+bin = "spec"
+subprog = "grab"
+title = "Grab Analysis Window"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Grabs a single analysis window at a given time and holds it as a static spectrum"
+description = """
+Grabs a single spectral analysis window at the given time and holds that frozen spectrum \
+for the whole output — a way to isolate and sustain one exact spectral moment. A time \
+beyond the end of the file grabs the last window.
+"""
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Time"
+description = "Time at which to grab the analysis window, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 3600.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "pitch_transp_1"
+bin = "pitch"
+subprog = "transp"
+mode = "1"
+title = "Octave Transpose Above"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Transposes frequencies above a split point up an octave"
+description = "Octave-transposes upward every part of the spectrum above the given split frequency, leaving material below it unchanged."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Split Frequency"
+description = "Frequency above which transposition takes place, in Hz"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 1.0
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Depth"
+description = "Strength of the transposition effect (0 = no effect, 1 = full effect)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-d"
+
+[[process]]
+key = "pitch_transp_4"
+bin = "pitch"
+subprog = "transp"
+mode = "4"
+title = "Pitch Transpose Above"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Transposes frequencies above a split point by a chosen semitone amount"
+description = "Transposes every part of the spectrum above the given split frequency by a chosen number of semitones, leaving material below it unchanged."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Split Frequency"
+description = "Frequency above which transposition takes place, in Hz"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 1.0
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Transposition"
+description = "Transposition applied above the split frequency, in semitones"
+automatable = true
+kind = "number"
+min = -24.0
+max = 24.0
+step = 0.1
+default = 12.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Depth"
+description = "Strength of the transposition effect (0 = no effect, 1 = full effect)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-d"
+
+[[process]]
+key = "pitch_pick_1"
+bin = "pitch"
+subprog = "pick"
+mode = "1"
+title = "Pick Harmonic Partials"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Keeps only spectral channels that might hold partials of a harmonic series"
+description = """
+Retains only the spectral channels that could plausibly hold a partial of the given \
+harmonic series, suppressing everything else — a way to sharpen or isolate a harmonic tone \
+from a noisier spectrum.
+"""
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Fundamental"
+description = "Fundamental frequency of the harmonic series, in Hz"
+automatable = true
+kind = "number"
+min = 20.0
+max = 2000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Clarity"
+description = "Extent to which channels outside the harmonic series are suppressed"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-c"
+
+[[process]]
+key = "sorter_sorter_1"
+bin = "sorter"
+subprog = "sorter"
+mode = "1"
+title = "Sort To Crescendo"
+category = "time"
+subcategory = "texture"
+short_description = "Chops the sound into elements and reorders them into a crescendo"
+description = "Chops a mono source into elements and reorders them by loudness, building to a crescendo."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Element Size"
+description = "Approximate size of each element to sort, in seconds (0 uses individual wavesets)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 60.0
+step = 0.01
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Smooth"
+description = "Fade applied to each segment's start and end, in milliseconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 10.0
+exponential = true
+scale = "plain"
+flag = "-s"
+
+[[process]]
+key = "sorter_sorter_2"
+bin = "sorter"
+subprog = "sorter"
+mode = "2"
+title = "Sort To Decrescendo"
+category = "time"
+subcategory = "texture"
+short_description = "Chops the sound into elements and reorders them into a decrescendo"
+description = "Chops a mono source into elements and reorders them by loudness, tapering into a decrescendo."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Element Size"
+description = "Approximate size of each element to sort, in seconds (0 uses individual wavesets)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 60.0
+step = 0.01
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Smooth"
+description = "Fade applied to each segment's start and end, in milliseconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 10.0
+exponential = true
+scale = "plain"
+flag = "-s"
+
+[[process]]
+key = "sorter_sorter_3"
+bin = "sorter"
+subprog = "sorter"
+mode = "3"
+title = "Sort To Accelerando"
+category = "time"
+subcategory = "texture"
+short_description = "Chops the sound into elements and reorders them into an accelerando"
+description = "Chops a mono source into elements and reorders them by duration, building into an accelerando. With very small elements, this may also rise in pitch."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Element Size"
+description = "Approximate size of each element to sort, in seconds (0 uses individual wavesets)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 60.0
+step = 0.01
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Smooth"
+description = "Fade applied to each segment's start and end, in milliseconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 10.0
+exponential = true
+scale = "plain"
+flag = "-s"
+
+[[process]]
+key = "sorter_sorter_4"
+bin = "sorter"
+subprog = "sorter"
+mode = "4"
+title = "Sort To Ritardando"
+category = "time"
+subcategory = "texture"
+short_description = "Chops the sound into elements and reorders them into a ritardando"
+description = "Chops a mono source into elements and reorders them by duration, tapering into a ritardando. With very small elements, this may also fall in pitch."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Element Size"
+description = "Approximate size of each element to sort, in seconds (0 uses individual wavesets)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 60.0
+step = 0.01
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Smooth"
+description = "Fade applied to each segment's start and end, in milliseconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 10.0
+exponential = true
+scale = "plain"
+flag = "-s"
+
+# ---- Tier 0 batch 3 (2026-07-09) ------------------------------------------------------
+
+[[process]]
+key = "grain_reverse"
+bin = "grain"
+subprog = "reverse"
+title = "Reverse Grain Order"
+category = "time"
+subcategory = "texture"
+short_description = "Reverses the order of grains without reversing the grains themselves"
+description = """
+Finds grains (bursts of sound separated by low-level holes) in the source and plays them \
+back in reverse order, while leaving each individual grain itself un-reversed.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Gate"
+description = "Signal level required for a grain to be recognised"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+flag = "-l"
+
+[[process]]
+key = "grain_duplicate"
+bin = "grain"
+subprog = "duplicate"
+title = "Duplicate Grains"
+category = "time"
+subcategory = "texture"
+short_description = "Repeats each grain in the source a number of times"
+description = """
+Finds grains (bursts of sound separated by low-level holes) in the source and repeats each \
+one in place, thickening the texture without changing its overall timing.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Repetitions"
+description = "Number of times each grain is repeated"
+automatable = true
+kind = "number"
+min = 1.0
+max = 20.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gate"
+description = "Signal level required for a grain to be recognised"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+flag = "-l"
+
+[[process]]
+key = "grain_timewarp"
+bin = "grain"
+subprog = "timewarp"
+title = "Grain Timewarp"
+category = "time"
+subcategory = "texture"
+short_description = "Stretches or shrinks the time between grains without stretching the grains themselves"
+description = """
+Finds grains (bursts of sound separated by low-level holes) in the source and stretches or \
+shrinks the time between them, leaving the grains themselves unaffected — a granular \
+time-stretch that preserves each grain's own character.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Timestretch Ratio"
+description = "Stretch factor for the time between grains (2 doubles it, 0.5 halves it)"
+automatable = true
+kind = "number"
+min = 0.01
+max = 20.0
+step = 0.01
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gate"
+description = "Signal level required for a grain to be recognised"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+flag = "-l"
+
+[[process]]
+key = "grain_omit"
+bin = "grain"
+subprog = "omit"
+title = "Omit Grains"
+category = "time"
+subcategory = "texture"
+short_description = "Keeps only a chosen proportion of grains, dropping the rest"
+description = """
+Finds grains (bursts of sound separated by low-level holes) in the source and, from every \
+set of grains, keeps only a chosen number and drops the rest — a rhythmic gating/thinning \
+effect driven by the source's own grain structure.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Keep"
+description = "Number of grains to keep from each set"
+automatable = true
+kind = "number"
+min = 1.0
+max = 20.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Out Of"
+description = "Size of each set of grains that Keep is drawn from"
+automatable = true
+kind = "number"
+min = 1.0
+max = 20.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gate"
+description = "Signal level required for a grain to be recognised"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+flag = "-l"
+
+[[process]]
+key = "envel_warp_3"
+bin = "envel"
+subprog = "warp"
+mode = "3"
+title = "Exaggerate Envelope"
+category = "time"
+subcategory = "envelope"
+short_description = "Exaggerates or softens the contour of the amplitude envelope"
+description = "Reshapes the envelope contour: values below 1 boost quiet moments, values above 1 boost loud moments, 1 leaves it unchanged."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Window Size"
+description = "Duration of the enveloping window, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 1000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Exaggeration"
+description = "Contour exaggeration: below 1 boosts quiet moments, above 1 boosts loud moments"
+automatable = true
+kind = "number"
+min = 0.01
+max = 10.0
+step = 0.01
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "envel_warp_4"
+bin = "envel"
+subprog = "warp"
+mode = "4"
+title = "Attenuate Envelope"
+category = "time"
+subcategory = "envelope"
+short_description = "Attenuates the amplitude envelope by a fixed amount"
+description = "Reduces the sound's amplitude envelope by a fixed proportion."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Window Size"
+description = "Duration of the enveloping window, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 1000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Attenuation"
+description = "Amount by which the envelope is attenuated"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "envel_warp_5"
+bin = "envel"
+subprog = "warp"
+mode = "5"
+title = "Lift Envelope"
+category = "time"
+subcategory = "envelope"
+short_description = "Lifts the amplitude envelope by a fixed amount"
+description = "Raises the sound's amplitude envelope by a fixed amount, useful for bringing up quiet passages."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Window Size"
+description = "Duration of the enveloping window, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 1000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Lift"
+description = "Amount by which the envelope is lifted"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.2
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "envel_warp_7"
+bin = "envel"
+subprog = "warp"
+mode = "7"
+title = "Flatten Envelope"
+category = "time"
+subcategory = "envelope"
+short_description = "Flattens (smooths) the amplitude envelope's contour"
+description = "Smooths out the sound's amplitude envelope, evening out fast fluctuations over the given window."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Window Size"
+description = "Duration of the enveloping window, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 1000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Flatten"
+description = "Smoothing extent, in windows"
+automatable = true
+kind = "number"
+min = 1.0
+max = 5000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "envel_warp_9"
+bin = "envel"
+subprog = "warp"
+mode = "9"
+title = "Invert Envelope"
+category = "time"
+subcategory = "envelope"
+short_description = "Inverts the amplitude envelope around a mirror level"
+description = """
+Zeroes levels below a gate threshold, then mirrors every other level to the opposite side \
+of a chosen mirror level — quiet moments become loud and vice versa.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Window Size"
+description = "Duration of the enveloping window, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 1000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gate"
+description = "Levels below this are set to zero"
+automatable = true
+kind = "number"
+min = 0.0
+max = 0.9
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Mirror"
+description = "Level that other values are inverted around"
+automatable = true
+kind = "number"
+min = 0.1
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "envel_warp_10"
+bin = "envel"
+subprog = "warp"
+mode = "10"
+title = "Limit Envelope"
+category = "time"
+subcategory = "envelope"
+short_description = "Squeezes loud levels of the envelope down towards a limit"
+description = "Squeezes levels above a threshold downwards so the loudest moment is reduced to a chosen limit."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Window Size"
+description = "Duration of the enveloping window, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 1000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Limit"
+description = "Level the loudest moment is squeezed down to"
+automatable = true
+kind = "number"
+min = 0.1
+max = 1.0
+step = 0.01
+default = 0.7
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Threshold"
+description = "Level above which squeezing begins"
+automatable = true
+kind = "number"
+min = 0.0
+max = 0.7
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "envel_warp_12"
+bin = "envel"
+subprog = "warp"
+mode = "12"
+title = "Expand Envelope"
+category = "time"
+subcategory = "envelope"
+short_description = "Squeezes quiet levels of the envelope up towards a threshold"
+description = "Zeroes levels below a gate, then squeezes remaining quiet levels upwards so the quietest moment reaches a chosen threshold — an envelope-domain expander."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Window Size"
+description = "Duration of the enveloping window, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 1000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gate"
+description = "Levels below this are set to zero"
+automatable = true
+kind = "number"
+min = 0.0
+max = 0.5
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Threshold"
+description = "Level the quietest surviving moment is squeezed up to"
+automatable = true
+kind = "number"
+min = 0.1
+max = 1.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Smoothing"
+description = "Excises low-level segments shorter than this many windows (0 disables)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 32767.0
+step = 1.0
+default = 0.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "hilite_arpeg_1"
+bin = "hilite"
+subprog = "arpeg"
+mode = "1"
+title = "Arpeggiate (On)"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Sweeps a band through the spectrum, playing only the components inside it"
+description = """
+Sweeps a frequency band up and down through the spectrum at a chosen rate, playing only \
+the spectral components currently inside the band — everything else is silent.
+"""
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Wave"
+description = "Shape of the sweep: 1 = downramp, 2 = sine, 3 = sawtooth, 4 = upramp"
+automatable = false
+kind = "choice"
+options = ["1", "2", "3", "4"]
+default = 1
+
+[[process.params]]
+name = "Rate"
+description = "Sweeps per second"
+automatable = true
+kind = "number"
+min = 0.01
+max = 50.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Amplification"
+description = "Amplification applied to components inside the sweep band"
+automatable = true
+kind = "number"
+min = 0.1
+max = 50.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+flag = "-a"
+
+# ---- Tier 0 batch 4 (2026-07-09) ------------------------------------------------------
+
+[[process]]
+key = "filter_phasing_1"
+bin = "filter"
+subprog = "phasing"
+mode = "1"
+title = "Allpass Filter"
+category = "time"
+subcategory = "filter"
+short_description = "Phase-shifts the sound through an allpass filter"
+description = "Passes the sound through an allpass filter, shifting phase relationships between frequencies without changing their relative levels."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Gain"
+description = "Filter gain"
+automatable = true
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Delay"
+description = "Filter delay, in milliseconds"
+automatable = true
+kind = "number"
+min = 0.01
+max = 500.0
+step = 0.01
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "filter_phasing_2"
+bin = "filter"
+subprog = "phasing"
+mode = "2"
+title = "Phasing Effect"
+category = "time"
+subcategory = "filter"
+short_description = "Applies a classic sweeping phaser effect"
+description = "Applies a phasing effect: as gain increases from -1, the phasing effect intensifies, until a gain of 1.0 produces complete phase cancellation (silence)."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Gain"
+description = "Phasing intensity (1.0 produces complete cancellation/silence)"
+automatable = true
+kind = "number"
+min = -1.0
+max = 0.99
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Delay"
+description = "Filter delay, in milliseconds"
+automatable = true
+kind = "number"
+min = 0.01
+max = 500.0
+step = 0.01
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "filter_sweeping_1"
+bin = "filter"
+subprog = "sweeping"
+mode = "1"
+title = "Sweeping Notch Filter"
+category = "time"
+subcategory = "filter"
+short_description = "A notch (band-reject) filter whose focus frequency sweeps over a range"
+description = "A notch filter that removes a narrow band of frequencies, with the band's centre frequency sweeping back and forth across a chosen range."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Acuity"
+description = "Filter tightness (smaller values give a tighter filter)"
+automatable = true
+kind = "number"
+min = 0.0001
+max = 1.0
+step = 0.0001
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Overall output gain"
+automatable = true
+kind = "number"
+min = 0.001
+max = 10000.0
+step = 0.001
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Low Frequency"
+description = "Lowest frequency the sweep reaches, in Hz"
+automatable = true
+kind = "number"
+min = 0.1
+max = 20000.0
+step = 0.1
+default = 200.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "High Frequency"
+description = "Highest frequency the sweep reaches, in Hz"
+automatable = true
+kind = "number"
+min = 0.1
+max = 20000.0
+step = 0.1
+default = 2000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Sweep Frequency"
+description = "Frequency of the sweep itself"
+automatable = true
+kind = "number"
+min = 0.0
+max = 200.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "filter_sweeping_2"
+bin = "filter"
+subprog = "sweeping"
+mode = "2"
+title = "Sweeping Band-Pass Filter"
+category = "time"
+subcategory = "filter"
+short_description = "A band-pass filter whose focus frequency sweeps over a range"
+description = "A band-pass filter that only lets a narrow band of frequencies through, with the band's centre frequency sweeping back and forth across a chosen range."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Acuity"
+description = "Filter tightness (smaller values give a tighter filter)"
+automatable = true
+kind = "number"
+min = 0.0001
+max = 1.0
+step = 0.0001
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Overall output gain"
+automatable = true
+kind = "number"
+min = 0.001
+max = 10000.0
+step = 0.001
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Low Frequency"
+description = "Lowest frequency the sweep reaches, in Hz"
+automatable = true
+kind = "number"
+min = 0.1
+max = 20000.0
+step = 0.1
+default = 200.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "High Frequency"
+description = "Highest frequency the sweep reaches, in Hz"
+automatable = true
+kind = "number"
+min = 0.1
+max = 20000.0
+step = 0.1
+default = 2000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Sweep Frequency"
+description = "Frequency of the sweep itself"
+automatable = true
+kind = "number"
+min = 0.0
+max = 200.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "filter_sweeping_3"
+bin = "filter"
+subprog = "sweeping"
+mode = "3"
+title = "Sweeping Low-Pass Filter"
+category = "time"
+subcategory = "filter"
+short_description = "A low-pass filter whose cutoff frequency sweeps over a range"
+description = "A low-pass filter that removes frequencies above its cutoff, with the cutoff sweeping back and forth across a chosen range."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Acuity"
+description = "Filter tightness (smaller values give a tighter filter)"
+automatable = true
+kind = "number"
+min = 0.0001
+max = 1.0
+step = 0.0001
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Overall output gain"
+automatable = true
+kind = "number"
+min = 0.001
+max = 10000.0
+step = 0.001
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Low Frequency"
+description = "Lowest frequency the sweep reaches, in Hz"
+automatable = true
+kind = "number"
+min = 0.1
+max = 20000.0
+step = 0.1
+default = 200.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "High Frequency"
+description = "Highest frequency the sweep reaches, in Hz"
+automatable = true
+kind = "number"
+min = 0.1
+max = 20000.0
+step = 0.1
+default = 2000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Sweep Frequency"
+description = "Frequency of the sweep itself"
+automatable = true
+kind = "number"
+min = 0.0
+max = 200.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "filter_sweeping_4"
+bin = "filter"
+subprog = "sweeping"
+mode = "4"
+title = "Sweeping High-Pass Filter"
+category = "time"
+subcategory = "filter"
+short_description = "A high-pass filter whose cutoff frequency sweeps over a range"
+description = "A high-pass filter that removes frequencies below its cutoff, with the cutoff sweeping back and forth across a chosen range."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Acuity"
+description = "Filter tightness (smaller values give a tighter filter)"
+automatable = true
+kind = "number"
+min = 0.0001
+max = 1.0
+step = 0.0001
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Overall output gain"
+automatable = true
+kind = "number"
+min = 0.001
+max = 10000.0
+step = 0.001
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Low Frequency"
+description = "Lowest frequency the sweep reaches, in Hz"
+automatable = true
+kind = "number"
+min = 0.1
+max = 20000.0
+step = 0.1
+default = 200.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "High Frequency"
+description = "Highest frequency the sweep reaches, in Hz"
+automatable = true
+kind = "number"
+min = 0.1
+max = 20000.0
+step = 0.1
+default = 2000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Sweep Frequency"
+description = "Frequency of the sweep itself"
+automatable = true
+kind = "number"
+min = 0.0
+max = 200.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "modify_space_1"
+bin = "modify"
+subprog = "space"
+mode = "1"
+title = "Pan"
+category = "time"
+subcategory = "space"
+short_description = "Positions or moves a mono sound in a stereo field"
+description = "Places a mono sound at a fixed position in the stereo field, or moves it across the field over time."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = true
+
+[[process.params]]
+name = "Pan"
+description = "Stereo position, -1 (full left) to 1 (full right)"
+automatable = true
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Prescale"
+description = "Gain applied to the input before panning, to avoid clipping"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.7
+exponential = false
+scale = "plain"
+flag = "-p"
+
+[[process]]
+key = "modify_space_2"
+bin = "modify"
+subprog = "space"
+mode = "2"
+title = "Mirror Stereo Position"
+category = "time"
+subcategory = "space"
+short_description = "Inverts left/right stereo positions in a stereo file"
+description = "Swaps the stereo image left-for-right, mirroring where every sound sits in the stereo field. Requires a stereo file."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = true
+
+[[process]]
+key = "modify_space_4"
+bin = "modify"
+subprog = "space"
+mode = "4"
+title = "Narrow Stereo Image"
+category = "time"
+subcategory = "space"
+short_description = "Narrows (or widens/inverts) the stereo image of a sound"
+description = """
+Narrows the stereo image toward mono: 1 leaves it unchanged, 0.5 narrows it by half, 0 \
+collapses it to mono. Negative values narrow similarly but also invert the stereo image. \
+Requires a stereo file.
+"""
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = true
+
+[[process.params]]
+name = "Narrowing"
+description = "Stereo image narrowing: 1 = unchanged, 0 = mono, negative also inverts"
+automatable = true
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "modify_shudder"
+bin = "modify"
+subprog = "shudder"
+title = "Shudder"
+category = "time"
+subcategory = "modulation"
+short_description = "Applies randomised amplitude shudders across the stereo field"
+description = """
+Applies a series of randomised amplitude "shudder" events, scattered in time and \
+positioned across the stereo field — a granular, tremulous effect. Requires a stereo file.
+"""
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = true
+
+[[process.params]]
+name = "Start Time"
+description = "Time at which shuddering begins, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 3600.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Frequency"
+description = "Average frequency of the shudder events, in Hz"
+automatable = true
+kind = "number"
+min = 0.1
+max = 50.0
+step = 0.1
+default = 4.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Scatter"
+description = "Randomisation of shudder event timing"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Stereo Spread"
+description = "How widely shudder events are positioned across the stereo field"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Depth"
+description = "Minimum amplitude of each shudder event"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.2
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Depth"
+description = "Maximum amplitude of each shudder event"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.6
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Width"
+description = "Minimum duration of each shudder event, in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 5.0
+step = 0.01
+default = 0.05
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Max Width"
+description = "Maximum duration of each shudder event, in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 5.0
+step = 0.01
+default = 0.2
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "splinter_splinter_1"
+bin = "splinter"
+subprog = "splinter"
+mode = "1"
+title = "Splinter (Lead In, Pitched)"
+category = "time"
+subcategory = "texture"
+short_description = "Builds a pitched, shrinking splinter texture that leads into the original sound"
+description = """
+Repeats and progressively shrinks a chosen group of wavesets, building a pitched, \
+accelerating "splinter" texture that leads into the original sound.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Target Time"
+description = "Time in the source immediately before the desired waveset group, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 3600.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Waveset Count"
+description = "Number of wavesets used to create the splinter group"
+automatable = false
+kind = "number"
+min = 1.0
+max = 50.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Shrink Count"
+description = "Number of waveset-group repeats over which shrinkage takes place"
+automatable = false
+kind = "number"
+min = 1.0
+max = 50.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Overshrink Count"
+description = "Number of maximally-shrunken splinters beyond the shrink phase"
+automatable = false
+kind = "number"
+min = 0.0
+max = 50.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pulse Speed 1"
+description = "Pulse speed of waveset repetitions at the originating waveset, in Hz (0 = derive from waveset-group duration)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 200.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pulse Speed 2"
+description = "Pulse speed of the most-shrunken splinters, in Hz (0 = same as Pulse Speed 1)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 200.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Splinter Frequency"
+description = "Approximate frequency of the most-shrunken splinters, in Hz"
+automatable = false
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 1.0
+default = 6000.0
+exponential = true
+scale = "plain"
+flag = "-f"
+
+# ---- Tier 0 batch 5 (2026-07-09) ------------------------------------------------------
+
+[[process]]
+key = "spike_spike"
+bin = "spike"
+subprog = "spike"
+title = "Spike At Peak"
+category = "time"
+subcategory = "envelope"
+short_description = "Reshapes the envelope into a single sharp spike at a chosen peak time"
+description = """
+Envelopes the sound so its level spikes sharply at a chosen time, with independently \
+controllable rise and fall slopes either side of the peak.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Peak Time"
+description = "Time at which the spike peaks, in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 3600.0
+step = 0.01
+default = 0.5
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Up Slope"
+description = "Steepness of the envelope's approach to the peak"
+automatable = false
+kind = "number"
+min = 1.0
+max = 100.0
+step = 1.0
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Down Slope"
+description = "Steepness of the envelope's fall after the peak"
+automatable = false
+kind = "number"
+min = 1.0
+max = 100.0
+step = 1.0
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "envel_curtail_1"
+bin = "envel"
+subprog = "curtail"
+mode = "1"
+title = "Curtail (Fade Between Times)"
+category = "time"
+subcategory = "envelope"
+short_description = "Fades the sound to zero between two chosen times"
+description = "Curtails the sound by fading it to silence between two explicit times, continuing at silence to the end of the file."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Fade Start"
+description = "Time at which the fade to silence begins, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 3600.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Fade End"
+description = "Time at which the fade to silence completes, in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 3600.0
+step = 0.01
+default = 0.6
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Envelope Type"
+description = "Shape of the fade: 0 = linear, 1 = exponential"
+automatable = false
+kind = "choice"
+options = ["0", "1"]
+default = 1
+
+[[process]]
+key = "envel_curtail_2"
+bin = "envel"
+subprog = "curtail"
+mode = "2"
+title = "Curtail (Fade From Start Time)"
+category = "time"
+subcategory = "envelope"
+short_description = "Fades the sound to zero over a chosen duration starting at a chosen time"
+description = "Curtails the sound by fading it to silence over a chosen duration, beginning at a chosen start time, continuing at silence to the end of the file."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Fade Start"
+description = "Time at which the fade to silence begins, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 3600.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Fade Duration"
+description = "Duration of the fade to silence, in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 3600.0
+step = 0.01
+default = 0.3
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Envelope Type"
+description = "Shape of the fade: 0 = linear, 1 = exponential"
+automatable = false
+kind = "choice"
+options = ["0", "1"]
+default = 1
+
+[[process]]
+key = "envel_attack_1"
+bin = "envel"
+subprog = "attack"
+mode = "1"
+title = "Emphasise Attack (At Gate)"
+category = "time"
+subcategory = "envelope"
+short_description = "Emphasises the sound's attack at the point it first exceeds a level"
+description = """
+Finds the first moment the sound's level exceeds a chosen gate level and emphasises it as \
+an attack transient, with a controllable onset and decay shape.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Gate"
+description = "Level at which the attack point is recognised"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Amplification applied to the attack point"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.1
+default = 1.5
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Onset"
+description = "Attack onset duration, in milliseconds"
+automatable = false
+kind = "number"
+min = 5.0
+max = 32767.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Decay"
+description = "Attack decay duration, in milliseconds"
+automatable = false
+kind = "number"
+min = 5.0
+max = 5000.0
+step = 1.0
+default = 100.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "envel_attack_2"
+bin = "envel"
+subprog = "attack"
+mode = "2"
+title = "Emphasise Attack (Near Time)"
+category = "time"
+subcategory = "envelope"
+short_description = "Emphasises the sound's attack at the loudest moment near a chosen time"
+description = """
+Finds the moment of maximum level within roughly 200ms of a chosen approximate time and \
+emphasises it as an attack transient, with a controllable onset and decay shape.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Approximate Time"
+description = "Approximate time of the attack point, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 3600.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Amplification applied to the attack point"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.1
+default = 1.5
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Onset"
+description = "Attack onset duration, in milliseconds"
+automatable = false
+kind = "number"
+min = 5.0
+max = 32767.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Decay"
+description = "Attack decay duration, in milliseconds"
+automatable = false
+kind = "number"
+min = 5.0
+max = 5000.0
+step = 1.0
+default = 100.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "envel_dovetail_2"
+bin = "envel"
+subprog = "dovetail"
+mode = "2"
+title = "Dovetail (Steep)"
+category = "time"
+subcategory = "envelope"
+short_description = "Fades in the start and fades out the end with a steeper, doubly-exponential curve"
+description = """
+Applies independent fade-in and fade-out envelopes to the start and end of the sound, using \
+a steeper doubly-exponential curve than the standard Dovetail.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "In Fade Duration"
+description = "Duration of the fade-in at the start, in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 60.0
+step = 0.01
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Out Fade Duration"
+description = "Duration of the fade-out at the end, in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 60.0
+step = 0.01
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "pitch_transp_2"
+bin = "pitch"
+subprog = "transp"
+mode = "2"
+title = "Octave Transpose Below"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Transposes frequencies below a split point down an octave"
+description = "Octave-transposes downward every part of the spectrum below the given split frequency, leaving material above it unchanged."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Split Frequency"
+description = "Frequency below which transposition takes place, in Hz"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 1.0
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Depth"
+description = "Strength of the transposition effect (0 = no effect, 1 = full effect)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-d"
+
+[[process]]
+key = "pitch_transp_3"
+bin = "pitch"
+subprog = "transp"
+mode = "3"
+title = "Octave Transpose Above & Below"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Octave-transposes both above and below a split point, away from it"
+description = "Octave-transposes upward above the split frequency and downward below it, spreading the spectrum away from the split point."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Split Frequency"
+description = "Frequency around which transposition takes place, in Hz"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 1.0
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Depth"
+description = "Strength of the transposition effect (0 = no effect, 1 = full effect)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-d"
+
+[[process]]
+key = "pitch_pick_2"
+bin = "pitch"
+subprog = "pick"
+mode = "2"
+title = "Pick Octave Partials"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Keeps only spectral channels that might hold octave partials"
+description = """
+Retains only the spectral channels that could plausibly hold an octave partial of the \
+given fundamental, suppressing everything else.
+"""
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Fundamental"
+description = "Fundamental frequency of the octave series, in Hz"
+automatable = true
+kind = "number"
+min = 20.0
+max = 2000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Clarity"
+description = "Extent to which channels outside the octave series are suppressed"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-c"
+
+[[process]]
+key = "pitch_pick_3"
+bin = "pitch"
+subprog = "pick"
+mode = "3"
+title = "Pick Odd Harmonic Partials"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Keeps only spectral channels that might hold odd harmonic partials"
+description = """
+Retains only the spectral channels that could plausibly hold an odd-numbered partial of \
+the given harmonic series, suppressing everything else — a hollow, clarinet-like filtering.
+"""
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Fundamental"
+description = "Fundamental frequency of the harmonic series, in Hz"
+automatable = true
+kind = "number"
+min = 20.0
+max = 2000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Clarity"
+description = "Extent to which channels outside the odd partials are suppressed"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-c"
+
+[[process]]
+key = "hilite_arpeg_2"
+bin = "hilite"
+subprog = "arpeg"
+mode = "2"
+title = "Arpeggiate (Boost)"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Sweeps a band through the spectrum, amplifying the components inside it"
+description = """
+Sweeps a frequency band up and down through the spectrum at a chosen rate, amplifying the \
+spectral components currently inside the band while the rest of the spectrum plays \
+unamplified.
+"""
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Wave"
+description = "Shape of the sweep: 1 = downramp, 2 = sine, 3 = sawtooth, 4 = upramp"
+automatable = false
+kind = "choice"
+options = ["1", "2", "3", "4"]
+default = 1
+
+[[process.params]]
+name = "Rate"
+description = "Sweeps per second"
+automatable = true
+kind = "number"
+min = 0.01
+max = 50.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Amplification"
+description = "Amplification applied to components inside the sweep band"
+automatable = true
+kind = "number"
+min = 0.1
+max = 50.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+flag = "-a"
+
+[[process]]
+key = "hilite_arpeg_5"
+bin = "hilite"
+subprog = "arpeg"
+mode = "5"
+title = "Arpeggiate (Below Band Only)"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Sweeps a band through the spectrum, playing only components below it"
+description = """
+Sweeps a frequency band up and down through the spectrum at a chosen rate, playing only \
+the spectral components currently below the band — everything else is silent.
+"""
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Wave"
+description = "Shape of the sweep: 1 = downramp, 2 = sine, 3 = sawtooth, 4 = upramp"
+automatable = false
+kind = "choice"
+options = ["1", "2", "3", "4"]
+default = 1
+
+[[process.params]]
+name = "Rate"
+description = "Sweeps per second"
+automatable = true
+kind = "number"
+min = 0.01
+max = 50.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Amplification"
+description = "Amplification applied to components below the sweep band"
+automatable = true
+kind = "number"
+min = 0.1
+max = 50.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+flag = "-a"
+
+# ---- Tier 0 batch 6 (2026-07-09) ------------------------------------------------------
+
+[[process]]
+key = "spec_gate"
+bin = "spec"
+subprog = "gate"
+title = "Spectral Gate"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Eliminates spectral channel data below a threshold amplitude"
+description = "Zeroes out any spectral channel whose amplitude falls below a chosen threshold, cleaning up low-level noise in the spectrum."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Threshold"
+description = "Amplitude below which channel data is eliminated"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "chanphase_chanphase"
+bin = "chanphase"
+subprog = "chanphase"
+title = "Invert Channel Phase"
+category = "time"
+subcategory = "channels"
+short_description = "Inverts the phase of one channel of a multichannel sound"
+description = "Inverts the polarity (phase) of a single channel, leaving all others untouched — useful for correcting an out-of-phase microphone channel or creating phase-cancellation effects when combined with other material."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Channel"
+description = "Channel number to invert (1 = left/mono, 2 = right)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 2.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "waveform_make_1"
+bin = "waveform"
+subprog = "make"
+mode = "1"
+title = "Make Wavetable (By Cycle Count)"
+category = "time"
+subcategory = "synthesis"
+short_description = "Extracts a symmetric wavetable from a chosen number of half-wavesets"
+description = """
+Extracts a group of half-wavesets at a chosen time in a mono source, then abuts the \
+segment to its own inversion to form a symmetric wavecycle — a way to harvest a wavetable \
+from an existing recording.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Time"
+description = "Time in the source at which to extract material, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 3600.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Half-Waveset Count"
+description = "Number of half-wavesets to extract"
+automatable = false
+kind = "number"
+min = 1.0
+max = 100.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "waveform_make_2"
+bin = "waveform"
+subprog = "make"
+mode = "2"
+title = "Make Wavetable (By Duration)"
+category = "time"
+subcategory = "synthesis"
+short_description = "Extracts a symmetric wavetable from a chosen duration of source, cut at zero-crossings"
+description = """
+Extracts a chosen duration of material at a chosen time in a mono source, cutting cleanly \
+at zero-crossings, then abuts the segment to its own inversion to form a symmetric \
+wavecycle — a way to harvest a wavetable from an existing recording.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Time"
+description = "Time in the source at which to extract material, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 3600.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the sound clip to extract, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 5000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "retime_retime_13"
+bin = "retime"
+subprog = "retime"
+mode = "13"
+title = "Move Peak To Time"
+category = "time"
+subcategory = "time"
+short_description = "Finds the sound's peak and moves all data so the peak lands at a chosen time"
+description = "Locates the loudest moment in the sound and shifts the entire file so that peak lands exactly at a chosen target time."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Goal Peak Time"
+description = "Time the peak is moved to, in seconds (must be later than the peak's original time)"
+automatable = false
+kind = "number"
+min = 0.01
+max = 3600.0
+step = 0.01
+default = 0.5
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "tostereo_tostereo"
+bin = "tostereo"
+subprog = "tostereo"
+title = "Diverge To/From Stereo"
+category = "time"
+subcategory = "space"
+short_description = "Makes a stereo file start (or end) mixed to mono and diverge to real stereo"
+description = """
+Causes a stereo file to begin mixed down to mono and gradually diverge into real stereo by \
+a chosen time — or, if the end time is earlier than the start, the reverse: begins in \
+stereo and converges to mono. Requires a stereo file.
+"""
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = true
+
+[[process.params]]
+name = "Start Time"
+description = "Time at which divergence to stereo begins, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 3600.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "End Time"
+description = "Time at which the sound is fully stereo (earlier than Start Time reverses the effect)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 3600.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+# ---- Tier 0 batch 7 (2026-07-09) ------------------------------------------------------
+
+# modify_convolve_1 was tried here and deliberately NOT included: `modify convolve 1`
+# segfaults (SIGSEGV, core dump) in this CDP 7.1 build on every input pairing tested
+# (identical files, different mono files, different durations) — a real crash in the
+# binary itself, not a catalog-authoring mistake. Unlike a known-crashing mode inside an
+# already-large, mostly-working family (see specfnu_specfnu_19's skip-list entry), this
+# would-be entry is the *only* mode of a standalone process, so shipping it means every
+# real user who tries it crashes CDP. Revisit if a newer CDP release fixes it.
+
+[[process]]
+key = "cascade_cascade_1"
+bin = "cascade"
+subprog = "cascade"
+mode = "1"
+title = "Cascade Echoes"
+category = "time"
+subcategory = "delay"
+short_description = "Repeat-echoes successive segments of the sound, superimposing echo-sets on the source"
+description = """
+Cuts the source into successive segments and layers each one with a set of repeating \
+echoes, superimposed back on the original — building a dense, cascading echo texture. \
+Channel count is preserved (mono stays mono, stereo stays stereo).
+"""
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Clip Size"
+description = "Duration of each segment to echo, in seconds"
+automatable = true
+kind = "number"
+min = 0.005
+max = 60.0
+step = 0.005
+default = 0.2
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Echoes"
+description = "Number of echoes per segment"
+automatable = true
+kind = "number"
+min = 1.0
+max = 64.0
+step = 1.0
+default = 6.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Clip Max"
+description = "Maximum segment duration, in seconds — segments vary randomly between Clip Size and this (0 disables)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 60.0
+step = 0.005
+default = 0.0
+exponential = false
+scale = "plain"
+
+# ---- Tier 1: glob (multi-file) output infrastructure (2026-07-09) ---------------------
+#
+# distcut/envcut cut the source into an unknown number of falling-envelope segments,
+# writing each as its own numbered file (cutout0.wav, cutout1.wav, ...) instead of one
+# result. `IoKind::WavGlob` (see model/cdp/def.rs and pipeline::plan_wav_glob) is the new
+# infrastructure that makes this possible: the runner loads every numbered file it finds,
+# and the UI opens each as its own new buffer (Apply only — there's no single "the result"
+# to Preview, so Preview plays just the first segment as a representative sample).
+
+[[process]]
+key = "distcut_distcut_1"
+bin = "distcut"
+subprog = "distcut"
+mode = "1"
+title = "Cut Into Wavecycle Groups"
+category = "time"
+subcategory = "segment"
+short_description = "Cuts the sound into separate files, one per group of wavesets, each with a falling envelope"
+description = """
+Cuts the sound into disjunct groups of wavesets, applying a falling envelope to each, and \
+writes every group as its own new buffer — a way to chop a texture into a set of separate \
+short decaying events.
+"""
+input = "wav"
+output = "wav_glob"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Cycle Count"
+description = "Number of wavesets in each output segment"
+automatable = false
+kind = "number"
+min = 1.0
+max = 200.0
+step = 1.0
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Decay Shape"
+description = "Envelope decay shape: 1 = linear, above 1 = more rapid decay, below 1 = less rapid"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.1
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Limit"
+description = "Minimum level of output events to accept, in dB below full scale"
+automatable = false
+kind = "number"
+min = 0.0
+max = 96.0
+step = 1.0
+default = 70.0
+exponential = false
+scale = "plain"
+flag = "-c"
+
+# envcut_envcut_1 was tried here and deliberately NOT included: mode 1 consistently rejects
+# the *last* (necessarily truncated) segment near the end of the file with "Attack too long
+# for envelope event", reproduced across three different test files (1s/2s-with-fadeout/3s)
+# and multiple attack/envlen combinations — a near-universal boundary problem, not a
+# fixture-content issue like the entries in cdp::runner's KNOWN_FIXTURE_FAILURES list.
+# distcut (the same "cut into numbered segments" family, plain waveset-count based rather
+# than envelope-boundary based) has no such issue and is included above.

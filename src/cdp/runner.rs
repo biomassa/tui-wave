@@ -41,9 +41,15 @@ pub struct Job {
     pub purpose: JobPurpose,
 }
 
+/// The audio a finished job produced. `results` holds one deinterleaved channel-set per
+/// output *buffer* — almost always exactly one (the normal case: one process applied to
+/// one selection). More than one only for a glob-output process
+/// (`model::cdp::pipeline::GlobOutputSpec`, e.g. `distcut`/`envcut`): each numbered file it
+/// produced becomes its own entry here, and the UI opens each as a separate new buffer
+/// instead of splicing a single result into the current selection.
 #[derive(Debug)]
 pub struct JobOutput {
-    pub channels: Vec<Vec<f32>>,
+    pub results: Vec<Vec<Vec<f32>>>,
     pub sample_rate: u32,
 }
 
@@ -320,6 +326,10 @@ fn run_step(
 }
 
 fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
+    if let Some(glob) = &job.planned.glob_output {
+        return load_glob_outputs(glob, job.input_sample_rate, temp_dir);
+    }
+
     let max_channel = job
         .planned
         .output_files
@@ -349,7 +359,37 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
         c.resize(max_len, 0.0);
     }
 
-    Ok(JobOutput { channels, sample_rate })
+    Ok(JobOutput { results: vec![channels], sample_rate })
+}
+
+/// Loads every `<prefix>N.wav` (N = 0, 1, 2, …) found in `temp_dir`, in numeric order, as
+/// its own separate result — the glob-output counterpart of the normal single-result path
+/// above. Stops at the first missing index (0, 1, 2, … until a gap) rather than doing a
+/// directory scan + sort, since CDP always numbers this family of outputs contiguously
+/// from 0 and `run_job_body` already confirmed index 0 exists before calling here.
+fn load_glob_outputs(
+    glob: &crate::model::cdp::pipeline::GlobOutputSpec,
+    fallback_sample_rate: u32,
+    temp_dir: &Path,
+) -> Result<JobOutput, CdpError> {
+    let mut results = Vec::new();
+    let mut sample_rate = fallback_sample_rate;
+    for index in 0.. {
+        let path = temp_dir.join(format!("{}{index}.wav", glob.prefix));
+        if !path.exists() {
+            break;
+        }
+        let doc = load_wav(&path).map_err(|e| CdpError::OutputRead {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        })?;
+        sample_rate = doc.sample_rate;
+        results.push(doc.channels);
+    }
+    if results.is_empty() {
+        return Err(CdpError::NoOutput { step: format!("{}0.wav", glob.prefix) });
+    }
+    Ok(JobOutput { results, sample_rate })
 }
 
 #[cfg(test)]
@@ -382,6 +422,7 @@ mod tests {
                 relative_name: output_relative_name.into(),
                 dest_channels: vec![0],
             }],
+            glob_output: None,
             brk_files: Vec::new(),
             deferred_window_params: Vec::new(),
         }
@@ -415,8 +456,60 @@ mod tests {
         };
         let output = result.expect("job should succeed");
         assert_eq!(output.sample_rate, 44100);
-        assert_eq!(output.channels.len(), 1);
-        assert_eq!(output.channels[0].len(), 4);
+        assert_eq!(output.results.len(), 1);
+        assert_eq!(output.results[0][0].len(), 4);
+    }
+
+    /// A glob-output job (`PlannedJob.glob_output`, e.g. distcut/envcut) loads every
+    /// numbered `<prefix>N.wav` it finds, in order, as its own separate `results` entry —
+    /// exercised with a fake shell step that writes three numbered copies of the input
+    /// (standing in for CDP writing an unpredictable number of segments) rather than
+    /// depending on a real CDP install, matching `fake_copy_step_round_trips_audio`'s own
+    /// "no real CDP needed" precedent for pure runner-mechanics tests.
+    #[test]
+    fn glob_output_job_loads_every_numbered_file_as_a_separate_result() {
+        let steps = vec![Invocation {
+            bin: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "cp in.wav cutout0.wav && cp in.wav cutout1.wav && cp in.wav cutout2.wav".into(),
+            ],
+            label: "fake distcut".into(),
+            expected_output: "cutout0.wav".into(),
+        }];
+        let planned = PlannedJob {
+            steps,
+            input_files: vec![TempWavSpec {
+                relative_name: "in.wav".into(),
+                input_index: 0,
+                source_channels: vec![0],
+            }],
+            output_files: Vec::new(),
+            glob_output: Some(crate::model::cdp::pipeline::GlobOutputSpec { prefix: "cutout".into() }),
+            brk_files: Vec::new(),
+            deferred_window_params: Vec::new(),
+        };
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 5,
+            cdp_dir: PathBuf::from("/bin"),
+            planned,
+            inputs: vec![vec![vec![0.1, 0.2, -0.3, 0.4]]],
+            input_sample_rate: 44100,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(5))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("job should succeed");
+        assert_eq!(output.sample_rate, 44100);
+        assert_eq!(output.results.len(), 3, "expected one result per numbered file");
+        for segment in &output.results {
+            assert_eq!(segment[0].len(), 4, "each copied segment should round-trip the same 4 samples");
+        }
     }
 
     #[test]
@@ -583,8 +676,8 @@ mod tests {
             unreachable!()
         };
         let output = result.expect("modify speed 2 should succeed on a real CDP install");
-        assert_eq!(output.channels.len(), 1);
-        let ratio = output.channels[0].len() as f64 / len_samples as f64;
+        assert_eq!(output.results.len(), 1);
+        let ratio = output.results[0][0].len() as f64 / len_samples as f64;
         assert!((ratio - 0.5).abs() < 0.05, "expected ~half duration at +12 semitones, got ratio {ratio}");
     }
 
@@ -622,7 +715,7 @@ mod tests {
         };
         let output = result.expect("blur avrg should succeed on a real CDP install");
         assert_eq!(output.sample_rate, sample_rate);
-        let ratio = output.channels[0].len() as f64 / len_samples as f64;
+        let ratio = output.results[0][0].len() as f64 / len_samples as f64;
         assert!((ratio - 1.0).abs() < 0.1, "expected ~same duration after pvoc round-trip, got ratio {ratio}");
     }
 
@@ -671,7 +764,7 @@ mod tests {
             unreachable!()
         };
         let output = result.expect("blur blur should succeed on both stereo lanes");
-        assert_eq!(output.channels.len(), 2);
+        assert_eq!(output.results[0].len(), 2);
     }
 
     /// Regression test for the actual reported bug: automating (enveloping) `blur_blur`'s
@@ -794,7 +887,7 @@ mod tests {
             unreachable!()
         };
         let output = result.expect("sfedit join should succeed on a real CDP install");
-        let ratio = output.channels[0].len() as f64 / len_samples as f64;
+        let ratio = output.results[0][0].len() as f64 / len_samples as f64;
         assert!((ratio - 2.0).abs() < 0.05, "joining a file to itself should ~double duration, got ratio {ratio}");
     }
 
@@ -833,8 +926,18 @@ mod tests {
         //     either gates nothing ("No signal is gateable") or everything ("Entire signal
         //     would be gated") — the catalog default (-40dB) is a sensible choice for real
         //     audio with an actual noise floor.
+        //   grainex_extend, grain_reverse: "NO PEAKS IN THE FILE" / "No grains found" —
+        //     grain-finding needs amplitude variation (peaks and troughs) to find grains
+        //     between; a constant-level tone has none by definition.
         //   housekeep_extract_4: "NO CHANGE to original sound file" against this specific
         //     mono fixture — content-dependent, not an argv-shape problem.
+        //   modify_space_2, modify_space_4, tostereo_tostereo: explicitly stereo-only
+        //     ("MIRROR/NARROW only works with STEREO input files"; tostereo: "must be
+        //     stereo") — this harness only ever exercises mono input (see
+        //     `input_count`/`inputs` above), so any process that hard-requires stereo will
+        //     always fail here regardless of catalog correctness. Each verified correct by
+        //     hand against `tests/fixtures/stereo_sine.wav` (real exit-0 runs), not a bug to
+        //     chase.
         //   specfnu_specfnu_19: the CDP binary itself crashes ("double free or corruption")
         //     on this input — a CDP bug, nothing tui-wave's plan/argv can work around.
         // And two pre-existing (not catalog_extra.toml's) bugs found the same way: the
@@ -850,9 +953,14 @@ mod tests {
             "extend_scramble_1",
             "gate_gate_1",
             "gate_gate_2",
+            "grain_reverse",
+            "grainex_extend",
             "housekeep_extract_4",
             "modify_brassage_4",
+            "modify_space_2",
+            "modify_space_4",
             "specfnu_specfnu_19",
+            "tostereo_tostereo",
         ];
 
         let (catalog, warnings) = crate::model::cdp::CdpCatalog::load(None);
@@ -867,7 +975,9 @@ mod tests {
             let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
             let input_count = match def.input {
                 crate::model::cdp::IoKind::None => 0,
-                crate::model::cdp::IoKind::Wav | crate::model::cdp::IoKind::Ana => 1,
+                crate::model::cdp::IoKind::Wav
+                | crate::model::cdp::IoKind::Ana
+                | crate::model::cdp::IoKind::WavGlob => 1,
                 crate::model::cdp::IoKind::DualWav | crate::model::cdp::IoKind::DualAna => 2,
             };
             let inputs_spec = vec![input; input_count];
