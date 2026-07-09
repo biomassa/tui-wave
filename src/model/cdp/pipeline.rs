@@ -112,11 +112,32 @@ pub enum DeferredWindowTarget {
     BrkFile { relative_name: String, points: Vec<(f64, f64)> },
 }
 
+/// A process that produces an unknown number of numbered mono output files sharing a
+/// prefix (`IoKind::WavGlob`, e.g. `distcut`/`envcut`'s `cutout0.wav`, `cutout1.wav`, …)
+/// instead of one result. The runner scans the temp dir for every `<prefix>N.wav` it finds
+/// (sorted numerically) after the job's steps complete, and the UI opens each as its own
+/// new buffer rather than splicing a single result into the current selection — the same
+/// "one new buffer per output" shape `Action::NewFromLeft`/`NewFromRight` already use.
+/// Deliberately mono-only: only the source's first channel is ever written to the temp
+/// input file (see `plan_wav_glob`), since merging independently-numbered file sets across
+/// stereo lanes (which could even produce different *counts* of files per lane, since the
+/// cycle/event detection these processes do is content-dependent) has no well-defined
+/// pairing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlobOutputSpec {
+    /// Prefix shared by every produced file, e.g. `"cutout"` for `cutout0.wav`,
+    /// `cutout1.wav`, ….
+    pub prefix: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlannedJob {
     pub steps: Vec<Invocation>,
     pub input_files: Vec<TempWavSpec>,
     pub output_files: Vec<OutputWavSpec>,
+    /// `Some` only for a glob-output process (`IoKind::WavGlob`); `output_files` is always
+    /// empty in that case — the two are mutually exclusive result shapes.
+    pub glob_output: Option<GlobOutputSpec>,
     pub brk_files: Vec<(String, String)>,
     pub deferred_window_params: Vec<DeferredWindowParam>,
 }
@@ -389,7 +410,9 @@ pub fn plan_job(
 
     let expected_inputs = match def.input {
         IoKind::None => 0,
-        IoKind::Wav | IoKind::Ana => 1,
+        // `WavGlob` is output-only (see its doc comment) and never valid as `def.input` — a
+        // catalog bug, not a real input arity, but the match must stay exhaustive.
+        IoKind::Wav | IoKind::Ana | IoKind::WavGlob => 1,
         IoKind::DualWav | IoKind::DualAna => 2,
     };
     if inputs.len() != expected_inputs {
@@ -407,13 +430,61 @@ pub fn plan_job(
         }
     }
 
+    // `WavGlob` (an unknown number of numbered output files) is a distinct enough result
+    // shape — one mono lane always, no channel merging, no splice target — that it gets its
+    // own planning function rather than threading a glob flag through `plan_wav`'s
+    // stereo-lane-splitting logic. Checked on `def.output`, ahead of the `def.input`
+    // dispatch below (which stays keyed on input arity as normal).
+    if def.output == IoKind::WavGlob {
+        return plan_wav_glob(def, values, &inputs[0], pvoc);
+    }
+
     match def.input {
         IoKind::None => plan_synthesis(def, values, pvoc),
         IoKind::Wav => plan_wav(def, values, &inputs[0], pvoc),
         IoKind::Ana => plan_ana(def, values, &inputs[0], pvoc),
         IoKind::DualWav => plan_dual_wav(def, values, &inputs[0], &inputs[1], pvoc),
         IoKind::DualAna => plan_dual_ana(def, values, &inputs[0], &inputs[1], pvoc),
+        // Never valid as `def.input` (see `IoKind::WavGlob`'s doc comment) — a catalog bug
+        // if reached, not a real plan to build.
+        IoKind::WavGlob => Err(PlanError::UnsupportedInV1 {
+            reason: "WavGlob is not a valid input kind".into(),
+        }),
     }
+}
+
+/// Plans a glob-output process (`IoKind::WavGlob` — an unknown number of numbered mono
+/// output files sharing a prefix, e.g. `distcut`/`envcut`). Always exactly one mono lane:
+/// only the source's first channel is written to the temp input file (see
+/// `GlobOutputSpec`'s doc comment for why stereo isn't supported here). `expected_output`
+/// checks for `<prefix>0.wav` specifically — CDP numbers this family of outputs from 0.
+fn plan_wav_glob(
+    def: &ProcessDef,
+    values: &[ParamValue],
+    input: &InputSpec,
+    pvoc: &PvocSettings,
+) -> Result<PlannedJob, PlanError> {
+    let mut brk_files = Vec::new();
+    let duration = input.duration_secs();
+    let prefix = "cutout".to_string();
+
+    let (args, deferred) =
+        build_process_args(def, values, &["in.wav"], &prefix, duration, pvoc, &mut brk_files)?;
+    debug_assert!(deferred.is_empty(), "glob-output processes never carry ana-window-count params");
+
+    Ok(PlannedJob {
+        steps: vec![Invocation {
+            bin: def.bin.clone(),
+            args,
+            label: process_label(def),
+            expected_output: format!("{prefix}0.wav"),
+        }],
+        input_files: vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0] }],
+        output_files: Vec::new(),
+        glob_output: Some(GlobOutputSpec { prefix }),
+        brk_files,
+        deferred_window_params: Vec::new(),
+    })
 }
 
 fn plan_synthesis(
@@ -437,6 +508,7 @@ fn plan_synthesis(
         input_files: Vec::new(),
         output_files: vec![OutputWavSpec { relative_name: "out.wav".into(), dest_channels }],
         brk_files,
+        glob_output: None,
         deferred_window_params: Vec::new(),
     })
 }
@@ -470,7 +542,8 @@ fn plan_wav(
             }],
             output_files: vec![OutputWavSpec { relative_name: "out.wav".into(), dest_channels }],
             brk_files,
-            deferred_window_params: Vec::new(),
+            glob_output: None,
+        deferred_window_params: Vec::new(),
         });
     }
 
@@ -497,7 +570,7 @@ fn plan_wav(
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, brk_files, deferred_window_params: Vec::new() })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, brk_files, deferred_window_params: Vec::new() })
 }
 
 /// Dual-input time-domain process: `bin subprog [mode] inA inB out params...`. Lanes work
@@ -551,7 +624,8 @@ fn plan_dual_wav(
                 dest_channels: (0..a.channels.max(1)).collect(),
             }],
             brk_files,
-            deferred_window_params: Vec::new(),
+            glob_output: None,
+        deferred_window_params: Vec::new(),
         });
     }
 
@@ -587,7 +661,7 @@ fn plan_dual_wav(
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, brk_files, deferred_window_params: Vec::new() })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, brk_files, deferred_window_params: Vec::new() })
 }
 
 /// Dual-input spectral process: per channel lane, `pvoc anal` both inputs, run the process
@@ -670,7 +744,7 @@ fn plan_dual_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, brk_files, deferred_window_params: Vec::new() })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, brk_files, deferred_window_params: Vec::new() })
 }
 
 fn plan_ana(
@@ -744,7 +818,7 @@ fn plan_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, brk_files, deferred_window_params })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, brk_files, deferred_window_params })
 }
 
 #[cfg(test)]
@@ -1083,6 +1157,44 @@ mod tests {
         assert!(job.input_files.is_empty());
         assert_eq!(job.steps[0].args, vec!["noise", "out.wav"]);
         assert_eq!(job.output_files[0].dest_channels, vec![0]);
+    }
+
+    /// A glob-output process (`IoKind::WavGlob`, e.g. distcut/envcut) plans a single mono
+    /// lane with the shared prefix as its "outfile" argv token, `output_files` left empty
+    /// (there's no single known result file), and `glob_output` populated instead —
+    /// `expected_output` checks for `<prefix>0.wav` specifically, matching CDP's own
+    /// 0-based numbering for this family of outputs.
+    #[test]
+    fn glob_output_process_uses_a_shared_prefix_and_no_output_files() {
+        let mut def = base_def(IoKind::Wav, IoKind::WavGlob);
+        def.bin = "distcut".into();
+        def.subprog = Some("distcut".into());
+        def.mode = Some("1".into());
+        def.params = vec![
+            number_param("Cycle Count", 1.0, 200.0, 10.0, NumberScale::Plain),
+            number_param("Decay Shape", 0.1, 10.0, 1.0, NumberScale::Plain),
+        ];
+        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100 };
+
+        let job = plan_job(
+            &def,
+            &[ParamValue::Number(10.0), ParamValue::Number(1.0)],
+            std::slice::from_ref(&input),
+            &PvocSettings::default(),
+        )
+        .unwrap();
+
+        assert_eq!(job.steps.len(), 1);
+        assert_eq!(job.steps[0].args, vec!["distcut", "1", "in.wav", "cutout", "10", "1"]);
+        assert_eq!(job.steps[0].expected_output, "cutout0.wav");
+        assert!(job.output_files.is_empty(), "glob-output jobs have no single known result file");
+        let glob = job.glob_output.expect("expected a GlobOutputSpec");
+        assert_eq!(glob.prefix, "cutout");
+        // Always exactly one mono lane, using only the first channel — even though the
+        // InputSpec above says the document is stereo (see GlobOutputSpec's doc comment for
+        // why merging independently-numbered file sets across stereo lanes isn't supported).
+        assert_eq!(job.input_files.len(), 1);
+        assert_eq!(job.input_files[0].source_channels, vec![0]);
     }
 
     // -- Dual-input planning ---------------------------------------------------------------

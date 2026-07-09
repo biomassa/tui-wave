@@ -18,7 +18,11 @@ pub enum Category {
 
 /// What kind of file a process reads/writes on one side. `Dual*` processes take two input
 /// files (e.g. combine/morph) — modeled but not yet supported by the v1 UI (see
-/// `pipeline::PlanError::UnsupportedInV1`).
+/// `pipeline::PlanError::UnsupportedInV1`). `WavGlob` is output-only (never valid as
+/// `input`): a process that produces an unknown number of numbered mono output files
+/// sharing a prefix (e.g. `distcut`'s `cutout0.wav`, `cutout1.wav`, …) instead of one
+/// result — each file becomes its own new buffer instead of being spliced into the
+/// selection (see `pipeline::plan_wav_glob`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IoKind {
@@ -27,6 +31,7 @@ pub enum IoKind {
     Ana,
     DualWav,
     DualAna,
+    WavGlob,
 }
 
 /// How a `Number` parameter's raw slider value (0-100 for percentage-based scales) maps to
