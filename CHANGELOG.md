@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-07-09
+
+- **CDP: 13 new processes SoundThread never covered, and a smoke-test harness to add more
+  safely.** The built-in catalog (previously all SoundThread-derived) gains a hand-authored
+  extension file with `Time Stretch (Spectral)` (phase-vocoder time-stretch, distinct from
+  the existing granular one), `Iterate`, `Gate (Silence)`/`Gate (Trim)`, `Echo`, `DVD Wind`,
+  `Flatten`, `Tremolo Envelope`, `Trim Silent Ends`, `Waveset Double`, `Emphasise Changes`,
+  `Spectral Band`, and `Impulse Stream` — each verified against the real CDP binaries via a
+  new gated test that runs every catalog entry once and asserts it succeeds
+  (`TUI_WAVE_CDP_SMOKE=1 cargo test catalog_smoke_test`), catching two real bugs (a wrong
+  binary name, two params in the wrong argv position) before they shipped.
+
 ## 2026-07-08
 
 - **CDP: breakpoint automation, a two-step browser/params flow, and per-process presets.**

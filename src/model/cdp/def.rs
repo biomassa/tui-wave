@@ -80,6 +80,21 @@ pub enum ParamKind {
     },
 }
 
+impl ParamKind {
+    /// Test-only: what `cdp::runner`'s catalog smoke test drives every process with, since
+    /// it's the one value guaranteed to already be inside the param's own declared range.
+    /// The UI's own "value a fresh dialog opens with" path is `CdpField::from_default`
+    /// (`ui/app.rs`), which builds a `CdpField` directly rather than going through this.
+    #[cfg(test)]
+    pub fn default_value(&self) -> ParamValue {
+        match self {
+            ParamKind::Number { default, .. } => ParamValue::Number(*default),
+            ParamKind::Toggle { default } => ParamValue::Toggle(*default),
+            ParamKind::Choice { default, .. } => ParamValue::Choice(*default),
+        }
+    }
+}
+
 /// One parameter of a CDP process: what to call it, how to edit it, and how it's placed on
 /// the command line.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -797,4 +797,118 @@ mod tests {
         let ratio = output.channels[0].len() as f64 / len_samples as f64;
         assert!((ratio - 2.0).abs() < 0.05, "joining a file to itself should ~double duration, got ratio {ratio}");
     }
+
+    /// Runs every catalog entry once, at its own declared defaults, against a short mono
+    /// sine and asserts it succeeds — the bulk-authoring safety net `CDP-Ext-Plan.md`'s Tier
+    /// 0 depends on: a hand-typed `[[process]]` entry can have the wrong argv shape (subprog
+    /// misspelled, params in the wrong order, a mode string CDP doesn't recognise) even when
+    /// it parses as valid TOML, and that only shows up by actually running it. Deliberately
+    /// separate from `TUI_WAVE_CDP_DIR`'s always-on gating (`require_cdp!`) — iterating the
+    /// whole catalog takes real wall-clock time (a CDP invocation per entry, several needing
+    /// a `pvoc anal`/`synth` wrap), which is fine for a manually-triggered check but not for
+    /// every `cargo test`. A dual-input process gets the same mono input on both sides
+    /// (self-processing is always valid for the argv shapes we care about here); a
+    /// `PlanError::UnsupportedInV1` (currently only `morph_glide`) is a known, accepted gap,
+    /// not a smoke-test failure. Collects every failure before asserting, so one bad entry's
+    /// error doesn't hide every other one behind it.
+    #[test]
+    fn catalog_smoke_test() {
+        if std::env::var("TUI_WAVE_CDP_SMOKE").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set TUI_WAVE_CDP_SMOKE=1 to run the full catalog smoke test");
+            return;
+        }
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+
+        // Entries that fail against this harness's specific test fixture (a 1-second, full-
+        // level, constant sine tone) for reasons that have nothing to do with the catalog
+        // entry's own argv shape or ranges — a real recording wouldn't trip these. Documented
+        // rather than silently dropped, per usual policy for a bounded/known exclusion list:
+        //   envspeak_envspeak_{1,2,5,6}: needs audio with real amplitude troughs to find; a
+        //     constant tone has none.
+        //   gate_gate_{1,2}: a noise gate needs a mix of loud and quiet passages to have
+        //     anything meaningful to do; against a constant-level tone, any fixed threshold
+        //     either gates nothing ("No signal is gateable") or everything ("Entire signal
+        //     would be gated") — the catalog default (-40dB) is a sensible choice for real
+        //     audio with an actual noise floor.
+        //   housekeep_extract_4: "NO CHANGE to original sound file" against this specific
+        //     mono fixture — content-dependent, not an argv-shape problem.
+        //   specfnu_specfnu_19: the CDP binary itself crashes ("double free or corruption")
+        //     on this input — a CDP bug, nothing tui-wave's plan/argv can work around.
+        // And two pre-existing (not catalog_extra.toml's) bugs found the same way: the
+        // machine-generated catalog.toml (regenerate via
+        // scripts/convert_soundthread_catalog.py, don't hand-edit) has a default outside
+        // CDP's actually-enforced range for extend_scramble_1 (0.02 vs 0.031-0.985) and
+        // modify_brassage_4 (2500 vs 0-2000).
+        const KNOWN_FIXTURE_FAILURES: &[&str] = &[
+            "envspeak_envspeak_1",
+            "envspeak_envspeak_2",
+            "envspeak_envspeak_5",
+            "envspeak_envspeak_6",
+            "extend_scramble_1",
+            "gate_gate_1",
+            "gate_gate_2",
+            "housekeep_extract_4",
+            "modify_brassage_4",
+            "specfnu_specfnu_19",
+        ];
+
+        let (catalog, warnings) = crate::model::cdp::CdpCatalog::load(None);
+        assert!(warnings.is_empty(), "catalog failed to parse: {warnings:?}");
+
+        let runner = CdpRunner::new();
+        let mut failures = Vec::new();
+        for (i, def) in catalog.processes.iter().enumerate() {
+            if KNOWN_FIXTURE_FAILURES.contains(&def.key.as_str()) {
+                continue;
+            }
+            let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+            let input_count = match def.input {
+                crate::model::cdp::IoKind::None => 0,
+                crate::model::cdp::IoKind::Wav | crate::model::cdp::IoKind::Ana => 1,
+                crate::model::cdp::IoKind::DualWav | crate::model::cdp::IoKind::DualAna => 2,
+            };
+            let inputs_spec = vec![input; input_count];
+
+            let planned = match crate::model::cdp::plan_job(
+                def,
+                &values,
+                &inputs_spec,
+                &crate::model::cdp::PvocSettings::default(),
+            ) {
+                Ok(planned) => planned,
+                Err(crate::model::cdp::PlanError::UnsupportedInV1 { .. }) => continue,
+                Err(e) => {
+                    failures.push(format!("{}: plan_job failed: {e:?}", def.key));
+                    continue;
+                }
+            };
+
+            runner.submit(Job {
+                id: 10_000 + i as u64,
+                cdp_dir: cdp_dir.clone(),
+                planned,
+                inputs: vec![channels.clone(); input_count],
+                input_sample_rate: sample_rate,
+                purpose: JobPurpose::Apply,
+            });
+            let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(30))
+            else {
+                unreachable!()
+            };
+            if let Err(e) = result {
+                failures.push(format!("{}: {e:?}", def.key));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} of {} catalog entries failed:\n{}",
+            failures.len(),
+            catalog.processes.len(),
+            failures.join("\n")
+        );
+    }
 }

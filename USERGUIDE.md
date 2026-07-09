@@ -189,7 +189,7 @@ in another buffer first). The second buffer is used whole; both inputs must shar
 viewer (`↑`/`↓`/`PgUp`/`PgDn` to scroll, `Enter`/`Esc` to dismiss). A long-running process shows
 a progress dialog with a step counter; `Esc` cancels it.
 
-**Adding processes.** The built-in catalog covers ~120 common CDP processes. To add or override
+**Adding processes.** The built-in catalog covers ~130 common CDP processes. To add or override
 one, drop a `*.toml` file (same schema as the built-in catalog) into
 `$XDG_CONFIG_HOME/tui-wave/cdp/` — see `docs/cdp-custom-process-example.toml` in the source tree
 for a worked example. A file reusing an existing process's `key` replaces the built-in
