@@ -1,0 +1,776 @@
+# Hand-authored CDP process definitions for programs SoundThread never covered — see
+# CDP-Ext-Plan.md for the inventory and rationale. Same [[process]] schema as catalog.toml
+# and the user-extension directory (see docs/cdp-custom-process-example.toml for a fully
+# commented field reference). Unlike catalog.toml, this file IS meant to be hand-edited —
+# each entry's argv shape and parameter ranges were verified against the real CDP 7.1
+# binary's own usage text (every CDP program prints full usage with no arguments) and, where
+# the usage text gave no explicit numeric range, against actual invocations of the binary.
+# Every entry here is exercised by `cdp::runner::tests::catalog_smoke_test`
+# (TUI_WAVE_CDP_SMOKE=1 cargo test catalog_smoke_test) before being added.
+
+# ---- Tier 0 batch 1 (2026-07-09) ------------------------------------------------------
+
+[[process]]
+key = "stretch_time_1"
+bin = "stretch"
+subprog = "time"
+mode = "1"
+title = "Time Stretch (Spectral)"
+category = "pvoc"
+subcategory = "time"
+short_description = "Stretches or compresses duration in the frequency domain, pitch unaffected"
+description = """
+Classic phase-vocoder time-stretch: changes the duration of the sound without affecting its \
+pitch (unlike simply changing playback speed). A value above 1 lengthens the sound, below 1 \
+shortens it; 1 leaves duration unchanged. Distinct from "Time Stretch" (Modify Brassage) — \
+that one is granular and can develop a metallic character at extreme ratios, this one is \
+phase-vocoder-based and generally smoother but can smear transients.
+"""
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Timestretch"
+description = "Stretch factor: above 1 lengthens, below 1 shortens, 1 is unchanged"
+automatable = true
+kind = "number"
+min = 0.05
+max = 20.0
+step = 0.01
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "extend_iterate_1"
+bin = "extend"
+subprog = "iterate"
+mode = "1"
+title = "Iterate"
+category = "time"
+subcategory = "texture"
+short_description = "Repeats the sound in a fluid, randomised stream to fill a target duration"
+description = """
+Iterates (repeats) the input sound in a fluid manner, with randomised timing, pitch, and \
+amplitude variation between repeats, until the output reaches the given duration.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Output Duration"
+description = "Target duration of the output, in seconds"
+automatable = false
+kind = "number"
+min = 0.1
+max = 3600.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Delay"
+description = "Average delay between iterations, in seconds"
+automatable = true
+kind = "number"
+min = 0.01
+max = 60.0
+step = 0.01
+default = 0.5
+exponential = true
+scale = "plain"
+flag = "-d"
+
+[[process.params]]
+name = "Delay Randomise"
+description = "Randomisation of the delay time between iterations"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-r"
+
+[[process.params]]
+name = "Pitch Shift"
+description = "Maximum random pitch shift applied to each iteration, in semitones"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-p"
+
+[[process.params]]
+name = "Amp Cut"
+description = "Maximum random amplitude reduction applied to each iteration"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-a"
+
+[[process.params]]
+name = "Fade"
+description = "Average amplitude fade applied between iterations"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-f"
+
+[[process.params]]
+name = "Gain"
+description = "Overall output gain (0 lets CDP pick a level that avoids distortion)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-g"
+
+[[process]]
+key = "gate_gate_1"
+bin = "gate"
+subprog = "gate"
+mode = "1"
+title = "Gate (Silence)"
+category = "time"
+subcategory = "filter"
+short_description = "Replaces low-level sound with silence"
+description = """
+A noise gate: removes sound below a level threshold, replacing it with silence. The output \
+is the same length as the input (compare "Gate (Trim)", which edits low-level sound out \
+entirely, shortening the file).
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Gate Level"
+description = "Level below which sound is removed, in dB (0 to -96)"
+automatable = false
+kind = "number"
+min = -96.0
+max = 0.0
+step = 0.1
+default = -40.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "gate_gate_2"
+bin = "gate"
+subprog = "gate"
+mode = "2"
+title = "Gate (Trim)"
+category = "time"
+subcategory = "filter"
+short_description = "Edits out low-level sound, shortening the file"
+description = """
+A noise gate: removes sound below a level threshold by editing it out, so the output is \
+shorter than the input (compare "Gate (Silence)", which replaces the low-level sound with \
+silence at the same length).
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Gate Level"
+description = "Level below which sound is removed, in dB (0 to -96)"
+automatable = false
+kind = "number"
+min = -96.0
+max = 0.0
+step = 0.1
+default = -40.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "sfecho_echo"
+bin = "sfecho"
+subprog = "echo"
+title = "Echo"
+category = "time"
+subcategory = "delay"
+short_description = "Adds a simple decaying echo"
+description = """
+Adds a stream of echo repeats to the sound, decaying in level until they fall below a \
+cutoff, or the maximum output duration is reached. Echo delay cannot be shorter than the \
+sound's own duration; use Modify Revecho if overlapping echoes are needed.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Delay"
+description = "Time between echo repeats, in seconds (CDP requires this to be at least the sound's own duration)"
+automatable = true
+kind = "number"
+min = 0.5
+max = 60.0
+step = 0.01
+default = 1.5
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Attenuation"
+description = "Relative level of each successive echo repeat"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.6
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Total Duration"
+description = "Maximum duration of the output, in seconds (may end sooner)"
+automatable = false
+kind = "number"
+min = 0.1
+max = 3600.0
+step = 0.1
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Randomise"
+description = "Randomisation applied to echo timing"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-r"
+
+[[process.params]]
+name = "Cutoff"
+description = "Level, in dB, at which decaying echoes are cut off"
+automatable = false
+kind = "number"
+min = -96.0
+max = 0.0
+step = 0.1
+default = -96.0
+exponential = false
+scale = "plain"
+flag = "-c"
+
+[[process]]
+key = "dvdwind_dvdwind"
+bin = "dvdwind"
+subprog = "dvdwind"
+title = "DVD Wind"
+category = "time"
+subcategory = "time"
+short_description = "Shortens a sound by repeatedly reading a clip then skipping ahead"
+description = """
+Shortens a sound like fast-forwarding a tape in bursts: reads a short clip, skips ahead, \
+reads another clip, and so on, giving a stuttering fast-forward effect.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Contraction"
+description = "Time-contraction factor of the input (must be greater than 1)"
+automatable = false
+kind = "number"
+min = 1.01
+max = 50.0
+step = 0.01
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Clip Size"
+description = "Duration of each retained clip, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 2000.0
+step = 1.0
+default = 50.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "flatten_flatten"
+bin = "flatten"
+subprog = "flatten"
+title = "Flatten"
+category = "time"
+subcategory = "envelope"
+short_description = "Equalises the level of sound elements (e.g. syllables) in a mono source"
+description = """
+Evens out the loudness of successive sound elements (such as syllables in speech) so they \
+all reach a similar level, useful for smoothing out uneven recordings.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Element Size"
+description = "Approximate size of each sound element (e.g. a syllable), in seconds"
+automatable = false
+kind = "number"
+min = 0.001
+max = 100.0
+step = 0.001
+default = 0.3
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Shoulder"
+description = "Rise time to the changed level within a segment, in milliseconds"
+automatable = false
+kind = "number"
+min = 20.0
+max = 500.0
+step = 1.0
+default = 50.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Tail"
+description = "Portion at the end of the sound treated as a whole segment, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 10.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-t"
+
+[[process]]
+key = "tremenv_tremenv"
+bin = "tremenv"
+subprog = "tremenv"
+title = "Tremolo Envelope"
+category = "time"
+subcategory = "modulation"
+short_description = "Applies a narrowing tremolo after each amplitude peak"
+description = """
+Tremolos the sound, with the tremolo width narrowing after each envelope peak, giving a \
+"chattering" effect that intensifies after loud moments.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Frequency"
+description = "Tremolo frequency, in Hz"
+automatable = false
+kind = "number"
+min = 0.0
+max = 500.0
+step = 0.1
+default = 8.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Depth"
+description = "Depth of the tremolo effect"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Window Size"
+description = "Size of the window used for envelope extraction, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 40.0
+step = 0.1
+default = 10.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Fineness"
+description = "Squeeze width of the tremolo effect (higher is finer)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 100.0
+step = 1.0
+default = 4.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "topantail2_topantail"
+bin = "topantail2"
+subprog = "topantail"
+title = "Trim Silent Ends"
+category = "time"
+subcategory = "envelope"
+short_description = "Trims silence from the start and/or end of a sound based on level"
+description = """
+Removes low-level sound from the start and end of the file, using independent thresholds \
+for each end (set either to 0 to leave that end untouched).
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Start Gate"
+description = "Level before which sound at the start is removed"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.001
+default = 0.01
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "End Gate"
+description = "Level after which sound at the end is removed"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.001
+default = 0.01
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Splice Length"
+description = "Length of the splice applied at each trimmed edge, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 100.0
+step = 1.0
+default = 15.0
+exponential = false
+scale = "plain"
+flag = "-s"
+
+[[process]]
+key = "distmore_double"
+bin = "distmore"
+subprog = "double"
+title = "Waveset Double"
+category = "time"
+subcategory = "distort"
+short_description = "Doubles (or more) the frequency of each waveset"
+description = """
+Distorts the sound by splitting each waveset (segment between zero-crossings) and \
+repeating it, raising its effective frequency by the given number of octaves.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Octave Step"
+description = "Number of octaves to step up (1-4)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 4.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "hilite_pluck"
+bin = "hilite"
+subprog = "pluck"
+title = "Emphasise Changes"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Emphasises spectral changes, boosting newly-prominent partials"
+description = """
+Emphasises moments of spectral change by amplifying components that are newly prominent — \
+useful ahead of processes like Hilite Arpeggiate that respond to spectral change.
+"""
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Gain"
+description = "Amplitude gain applied to newly-prominent spectral components"
+automatable = true
+kind = "number"
+min = 0.0
+max = 20.0
+step = 0.1
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "synth_spectra"
+bin = "synth"
+subprog = "spectra"
+title = "Spectral Band"
+category = "time"
+subcategory = "synthesis"
+short_description = "Generates a stereo band of filtered noise focused around a centre frequency"
+description = """
+Generates both channels of a stereo band of sound, energy concentrated around a centre \
+frequency and spread by a given bandwidth — a quick way to synthesise pitched or noisy \
+spectral material from scratch.
+"""
+input = "none"
+output = "wav"
+stereo_native = true
+output_is_stereo = true
+
+[[process.params]]
+name = "Output Duration"
+description = "The length in seconds to generate the sound for"
+automatable = false
+kind = "number"
+min = 0.5
+max = 720.0
+step = 0.1
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Centre Frequency"
+description = "Centre frequency of the band, in Hz"
+automatable = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 440.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Spread"
+description = "Width of the band in Hz"
+automatable = true
+kind = "number"
+min = 1.0
+max = 10000.0
+step = 1.0
+default = 100.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Max Focus"
+description = "Maximum degree to which band energy is concentrated at the centre frequency"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.8
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Focus"
+description = "Minimum degree to which band energy is concentrated at the centre frequency"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.2
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Time Variation"
+description = "Degree to which the band varies over time"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Sample Rate"
+description = "The sample rate of the generated sound"
+automatable = false
+kind = "choice"
+options = ["44100", "48000", "88200", "96000"]
+default = 0
+
+[[process]]
+key = "impulse_impulse"
+bin = "impulse"
+subprog = "impulse"
+title = "Impulse Stream"
+category = "time"
+subcategory = "synthesis"
+short_description = "Generates a stream of impulses at a given pitch"
+description = """
+Synthesises a stream of short impulses at a controllable pitch, glissing, and shape — a \
+zero (Duration = 0) gives a single isolated impulse, useful as an excitation source or \
+click track.
+"""
+input = "none"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the output; 0 produces a single isolated impulse"
+automatable = false
+kind = "number"
+min = 0.0
+max = 3600.0
+step = 0.01
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Pitch"
+description = "Pitch of the impulse stream, as a MIDI note number"
+automatable = true
+kind = "number"
+min = 0.0
+max = 127.0
+step = 0.1
+default = 60.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Chirp"
+description = "Amount of glissing (pitch sweep) applied to each impulse"
+automatable = true
+kind = "number"
+min = 0.0
+max = 30.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Slope"
+description = "How quickly each impulse rises and falls in level"
+automatable = true
+kind = "number"
+min = 1.0
+max = 20.0
+step = 0.1
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Peak Count"
+description = "Number of peaks within each impulse"
+automatable = true
+kind = "number"
+min = 1.0
+max = 200.0
+step = 1.0
+default = 8.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Level"
+description = "Level of each impulse"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.8
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gap"
+description = "Relative silent gap between impulses (negative overlaps them, raising the apparent pitch)"
+automatable = true
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-g"
+
+[[process.params]]
+name = "Sample Rate"
+description = "The sample rate of the generated sound"
+automatable = false
+kind = "choice"
+options = ["44100", "48000", "88200", "96000"]
+default = 0
+flag = "-s"

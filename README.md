@@ -96,11 +96,13 @@ sound-transformation power previously found only on institutional mainframes to 
 "desktop." It's been free, open-source software since 2014, licensed under the
 [GNU LGPL 2.1+](https://github.com/ComposersDesktop/CDP8/blob/main/LICENSE), and is still
 actively developed (CDP8, released 2023, added roughly 80 new processes over the prior CDP7).
-tui-wave's built-in catalog of ~120 processes (parameter names, ranges, and descriptions) is
-adapted from [SoundThread](https://github.com/j-p-higgins/SoundThread) by Jonathan Higgins (MIT
-license) — see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the full text. All credit
-for CDP itself, and for the ~250 underlying command-line programs tui-wave shells out to, belongs
-to the Composer's Desktop Project — tui-wave neither bundles nor redistributes any CDP binaries.
+tui-wave's built-in catalog of ~130 processes (parameter names, ranges, and descriptions) is
+mostly adapted from [SoundThread](https://github.com/j-p-higgins/SoundThread) by Jonathan
+Higgins (MIT license) — see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the full
+text — plus a growing set of hand-authored additions covering CDP programs SoundThread never
+exposed. All credit for CDP itself, and for the ~250 underlying command-line programs
+tui-wave shells out to, belongs to the Composer's Desktop Project — tui-wave neither bundles
+nor redistributes any CDP binaries.
 
 **Installing CDP.** CDP is not on `PATH` by default, and there's no package-manager install for
 it — download or build it yourself, then tell tui-wave where the binaries live:
