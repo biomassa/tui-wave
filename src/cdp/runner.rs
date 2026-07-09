@@ -972,7 +972,38 @@ mod tests {
             if KNOWN_FIXTURE_FAILURES.contains(&def.key.as_str()) {
                 continue;
             }
-            let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+            // A `required_envelope` param has no meaningful `ParamValue::Number` default —
+            // its argv token must always be a breakpoint textfile path (see
+            // `ParamDef::required_envelope`'s doc comment) — so drive it with a 2-point line
+            // at the param's own default value, spanning this fixture's real duration (an
+            // arbitrary/mismatched duration, e.g. the placeholder `1.0` the UI's own never-
+            // opened-editor state would use, is exactly the kind of thing this smoke test
+            // exists to catch before a real user does). 3 points with a middle bump rather
+            // than a straight 2-point line — mirrors `App::open_cdp_envelope_editor`'s own
+            // starting shape (see that fn's doc comment): at least one real CDP process
+            // (`fractal wave`/`spectrum`'s Shape) hangs indefinitely on *any* straight
+            // 2-point line, so testing with one here would just as easily hang the smoke
+            // test itself.
+            let duration_secs = len_samples as f64 / sample_rate as f64;
+            let values: Vec<_> = def
+                .params
+                .iter()
+                .map(|p| {
+                    if p.required_envelope {
+                        let crate::model::cdp::ParamKind::Number { default, min, max, step, .. } = &p.kind else {
+                            panic!("{}: required_envelope param {:?} is not a Number kind", def.key, p.name);
+                        };
+                        let bumped = if default + step <= *max { default + step } else { default - step };
+                        crate::model::cdp::ParamValue::Breakpoints(vec![
+                            (0.0, *default),
+                            (duration_secs / 2.0, bumped.clamp(*min, *max)),
+                            (duration_secs, *default),
+                        ])
+                    } else {
+                        p.kind.default_value()
+                    }
+                })
+                .collect();
             let input_count = match def.input {
                 crate::model::cdp::IoKind::None => 0,
                 crate::model::cdp::IoKind::Wav

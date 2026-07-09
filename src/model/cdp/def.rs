@@ -113,6 +113,21 @@ pub struct ParamDef {
     /// Whether CDP supports driving this parameter with a breakpoint (`.brk`) envelope file
     /// instead of a constant — a V2 UI capability; `pipeline.rs` supports it today.
     pub automatable: bool,
+    /// True for a parameter whose CDP argument syntax is *always* a breakpoint textfile —
+    /// never a bare constant (e.g. `iterline`'s TDATA, `fractal wave`'s SHAPE — CDP-Ext-Plan.md
+    /// Phase 3/"Tier 1b"). Distinct from `automatable`, which additionally allows a plain
+    /// constant as one valid alternative: every `required_envelope` param must also set
+    /// `automatable = true` (so the existing 'e'-key/envelope-editor machinery applies
+    /// unchanged — `pipeline.rs` needs no changes at all, since it already turns any
+    /// `ParamValue::Breakpoints` into a `.brk`-shaped datafile for any `Number`-kind param),
+    /// but the UI never offers a way *back* to a constant: `CdpField` starts such a field
+    /// with no envelope yet (`App::open_cdp_envelope_editor`'s existing "no envelope yet"
+    /// fallback already builds a sensible real-duration-scaled starting shape), validation
+    /// blocks Apply/Preview until the user has actually opened the editor and set one
+    /// (`App::cdp_validate_fields`), and the envelope editor's 'c' ("commit as constant")
+    /// key is a no-op for it (`App::handle_cdp_envelope_key`).
+    #[serde(default)]
+    pub required_envelope: bool,
     #[serde(flatten)]
     pub kind: ParamKind,
 }
@@ -167,6 +182,7 @@ mod tests {
             description: "Number of cycles over which to average".into(),
             flag: None,
             automatable: true,
+            required_envelope: false,
             kind: ParamKind::Number {
                 min: 2.0,
                 max: 64.0,
@@ -209,6 +225,7 @@ mod tests {
             description: "Removes inharmonic partials from the sound".into(),
             flag: Some("-x".into()),
             automatable: false,
+            required_envelope: false,
             kind: ParamKind::Toggle { default: false },
         };
         let choice = ParamDef {
@@ -216,6 +233,7 @@ mod tests {
             description: "Output sample rate".into(),
             flag: None,
             automatable: false,
+            required_envelope: false,
             kind: ParamKind::Choice {
                 options: vec!["44100".into(), "48000".into()],
                 default: 0,
