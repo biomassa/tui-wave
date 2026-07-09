@@ -2811,7 +2811,36 @@ impl App {
                     }
 
                     match result {
-                        Ok(output) => match purpose {
+                        Ok(mut output) => match purpose {
+                            crate::cdp::JobPurpose::Apply if output.results.len() > 1 => {
+                                // A glob-output process (e.g. distcut/envcut): each numbered
+                                // file it produced becomes its own new buffer, the same "one
+                                // new buffer per result" shape Action::NewFromLeft/NewFromRight
+                                // already use, rather than being spliced into the selection —
+                                // there's no single "the result" to splice.
+                                let bits_per_sample = self
+                                    .documents
+                                    .get(pending.doc_index)
+                                    .map(|d| d.bits_per_sample)
+                                    .unwrap_or(32);
+                                for channels in output.results.drain(..) {
+                                    self.push_document(Document {
+                                        channels,
+                                        sample_rate: output.sample_rate,
+                                        bits_per_sample,
+                                        selection: None,
+                                        cursor: 0,
+                                        dirty: true,
+                                        path: None,
+                                        markers: Vec::new(),
+                                        bext: None,
+                                    });
+                                }
+                                self.viewport = None;
+                                self.rebuild_audio();
+                                self.rebuild_waveform_caches();
+                                self.dialog = None;
+                            }
                             crate::cdp::JobPurpose::Apply => {
                                 // Splicing raw samples at a different rate would play the
                                 // result at the wrong speed — only reachable if the user
@@ -2829,8 +2858,9 @@ impl App {
                                     });
                                     continue;
                                 }
+                                let channels = output.results.into_iter().next().unwrap_or_default();
                                 self.histories[pending.doc_index].apply(
-                                    crate::commands::cdp::cdp_process_command(pending.label, pending.range, output.channels),
+                                    crate::commands::cdp::cdp_process_command(pending.label, pending.range, channels),
                                     &mut self.documents[pending.doc_index],
                                 );
                                 self.viewport = None;
@@ -2838,8 +2868,12 @@ impl App {
                                 self.dialog = None;
                             }
                             crate::cdp::JobPurpose::Preview => {
+                                // A glob-output process can't be meaningfully previewed as one
+                                // audio stream (there's no single "the result"); play the
+                                // first produced segment as a representative sample.
+                                let channels = output.results.into_iter().next().unwrap_or_default();
                                 self.cdp_preview_audio =
-                                    AudioEngine::try_new(output.channels.clone(), output.sample_rate);
+                                    AudioEngine::try_new(channels.clone(), output.sample_rate);
                                 if let Some(audio) = &self.cdp_preview_audio {
                                     audio.play(0);
                                 }
@@ -2853,7 +2887,7 @@ impl App {
                                     preview: Some(CdpPreview {
                                         values,
                                         range: pending.range,
-                                        channels: output.channels,
+                                        channels,
                                         sample_rate: output.sample_rate,
                                     }),
                                     envelope: None,
@@ -8113,6 +8147,85 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
+    /// A glob-output job's `Finished(Ok(..))` event (`output.results.len() > 1`, e.g. from
+    /// distcut/envcut) opens each result as its own new buffer instead of splicing into the
+    /// current selection — exercises `App::tick_cdp`'s multi-result branch end-to-end
+    /// through the real `cdp_runner`, using a fake `/bin/sh` step (no real CDP install
+    /// needed) that writes three numbered files, mirroring
+    /// `cdp::runner::tests::glob_output_job_loads_every_numbered_file_as_a_separate_result`'s
+    /// own "no real CDP needed" precedent but one layer up, at the UI dispatch level.
+    #[test]
+    fn glob_output_apply_opens_one_new_buffer_per_result() {
+        let mut app = new_app(Some(doc(0.1, 4)), None);
+        let starting_buffer_count = app.documents.len();
+
+        app.cdp_pending = Some(CdpPending {
+            doc_index: 0,
+            range: (0, 4),
+            label: "CDP: Fake Glob".into(),
+            catalog_index: 0,
+            fields: Vec::new(),
+            second_input: None,
+            focus: 0,
+            presets: Vec::new(),
+            preset_selected: None,
+        });
+        app.dialog = Some(Dialog::CdpRunning {
+            job_id: 42,
+            title: "Fake Glob".into(),
+            step_label: String::new(),
+            step_index: 0,
+            step_total: 1,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let planned = crate::model::cdp::pipeline::PlannedJob {
+            steps: vec![crate::model::cdp::pipeline::Invocation {
+                bin: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "cp in.wav g0.wav && cp in.wav g1.wav && cp in.wav g2.wav".into(),
+                ],
+                label: "fake glob".into(),
+                expected_output: "g0.wav".into(),
+            }],
+            input_files: vec![crate::model::cdp::pipeline::TempWavSpec {
+                relative_name: "in.wav".into(),
+                input_index: 0,
+                source_channels: vec![0],
+            }],
+            output_files: Vec::new(),
+            glob_output: Some(crate::model::cdp::pipeline::GlobOutputSpec { prefix: "g".into() }),
+            brk_files: Vec::new(),
+            deferred_window_params: Vec::new(),
+        };
+        app.cdp_runner.submit(crate::cdp::Job {
+            id: 42,
+            cdp_dir: std::path::PathBuf::from("/bin"),
+            planned,
+            inputs: vec![vec![vec![0.1, 0.2, 0.3, 0.4]]],
+            input_sample_rate: 44100,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.dialog.is_some() && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(app.dialog.is_none(), "the CdpRunning dialog should close once the job finishes");
+        assert_eq!(
+            app.documents.len(),
+            starting_buffer_count + 3,
+            "expected one new buffer per numbered output file"
+        );
+        for doc in &app.documents[starting_buffer_count..] {
+            assert_eq!(doc.channels[0].len(), 4, "each new buffer should hold the copied 4 samples");
+            assert!(doc.dirty, "a never-saved new buffer should start dirty");
+        }
+    }
 
     /// Shift+Tab cycles panel focus the opposite way to Tab:
     /// Waveform → Buffers → Files → Waveform. Both the kitty form (Tab+SHIFT) and the legacy
