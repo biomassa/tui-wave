@@ -323,21 +323,39 @@ enum Dialog {
     /// `CdpBrowser`; the menu entry stays always-enabled rather than being conditionally
     /// greyed out, so a bad/missing path is discovered here rather than silently.
     CdpSetup { input: TextInput, error: Option<String> },
-    /// Searchable list of CDP processes — the list on the left, the highlighted process's
-    /// full `description` on the right (`render_cdp_browser_dialog`). Deliberately a
-    /// *fixed* size regardless of scroll position or which process is highlighted: params
-    /// live in the separate `CdpParams` dialog now, so nothing here varies per process —
-    /// this is what stops the dialog resizing itself as you browse (the thing the
-    /// browser/params split exists to fix; they used to be one merged dialog). `entries` are
-    /// indices into the loaded `CdpCatalog::processes`, filtered by `search`'s text
-    /// (case-insensitive substring over key/title/short_description) and re-filtered on
-    /// every keystroke; `selected` indexes into `entries`, not the catalog directly. Enter
-    /// or a mouse click on an entry opens `Dialog::CdpParams` for that process
-    /// (`App::open_cdp_params`, via `handle_dialog_row_click` for the mouse path); arrow
-    /// keys/PageUp/PageDown just move `selected` (updating the description), staying in
-    /// this dialog.
+    /// Searchable, group-filterable list of CDP processes — three columns
+    /// (`render_cdp_browser_dialog`): groups, the process list, and the highlighted
+    /// process's full `description`. Deliberately a *fixed* size regardless of scroll
+    /// position or which process is highlighted: params live in the separate `CdpParams`
+    /// dialog now, so nothing here varies per process — this is what stops the dialog
+    /// resizing itself as you browse (the thing the browser/params split exists to fix;
+    /// they used to be one merged dialog).
+    ///
+    /// `groups` is `["All", "Recent", ...every real `subcategory` value in the catalog,
+    /// alphabetically]` (`App::cdp_groups`), computed once at open time since the catalog
+    /// doesn't change while the dialog is up. `group_selected` indexes into `groups`;
+    /// `recent` is a snapshot of `model::cdp::recent::load_recent()` taken at open time
+    /// (most-recent-first — the *order* `entries` should show when "Recent" is highlighted,
+    /// not just a membership filter, so it can't be re-derived from `entries` itself).
+    /// `entries` are indices into the loaded `CdpCatalog::processes`, filtered by BOTH the
+    /// highlighted group and `search`'s text (case-insensitive substring over
+    /// key/title/short_description) — `App::refresh_cdp_browser_filter` recomputes it
+    /// whenever either changes; `selected` indexes into `entries`, not the catalog directly.
+    ///
+    /// `group_focus` says which column Up/Down/PageUp/PageDown act on — Tab/Shift+Tab
+    /// toggles it (`App::cycle_dialog_focus`), mirroring `CdpParams`'s Tab-cycle convention
+    /// rather than inventing a new one. Search stays typable from either column (typing
+    /// always narrows the currently-highlighted group; "All" is what makes it search the
+    /// whole catalog) so there's no separate "focus the search box" step. Enter or a mouse
+    /// click on a process entry opens `Dialog::CdpParams` for it (`App::open_cdp_params`,
+    /// via `handle_dialog_row_click` for the mouse path) regardless of which column has
+    /// focus — only the highlighted *process* row matters for that, not `group_focus`.
     CdpBrowser {
         search: TextInput,
+        groups: Vec<String>,
+        group_selected: usize,
+        group_focus: bool,
+        recent: Vec<String>,
         entries: Vec<usize>,
         selected: usize,
     },
@@ -500,6 +518,18 @@ fn cdp_params_focus_apply(field_count: usize, has_second_input: bool) -> usize {
 
 /// PageUp/PageDown step size for `Dialog::CdpBrowser`'s process list.
 const CDP_BROWSER_PAGE_SIZE: usize = 10;
+
+/// `Dialog::CdpBrowser`'s always-first group: no group filter, `search` spans the whole
+/// catalog — the pre-Phase-7 behavior. Not a real `subcategory` value, so it can't collide
+/// with one.
+const CDP_GROUP_ALL: &str = "All";
+/// `Dialog::CdpBrowser`'s always-second group: the entries in `Dialog::CdpBrowser.recent`,
+/// most-recently-used first (not catalog order — see `App::cdp_filter_entries`).
+const CDP_GROUP_RECENT: &str = "Recent";
+/// Width of `Dialog::CdpBrowser`'s Groups column (`render_cdp_browser_dialog`) — shared
+/// with `App::handle_dialog_row_click`'s Groups-vs-Processes hit-test so the two can't
+/// disagree about which column an `x_in_row` falls in.
+const CDP_GROUP_COL_WIDTH: u16 = 18;
 
 /// Focus-order layout for the Gain dialog's interactive rows. The Gain/Left field is always
 /// focus index 0. On a stereo document, a "Per-channel gain" checkbox and (when checked) a
@@ -1635,13 +1665,15 @@ impl App {
                 Some(Dialog::CdpSetup { input, .. }) => {
                     self.confirm_cdp_setup(input.value().to_string());
                 }
-                Some(Dialog::CdpBrowser { search, entries, selected }) => {
-                    // No matches: nothing to open, just leave the dialog as-is.
-                    if let Some(&catalog_index) = entries.get(selected) {
-                        self.dialog = Some(Dialog::CdpBrowser { search, entries, selected });
+                Some(dlg @ Dialog::CdpBrowser { .. }) => {
+                    // No matches: nothing to open, just leave the dialog as-is. Opens the
+                    // highlighted process regardless of `group_focus` — only the highlighted
+                    // *process* row matters here, not which column currently has focus.
+                    let Dialog::CdpBrowser { entries, selected, .. } = &dlg else { unreachable!() };
+                    let catalog_index = entries.get(*selected).copied();
+                    self.dialog = Some(dlg);
+                    if let Some(catalog_index) = catalog_index {
                         self.open_cdp_params(catalog_index);
-                    } else {
-                        self.dialog = Some(Dialog::CdpBrowser { search, entries, selected });
                     }
                 }
                 Some(Dialog::CdpParams {
@@ -1689,8 +1721,17 @@ impl App {
                 if let Some(Dialog::ExportRegions { focused, depth, .. }) = self.dialog.as_mut() {
                     if *focused == er_focus::FORMAT { *depth = depth.prev(); }
                     else if let Some(input) = self.dialog_input() { input.left(); }
-                } else if let Some(Dialog::CdpBrowser { .. }) = self.dialog.as_mut() {
-                    if let Some(input) = self.dialog_input() { input.left(); }
+                } else if let Some(Dialog::CdpBrowser { group_focus, .. }) = self.dialog.as_mut() {
+                    // Left out of Processes moves focus back into Groups — the mirror image
+                    // of Right's "step right, into the next column" (see its own arm below).
+                    // Left while already in Groups has no column further left to step into,
+                    // so it stays search-cursor movement, matching how Right-in-Processes
+                    // falls through the same way for the same reason.
+                    if !*group_focus {
+                        *group_focus = true;
+                    } else if let Some(input) = self.dialog_input() {
+                        input.left();
+                    }
                 } else if let Some(Dialog::CdpParams { .. }) = self.dialog.as_mut() {
                     self.cdp_params_cycle_left_right(false);
                 } else if let Some(input) = self.dialog_input() {
@@ -1703,8 +1744,18 @@ impl App {
                 if let Some(Dialog::ExportRegions { focused, depth, .. }) = self.dialog.as_mut() {
                     if *focused == er_focus::FORMAT { *depth = depth.next(); }
                     else if let Some(input) = self.dialog_input() { input.right(); }
-                } else if let Some(Dialog::CdpBrowser { .. }) = self.dialog.as_mut() {
-                    if let Some(input) = self.dialog_input() { input.right(); }
+                } else if let Some(Dialog::CdpBrowser { group_focus, .. }) = self.dialog.as_mut() {
+                    // Right out of the Groups column moves focus into Processes — the
+                    // natural "step right, into the next column" reading of the key,
+                    // distinct from Tab's plain toggle. Mirrors nothing else in this file
+                    // since Groups is the only column with a column to its right; Processes'
+                    // own Right stays search-cursor movement (there's no column further
+                    // right for it to step into — Description is display-only).
+                    if *group_focus {
+                        *group_focus = false;
+                    } else if let Some(input) = self.dialog_input() {
+                        input.right();
+                    }
                 } else if let Some(Dialog::CdpParams { .. }) = self.dialog.as_mut() {
                     self.cdp_params_cycle_left_right(true);
                 } else if let Some(input) = self.dialog_input() {
@@ -1713,15 +1764,19 @@ impl App {
                     self.cycle_dialog_curve(true);
                 }
             }
+            // Groups list is fully visible at once (no scrolling — see `Dialog::CdpBrowser`'s
+            // doc comment), so a page-step there would be indistinguishable from a
+            // single-step one; PageUp/PageDown only ever act on the process list, regardless
+            // of `group_focus`.
             KeyCode::PageUp => {
-                if let Some(Dialog::CdpBrowser { selected, .. }) = self.dialog.as_mut() {
+                if let Some(Dialog::CdpBrowser { group_focus: false, selected, .. }) = self.dialog.as_mut() {
                     *selected = selected.saturating_sub(CDP_BROWSER_PAGE_SIZE);
                 } else if let Some(Dialog::CdpOutput { scroll, .. }) = self.dialog.as_mut() {
                     *scroll = scroll.saturating_sub(10);
                 }
             }
             KeyCode::PageDown => {
-                if let Some(Dialog::CdpBrowser { entries, selected, .. }) = self.dialog.as_mut() {
+                if let Some(Dialog::CdpBrowser { group_focus: false, entries, selected, .. }) = self.dialog.as_mut() {
                     if !entries.is_empty() {
                         *selected = (*selected + CDP_BROWSER_PAGE_SIZE).min(entries.len() - 1);
                     }
@@ -1730,6 +1785,10 @@ impl App {
                 }
             }
             KeyCode::Up => {
+                if matches!(self.dialog, Some(Dialog::CdpBrowser { group_focus: true, .. })) {
+                    self.cdp_browser_move_group(-1);
+                    return;
+                }
                 match self.dialog.as_mut() {
                     Some(Dialog::CdpBrowser { selected, .. }) => {
                         *selected = selected.saturating_sub(1);
@@ -1742,6 +1801,10 @@ impl App {
                 }
             }
             KeyCode::Down => {
+                if matches!(self.dialog, Some(Dialog::CdpBrowser { group_focus: true, .. })) {
+                    self.cdp_browser_move_group(1);
+                    return;
+                }
                 match self.dialog.as_mut() {
                     Some(Dialog::CdpBrowser { entries, selected, .. }) => {
                         if !entries.is_empty() {
@@ -1878,17 +1941,37 @@ impl App {
         }
     }
 
-    /// Re-filters `Dialog::CdpBrowser`'s entries after its search field changes, resetting
-    /// `selected` to 0 (the old index's meaning doesn't survive a changed filter). A no-op
-    /// for every other dialog, so it's safe to call unconditionally after any text edit.
+    /// Re-filters `Dialog::CdpBrowser`'s entries against its current search text AND
+    /// highlighted group, resetting `selected` to 0 (the old index's meaning doesn't survive
+    /// a changed filter). Called after either input changes — a search keystroke or a group
+    /// move — so both stay in sync with what's displayed. A no-op for every other dialog, so
+    /// it's safe to call unconditionally after any text edit.
     fn refresh_cdp_browser_filter(&mut self) {
-        let Some(Dialog::CdpBrowser { search, .. }) = &self.dialog else { return };
+        let Some(Dialog::CdpBrowser { search, groups, group_selected, recent, .. }) = &self.dialog else { return };
         let query = search.value().to_string();
-        let new_entries = self.cdp_filter_entries(&query);
+        let group = groups.get(*group_selected).cloned().unwrap_or_else(|| CDP_GROUP_ALL.to_string());
+        let recent = recent.clone();
+        let new_entries = self.cdp_filter_entries(&query, &group, &recent);
         if let Some(Dialog::CdpBrowser { entries, selected, .. }) = &mut self.dialog {
             *entries = new_entries;
             *selected = 0;
         }
+    }
+
+    /// Moves `Dialog::CdpBrowser`'s highlighted group by `delta` (clamped, no wraparound —
+    /// wrapping between "All" and the last real group past the ends felt more disorienting
+    /// than useful for a one-row-at-a-time list), then re-filters `entries` against the new
+    /// group so the process list never shows stale results for the group that used to be
+    /// highlighted.
+    fn cdp_browser_move_group(&mut self, delta: isize) {
+        if let Some(Dialog::CdpBrowser { groups, group_selected, .. }) = self.dialog.as_mut() {
+            let n = groups.len();
+            if n == 0 {
+                return;
+            }
+            *group_selected = (*group_selected as isize + delta).clamp(0, n as isize - 1) as usize;
+        }
+        self.refresh_cdp_browser_filter();
     }
 
     fn cycle_dialog_curve(&mut self, forward: bool) {
@@ -1915,6 +1998,9 @@ impl App {
                 *curve = if forward { curve.next() } else { curve.prev() };
             }
             Some(Dialog::ExportRegions { focused, .. }) => *focused = step(*focused, er_focus::COUNT),
+            // Only two columns receive keyboard focus (Groups, Processes — the description
+            // column is display-only), so Tab and Shift+Tab both just flip it.
+            Some(Dialog::CdpBrowser { group_focus, .. }) => *group_focus = !*group_focus,
             // The preset row, then fields, then the second-input picker (dual-input
             // processes only), then Preview, then Apply (see
             // cdp_params_focus_{second_input,preview,apply}). `render_cdp_params_dialog`
@@ -2003,18 +2089,33 @@ impl App {
                     _ => {}
                 }
             }
-            // A click on a process name selects *and* opens it in one step (matching
-            // Enter's behavior on the currently-selected entry) — clicking is how a mouse
-            // user "commits" a choice, there's no separate confirm step the way there is
-            // for e.g. a checkbox row elsewhere in this function. `row` is 0-based into the
-            // *visible* window (`render_cdp_browser_dialog`'s own scroll_top math, mirrored
-            // here so the two can't disagree about which entry a given row means).
-            Some(Dialog::CdpBrowser { entries, selected, .. }) => {
-                let scroll_top = selected.saturating_sub(CDP_BROWSER_LIST_ROWS.saturating_sub(1));
-                let clicked = scroll_top + row;
-                if clicked < entries.len() {
-                    *selected = clicked;
-                    self.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            // `row_rects` (`render_cdp_browser_dialog`) spans BOTH the Groups and Processes
+            // columns on one combined `Rect` per row, so `row` alone (0-based, no scroll
+            // offset — the groups list is always fully visible) means the same thing in
+            // either column; `x_in_row` disambiguates which one was actually clicked.
+            // A groups click moves the highlight there and re-filters (no separate "open"
+            // step — see `App::cdp_browser_move_group`'s doc comment for why arrow-key moves
+            // work the same way). A click on a process name selects *and* opens it in one
+            // step (matching Enter's behavior on the currently-selected entry) — clicking is
+            // how a mouse user "commits" a choice, there's no separate confirm step the way
+            // there is for e.g. a checkbox row elsewhere in this function. `row` is 0-based
+            // into the *visible* window (`render_cdp_browser_dialog`'s own scroll_top math,
+            // mirrored here so the two can't disagree about which entry a given row means).
+            Some(Dialog::CdpBrowser { groups, group_selected, group_focus, entries, selected, .. }) => {
+                if x_in_row < CDP_GROUP_COL_WIDTH {
+                    if row < groups.len() {
+                        *group_focus = true;
+                        *group_selected = row;
+                        self.refresh_cdp_browser_filter();
+                    }
+                } else {
+                    *group_focus = false;
+                    let scroll_top = selected.saturating_sub(CDP_BROWSER_LIST_ROWS.saturating_sub(1));
+                    let clicked = scroll_top + row;
+                    if clicked < entries.len() {
+                        *selected = clicked;
+                        self.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                    }
                 }
             }
             _ => {}
@@ -2125,32 +2226,77 @@ impl App {
         }
     }
 
-    /// Entries matching `query` (case-insensitive substring over key/title/short
-    /// description), as indices into `cdp_catalog.processes`. Catalog order (alphabetical
-    /// by key, from the conversion script) is preserved rather than re-sorted, so results
-    /// don't reshuffle confusingly as the user types.
-    fn cdp_filter_entries(&self, query: &str) -> Vec<usize> {
+    /// Entries matching `query` (case-insensitive substring over key/title — the process's
+    /// *name*, not its description) AND `group`, as indices into `cdp_catalog.processes`.
+    ///
+    /// `group == CDP_GROUP_ALL` skips the group filter entirely (the pre-Phase-7 behavior);
+    /// `group == CDP_GROUP_RECENT` returns entries in `recent`'s own most-recently-used
+    /// order instead of catalog order — order carries meaning there (it's *why* the group
+    /// exists) in a way it doesn't for the other groups. Every other `group` value matches
+    /// `ProcessDef::subcategory` exactly. For every case but Recent, catalog order
+    /// (alphabetical by key, from the conversion script) is preserved rather than re-sorted,
+    /// so results don't reshuffle confusingly as the user types.
+    fn cdp_filter_entries(&self, query: &str, group: &str, recent: &[String]) -> Vec<usize> {
         let query = query.to_lowercase();
+        // Name only — `key` (the internal identifier, e.g. "blur_avrg") and `title` (the
+        // displayed name, e.g. "Blur Average"). `short_description`/`description` used to be
+        // included too, but that surfaced processes whose *description* happened to mention
+        // a search term while their actual name didn't, which read as the search matching
+        // almost anything.
+        let matches_query = |p: &crate::model::cdp::ProcessDef| {
+            query.is_empty()
+                || p.key.to_lowercase().contains(&query)
+                || p.title.to_lowercase().contains(&query)
+        };
+        if group == CDP_GROUP_RECENT {
+            return recent
+                .iter()
+                .filter_map(|key| self.cdp_catalog.processes.iter().position(|p| &p.key == key))
+                .filter(|&i| matches_query(&self.cdp_catalog.processes[i]))
+                .collect();
+        }
         self.cdp_catalog
             .processes
             .iter()
             .enumerate()
-            .filter(|(_, p)| {
-                query.is_empty()
-                    || p.key.to_lowercase().contains(&query)
-                    || p.title.to_lowercase().contains(&query)
-                    || p.short_description.to_lowercase().contains(&query)
-            })
+            .filter(|(_, p)| (group == CDP_GROUP_ALL || p.subcategory == group) && matches_query(p))
             .map(|(i, _)| i)
             .collect()
     }
 
-    /// Opens the CDP process browser: a plain searchable list, no controls — see
-    /// `Dialog::CdpBrowser`'s doc comment for why that's now a fixed-size dialog rather than
-    /// something that grows/shrinks per process.
+    /// `Dialog::CdpBrowser`'s group list: `CDP_GROUP_ALL`, `CDP_GROUP_RECENT`, then every
+    /// real `subcategory` value in the catalog, alphabetically — the taxonomy
+    /// `scripts/convert_soundthread_catalog.py`'s `resolve_subcategory` reconciles down to
+    /// one clean set (see CDP-Ext-Plan.md Phase 7), used verbatim rather than re-derived
+    /// here.
+    fn cdp_groups(&self) -> Vec<String> {
+        let mut subcategories: Vec<String> =
+            self.cdp_catalog.processes.iter().map(|p| p.subcategory.clone()).collect();
+        subcategories.sort();
+        subcategories.dedup();
+        let mut groups = vec![CDP_GROUP_ALL.to_string(), CDP_GROUP_RECENT.to_string()];
+        groups.extend(subcategories);
+        groups
+    }
+
+    /// Opens the CDP process browser: a plain searchable, group-filterable list, no controls
+    /// — see `Dialog::CdpBrowser`'s doc comment for why that's now a fixed-size dialog
+    /// rather than something that grows/shrinks per process. Starts on "All" (group index 0)
+    /// with the process list focused, matching the pre-Phase-7 behavior for anyone who never
+    /// touches the groups column.
     fn open_cdp_browser(&mut self) {
-        let entries = self.cdp_filter_entries("");
-        self.dialog = Some(Dialog::CdpBrowser { search: TextInput::new(""), entries, selected: 0 });
+        let groups = self.cdp_groups();
+        let recent = crate::model::cdp::recent::load_recent();
+        let entries = self.cdp_filter_entries("", CDP_GROUP_ALL, &recent);
+        self.dialog = Some(Dialog::CdpBrowser {
+            search: TextInput::new(""),
+            groups,
+            group_selected: 0,
+            group_focus: false,
+            recent,
+            entries,
+            selected: 0,
+        });
     }
 
     /// Opens `Dialog::CdpParams` for the process at `catalog_index`, building fresh
@@ -2234,13 +2380,16 @@ impl App {
             return false;
         }
         let field_index = *focus - 1;
-        let Some(CdpField::Number { input, min, max, envelope, .. }) = fields.get(field_index) else {
+        let Some(CdpField::Number { input, min, max, step, envelope, .. }) = fields.get(field_index) else {
             return false;
         };
         let Some(def) = self.cdp_catalog.processes.get(*catalog_index) else {
             return false;
         };
-        if !def.params.get(field_index).is_some_and(|p| p.automatable) {
+        let Some(param) = def.params.get(field_index) else {
+            return false;
+        };
+        if !param.automatable {
             return false;
         }
 
@@ -2254,9 +2403,28 @@ impl App {
             .map(|doc| (range.1 - range.0) as f64 / doc.sample_rate as f64)
             .filter(|&d| d > 0.0)
             .unwrap_or(1.0);
-        let points = original
-            .clone()
-            .unwrap_or_else(|| vec![(0.0, current_value), (time_max, current_value)]);
+        // A flat 2-point starting line is the right placeholder for an *optional*
+        // automatable field — it exactly reproduces the constant it's replacing. But a
+        // `required_envelope` field has no constant it's replacing, and at least one real
+        // CDP process (`fractal wave`/`spectrum`'s Shape) hangs indefinitely — no error, it
+        // just never returns — on *any* straight 2-point line, regardless of whether the two
+        // points' values are equal or different (confirmed against the real binary: a
+        // 2-point ramp of any size hangs, but a 3-point line with even a barely-perceptible
+        // bend in the middle completes in milliseconds — the fractal algorithm's recursive
+        // self-similarity check apparently never terminates against an input shape that's
+        // itself perfectly self-similar at every scale, i.e. a straight line). So a required
+        // field's never-yet-opened starting shape seeds 3 points with a small symmetric bump
+        // in the middle rather than 2, sidestepping that trap by construction (for every
+        // required-envelope process, not just fractal — a harmless, barely-visible starting
+        // curve either way) rather than asking every affected process to work around it.
+        let points = original.clone().unwrap_or_else(|| {
+            if param.required_envelope {
+                let bumped = if current_value + *step <= *max { current_value + *step } else { current_value - *step };
+                vec![(0.0, current_value), (time_max / 2.0, bumped.clamp(*min, *max)), (time_max, current_value)]
+            } else {
+                vec![(0.0, current_value), (time_max, current_value)]
+            }
+        });
 
         let Some(Dialog::CdpParams { envelope: dialog_envelope, .. }) = self.dialog.as_mut() else {
             return false;
@@ -2273,12 +2441,21 @@ impl App {
     /// (can't null out the `Option` while something still borrows its contents) — every
     /// value they need is captured into plain owned locals up front for exactly that reason.
     fn handle_cdp_envelope_key(&mut self, key: KeyEvent) {
-        let Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) = self.dialog.as_mut() else { return };
+        let Some(Dialog::CdpParams { envelope: Some(edit), fields, catalog_index, .. }) = self.dialog.as_mut()
+        else {
+            return;
+        };
         let field_index = edit.field_index;
         let Some(CdpField::Number { min, max, step, .. }) = fields.get(field_index) else { return };
         let (min, max, step) = (*min, *max, *step);
         let committed_points = edit.points.clone();
         let original = edit.original.clone();
+        let required_envelope = self
+            .cdp_catalog
+            .processes
+            .get(*catalog_index)
+            .and_then(|d| d.params.get(field_index))
+            .is_some_and(|p| p.required_envelope);
 
         match key.code {
             KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -2362,6 +2539,9 @@ impl App {
                     *envelope = None;
                 }
             }
+            // No-op for a `required_envelope` field — it has no valid constant
+            // representation to revert to (see `ParamDef::required_envelope`'s doc comment).
+            KeyCode::Char('c') if required_envelope => {}
             KeyCode::Char('c') => {
                 if let Some(Dialog::CdpParams { fields, envelope, .. }) = self.dialog.as_mut() {
                     if let Some(CdpField::Number { envelope: field_env, .. }) = fields.get_mut(field_index) {
@@ -2600,13 +2780,26 @@ impl App {
 
     /// Validates every field against its `ParamKind` range, returning the index of the
     /// first invalid one. `None` means all fields are in range and safe to run.
+    ///
+    /// A `required_envelope` field additionally requires `envelope.is_some()` — its
+    /// `input` never becomes the submitted value (see `CdpField::to_value` and
+    /// `ParamDef::required_envelope`'s doc comment), so validating that stale text would
+    /// pass or fail for reasons unrelated to whether the process can actually run.
     fn cdp_validate_fields(
         def: &crate::model::cdp::ProcessDef,
         fields: &[CdpField],
     ) -> Option<usize> {
         use crate::model::cdp::ParamKind;
         for (i, (param, field)) in def.params.iter().zip(fields).enumerate() {
-            if let (ParamKind::Number { min, max, .. }, CdpField::Number { input, .. }) = (&param.kind, field) {
+            if let (ParamKind::Number { min, max, .. }, CdpField::Number { input, envelope, .. }) =
+                (&param.kind, field)
+            {
+                if param.required_envelope {
+                    if envelope.is_none() {
+                        return Some(i);
+                    }
+                    continue;
+                }
                 match input.value().trim().parse::<f64>() {
                     Ok(v) if v >= *min && v <= *max => {}
                     _ => return Some(i),
@@ -2675,6 +2868,7 @@ impl App {
                     );
                     self.viewport = None;
                     self.after_sample_mutation(idx);
+                    crate::model::cdp::recent::record_used(&def.key);
                     return;
                 }
             }
@@ -2810,6 +3004,11 @@ impl App {
                         continue;
                     }
 
+                    // Only a successful Apply counts as "used" for `Dialog::CdpBrowser`'s
+                    // Recent group — Preview is an audition, not a commitment. Looked up
+                    // once here since both Apply arms below need it.
+                    let recent_key = self.cdp_catalog.processes.get(pending.catalog_index).map(|d| d.key.clone());
+
                     match result {
                         Ok(mut output) => match purpose {
                             crate::cdp::JobPurpose::Apply if output.results.len() > 1 => {
@@ -2840,6 +3039,9 @@ impl App {
                                 self.rebuild_audio();
                                 self.rebuild_waveform_caches();
                                 self.dialog = None;
+                                if let Some(key) = &recent_key {
+                                    crate::model::cdp::recent::record_used(key);
+                                }
                             }
                             crate::cdp::JobPurpose::Apply => {
                                 // Splicing raw samples at a different rate would play the
@@ -2866,6 +3068,9 @@ impl App {
                                 self.viewport = None;
                                 self.after_sample_mutation(pending.doc_index);
                                 self.dialog = None;
+                                if let Some(key) = &recent_key {
+                                    crate::model::cdp::recent::record_used(key);
+                                }
                             }
                             crate::cdp::JobPurpose::Preview => {
                                 // A glob-output process can't be meaningfully previewed as one
@@ -6043,8 +6248,10 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, catalog: &crate
         Dialog::Info { message } => {
             return render_info_dialog(frame, area, message);
         }
-        Dialog::CdpBrowser { search, entries, selected } => {
-            return render_cdp_browser_dialog(frame, area, search, entries, *selected, catalog);
+        Dialog::CdpBrowser { search, groups, group_selected, group_focus, entries, selected, .. } => {
+            return render_cdp_browser_dialog(
+                frame, area, search, groups, *group_selected, *group_focus, entries, *selected, catalog,
+            );
         }
         Dialog::CdpParams {
             catalog_index, fields, second_input, focus, error, preview, envelope,
@@ -6529,10 +6736,9 @@ fn render_cdp_envelope_editor(
         return Vec::new();
     };
     let (min, max) = (*min, *max);
-    let param_name = def
-        .and_then(|d| d.params.get(edit.field_index))
-        .map(|p| p.name.as_str())
-        .unwrap_or("Envelope");
+    let param = def.and_then(|d| d.params.get(edit.field_index));
+    let param_name = param.map(|p| p.name.as_str()).unwrap_or("Envelope");
+    let required_envelope = param.is_some_and(|p| p.required_envelope);
 
     let layout = cdp_envelope_layout(area);
     let popup = layout.popup;
@@ -6637,7 +6843,7 @@ fn render_cdp_envelope_editor(
             label_style,
         ),
     ]));
-    lines.push(Line::from(vec![
+    let mut hint_spans = vec![
         Span::styled(" \u{2190}\u{2192}", hint_style),
         Span::styled(":point  ", label_style),
         Span::styled("Shift+\u{2190}\u{2192}", hint_style),
@@ -6650,13 +6856,18 @@ fn render_cdp_envelope_editor(
         Span::styled(":insert  ", label_style),
         Span::styled("Del", hint_style),
         Span::styled(":remove  ", label_style),
-        Span::styled("c", hint_style),
-        Span::styled(":constant  ", label_style),
-        Span::styled("Enter", hint_style),
-        Span::styled(":save  ", label_style),
-        Span::styled("Esc", hint_style),
-        Span::styled(":cancel", label_style),
-    ]));
+    ];
+    // A required datafile field has no valid constant to revert to (`ParamDef.required_envelope`'s
+    // doc comment) — 'c' is a no-op there, so the hint that advertises it is omitted too.
+    if !required_envelope {
+        hint_spans.push(Span::styled("c", hint_style));
+        hint_spans.push(Span::styled(":constant  ", label_style));
+    }
+    hint_spans.push(Span::styled("Enter", hint_style));
+    hint_spans.push(Span::styled(":save  ", label_style));
+    hint_spans.push(Span::styled("Esc", hint_style));
+    hint_spans.push(Span::styled(":cancel", label_style));
+    lines.push(Line::from(hint_spans));
     lines.push(Line::from(vec![
         Span::styled(" Click", hint_style),
         Span::styled(":select  ", label_style),
@@ -6674,34 +6885,40 @@ fn render_cdp_envelope_editor(
     vec![layout.grid]
 }
 
-/// The unified CDP process browser/params dialog: a searchable process list and its
-/// parameter form share the left column (list, then that process's fields, then
-/// Preview/Apply), while the right column shows the selected process's full `description`
+/// The unified CDP process browser/params dialog: a Groups column, a searchable Processes
+/// column, and a description column showing the highlighted process's full `description`
 /// (word-wrapped) — see `Dialog::CdpBrowser`'s doc comment for the interaction model.
-/// Keyboard-only (returns no interactive rects), matching the two dialogs this one merges.
 /// Visible process-list rows in `Dialog::CdpBrowser` — a fixed constant (not
 /// content-dependent) shared between the renderer and `App::handle_dialog_row_click`'s
-/// scroll-position math, so a click can never disagree with what's actually on screen.
+/// scroll-position math, so a click can never disagree with what's actually on screen. Also
+/// the fixed height of the Groups column's list — the full group list (currently under 20
+/// entries: `All`, `Recent`, plus one row per real `subcategory`) always fits without its
+/// own scrolling, which is what lets `row` mean the same "row index" in both columns.
 const CDP_BROWSER_LIST_ROWS: usize = 24;
 
-/// The CDP process browser: a plain searchable list on the left, the highlighted process's
-/// full `description` on the right. Deliberately a *fixed*-size popup (width and height are
-/// constants, independent of `entries`/the selected process) — see `Dialog::CdpBrowser`'s
-/// doc comment for why. Returns one `Rect` per *visible* list row (for
-/// `App::handle_dialog_row_click`'s click-to-select-and-open) plus a trailing hints-bar
+/// The CDP process browser: Groups on the left, the searchable process list in the middle,
+/// the highlighted process's full `description` on the right. Deliberately a *fixed*-size
+/// popup (width and height are constants, independent of `entries`/`groups`/the selected
+/// process) — see `Dialog::CdpBrowser`'s doc comment for why. Returns one `Rect` per visible
+/// row — each spanning *both* the Groups and Processes columns, since they render in
+/// lockstep row-for-row (`App::handle_dialog_row_click` disambiguates which column a click
+/// landed in from `x_in_row` against `CDP_GROUP_COL_WIDTH`) — plus a trailing hints-bar
 /// `Rect`, matching every other dialog's row-click convention in this file.
 fn render_cdp_browser_dialog(
     frame: &mut Frame,
     area: Rect,
     search: &TextInput,
+    groups: &[String],
+    group_selected: usize,
+    group_focus: bool,
     entries: &[usize],
     selected: usize,
     catalog: &crate::model::cdp::CdpCatalog,
 ) -> Vec<Rect> {
     let def = entries.get(selected).and_then(|&i| catalog.processes.get(i));
 
-    let width = 130u16.min(area.width);
-    // header spacer + search + blank + LIST_ROWS + blank + hints, + 2 border.
+    let width = 150u16.min(area.width);
+    // header spacer + search/label + blank + LIST_ROWS + blank + hints, + 2 border.
     let height = (1 + 1 + 1 + CDP_BROWSER_LIST_ROWS as u16 + 1 + 1 + 2).min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -6716,6 +6933,15 @@ fn render_cdp_browser_dialog(
     let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
     let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
     let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+    // The focused column's header is bold peach (matches `theme::FOCUS`'s use elsewhere as
+    // the one accent for "this is where input goes"); its highlighted row is a full reverse
+    // block. The *other* column still shows which entry is selected (peach text, no
+    // reverse) so switching focus back and forth never loses track of either choice — but
+    // deliberately isn't the header's bold+peach combination, so a glance at either can't be
+    // mistaken for "this column has focus" (CLAUDE.md: one accent per role, not stacked).
+    let focus_label_style =
+        Style::default().fg(theme::FOCUS).bg(theme::SURFACE0).add_modifier(ratatui::style::Modifier::BOLD);
+    let soft_selected_style = Style::default().fg(theme::FOCUS).bg(theme::SURFACE0);
 
     let block = Block::default()
         .title("CDP Process")
@@ -6725,19 +6951,52 @@ fn render_cdp_browser_dialog(
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    const LEFT_WIDTH: u16 = 56;
-    let cols = Layout::horizontal([Constraint::Length(LEFT_WIDTH), Constraint::Min(10)]).split(inner);
-    let left = cols[0];
-    let right_block = Block::default().borders(Borders::LEFT).border_style(Style::default().fg(theme::BORDER));
-    let right = right_block.inner(cols[1]);
-    frame.render_widget(right_block, cols[1]);
+    const PROCESSES_WIDTH: u16 = 46;
+    let cols = Layout::horizontal([
+        Constraint::Length(CDP_GROUP_COL_WIDTH),
+        Constraint::Length(PROCESSES_WIDTH),
+        Constraint::Min(10),
+    ])
+    .split(inner);
+    let groups_col = cols[0];
+    let processes_block = Block::default().borders(Borders::LEFT).border_style(Style::default().fg(theme::BORDER));
+    let processes_col = processes_block.inner(cols[1]);
+    frame.render_widget(processes_block, cols[1]);
+    let desc_block = Block::default().borders(Borders::LEFT).border_style(Style::default().fg(theme::BORDER));
+    let desc_col = desc_block.inner(cols[2]);
+    frame.render_widget(desc_block, cols[2]);
 
-    // ---- Left column: search + process list ----
+    // Blank + label/search + blank precede the list in both columns, so a given row index
+    // lands on the same screen line in either one.
+    const HEADER_ROWS: u16 = 3;
+    let list_rows = CDP_BROWSER_LIST_ROWS;
+
+    // ---- Groups column ----
+    let mut group_lines = vec![
+        Line::raw(""),
+        Line::from(Span::styled(" Groups", if group_focus { focus_label_style } else { label_style })),
+        Line::raw(""),
+    ];
+    for (i, name) in groups.iter().enumerate() {
+        let text = format!(" {name}");
+        let style = if i == group_selected {
+            if group_focus { cursor_style } else { soft_selected_style }
+        } else {
+            base
+        };
+        group_lines.push(Line::from(Span::styled(text, style)));
+    }
+    for _ in groups.len()..list_rows {
+        group_lines.push(Line::raw(""));
+    }
+    frame.render_widget(Paragraph::new(group_lines), groups_col);
+
+    // ---- Processes column: search + process list ----
     let (before, under, after) = search.split_at_cursor();
     let mut lines = vec![
         Line::raw(""),
         Line::from(vec![
-            Span::styled(" Search: ", label_style),
+            Span::styled(" Search: ", if group_focus { label_style } else { focus_label_style }),
             Span::styled(before, base),
             Span::styled(under, cursor_style),
             Span::styled(after, base),
@@ -6750,9 +7009,7 @@ fn render_cdp_browser_dialog(
     // to land on the right entry; on a terminal too short to show all of them, the popup's
     // own height clamp (above) simply crops the bottom of the list, matching how every other
     // dialog in this file that doesn't have real scroll support handles overflow.
-    let list_rows = CDP_BROWSER_LIST_ROWS;
     let scroll_top = selected.saturating_sub(list_rows.saturating_sub(1));
-    let mut row_rects = Vec::with_capacity(list_rows + 1);
     let mut rendered_rows = 0;
     if entries.is_empty() {
         lines.push(Line::from(Span::styled(" No matches", dim_style)));
@@ -6761,48 +7018,69 @@ fn render_cdp_browser_dialog(
         for (row, &catalog_idx) in entries.iter().enumerate().skip(scroll_top).take(list_rows) {
             let Some(d) = catalog.processes.get(catalog_idx) else { continue };
             let text = format!(" {}", d.title);
-            let style = if row == selected { cursor_style } else { base };
+            let style = if row == selected {
+                if group_focus { soft_selected_style } else { cursor_style }
+            } else {
+                base
+            };
             lines.push(Line::from(Span::styled(text, style)));
-            row_rects.push(Rect { x: left.x, y: left.y + 1 + rendered_rows as u16, width: left.width, height: 1 });
             rendered_rows += 1;
         }
     }
     for _ in rendered_rows..list_rows {
         lines.push(Line::raw(""));
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::styled(" \u{2191}\u{2193}", hint_style),
-        Span::styled(":select  ", label_style),
-        Span::styled("PgUp/PgDn", hint_style),
-        Span::styled(":page  ", label_style),
-        Span::styled("Enter", hint_style),
-        Span::styled(":open  ", label_style),
-        Span::styled("Esc", hint_style),
-        Span::styled(":cancel", label_style),
-    ]));
-    let hints_row = left.y + inner.height.saturating_sub(1);
-    row_rects.push(Rect { x: left.x, y: hints_row, width: left.width, height: 1 });
+    frame.render_widget(Paragraph::new(lines), processes_col);
 
-    frame.render_widget(Paragraph::new(lines), left);
+    // One combined Rect per row spans both columns; see this function's doc comment for why.
+    let click_width = (processes_col.x + processes_col.width).saturating_sub(groups_col.x);
+    let mut row_rects = Vec::with_capacity(list_rows + 1);
+    for row in 0..list_rows {
+        row_rects.push(Rect {
+            x: groups_col.x,
+            y: groups_col.y + HEADER_ROWS + row as u16,
+            width: click_width,
+            height: 1,
+        });
+    }
 
-    // ---- Right column: the selected process's full description, word-wrapped ----
+    // ---- Hints bar: spans the full popup width, pinned to the bottom ----
+    let hints_row = inner.y + inner.height.saturating_sub(1);
+    let hints_rect = Rect { x: inner.x, y: hints_row, width: inner.width, height: 1 };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" \u{2191}\u{2193}", hint_style),
+            Span::styled(":select  ", label_style),
+            Span::styled("Tab", hint_style),
+            Span::styled(":column  ", label_style),
+            Span::styled("PgUp/PgDn", hint_style),
+            Span::styled(":page  ", label_style),
+            Span::styled("Enter", hint_style),
+            Span::styled(":open  ", label_style),
+            Span::styled("Esc", hint_style),
+            Span::styled(":cancel", label_style),
+        ])),
+        hints_rect,
+    );
+    row_rects.push(hints_rect);
+
+    // ---- Description column: the selected process's full description, word-wrapped ----
     // A 1-column margin baked into the *Rect* (not a leading space in the text) so it
     // applies uniformly to every wrapped row, not just each logical line's first visual
     // row — a leading `" "` in the text only padded the row `Wrap` happened to start on.
-    let right_padded =
-        Rect { x: right.x + 1, y: right.y, width: right.width.saturating_sub(2), height: right.height };
-    let right_lines = match def {
+    let desc_padded =
+        Rect { x: desc_col.x + 1, y: desc_col.y, width: desc_col.width.saturating_sub(2), height: desc_col.height };
+    let desc_lines = match def {
         Some(d) => vec![
             Line::raw(""),
             Line::from(Span::styled(d.title.as_str(), label_style)),
-            Line::from(Span::styled("\u{2500}".repeat(right_padded.width as usize), dim_style)),
+            Line::from(Span::styled("\u{2500}".repeat(desc_padded.width as usize), dim_style)),
             Line::raw(""),
             Line::from(Span::styled(d.description.trim(), base)),
         ],
         None => vec![Line::raw(""), Line::from(Span::styled("No matches", dim_style))],
     };
-    frame.render_widget(Paragraph::new(right_lines).wrap(Wrap { trim: false }), right_padded);
+    frame.render_widget(Paragraph::new(desc_lines).wrap(Wrap { trim: false }), desc_padded);
 
     row_rects
 }
@@ -6947,6 +7225,15 @@ fn render_cdp_params_dialog(
                 Span::styled(label, label_style_here),
                 Span::styled(format!("{:<range_width$}", ""), range_style),
                 Span::styled(format!(" envelope ({} pts, e to edit)", points.len()), point_style),
+            ]),
+            // A `required_envelope` param has no constant representation at all — showing
+            // its (irrelevant, never-submitted) `input` text would read as "this number is
+            // the value," which is actively misleading. `cdp_validate_fields` blocks
+            // Apply/Preview until the user has actually opened the editor once.
+            CdpField::Number { envelope: None, .. } if param.required_envelope => Line::from(vec![
+                Span::styled(label, label_style_here),
+                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(" (not set — e to edit)", dim_style),
             ]),
             CdpField::Number { input, min, max, .. } => {
                 let range = format!("{:<range_width$}", format_cdp_range(*min, *max));
@@ -7659,7 +7946,9 @@ mod tests {
             Some(Dialog::CdpBrowser { entries, .. }) => entries[1],
             _ => panic!("no dialog"),
         };
-        app.handle_dialog_row_click(1, 0);
+        // x_in_row must land past the Groups column, or the click is read as a group pick
+        // instead (see `App::handle_dialog_row_click`'s `Dialog::CdpBrowser` arm).
+        app.handle_dialog_row_click(1, CDP_GROUP_COL_WIDTH);
 
         match &app.dialog {
             Some(Dialog::CdpParams { catalog_index: ci, .. }) => assert_eq!(*ci, catalog_index),
@@ -7797,6 +8086,123 @@ mod tests {
             crate::model::cdp::ParamValue::Breakpoints(points) => assert_eq!(points.len(), 3),
             _ => panic!("expected Breakpoints after committing an envelope"),
         }
+    }
+
+    /// Opens `Dialog::CdpParams` for `focus_hold`, focused on its one `required_envelope`
+    /// field — the shared setup for the tests below (CDP-Ext-Plan.md Phase 3/"Tier 1b").
+    fn open_focus_hold_with_field_focused(app: &mut App) {
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "focus_hold")
+            .expect("focus_hold should be in the catalog");
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = 1;
+        }
+    }
+
+    /// A fresh `required_envelope` field starts with no envelope at all (not a constant, not
+    /// a pre-seeded breakpoint list) — the field is genuinely "not configured yet" until the
+    /// user opens the editor once, matching the render-side "(not set — e to edit)" display.
+    #[test]
+    fn required_envelope_field_starts_unset() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_focus_hold_with_field_focused(&mut app);
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::Number { envelope, .. }) = fields.first() else { panic!("expected a Number field") };
+        assert!(envelope.is_none());
+    }
+
+    /// 'e' on a never-opened `required_envelope` field seeds 3 points with a bend in the
+    /// middle, not a straight 2-point line — regression test for a real hang: at least one
+    /// CDP process (`fractal wave`/`spectrum`'s Shape) never returns when handed a straight
+    /// 2-point breakpoint file, regardless of whether its two points' values are equal or
+    /// different (confirmed against the real binary), while a 3-point line with even a
+    /// barely-perceptible bend completes in milliseconds. See
+    /// `App::open_cdp_envelope_editor`'s doc comment for the full finding.
+    #[test]
+    fn opening_a_required_envelope_field_seeds_three_non_collinear_points() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_focus_hold_with_field_focused(&mut app);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else {
+            panic!("expected the envelope editor to be open");
+        };
+        assert_eq!(edit.points.len(), 3, "must not be a straight 2-point line — see this test's doc comment");
+        let (t0, v0) = edit.points[0];
+        let (t1, v1) = edit.points[1];
+        let (t2, v2) = edit.points[2];
+        assert!(t0 < t1 && t1 < t2, "the middle point must sit strictly between the other two in time");
+        assert_ne!(v1, v0, "the middle point must not be collinear with a flat start/end");
+        assert_eq!(v0, v2, "start and end return to the same value — a small, unobtrusive default bump");
+    }
+
+    /// Apply/Preview must be blocked with a validation error while a `required_envelope`
+    /// field is still unset — its `input` text is never the submitted value (`to_value`
+    /// would otherwise silently emit a `ParamValue::Number` that CDP rejects as an
+    /// unreadable file path), so `cdp_validate_fields` has to check `envelope.is_some()`
+    /// directly rather than the field's numeric range.
+    #[test]
+    fn apply_is_blocked_until_a_required_envelope_field_is_set() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_focus_hold_with_field_focused(&mut app);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { error, focus, .. }) = &app.dialog else {
+            panic!("expected CdpParams still open after a blocked Apply");
+        };
+        assert!(error.is_some(), "an unset required_envelope field should block Apply with an error");
+        assert_eq!(*focus, 1, "should focus the offending field");
+    }
+
+    /// Once the user has opened the editor and committed points (Enter inside the editor),
+    /// the field is a valid `Breakpoints` value and Apply is no longer blocked by it.
+    #[test]
+    fn setting_a_required_envelope_field_unblocks_apply() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_focus_hold_with_field_focused(&mut app);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert!(
+            matches!(&app.dialog, Some(Dialog::CdpParams { envelope: Some(_), .. })),
+            "'e' should open the envelope editor for an automatable field regardless of required_envelope"
+        );
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // commit
+
+        let Some(Dialog::CdpParams { fields, envelope, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(envelope.is_none(), "editor should be closed after commit");
+        let Some(CdpField::Number { envelope: field_env, .. }) = fields.first() else {
+            panic!("expected a Number field")
+        };
+        assert!(field_env.is_some(), "committing the editor should set the field's envelope");
+
+        let def = app.cdp_catalog.processes.iter().find(|p| p.key == "focus_hold").unwrap();
+        assert!(
+            App::cdp_validate_fields(def, fields).is_none(),
+            "a set required_envelope field should no longer block validation"
+        );
+    }
+
+    /// 'c' ("commit as constant") inside the envelope editor is a no-op for a
+    /// `required_envelope` field — there's no valid constant to revert to, so the field must
+    /// stay in envelope mode with its points untouched rather than being cleared to `None`.
+    #[test]
+    fn c_key_is_a_no_op_for_a_required_envelope_field() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_focus_hold_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        assert!(
+            matches!(&app.dialog, Some(Dialog::CdpParams { envelope: Some(_), .. })),
+            "'c' must not close the editor for a required_envelope field"
+        );
     }
 
     /// `interp_cdp_envelope` is exactly CDP's own breakpoint semantics: piecewise-linear
@@ -8225,6 +8631,268 @@ mod tests {
             assert_eq!(doc.channels[0].len(), 4, "each new buffer should hold the copied 4 samples");
             assert!(doc.dirty, "a never-saved new buffer should start dirty");
         }
+    }
+
+    /// `App::cdp_groups` always starts with `CDP_GROUP_ALL` then `CDP_GROUP_RECENT`,
+    /// followed by every real `subcategory` in the catalog, alphabetically sorted with no
+    /// duplicates — the taxonomy `scripts/convert_soundthread_catalog.py` reconciles down to
+    /// one clean set (CDP-Ext-Plan.md Phase 7).
+    #[test]
+    fn cdp_groups_lists_all_recent_then_alphabetical_subcategories() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let groups = app.cdp_groups();
+        assert_eq!(groups[0], CDP_GROUP_ALL);
+        assert_eq!(groups[1], CDP_GROUP_RECENT);
+        let subcategories = &groups[2..];
+        assert!(!subcategories.is_empty(), "the real catalog has real subcategories");
+        let mut sorted = subcategories.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(subcategories, sorted.as_slice(), "should already be sorted with no duplicates");
+    }
+
+    /// Tab toggles `Dialog::CdpBrowser.group_focus`; while it's set, Up/Down move
+    /// `group_selected` (re-filtering `entries`, resetting the process list's `selected` to
+    /// 0) instead of the process list's own `selected` — see `App::cdp_browser_move_group`.
+    #[test]
+    fn tab_toggles_browser_group_focus_and_arrow_keys_follow_it() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_browser();
+        let Some(Dialog::CdpBrowser { group_focus, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(!group_focus, "should start with the process list focused");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { group_focus, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(*group_focus);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { group_selected, selected, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*group_selected, 1, "Down while group-focused should move group_selected, not selected");
+        assert_eq!(*selected, 0, "the process list's own selection is untouched by a group move");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { group_focus, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(!group_focus, "Tab toggles — a second press returns focus to the process list");
+    }
+
+    /// Highlighting a real `subcategory` group filters `entries` down to exactly the
+    /// processes in that subcategory — the reason the groups column exists at all.
+    #[test]
+    fn selecting_a_group_filters_the_process_list_by_subcategory() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_browser();
+        let Some(Dialog::CdpBrowser { groups, entries, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(groups.len() > 2, "need at least one real subcategory group");
+        let target_group = groups[2].clone();
+        let unfiltered_count = entries.len();
+
+        // All(0) -> Recent(1) -> the first real subcategory(2).
+        app.cdp_browser_move_group(2);
+        let Some(Dialog::CdpBrowser { entries, group_selected, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*group_selected, 2);
+        assert!(!entries.is_empty(), "the chosen group came from the catalog's own subcategories, so it must have members");
+        assert!(entries.len() <= unfiltered_count);
+        for &i in entries {
+            assert_eq!(app.cdp_catalog.processes[i].subcategory, target_group);
+        }
+    }
+
+    /// Typing into `search` while a real subcategory group is highlighted narrows within
+    /// that group rather than replacing its filter — group AND search compose, they don't
+    /// override each other (per the user's own refinement of the Phase 7 design: "Search
+    /// narrows within the highlighted group").
+    #[test]
+    fn search_narrows_within_the_highlighted_group() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_browser();
+        app.cdp_browser_move_group(2); // the first real subcategory group
+        let Some(Dialog::CdpBrowser { entries, group_selected: 2, .. }) = &app.dialog else {
+            panic!("expected group index 2 to be selected")
+        };
+        let unfiltered_count = entries.len();
+        let sample_index = entries[0];
+        let sample_key = app.cdp_catalog.processes[sample_index].key.clone();
+
+        for c in sample_key.chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let Some(Dialog::CdpBrowser { entries, group_selected, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*group_selected, 2, "typing must not disturb the highlighted group");
+        assert!(entries.len() <= unfiltered_count, "a specific-enough query should narrow, not widen, the group's results");
+        assert!(entries.contains(&sample_index), "the sampled entry's own key must still match a search for exactly that key");
+    }
+
+    /// Search matches a process's *name* (`key`/`title`) only — a term that only appears in
+    /// `short_description`/`description` must not match, or the search box effectively
+    /// searches everything rather than narrowing by name (the user-reported confusion this
+    /// fixes: `blur_avrg`'s title is "Average" and its key is "blur_avrg", but its
+    /// description happens to say "spectral energy").
+    #[test]
+    fn search_matches_process_name_not_description() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let blur_avrg = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").expect("blur_avrg in catalog");
+        assert!(
+            app.cdp_catalog.processes[blur_avrg].short_description.to_lowercase().contains("spectral"),
+            "test assumes blur_avrg's short_description mentions \"spectral\" while its name doesn't"
+        );
+
+        app.open_cdp_browser();
+        for c in "spectral".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let Some(Dialog::CdpBrowser { entries, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(
+            !entries.contains(&blur_avrg),
+            "a description-only term must not match — search is name-only, not full-text"
+        );
+    }
+
+    /// Right arrow while the Groups column has focus steps into the Processes column — the
+    /// natural "step right" reading of the key, distinct from Tab's plain toggle. Right in
+    /// the Processes column stays search-cursor movement (there's no column further right to
+    /// step into).
+    #[test]
+    fn right_arrow_in_groups_column_moves_focus_to_processes() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_browser();
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { group_focus, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(*group_focus, "Tab should have moved focus to Groups");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { group_focus, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(!group_focus, "Right out of Groups should move focus to Processes");
+    }
+
+    /// Left arrow while the Processes column has focus steps back into Groups — the mirror
+    /// image of `right_arrow_in_groups_column_moves_focus_to_processes` above. Left while
+    /// already in Groups stays search-cursor movement (there's no column further left).
+    #[test]
+    fn left_arrow_in_processes_column_moves_focus_to_groups() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_browser();
+        let Some(Dialog::CdpBrowser { group_focus, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(!group_focus, "should start with the process list focused");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { group_focus, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(*group_focus, "Left out of Processes should move focus to Groups");
+
+        // Left again, now already in Groups, has nowhere further left to step — falls
+        // through to search-cursor movement, leaving focus on Groups unchanged.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { group_focus, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(*group_focus, "Left while already in Groups should leave focus unchanged");
+    }
+
+    /// `Dialog::CdpBrowser.recent`'s order (most-recently-used first, from
+    /// `model::cdp::recent::load_recent`) is what the "Recent" group actually shows — not
+    /// catalog order, which would defeat the point of a recency-ordered shortcut list.
+    #[test]
+    fn recent_group_shows_most_recently_used_first() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_recent_group_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let first_key = app.cdp_catalog.processes[0].key.clone();
+        let second_key = app.cdp_catalog.processes[1].key.clone();
+        crate::model::cdp::recent::record_used(&first_key);
+        crate::model::cdp::recent::record_used(&second_key);
+
+        app.open_cdp_browser();
+        app.cdp_browser_move_group(1); // All(0) -> Recent(1)
+        let Some(Dialog::CdpBrowser { entries, group_selected: 1, .. }) = &app.dialog else {
+            panic!("expected the Recent group to be selected")
+        };
+        let keys: Vec<&str> = entries.iter().map(|&i| app.cdp_catalog.processes[i].key.as_str()).collect();
+        assert_eq!(keys, vec![second_key.as_str(), first_key.as_str()], "most-recently-used should come first");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// A successful Apply — the normal single-result splice path through `tick_cdp` — records
+    /// the process as recently used, so it shows up in the browser's "Recent" group next time
+    /// it's opened. Preview alone must not (see the other assertion below).
+    #[test]
+    fn applying_a_process_records_it_as_recently_used() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_recent_apply_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = new_app(Some(doc(0.1, 4)), None);
+        let catalog_index = 0;
+        let expected_key = app.cdp_catalog.processes[catalog_index].key.clone();
+        assert!(crate::model::cdp::recent::load_recent().is_empty(), "nothing recorded yet");
+
+        app.cdp_pending = Some(CdpPending {
+            doc_index: 0,
+            range: (0, 4),
+            label: "CDP: Fake".into(),
+            catalog_index,
+            fields: Vec::new(),
+            second_input: None,
+            focus: 0,
+            presets: Vec::new(),
+            preset_selected: None,
+        });
+        app.dialog = Some(Dialog::CdpRunning {
+            job_id: 99,
+            title: "Fake".into(),
+            step_label: String::new(),
+            step_index: 0,
+            step_total: 1,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let planned = crate::model::cdp::pipeline::PlannedJob {
+            steps: vec![crate::model::cdp::pipeline::Invocation {
+                bin: "cp".into(),
+                args: vec!["in.wav".into(), "out.wav".into()],
+                label: "fake copy".into(),
+                expected_output: "out.wav".into(),
+            }],
+            input_files: vec![crate::model::cdp::pipeline::TempWavSpec {
+                relative_name: "in.wav".into(),
+                input_index: 0,
+                source_channels: vec![0],
+            }],
+            output_files: vec![crate::model::cdp::pipeline::OutputWavSpec {
+                relative_name: "out.wav".into(),
+                dest_channels: vec![0],
+            }],
+            glob_output: None,
+            brk_files: Vec::new(),
+            deferred_window_params: Vec::new(),
+        };
+        app.cdp_runner.submit(crate::cdp::Job {
+            id: 99,
+            cdp_dir: std::path::PathBuf::from("/bin"),
+            planned,
+            inputs: vec![vec![vec![0.1, 0.2, 0.3, 0.4]]],
+            input_sample_rate: app.documents[0].sample_rate,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.dialog.is_some() && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.dialog.is_none(), "the CdpRunning dialog should close once the job finishes");
+
+        assert_eq!(
+            crate::model::cdp::recent::load_recent(),
+            vec![expected_key],
+            "a successful Apply should record the process as recently used"
+        );
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     /// Shift+Tab cycles panel focus the opposite way to Tab:

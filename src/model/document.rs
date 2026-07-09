@@ -295,14 +295,27 @@ impl Document {
         out
     }
 
-    /// Inserts `data` (one Vec per channel) at `at` in every channel. Channels beyond
-    /// `data`'s length are left untouched. Markers at or after `at` shift right by the
-    /// inserted length so they stay anchored to the same audio.
+    /// Inserts `data` (one Vec per channel) at `at` in every channel of `self`, adapting a
+    /// mono/stereo `data.len()` mismatch rather than leaving channels desynced in length:
+    /// a mono `data` inserted into a stereo document duplicates its one channel into both
+    /// (so the inserted audio is audible on both, not silent on one); a stereo/multi-channel
+    /// `data` inserted into a document with fewer channels drops the extra source channels.
+    /// Every one of `self.channels` always receives *something* the same length as the
+    /// others, which is the actual invariant this exists to protect — `DocumentSource`
+    /// (`audio/source.rs`) derives its total-frame count from channel 0 alone but indexes
+    /// every channel with it, so a caller that left one channel shorter than another (the
+    /// original `.zip(data)` here silently dropped the insert for any channel beyond
+    /// `data.len()`) would panic on playback the moment `frame_index` ran past that
+    /// channel's real length — reachable in practice via a mono CDP synthesis result
+    /// (`commands::cdp`) spliced into a stereo document. Markers at or after `at` shift
+    /// right by the inserted length so they stay anchored to the same audio.
     pub fn insert_range(&mut self, at: usize, data: Vec<Vec<f32>>) {
-        let count = data.first().map(|c| c.len()).unwrap_or(0);
-        for (channel, new_samples) in self.channels.iter_mut().zip(data) {
+        let Some(first) = data.first() else { return };
+        let count = first.len();
+        for (i, channel) in self.channels.iter_mut().enumerate() {
+            let source = data.get(i).unwrap_or(first);
             let at = at.min(channel.len());
-            channel.splice(at..at, new_samples);
+            channel.splice(at..at, source.iter().copied());
         }
         for m in &mut self.markers {
             if m.position >= at {
@@ -497,5 +510,42 @@ mod tests {
         assert_eq!(document.channels, vec![vec![1.0, 4.0, 5.0]]);
         document.insert_range(1, removed);
         assert_eq!(document.channels, vec![vec![1.0, 2.0, 3.0, 4.0, 5.0]]);
+    }
+
+    /// Regression test for a real crash: inserting mono `data` into a stereo document used
+    /// to leave the second channel untouched (`self.channels.iter_mut().zip(data)` silently
+    /// drops any `self.channels` entry beyond `data.len()`), desyncing channel lengths —
+    /// `DocumentSource` (`audio/source.rs`) derives its total-frame count from channel 0
+    /// alone but indexes every channel with it, so playing a document in this state panics
+    /// on an out-of-bounds index the moment playback runs past the shorter channel's real
+    /// length. Reachable via a mono CDP synthesis result spliced into a stereo document
+    /// (`commands::cdp`). The fix duplicates the one source channel into every destination
+    /// channel instead, so both stay the same length and the inserted audio is audible on
+    /// both rather than silent on one.
+    #[test]
+    fn inserting_mono_data_into_a_stereo_document_duplicates_it_into_both_channels() {
+        let mut document = Document {
+            channels: vec![vec![1.0, 2.0, 3.0], vec![10.0, 20.0, 30.0]],
+            sample_rate: 44100,
+            ..doc(vec![])
+        };
+        document.insert_range(1, vec![vec![9.0, 9.0]]);
+        assert_eq!(document.channels[0], vec![1.0, 9.0, 9.0, 2.0, 3.0]);
+        assert_eq!(document.channels[1], vec![10.0, 9.0, 9.0, 20.0, 30.0]);
+        assert_eq!(
+            document.channels[0].len(),
+            document.channels[1].len(),
+            "channels must stay the same length or playback panics indexing the shorter one"
+        );
+    }
+
+    /// The inverse mismatch: inserting stereo (or wider) `data` into a document with fewer
+    /// channels drops the extra source channels rather than growing `self.channels` or
+    /// panicking — only as many of `data`'s channels as `self.channels` has are used.
+    #[test]
+    fn inserting_stereo_data_into_a_mono_document_drops_the_extra_channel() {
+        let mut document = doc(vec![1.0, 2.0, 3.0]);
+        document.insert_range(1, vec![vec![9.0, 9.0], vec![99.0, 99.0]]);
+        assert_eq!(document.channels, vec![vec![1.0, 9.0, 9.0, 2.0, 3.0]]);
     }
 }
