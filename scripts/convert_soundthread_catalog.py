@@ -53,6 +53,48 @@ INPUT_OUTPUT_KIND = {
 
 CATEGORY = {"time": "time", "pvoc": "pvoc"}
 
+# Reconciles SoundThread's own `subcategory` values with the (larger, independently
+# hand-authored) set introduced in catalog_extra.toml, so the CDP browser's process-grouping
+# feature (Ctrl+P — see CDP-Ext-Plan.md Phase 7) shows one clean taxonomy instead of two
+# near-duplicate ones (e.g. this file's "granulate" next to catalog_extra.toml's "texture"
+# for the same kind of process). Two layers:
+#   SUBCATEGORY_REMAP   — a blanket string rename, for cases where SoundThread's own value
+#                          unambiguously means the same thing everywhere it's used.
+#   SUBCATEGORY_OVERRIDE — a few individual process keys needing per-process judgment,
+#                          applied after the blanket remap. Every one of these was
+#                          SoundThread's own catch-all "misc" (verified against
+#                          process_help.json directly — SoundThread never actually
+#                          distinguishes *why* something is misc, so there's no way to do
+#                          this generically; each of the 14 "misc" entries was read and
+#                          reclassified by hand).
+SUBCATEGORY_REMAP = {
+    "granulate": "texture",
+    "extend": "texture",
+    "reverb": "delay",
+}
+SUBCATEGORY_OVERRIDE = {
+    "envel_replace_1": "envelope",
+    "housekeep_extract_4": "utility",
+    "modify_loudness_1": "amplitude",
+    "modify_radical_1": "distort",
+    "modify_radical_5": "distort",
+    "modify_radical_6": "distort",
+    "modify_speed_2": "time",
+    "modify_speed_5": "time",
+    "modify_stack": "combine",
+    "phase_phase_1": "utility",
+    "sfedit_cut_1": "segment",
+    "sfedit_excise_1": "segment",
+    "sfedit_join": "segment",
+    "silend_silend_1": "segment",
+}
+
+
+def resolve_subcategory(key, raw_subcategory):
+    if key in SUBCATEGORY_OVERRIDE:
+        return SUBCATEGORY_OVERRIDE[key]
+    return SUBCATEGORY_REMAP.get(raw_subcategory, raw_subcategory)
+
 
 def split_key(key, known_bins):
     """Splits a SoundThread key like "modify_speed_2" into (bin, subprog, mode).
@@ -150,7 +192,7 @@ def convert_process(key, entry, known_bins):
         "mode": mode,
         "title": entry["title"],
         "category": CATEGORY[entry["category"]],
-        "subcategory": entry.get("subcategory", ""),
+        "subcategory": resolve_subcategory(key, entry.get("subcategory", "")),
         "short_description": entry.get("short_description", ""),
         "description": entry.get("description", ""),
         "input": INPUT_OUTPUT_KIND[entry.get("inputtype", "")],

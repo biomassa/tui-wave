@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod def;
 pub mod pipeline;
 pub mod preset;
+pub mod recent;
 
 pub use catalog::CdpCatalog;
 pub use def::{IoKind, ParamKind, ParamValue, ProcessDef};

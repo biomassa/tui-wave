@@ -832,6 +832,7 @@ mod tests {
             description: String::new(),
             flag: None,
             automatable: false,
+            required_envelope: false,
             kind: ParamKind::Number { min, max, step: 1.0, default, exponential: false, scale },
         }
     }
@@ -956,6 +957,7 @@ mod tests {
                 description: String::new(),
                 flag: Some("-x".into()),
                 automatable: false,
+                required_envelope: false,
                 kind: ParamKind::Toggle { default: false },
             },
             ParamDef {
@@ -963,6 +965,7 @@ mod tests {
                 description: String::new(),
                 flag: None,
                 automatable: false,
+                required_envelope: false,
                 kind: ParamKind::Choice { options: vec!["44100".into(), "48000".into()], default: 0 },
             },
         ];
@@ -1119,6 +1122,7 @@ mod tests {
             description: String::new(),
             flag: Some("-f".into()),
             automatable: true,
+            required_envelope: false,
             kind: ParamKind::Number {
                 min: 0.0,
                 max: 2.0,
