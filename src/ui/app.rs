@@ -175,12 +175,25 @@ enum CdpField {
     /// `options` is cloned from the `ParamKind::Choice` at construction time so cycling it
     /// (Left/Right) never needs a catalog lookup back through the current selection.
     Choice { options: Vec<String>, selected: usize },
+    /// A `ParamDef.required_list` field (`CDP-Ext-Plan.md` Phase 3's plain-list shape) — a
+    /// distinct variant, not a `Number` mode like `envelope`, because there's no constant
+    /// fallback to fall back *to*: the argv token is always a list-file path. `values`
+    /// starts empty ("not set yet") until `App::open_cdp_list_editor` commits at least one
+    /// entry — no wrapping `Option` needed, an empty `Vec` already means "unset."
+    /// `min`/`max`/`step` bound each entry, same rationale as `Number`'s.
+    List { values: Vec<f64>, min: f64, max: f64, step: f64 },
 }
 
 impl CdpField {
-    fn from_default(kind: &crate::model::cdp::ParamKind) -> Self {
+    fn from_default(param: &crate::model::cdp::ParamDef) -> Self {
         use crate::model::cdp::ParamKind;
-        match kind {
+        if param.required_list {
+            let ParamKind::Number { min, max, step, .. } = &param.kind else {
+                panic!("required_list param {:?} is not a Number kind", param.name);
+            };
+            return CdpField::List { values: Vec::new(), min: *min, max: *max, step: *step };
+        }
+        match &param.kind {
             ParamKind::Number { default, min, max, step, .. } => {
                 CdpField::Number {
                     input: TextInput::fresh(format_cdp_float_for_display(*default)),
@@ -203,9 +216,9 @@ impl CdpField {
     /// since the file was saved — `preset::load_presets` already filters out a *count*
     /// mismatch, but a same-length type change would slip through that check) rather than
     /// panicking on a saved preset that no longer lines up with the live catalog.
-    fn from_value(kind: &crate::model::cdp::ParamKind, value: &crate::model::cdp::ParamValue) -> Self {
+    fn from_value(param: &crate::model::cdp::ParamDef, value: &crate::model::cdp::ParamValue) -> Self {
         use crate::model::cdp::{ParamKind, ParamValue};
-        match (kind, value) {
+        match (&param.kind, value) {
             (ParamKind::Number { min, max, step, .. }, ParamValue::Number(v)) => CdpField::Number {
                 input: TextInput::fresh(format_cdp_float_for_display(*v)),
                 min: *min,
@@ -222,12 +235,15 @@ impl CdpField {
                 step: *step,
                 envelope: Some(points.clone()),
             },
+            (ParamKind::Number { min, max, step, .. }, ParamValue::List(values)) => {
+                CdpField::List { values: values.clone(), min: *min, max: *max, step: *step }
+            }
             (ParamKind::Toggle { .. }, ParamValue::Toggle(on)) => CdpField::Toggle { on: *on },
             (ParamKind::Choice { options, .. }, ParamValue::Choice(i)) => CdpField::Choice {
                 options: options.clone(),
                 selected: (*i).min(options.len().saturating_sub(1)),
             },
-            _ => CdpField::from_default(kind),
+            _ => CdpField::from_default(param),
         }
     }
 
@@ -240,6 +256,7 @@ impl CdpField {
             }
             CdpField::Toggle { on } => ParamValue::Toggle(*on),
             CdpField::Choice { selected, .. } => ParamValue::Choice(*selected),
+            CdpField::List { values, .. } => ParamValue::List(values.clone()),
         }
     }
 }
@@ -403,6 +420,11 @@ enum Dialog {
         error: Option<String>,
         preview: Option<CdpPreview>,
         envelope: Option<CdpEnvelopeEdit>,
+        /// `Some` while the plain-list editor (`render_cdp_list_editor`) is open for one of
+        /// `fields`' `required_list` params — mutually exclusive with `envelope` (a field is
+        /// either breakpoint-shaped or list-shaped, never both), same take-over-all-key-
+        /// handling shape.
+        list_edit: Option<CdpListEdit>,
         presets: Vec<crate::model::cdp::preset::CdpPreset>,
         preset_selected: Option<usize>,
         save_prompt: Option<TextInput>,
@@ -472,6 +494,35 @@ struct CdpEnvelopeEdit {
     /// graphics-mode renderer can look up the actual audio for that span to draw as a pale
     /// reference waveform behind the curve, without recomputing the selection.
     range: (usize, usize),
+}
+
+/// State for the plain-list editor, active while `Dialog::CdpParams.list_edit` is `Some` —
+/// the `required_list` counterpart to `CdpEnvelopeEdit` (`CDP-Ext-Plan.md` Phase 3's plain
+/// time/value-list shape), simpler since there's no interpolation or graphics-mode curve to
+/// render: just an ordered list of numbers. `values` starts as a clone of the field's
+/// current list (empty for a never-configured field); always kept with at least 1 entry
+/// once the user has added one — unlike `CdpEnvelopeEdit`'s 2-point minimum, a
+/// single-entry list is perfectly meaningful here (e.g. "freeze the spectrum at this one
+/// time"). `original` snapshots the field's list as it was when the editor opened, so Esc
+/// can discard every edit made this session.
+///
+/// `is_time_sequence` mirrors `ParamDef.list_is_time_sequence` (looked up once at open
+/// time rather than re-checked per keystroke): when true, `App::handle_cdp_list_key`
+/// constrains Up/Down and 'n' to keep `values` strictly ascending (CDP's own requirement
+/// for e.g. `grain reposition`'s TIMEFILE — confirmed by hand: a submitted list with times
+/// out of order fails with "Sync times out of sequence", found via the user manually
+/// testing this exact editor). `time_max` is the *practical* nudge/clamp bound for a
+/// time-sequence field: the real selection's duration in seconds, not the catalog's own
+/// (necessarily generous) `max` — the same reasoning `CdpEnvelopeEdit.time_max` already
+/// uses for its time axis, extended here since a time-sequence list's entries are exactly
+/// the same kind of value. Unused (left at the catalog `max`) for a non-time-sequence list.
+struct CdpListEdit {
+    field_index: usize,
+    values: Vec<f64>,
+    selected: usize,
+    original: Vec<f64>,
+    is_time_sequence: bool,
+    time_max: f64,
 }
 
 /// A cached successful Preview run, kept alongside `Dialog::CdpParams` so an unchanged-
@@ -1562,6 +1613,10 @@ impl App {
             self.handle_cdp_envelope_key(key);
             return;
         }
+        if let Some(Dialog::CdpParams { list_edit: Some(_), .. }) = &self.dialog {
+            self.handle_cdp_list_key(key);
+            return;
+        }
         if let Some(Dialog::CdpParams { save_prompt: Some(_), .. }) = &self.dialog {
             self.handle_cdp_preset_save_prompt_key(key);
             return;
@@ -1677,7 +1732,7 @@ impl App {
                     }
                 }
                 Some(Dialog::CdpParams {
-                    catalog_index, fields, second_input, focus, error, preview, envelope,
+                    catalog_index, fields, second_input, focus, error, preview, envelope, list_edit,
                     presets, preset_selected, save_prompt, scroll,
                 }) => {
                     // Enter's default action is Apply (from anywhere, including the preset
@@ -1691,7 +1746,7 @@ impl App {
                         crate::cdp::JobPurpose::Apply
                     };
                     self.dialog = Some(Dialog::CdpParams {
-                        catalog_index, fields, second_input, focus, error, preview, envelope,
+                        catalog_index, fields, second_input, focus, error, preview, envelope, list_edit,
                         presets, preset_selected, save_prompt, scroll,
                     });
                     self.cdp_run(purpose);
@@ -1889,15 +1944,17 @@ impl App {
                 self.cycle_dialog_focus(false)
             }
             KeyCode::Tab => self.cycle_dialog_focus(true),
-            // 'e' opens the breakpoint-curve editor for the focused Number field, but only
-            // when that param is `automatable` (CDP's own constraint — not every param
-            // accepts a .brk file) — checked before the generic accepts-a-char arm below
-            // since a focused Number field's `dialog_accepts` normally rejects 'e' anyway
-            // (digit/minus/dot only), leaving this free to repurpose without a conflict.
+            // 'e' opens the breakpoint-curve editor for a focused automatable Number field,
+            // or the plain-list editor for a focused automatable List field (only one of
+            // the two ever applies to a given field — `open_cdp_envelope_editor` already
+            // returns `false` for a List field since it pattern-matches `CdpField::Number`)
+            // — checked before the generic accepts-a-char arm below since a focused Number
+            // field's `dialog_accepts` normally rejects 'e' anyway (digit/minus/dot only),
+            // leaving this free to repurpose without a conflict.
             KeyCode::Char('e')
                 if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
-                if !self.open_cdp_envelope_editor() && self.dialog_accepts('e') {
+                if !self.open_cdp_envelope_editor() && !self.open_cdp_list_editor() && self.dialog_accepts('e') {
                     if let Some(input) = self.dialog_input() {
                         input.insert('e');
                     }
@@ -2313,6 +2370,7 @@ impl App {
             error: None,
             preview: None,
             envelope: None,
+            list_edit: None,
             presets,
             preset_selected: None,
             save_prompt: None,
@@ -2327,8 +2385,7 @@ impl App {
         let Some(def) = self.cdp_catalog.processes.get(catalog_index) else {
             return (Vec::new(), None);
         };
-        let mut fields: Vec<CdpField> =
-            def.params.iter().map(|p| CdpField::from_default(&p.kind)).collect();
+        let mut fields: Vec<CdpField> = def.params.iter().map(CdpField::from_default).collect();
         // Synthesis processes carry a Sample Rate choice — preselect the option matching
         // the active document so the generated audio splices in at the right speed by
         // default (Apply hard-rejects a mismatch; see tick_cdp). Matched generically by
@@ -2431,6 +2488,204 @@ impl App {
         };
         *dialog_envelope = Some(CdpEnvelopeEdit { field_index, points, selected: 0, original, time_max, range });
         true
+    }
+
+    /// Opens the plain-list editor for whichever `CdpField::List` is currently focused in
+    /// `Dialog::CdpParams` ('e' key) — the `required_list` counterpart to
+    /// `open_cdp_envelope_editor`. Returns `false` (a no-op, falls through to typing 'e' as
+    /// ordinary text) when there's no such dialog, focus isn't on a field, the field isn't a
+    /// List, or the process's own catalog metadata marks that param as not `automatable`.
+    fn open_cdp_list_editor(&mut self) -> bool {
+        let Some(Dialog::CdpParams { catalog_index, fields, focus, .. }) = &self.dialog else {
+            return false;
+        };
+        if *focus == CDP_PRESET_FOCUS {
+            return false;
+        }
+        let field_index = *focus - 1;
+        let Some(CdpField::List { values, .. }) = fields.get(field_index) else {
+            return false;
+        };
+        let Some(def) = self.cdp_catalog.processes.get(*catalog_index) else {
+            return false;
+        };
+        let Some(param) = def.params.get(field_index) else {
+            return false;
+        };
+        if !param.automatable {
+            return false;
+        }
+
+        let is_time_sequence = param.list_is_time_sequence;
+        let idx = self.active_document;
+        let range = self.operation_range(idx, self.snap_to_zero).unwrap_or((0, 0));
+        let time_max = self
+            .documents
+            .get(idx)
+            .map(|doc| (range.1 - range.0) as f64 / doc.sample_rate as f64)
+            .filter(|&d| d > 0.0)
+            .unwrap_or(1.0);
+
+        let original = values.clone();
+        // Never-yet-configured (empty) list: seed one entry at the param's own default
+        // rather than opening on a genuinely empty editor with nothing to select/nudge —
+        // clamped to the real selection's duration for a time-sequence field, so the seed
+        // itself is never already out of the practical range the user is about to nudge
+        // within.
+        let seeded = if original.is_empty() {
+            let crate::model::cdp::ParamKind::Number { default, min, .. } = &param.kind else {
+                unreachable!("required_list param {:?} is not a Number kind", param.name)
+            };
+            let seed_value = if is_time_sequence { default.clamp(*min, time_max) } else { *default };
+            vec![seed_value]
+        } else {
+            original.clone()
+        };
+
+        let Some(Dialog::CdpParams { list_edit: dialog_list_edit, .. }) = self.dialog.as_mut() else {
+            return false;
+        };
+        *dialog_list_edit =
+            Some(CdpListEdit { field_index, values: seeded, selected: 0, original, is_time_sequence, time_max });
+        true
+    }
+
+    /// All key handling while `Dialog::CdpParams.list_edit` is `Some` — the `required_list`
+    /// counterpart to `handle_cdp_envelope_key`, dispatched the same way (checked at the top
+    /// of `handle_dialog_key`, mutually exclusive with the envelope path since a field is
+    /// never both). Left/Right selects an entry; Del/Backspace removes it (kept at a
+    /// minimum of 1 — unlike the envelope editor's 2-point minimum, a single-entry list is
+    /// perfectly meaningful here); Esc discards every edit made this session, Enter commits.
+    ///
+    /// Up/Down and 'n' branch on `edit.is_time_sequence` (`ParamDef.list_is_time_sequence`'s
+    /// doc comment has the full "why," found via a user manually testing this exact editor
+    /// against `grain_reposition` and hitting CDP's real "Sync times out of sequence"
+    /// rejection): for a time-sequence field they're constrained the same way the envelope
+    /// editor's own time-move already is — Up/Down clamps a value between its immediate
+    /// neighbors (never past them, so `values` can't go out of order no matter how it's
+    /// nudged) using the real selection's duration as the practical range instead of the
+    /// catalog's own generous `max`, and 'n' inserts at the midpoint between the selected
+    /// entry and its neighbor (or, with only one entry so far, offset by one `step` from it)
+    /// rather than a flat duplicate, which would create two equal — also rejected — times.
+    /// A non-time-sequence field (e.g. `grain repitch`'s per-grain transpositions) keeps the
+    /// original unconstrained behavior: any order is fine, so Up/Down only clamps to the
+    /// catalog's own `min`/`max` and 'n' duplicates the selected value.
+    fn handle_cdp_list_key(&mut self, key: KeyEvent) {
+        let Some(Dialog::CdpParams { list_edit: Some(edit), fields, .. }) = self.dialog.as_mut() else { return };
+        let field_index = edit.field_index;
+        let Some(CdpField::List { min, max, step, .. }) = fields.get(field_index) else { return };
+        let (min, max, step) = (*min, *max, *step);
+        let committed_values = edit.values.clone();
+        let original = edit.original.clone();
+        // A time-sequence field's practical range is the real selection's duration, not
+        // the catalog's own safety-cap `max` (e.g. "up to 2 hours") — see this fn's doc
+        // comment and `CdpListEdit.time_max`'s.
+        let effective_max = if edit.is_time_sequence { max.min(edit.time_max) } else { max };
+        // Minimum gap enforced between neighboring time-sequence entries so they can never
+        // become exactly equal (also rejected by CDP as "out of sequence") — same constant
+        // the envelope editor's own neighbor-clamped time-move already uses.
+        const MIN_GAP: f64 = 0.001;
+
+        match key.code {
+            KeyCode::Left => {
+                edit.selected = edit.selected.saturating_sub(1);
+                return;
+            }
+            KeyCode::Right => {
+                edit.selected = (edit.selected + 1).min(edit.values.len().saturating_sub(1));
+                return;
+            }
+            KeyCode::Up => {
+                let i = edit.selected;
+                let value_step = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    step
+                } else {
+                    ((effective_max - min) / 40.0).max(step)
+                };
+                if edit.is_time_sequence {
+                    let upper =
+                        if i + 1 == edit.values.len() { effective_max } else { edit.values[i + 1] - MIN_GAP };
+                    edit.values[i] = (edit.values[i] + value_step).min(upper.max(edit.values[i])).max(min);
+                } else {
+                    edit.values[i] = (edit.values[i] + value_step).clamp(min, max);
+                }
+                return;
+            }
+            KeyCode::Down => {
+                let i = edit.selected;
+                let value_step = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    step
+                } else {
+                    ((effective_max - min) / 40.0).max(step)
+                };
+                if edit.is_time_sequence {
+                    let lower = if i == 0 { min } else { edit.values[i - 1] + MIN_GAP };
+                    edit.values[i] = (edit.values[i] - value_step).max(lower.min(edit.values[i])).min(effective_max);
+                } else {
+                    edit.values[i] = (edit.values[i] - value_step).clamp(min, max);
+                }
+                return;
+            }
+            KeyCode::Char('n') => {
+                let i = edit.selected;
+                if edit.is_time_sequence {
+                    if edit.values.len() == 1 {
+                        let new_time = if edit.values[0] + step <= effective_max {
+                            edit.values[0] + step
+                        } else {
+                            (edit.values[0] - step).max(min)
+                        };
+                        if new_time >= edit.values[0] {
+                            edit.values.push(new_time);
+                            edit.selected = 1;
+                        } else {
+                            edit.values.insert(0, new_time);
+                            edit.selected = 0;
+                        }
+                    } else {
+                        let (lo_i, hi_i) = if i + 1 < edit.values.len() { (i, i + 1) } else { (i - 1, i) };
+                        let mid = (edit.values[lo_i] + edit.values[hi_i]) / 2.0;
+                        edit.values.insert(hi_i, mid);
+                        edit.selected = hi_i;
+                    }
+                } else {
+                    let v = edit.values[i];
+                    edit.values.insert(i + 1, v);
+                    edit.selected = i + 1;
+                }
+                return;
+            }
+            KeyCode::Delete | KeyCode::Backspace => {
+                if edit.values.len() > 1 {
+                    edit.values.remove(edit.selected);
+                    edit.selected = edit.selected.min(edit.values.len() - 1);
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        // Only the closing actions (Esc/Enter) reach here — `edit`/`fields` are no longer
+        // borrowed past this point, so `self.dialog` can be freely re-borrowed.
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(Dialog::CdpParams { fields, list_edit, .. }) = self.dialog.as_mut() {
+                    if let Some(CdpField::List { values: field_values, .. }) = fields.get_mut(field_index) {
+                        *field_values = original;
+                    }
+                    *list_edit = None;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(Dialog::CdpParams { fields, list_edit, .. }) = self.dialog.as_mut() {
+                    if let Some(CdpField::List { values: field_values, .. }) = fields.get_mut(field_index) {
+                        *field_values = committed_values;
+                    }
+                    *list_edit = None;
+                }
+            }
+            _ => {}
+        }
     }
 
     /// All key handling while `Dialog::CdpParams.envelope` is `Some` — a completely
@@ -2622,13 +2877,13 @@ impl App {
             (*catalog_index, new_index)
         };
         let Some(def) = self.cdp_catalog.processes.get(catalog_index) else { return };
-        let kinds: Vec<_> = def.params.iter().map(|p| p.kind.clone()).collect();
+        let params = def.params.clone();
 
         let Some(Dialog::CdpParams { presets, preset_selected, fields, .. }) = self.dialog.as_mut() else {
             return;
         };
         let Some(preset) = presets.get(new_index) else { return };
-        *fields = kinds.iter().zip(preset.values.iter()).map(|(k, v)| CdpField::from_value(k, v)).collect();
+        *fields = params.iter().zip(preset.values.iter()).map(|(p, v)| CdpField::from_value(p, v)).collect();
         *preset_selected = Some(new_index);
     }
 
@@ -2805,6 +3060,22 @@ impl App {
                     _ => return Some(i),
                 }
             }
+            // A `required_list` field's `values` is the actual submitted value (`to_value`)
+            // — same reasoning as `required_envelope` above, just for `CdpField::List`
+            // instead: empty means "never configured," which must block Apply/Preview
+            // rather than silently submitting an empty datafile. `handle_cdp_list_key`
+            // already keeps a time-sequence field's `values` ascending by construction, but
+            // a saved preset from before that constraint existed (or a hand-edited config)
+            // could still carry an out-of-order list — checked here too as defense in
+            // depth, since CDP rejects it outright ("Sync times out of sequence").
+            if let CdpField::List { values, .. } = field {
+                if values.is_empty() {
+                    return Some(i);
+                }
+                if param.list_is_time_sequence && values.windows(2).any(|w| w[0] >= w[1]) {
+                    return Some(i);
+                }
+            }
         }
         None
     }
@@ -2830,7 +3101,7 @@ impl App {
         let reopen = |focus: usize, error: String, fields: Vec<CdpField>, second_input: Option<CdpSecondInput>, preview: Option<CdpPreview>, presets: Vec<crate::model::cdp::preset::CdpPreset>, preset_selected: Option<usize>| {
             Dialog::CdpParams {
                 catalog_index, fields, second_input, focus, error: Some(error), preview,
-                envelope: None, presets, preset_selected, save_prompt: None, scroll: 0,
+                envelope: None, list_edit: None, presets, preset_selected, save_prompt: None, scroll: 0,
             }
         };
 
@@ -3096,6 +3367,7 @@ impl App {
                                         sample_rate: output.sample_rate,
                                     }),
                                     envelope: None,
+                                    list_edit: None,
                                     presets: pending.presets,
                                     preset_selected: pending.preset_selected,
                                     save_prompt: None,
@@ -6254,12 +6526,15 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, catalog: &crate
             );
         }
         Dialog::CdpParams {
-            catalog_index, fields, second_input, focus, error, preview, envelope,
+            catalog_index, fields, second_input, focus, error, preview, envelope, list_edit,
             presets, preset_selected, save_prompt, scroll,
         } => {
             let def = catalog.processes.get(*catalog_index);
             if let Some(edit) = envelope {
                 return render_cdp_envelope_editor(frame, area, fields, edit, def);
+            }
+            if let Some(edit) = list_edit {
+                return render_cdp_list_editor(frame, area, fields, edit, def);
             }
             return render_cdp_params_dialog(
                 frame, area, def, fields, second_input.as_ref(), *focus, error, preview,
@@ -6885,6 +7160,94 @@ fn render_cdp_envelope_editor(
     vec![layout.grid]
 }
 
+/// Fixed visible-row count for `render_cdp_list_editor` — a plain scrolling list, no
+/// graphics-mode rendering, so unlike the envelope editor's grid there's no reason to size
+/// it off the terminal beyond a sane fixed cap.
+const CDP_LIST_EDITOR_ROWS: usize = 16;
+
+/// The plain-list editor: one number per row, no time axis or interpolated curve — the
+/// `required_list` counterpart to `render_cdp_envelope_editor`, much simpler since there's
+/// nothing to interpolate between entries (`CdpListEdit`'s doc comment has the key
+/// semantics). Keyboard-only, matching this popup's simplicity — no mouse hit-testing yet.
+fn render_cdp_list_editor(
+    frame: &mut Frame,
+    area: Rect,
+    fields: &[CdpField],
+    edit: &CdpListEdit,
+    def: Option<&crate::model::cdp::ProcessDef>,
+) -> Vec<Rect> {
+    let Some(CdpField::List { min, max, .. }) = fields.get(edit.field_index) else {
+        return Vec::new();
+    };
+    let (min, max) = (*min, *max);
+    let param = def.and_then(|d| d.params.get(edit.field_index));
+    let param_name = param.map(|p| p.name.as_str()).unwrap_or("List");
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+    let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
+
+    let width = 50u16.min(area.width);
+    // header spacer + LIST_ROWS + blank + 2 hint lines, + 2 border.
+    let height = (1 + CDP_LIST_EDITOR_ROWS as u16 + 1 + 2 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let block = Block::default()
+        .title(format!("List: {param_name}"))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    // Fixed at the constant (not clamped to `inner.height`), matching every other fixed-size
+    // CDP popup's convention in this file — a terminal too short simply crops the bottom.
+    let list_rows = CDP_LIST_EDITOR_ROWS;
+    let scroll_top = edit.selected.saturating_sub(list_rows.saturating_sub(1));
+    let mut lines = vec![Line::raw("")];
+    let mut rendered_rows = 0;
+    for (i, &v) in edit.values.iter().enumerate().skip(scroll_top).take(list_rows) {
+        let style = if i == edit.selected { selected_style } else { base };
+        let text = format!(" {:>3}: {}", i + 1, format_cdp_float_for_display(v));
+        lines.push(Line::from(Span::styled(text, style)));
+        rendered_rows += 1;
+    }
+    for _ in rendered_rows..list_rows {
+        lines.push(Line::raw(""));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(" \u{2190}\u{2192}", hint_style),
+        Span::styled(":entry  ", label_style),
+        Span::styled("\u{2191}\u{2193}", hint_style),
+        Span::styled(":value  ", label_style),
+        Span::styled("Shift+\u{2191}\u{2193}", hint_style),
+        Span::styled(":fine value  ", label_style),
+        Span::styled("n", hint_style),
+        Span::styled(":insert  ", label_style),
+        Span::styled("Del", hint_style),
+        Span::styled(":remove", label_style),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" Enter", hint_style),
+        Span::styled(":save  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel  ", label_style),
+        Span::styled(format!("range {}", format_cdp_range(min, max)), dim_style),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+    Vec::new()
+}
+
 /// The unified CDP process browser/params dialog: a Groups column, a searchable Processes
 /// column, and a description column showing the highlighted process's full `description`
 /// (word-wrapped) — see `Dialog::CdpBrowser`'s doc comment for the interaction model.
@@ -7276,6 +7639,19 @@ fn render_cdp_params_dialog(
                     Span::styled(value, base),
                 ])
             }
+            // A `required_list` param has no constant representation either — same
+            // rationale as `required_envelope`'s "(not set)" display above, just for the
+            // list editor (`App::open_cdp_list_editor`) instead of the envelope editor.
+            CdpField::List { values, .. } if values.is_empty() => Line::from(vec![
+                Span::styled(label, label_style_here),
+                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(" (not set — e to edit)", dim_style),
+            ]),
+            CdpField::List { values, .. } => Line::from(vec![
+                Span::styled(label, label_style_here),
+                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(format!(" list ({} items, e to edit)", values.len()), point_style),
+            ]),
         };
         lines.push(line);
     }
@@ -7406,31 +7782,35 @@ fn render_cdp_output_dialog(frame: &mut Frame, area: Rect, title: &str, lines_te
     let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
     let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
 
-    let visible_rows = (popup.height as usize).saturating_sub(4).max(1);
-    let mut rendered: Vec<Line> = vec![Line::raw("")];
-    rendered.extend(
-        lines_text
-            .iter()
-            .skip(scroll)
-            .take(visible_rows)
-            .map(|l| Line::from(Span::styled(format!(" {l}"), base))),
-    );
-    for _ in (rendered.len() - 1)..visible_rows {
-        rendered.push(Line::raw(""));
-    }
-    rendered.push(Line::from(vec![
-        Span::styled(" \u{2191}\u{2193}/PgUp/PgDn", hint_style),
-        Span::styled(":scroll  ", label_style),
-        Span::styled("Enter/Esc", hint_style),
-        Span::styled(":close", label_style),
-    ]));
-
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
-    frame.render_widget(Paragraph::new(rendered).block(block), popup);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    // A CDP error line easily runs well past this popup's width (e.g. "Parameter[3] Value
+    // (...) out of range (...)") — word-wrapped via ratatui's own `Wrap`, with `.scroll`
+    // driving it by *rendered* row rather than re-wrapping by hand. The last row is
+    // reserved for the hints bar, which never scrolls with the content.
+    let text_area = Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(2), height: inner.height.saturating_sub(1) };
+    let hints_area = Rect { x: inner.x, y: inner.y + text_area.height, width: inner.width, height: 1 };
+
+    let content: Vec<Line> = lines_text.iter().map(|l| Line::from(Span::styled(l.as_str(), base))).collect();
+    frame.render_widget(
+        Paragraph::new(content).wrap(Wrap { trim: false }).scroll((scroll as u16, 0)),
+        text_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" \u{2191}\u{2193}/PgUp/PgDn", hint_style),
+            Span::styled(":scroll  ", label_style),
+            Span::styled("Enter/Esc", hint_style),
+            Span::styled(":close", label_style),
+        ])),
+        hints_area,
+    );
     Vec::new()
 }
 
@@ -8205,6 +8585,192 @@ mod tests {
         );
     }
 
+    /// Opens `Dialog::CdpParams` for `grain_reposition`, focused on its one
+    /// `required_list` field — the shared setup for the `CdpField::List` tests below
+    /// (CDP-Ext-Plan.md Phase 3's plain-list shape).
+    fn open_grain_reposition_with_field_focused(app: &mut App) {
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "grain_reposition")
+            .expect("grain_reposition should be in the catalog");
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = 1;
+        }
+    }
+
+    /// A fresh `required_list` field starts with an empty list (not a constant, not a
+    /// pre-seeded entry) — genuinely "not configured yet" until the user opens the editor
+    /// once, matching the render-side "(not set — e to edit)" display.
+    #[test]
+    fn required_list_field_starts_unset() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_grain_reposition_with_field_focused(&mut app);
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::List { values, .. }) = fields.first() else { panic!("expected a List field") };
+        assert!(values.is_empty());
+    }
+
+    /// Apply/Preview must be blocked with a validation error while a `required_list` field
+    /// is still unset (empty) — mirrors `apply_is_blocked_until_a_required_envelope_field_is_set`.
+    #[test]
+    fn apply_is_blocked_until_a_required_list_field_is_set() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_grain_reposition_with_field_focused(&mut app);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { error, focus, .. }) = &app.dialog else {
+            panic!("expected CdpParams still open after a blocked Apply");
+        };
+        assert!(error.is_some(), "an unset required_list field should block Apply with an error");
+        assert_eq!(*focus, 1, "should focus the offending field");
+    }
+
+    /// 'e' on a never-opened `required_list` field seeds exactly one entry at the param's
+    /// default value — unlike `required_envelope`'s 3-point seeding, a plain list has no
+    /// known pathological-on-N-entries CDP behavior to sidestep, so there's no reason to
+    /// seed more than one.
+    #[test]
+    fn opening_a_required_list_field_seeds_one_entry_at_default() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_grain_reposition_with_field_focused(&mut app);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { list_edit: Some(edit), .. }) = &app.dialog else {
+            panic!("expected the list editor to be open");
+        };
+        assert_eq!(edit.values.len(), 1);
+    }
+
+    /// Regression test for a real bug found by manual testing: submitting `grain_reposition`
+    /// with out-of-order onset times ("2700.0, 1800.0") crashed with CDP's own "Sync times
+    /// out of sequence" error. `grain_reposition`'s "Grain Onset Times" is a time-sequence
+    /// list (`ParamDef.list_is_time_sequence`) — Up must never nudge an entry past its next
+    /// neighbor, no matter how many times it's pressed.
+    #[test]
+    fn time_sequence_up_nudge_cannot_cross_the_next_entry() {
+        let mut app = new_app(Some(doc(1.0, 44100)), None);
+        open_grain_reposition_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)); // now 2 entries
+        let Some(Dialog::CdpParams { list_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.values.len(), 2);
+        assert_eq!(edit.selected, 1, "'n' should select the newly inserted (later) entry");
+
+        // Select the first (earlier) entry and hammer Up on it — it must approach but never
+        // reach or cross the second entry's value.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        for _ in 0..200 {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        }
+
+        let Some(Dialog::CdpParams { list_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert!(
+            edit.values[0] < edit.values[1],
+            "first entry ({}) must stay strictly before the second ({})",
+            edit.values[0],
+            edit.values[1]
+        );
+
+        // Committing and validating must therefore never trip the ascending-order check.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let def = app.cdp_catalog.processes.iter().find(|p| p.key == "grain_reposition").unwrap();
+        assert!(App::cdp_validate_fields(def, fields).is_none());
+    }
+
+    /// Regression test for the other half of the same manual-testing bug report: the coarse
+    /// Up/Down nudge step for a time-sequence field must scale off the real selection's
+    /// duration, not the catalog's own generous safety-cap `max` (`grain_reposition`'s
+    /// "Grain Onset Times" allows up to 7200s so long *files* aren't artificially capped —
+    /// but a coarse step sized off that cap alone jumps by ~180s per press, useless and
+    /// immediately out-of-range-feeling against a short real selection).
+    #[test]
+    fn time_sequence_coarse_nudge_scales_with_selection_duration_not_catalog_max() {
+        let mut app = new_app(Some(doc(2.0, 44100)), None); // a short, 2-second selection
+        open_grain_reposition_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { list_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert!(
+            edit.values[0] < 1.0,
+            "one coarse Up on a 2s selection should move well under a second, not the \
+             catalog max's ~180s-per-press (got {})",
+            edit.values[0]
+        );
+    }
+
+    /// 'n' inserts a duplicate of the selected entry right after it; Del removes the
+    /// selected entry, kept at a minimum of 1 (unlike the envelope editor's 2-point
+    /// minimum — a single-entry list is meaningful here).
+    #[test]
+    fn list_editor_insert_and_delete_entries() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_grain_reposition_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { list_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.values.len(), 2, "'n' should insert a duplicate entry");
+        assert_eq!(edit.selected, 1, "'n' should select the newly inserted entry");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { list_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.values.len(), 1, "Del should remove the selected entry");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { list_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.values.len(), 1, "Del must not remove the last remaining entry");
+    }
+
+    /// Esc discards every edit made in the session, restoring the field to an empty list
+    /// (its state before the editor was ever opened) — mirrors
+    /// `esc_discards_envelope_edits_and_restores_constant_mode`.
+    #[test]
+    fn esc_discards_list_edits() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_grain_reposition_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { list_edit, fields, .. }) = &app.dialog else {
+            panic!("expected CdpParams to still be open (Esc closes the editor, not the dialog)");
+        };
+        assert!(list_edit.is_none(), "editor should be closed");
+        let Some(CdpField::List { values, .. }) = fields.first() else { panic!("expected a List field") };
+        assert!(values.is_empty(), "field must revert to its pre-edit (unset) state after Esc");
+    }
+
+    /// Once the user has opened the editor and committed at least one entry (Enter inside
+    /// the editor), the field is a valid `List` value and Apply is no longer blocked by it.
+    #[test]
+    fn setting_a_required_list_field_unblocks_apply() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_grain_reposition_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // commit
+
+        let Some(Dialog::CdpParams { fields, list_edit, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(list_edit.is_none(), "editor should be closed after commit");
+        let Some(CdpField::List { values, .. }) = fields.first() else { panic!("expected a List field") };
+        assert!(!values.is_empty(), "committing the editor should set the field's list");
+
+        let def = app.cdp_catalog.processes.iter().find(|p| p.key == "grain_reposition").unwrap();
+        assert!(
+            App::cdp_validate_fields(def, fields).is_none(),
+            "a set required_list field should no longer block validation"
+        );
+    }
+
     /// `interp_cdp_envelope` is exactly CDP's own breakpoint semantics: piecewise-linear
     /// between points, clamped flat outside their time range.
     #[test]
@@ -8605,6 +9171,7 @@ mod tests {
             glob_output: Some(crate::model::cdp::pipeline::GlobOutputSpec { prefix: "g".into() }),
             brk_files: Vec::new(),
             deferred_window_params: Vec::new(),
+            needs_simple_wav_input: false,
         };
         app.cdp_runner.submit(crate::cdp::Job {
             id: 42,
@@ -8868,6 +9435,7 @@ mod tests {
             glob_output: None,
             brk_files: Vec::new(),
             deferred_window_params: Vec::new(),
+            needs_simple_wav_input: false,
         };
         app.cdp_runner.submit(crate::cdp::Job {
             id: 99,

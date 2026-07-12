@@ -169,6 +169,16 @@ fn run_job_body(
 }
 
 fn write_inputs(job: &Job, temp_dir: &Path) -> Result<(), CdpError> {
+    // `hound` (our WAV library) writes the WAVE_FORMAT_EXTENSIBLE header for any file with
+    // `bits_per_sample > 16` — i.e. every input file this app normally sends CDP, since
+    // Float32 is the working format. A few older binaries can't correctly parse that header
+    // (`ProcessDef.requires_simple_wav_input`'s doc comment has the full story — found via
+    // `rmverb` silently corrupting audio, not erroring); for those, write plain 16-bit
+    // integer PCM instead, which is exactly the condition under which hound uses the
+    // simple, non-extensible `fmt ` chunk (`channels <= 2 && bits_per_sample <= 16`, true
+    // for every job this app ever plans — mono or stereo).
+    let bit_depth =
+        if job.planned.needs_simple_wav_input { BitDepth::Int16 } else { BitDepth::Float32 };
     for spec in &job.planned.input_files {
         let source = job.inputs.get(spec.input_index).map(Vec::as_slice).unwrap_or(&[]);
         let channels: Vec<Vec<f32>> = spec
@@ -178,7 +188,7 @@ fn write_inputs(job: &Job, temp_dir: &Path) -> Result<(), CdpError> {
             .collect();
         let doc = Document { channels, sample_rate: job.input_sample_rate, ..Default::default() };
         let path = temp_dir.join(&spec.relative_name);
-        save_wav_with(&doc, &path, BitDepth::Float32, false).map_err(|e| CdpError::Spawn {
+        save_wav_with(&doc, &path, bit_depth, false).map_err(|e| CdpError::Spawn {
             step: format!("write {}", spec.relative_name),
             message: e.to_string(),
         })?;
@@ -425,6 +435,7 @@ mod tests {
             glob_output: None,
             brk_files: Vec::new(),
             deferred_window_params: Vec::new(),
+            needs_simple_wav_input: false,
         }
     }
 
@@ -488,6 +499,7 @@ mod tests {
             glob_output: Some(crate::model::cdp::pipeline::GlobOutputSpec { prefix: "cutout".into() }),
             brk_files: Vec::new(),
             deferred_window_params: Vec::new(),
+            needs_simple_wav_input: false,
         };
 
         let runner = CdpRunner::new();
@@ -717,6 +729,141 @@ mod tests {
         assert_eq!(output.sample_rate, sample_rate);
         let ratio = output.results[0][0].len() as f64 / len_samples as f64;
         assert!((ratio - 1.0).abs() < 0.1, "expected ~same duration after pvoc round-trip, got ratio {ratio}");
+    }
+
+    /// Regression test for a real bug found by manual testing: `grain_reposition`'s (and
+    /// its sibling grain processes') "Max Inter-Grain Time"/"Min Hole Duration"/"Gate
+    /// Tracking Window" params have valid ranges CDP computes from the actual input's
+    /// duration at runtime, not the fixed literal ranges the catalog originally declared —
+    /// confirmed by hand against the real binary (e.g. "-b1.0" rejected as "out of range
+    /// (0.100000 to 0.200000)" against a genuinely short ~0.2s selection). The 1-second
+    /// fixture every other smoke test in this file uses happened to land right at the edge
+    /// of validity for the old static range, masking the bug — this one deliberately uses a
+    /// much shorter slice to actually exercise it, through the real pipeline/runner, not
+    /// just a manual CDP CLI probe.
+    #[test]
+    fn grain_reposition_succeeds_on_a_genuinely_short_selection() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        // This exact length ("out of range (0.1 to 0.2)") reproduced the bug being
+        // regression-tested here.
+        let short_len = (sample_rate as f64 * 0.2) as usize;
+        let short_channels: Vec<Vec<f32>> =
+            channels.into_iter().map(|c| c[..short_len.min(c.len())].to_vec()).collect();
+        let len_samples = short_channels[0].len();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("grain_reposition").expect("grain_reposition in catalog");
+
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let values: Vec<_> = def
+            .params
+            .iter()
+            .map(|p| {
+                if p.required_list {
+                    let crate::model::cdp::ParamKind::Number { default, .. } = &p.kind else {
+                        unreachable!()
+                    };
+                    crate::model::cdp::ParamValue::List(vec![*default])
+                } else {
+                    p.kind.default_value()
+                }
+            })
+            .collect();
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            std::slice::from_ref(&input),
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 102,
+            cdp_dir,
+            planned,
+            inputs: vec![short_channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(10)) else {
+            unreachable!()
+        };
+        result.expect("grain_reposition should succeed on a genuinely short selection with its own default field values");
+    }
+
+    /// Regression test for a real, silent-data-loss bug found while researching a *new*
+    /// catalog entry (`reverb`) but affecting an already-shipped one (`rmverb`, SoundThread-
+    /// derived): both processes' own `-cN` flag defaults to `N=2`, meaning they emit a real
+    /// stereo output *even from a mono input* — confirmed against the real binary. `plan_wav`
+    /// used to set a `stereo_native` process's destination channel count to always match the
+    /// *source's* channel count (`dest_channels = source_channels.clone()`), so a mono
+    /// input's `dest_channels` was `[0]` — `load_outputs` then only ever read that one
+    /// channel back out of a genuinely 2-channel result file, silently discarding the whole
+    /// right channel with no error. Fixed by keying `dest_channels` off `def.output_is_stereo`
+    /// instead. This test drives `rmverb` on a mono fixture and asserts the real output has
+    /// both channels with actual (non-silent) content in each.
+    #[test]
+    fn rmverb_on_mono_input_returns_both_channels_of_its_real_stereo_output() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("rmverb").expect("rmverb in catalog");
+
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            std::slice::from_ref(&input),
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 103,
+            cdp_dir,
+            planned,
+            inputs: vec![channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(30)) else {
+            unreachable!()
+        };
+        let output = result.expect("rmverb should succeed on a real CDP install");
+        assert_eq!(output.results.len(), 1);
+        assert_eq!(output.results[0].len(), 2, "rmverb's real output is stereo even from a mono input");
+        for (i, channel) in output.results[0].iter().enumerate() {
+            assert!(
+                channel.iter().any(|&s| s.abs() > 0.001),
+                "channel {i} should have real audio, not be silently dropped/left empty"
+            );
+            // Guards against the `requires_simple_wav_input` regression this test was written
+            // for: rmverb misreading our WAVE_FORMAT_EXTENSIBLE float32 input as raw int32
+            // samples, which didn't fail the run (exit 0, non-empty output) but silently
+            // corrupted it into a DC-step-then-flatline pattern -- caught here as an
+            // implausibly large single-sample jump plus a channel that's mostly flat, neither
+            // of which a real reverb tail on a smooth sine input produces.
+            let max_delta = channel.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
+            assert!(
+                max_delta < 0.5,
+                "channel {i} has an implausibly large sample-to-sample jump ({max_delta}), looks like corrupted/misdecoded audio"
+            );
+            let flat_fraction =
+                channel.windows(2).filter(|w| w[0] == w[1]).count() as f64 / channel.len() as f64;
+            assert!(
+                flat_fraction < 0.5,
+                "channel {i} is mostly flat ({:.0}% unchanged samples), looks like corrupted/misdecoded audio",
+                flat_fraction * 100.0
+            );
+        }
     }
 
     fn stereo_sine_channels() -> (Vec<Vec<f32>>, u32) {
@@ -999,6 +1146,16 @@ mod tests {
                             (duration_secs / 2.0, bumped.clamp(*min, *max)),
                             (duration_secs, *default),
                         ])
+                    } else if p.required_list {
+                        // Mirrors `App::open_cdp_list_editor`'s own never-opened seeding: a
+                        // single entry at the param's own default value — plain lists have
+                        // no known analogue of the required_envelope hang above (no reports,
+                        // no interpolation to go pathological on), so unlike the branch
+                        // above there's no reason to seed more than one entry here.
+                        let crate::model::cdp::ParamKind::Number { default, .. } = &p.kind else {
+                            panic!("{}: required_list param {:?} is not a Number kind", def.key, p.name);
+                        };
+                        crate::model::cdp::ParamValue::List(vec![*default])
                     } else {
                         p.kind.default_value()
                     }
