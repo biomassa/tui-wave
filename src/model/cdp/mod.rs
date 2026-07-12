@@ -8,5 +8,5 @@ pub mod preset;
 pub mod recent;
 
 pub use catalog::CdpCatalog;
-pub use def::{IoKind, ParamKind, ParamValue, ProcessDef};
+pub use def::{IoKind, ParamDef, ParamKind, ParamValue, ProcessDef};
 pub use pipeline::{plan_job, InputSpec, PlanError, PvocSettings};

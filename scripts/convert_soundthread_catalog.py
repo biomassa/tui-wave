@@ -96,6 +96,18 @@ def resolve_subcategory(key, raw_subcategory):
     return SUBCATEGORY_REMAP.get(raw_subcategory, raw_subcategory)
 
 
+# Processes whose binary can't correctly parse the WAVE_FORMAT_EXTENSIBLE WAV header this
+# app's runner normally writes for its 32-bit-float working format -- `write_inputs`
+# (src/cdp/runner.rs) writes plain 16-bit integer PCM instead for these, trading a small
+# amount of precision for correctness. See ProcessDef.requires_simple_wav_input's doc
+# comment in src/model/cdp/def.rs for the full story: found via `rmverb` silently
+# misreading float sample bytes as integers and producing wildly distorted (not erroring)
+# output -- a user manually testing the process caught it, since neither the smoke test
+# (checks exit code + non-empty file, not audio *content*) nor a routine listen would
+# obviously reveal a "successful" job with garbage samples.
+REQUIRES_SIMPLE_WAV_INPUT = {"rmverb"}
+
+
 def split_key(key, known_bins):
     """Splits a SoundThread key like "modify_speed_2" into (bin, subprog, mode).
 
@@ -199,6 +211,7 @@ def convert_process(key, entry, known_bins):
         "output": INPUT_OUTPUT_KIND[entry.get("outputtype", "")],
         "stereo_native": bool(entry.get("stereo", False)),
         "output_is_stereo": bool(entry.get("outputisstereo", False)),
+        "requires_simple_wav_input": key in REQUIRES_SIMPLE_WAV_INPUT,
         "params": [c for p in params_in_order if (c := convert_param(p)) is not None],
     }
 
@@ -265,6 +278,12 @@ def write_process_table(lines, proc):
         if value is None:
             continue
         lines.append(f"{field} = {toml_value(value)}")
+    # Rust's #[serde(default)] means omitting this (false) is equivalent to writing it --
+    # only emit it for the handful of processes that actually need it, so the generated
+    # TOML doesn't grow a `requires_simple_wav_input = false` line on every one of the other
+    # ~120 entries.
+    if proc["requires_simple_wav_input"]:
+        lines.append(f"requires_simple_wav_input = {toml_value(True)}")
     lines.append("")
     for param in proc["params"]:
         write_param_table(lines, param)
