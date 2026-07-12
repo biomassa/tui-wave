@@ -140,6 +140,11 @@ pub struct PlannedJob {
     pub glob_output: Option<GlobOutputSpec>,
     pub brk_files: Vec<(String, String)>,
     pub deferred_window_params: Vec<DeferredWindowParam>,
+    /// Copied straight from `ProcessDef.requires_simple_wav_input` — carried on the planned
+    /// job (rather than the runner needing the `ProcessDef` again) so `cdp::runner`'s
+    /// `write_inputs` knows to write plain 16-bit integer PCM instead of the normal 32-bit
+    /// float for this one job's input file(s). See that field's doc comment for why.
+    pub needs_simple_wav_input: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -230,6 +235,13 @@ fn scale_number_value(scale: NumberScale, raw: f64, duration_secs: f64, pvoc: &P
         NumberScale::PercentOfAnaWindowCount => {
             unreachable!("PercentOfAnaWindowCount is deferred, never resolved here")
         }
+        // Same small safety margin `PercentOfInputDuration`'s 100% case already uses, for
+        // the same reason: dodges CDP rejecting a value exactly equal to the file's own
+        // duration due to rounding. Left below the catalog's own literal `min` (a genuine
+        // CDP-enforced floor, independent of duration) is not this scale's job to protect —
+        // a selection shorter than that floor has no valid value at all, which is an
+        // inherent CDP limitation for very short selections, not something to work around.
+        NumberScale::CappedAtInputDuration => raw.min((duration_secs - 0.01).max(0.0)),
     }
 }
 
@@ -319,6 +331,25 @@ fn plan_param(
                     ParamPlan { arg: format_arg(&param.flag, &relative_name), deferred: None }
                 }
             }
+        }
+        // A plain ordered list (no time axis) — one number per line, same "extra text file
+        // written to the temp dir, argv token is its filename" mechanism `brk_files`
+        // already provides for `Breakpoints`, just without the paired time column. None of
+        // the catalog's `required_list` params today use `PercentOfAnaWindowCount`, so
+        // unlike `Breakpoints` above this doesn't need a deferred-rewrite path — every
+        // scale resolves outright via `scale_number_value`.
+        ParamValue::List(values) => {
+            let super::def::ParamKind::Number { scale, .. } = &param.kind else {
+                unreachable!("List value paired with non-Number ParamKind")
+            };
+            let relative_name = format!("list_{brk_index}.txt");
+            let contents = values
+                .iter()
+                .map(|&v| format_number(scale_number_value(*scale, v, duration_secs, pvoc)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            brk_files.push((relative_name.clone(), contents));
+            ParamPlan { arg: format_arg(&param.flag, &relative_name), deferred: None }
         }
     }
 }
@@ -484,6 +515,7 @@ fn plan_wav_glob(
         glob_output: Some(GlobOutputSpec { prefix }),
         brk_files,
         deferred_window_params: Vec::new(),
+        needs_simple_wav_input: def.requires_simple_wav_input,
     })
 }
 
@@ -510,6 +542,7 @@ fn plan_synthesis(
         brk_files,
         glob_output: None,
         deferred_window_params: Vec::new(),
+        needs_simple_wav_input: def.requires_simple_wav_input,
     })
 }
 
@@ -527,7 +560,18 @@ fn plan_wav(
         let (args, deferred) =
             build_process_args(def, values, &["in.wav"], "out.wav", duration, pvoc, &mut brk_files)?;
         debug_assert!(deferred.is_empty(), "wav processes never carry ana-window-count params");
-        let dest_channels = source_channels.clone();
+        // A `stereo_native` process's real output channel count is `def.output_is_stereo`,
+        // not necessarily the *input's* channel count — e.g. `rmverb`/`reverb` always emit
+        // stereo (their own `-cN` flag defaults to 2) even from a mono input, since a
+        // reverb's two output channels are independently-generated room reflections, not a
+        // copy of a single input channel. Read literally as `source_channels.clone()`
+        // (this fn's original behavior, correct for the vastly more common case where a
+        // channel-preserving process's input and output channel counts always match), a
+        // mono input into `rmverb` silently dropped its whole right channel — `load_outputs`
+        // only ever reads as many of the real output file's channels as `dest_channels` has
+        // entries. For an already-stereo input this is a no-op (`source_channels` is
+        // already `[0, 1]`, identical to what this produces).
+        let dest_channels = if def.output_is_stereo { vec![0, 1] } else { source_channels.clone() };
         return Ok(PlannedJob {
             steps: vec![Invocation {
                 bin: def.bin.clone(),
@@ -544,6 +588,7 @@ fn plan_wav(
             brk_files,
             glob_output: None,
         deferred_window_params: Vec::new(),
+        needs_simple_wav_input: def.requires_simple_wav_input,
         });
     }
 
@@ -570,7 +615,7 @@ fn plan_wav(
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, brk_files, deferred_window_params: Vec::new() })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, brk_files, deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 /// Dual-input time-domain process: `bin subprog [mode] inA inB out params...`. Lanes work
@@ -626,6 +671,7 @@ fn plan_dual_wav(
             brk_files,
             glob_output: None,
         deferred_window_params: Vec::new(),
+        needs_simple_wav_input: def.requires_simple_wav_input,
         });
     }
 
@@ -661,7 +707,7 @@ fn plan_dual_wav(
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, brk_files, deferred_window_params: Vec::new() })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, brk_files, deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 /// Dual-input spectral process: per channel lane, `pvoc anal` both inputs, run the process
@@ -744,7 +790,7 @@ fn plan_dual_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, brk_files, deferred_window_params: Vec::new() })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, brk_files, deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 fn plan_ana(
@@ -818,7 +864,7 @@ fn plan_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, brk_files, deferred_window_params })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, brk_files, deferred_window_params, needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 #[cfg(test)]
@@ -833,6 +879,8 @@ mod tests {
             flag: None,
             automatable: false,
             required_envelope: false,
+            required_list: false,
+            list_is_time_sequence: false,
             kind: ParamKind::Number { min, max, step: 1.0, default, exponential: false, scale },
         }
     }
@@ -852,6 +900,7 @@ mod tests {
             output,
             stereo_native: false,
             output_is_stereo: false,
+            requires_simple_wav_input: false,
             params: vec![number_param("Speed", -96.0, 96.0, 0.0, NumberScale::Plain)],
         }
     }
@@ -958,6 +1007,8 @@ mod tests {
                 flag: Some("-x".into()),
                 automatable: false,
                 required_envelope: false,
+                required_list: false,
+                list_is_time_sequence: false,
                 kind: ParamKind::Toggle { default: false },
             },
             ParamDef {
@@ -966,6 +1017,8 @@ mod tests {
                 flag: None,
                 automatable: false,
                 required_envelope: false,
+                required_list: false,
+                list_is_time_sequence: false,
                 kind: ParamKind::Choice { options: vec!["44100".into(), "48000".into()], default: 0 },
             },
         ];
@@ -1123,6 +1176,8 @@ mod tests {
             flag: Some("-f".into()),
             automatable: true,
             required_envelope: false,
+            required_list: false,
+            list_is_time_sequence: false,
             kind: ParamKind::Number {
                 min: 0.0,
                 max: 2.0,

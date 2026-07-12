@@ -48,6 +48,19 @@ pub enum NumberScale {
     PercentOfFftSize,
     PercentOfAnaWindowCount,
     OutputDurationSeconds,
+    /// The raw literal value (already in the param's real unit — seconds, unlike
+    /// `PercentOfInputDuration`'s 0-100 slider), clamped down to just under the real
+    /// selection's duration if it would otherwise exceed it — the catalog's own `min`/`max`
+    /// stay literal (a genuine fixed floor CDP enforces independent of duration, and a
+    /// generous outer safety cap respectively), only the *effective ceiling* tightens per
+    /// selection. Found via a user manually testing `grain reposition`'s "Max Inter-Grain
+    /// Time" (`-b`): CDP rejects any value greater than the actual input's duration with
+    /// "Value (...) out of range (0.1 to <duration>)" — a genuinely data-dependent
+    /// constraint (confirmed against the real binary across several file lengths: the
+    /// upper bound tracked the file's own duration exactly every time, unrelated to the
+    /// catalog's static `max`), not a fixed range this catalog can declare once and reuse
+    /// unchanged across every selection the way `Plain` params can.
+    CappedAtInputDuration,
 }
 
 /// A concrete value for one parameter, as edited in the UI. Also the shape a saved CDP
@@ -62,6 +75,13 @@ pub enum ParamValue {
     Toggle(bool),
     Choice(usize),
     Breakpoints(Vec<(f64, f64)>),
+    /// A plain ordered list of numbers, one per line in the datafile CDP reads — no time
+    /// axis, unlike `Breakpoints` (see `ParamDef::required_list`'s doc comment for the
+    /// real processes this covers: a list of grain-onset *times*, or a list of per-grain
+    /// transposition/multiplier *values* — mechanically the same file shape either way,
+    /// differing only in what the numbers mean, which lives in the param's own
+    /// name/description rather than the type).
+    List(Vec<f64>),
 }
 
 /// The shape of one parameter: its range/default for a slider, or its set of named options.
@@ -128,6 +148,40 @@ pub struct ParamDef {
     /// key is a no-op for it (`App::handle_cdp_envelope_key`).
     #[serde(default)]
     pub required_envelope: bool,
+    /// True for a parameter whose CDP argument syntax is *always* a plain ordered-list
+    /// datafile (one number per line, no time axis) — never a bare constant. Covers two
+    /// real shapes that happen to share one file format: a list of *times* (e.g. `grain
+    /// reposition`'s TIMEFILE, `stutter`'s DATAFILE) and a list of per-element *values*
+    /// (e.g. `grain repitch`'s TRANSPFILE, `grain rerhythm`'s MULTFILE) — see
+    /// CDP-Ext-Plan.md Phase 3's "plain time-list"/"plain value-list" shapes. Mutually
+    /// exclusive with `required_envelope` on the same param (one param is either a
+    /// breakpoint-pairs field or a plain-list field, never both) — mirrors that flag's
+    /// shape exactly: every `required_list` param must also set `automatable = true`
+    /// (reusing the existing 'e'-key gate, this time to open the list editor instead of
+    /// the envelope editor — `App::open_cdp_list_editor`), starts with no list yet
+    /// (`CdpField::List`'s `values` empty), and blocks Apply/Preview until the user has
+    /// set at least one entry (`App::cdp_validate_fields`).
+    #[serde(default)]
+    pub required_list: bool,
+    /// Only meaningful when `required_list` is also true: whether the list's entries are
+    /// audio-position *times* that CDP requires to stay strictly ascending (e.g. `grain
+    /// reposition`'s TIMEFILE, `stutter`'s DATAFILE — confirmed against the real binary,
+    /// which rejects an out-of-order list with "Sync times out of sequence") as opposed to
+    /// per-element *values* with no ordering constraint (e.g. `grain repitch`'s
+    /// TRANSPFILE — transpositions applied to successive grains in whatever order the user
+    /// wants). When true, `App::handle_cdp_list_key`'s Up/Down nudge clamps a time entry
+    /// between its immediate neighbors (mirroring the envelope editor's neighbor-clamped
+    /// time-move) instead of the field's full `min`/`max`, 'n' inserts a new entry at the
+    /// midpoint between the selected entry and its neighbor (instead of a flat duplicate,
+    /// which would create two equal — also rejected — times), and the practical nudge
+    /// range/step is bound by the actual selection's duration rather than the catalog's
+    /// own (necessarily generous, e.g. "up to 2 hours") `max` — the catalog `max` stays a
+    /// hard safety cap, but the *usable* range for a specific selection is almost always
+    /// far smaller than that cap, and a coarse nudge step sized off the cap alone (as a
+    /// non-time value-list's is) produces jumps of hundreds of seconds that are useless for
+    /// picking a real position in a short file.
+    #[serde(default)]
+    pub list_is_time_sequence: bool,
     #[serde(flatten)]
     pub kind: ParamKind,
 }
@@ -163,6 +217,28 @@ pub struct ProcessDef {
     /// once per channel.
     pub stereo_native: bool,
     pub output_is_stereo: bool,
+    /// True for a process whose binary can't correctly read the `WAVE_FORMAT_EXTENSIBLE`
+    /// WAV header `hound` (this project's WAV library) writes for any file with
+    /// `bits_per_sample > 16` — which is every input file this app ever sends CDP, since
+    /// the runner's normal working format is 32-bit float. Found by hand (`rmverb`,
+    /// SoundThread-derived, already shipped): the *symptom* wasn't a clean error — the
+    /// binary silently misread the float samples' raw bytes as if they were 32-bit
+    /// integers, producing wildly wrong ("distorted") audio with no error at all, discovered
+    /// by dumping and comparing raw sample values between our pipeline's output and a
+    /// direct CDP CLI run on a plain 16-bit input (which produced a clean, correct result).
+    /// `reverb` (a sibling, never-shipped process — see `catalog_extra.toml`'s removal
+    /// note) hit the same root cause but failed loudly instead ("cannot open output file"),
+    /// which is how the incompatibility was first found. Most of the catalog's ~200 other
+    /// processes tolerate the extensible header fine (confirmed via the smoke test, though
+    /// that only checks exit code — it can't catch *silent* corruption the way this one
+    /// slipped through), so this is a per-process opt-in rather than a global format
+    /// change: `App`/`cdp::runner`'s `write_inputs` writes this process's input as plain
+    /// 16-bit integer PCM instead (channels ≤ 2 and bits ≤ 16 are exactly the condition
+    /// under which `hound` uses the simple, non-extensible `fmt ` chunk), trading a small,
+    /// CDP-processing-scale amount of precision for correctness on the processes that need
+    /// it, without touching the float32 precision every other process still gets.
+    #[serde(default)]
+    pub requires_simple_wav_input: bool,
     /// Ordered — this order is exactly the order these values appear as positional
     /// arguments on the CDP command line (flagged params are still emitted in this order,
     /// just as `-x<value>` tokens instead of bare ones). A process with no parameters emits
@@ -183,6 +259,8 @@ mod tests {
             flag: None,
             automatable: true,
             required_envelope: false,
+            required_list: false,
+            list_is_time_sequence: false,
             kind: ParamKind::Number {
                 min: 2.0,
                 max: 64.0,
@@ -210,6 +288,7 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: false,
+            requires_simple_wav_input: false,
             params: vec![sample_number()],
         };
 
@@ -226,6 +305,8 @@ mod tests {
             flag: Some("-x".into()),
             automatable: false,
             required_envelope: false,
+            required_list: false,
+            list_is_time_sequence: false,
             kind: ParamKind::Toggle { default: false },
         };
         let choice = ParamDef {
@@ -234,6 +315,8 @@ mod tests {
             flag: None,
             automatable: false,
             required_envelope: false,
+            required_list: false,
+            list_is_time_sequence: false,
             kind: ParamKind::Choice {
                 options: vec!["44100".into(), "48000".into()],
                 default: 0,
@@ -253,6 +336,7 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: false,
+            requires_simple_wav_input: false,
             params: vec![toggle, choice],
         };
 

@@ -4295,3 +4295,671 @@ default = false
 # an unconsumed positional, one slot further out each time an extra positional is added).
 # Usage-text/binary mismatch, not a tui-wave argv-shape bug -- revisit if a later CDP
 # release fixes or documents the real requirement.
+
+# ---- Tier 1b batch 2 (2026-07-10): first required_list processes ----
+# See CDP-Ext-Plan.md Phase 3 -- these are the first catalog entries whose only "value" IS
+# a plain ordered-number-list textfile (no time axis, unlike the required_envelope batch
+# above), the ParamDef.required_list capability. Confirmed against the real CDP binaries'
+# own usage text before authoring.
+
+[[process]]
+key = "grain_reposition"
+bin = "grain"
+subprog = "reposition"
+title = "Reposition"
+category = "time"
+subcategory = "texture"
+short_description = "Repositions a grainy sound's grain onsets to a specified list of times"
+description = """
+Repositions the onsets of grains detected in the source at a list of specified times, \
+reshaping the sound's rhythm without altering the grains themselves. An inter-grain time \
+reduced below 0.032s by the new positions is clamped up to that minimum.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Grain Onset Times"
+description = "Ordered list of times (seconds) each grain's onset is repositioned to; must stay strictly ascending"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Offset"
+description = "Value (seconds) added to every grain timing after repositioning"
+automatable = false
+kind = "number"
+min = -60.0
+max = 60.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Inter-Grain Time"
+description = "Maximum time gap between detected grains (CDP additionally caps this at the selection's own duration, with a fixed 0.1s floor)"
+flag = "-b"
+automatable = false
+kind = "number"
+min = 0.1
+max = 5.0
+step = 0.01
+default = 0.5
+exponential = true
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Gate Level"
+description = "Minimum signal level for a grain to be detected"
+flag = "-l"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Hole Duration"
+description = "Minimum duration of a silent hole between grains (CDP additionally caps this at the selection's own duration)"
+flag = "-h"
+automatable = false
+kind = "number"
+min = 0.032
+max = 1.0
+step = 0.001
+default = 0.032
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Gate Tracking Window"
+description = "Window size (seconds) for gate-level tracking, capped at the selection's own duration; 0 disables tracking, using a fixed gate level instead"
+flag = "-t"
+automatable = false
+kind = "number"
+min = 0.0
+max = 5.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Ignore Last Grain"
+description = "Ignore the final grain in the source"
+flag = "-x"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "grain_repitch_1"
+bin = "grain"
+subprog = "repitch"
+mode = "1"
+title = "Repitch (Cycle)"
+category = "time"
+subcategory = "texture"
+short_description = "Repitches each grain in turn to a list of transpositions, cycling back to the start"
+description = """
+Repitches each grain of a grainy sound in turn to the next transposition in an ordered \
+list, without repeating any grain; on reaching the end of the list, cycles back to its \
+start.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Transpositions"
+description = "Ordered list of per-grain transpositions, in semitones (max 4 octaves up or down)"
+automatable = true
+required_list = true
+kind = "number"
+min = -48.0
+max = 48.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Inter-Grain Time"
+description = "Maximum time gap between detected grains (CDP additionally caps this at the selection's own duration, with a fixed 0.1s floor)"
+flag = "-b"
+automatable = false
+kind = "number"
+min = 0.1
+max = 5.0
+step = 0.01
+default = 0.5
+exponential = true
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Gate Level"
+description = "Minimum signal level for a grain to be detected"
+flag = "-l"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Hole Duration"
+description = "Minimum duration of a silent hole between grains (CDP additionally caps this at the selection's own duration)"
+flag = "-h"
+automatable = false
+kind = "number"
+min = 0.032
+max = 1.0
+step = 0.001
+default = 0.032
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Gate Tracking Window"
+description = "Window size (seconds) for gate-level tracking, capped at the selection's own duration; 0 disables tracking, using a fixed gate level instead"
+flag = "-t"
+automatable = false
+kind = "number"
+min = 0.0
+max = 5.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Ignore Last Grain"
+description = "Ignore the final grain in the source"
+flag = "-x"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "grain_repitch_2"
+bin = "grain"
+subprog = "repitch"
+mode = "2"
+title = "Repitch (Repeat)"
+category = "time"
+subcategory = "texture"
+short_description = "Plays each grain at every listed transposition before moving to the next grain"
+description = """
+Plays each grain of a grainy sound at every transposition in an ordered list before \
+proceeding to the next grain — the same transposition list as Repitch (Cycle), but \
+exhausted per-grain rather than cycled across the whole sound.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Transpositions"
+description = "Ordered list of per-grain transpositions, in semitones (max 4 octaves up or down)"
+automatable = true
+required_list = true
+kind = "number"
+min = -48.0
+max = 48.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Inter-Grain Time"
+description = "Maximum time gap between detected grains (CDP additionally caps this at the selection's own duration, with a fixed 0.1s floor)"
+flag = "-b"
+automatable = false
+kind = "number"
+min = 0.1
+max = 5.0
+step = 0.01
+default = 0.5
+exponential = true
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Gate Level"
+description = "Minimum signal level for a grain to be detected"
+flag = "-l"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Hole Duration"
+description = "Minimum duration of a silent hole between grains (CDP additionally caps this at the selection's own duration)"
+flag = "-h"
+automatable = false
+kind = "number"
+min = 0.032
+max = 1.0
+step = 0.001
+default = 0.032
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Gate Tracking Window"
+description = "Window size (seconds) for gate-level tracking, capped at the selection's own duration; 0 disables tracking, using a fixed gate level instead"
+flag = "-t"
+automatable = false
+kind = "number"
+min = 0.0
+max = 5.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Ignore Last Grain"
+description = "Ignore the final grain in the source"
+flag = "-x"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "grain_rerhythm_1"
+bin = "grain"
+subprog = "rerhythm"
+mode = "1"
+title = "Rerhythm (Cycle)"
+category = "time"
+subcategory = "texture"
+short_description = "Lengthens or shortens each grain in turn by a list of duration-multipliers, cycling back to the start"
+description = """
+Changes the rhythm of a grainy sound by lengthening or shortening each grain in turn by \
+the next duration-multiplier in an ordered list, without repeating any grain; on reaching \
+the end of the list, cycles back to its start.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Duration Multipliers"
+description = "Ordered list of per-grain duration multipliers (range 0.001 to 1000)"
+automatable = true
+required_list = true
+kind = "number"
+min = 0.001
+max = 1000.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Max Inter-Grain Time"
+description = "Maximum time gap between detected grains (CDP additionally caps this at the selection's own duration, with a fixed 0.1s floor)"
+flag = "-b"
+automatable = false
+kind = "number"
+min = 0.1
+max = 5.0
+step = 0.01
+default = 0.5
+exponential = true
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Gate Level"
+description = "Minimum signal level for a grain to be detected"
+flag = "-l"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Hole Duration"
+description = "Minimum duration of a silent hole between grains (CDP additionally caps this at the selection's own duration)"
+flag = "-h"
+automatable = false
+kind = "number"
+min = 0.032
+max = 1.0
+step = 0.001
+default = 0.032
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Gate Tracking Window"
+description = "Window size (seconds) for gate-level tracking, capped at the selection's own duration; 0 disables tracking, using a fixed gate level instead"
+flag = "-t"
+automatable = false
+kind = "number"
+min = 0.0
+max = 5.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Ignore Last Grain"
+description = "Ignore the final grain in the source"
+flag = "-x"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "grain_rerhythm_2"
+bin = "grain"
+subprog = "rerhythm"
+mode = "2"
+title = "Rerhythm (Repeat)"
+category = "time"
+subcategory = "texture"
+short_description = "Plays each grain at every listed retiming before moving to the next grain"
+description = """
+Changes the rhythm of a grainy sound by playing each grain at every duration-multiplier \
+in an ordered list before proceeding to the next grain — the same multiplier list as \
+Rerhythm (Cycle), but exhausted per-grain rather than cycled across the whole sound.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Duration Multipliers"
+description = "Ordered list of per-grain duration multipliers (range 0.001 to 1000)"
+automatable = true
+required_list = true
+kind = "number"
+min = 0.001
+max = 1000.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Max Inter-Grain Time"
+description = "Maximum time gap between detected grains (CDP additionally caps this at the selection's own duration, with a fixed 0.1s floor)"
+flag = "-b"
+automatable = false
+kind = "number"
+min = 0.1
+max = 5.0
+step = 0.01
+default = 0.5
+exponential = true
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Gate Level"
+description = "Minimum signal level for a grain to be detected"
+flag = "-l"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Hole Duration"
+description = "Minimum duration of a silent hole between grains (CDP additionally caps this at the selection's own duration)"
+flag = "-h"
+automatable = false
+kind = "number"
+min = 0.032
+max = 1.0
+step = 0.001
+default = 0.032
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Gate Tracking Window"
+description = "Window size (seconds) for gate-level tracking, capped at the selection's own duration; 0 disables tracking, using a fixed gate level instead"
+flag = "-t"
+automatable = false
+kind = "number"
+min = 0.0
+max = 5.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Ignore Last Grain"
+description = "Ignore the final grain in the source"
+flag = "-x"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "stutter_stutter"
+bin = "stutter"
+subprog = "stutter"
+title = "Stutter"
+category = "time"
+subcategory = "texture"
+short_description = "Slices the source into elements at a list of times, then plays cut segments back in random order"
+description = """
+Slices the source (e.g. speech) into elements at a list of specified times, then cuts \
+segments from those elements (always starting from an element's own start) and plays the \
+segments back in a random order, with optional silence inserted at the joins between them.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Slice Times"
+description = "Ordered list of times (seconds) at which to slice the source into elements; must stay strictly ascending, at least 0.016s from the start and from each other"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.016
+max = 7200.0
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Output Duration"
+description = "Duration of the output, in seconds"
+automatable = false
+kind = "number"
+min = 0.1
+max = 7200.0
+step = 0.1
+default = 5.0
+exponential = true
+scale = "output_duration_seconds"
+
+[[process.params]]
+name = "Segment Joins"
+description = "1 uses single elements as sources to cut; N also uses joined runs of up to N elements as sources"
+automatable = false
+kind = "number"
+min = 1.0
+max = 8.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Silence Proportion"
+description = "Proportion of joins between cut segments that get silence inserted (CDP rejects exactly 0; minimum practical value is 0.05)"
+automatable = false
+kind = "number"
+min = 0.05
+max = 1.0
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Silence"
+description = "Minimum duration of any inserted silence at a join"
+automatable = false
+kind = "number"
+min = 0.0
+max = 5.0
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Silence"
+description = "Maximum duration of any inserted silence at a join"
+automatable = false
+kind = "number"
+min = 0.0
+max = 5.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Seed"
+description = "Random seed; the same seed (with all other params the same) reproduces identical output"
+automatable = false
+kind = "number"
+min = 0.0
+max = 999999.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Transposition Range"
+description = "Range (semitones) of random transposition applied to each cut segment"
+flag = "-t"
+automatable = false
+kind = "number"
+min = 0.0
+max = 24.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Attenuation Range"
+description = "Range of random attenuation applied to each cut segment's level"
+flag = "-a"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Size Bias"
+description = "Bias toward smaller (negative) or larger (positive) cut segments; 0 is unbiased"
+flag = "-b"
+automatable = false
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Segment Duration"
+description = "Minimum duration of any cut segment, in milliseconds (must be > 8)"
+flag = "-m"
+automatable = false
+kind = "number"
+min = 9.0
+max = 2000.0
+step = 1.0
+default = 50.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Permute Elements"
+description = "Use every element once (in a random order) before any element repeats, instead of picking elements entirely at random"
+flag = "-p"
+automatable = false
+kind = "toggle"
+default = false
+
+# focus_freeze_{1,2,3} were tried here and deliberately NOT included: the datafile's
+# character MARKERS (a/b) turned out to be mandatory, not optional as the usage text's
+# phrasing suggested ("these times MAY be preceded by...") -- a plain list of bare times
+# fails with "ERROR: No flags given in freeze data" (confirmed against the real binary).
+# This is a genuinely different, bespoke shape (marker character + time per line), not the
+# plain-number-list ParamKind::List covers -- out of scope for this batch, same as the
+# other bespoke multi-column formats CDP-Ext-Plan.md Phase 3 already scopes out
+# (repeater/tapdelay/blur weave/hilite band).
+
+# `reverb` (bin, distinct from the already-cataloged `rmverb`) was tried here and
+# deliberately NOT included: its argv/params are all straightforward (rgain/mix/rvbtime/
+# absorb/lpfreq/trailertime plus -c/-H/-L/-p, with its two datafile params -- times.txt and
+# -eFILE -- both genuinely optional, confirmed safe to omit), but the *binary itself*
+# rejects the WAV files this runner writes with "cannot open output file out.wav" -- an
+# unhelpful error for what turned out to be an input-parsing failure. Root-caused by hand:
+# `write_inputs` (cdp/runner.rs) writes float32 input via `hound`, which emits a 40-byte
+# WAVE_FORMAT_EXTENSIBLE `fmt ` chunk (not the simpler 16/18-byte plain IEEE-float chunk);
+# `reverb`'s WAV reader apparently can't handle the extensible header and corrupts some
+# internal state as a result, well before it ever tries to write real output. Every other
+# process in this catalog (~200, including the structurally-similar `rmverb`) tolerates the
+# same extensible-format files fine, so this reads as a narrow quirk in this one older
+# binary's parser, not a defect in every CDP install -- not chasing a global "always write
+# non-extensible WAV" change to work around one binary without review (would touch every
+# job this app runs). Revisit if `reverb` specifically is wanted badly enough to justify
+# either that broader change or a per-process WAV-format override.

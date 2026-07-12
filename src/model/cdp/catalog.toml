@@ -3807,6 +3807,7 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = true
+requires_simple_wav_input = true
 
 [[process.params]]
 name = "Small/Medium/Large"
