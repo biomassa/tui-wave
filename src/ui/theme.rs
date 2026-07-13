@@ -10,6 +10,10 @@ pub const SURFACE1: Color = Color::Rgb(0x45, 0x47, 0x5a);
 pub const TEXT: Color = Color::Rgb(0xcd, 0xd6, 0xf4);
 pub const SUBTEXT0: Color = Color::Rgb(0xa6, 0xad, 0xc8);
 pub const SUBTEXT1: Color = Color::Rgb(0xba, 0xc2, 0xde);
+/// Catppuccin Mocha's "Overlay0" — visibly dimmer than `SUBTEXT0`, for de-emphasized
+/// annotations that should read as a step below regular muted text, not just a slightly
+/// duller shade of it.
+pub const OVERLAY0: Color = Color::Rgb(0x6c, 0x70, 0x86);
 pub const RED: Color = Color::Rgb(0xf3, 0x8b, 0xa8);
 pub const PEACH: Color = Color::Rgb(0xfa, 0xb3, 0x87);
 pub const YELLOW: Color = Color::Rgb(0xf9, 0xe2, 0xaf);
@@ -57,3 +61,7 @@ pub const STATUS_BG: Color = SURFACE0;
 /// Quit-confirmation warning modal.
 pub const WARNING_FG: Color = PEACH;
 pub const WARNING_BG: Color = SURFACE1;
+/// Inline heads-up annotations that should read as a step below regular muted text (e.g.
+/// the CDP browser's ">1 inputs" note) — deliberately dimmer than `SUBTEXT0`/`DB_SCALE`,
+/// which are for text that's still meant to be read at a glance.
+pub const ANNOTATION: Color = OVERLAY0;

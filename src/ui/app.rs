@@ -7386,7 +7386,17 @@ fn render_cdp_browser_dialog(
             } else {
                 base
             };
-            lines.push(Line::from(Span::styled(text, style)));
+            let mut spans = vec![Span::styled(text, style)];
+            if matches!(d.input, crate::model::cdp::IoKind::DualWav | crate::model::cdp::IoKind::DualAna) {
+                // Pale, deliberately unobtrusive — this is a heads-up, not a warning. On a
+                // highlighted row, fold into that row's own single highlight color instead
+                // of layering a second accent on top of it (CLAUDE.md: a selected row uses
+                // one uniform highlight, same rule the menu/toolbar's shortcut-vs-selection
+                // styling already follows).
+                let note_style = if row == selected { style } else { Style::default().fg(theme::ANNOTATION).bg(theme::SURFACE0) };
+                spans.push(Span::styled(" >1 inputs", note_style));
+            }
+            lines.push(Line::from(spans));
             rendered_rows += 1;
         }
     }
