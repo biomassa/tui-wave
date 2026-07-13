@@ -107,6 +107,24 @@ def resolve_subcategory(key, raw_subcategory):
 # obviously reveal a "successful" job with garbage samples.
 REQUIRES_SIMPLE_WAV_INPUT = {"rmverb"}
 
+# Per-(process key, param name) overrides for cases where SoundThread's own static
+# min/max/default is simply wrong -- the real constraint depends on runtime state this
+# catalog format can't express as a fixed range, and needed a new NumberScale variant
+# rather than a corrected literal. See NumberScale::HzCappedToAnalysisRange's doc comment
+# (src/model/cdp/def.rs) for the strange_glis_2 finding: a user manually testing the
+# process at its unchanged default hit "Value (50.0) out of range (93.75 to 24000.0)" --
+# SoundThread's catalog declares a fixed 50-200 Hz range, but the real range is
+# [sample_rate/analysis_points, sample_rate/4], confirmed against the binary's own usage
+# text ("Range: FROM channel-frq-width TO nyquist/2").
+PARAM_OVERRIDE = {
+    ("strange_glis_2", "Spacing"): {
+        "scale": "hz_capped_to_analysis_range",
+        "min": 1.0,
+        "max": 24000.0,
+        "default": 200.0,
+    },
+}
+
 
 def split_key(key, known_bins):
     """Splits a SoundThread key like "modify_speed_2" into (bin, subprog, mode).
@@ -197,6 +215,11 @@ def convert_process(key, entry, known_bins):
             key=lambda name: int(name.replace("param", "")),
         )
     ]
+    params = [c for p in params_in_order if (c := convert_param(p)) is not None]
+    for p in params:
+        override = PARAM_OVERRIDE.get((key, p["name"]))
+        if override:
+            p.update(override)
     return {
         "key": key,
         "bin": bin_name,
@@ -212,7 +235,7 @@ def convert_process(key, entry, known_bins):
         "stereo_native": bool(entry.get("stereo", False)),
         "output_is_stereo": bool(entry.get("outputisstereo", False)),
         "requires_simple_wav_input": key in REQUIRES_SIMPLE_WAV_INPUT,
-        "params": [c for p in params_in_order if (c := convert_param(p)) is not None],
+        "params": params,
     }
 
 

@@ -8221,3 +8221,941 @@ default = 0.8
 exponential = false
 scale = "plain"
 flag = "-r"
+
+# ---- Phase 4 (2026-07-13): pitch-family processes reachable via existing infra ----
+#
+# Original Phase 4 sketch assumed the whole `pitch`/`repitch` family needed new binary
+# `.frq` infrastructure. Investigating `repitch getpitch` (which produces the PITCHFILE
+# these processes consume) found mode 2 produces a *plain text* breakpoint file (time/Hz
+# pairs) -- and `pitch altharms`/`octmove` accept that text file directly, confirmed
+# against the real binary. That's exactly the `required_envelope` shape Phase 3 already
+# built; only `getpitch` mode 1's *binary* pfil output genuinely needs new infra. Several
+# other `pitch`/`repitch` subprograms turned out to need no pitch data at all (plain
+# params) or a flat value list (`required_list`). The remaining `repitch` subprograms that
+# transform a pitchfile into another pitchfile (exag/invert/quantise/randomise/smooth/
+# vibrato) are a genuinely different shape -- no audio file at all, pitchfile-in-
+# pitchfile-out -- deferred pending a first-class pitch-curve document concept.
+
+# `pitch altharms`/`pitch octmove` were tried here and, despite the required_envelope
+# pitchfile format being confirmed to work (see above), deliberately NOT included: their
+# real argv order is `infile pitchfile outfile` -- the pitchfile comes BEFORE outfile, not
+# after it. Every process shape this pipeline builds (`plan_wav`/`plan_ana`/etc.) hardcodes
+# infile(s) then outfile as the first tokens, with all params (including datafile params)
+# emitted afterward -- there's no way to place a required param before outfile with the
+# current architecture. Confirmed by reproducing the exact failure: our runner emitted
+# `[infile, outfile, brk_file...]`, and CDP read our *outfile's own name* as the pitchfile
+# argument, failing with "Can't open brkpntfile <outfile> to read data." Revisit if/when
+# `plan_ana` gains support for a datafile param positioned before outfile -- a real gap this
+# session found, not previously anticipated by any of the required_envelope/required_list
+# infra built so far (every prior datafile param came after outfile in its real argv).
+
+[[process]]
+key = "pitch_transp_5"
+bin = "pitch"
+subprog = "transp"
+mode = "5"
+title = "Pitch Transpose Below Split (Down)"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Transposes the spectrum below a split frequency down by a chosen pitch amount"
+description = "This process transposes the part of the spectrum below a chosen split frequency down by a chosen pitch interval, leaving the rest of the spectrum untouched."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Split Frequency"
+description = "Frequency below which the transposition takes place"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 1.0
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Transposition"
+description = "Transposition amount, in semitones"
+automatable = true
+kind = "number"
+min = -24.0
+max = 24.0
+step = 0.1
+default = -12.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Depth"
+description = "Strength of the transposition effect, from 0 (no effect) to 1 (full effect)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-d"
+
+[[process]]
+key = "pitch_transp_6"
+bin = "pitch"
+subprog = "transp"
+mode = "6"
+title = "Pitch Transpose Above And Below Split"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Transposes the spectrum both above and below a split frequency by independent amounts"
+description = "This process transposes the part of the spectrum above a split frequency by one chosen pitch amount, and the part below it by an independent amount."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Split Frequency"
+description = "Frequency around which the transposition takes place"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 1.0
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Transposition Above"
+description = "Transposition amount above the split frequency, in semitones"
+automatable = true
+kind = "number"
+min = -24.0
+max = 24.0
+step = 0.1
+default = 12.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Transposition Below"
+description = "Transposition amount below the split frequency, in semitones"
+automatable = true
+kind = "number"
+min = -24.0
+max = 24.0
+step = 0.1
+default = -12.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Depth"
+description = "Strength of the transposition effect, from 0 (no effect) to 1 (full effect)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-d"
+
+[[process]]
+key = "pitch_pick_4"
+bin = "pitch"
+subprog = "pick"
+mode = "4"
+title = "Retain Linear Steps"
+category = "pvoc"
+subcategory = "filter"
+short_description = "Keeps only spectral channels at successive linear frequency steps from a fundamental"
+description = "This process suppresses spectral channels except those at successive linear frequency steps up from a chosen fundamental frequency."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Fundamental"
+description = "Starting frequency for the linear steps"
+automatable = false
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Frequency Step"
+description = "Frequency step size between retained channels"
+automatable = false
+kind = "number"
+min = 1.0
+max = 2000.0
+step = 1.0
+default = 50.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Clarity"
+description = "Extent to which channels outside the steps are suppressed"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-c"
+
+[[process]]
+key = "pitch_pick_5"
+bin = "pitch"
+subprog = "pick"
+mode = "5"
+title = "Retain Harmonic Series Plus Linear Displacement"
+category = "pvoc"
+subcategory = "filter"
+short_description = "Keeps harmonic partials, each displaced by a linear frequency offset"
+description = "This process suppresses spectral channels except those at the harmonic partials of a fundamental frequency, each additionally displaced by a linear frequency offset."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Fundamental"
+description = "Fundamental frequency of the harmonic series"
+automatable = false
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Frequency Step"
+description = "Linear frequency displacement added to each harmonic partial"
+automatable = false
+kind = "number"
+min = 1.0
+max = 2000.0
+step = 1.0
+default = 50.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Clarity"
+description = "Extent to which channels outside the series are suppressed"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-c"
+
+[[process]]
+key = "repitch_transpose_1"
+bin = "repitch"
+subprog = "transpose"
+mode = "1"
+title = "Transpose Spectrum (Frequency Ratio)"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Transposes the spectrum by a frequency ratio, moving the spectral envelope with it"
+description = "This process transposes a sound's spectrum by a frequency ratio -- unlike a formant-preserving transpose, the spectral envelope (and so the perceived timbre) moves with the pitch."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Transposition Ratio"
+description = "Frequency ratio to transpose by"
+automatable = true
+kind = "number"
+min = 0.1
+max = 8.0
+step = 0.01
+default = 1.5
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Min Frequency"
+description = "Frequency below which data is filtered out"
+automatable = true
+kind = "number"
+min = 0.0
+max = 20000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+flag = "-l"
+
+[[process.params]]
+name = "Max Frequency"
+description = "Frequency above which data is filtered out"
+automatable = true
+kind = "number"
+min = 20.0
+max = 22000.0
+step = 1.0
+default = 20000.0
+exponential = true
+scale = "plain"
+flag = "-h"
+
+[[process.params]]
+name = "Fuller Spectrum"
+description = "Use a fuller spectral reconstruction"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-x"
+
+[[process]]
+key = "repitch_transpose_2"
+bin = "repitch"
+subprog = "transpose"
+mode = "2"
+title = "Transpose Spectrum (Octaves)"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Transposes the spectrum by a number of octaves, moving the spectral envelope with it"
+description = "The same spectral transposition as Transpose Spectrum (Frequency Ratio), specified in (possibly fractional) octaves instead."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Transposition"
+description = "Transposition, in octaves"
+automatable = true
+kind = "number"
+min = -4.0
+max = 4.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Frequency"
+description = "Frequency below which data is filtered out"
+automatable = true
+kind = "number"
+min = 0.0
+max = 20000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+flag = "-l"
+
+[[process.params]]
+name = "Max Frequency"
+description = "Frequency above which data is filtered out"
+automatable = true
+kind = "number"
+min = 20.0
+max = 22000.0
+step = 1.0
+default = 20000.0
+exponential = true
+scale = "plain"
+flag = "-h"
+
+[[process.params]]
+name = "Fuller Spectrum"
+description = "Use a fuller spectral reconstruction"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-x"
+
+[[process]]
+key = "repitch_transpose_3"
+bin = "repitch"
+subprog = "transpose"
+mode = "3"
+title = "Transpose Spectrum (Semitones)"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Transposes the spectrum by a number of semitones, moving the spectral envelope with it"
+description = "The same spectral transposition as Transpose Spectrum (Frequency Ratio), specified in (possibly fractional) semitones instead."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Transposition"
+description = "Transposition, in semitones"
+automatable = true
+kind = "number"
+min = -48.0
+max = 48.0
+step = 0.1
+default = 12.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Frequency"
+description = "Frequency below which data is filtered out"
+automatable = true
+kind = "number"
+min = 0.0
+max = 20000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+flag = "-l"
+
+[[process.params]]
+name = "Max Frequency"
+description = "Frequency above which data is filtered out"
+automatable = true
+kind = "number"
+min = 20.0
+max = 22000.0
+step = 1.0
+default = 20000.0
+exponential = true
+scale = "plain"
+flag = "-h"
+
+[[process.params]]
+name = "Fuller Spectrum"
+description = "Use a fuller spectral reconstruction"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-x"
+
+[[process]]
+key = "repitch_transposef_1"
+bin = "repitch"
+subprog = "transposef"
+mode = "1"
+title = "Transpose Spectrum, Keep Envelope (Frequency Ratio)"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Transposes the spectrum by a frequency ratio, keeping the original spectral envelope"
+description = "This process transposes a sound's spectrum by a frequency ratio while retaining the original spectral envelope (formant-preserving) -- the pitch moves but the timbre stays put."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+# Real binary requires the -p/-f flag to appear BEFORE the transposition value on the
+# command line ("Formant flag missing on cmdline" otherwise, even though the flag WAS
+# present later in argv) -- unlike almost every other flag in this catalog, CDP's parser
+# here is position-sensitive, not just presence-sensitive. Declared first so it's emitted
+# first (this project's params always emit in declared-vec order).
+[[process.params]]
+name = "Formant Bands"
+description = "Number of equally-spaced pitch-bands per octave used to extract the formant envelope"
+automatable = false
+kind = "number"
+min = 0.1
+max = 12.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-p"
+
+[[process.params]]
+name = "Transposition Ratio"
+description = "Frequency ratio to transpose by"
+automatable = true
+kind = "number"
+min = 0.1
+max = 8.0
+step = 0.01
+default = 1.5
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Quick Search"
+description = "Faster but less accurate formant search"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-i"
+
+[[process.params]]
+name = "Min Frequency"
+description = "Frequency below which data is filtered out"
+automatable = true
+kind = "number"
+min = 0.0
+max = 20000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+flag = "-l"
+
+[[process.params]]
+name = "Max Frequency"
+description = "Frequency above which data is filtered out"
+automatable = true
+kind = "number"
+min = 20.0
+max = 22000.0
+step = 1.0
+default = 20000.0
+exponential = true
+scale = "plain"
+flag = "-h"
+
+[[process.params]]
+name = "Fuller Spectrum"
+description = "Use a fuller spectral reconstruction"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-x"
+
+[[process]]
+key = "repitch_transposef_2"
+bin = "repitch"
+subprog = "transposef"
+mode = "2"
+title = "Transpose Spectrum, Keep Envelope (Octaves)"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Transposes the spectrum by a number of octaves, keeping the original spectral envelope"
+description = "The same formant-preserving transposition as Transpose Spectrum, Keep Envelope (Frequency Ratio), specified in (possibly fractional) octaves instead."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+# Real binary requires -p/-f before the transposition value on the command line -- see
+# repitch_transposef_1's identical note.
+[[process.params]]
+name = "Formant Bands"
+description = "Number of equally-spaced pitch-bands per octave used to extract the formant envelope"
+automatable = false
+kind = "number"
+min = 0.1
+max = 12.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-p"
+
+[[process.params]]
+name = "Transposition"
+description = "Transposition, in octaves"
+automatable = true
+kind = "number"
+min = -4.0
+max = 4.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Quick Search"
+description = "Faster but less accurate formant search"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-i"
+
+[[process.params]]
+name = "Min Frequency"
+description = "Frequency below which data is filtered out"
+automatable = true
+kind = "number"
+min = 0.0
+max = 20000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+flag = "-l"
+
+[[process.params]]
+name = "Max Frequency"
+description = "Frequency above which data is filtered out"
+automatable = true
+kind = "number"
+min = 20.0
+max = 22000.0
+step = 1.0
+default = 20000.0
+exponential = true
+scale = "plain"
+flag = "-h"
+
+[[process.params]]
+name = "Fuller Spectrum"
+description = "Use a fuller spectral reconstruction"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-x"
+
+[[process]]
+key = "repitch_transposef_3"
+bin = "repitch"
+subprog = "transposef"
+mode = "3"
+title = "Transpose Spectrum, Keep Envelope (Semitones)"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Transposes the spectrum by a number of semitones, keeping the original spectral envelope"
+description = "The same formant-preserving transposition as Transpose Spectrum, Keep Envelope (Frequency Ratio), specified in (possibly fractional) semitones instead."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+# Real binary requires -p/-f before the transposition value on the command line -- see
+# repitch_transposef_1's identical note.
+[[process.params]]
+name = "Formant Bands"
+description = "Number of equally-spaced pitch-bands per octave used to extract the formant envelope"
+automatable = false
+kind = "number"
+min = 0.1
+max = 12.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-p"
+
+[[process.params]]
+name = "Transposition"
+description = "Transposition, in semitones"
+automatable = true
+kind = "number"
+min = -48.0
+max = 48.0
+step = 0.1
+default = 12.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Quick Search"
+description = "Faster but less accurate formant search"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-i"
+
+[[process.params]]
+name = "Min Frequency"
+description = "Frequency below which data is filtered out"
+automatable = true
+kind = "number"
+min = 0.0
+max = 20000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+flag = "-l"
+
+[[process.params]]
+name = "Max Frequency"
+description = "Frequency above which data is filtered out"
+automatable = true
+kind = "number"
+min = 20.0
+max = 22000.0
+step = 1.0
+default = 20000.0
+exponential = true
+scale = "plain"
+flag = "-h"
+
+[[process.params]]
+name = "Fuller Spectrum"
+description = "Use a fuller spectral reconstruction"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-x"
+
+[[process]]
+key = "pitch_tune_1"
+bin = "pitch"
+subprog = "tune"
+mode = "1"
+title = "Tune To Pitch Template (Hz)"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Replaces spectral frequencies with harmonics of a set of specified pitches"
+description = "This process replaces the spectral frequencies with harmonics of a set of specified pitches (given in Hz), retuning the sound's harmonic content to a fixed set of target pitches."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitch Template"
+description = "Target pitches, in Hz, to tune the harmonics to"
+automatable = false
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+required_list = true
+
+[[process.params]]
+name = "Focus"
+description = "Degree of focusing of the partials onto the template"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-f"
+
+[[process.params]]
+name = "Clarity"
+description = "Degree of suppression of channels not matching a template pitch"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-c"
+
+[[process]]
+key = "pitch_tune_2"
+bin = "pitch"
+subprog = "tune"
+mode = "2"
+title = "Tune To Pitch Template (MIDI)"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Replaces spectral frequencies with harmonics of a set of specified MIDI pitches"
+description = "The same pitch-template retuning as Tune To Pitch Template (Hz), but the target pitches are given as (possibly fractional) MIDI values instead."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitch Template"
+description = "Target pitches, in MIDI, to tune the harmonics to"
+automatable = false
+kind = "number"
+min = 0.0
+max = 127.0
+step = 0.1
+default = 57.0
+exponential = false
+scale = "plain"
+required_list = true
+
+[[process.params]]
+name = "Focus"
+description = "Degree of focusing of the partials onto the template"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-f"
+
+[[process.params]]
+name = "Clarity"
+description = "Degree of suppression of channels not matching a template pitch"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-c"
+
+[[process]]
+key = "pitch_chordf_chordf"
+bin = "pitch"
+subprog = "chordf"
+title = "Chord From Spectrum"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Superimposes transposed versions of the spectrum within its own spectral envelope"
+description = "This process superimposes several transposed copies of a sound's spectrum, one per semitone offset in a chosen list, all shaped within the original spectral envelope -- a way to turn a single note into a chord without the formant character shifting per note."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+# Real binary requires -p/-f before the transposition list on the command line -- see
+# repitch_transposef_1's identical note.
+[[process.params]]
+name = "Formant Bands"
+description = "Number of equally-spaced pitch-bands per octave used to extract the spectral envelope"
+automatable = false
+kind = "number"
+min = 0.1
+max = 12.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-p"
+
+[[process.params]]
+name = "Transposition List"
+description = "Semitone transpositions to superimpose"
+automatable = false
+kind = "number"
+min = -48.0
+max = 48.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+required_list = true
+
+[[process.params]]
+name = "Quick Search"
+description = "Faster but less accurate formant search"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-i"
+
+[[process.params]]
+name = "Min Frequency"
+description = "Frequency below which data is filtered out"
+automatable = true
+kind = "number"
+min = 0.0
+max = 20000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+flag = "-b"
+
+[[process.params]]
+name = "Max Frequency"
+description = "Frequency above which data is filtered out"
+automatable = true
+kind = "number"
+min = 20.0
+max = 22000.0
+step = 1.0
+default = 20000.0
+exponential = true
+scale = "plain"
+flag = "-t"
+
+[[process.params]]
+name = "Fuller Spectrum"
+description = "Use a fuller spectral reconstruction"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-x"
+
+[[process]]
+key = "pitch_chord_chord"
+bin = "pitch"
+subprog = "chord"
+title = "Chord From Sound"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Superimposes transposed versions of a sound on the original"
+description = "This process superimposes several transposed copies of a sound directly onto the original, one per semitone offset in a chosen list -- a simpler, less formant-careful sibling of Chord From Spectrum."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Transposition List"
+description = "Semitone transpositions to superimpose"
+automatable = false
+kind = "number"
+min = -48.0
+max = 48.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+required_list = true
+
+[[process.params]]
+name = "Min Frequency"
+description = "Frequency below which data is filtered out"
+automatable = true
+kind = "number"
+min = 0.0
+max = 20000.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+flag = "-b"
+
+[[process.params]]
+name = "Max Frequency"
+description = "Frequency above which data is filtered out"
+automatable = true
+kind = "number"
+min = 20.0
+max = 22000.0
+step = 1.0
+default = 20000.0
+exponential = true
+scale = "plain"
+flag = "-t"
+
+[[process.params]]
+name = "Fuller Spectrum"
+description = "Use a fuller spectral reconstruction"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-x"

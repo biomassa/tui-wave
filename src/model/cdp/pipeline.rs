@@ -225,7 +225,13 @@ fn format_arg(flag: &Option<String>, value_text: &str) -> Option<String> {
 /// resolved at plan time at all (see `DeferredWindowTarget`'s doc comment) — shared between
 /// a plain constant `Number` value and each point's *value* in an automated `Breakpoints`
 /// envelope, so both take exactly the same percent-of-duration/percent-of-fft-size math.
-fn scale_number_value(scale: NumberScale, raw: f64, duration_secs: f64, pvoc: &PvocSettings) -> f64 {
+fn scale_number_value(
+    scale: NumberScale,
+    raw: f64,
+    duration_secs: f64,
+    pvoc: &PvocSettings,
+    sample_rate: u32,
+) -> f64 {
     match scale {
         NumberScale::Plain | NumberScale::OutputDurationSeconds => raw,
         NumberScale::PercentOfInputDuration => {
@@ -242,6 +248,14 @@ fn scale_number_value(scale: NumberScale, raw: f64, duration_secs: f64, pvoc: &P
         // a selection shorter than that floor has no valid value at all, which is an
         // inherent CDP limitation for very short selections, not something to work around.
         NumberScale::CappedAtInputDuration => raw.min((duration_secs - 0.01).max(0.0)),
+        // See NumberScale::HzCappedToAnalysisRange's doc comment (def.rs) for the finding
+        // this came from -- the real accepted range for a Hz-domain param bounded by the
+        // analysis window is [sample_rate/points, sample_rate/4], not a fixed Hz range.
+        NumberScale::HzCappedToAnalysisRange => {
+            let channel_width = sample_rate as f64 / pvoc.points as f64;
+            let nyquist_half = sample_rate as f64 / 4.0;
+            raw.clamp(channel_width, nyquist_half)
+        }
     }
 }
 
@@ -267,6 +281,7 @@ fn plan_param(
     value: &ParamValue,
     duration_secs: f64,
     pvoc: &PvocSettings,
+    sample_rate: u32,
     brk_files: &mut Vec<(String, String)>,
     brk_index: usize,
 ) -> ParamPlan {
@@ -293,7 +308,7 @@ fn plan_param(
                     deferred: Some(DeferredParamKind::Arg { flag: param.flag.clone(), percent: *raw }),
                 },
                 other => {
-                    let value = scale_number_value(*other, *raw, duration_secs, pvoc);
+                    let value = scale_number_value(*other, *raw, duration_secs, pvoc, sample_rate);
                     ParamPlan { arg: format_arg(&param.flag, &format_number(value)), deferred: None }
                 }
             }
@@ -324,7 +339,7 @@ fn plan_param(
                 other => {
                     let contents = points
                         .iter()
-                        .map(|&(t, v)| format!("{t} {}", scale_number_value(*other, v, duration_secs, pvoc)))
+                        .map(|&(t, v)| format!("{t} {}", scale_number_value(*other, v, duration_secs, pvoc, sample_rate)))
                         .collect::<Vec<_>>()
                         .join("\n");
                     brk_files.push((relative_name.clone(), contents));
@@ -345,7 +360,7 @@ fn plan_param(
             let relative_name = format!("list_{brk_index}.txt");
             let contents = values
                 .iter()
-                .map(|&v| format_number(scale_number_value(*scale, v, duration_secs, pvoc)))
+                .map(|&v| format_number(scale_number_value(*scale, v, duration_secs, pvoc, sample_rate)))
                 .collect::<Vec<_>>()
                 .join("\n");
             brk_files.push((relative_name.clone(), contents));
@@ -367,6 +382,7 @@ fn build_process_args(
     outfile: &str,
     duration_secs: f64,
     pvoc: &PvocSettings,
+    sample_rate: u32,
     brk_files: &mut Vec<(String, String)>,
 ) -> Result<(Vec<String>, Vec<DeferredWindowTarget>), PlanError> {
     if values.len() != def.params.len() {
@@ -385,7 +401,7 @@ fn build_process_args(
 
     let mut deferred = Vec::new();
     for (i, (param, value)) in def.params.iter().zip(values).enumerate() {
-        let plan = plan_param(param, value, duration_secs, pvoc, brk_files, i);
+        let plan = plan_param(param, value, duration_secs, pvoc, sample_rate, brk_files, i);
         if let Some(token) = plan.arg {
             match plan.deferred {
                 Some(DeferredParamKind::Arg { flag, percent }) => {
@@ -499,8 +515,16 @@ fn plan_wav_glob(
     let duration = input.duration_secs();
     let prefix = "cutout".to_string();
 
-    let (args, deferred) =
-        build_process_args(def, values, &["in.wav"], &prefix, duration, pvoc, &mut brk_files)?;
+    let (args, deferred) = build_process_args(
+        def,
+        values,
+        &["in.wav"],
+        &prefix,
+        duration,
+        pvoc,
+        input.sample_rate,
+        &mut brk_files,
+    )?;
     debug_assert!(deferred.is_empty(), "glob-output processes never carry ana-window-count params");
 
     Ok(PlannedJob {
@@ -525,8 +549,12 @@ fn plan_synthesis(
     pvoc: &PvocSettings,
 ) -> Result<PlannedJob, PlanError> {
     let mut brk_files = Vec::new();
+    // No real input to analyze, so no real sample rate either -- `HzCappedToAnalysisRange`
+    // only makes sense for a process reading an actual `.ana` file, which a synthesis
+    // process (no input at all) never does. Placeholder value is inert for every other
+    // scale, and no catalog entry pairs this scale with an `IoKind::None` process.
     let (args, deferred) =
-        build_process_args(def, values, &[], "out.wav", 0.0, pvoc, &mut brk_files)?;
+        build_process_args(def, values, &[], "out.wav", 0.0, pvoc, 44100, &mut brk_files)?;
     debug_assert!(deferred.is_empty(), "synthesis processes have no ana-window-count params");
 
     let dest_channels = if def.output_is_stereo { vec![0, 1] } else { vec![0] };
@@ -557,8 +585,16 @@ fn plan_wav(
 
     if input.channels <= 1 || def.stereo_native {
         let source_channels: Vec<usize> = (0..input.channels.max(1)).collect();
-        let (args, deferred) =
-            build_process_args(def, values, &["in.wav"], "out.wav", duration, pvoc, &mut brk_files)?;
+        let (args, deferred) = build_process_args(
+            def,
+            values,
+            &["in.wav"],
+            "out.wav",
+            duration,
+            pvoc,
+            input.sample_rate,
+            &mut brk_files,
+        )?;
         debug_assert!(deferred.is_empty(), "wav processes never carry ana-window-count params");
         // A `stereo_native` process's real output channel count is `def.output_is_stereo`,
         // not necessarily the *input's* channel count — e.g. `rmverb`/`reverb` always emit
@@ -606,6 +642,7 @@ fn plan_wav(
             &outfile,
             duration,
             pvoc,
+            input.sample_rate,
             &mut brk_files,
         )?;
         debug_assert!(deferred.is_empty());
@@ -642,6 +679,7 @@ fn plan_dual_wav(
             "out.wav",
             duration,
             pvoc,
+            a.sample_rate,
             &mut brk_files,
         )?;
         debug_assert!(deferred.is_empty());
@@ -689,6 +727,7 @@ fn plan_dual_wav(
             &outfile,
             duration,
             pvoc,
+            a.sample_rate,
             &mut brk_files,
         )?;
         debug_assert!(deferred.is_empty());
@@ -771,6 +810,7 @@ fn plan_dual_ana(
             &ana_out,
             duration,
             pvoc,
+            a.sample_rate,
             &mut brk_files,
         )?;
         debug_assert!(deferred.is_empty(), "no dual-input process uses the ana-window-count scale");
@@ -839,6 +879,7 @@ fn plan_ana(
             &ana_out,
             duration,
             pvoc,
+            input.sample_rate,
             &mut brk_files,
         )?;
         // Every lane analyzes its own .ana file, so each accumulates its own entry rather
