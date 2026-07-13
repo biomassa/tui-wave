@@ -117,8 +117,15 @@ impl Default for CdpRunner {
 }
 
 fn run_job(job: &Job, events: &Sender<CdpEvent>, cancel: &AtomicBool) -> Result<JobOutput, CdpError> {
-    let temp_dir =
-        std::env::temp_dir().join(format!("tui-wave-cdp-{}-{}", std::process::id(), job.id));
+    // The process-wide counter (not just `job.id`) keeps concurrent runners' temp dirs
+    // distinct even when two jobs share an id — job ids are only unique per `App`, and the
+    // test suite runs many runners in one process, where two tests reusing an id made each
+    // delete the other's working files mid-run (NoOutput failures only under a parallel
+    // `cargo test`, never single-threaded).
+    static RUN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = RUN_SEQ.fetch_add(1, Ordering::Relaxed);
+    let temp_dir = std::env::temp_dir()
+        .join(format!("tui-wave-cdp-{}-{}-{seq}", std::process::id(), job.id));
     if std::fs::create_dir_all(&temp_dir).is_err() {
         return Err(CdpError::Spawn {
             step: "setup".into(),
@@ -952,7 +959,7 @@ mod tests {
 
         let runner = CdpRunner::new();
         runner.submit(Job {
-            id: 104,
+            id: 106,
             cdp_dir,
             planned,
             inputs: vec![channels],
@@ -1032,7 +1039,7 @@ mod tests {
 
         let runner = CdpRunner::new();
         runner.submit(Job {
-            id: 102,
+            id: 107,
             cdp_dir,
             planned,
             inputs: vec![channels],
@@ -1075,7 +1082,7 @@ mod tests {
 
         let runner = CdpRunner::new();
         runner.submit(Job {
-            id: 103,
+            id: 108,
             cdp_dir,
             planned,
             inputs: vec![channels.clone(), channels],
@@ -1090,6 +1097,316 @@ mod tests {
         let output = result.expect("sfedit join should succeed on a real CDP install");
         let ratio = output.results[0][0].len() as f64 / len_samples as f64;
         assert!((ratio - 2.0).abs() < 0.05, "joining a file to itself should ~double duration, got ratio {ratio}");
+    }
+
+    /// Exercises a `required_list` time-sequence param with a real multi-entry ascending
+    /// list plus engaged flag params — the smoke test only ever drives such params with a
+    /// single default entry and every flag at its (unemitted) default, so an argv-ordering
+    /// or datafile-shape bug that only manifests with several slice times or with `-s`/`-a`
+    /// style tokens present would get through it. `motor` mode 5 is one of the new
+    /// hand-authored entries; its Duration param directly sets the output length, which
+    /// gives a real correctness assertion beyond "exit 0".
+    #[test]
+    fn motor_5_with_a_multi_entry_slice_time_list_and_engaged_flags() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("motor_motor_5").expect("motor_motor_5 in catalog");
+
+        use crate::model::cdp::ParamValue as V;
+        // In catalog param order: slice times (multi-entry, ascending), duration 1s, then
+        // the positional defaults, then real values for the flagged params -j/-s and the
+        // bare -a toggle.
+        let values = vec![
+            V::List(vec![0.05, 0.3, 0.6]), // Slice Times
+            V::Number(1.0),                // Duration
+            V::Number(10.0),               // Inner Pulse Rate
+            V::Number(2.0),                // Outer Pulse Rate
+            V::Number(0.5),                // Inner On/Off Ratio
+            V::Number(0.5),                // Outer On/Off Ratio
+            V::Number(0.5),                // Symmetry
+            V::Number(0.0),                // Freq Randomize (-f)
+            V::Number(0.0),                // Pulse Randomize (-p)
+            V::Number(0.5),                // Jitter (-j) — deliberately non-default
+            V::Number(0.0),                // Tremor (-t)
+            V::Number(0.0),                // Shift (-y)
+            V::Number(0.0),                // Edge (-e)
+            V::Number(3.0),                // Bite (-b)
+            V::Number(0.0),                // Vary (-v)
+            V::Number(1.0),                // Seed (-s) — deliberately non-default
+            V::Toggle(true),               // Advance By Fixed Step (-a)
+        ];
+
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            std::slice::from_ref(&input),
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+        // The list datafile must be referenced positionally before the numeric params, and
+        // the engaged flags must appear as single tokens.
+        let args = &planned.steps[0].args;
+        assert_eq!(args[..4], ["motor".to_string(), "5".into(), "in.wav".into(), "out.wav".into()]);
+        assert_eq!(args[4], "list_0.txt");
+        assert!(args.contains(&"-j0.5".to_string()), "flagged jitter missing: {args:?}");
+        assert!(args.contains(&"-s1".to_string()), "flagged seed missing: {args:?}");
+        assert!(args.contains(&"-a".to_string()), "bare toggle missing: {args:?}");
+        let (_, list_contents) =
+            planned.brk_files.iter().find(|(n, _)| n == "list_0.txt").expect("list datafile");
+        assert_eq!(list_contents, "0.05\n0.3\n0.6");
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 110,
+            cdp_dir,
+            planned,
+            inputs: vec![channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(30))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("motor 5 should succeed with a multi-entry slice-time list");
+        let duration = output.results[0][0].len() as f64 / output.sample_rate as f64;
+        // motor ends at the last complete outer pulse rather than padding out the requested
+        // duration — probed by hand against the real binary: at outer rate 2.0 / on-off 0.5
+        // it consistently emits requested − 0.25s (the trailing off-phase) for any requested
+        // length. Allow up to one outer-pulse period (0.5s at rate 2.0) of shortfall.
+        assert!(
+            duration > 0.5 && duration <= 1.05,
+            "Duration param was 1.0s (outer pulse period 0.5s) but output is {duration:.2}s"
+        );
+    }
+
+    /// Exercises a synthesis process (`IoKind::None`) whose first param is a
+    /// `required_list` of *values* (MIDI pitches — no time axis, no ordering constraint)
+    /// followed by two `Choice` params — the full "no input buffer at all, output becomes
+    /// an insert at the cursor" path with a real multi-note chord, asserting the declared
+    /// `output_is_stereo` and the sample rate actually chosen via the Choice param rather
+    /// than just exit 0.
+    #[test]
+    fn synth_chord_produces_a_stereo_chord_at_the_chosen_sample_rate() {
+        let cdp_dir = require_cdp!();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("synth_chord_1").expect("synth_chord_1 in catalog");
+
+        use crate::model::cdp::ParamValue as V;
+        let values = vec![
+            V::List(vec![60.0, 64.0, 67.0]), // Pitches: C major triad
+            V::Choice(4),                    // Sample Rate: "44100"
+            V::Choice(0),                    // Output Channels: "2"
+            V::Number(1.0),                  // Duration
+            V::Number(0.5),                  // Amplitude (-a)
+        ];
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            &[],
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 111,
+            cdp_dir,
+            planned,
+            inputs: vec![],
+            input_sample_rate: 48_000, // deliberately NOT the chosen rate
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(30))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("synth chord should succeed with a 3-note pitch list");
+        assert_eq!(output.sample_rate, 44_100, "sample rate must come from the Choice param's real output file, not the submitting document");
+        assert_eq!(output.results[0].len(), 2, "synth chord declares output_is_stereo");
+        for (i, channel) in output.results[0].iter().enumerate() {
+            assert!(
+                (channel.len() as f64 / 44_100.0 - 1.0).abs() < 0.1,
+                "channel {i}: expected ~1s at 44.1kHz, got {} samples",
+                channel.len()
+            );
+            assert!(channel.iter().any(|&s| s.abs() > 0.01), "channel {i} is silent");
+        }
+    }
+
+    /// Exercises a real glob-output run end-to-end: `distcut` on a 1-second sine with a
+    /// 20-cycle segment size must produce *several* numbered `cutout N.wav` files, each
+    /// loading as its own separate result buffer — the existing glob test fakes the
+    /// numbered files with `sh -c 'cp …'`, so nothing yet proved a real CDP binary's own
+    /// numbering/format round-trips through `load_glob_outputs`.
+    #[test]
+    fn distcut_on_a_real_sine_returns_multiple_segments_as_separate_buffers() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("distcut_distcut_1").expect("distcut_distcut_1 in catalog");
+
+        use crate::model::cdp::ParamValue as V;
+        let values = vec![
+            V::Number(20.0), // Cycle Count: cut every 20 wavecycles
+            V::Number(1.0),  // Decay Shape
+            V::Number(70.0), // Limit (-c)
+        ];
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            std::slice::from_ref(&input),
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 112,
+            cdp_dir,
+            planned,
+            inputs: vec![channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(30))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("distcut should succeed on a real sine");
+        assert!(
+            output.results.len() >= 2,
+            "a 1s sine cut every 20 cycles should produce several segments, got {}",
+            output.results.len()
+        );
+        let total: usize = output.results.iter().map(|r| r[0].len()).sum();
+        assert!(total > 0);
+        for (i, segment) in output.results.iter().enumerate() {
+            assert!(!segment[0].is_empty(), "segment {i} is empty");
+        }
+    }
+
+    /// Exercises the dual-`Ana` lane-pairing path with *mismatched channel counts*: a
+    /// stereo selection against a mono second buffer must run two full
+    /// anal/anal/process/synth lanes, reusing the mono input's only channel in both — the
+    /// existing dual-input test (`sfedit_join`) is mono+mono and stereo-native, so the
+    /// mono-reuse pairing in `plan_dual_ana` had no end-to-end coverage at all.
+    #[test]
+    fn dual_ana_stereo_selection_with_mono_second_input_pairs_lanes() {
+        let cdp_dir = require_cdp!();
+        let (stereo, sample_rate) = stereo_sine_channels();
+        let (mono, _) = mono_sine_channels();
+        let len_samples = stereo[0].len();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("combine_diff").expect("combine_diff in catalog");
+
+        let inputs_spec = [
+            crate::model::cdp::InputSpec { channels: 2, sample_rate, len_samples },
+            crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples: mono[0].len() },
+        ];
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &[crate::model::cdp::ParamValue::Number(1.0)],
+            &inputs_spec,
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+        // Two lanes of anal A + anal B + combine + synth.
+        assert_eq!(planned.steps.len(), 8);
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 113,
+            cdp_dir,
+            planned,
+            inputs: vec![stereo, mono],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(60))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("combine diff should succeed on stereo-vs-mono lanes");
+        assert_eq!(output.results[0].len(), 2, "expected a stereo result, one lane per selection channel");
+        for (i, channel) in output.results[0].iter().enumerate() {
+            assert!(!channel.is_empty(), "lane {i} produced no audio");
+        }
+    }
+
+    /// Exercises an *automated* (`Breakpoints`) value on a `PercentOfInputDuration`-scaled
+    /// param end-to-end: each point's 0-100 percent value must be rescaled into real
+    /// seconds in the emitted `.brk` file (the same class of bug `blur_blur`'s deferred
+    /// window-count envelope had — raw percents written verbatim — but on the plan-time
+    /// path, which nothing exercised with an envelope + non-plain scale before).
+    #[test]
+    fn envelope_on_a_percent_of_input_duration_param_scales_points_to_seconds() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+        let duration = len_samples as f64 / sample_rate as f64;
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("extend_drunk_1").expect("extend_drunk_1 in catalog");
+
+        use crate::model::cdp::ParamValue as V;
+        let values = vec![
+            V::Number(1.0), // Minimum Output Duration (seconds — keeps the run fast)
+            V::Breakpoints(vec![(0.0, 0.0), (duration, 50.0)]), // Location: 0% -> 50%
+            V::Number(2.0),  // Ambitus (percent)
+            V::Number(0.5),  // Maximum Step (percent)
+            V::Number(0.05), // Clock
+        ];
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            std::slice::from_ref(&input),
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+        // Plan-level: the .brk file must hold seconds (50% of the ~1s fixture ≈ 0.5), never
+        // the raw percent values.
+        let (_, brk) = planned.brk_files.first().expect("a .brk file for the Location envelope");
+        let last_value: f64 = brk.lines().last().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
+        assert!(
+            (last_value - duration / 2.0).abs() < 0.01,
+            "expected ~{:.3}s for the 50% point, .brk holds {last_value} (raw percent leak?)",
+            duration / 2.0
+        );
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 114,
+            cdp_dir,
+            planned,
+            inputs: vec![channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(30))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("extend drunk should accept an enveloped Location");
+        assert!(
+            output.results[0][0].len() as f64 / sample_rate as f64 >= 0.9,
+            "output should honor the 1s minimum duration"
+        );
     }
 
     /// Runs every catalog entry once, at its own declared defaults, against a short mono

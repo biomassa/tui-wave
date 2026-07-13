@@ -21,6 +21,9 @@ pub struct CdpProcessCommand {
     removed: Option<Vec<Vec<f32>>>,
     markers_before: Option<Vec<Marker>>,
     cursor_before: usize,
+    /// Document channel count at `execute` time, so `undo` can shrink the document back
+    /// after a result wider than the document (see `execute`'s widening step) grew it.
+    channels_before: usize,
 }
 
 impl CdpProcessCommand {
@@ -34,6 +37,7 @@ impl CdpProcessCommand {
             removed: None,
             markers_before: None,
             cursor_before: 0,
+            channels_before: 0,
         }
     }
 }
@@ -47,6 +51,19 @@ impl Command for CdpProcessCommand {
         // the point of most of these processes), matching the Trim/Resample precedent for
         // length-changing commands.
         self.markers_before = Some(doc.markers.clone());
+        self.channels_before = doc.channels.len();
+        // A result wider than the document is a real, legitimate case (e.g. Pan or rmverb
+        // on a mono document: `output_is_stereo` processes emit true stereo from mono
+        // input). `insert_range`'s mismatch rule truncates wider data to the document's
+        // channel count, which would silently discard the entire right channel of the very
+        // effect the user asked for -- so widen the document first, duplicating existing
+        // content into the new channel(s) (audibly identical dual-mono outside the spliced
+        // range), and let `undo` shrink it back via `channels_before`.
+        if self.new_data.len() > doc.channels.len() {
+            if let Some(last) = doc.channels.last().cloned() {
+                doc.channels.resize(self.new_data.len(), last);
+            }
+        }
         self.removed = Some(doc.remove_range(start..end));
         doc.insert_range(start, self.new_data.clone());
         // Clear the selection and park the cursor at the *start* of the result, so pressing
@@ -67,6 +84,12 @@ impl Command for CdpProcessCommand {
         }
         if let Some(markers) = self.markers_before.take() {
             doc.markers = markers;
+        }
+        // Undo the widening step: the added channels were copies of existing content
+        // outside the splice (and the splice itself is removed above), so truncating
+        // restores the original channel set exactly.
+        if self.channels_before > 0 && doc.channels.len() > self.channels_before {
+            doc.channels.truncate(self.channels_before);
         }
         doc.selection = None;
         doc.cursor = self.cursor_before;
@@ -159,6 +182,39 @@ mod tests {
         assert_eq!(doc.channels, vec![vec![1.0, 2.0, 9.0, 9.0, 3.0]]);
         cmd.undo(&mut doc);
         assert_eq!(doc.channels, vec![vec![1.0, 2.0, 3.0]]);
+    }
+
+    /// A stereo result spliced into a mono document (e.g. Pan or rmverb, whose
+    /// `output_is_stereo` emits true stereo even from mono input) must widen the document
+    /// rather than let `insert_range`'s truncation rule silently discard the right channel
+    /// of the effect the user just asked for. Pre-existing audio outside the splice is
+    /// duplicated into the new channel (audibly identical dual-mono).
+    #[test]
+    fn stereo_result_widens_a_mono_document_and_undo_restores_it() {
+        let mut doc = doc_with(vec![vec![1.0, 2.0, 3.0, 4.0, 5.0]]);
+        let mut cmd = CdpProcessCommand::new(
+            "CDP: Pan".into(),
+            (1, 4),
+            vec![vec![9.0, 8.0], vec![-9.0, -8.0]],
+        );
+        cmd.execute(&mut doc);
+        assert_eq!(doc.channels.len(), 2, "document must widen to the result's channel count");
+        assert_eq!(doc.channels[0], vec![1.0, 9.0, 8.0, 5.0]);
+        assert_eq!(doc.channels[1], vec![1.0, -9.0, -8.0, 5.0], "right channel: real result data, surrounding audio duplicated from the mono original");
+
+        cmd.undo(&mut doc);
+        assert_eq!(doc.channels, vec![vec![1.0, 2.0, 3.0, 4.0, 5.0]], "undo must restore the exact mono original");
+    }
+
+    #[test]
+    fn stereo_result_into_mono_document_redoes_cleanly_after_undo() {
+        let mut doc = doc_with(vec![vec![1.0, 2.0, 3.0]]);
+        let mut cmd =
+            CdpProcessCommand::new("CDP: Pan".into(), (0, 3), vec![vec![9.0], vec![-9.0]]);
+        cmd.execute(&mut doc);
+        cmd.undo(&mut doc);
+        cmd.execute(&mut doc);
+        assert_eq!(doc.channels, vec![vec![9.0], vec![-9.0]]);
     }
 
     #[test]
