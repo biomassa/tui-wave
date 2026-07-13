@@ -3159,8 +3159,12 @@ impl App {
                 if Self::cdp_preview_matches(cached, &values, range, doc.sample_rate, second_doc_index) {
                     let label = format!("CDP: {}", def.title);
                     let channels = cached.channels.clone();
+                    let tolerance = crate::commands::cdp::timing_tolerance(
+                        def.category,
+                        crate::model::cdp::PvocSettings::default().points,
+                    );
                     self.histories[idx].apply(
-                        crate::commands::cdp::cdp_process_command(label, range, channels),
+                        crate::commands::cdp::cdp_process_command(label, range, channels, tolerance),
                         &mut self.documents[idx],
                     );
                     self.viewport = None;
@@ -3310,8 +3314,14 @@ impl App {
 
                     // Only a successful Apply counts as "used" for `Dialog::CdpBrowser`'s
                     // Recent group — Preview is an audition, not a commitment. Looked up
-                    // once here since both Apply arms below need it.
-                    let recent_key = self.cdp_catalog.processes.get(pending.catalog_index).map(|d| d.key.clone());
+                    // once here since both Apply arms below need it. The category feeds the
+                    // marker-preserving timing tolerance of the splice command.
+                    let process_def = self.cdp_catalog.processes.get(pending.catalog_index);
+                    let recent_key = process_def.map(|d| d.key.clone());
+                    let timing_tolerance = crate::commands::cdp::timing_tolerance(
+                        process_def.map(|d| d.category).unwrap_or(crate::model::cdp::Category::Time),
+                        crate::model::cdp::PvocSettings::default().points,
+                    );
 
                     match result {
                         Ok(mut output) => match purpose {
@@ -3366,7 +3376,7 @@ impl App {
                                 }
                                 let channels = output.results.into_iter().next().unwrap_or_default();
                                 self.histories[pending.doc_index].apply(
-                                    crate::commands::cdp::cdp_process_command(pending.label, pending.range, channels),
+                                    crate::commands::cdp::cdp_process_command(pending.label, pending.range, channels, timing_tolerance),
                                     &mut self.documents[pending.doc_index],
                                 );
                                 self.viewport = None;
