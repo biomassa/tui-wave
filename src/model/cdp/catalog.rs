@@ -173,6 +173,57 @@ mod tests {
         }
     }
 
+    /// A `required_list`/`required_envelope` field is unreachable in the UI unless
+    /// `automatable` is also true — `App::open_cdp_list_editor`/`open_cdp_envelope_editor`
+    /// both gate on `param.automatable` before opening (reusing the existing 'e'-key gate
+    /// meant for optional breakpoint automation on a plain constant). Found via manual
+    /// testing (2026-07-13): several freshly-authored `required_list` fields
+    /// (`synth chord`'s pitch/frequency list, `pitch tune`'s template, `pitch chord`/
+    /// `chordf`'s transposition list) had `automatable = false`, silently making the field's
+    /// only editor unreachable — pressing 'e' did nothing, with no error. The smoke test
+    /// can't catch this class of bug at all (it constructs `ParamValue`s directly, bypassing
+    /// the UI's key handling entirely), so this is a static catalog-data check instead.
+    #[test]
+    fn builtin_required_datafile_params_are_automatable() {
+        let (catalog, _) = CdpCatalog::load(None);
+        for proc in &catalog.processes {
+            for param in &proc.params {
+                if param.required_list || param.required_envelope {
+                    assert!(
+                        param.automatable,
+                        "{}: param {:?} is required_list/required_envelope but not \
+                         automatable -- its 'e'-key editor would be unreachable",
+                        proc.key,
+                        param.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// An enabled toggle's entire argv contribution IS its flag token (`pipeline.rs`
+    /// emits nothing for a flagless toggle rather than an empty token) — so a toggle
+    /// param without a flag can never reach CDP at all, silently. A bare-word toggle is
+    /// already expressible as `flag = "word"`; there is no valid reason for `flag` to be
+    /// absent or empty on a toggle.
+    #[test]
+    fn builtin_toggle_params_always_carry_a_flag() {
+        use super::super::def::ParamKind;
+        let (catalog, _) = CdpCatalog::load(None);
+        for proc in &catalog.processes {
+            for param in &proc.params {
+                if matches!(param.kind, ParamKind::Toggle { .. }) {
+                    assert!(
+                        param.flag.as_deref().is_some_and(|f| !f.is_empty()),
+                        "{}: toggle param {:?} has no flag -- enabling it would emit nothing",
+                        proc.key,
+                        param.name
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn user_dir_override_replaces_and_append_adds() {
         let dir = std::env::temp_dir().join(format!(
