@@ -4944,12 +4944,12 @@ name = "Spacing"
 description = "The spacing between each glissando in Hz"
 automatable = false
 kind = "number"
-min = 50.0
-max = 200.0
+min = 1.0
+max = 24000.0
 step = 0.01
-default = 50.0
+default = 200.0
 exponential = false
-scale = "plain"
+scale = "hz_capped_to_analysis_range"
 
 [[process]]
 key = "strange_glis_3"

@@ -1,5 +1,43 @@
 # Changelog
 
+## 2026-07-13
+
+- **CDP: reverb re-added, dual-input processes marked in the browser, 36 new processes, and
+  a real sample-rate-dependent-range bug fixed.** `Reverb (Comb/Allpass)` is back in the
+  catalog (dropped two sessions ago for a WAV-format incompatibility that now has a real
+  fix). The process browser marks any process needing a second buffer as input with a pale
+  ">1 inputs" note next to its name, so that's visible before opening it. A further pass
+  over every CDP binary not yet in the catalog added `caltrain`, `cantor`, `constrict`,
+  `distortt`, `frfractal`, `hover`/`hover2`, `prefix`, `strans`, `tremolo`, `rotor`,
+  `synfilt`, `clicknew`, `distmark`, `verges`, `motor`, `shifter`, `superaccu`, `brownian`,
+  `phasor`, `fastconv` (a new convolution-with-a-second-buffer effect), `subtract`,
+  `specsphinx`, `spectwin`, and the start of a `pitch`/`repitch` family (transpose, pick,
+  tune, chord-building) — 36 processes total, each individually verified against the real
+  CDP binaries. Also fixed `Inharmonic Glissandos`, reported failing at its own unchanged
+  default settings: its real valid range depends on the file's sample rate, which the
+  catalog previously declared as a fixed range that only happened to work at common sample
+  rates.
+
+## 2026-07-12
+
+- **CDP: fixed `rmverb` silently distorting audio.** Reported as "produces good tail but
+  entirely distorts the source audio" — the binary was misreading the app's normal 32-bit
+  float WAV input as raw integer samples, producing garbled output without ever raising an
+  error. Fixed by writing plain 16-bit audio to the small set of CDP binaries that need it,
+  rather than the app's usual working format.
+
+## 2026-07-10
+
+- **CDP: three more real bugs fixed from manual testing**, and a fourth parameter shape
+  (plain ordered lists — grain-onset times, per-grain transpositions) added alongside the
+  existing breakpoint-envelope one, covering `Grain Reposition`, `Grain Repitch`, `Grain
+  Rerhythm`, and `Stutter`. The list editor now enforces ascending order for time-based
+  lists and scales its nudge step to the actual selection length instead of the CDP
+  binary's own maximum (which made a single tap jump by minutes on a short file); `Grain
+  Reposition` failed outright at some parameter combinations because a few of its ranges
+  depend on the real selection's duration, not a fixed catalog value; and long CDP error
+  messages now wrap to fit the dialog instead of being cut off mid-sentence.
+
 ## 2026-07-09
 
 - **CDP: 13 new processes SoundThread never covered, and a smoke-test harness to add more
