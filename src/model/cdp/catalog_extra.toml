@@ -1092,6 +1092,13 @@ default = 20.0
 exponential = true
 scale = "plain"
 
+# NOTE: this key deliberately OVERRIDES the SoundThread-derived catalog.toml entry (same
+# key, later merge order wins — see catalog.rs's module doc) with a clearer title and
+# description. It must keep the builtin's `stereo_native = true`: this entry originally
+# (accidentally) downgraded it to `false`, halving stereo files into two mono lanes for no
+# benefit — probed against the real binary (2026-07-13), which handles stereo input, and
+# even mismatched stereo-first/mono-second input pairs, natively with exit 0 and a real
+# stereo result.
 [[process]]
 key = "envel_replace_1"
 bin = "envel"
@@ -1108,7 +1115,7 @@ contour after time-varying filtering flattens it.
 """
 input = "dual_wav"
 output = "wav"
-stereo_native = false
+stereo_native = true
 output_is_stereo = false
 
 [[process.params]]
@@ -7017,6 +7024,636 @@ kind = "toggle"
 default = false
 flag = "-c"
 
+# ---- Tier 0/1b batch 10 (2026-07-13): motor modes 5/8, selfsim, synth chord ----
+
+[[process]]
+key = "motor_motor_5"
+bin = "motor"
+subprog = "motor"
+mode = "5"
+title = "Motor (Sliced Source, Advance Only)"
+category = "time"
+subcategory = "texture"
+short_description = "Cuts fast inner pulse-streams from segments sliced at specified times, source-reads only advance"
+description = "The same sliced-source pulse-stream process as Motor (Sliced Source), but the source read position only ever advances forward, never regressing."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Slice Times"
+description = "Times in the source at which to slice it into separate segments"
+automatable = true
+kind = "number"
+min = 0.02
+max = 999999.0
+step = 0.01
+default = 0.05
+exponential = false
+scale = "plain"
+required_list = true
+list_is_time_sequence = true
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the output"
+automatable = false
+kind = "number"
+min = 0.5
+max = 300.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Inner Pulse Rate"
+description = "Pulse rate of the fast inner events"
+automatable = false
+kind = "number"
+min = 2.0
+max = 100.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Outer Pulse Rate"
+description = "Pulse rate of the slower outer envelope"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Inner On/Off Ratio"
+description = "Proportion of on-time to off-time of inner events"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Outer On/Off Ratio"
+description = "Proportion of on-time to off-time of outer events"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Symmetry"
+description = "Symmetry of the outer pulse envelope; 0.5 = symmetrical crescendo-decrescendo, 1 = crescendo only, 0 = decrescendo only"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Freq Randomize"
+description = "Random variation of the inner pulse rate"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-f"
+
+[[process.params]]
+name = "Pulse Randomize"
+description = "Random variation of the outer pulse rate"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-p"
+
+[[process.params]]
+name = "Jitter"
+description = "Range of random pitch jitter applied to inner pulses, in semitones"
+automatable = false
+kind = "number"
+min = 0.0
+max = 3.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-j"
+
+[[process.params]]
+name = "Tremor"
+description = "Range of random amplitude attenuation applied to inner pulses"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-t"
+
+[[process.params]]
+name = "Shift"
+description = "Range of random variation applied to the outer pulse's symmetry"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-y"
+
+[[process.params]]
+name = "Edge"
+description = "Length of the decay-tail on inner pulses, as a multiple of duration"
+automatable = false
+kind = "number"
+min = 0.0
+max = 20.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-e"
+
+[[process.params]]
+name = "Bite"
+description = "Shape of the outer pulses; 1 = linear, above 1 = slow-fast rise, below 1 = fast-slow rise"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 3.0
+exponential = true
+scale = "plain"
+flag = "-b"
+
+[[process.params]]
+name = "Vary"
+description = "Randomizes the source-read advance step from one outer pulse to the next"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-v"
+
+[[process.params]]
+name = "Seed"
+description = "Random seed"
+automatable = false
+kind = "number"
+min = 0.0
+max = 256.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-s"
+
+[[process.params]]
+name = "Advance By Fixed Step"
+description = "Inner events under the outer crescendo advance by a fixed step, instead of advancing to the end of the source"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-a"
+
+[[process]]
+key = "motor_motor_8"
+bin = "motor"
+subprog = "motor"
+mode = "8"
+title = "Motor (Sliced Source, Advance Or Regress Only)"
+category = "time"
+subcategory = "texture"
+short_description = "Cuts fast inner pulse-streams from segments sliced at specified times, source-reads only advance or only regress"
+description = "The same sliced-source pulse-stream process as Motor (Sliced Source), but each source read either only ever advances or only ever regresses, never both within the same read."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Slice Times"
+description = "Times in the source at which to slice it into separate segments"
+automatable = true
+kind = "number"
+min = 0.02
+max = 999999.0
+step = 0.01
+default = 0.05
+exponential = false
+scale = "plain"
+required_list = true
+list_is_time_sequence = true
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the output"
+automatable = false
+kind = "number"
+min = 0.5
+max = 300.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Inner Pulse Rate"
+description = "Pulse rate of the fast inner events"
+automatable = false
+kind = "number"
+min = 2.0
+max = 100.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Outer Pulse Rate"
+description = "Pulse rate of the slower outer envelope"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Inner On/Off Ratio"
+description = "Proportion of on-time to off-time of inner events"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Outer On/Off Ratio"
+description = "Proportion of on-time to off-time of outer events"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Symmetry"
+description = "Symmetry of the outer pulse envelope; 0.5 = symmetrical crescendo-decrescendo, 1 = crescendo only, 0 = decrescendo only"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Freq Randomize"
+description = "Random variation of the inner pulse rate"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-f"
+
+[[process.params]]
+name = "Pulse Randomize"
+description = "Random variation of the outer pulse rate"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-p"
+
+[[process.params]]
+name = "Jitter"
+description = "Range of random pitch jitter applied to inner pulses, in semitones"
+automatable = false
+kind = "number"
+min = 0.0
+max = 3.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-j"
+
+[[process.params]]
+name = "Tremor"
+description = "Range of random amplitude attenuation applied to inner pulses"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-t"
+
+[[process.params]]
+name = "Shift"
+description = "Range of random variation applied to the outer pulse's symmetry"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-y"
+
+[[process.params]]
+name = "Edge"
+description = "Length of the decay-tail on inner pulses, as a multiple of duration"
+automatable = false
+kind = "number"
+min = 0.0
+max = 20.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-e"
+
+[[process.params]]
+name = "Bite"
+description = "Shape of the outer pulses; 1 = linear, above 1 = slow-fast rise, below 1 = fast-slow rise"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 3.0
+exponential = true
+scale = "plain"
+flag = "-b"
+
+[[process.params]]
+name = "Vary"
+description = "Randomizes the source-read advance step from one outer pulse to the next"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-v"
+
+[[process.params]]
+name = "Seed"
+description = "Random seed"
+automatable = false
+kind = "number"
+min = 0.0
+max = 256.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-s"
+
+[[process.params]]
+name = "Advance By Fixed Step"
+description = "Inner events under the outer crescendo advance by a fixed step, instead of advancing to the end of the source"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-a"
+
+# `strands` mode 2 (the only sound-output mode -- modes 1/3 output pitch-data text files, out
+# of scope like the rest of the pitch-curve family) was tried here and deliberately NOT
+# included: confirmed against the real binary that it always writes exactly one output file,
+# but with a literal "0" appended before the extension regardless of the outfile name given
+# (e.g. requesting "out.wav" produces "out0.wav") -- the same numbered-suffix convention
+# `distcut`/`cantor`'s glob-output shape uses, but for a process with NO real input at all
+# (`IoKind::None`). `plan_job`'s `IoKind::WavGlob` branch unconditionally indexes
+# `inputs[0]` before ever checking `def.input`, so a synthesis process (0 expected inputs)
+# declaring `output = "wav_glob"` would panic at plan time, not error cleanly -- a real gap,
+# not a workaround-able catalog quirk. Revisit once `plan_wav_glob` handles a zero-input
+# synthesis source.
+
+[[process]]
+key = "selfsim_selfsim"
+bin = "selfsim"
+subprog = "selfsim"
+title = "Self-Similarity"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Replaces spectral windows with the most similar, louder window(s)"
+description = "This process finds the loudest spectral windows and replaces the windows most similar to them with copies of the loud ones (rescaled), then repeats with the next-loudest window, and so on -- a way to increase a sound's spectral self-similarity, smearing its texture toward its own loudest moments."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Self-Similarity Index"
+description = "Number of similar windows each loud window replaces; 1 replaces the single most similar window, 2 replaces the two most similar, and so on"
+automatable = false
+kind = "number"
+min = 1.0
+max = 20.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "synth_chord_1"
+bin = "synth"
+subprog = "chord"
+mode = "1"
+title = "Synth Chord (MIDI)"
+category = "time"
+subcategory = "synthesis"
+short_description = "Synthesizes a chord from a list of MIDI pitches"
+description = "This process generates a simple-waveform chord from scratch, one voice per MIDI pitch in a chosen list."
+input = "none"
+output = "wav"
+stereo_native = false
+output_is_stereo = true
+
+[[process.params]]
+name = "Pitches"
+description = "MIDI pitches to sound together"
+automatable = true
+kind = "number"
+min = 0.0
+max = 127.0
+step = 0.1
+default = 60.0
+exponential = false
+scale = "plain"
+required_list = true
+
+[[process.params]]
+name = "Sample Rate"
+description = "Sample rate of the generated output"
+automatable = false
+kind = "choice"
+options = ["16000", "22050", "24000", "32000", "44100", "48000"]
+default = 4
+
+[[process.params]]
+name = "Output Channels"
+description = "Fixed at stereo output"
+automatable = false
+kind = "choice"
+options = ["2"]
+default = 0
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the output"
+automatable = false
+kind = "number"
+min = 0.5
+max = 300.0
+step = 0.1
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Amplitude"
+description = "Amplitude of the output"
+automatable = false
+kind = "number"
+min = 0.01
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+flag = "-a"
+
+[[process]]
+key = "synth_chord_2"
+bin = "synth"
+subprog = "chord"
+mode = "2"
+title = "Synth Chord (Frequency)"
+category = "time"
+subcategory = "synthesis"
+short_description = "Synthesizes a chord from a list of frequencies"
+description = "The same simple-waveform chord synthesis as Synth Chord (MIDI), but the voices are given as frequencies in Hz instead of MIDI pitches."
+input = "none"
+output = "wav"
+stereo_native = false
+output_is_stereo = true
+
+[[process.params]]
+name = "Frequencies"
+description = "Frequencies, in Hz, to sound together"
+automatable = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+required_list = true
+
+[[process.params]]
+name = "Sample Rate"
+description = "Sample rate of the generated output"
+automatable = false
+kind = "choice"
+options = ["16000", "22050", "24000", "32000", "44100", "48000"]
+default = 4
+
+[[process.params]]
+name = "Output Channels"
+description = "Fixed at stereo output"
+automatable = false
+kind = "choice"
+options = ["2"]
+default = 0
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the output"
+automatable = false
+kind = "number"
+min = 0.5
+max = 300.0
+step = 0.1
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Amplitude"
+description = "Amplitude of the output"
+automatable = false
+kind = "number"
+min = 0.01
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+flag = "-a"
+
 [[process]]
 key = "shifter_shifter_1"
 bin = "shifter"
@@ -8925,7 +9562,7 @@ output_is_stereo = false
 [[process.params]]
 name = "Pitch Template"
 description = "Target pitches, in Hz, to tune the harmonics to"
-automatable = false
+automatable = true
 kind = "number"
 min = 20.0
 max = 10000.0
@@ -8979,7 +9616,7 @@ output_is_stereo = false
 [[process.params]]
 name = "Pitch Template"
 description = "Target pitches, in MIDI, to tune the harmonics to"
-automatable = false
+automatable = true
 kind = "number"
 min = 0.0
 max = 127.0
@@ -9047,7 +9684,7 @@ flag = "-p"
 [[process.params]]
 name = "Transposition List"
 description = "Semitone transpositions to superimpose"
-automatable = false
+automatable = true
 kind = "number"
 min = -48.0
 max = 48.0
@@ -9116,7 +9753,7 @@ output_is_stereo = false
 [[process.params]]
 name = "Transposition List"
 description = "Semitone transpositions to superimpose"
-automatable = false
+automatable = true
 kind = "number"
 min = -48.0
 max = 48.0
