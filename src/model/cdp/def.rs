@@ -61,6 +61,17 @@ pub enum NumberScale {
     /// catalog's static `max`), not a fixed range this catalog can declare once and reuse
     /// unchanged across every selection the way `Plain` params can.
     CappedAtInputDuration,
+    /// A frequency value (Hz) whose valid range is `[sample_rate / pvoc.points,
+    /// sample_rate / 4]` — the width of one analysis channel up to half the Nyquist
+    /// frequency. Found via a user manually testing `strange glis`'s "Spacing" (`hzstep`)
+    /// at its catalog default (50 Hz): CDP rejected it with "Value (50.0) out of range
+    /// (93.75 to 24000.0)" against a 96kHz file at the default 1024-point analysis —
+    /// 93.75 = 96000/1024 (one channel's width) and 24000 = 96000/4 (nyquist/2), confirming
+    /// the binary's own usage text verbatim ("Range: FROM channel-frq-width TO nyquist/2")
+    /// rather than the fixed 50-200 range SoundThread's own catalog data declared. Depends
+    /// on the real input's sample rate, not just its duration, so this needed a new scale
+    /// rather than reusing `CappedAtInputDuration`.
+    HzCappedToAnalysisRange,
 }
 
 /// A concrete value for one parameter, as edited in the UI. Also the shape a saved CDP

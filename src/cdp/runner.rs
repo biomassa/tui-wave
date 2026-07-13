@@ -866,6 +866,60 @@ mod tests {
         }
     }
 
+    /// Regression test for a real bug found by manual testing: `strange glis` mode 2's
+    /// "Spacing" (`hzstep`) param rejected its own unchanged catalog default at 96kHz with
+    /// "Value (50.0) out of range (93.75 to 24000.0)" -- SoundThread's own catalog data
+    /// declared a fixed 50-200 Hz range, but the real range is `[sample_rate/analysis_
+    /// points, sample_rate/4]` per the binary's own usage text ("Range: FROM channel-frq-
+    /// width TO nyquist/2"), confirmed by reproducing the exact reported error against a
+    /// synthesized 96kHz sine. Fixed via `NumberScale::HzCappedToAnalysisRange` (a new
+    /// scale, since the real range depends on sample rate, which no existing scale had
+    /// access to) plus a `PARAM_OVERRIDE` entry in the converter script correcting the
+    /// catalog's min/max/default. This test deliberately uses a 96kHz fixture rather than
+    /// the file's usual 44.1kHz one -- at 44.1kHz the old fixed 50-200 range happened to
+    /// overlap the real dynamic range enough to mask the bug, exactly the kind of
+    /// fixture-masks-a-real-bug case `grain_reposition`'s own regression test above was
+    /// written to catch a version of.
+    #[test]
+    fn strange_glis_succeeds_at_its_own_default_values_on_a_96khz_file() {
+        let cdp_dir = require_cdp!();
+        let sample_rate = 96_000u32;
+        let len_samples = sample_rate as usize; // 1 second
+        let channels = vec![(0..len_samples)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sample_rate as f32).sin() * 0.5)
+            .collect()];
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("strange_glis_2").expect("strange_glis_2 in catalog");
+
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            std::slice::from_ref(&input),
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 104,
+            cdp_dir,
+            planned,
+            inputs: vec![channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(30)) else {
+            unreachable!()
+        };
+        result.expect(
+            "strange_glis_2 should succeed at its own unchanged default values on a 96kHz file",
+        );
+    }
+
     fn stereo_sine_channels() -> (Vec<Vec<f32>>, u32) {
         let doc = crate::model::io::load_wav("tests/fixtures/stereo_sine.wav").unwrap();
         (doc.channels, doc.sample_rate)
