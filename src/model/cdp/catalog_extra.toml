@@ -4947,19 +4947,3277 @@ default = false
 # other bespoke multi-column formats CDP-Ext-Plan.md Phase 3 already scopes out
 # (repeater/tapdelay/blur weave/hilite band).
 
-# `reverb` (bin, distinct from the already-cataloged `rmverb`) was tried here and
-# deliberately NOT included: its argv/params are all straightforward (rgain/mix/rvbtime/
-# absorb/lpfreq/trailertime plus -c/-H/-L/-p, with its two datafile params -- times.txt and
-# -eFILE -- both genuinely optional, confirmed safe to omit), but the *binary itself*
-# rejects the WAV files this runner writes with "cannot open output file out.wav" -- an
-# unhelpful error for what turned out to be an input-parsing failure. Root-caused by hand:
-# `write_inputs` (cdp/runner.rs) writes float32 input via `hound`, which emits a 40-byte
-# WAVE_FORMAT_EXTENSIBLE `fmt ` chunk (not the simpler 16/18-byte plain IEEE-float chunk);
-# `reverb`'s WAV reader apparently can't handle the extensible header and corrupts some
-# internal state as a result, well before it ever tries to write real output. Every other
-# process in this catalog (~200, including the structurally-similar `rmverb`) tolerates the
-# same extensible-format files fine, so this reads as a narrow quirk in this one older
-# binary's parser, not a defect in every CDP install -- not chasing a global "always write
-# non-extensible WAV" change to work around one binary without review (would touch every
-# job this app runs). Revisit if `reverb` specifically is wanted badly enough to justify
-# either that broader change or a per-process WAV-format override.
+# ---- Tier 1b batch 3 (2026-07-13): reverb re-add + more candidates --------------------
+
+# `reverb` (bin, distinct from the already-cataloged `rmverb`) was originally tried here and
+# dropped: same WAVE_FORMAT_EXTENSIBLE WAV-parser incompatibility as `rmverb` (see that
+# entry's `requires_simple_wav_input` doc comment in def.rs for the full story), except
+# `reverb`'s parser fails loudly ("cannot open output file out.wav") instead of silently
+# corrupting audio. Now that `requires_simple_wav_input` exists as a working per-process fix
+# (built to resolve the `rmverb` corruption), re-added here with the flag set. Its
+# rgain/mix/rvbtime/absorb/lpfreq/trailertime params are all straightforward; its two
+# datafile params (times.txt, -eFILE) are both genuinely optional (confirmed safe to omit
+# against the real binary) and left out, same as before.
+[[process]]
+key = "reverb"
+bin = "reverb"
+title = "Reverb (Comb/Allpass)"
+category = "time"
+subcategory = "delay"
+short_description = "Add simulated acoustic resonance via a comb/allpass filter network"
+description = "This process produces a reverb effect using a network of comb and allpass delay filters, distinct from rmverb's room-simulation algorithm. Reverb time is set directly in seconds rather than via a feedback level."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = true
+requires_simple_wav_input = true
+
+[[process.params]]
+name = "Reverb Gain"
+description = "The level of the dense reverb"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Wet/Dry Mix"
+description = "Balance between reverb and the input sound, 0 = wet, 1 = dry"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.1
+default = 0.4
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Reverb Time"
+description = "Reverb decay time (to -60dB) in seconds"
+automatable = false
+kind = "number"
+min = 0.1
+max = 30.0
+step = 0.1
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Absorption"
+description = "Degree of high-frequency damping, suggesting air absorption"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.25
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Low Pass Filter"
+description = "Lowpass filter cutoff (Hz) applied at the input to the reverb, 0 = bypassed"
+automatable = false
+kind = "number"
+min = 0.0
+max = 10000.0
+step = 0.01
+default = 0.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Tail Time"
+description = "Amount of silence, in seconds, to append to the input file to avoid cutting off the reverb tail"
+automatable = false
+kind = "number"
+min = 0.0
+max = 60.0
+step = 0.01
+default = 10.0
+exponential = false
+scale = "plain"
+
+# ---- Tier 0 batch 8 (2026-07-13): plain-param sweep across previously-uncataloged binaries
+#
+# Researched via a full triage pass over every CDP binary not yet in either catalog file
+# (162 candidates). This batch covers the "plain_params" bucket: real sound-transformation
+# processes needing only constant numeric/toggle params, no datafile infra beyond what's
+# already built. Argv shapes (bin/subprog/mode split) were independently verified against
+# the real binaries -- not trusted from usage-text banners alone, since at least one
+# (frfractal) prints a *different* internal name ("fractal fractal") than its own filename
+# on disk, which would have produced a wrong `bin`/`subprog` split if taken at face value.
+# Numeric ranges below are informed starting points from each binary's own usage text, not
+# yet smoke-test-verified -- see the smoke-test note further down this batch once that pass
+# is complete.
+
+[[process]]
+key = "caltrain_caltrain"
+bin = "caltrain"
+subprog = "caltrain"
+title = "Spectral Train Blur"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Time-blurs the upper spectrum while optionally protecting the bass"
+description = "This process time-blurs the frequency channels above a chosen cutoff, smearing the upper spectrum over time while an optional bass cutoff keeps low frequencies untouched. Useful for softening the top end of a bright or noisy sound without muddying the bass."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Blur Time"
+description = "Time over which the upper spectrum is blurred"
+automatable = false
+kind = "number"
+min = 0.01
+max = 5.0
+step = 0.01
+default = 0.2
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Blur Above"
+description = "Frequency above which the spectrum is blurred"
+automatable = false
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 1.0
+default = 2000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Bass Cutoff"
+description = "Frequency below which the spectrum is left untouched, 0 = no bass protection"
+automatable = false
+kind = "number"
+min = 0.0
+max = 2000.0
+step = 1.0
+default = 0.0
+exponential = true
+scale = "plain"
+flag = "-l"
+
+[[process]]
+key = "cantor_set_1"
+bin = "cantor"
+subprog = "set"
+mode = "1"
+title = "Gradual Hole (Percentage)"
+category = "time"
+subcategory = "texture"
+short_description = "Gradually cuts a growing hole in the center of a sound, one buffer per stage"
+description = "This process repeatedly cuts a hole in the central third of a sound, then cuts a hole in the central third of what remains, and so on, writing each increasingly perforated stage as its own new buffer. Hole size is set as a percentage of the current segment being cut."
+input = "wav"
+output = "wav_glob"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Hole Size"
+description = "Percentage of the current segment taken up by the hole"
+automatable = false
+kind = "number"
+min = 1.0
+max = 100.0
+step = 0.1
+default = 50.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Hole Depth"
+description = "Depth of each cut as the hole is gradually created"
+automatable = false
+kind = "number"
+min = 0.01
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Depth Trigger"
+description = "Hole depth level that triggers the next hole-cutting stage"
+automatable = false
+kind = "number"
+min = 0.01
+max = 1.0
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Splice Length"
+description = "Splice length, in milliseconds, at each cut"
+automatable = false
+kind = "number"
+min = 1.0
+max = 200.0
+step = 1.0
+default = 15.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Duration"
+description = "Maximum total duration of the output"
+automatable = false
+kind = "number"
+min = 0.1
+max = 600.0
+step = 0.1
+default = 30.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Extend"
+description = "Extend the sound beyond the splice-length limits"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-e"
+
+# `cantor_set_2` (mode 2 -- fixed-duration hole size, as opposed to mode 1's percentage-
+# based sizing) was tried here and deliberately NOT included: smoke-tested against the real
+# binary, its Hole Duration param rejected the catalog's static range with "Value (0.5) out
+# of range (0.0 to 0.333333)" -- against the smoke test's 1-second fixture, that upper bound
+# is exactly duration/3, not a fixed literal max the way `constrict`'s Constriction or
+# similar params are. This is a genuinely data-dependent ceiling like
+# `NumberScale::CappedAtInputDuration` already handles for `grain_reposition`, but scaled by
+# a fraction (duration/3) rather than that scale's flat "duration minus a small margin" --
+# no existing `NumberScale` variant covers a fractional cap, and adding one was out of scope
+# for this batch. Revisit by adding a parametrized scale variant if mode 2 specifically is
+# wanted; mode 1 (percentage-based, no such ceiling) and mode 3 (vibrato-layer fill) shipped
+# fine without it.
+
+[[process]]
+key = "cantor_set_3"
+bin = "cantor"
+subprog = "set"
+mode = "3"
+title = "Gradual Hole (Vibrato Layers)"
+category = "time"
+subcategory = "texture"
+short_description = "Cuts a hole in the center of a sound with layered vibrato, one buffer per stage"
+description = "A variant of the gradual-hole-cutting process that fills the growing hole with superimposed vibrato-envelope layers instead of silence, writing each stage as its own new buffer -- a wavering, shimmering fill rather than a clean gap."
+input = "wav"
+output = "wav_glob"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Hole Level"
+description = "Level of the signal at the base of the hole"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Depth Ramp"
+description = "Number of repeats before the hole reaches full depth"
+automatable = false
+kind = "number"
+min = 1.0
+max = 50.0
+step = 1.0
+default = 5.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Layer Count"
+description = "Number of vibrato layers used"
+automatable = false
+kind = "number"
+min = 1.0
+max = 20.0
+step = 1.0
+default = 3.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Layer Decay"
+description = "Depth of each successive vibrato layer relative to the previous one"
+automatable = false
+kind = "number"
+min = 0.01
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Duration"
+description = "Maximum total duration of the output"
+automatable = false
+kind = "number"
+min = 0.1
+max = 600.0
+step = 0.1
+default = 30.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "constrict_constrict"
+bin = "constrict"
+subprog = "constrict"
+title = "Constrict Silence"
+category = "time"
+subcategory = "segment"
+short_description = "Shortens or overlaps silent gaps in a sound"
+description = "This process shortens zero-level (silent) sections of a sound by a percentage, tightening up gaps between sounds. Pushed past 100%, it instead overlaps the sound on either side of each gap, crossfading across what used to be silence."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Constriction"
+description = "0-100 shortens silence by that percentage; above 100 overlaps surrounding sound by (value - 100) percent"
+automatable = false
+kind = "number"
+min = 0.0
+max = 200.0
+step = 0.1
+default = 50.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "distortt_repeat"
+bin = "distortt"
+subprog = "repeat"
+title = "Waveset Group Repeat"
+category = "time"
+subcategory = "distort"
+short_description = "Repeats groups of wavesets to extend a sound"
+description = "This process skips an initial offset into the sound, then repeats each group of wavesets a fixed number of times, extending the sound to a target duration. Produces a stuttering, granular distortion that thickens as the repeat count rises."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Group Size"
+description = "Number of wavesets in each repeated group"
+automatable = false
+kind = "number"
+min = 1.0
+max = 100.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Repeats"
+description = "Number of repetitions of each waveset group"
+automatable = false
+kind = "number"
+min = 1.0
+max = 50.0
+step = 1.0
+default = 3.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Offset"
+description = "Time, in milliseconds, to skip before starting the waveset process"
+automatable = false
+kind = "number"
+min = 0.0
+max = 5000.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Duration"
+description = "Required duration of the output"
+automatable = false
+kind = "number"
+min = 0.1
+max = 600.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Telescope"
+description = "Skip wavesets so the output stays close to the input's own size"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-t"
+
+# `freeze_freeze_1`/`freeze_freeze_2` (fluid iterative segment-freeze, modes 1 and 2) were
+# tried here and deliberately NOT included: the real binary fails every invocation --
+# every parameter value combination tested, on multiple real WAV files (both the project's
+# own 16-bit fixture and freshly ffmpeg-generated ones, ruling out any WAV-format quirk) --
+# with the same "ERROR: INTERNAL ERROR: (Bug?)\nERROR: Failed to parse input file N" (N
+# happens to equal the mode number, 1 or 2, which looks like an internal index reused by
+# coincidence rather than anything about the actual input file). Confirmed this isn't an
+# argv-shape or param-range problem on this project's end: the binary rejects the identical
+# argv pattern regardless of which values are passed, including maximally simple
+# whole-number values. Same class of finding as `iterline`'s earlier removal -- a real bug
+# in this CDP release's binary, not something a catalog fix can work around.
+
+[[process]]
+key = "frfractal_fractal"
+bin = "frfractal"
+subprog = "fractal"
+title = "Fractalize"
+category = "time"
+subcategory = "distort"
+short_description = "Creates a fractalized, self-layered version of a sound"
+description = "This process builds a fractalized version of a sound by layering self-similar copies of it. Higher layer counts produce denser, longer, and more chaotic textures -- the practical maximum depends on the input's duration and the splice length used."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Layers"
+description = "Number of fractal layers in the output; large values can produce very long, memory-heavy output"
+automatable = false
+kind = "number"
+# The real binary rejects 1 ("out of range (2.0 to 100.0)") and reliably crashes
+# (`malloc(): invalid next size (unsorted)`) at exactly 2, confirmed against both a 2s and a
+# 5s test file -- a genuine bug in this CDP release, not an argv-shape issue (same class of
+# finding as `iterline`'s dropped modes). 3 works but already grows a 2-second input into a
+# 15+ second output, matching the usage text's own "very long output" warning -- max capped
+# well below the binary's own literal ceiling (100) to keep the slider's range musically
+# useful; the binary cleanly reports its own real per-file ceiling ("Maximum number of
+# fractal cuts for this file = N") when a value is too large for a given selection, which
+# surfaces through the existing CDP error dialog without needing new scale infra.
+min = 3.0
+max = 20.0
+step = 1.0
+default = 3.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Splice Length"
+description = "Length of splices, in milliseconds"
+automatable = false
+kind = "number"
+# Bisected against the real binary: at Layers=3, splice values of 15 and 20 both reliably
+# crash it (same `malloc(): invalid next size (unsorted)` bug, independent of the input's
+# own duration -- reproduced on 1s, 2s, and 5s files alike), while 25 and 30 both run
+# cleanly. Floor raised to 25 (with margin) rather than the binary's own literal minimum,
+# to keep the default combination smoke-test-clean; a value in the crashing 1-20 band would
+# only be reachable by lowering this catalog's own min, not by anything a user types in
+# past this range.
+min = 25.0
+max = 200.0
+step = 1.0
+default = 30.0
+exponential = false
+scale = "plain"
+flag = "-s"
+
+[[process]]
+key = "hover_hover"
+bin = "hover"
+subprog = "hover"
+title = "Hover"
+category = "time"
+subcategory = "texture"
+short_description = "Zigzag-reads through a sound at a controllable frequency"
+description = "This process moves through a sound reading it in a zigzag pattern (forward then back) at a chosen frequency, producing a granular, hovering motion around a point in the source. Frequency and read location can drift over time."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Frequency"
+description = "Rate of the zigzag read, in Hz"
+automatable = true
+kind = "number"
+min = 0.01
+max = 1000.0
+step = 0.01
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Location"
+description = "Time in the source sound from which samples are read"
+automatable = true
+kind = "number"
+min = 0.0
+max = 999999.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Frequency Random"
+description = "Random variation of the read frequency"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Location Random"
+description = "Random variation of the read location"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Splice Length"
+description = "Length of splices at each zigzag turn, in milliseconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 100.0
+step = 1.0
+default = 15.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Duration"
+description = "Total output duration"
+automatable = false
+kind = "number"
+min = 0.1
+max = 600.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "hover2_hover2"
+bin = "hover2"
+subprog = "hover2"
+title = "Hover (Mirrored)"
+category = "time"
+subcategory = "texture"
+short_description = "Zigzag-reads a sound from a zero-crossing, mirroring each read"
+description = "A variant of Hover that reads back and forth from a zero-crossing and outputs each read mirrored, forming symmetrical, zero-centred waveforms -- a smoother, more tonal variant of the zigzag-read texture."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Frequency"
+description = "Rate of the zigzag read, in Hz"
+automatable = true
+kind = "number"
+min = 0.01
+max = 1000.0
+step = 0.01
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Location"
+description = "Time in the source sound near which samples are read"
+automatable = true
+kind = "number"
+min = 0.0
+max = 999999.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Frequency Random"
+description = "Random variation of the read frequency"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Location Random"
+description = "Random variation of the read location"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Duration"
+description = "Total output duration"
+automatable = false
+kind = "number"
+min = 0.1
+max = 600.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Step"
+description = "Step between locations at breakpoint times, instead of interpolating between them"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-s"
+
+[[process.params]]
+name = "Normalize"
+description = "Normalize the loudness of every generated wavecycle"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-n"
+
+[[process]]
+key = "prefix_silence"
+bin = "prefix"
+subprog = "silence"
+title = "Prefix Silence"
+category = "time"
+subcategory = "segment"
+short_description = "Adds silence to the start of a sound"
+description = "This process simply prepends a chosen duration of silence to the start of a sound."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Duration"
+description = "Duration of silence to add"
+automatable = false
+kind = "number"
+min = 0.0
+max = 600.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "strans_multi_1"
+bin = "strans"
+subprog = "multi"
+mode = "1"
+title = "Speed Change"
+category = "time"
+subcategory = "time"
+short_description = "Changes playback speed (and pitch along with it)"
+description = "This process changes the playback speed of a sound by a multiplier, with pitch shifting along with it (like a tape speed change)."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Speed"
+description = "Speed multiplier"
+automatable = true
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Envelope Times Are Output-Relative"
+description = "Read any breakpoint envelope's times as times in the output file, instead of the input file"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-o"
+
+[[process]]
+key = "strans_multi_2"
+bin = "strans"
+subprog = "multi"
+mode = "2"
+title = "Pitch Transpose"
+category = "time"
+subcategory = "pitch"
+short_description = "Transposes pitch without changing duration"
+description = "This process transposes a sound's pitch by a number of semitones without changing its duration."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Transposition"
+description = "Transposition in semitones"
+automatable = true
+kind = "number"
+min = -24.0
+max = 24.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Envelope Times Are Output-Relative"
+description = "Read any breakpoint envelope's times as times in the output file, instead of the input file"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-o"
+
+[[process]]
+key = "strans_multi_3"
+bin = "strans"
+subprog = "multi"
+mode = "3"
+title = "Speed Ramp"
+category = "time"
+subcategory = "time"
+short_description = "Accelerates smoothly to a target speed by a chosen time"
+description = "This process ramps playback speed smoothly from normal speed up to a target speed multiplier, reaching the target at a chosen time."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Target Speed"
+description = "Speed multiplier reached at the goal time"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Goal Time"
+description = "Time at which the target speed is reached"
+automatable = false
+kind = "number"
+min = 0.0
+max = 999999.0
+step = 0.01
+default = 999999.0
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Start Time"
+description = "Time at which acceleration begins"
+automatable = false
+kind = "number"
+min = 0.0
+max = 999999.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "capped_at_input_duration"
+flag = "-s"
+
+[[process]]
+key = "strans_multi_4"
+bin = "strans"
+subprog = "multi"
+mode = "4"
+title = "Vibrato"
+category = "time"
+subcategory = "modulation"
+short_description = "Adds vibrato to a sound"
+description = "This process adds vibrato (periodic pitch modulation) to a sound at a chosen rate and depth."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Vibrato Frequency"
+description = "Vibrato rate, in Hz"
+automatable = true
+kind = "number"
+min = 0.01
+max = 20.0
+step = 0.01
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Vibrato Depth"
+description = "Vibrato depth, in semitones"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "tremolo_tremolo_1"
+bin = "tremolo"
+subprog = "tremolo"
+mode = "1"
+title = "Tremolo (Linear)"
+category = "time"
+subcategory = "modulation"
+short_description = "Amplitude tremolo, with an optional narrowing width"
+description = "This process applies amplitude tremolo (periodic loudness modulation) to a sound, interpolating linearly between frequency values if the rate is automated. A fineness control can narrow/squeeze the tremolo's width."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Frequency"
+description = "Tremolo rate, in Hz"
+automatable = true
+kind = "number"
+min = 0.0
+max = 500.0
+step = 0.1
+default = 5.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Depth"
+description = "Depth of the tremolo effect"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Overall signal gain"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Fineness"
+description = "Squeezes the width of the tremolo; higher values narrow it"
+automatable = false
+kind = "number"
+min = 1.0
+max = 50.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "tremolo_tremolo_2"
+bin = "tremolo"
+subprog = "tremolo"
+mode = "2"
+title = "Tremolo (Logarithmic)"
+category = "time"
+subcategory = "modulation"
+short_description = "Amplitude tremolo using logarithmic (pitch-like) frequency interpolation"
+description = "The same tremolo effect as Tremolo (Linear), but interpolates logarithmically between frequency values when the rate is automated -- closer to how pitch is perceived. Take care with a rate near zero."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Frequency"
+description = "Tremolo rate, in Hz"
+automatable = true
+kind = "number"
+min = 0.0
+max = 500.0
+step = 0.1
+default = 5.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Depth"
+description = "Depth of the tremolo effect"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Overall signal gain"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Fineness"
+description = "Squeezes the width of the tremolo; higher values narrow it"
+automatable = false
+kind = "number"
+min = 1.0
+max = 50.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+# ---- Tier 1b batch 4 (2026-07-13): more required_envelope processes ----
+#
+# Continuing the plain-params-triage bucket list from Tier 0 batch 8's uncataloged-binary
+# sweep. `suppress` (partials, TIMESLOTS param) was researched but deliberately NOT
+# included: its second breakpoint column is itself an absolute end-*time* that must exceed
+# the first column's start-time, not an arbitrary value the way every other
+# `required_envelope` param's Y-axis is (a level, a pitch, a duration-to-insert) --
+# `required_envelope`'s generic (time, value) editor has no way to express "column 2 must
+# exceed column 1," and the editor's own never-opened seeding shape (3 points at
+# [0, duration/2, duration] with values clustered near the field's own default/min/max) has
+# no reason to produce valid start<end pairs for this specific semantic. Revisit if a
+# start/end-pair variant of the envelope editor is ever built.
+
+# `manysil` was tried here and deliberately NOT included: its SILENCEDATA envelope's very
+# first point sits at time=0.0 in every `required_envelope` field's never-opened seeding
+# (the general 3-point-bump shape `App::open_cdp_envelope_editor` seeds for any field to
+# dodge the earlier fractal-hang bug always starts at t=0.0) -- and the real binary reliably
+# fails a silence insertion exactly at time=0.0 with a misleading "ERROR: SYSTEM ERROR /
+# Can't write to output soundfile: no memory to open sndfile" (confirmed: 0.001 works fine,
+# 0.0 fails every time, on both single- and multi-point data, ruling out a WAV-format or
+# point-count issue). This is a real, narrow binary constraint that conflicts with the
+# generic seeding infra shared by every `required_envelope` field -- no per-process "minimum
+# start time" override exists yet. Revisit if that infra is ever built.
+
+[[process]]
+key = "rotor_rotor_1"
+bin = "rotor"
+subprog = "rotor"
+mode = "1"
+title = "Rotor (Grouped Timing)"
+category = "time"
+subcategory = "synthesis"
+short_description = "Generates evolving note-sets that grow and shrink in pitch range and speed"
+description = "This process reads a source sound at varying speeds to generate a stream of pitched events, grouped into sets whose pitch range, speed, and timing evolve over the output's duration. Each event is shaped by a breakpoint envelope; note-group start times are set directly by a fixed time-step."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Event Envelope"
+description = "Envelope imposed over each output event; its duration sets the duration of every event"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+required_envelope = true
+
+[[process.params]]
+name = "Event Count"
+description = "Number of events in each changing note-set"
+automatable = false
+kind = "number"
+min = 3.0
+max = 127.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Pitch"
+description = "Minimum MIDI pitch of events"
+automatable = false
+kind = "number"
+min = 0.0
+max = 127.0
+step = 1.0
+default = 48.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Pitch"
+description = "Maximum MIDI pitch of events"
+automatable = false
+kind = "number"
+min = 0.0
+max = 127.0
+step = 1.0
+default = 72.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Timestep"
+description = "Maximum time between event onsets"
+automatable = false
+kind = "number"
+min = 0.0
+max = 4.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Rotation"
+description = "Number of note-sets before the pitch sequence returns to its original order"
+automatable = false
+kind = "number"
+min = 4.0
+max = 256.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Speed Rotation"
+description = "Number of note-sets before the speed sequence returns to its original order"
+automatable = false
+kind = "number"
+min = 4.0
+max = 256.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Initial Phase"
+description = "Initial phase difference between the pitch and speed rotations"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the output to generate"
+automatable = false
+kind = "number"
+min = 1.0
+max = 300.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Group Timestep"
+description = "Time between the start of each note-group"
+automatable = false
+kind = "number"
+min = 1.0
+max = 60.0
+step = 0.1
+default = 10.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Dovetail"
+description = "Size of the start/end dovetails applied to the source, in milliseconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 5.0
+step = 0.1
+default = 2.0
+exponential = false
+scale = "plain"
+flag = "-d"
+
+[[process]]
+key = "rotor_rotor_2"
+bin = "rotor"
+subprog = "rotor"
+mode = "2"
+title = "Rotor (Sequential Timing)"
+category = "time"
+subcategory = "synthesis"
+short_description = "Generates evolving note-sets whose timing depends on the current set's own spacing"
+description = "The same evolving note-set generator as Rotor (Grouped Timing), but each note-group's start time depends on the spacing within the current set rather than a fixed time-step."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Event Envelope"
+description = "Envelope imposed over each output event; its duration sets the duration of every event"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+required_envelope = true
+
+[[process.params]]
+name = "Event Count"
+description = "Number of events in each changing note-set"
+automatable = false
+kind = "number"
+min = 3.0
+max = 127.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Pitch"
+description = "Minimum MIDI pitch of events"
+automatable = false
+kind = "number"
+min = 0.0
+max = 127.0
+step = 1.0
+default = 48.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Pitch"
+description = "Maximum MIDI pitch of events"
+automatable = false
+kind = "number"
+min = 0.0
+max = 127.0
+step = 1.0
+default = 72.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Timestep"
+description = "Maximum time between event onsets"
+automatable = false
+kind = "number"
+min = 0.0
+max = 4.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Rotation"
+description = "Number of note-sets before the pitch sequence returns to its original order"
+automatable = false
+kind = "number"
+min = 4.0
+max = 256.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Speed Rotation"
+description = "Number of note-sets before the speed sequence returns to its original order"
+automatable = false
+kind = "number"
+min = 4.0
+max = 256.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Initial Phase"
+description = "Initial phase difference between the pitch and speed rotations"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the output to generate"
+automatable = false
+kind = "number"
+min = 1.0
+max = 300.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Dovetail"
+description = "Size of the start/end dovetails applied to the source, in milliseconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 5.0
+step = 0.1
+default = 2.0
+exponential = false
+scale = "plain"
+flag = "-d"
+
+[[process]]
+key = "rotor_rotor_3"
+bin = "rotor"
+subprog = "rotor"
+mode = "3"
+title = "Rotor (Overlaid Timing)"
+category = "time"
+subcategory = "synthesis"
+short_description = "Generates evolving note-sets, overlaying each set's first event on the previous set's last"
+description = "The same evolving note-set generator as Rotor (Grouped Timing), but the first event of each new note-group is overlaid on the last event of the previous group."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Event Envelope"
+description = "Envelope imposed over each output event; its duration sets the duration of every event"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+required_envelope = true
+
+[[process.params]]
+name = "Event Count"
+description = "Number of events in each changing note-set"
+automatable = false
+kind = "number"
+min = 3.0
+max = 127.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Pitch"
+description = "Minimum MIDI pitch of events"
+automatable = false
+kind = "number"
+min = 0.0
+max = 127.0
+step = 1.0
+default = 48.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Pitch"
+description = "Maximum MIDI pitch of events"
+automatable = false
+kind = "number"
+min = 0.0
+max = 127.0
+step = 1.0
+default = 72.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Timestep"
+description = "Maximum time between event onsets"
+automatable = false
+kind = "number"
+min = 0.0
+max = 4.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Rotation"
+description = "Number of note-sets before the pitch sequence returns to its original order"
+automatable = false
+kind = "number"
+min = 4.0
+max = 256.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Speed Rotation"
+description = "Number of note-sets before the speed sequence returns to its original order"
+automatable = false
+kind = "number"
+min = 4.0
+max = 256.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Initial Phase"
+description = "Initial phase difference between the pitch and speed rotations"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the output to generate"
+automatable = false
+kind = "number"
+min = 1.0
+max = 300.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Dovetail"
+description = "Size of the start/end dovetails applied to the source, in milliseconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 5.0
+step = 0.1
+default = 2.0
+exponential = false
+scale = "plain"
+flag = "-d"
+
+[[process]]
+key = "synfilt_synfilt_1"
+bin = "synfilt"
+subprog = "synfilt"
+mode = "1"
+title = "Synth Filtered Noise (Single Pitch)"
+category = "time"
+subcategory = "synthesis"
+short_description = "Synthesizes noise shaped by a time-varying pitched filterbank"
+description = "This process synthesizes noise passed through a bank of filters tuned to a single time-varying pitch (and its harmonics), producing a pitched, resonant texture from scratch. For simultaneous multi-pitch filtering, see the (unshipped) varibank-datafile mode of the same binary."
+input = "none"
+output = "wav"
+stereo_native = false
+output_is_stereo = true
+
+[[process.params]]
+name = "Filter Pitch"
+description = "Time and MIDI-pitch pairs shaping the filter's centre pitch over time"
+automatable = true
+kind = "number"
+min = 0.0
+max = 127.0
+step = 0.1
+default = 60.0
+exponential = false
+scale = "plain"
+required_envelope = true
+
+# The binary's own usage text lists the positional order as "data dur srate chans Q gain
+# hcnt rolloff seed" -- bisected against the real binary (each attempt's "Parameter[N] out
+# of range" error pointed at a different param's *expected* range than the one actually in
+# that slot) and found the real order is `data srate chans dur Q rolloff hcnt`, with no
+# separate GAIN or SEED positional at all despite both being individually described in the
+# usage text. Ordering below matches what's actually verified against the binary, not the
+# usage text's own stated order.
+
+[[process.params]]
+name = "Sample Rate"
+description = "Sample rate of the generated output"
+automatable = false
+kind = "choice"
+options = ["44100", "48000", "88200", "96000"]
+default = 0
+
+[[process.params]]
+name = "Output Channels"
+description = "Fixed at stereo output"
+automatable = false
+kind = "choice"
+options = ["2"]
+default = 0
+
+[[process.params]]
+name = "Duration"
+description = "Nominal duration of the output (the datafile's own last time also bounds it)"
+automatable = false
+kind = "number"
+min = 0.5
+max = 300.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Q"
+description = "Tightness (Q) of the filter"
+automatable = false
+kind = "number"
+min = 0.001
+max = 10000.0
+step = 0.001
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Rolloff"
+description = "Level drop, in dB, from one harmonic to the next"
+automatable = false
+kind = "number"
+min = -96.0
+max = 0.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Harmonics"
+description = "Number of harmonics of the pitch to use"
+automatable = false
+kind = "number"
+min = 1.0
+max = 20.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Double Filtering"
+description = "Apply the filter twice"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-d"
+
+[[process.params]]
+name = "Drop On Overflow"
+description = "Drop output if the filter overflows"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-o"
+
+# ---- Tier 1b batch 5 (2026-07-13): more required_list processes ----
+
+[[process]]
+key = "clicknew_clicks"
+bin = "clicknew"
+subprog = "clicks"
+title = "Click Track"
+category = "time"
+subcategory = "synthesis"
+short_description = "Generates a click track from a list of times"
+description = "This process generates a plain click track from a list of times, useful as a tempo reference or rhythmic seed for further processing."
+input = "none"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Click Times"
+description = "Times at which to place a click"
+automatable = true
+kind = "number"
+min = 0.0
+max = 999999.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+required_list = true
+list_is_time_sequence = true
+
+[[process.params]]
+name = "Sample Rate"
+description = "Sample rate of the generated output"
+automatable = false
+kind = "choice"
+options = ["16000", "22050", "32000", "44100", "48000", "88200", "96000"]
+default = 3
+
+[[process]]
+key = "distmark_distmark_1"
+bin = "distmark"
+subprog = "distmark"
+mode = "1"
+title = "Distort At Marks"
+category = "time"
+subcategory = "texture"
+short_description = "Interpolates between waveset-groups at marked points in a mono sound"
+description = "This process finds waveset-groups at a list of marked times and interpolates between them, distorting the sound between marks. Works on mono sources only."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Mark List"
+description = "Times within the source at which to find waveset-groups"
+automatable = true
+kind = "number"
+min = 0.0
+max = 999999.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+required_list = true
+list_is_time_sequence = true
+
+[[process.params]]
+name = "Unit Length"
+description = "Approximate size, in milliseconds, of the waveset-group to find at each mark"
+automatable = false
+kind = "number"
+min = 1.0
+max = 500.0
+step = 1.0
+default = 50.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Time Stretch"
+description = "Stretches the distances between marks when building the output"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+flag = "-s"
+
+[[process.params]]
+name = "Randomize"
+description = "Randomizes the duration of interpolated wavesets, raising their pitch"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-r"
+
+[[process.params]]
+name = "Flip Phase"
+description = "Flip the phase of alternate wavesets"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-f"
+
+[[process.params]]
+name = "Add Tail"
+description = "Add the original remaining tail of the source sound to the output"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-t"
+
+[[process]]
+key = "distmark_distmark_2"
+bin = "distmark"
+subprog = "distmark"
+mode = "2"
+title = "Distort At Marks (Alternate Blocks)"
+category = "time"
+subcategory = "texture"
+short_description = "Interpolates within alternate marked blocks in a mono sound"
+description = "The same mark-based waveset interpolation as Distort At Marks, but only interpolates within alternate marked blocks rather than at every mark. Works on mono sources only."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Mark List"
+description = "Times within the source at which to find waveset-groups"
+automatable = true
+kind = "number"
+min = 0.0
+max = 999999.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+required_list = true
+list_is_time_sequence = true
+
+[[process.params]]
+name = "Unit Length"
+description = "Approximate size, in milliseconds, of the waveset-group to find at each mark"
+automatable = false
+kind = "number"
+min = 1.0
+max = 500.0
+step = 1.0
+default = 50.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Time Stretch"
+description = "Stretches the distances between marks when building the output"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+flag = "-s"
+
+[[process.params]]
+name = "Randomize"
+description = "Randomizes the duration of interpolated wavesets, raising their pitch"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-r"
+
+[[process.params]]
+name = "Flip Phase"
+description = "Flip the phase of alternate wavesets"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-f"
+
+[[process]]
+key = "verges_verges"
+bin = "verges"
+subprog = "verges"
+title = "Verges"
+category = "time"
+subcategory = "pitch"
+short_description = "Plays a source with brief moments glissing up or down"
+description = "This process plays a source sound normally, except at a list of specified attack times, where it briefly glisses up or down in pitch -- a way to add small expressive pitch-bend accents at chosen moments."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Verge Times"
+description = "Times of the verge-attacks"
+automatable = true
+kind = "number"
+min = 0.0
+max = 999999.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+required_list = true
+list_is_time_sequence = true
+
+[[process.params]]
+name = "Transposition"
+description = "Semitone transposition at the start of each verge"
+automatable = true
+kind = "number"
+min = -24.0
+max = 24.0
+step = 0.1
+default = 5.0
+exponential = false
+scale = "plain"
+flag = "-t"
+
+[[process.params]]
+name = "Gliss Slope"
+description = "Slope of the gliss; higher values gliss faster"
+automatable = true
+kind = "number"
+min = 1.0
+max = 8.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-e"
+
+[[process.params]]
+name = "Gliss Duration"
+description = "Duration of each gliss, in milliseconds"
+automatable = true
+kind = "number"
+min = 1.0
+max = 2000.0
+step = 1.0
+default = 100.0
+exponential = true
+scale = "plain"
+flag = "-d"
+
+[[process.params]]
+name = "Use Exact Times"
+description = "Use the given times exactly, instead of the nearest peak to each time"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-n"
+
+[[process.params]]
+name = "Boost"
+description = "Boost the level of the verges"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-b"
+
+[[process.params]]
+name = "Suppress"
+description = "Suppress all input except the verges (also boosts the verges)"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-s"
+
+[[process]]
+key = "motor_motor_2"
+bin = "motor"
+subprog = "motor"
+mode = "2"
+title = "Motor (Sliced Source)"
+category = "time"
+subcategory = "texture"
+short_description = "Cuts fast inner pulse-streams from segments sliced at specified times"
+description = "This process creates a fast inner pulse-stream nested within a slower outer pulsed envelope, cutting successive segments from the source -- sliced at a list of specified times -- as the outer envelope rises, then in reverse order as it falls."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Slice Times"
+description = "Times in the source at which to slice it into separate segments"
+automatable = true
+kind = "number"
+# Real binary rejects a slice time closer to the start than 2 splice-durations
+# ("Invalid time (0.0) closer to start than 2 splicedurs = 0.006") -- floor raised past 0.0.
+min = 0.02
+max = 999999.0
+step = 0.01
+default = 0.05
+exponential = false
+scale = "plain"
+required_list = true
+list_is_time_sequence = true
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the output"
+automatable = false
+kind = "number"
+min = 0.5
+max = 300.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Inner Pulse Rate"
+description = "Pulse rate of the fast inner events"
+automatable = false
+kind = "number"
+min = 2.0
+max = 100.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Outer Pulse Rate"
+description = "Pulse rate of the slower outer envelope"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Inner On/Off Ratio"
+description = "Proportion of on-time to off-time of inner events"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Outer On/Off Ratio"
+description = "Proportion of on-time to off-time of outer events"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Symmetry"
+description = "Symmetry of the outer pulse envelope; 0.5 = symmetrical crescendo-decrescendo, 1 = crescendo only, 0 = decrescendo only"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Freq Randomize"
+description = "Random variation of the inner pulse rate"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-f"
+
+[[process.params]]
+name = "Pulse Randomize"
+description = "Random variation of the outer pulse rate"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-p"
+
+[[process.params]]
+name = "Jitter"
+description = "Range of random pitch jitter applied to inner pulses, in semitones"
+automatable = false
+kind = "number"
+min = 0.0
+max = 3.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-j"
+
+[[process.params]]
+name = "Tremor"
+description = "Range of random amplitude attenuation applied to inner pulses"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-t"
+
+[[process.params]]
+name = "Shift"
+description = "Range of random variation applied to the outer pulse's symmetry"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-y"
+
+[[process.params]]
+name = "Edge"
+description = "Length of the decay-tail on inner pulses, as a multiple of duration"
+automatable = false
+kind = "number"
+min = 0.0
+max = 20.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-e"
+
+[[process.params]]
+name = "Bite"
+description = "Shape of the outer pulses; 1 = linear, above 1 = slow-fast rise, below 1 = fast-slow rise"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 3.0
+exponential = true
+scale = "plain"
+flag = "-b"
+
+[[process.params]]
+name = "Vary"
+description = "Randomizes the source-read advance step from one outer pulse to the next"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-v"
+
+[[process.params]]
+name = "Seed"
+description = "Random seed"
+automatable = false
+kind = "number"
+min = 0.0
+max = 256.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-s"
+
+[[process.params]]
+name = "Advance By Fixed Step"
+description = "Inner events under the outer crescendo advance by a fixed step, instead of advancing to the end of the source"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-a"
+
+[[process.params]]
+name = "Cycle Sources"
+description = "Cycle through the sliced segments in order, instead of randomly permuting them"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-c"
+
+[[process]]
+key = "shifter_shifter_1"
+bin = "shifter"
+subprog = "shifter"
+mode = "1"
+title = "Shifter"
+category = "time"
+subcategory = "texture"
+short_description = "Generates simultaneous repetition cycles, shifting focus between them"
+description = "This process generates several simultaneous repetition cycles of the source sound, each with a different beat count, and shifts a loudness focus from one cycle to the next over time."
+input = "wav"
+output = "wav"
+stereo_native = false
+# The real binary segfaults ("dumped core") whenever Output Channels is 2 -- reliably
+# reproduced with otherwise-minimal params, and mono (1) runs clean every time. Forced to
+# mono rather than exposing a channel choice that would crash on its own non-default value.
+output_is_stereo = false
+
+[[process.params]]
+name = "Cycle Beat Counts"
+description = "Number of beats in each cycle"
+automatable = true
+kind = "number"
+# Real binary rejects a cyclelength below 2 ("Cyclelength values must be >= 2").
+min = 2.0
+max = 64.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+required_list = true
+
+[[process.params]]
+name = "Cycle Duration"
+description = "Duration of one complete cycle"
+automatable = false
+kind = "number"
+min = 0.1
+max = 60.0
+step = 0.01
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Duration"
+description = "Required duration of the output"
+automatable = false
+kind = "number"
+min = 0.5
+max = 600.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Output Channels"
+description = "Fixed at mono output (2 crashes the real binary)"
+automatable = false
+kind = "choice"
+options = ["1"]
+default = 0
+
+[[process.params]]
+name = "Subdivision"
+description = "Minimum division of the beat; must be greater than 4 and a multiple of 2 and/or 3"
+automatable = false
+kind = "number"
+min = 6.0
+max = 48.0
+step = 1.0
+default = 12.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Linger"
+description = "Number of cycles to remain in a fixed focus"
+automatable = false
+kind = "number"
+min = 0.0
+max = 20.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Transit"
+description = "Number of cycles to transition to the next focus"
+automatable = false
+kind = "number"
+min = 0.0
+max = 20.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Boost"
+description = "Level boost added to the focused stream"
+automatable = false
+kind = "number"
+min = 0.0
+max = 4.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Zigzag"
+description = "Focus zigzags back and forth through the cycles instead of cycling straight through"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-z"
+
+[[process.params]]
+name = "Random Order"
+description = "Focus moves through a random order of the cycles"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-r"
+
+[[process.params]]
+name = "Linear Array"
+description = "Use a linear left-to-right speaker array instead of a surround layout"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-l"
+
+[[process]]
+key = "superaccu_superaccu_1"
+bin = "superaccu"
+subprog = "superaccu"
+mode = "1"
+title = "Spectral Hold"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Sustains each spectral band until louder data appears in it"
+description = "This process holds each spectral band at its current level until a louder signal appears in that band, producing a smeared, held-resonance version of the source spectrum."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Decay"
+# The usage text's own stated default (1.0, "no attenuation") is outside its own stated
+# range (">0.0 to 0.9") -- verified against the real binary that 1.0 really is rejected
+# ("out of range (0.00001 to 0.9)"), so the documented default is simply wrong. 0.9 (the
+# real ceiling, least aggressive decay) used as the closest practical stand-in.
+description = "Rate at which held channel data attenuates per second"
+automatable = false
+kind = "number"
+min = 0.01
+max = 0.9
+step = 0.01
+default = 0.9
+exponential = false
+scale = "plain"
+flag = "-d"
+
+[[process.params]]
+name = "Gliss"
+description = "Rate at which held channel data glisses, in octaves per second"
+automatable = false
+kind = "number"
+min = -11.7
+max = 11.7
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-g"
+
+[[process.params]]
+name = "Reassign"
+description = "Reassign glissing pitches to their appropriate channels"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-r"
+
+[[process]]
+key = "superaccu_superaccu_2"
+bin = "superaccu"
+subprog = "superaccu"
+mode = "2"
+title = "Spectral Hold (Tempered)"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Sustains each spectral band, forcing new resonances to the tempered scale"
+description = "The same spectral-hold process as Spectral Hold, but forces the start of each new held resonance onto the nearest tempered (equal-temperament) pitch."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Decay"
+description = "Rate at which held channel data attenuates per second (real ceiling is 0.9, not the usage text's documented 1.0 default)"
+automatable = false
+kind = "number"
+min = 0.01
+max = 0.9
+step = 0.01
+default = 0.9
+exponential = false
+scale = "plain"
+flag = "-d"
+
+[[process.params]]
+name = "Gliss"
+description = "Rate at which held channel data glisses, in octaves per second"
+automatable = false
+kind = "number"
+min = -11.7
+max = 11.7
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-g"
+
+[[process.params]]
+name = "Reassign"
+description = "Reassign glissing pitches to their appropriate channels"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-r"
+
+
+# `superaccu` modes 3 and 4 (TUNING-file variants) were tried here and deliberately NOT
+# included: every tested TUNING file -- single value, multiple values, with/without a count
+# header, space- or newline-separated, with/without a trailing newline -- was rejected
+# identically as "Pitch out of range (10.0 - 14700.0)" on line 1, even for values well
+# within that stated range (220, 440, both individually and combined). Since the *same*
+# error appears regardless of the file's actual content or format, this reads as either an
+# undocumented binary-specific file format this session didn't find, or a genuine parser bug
+# in this CDP release -- not a catalog-argv-shape problem. Modes 1 and 2 (no tuning file)
+# work fine and are shipped above.
+
+# ---- Tier 0 batch 9 (2026-07-13): more plain-param processes (round 3) ----
+#
+# Continuing the plain-params bucket from Tier 0 batch 8's uncataloged-binary triage.
+# `brownian`/`phasor` are the first candidates to actually test a channel-count param's
+# safe values rather than assume the worst -- both mono and stereo output were verified
+# clean against the real binary (no crash, unlike `shifter`'s stereo segfault last round),
+# but the pipeline still has no mechanism for a param's own runtime value to change the
+# planned output channel count (`ProcessDef.output_is_stereo` is a fixed, per-process
+# declaration). Rather than build that now, each process's channel-count param is forced to
+# whichever single value suits it best musically: `brownian` to mono (its spatial-position
+# params are the only casualty, and the binary itself treats mono as a fully first-class,
+# warning-free case), `phasor` to stereo (phase-interaction across space is the point of
+# the effect).
+
+[[process]]
+key = "brownian_motion_1"
+bin = "brownian"
+subprog = "motion"
+mode = "1"
+title = "Brownian Motion (Sampled)"
+category = "time"
+subcategory = "texture"
+short_description = "Generates a texture of sampled events wandering in pitch via brownian motion"
+description = "This process reads short events from a source waveform (which should start and end at zero) at randomly wandering pitches and timings, following a brownian-motion random walk rather than pure noise -- producing a texture that drifts smoothly rather than jumping erratically."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Output Channels"
+description = "Fixed at mono output"
+automatable = false
+kind = "choice"
+options = ["1"]
+default = 0
+
+[[process.params]]
+name = "Duration"
+description = "Maximum duration of the output"
+automatable = false
+kind = "number"
+min = 0.5
+max = 300.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Attack"
+description = "Rise time of each event"
+automatable = true
+kind = "number"
+min = 0.001
+max = 2.0
+step = 0.001
+default = 0.05
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Decay"
+description = "Decay time of each event"
+automatable = true
+kind = "number"
+min = 0.001
+max = 2.0
+step = 0.001
+default = 0.2
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Low"
+description = "Bottom of the pitch range, in MIDI"
+automatable = true
+kind = "number"
+min = 0.0
+max = 127.0
+step = 1.0
+default = 48.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch High"
+description = "Top of the pitch range, in MIDI"
+automatable = true
+kind = "number"
+min = 0.0
+max = 127.0
+step = 1.0
+default = 72.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Start"
+description = "Initial pitch, in MIDI"
+automatable = false
+kind = "number"
+min = 0.0
+max = 127.0
+step = 1.0
+default = 60.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Spatial Start"
+description = "Initial spatial position (ignored with mono output)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 2.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Step"
+description = "Maximum pitch step between events"
+automatable = true
+kind = "number"
+min = 0.0
+max = 24.0
+step = 0.1
+default = 5.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Spatial Step"
+description = "Maximum spatial step between events, as a fraction of the distance between channels (ignored with mono output)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Tick"
+description = "Average time between events"
+automatable = true
+kind = "number"
+min = 0.01
+max = 10.0
+step = 0.01
+default = 0.5
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Seed"
+description = "Random seed; the same seed reproduces the same random sequence"
+automatable = false
+kind = "number"
+min = 0.0
+max = 255.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Loudness Range"
+description = "Maximum loudness step between events, in dB, 0 = no variation"
+automatable = true
+kind = "number"
+min = 0.0
+max = 96.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-a"
+
+[[process.params]]
+name = "Min Loudness"
+description = "Minimum loudness, in dB below peak; 0 = no minimum (only relevant when Loudness Range is above 0)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 96.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-m"
+
+[[process.params]]
+name = "Attack Slope"
+description = "Attack slope shape; below 1 rises fast then slows, above 1 rises slow then faster"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+flag = "-s"
+
+[[process.params]]
+name = "Decay Slope"
+description = "Decay slope shape; below 1 falls slow then faster, above 1 falls fast then slows"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+flag = "-d"
+
+[[process.params]]
+name = "Line Array"
+description = "Loudspeakers arrayed in a line instead of a circle (only relevant with more than 1 output channel)"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-l"
+
+[[process]]
+key = "brownian_motion_2"
+bin = "brownian"
+subprog = "motion"
+mode = "2"
+title = "Brownian Motion (Transposed)"
+category = "time"
+subcategory = "texture"
+short_description = "Generates a texture of transposed whole-source events wandering in pitch via brownian motion"
+description = "The same brownian-motion pitch/timing wander as Brownian Motion (Sampled), but each event transposes the whole source sound rather than reading a short sampled event from it -- any source works, not just one shaped to start/end at zero, though a long source may take a while to render."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Output Channels"
+description = "Fixed at mono output"
+automatable = false
+kind = "choice"
+options = ["1"]
+default = 0
+
+[[process.params]]
+name = "Duration"
+description = "Maximum duration of the output"
+automatable = false
+kind = "number"
+min = 0.5
+max = 300.0
+step = 0.1
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Low"
+description = "Bottom of the pitch range, in MIDI"
+automatable = true
+kind = "number"
+min = 0.0
+max = 127.0
+step = 1.0
+default = 48.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch High"
+description = "Top of the pitch range, in MIDI"
+automatable = true
+kind = "number"
+min = 0.0
+max = 127.0
+step = 1.0
+default = 72.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Start"
+description = "Initial pitch, in MIDI"
+automatable = false
+kind = "number"
+min = 0.0
+max = 127.0
+step = 1.0
+default = 60.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Spatial Start"
+description = "Initial spatial position (ignored with mono output)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 2.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Step"
+description = "Maximum pitch step between events"
+automatable = true
+kind = "number"
+min = 0.0
+max = 24.0
+step = 0.1
+default = 5.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Spatial Step"
+description = "Maximum spatial step between events, as a fraction of the distance between channels (ignored with mono output)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Tick"
+description = "Average time between events"
+automatable = true
+kind = "number"
+min = 0.01
+max = 10.0
+step = 0.01
+default = 0.5
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Seed"
+description = "Random seed; the same seed reproduces the same random sequence"
+automatable = false
+kind = "number"
+min = 0.0
+max = 255.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Loudness Range"
+description = "Maximum loudness step between events, in dB, 0 = no variation"
+automatable = true
+kind = "number"
+min = 0.0
+max = 96.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-a"
+
+[[process.params]]
+name = "Min Loudness"
+description = "Minimum loudness, in dB below peak; 0 = no minimum (only relevant when Loudness Range is above 0)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 96.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-m"
+
+[[process.params]]
+name = "Line Array"
+description = "Loudspeakers arrayed in a line instead of a circle (only relevant with more than 1 output channel)"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-l"
+
+[[process]]
+key = "phasor_phasor"
+bin = "phasor"
+subprog = "phasor"
+title = "Phasor"
+category = "time"
+subcategory = "modulation"
+short_description = "Introduces multiple phase-interacting streams into a mono signal"
+description = "This process splits a mono signal into several streams that phase-shift forward and back against each other, producing a chorus/flange-like phase-interaction texture across the output channels."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = true
+
+[[process.params]]
+name = "Streams"
+description = "Number of interacting streams"
+automatable = false
+kind = "number"
+min = 2.0
+max = 8.0
+step = 1.0
+default = 3.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Phase Frequency"
+description = "Frequency of the phase-shift packets"
+automatable = true
+kind = "number"
+min = 0.01
+max = 50.0
+step = 0.01
+default = 3.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Shift"
+description = "Maximum phase-shift within a packet, in semitones"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.1
+default = 3.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Output Channels"
+description = "Fixed at stereo output"
+automatable = false
+kind = "choice"
+options = ["2"]
+default = 0
+
+[[process.params]]
+name = "Stream Offset"
+description = "Time-offset of the most-offset stream; other streams offset by intermediate amounts"
+automatable = false
+kind = "number"
+min = 0.0
+max = 500.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-o"
+
+[[process.params]]
+name = "Print Rounding Warnings"
+description = "Print warnings about rounding errors when calculating the time-shifted streams"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-e"
+
+[[process]]
+key = "fastconv_fastconv"
+bin = "fastconv"
+title = "Convolve"
+category = "time"
+subcategory = "filter"
+short_description = "Convolves a sound with an impulse response from another buffer"
+description = "This process convolves the sound with an impulse response taken from a second open buffer -- a general-purpose way to apply a captured room reverb or FIR filter response to the source."
+input = "dual_wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Dry/Wet Mix"
+description = "Balance between the dry (unconvolved) and wet (convolved) signal"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Amplitude Scale"
+description = "Scales the output amplitude"
+automatable = false
+kind = "number"
+min = 0.01
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+flag = "-a"
+
+[[process.params]]
+name = "Force Float Output"
+description = "Write the output as floating-point, avoiding clipping"
+automatable = false
+kind = "toggle"
+default = false
+flag = "-f"
+
+[[process]]
+key = "subtract_subtract"
+bin = "subtract"
+subprog = "subtract"
+title = "Subtract"
+category = "time"
+subcategory = "combine"
+short_description = "Subtracts a second (mono) sound from this one"
+description = "This process subtracts a second sound (which must be mono, from another open buffer) from a chosen channel of this one, sample by sample -- useful for phase-cancellation-based difference extraction."
+input = "dual_wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Channel"
+description = "Which channel of the first sound to subtract from"
+automatable = false
+kind = "number"
+min = 1.0
+max = 2.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-c"
+
+# `specenv` was tried here and deliberately NOT included: the real binary reliably crashes
+# ("dumped core") right at the end of processing, every time, regardless of Window Size,
+# Balance, or any of the toggle flags (all tested individually and in combination against
+# real .ana files derived from the same fixture used everywhere else in this catalog).
+# Value-independent, reproducible failure -- same class of finding as `freeze`'s earlier
+# removal, a real bug in this CDP release rather than an argv-shape or range problem this
+# catalog can work around.
+
+[[process]]
+key = "specsphinx_specsphinx_1"
+bin = "specsphinx"
+subprog = "specsphinx"
+mode = "1"
+title = "Impose Channel Amplitudes"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Imposes the channel amplitudes of a second sound onto this one's channel frequencies"
+description = "This process imposes the spectral channel amplitudes of a second sound (another open buffer) onto this sound's own channel frequencies, blending the two spectra's characteristics."
+input = "dual_ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Amp Balance"
+description = "Proportion of this sound's own amplitudes retained"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-a"
+
+[[process.params]]
+name = "Freq Balance"
+description = "Proportion of the second sound's frequencies injected into the output spectrum"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-f"
+
+[[process]]
+key = "specsphinx_specsphinx_2"
+bin = "specsphinx"
+subprog = "specsphinx"
+mode = "2"
+title = "Multiply Spectra"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Multiplies this sound's spectrum by a second sound's spectrum"
+description = "This process multiplies this sound's spectrum by a second sound's spectrum (another open buffer), a ring-modulation-like spectral combination."
+input = "dual_ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Bias"
+description = "When non-zero, adds a proportion of the original sounds back into the output"
+automatable = false
+kind = "number"
+min = -0.99
+max = 0.99
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-b"
+
+[[process.params]]
+name = "Gain"
+description = "Overall gain on the output"
+automatable = false
+kind = "number"
+min = 0.0
+max = 4.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+flag = "-g"
+
+[[process]]
+key = "spectwin_spectwin_1"
+bin = "spectwin"
+subprog = "spectwin"
+mode = "1"
+title = "Spectral Blend (Formant vs Formant)"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Blends this sound's formant envelope against a second sound's formant envelope"
+description = "This process blends the spectral characteristics of two sounds (this one and a second open buffer), comparing this sound's formant envelope against the second sound's formant envelope, with an optional layered pitch-duplication effect."
+input = "dual_ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Freq Dominance"
+description = "Dominance of the second sound's spectral frequencies"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-f"
+
+[[process.params]]
+name = "Envelope Dominance"
+description = "Dominance of the second sound's spectral envelope"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-e"
+
+[[process.params]]
+name = "Duplications"
+description = "Number of times to duplicate the original sound at higher pitches"
+automatable = false
+kind = "number"
+min = 0.0
+max = 20.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-d"
+
+[[process.params]]
+name = "Duplication Step"
+description = "Pitch step, in semitones, at each duplication"
+automatable = false
+kind = "number"
+min = 0.0
+max = 24.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-s"
+
+[[process.params]]
+name = "Duplication Decay"
+description = "Level multiplier from one duplication to the next"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.8
+exponential = false
+scale = "plain"
+flag = "-r"
+
+[[process]]
+key = "spectwin_spectwin_2"
+bin = "spectwin"
+subprog = "spectwin"
+mode = "2"
+title = "Spectral Blend (Formant vs Total)"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Blends this sound's formant envelope against a second sound's total envelope"
+description = "The same spectral blend as Spectral Blend (Formant vs Formant), but compares this sound's formant envelope against the second sound's total envelope instead."
+input = "dual_ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Freq Dominance"
+description = "Dominance of the second sound's spectral frequencies"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-f"
+
+[[process.params]]
+name = "Envelope Dominance"
+description = "Dominance of the second sound's spectral envelope"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-e"
+
+[[process.params]]
+name = "Duplications"
+description = "Number of times to duplicate the original sound at higher pitches"
+automatable = false
+kind = "number"
+min = 0.0
+max = 20.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-d"
+
+[[process.params]]
+name = "Duplication Step"
+description = "Pitch step, in semitones, at each duplication"
+automatable = false
+kind = "number"
+min = 0.0
+max = 24.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-s"
+
+[[process.params]]
+name = "Duplication Decay"
+description = "Level multiplier from one duplication to the next"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.8
+exponential = false
+scale = "plain"
+flag = "-r"
+
+[[process]]
+key = "spectwin_spectwin_3"
+bin = "spectwin"
+subprog = "spectwin"
+mode = "3"
+title = "Spectral Blend (Total vs Formant)"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Blends this sound's total envelope against a second sound's formant envelope"
+description = "The same spectral blend as Spectral Blend (Formant vs Formant), but compares this sound's total envelope against the second sound's formant envelope instead."
+input = "dual_ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Freq Dominance"
+description = "Dominance of the second sound's spectral frequencies"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-f"
+
+[[process.params]]
+name = "Envelope Dominance"
+description = "Dominance of the second sound's spectral envelope"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-e"
+
+[[process.params]]
+name = "Duplications"
+description = "Number of times to duplicate the original sound at higher pitches"
+automatable = false
+kind = "number"
+min = 0.0
+max = 20.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-d"
+
+[[process.params]]
+name = "Duplication Step"
+description = "Pitch step, in semitones, at each duplication"
+automatable = false
+kind = "number"
+min = 0.0
+max = 24.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-s"
+
+[[process.params]]
+name = "Duplication Decay"
+description = "Level multiplier from one duplication to the next"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.8
+exponential = false
+scale = "plain"
+flag = "-r"
+
+[[process]]
+key = "spectwin_spectwin_4"
+bin = "spectwin"
+subprog = "spectwin"
+mode = "4"
+title = "Spectral Blend (Total vs Total)"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Blends this sound's total envelope against a second sound's total envelope"
+description = "The same spectral blend as Spectral Blend (Formant vs Formant), but compares the total envelopes of both sounds instead of just their formants."
+input = "dual_ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Freq Dominance"
+description = "Dominance of the second sound's spectral frequencies"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-f"
+
+[[process.params]]
+name = "Envelope Dominance"
+description = "Dominance of the second sound's spectral envelope"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-e"
+
+[[process.params]]
+name = "Duplications"
+description = "Number of times to duplicate the original sound at higher pitches"
+automatable = false
+kind = "number"
+min = 0.0
+max = 20.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-d"
+
+[[process.params]]
+name = "Duplication Step"
+description = "Pitch step, in semitones, at each duplication"
+automatable = false
+kind = "number"
+min = 0.0
+max = 24.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-s"
+
+[[process.params]]
+name = "Duplication Decay"
+description = "Level multiplier from one duplication to the next"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.8
+exponential = false
+scale = "plain"
+flag = "-r"
