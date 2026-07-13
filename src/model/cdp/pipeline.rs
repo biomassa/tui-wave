@@ -235,7 +235,12 @@ fn scale_number_value(
     match scale {
         NumberScale::Plain | NumberScale::OutputDurationSeconds => raw,
         NumberScale::PercentOfInputDuration => {
-            if raw >= 100.0 { duration_secs - 0.1 } else { duration_secs * raw / 100.0 }
+            // `.max(0.0)`: for a selection shorter than the 0.1s margin the subtraction
+            // goes negative, and a bare (unflagged) negative token like "-0.05" risks
+            // being parsed by CDP as an unknown *flag* rather than rejected as an
+            // out-of-range value. Zero stays a plain value CDP can reject with its own
+            // clear range error — same guard `CappedAtInputDuration` below already has.
+            if raw >= 100.0 { (duration_secs - 0.1).max(0.0) } else { duration_secs * raw / 100.0 }
         }
         NumberScale::PercentOfFftSize => (pvoc.points as f64 * raw / 100.0).max(1.0).round(),
         NumberScale::PercentOfAnaWindowCount => {
@@ -287,8 +292,14 @@ fn plan_param(
 ) -> ParamPlan {
     match value {
         ParamValue::Toggle(false) => ParamPlan { arg: None, deferred: None },
+        // `.filter(|f| !f.is_empty())`: a toggle with no flag has no meaningful argv shape
+        // (an enabled toggle IS its flag token — the flag needn't start with `-`, so a bare
+        // word is already expressible as `flag = "word"`). Emitting the old
+        // `unwrap_or_default()` empty string instead produced a literal "" argv token that
+        // shifted every later positional out of place. No built-in entry does this (a
+        // catalog test enforces it), but user-authored catalogs can.
         ParamValue::Toggle(true) => ParamPlan {
-            arg: Some(param.flag.clone().unwrap_or_default()),
+            arg: param.flag.clone().filter(|f| !f.is_empty()),
             deferred: None,
         },
         ParamValue::Choice(index) => {
@@ -481,9 +492,18 @@ pub fn plan_job(
     // shape — one mono lane always, no channel merging, no splice target — that it gets its
     // own planning function rather than threading a glob flag through `plan_wav`'s
     // stereo-lane-splitting logic. Checked on `def.output`, ahead of the `def.input`
-    // dispatch below (which stays keyed on input arity as normal).
+    // dispatch below (which stays keyed on input arity as normal). A zero-input glob
+    // process (a synthesis program using the numbered-output convention, e.g. `strands`
+    // mode 2 — see catalog_extra.toml's removal note) is real but unsupported: erroring
+    // here keeps a user-authored catalog entry declaring that combination from panicking
+    // the plan (`inputs` is empty for `IoKind::None`, so `&inputs[0]` would).
     if def.output == IoKind::WavGlob {
-        return plan_wav_glob(def, values, &inputs[0], pvoc);
+        let Some(first) = inputs.first() else {
+            return Err(PlanError::UnsupportedInV1 {
+                reason: "a glob-output process without an audio input is not supported yet".into(),
+            });
+        };
+        return plan_wav_glob(def, values, first, pvoc);
     }
 
     match def.input {
@@ -1295,6 +1315,19 @@ mod tests {
         // why merging independently-numbered file sets across stereo lanes isn't supported).
         assert_eq!(job.input_files.len(), 1);
         assert_eq!(job.input_files[0].source_channels, vec![0]);
+    }
+
+    /// A glob-output process with no audio input at all (`input = "none"`, `output =
+    /// "wav_glob"` — the shape `strands` mode 2 would need, see catalog_extra.toml's removal
+    /// note) must fail with a clean `UnsupportedInV1`, not panic: the glob branch used to
+    /// index `inputs[0]` before ever consulting `def.input`, and a user-authored catalog
+    /// entry declaring this combination is enough to reach it.
+    #[test]
+    fn glob_output_with_no_input_errors_cleanly_instead_of_panicking() {
+        let mut def = base_def(IoKind::None, IoKind::WavGlob);
+        def.params = vec![];
+        let err = plan_job(&def, &[], &[], &PvocSettings::default()).unwrap_err();
+        assert!(matches!(err, PlanError::UnsupportedInV1 { .. }));
     }
 
     // -- Dual-input planning ---------------------------------------------------------------

@@ -526,13 +526,21 @@ struct CdpListEdit {
 }
 
 /// A cached successful Preview run, kept alongside `Dialog::CdpParams` so an unchanged-
-/// parameter Apply can splice the already-computed audio instead of re-running CDP.
-/// Invalidated (set back to `None`) by any field edit.
+/// parameter Apply can splice the already-computed audio instead of re-running CDP. Never
+/// proactively invalidated on edit — staleness is decided structurally, by comparing
+/// against the *current* values/range/second-input at Apply time (`cdp_preview_matches`)
+/// and when rendering the `[Preview ✓]` freshness mark.
 struct CdpPreview {
     values: Vec<crate::model::cdp::ParamValue>,
     range: (usize, usize),
     channels: Vec<Vec<f32>>,
     sample_rate: u32,
+    /// Which open document a dual-input process's second input came from when this preview
+    /// ran (`None` for single-input processes). Without it, previewing against buffer A,
+    /// switching the second-input picker to buffer B, and hitting Apply spliced the cached
+    /// A-derived audio while claiming to have processed against B — the picker is the one
+    /// dialog control `values`/`range` can't see change.
+    second_input_doc: Option<usize>,
 }
 
 /// `Dialog::CdpBrowser`'s control focus range is dynamic (one index per param field, then a
@@ -2536,7 +2544,15 @@ impl App {
             let crate::model::cdp::ParamKind::Number { default, min, .. } = &param.kind else {
                 unreachable!("required_list param {:?} is not a Number kind", param.name)
             };
-            let seed_value = if is_time_sequence { default.clamp(*min, time_max) } else { *default };
+            // `time_max.max(*min)`: a selection shorter than the param's own catalog floor
+            // (a genuine CDP-enforced minimum) leaves no valid in-range seed at all — seed
+            // at the floor rather than panicking (`f64::clamp` asserts `min <= max`, so
+            // `clamp(*min, time_max)` crashed the app outright for e.g. a <0.016s selection
+            // on Stutter's Slice Times) and let CDP's own clear range error surface on
+            // Apply, matching how `NumberScale::CappedAtInputDuration` treats the same
+            // too-short-selection case.
+            let seed_value =
+                if is_time_sequence { default.clamp(*min, time_max.max(*min)) } else { *default };
             vec![seed_value]
         } else {
             original.clone()
@@ -3029,8 +3045,12 @@ impl App {
         values: &[crate::model::cdp::ParamValue],
         range: (usize, usize),
         sample_rate: u32,
+        second_input_doc: Option<usize>,
     ) -> bool {
-        preview.range == range && preview.values == values && preview.sample_rate == sample_rate
+        preview.range == range
+            && preview.values == values
+            && preview.sample_rate == sample_rate
+            && preview.second_input_doc == second_input_doc
     }
 
     /// Validates every field against its `ParamKind` range, returning the index of the
@@ -3126,11 +3146,17 @@ impl App {
             }
         };
 
+        // The second input (dual-input processes) is another open buffer, used whole — it's
+        // source material, not a timeline being edited, so its selection is ignored.
+        // Resolved ahead of the cached-preview fast path below, which must know it to judge
+        // whether the cache is still valid.
+        let second_doc_index = second_input.as_ref().and_then(CdpSecondInput::selected_doc_index);
+
         // An unchanged-parameter Apply after a successful Preview splices the cached
         // result instead of re-running CDP.
         if matches!(purpose, crate::cdp::JobPurpose::Apply) {
             if let Some(cached) = &preview {
-                if Self::cdp_preview_matches(cached, &values, range, doc.sample_rate) {
+                if Self::cdp_preview_matches(cached, &values, range, doc.sample_rate, second_doc_index) {
                     let label = format!("CDP: {}", def.title);
                     let channels = cached.channels.clone();
                     self.histories[idx].apply(
@@ -3139,15 +3165,15 @@ impl App {
                     );
                     self.viewport = None;
                     self.after_sample_mutation(idx);
+                    // The preview clip has served its purpose once the result is spliced —
+                    // without this, it kept playing over the editor after the dialog closed
+                    // (the only stop was the Esc path).
+                    self.stop_cdp_preview_audio();
                     crate::model::cdp::recent::record_used(&def.key);
                     return;
                 }
             }
         }
-
-        // The second input (dual-input processes) is another open buffer, used whole — it's
-        // source material, not a timeline being edited, so its selection is ignored.
-        let second_doc_index = second_input.as_ref().and_then(CdpSecondInput::selected_doc_index);
         let mut input_specs = Vec::new();
         if def.input != IoKind::None {
             input_specs.push(crate::model::cdp::InputSpec {
@@ -3275,6 +3301,13 @@ impl App {
                         continue;
                     }
 
+                    // Whatever this job's outcome, any still-playing preview clip from an
+                    // earlier Preview is now stale — an Apply (success or error) leaves the
+                    // params dialog, and a fresh Preview replaces the engine below anyway.
+                    // Without this, Apply closed the dialog with the old preview still
+                    // audibly playing over the editor (the only stop was the Esc path).
+                    self.stop_cdp_preview_audio();
+
                     // Only a successful Apply counts as "used" for `Dialog::CdpBrowser`'s
                     // Recent group — Preview is an audition, not a commitment. Looked up
                     // once here since both Apply arms below need it.
@@ -3354,6 +3387,10 @@ impl App {
                                     audio.play(0);
                                 }
                                 let values = pending.fields.iter().map(CdpField::to_value).collect();
+                                let second_input_doc = pending
+                                    .second_input
+                                    .as_ref()
+                                    .and_then(CdpSecondInput::selected_doc_index);
                                 self.dialog = Some(Dialog::CdpParams {
                                     catalog_index: pending.catalog_index,
                                     fields: pending.fields,
@@ -3365,6 +3402,7 @@ impl App {
                                         range: pending.range,
                                         channels,
                                         sample_rate: output.sample_rate,
+                                        second_input_doc,
                                     }),
                                     envelope: None,
                                     list_edit: None,
@@ -7189,7 +7227,13 @@ fn render_cdp_list_editor(
     let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
     let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
 
-    let width = 50u16.min(area.width);
+    // Sized to fit the widest hint line, not a fixed guess — a fixed 50 cols cut off "n:insert"
+    // (and would cut off the range text too, for a process whose min/max are wide enough) on
+    // any terminal, not just narrow ones, since `Paragraph` here has no wrap set.
+    let hint_line_1 = " \u{2190}\u{2192}:entry  \u{2191}\u{2193}:value  Shift+\u{2191}\u{2193}:fine value  n:insert  Del:remove";
+    let hint_line_2 = format!(" Enter:save  Esc:cancel  range {}", format_cdp_range(min, max));
+    let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()) as u16;
+    let width = (content_width + 2).max(50).min(area.width);
     // header spacer + LIST_ROWS + blank + 2 hint lines, + 2 border.
     let height = (1 + CDP_LIST_EDITOR_ROWS as u16 + 1 + 2 + 2).min(area.height);
     let popup = Rect {
@@ -7690,7 +7734,16 @@ fn render_cdp_params_dialog(
 
     let preview_focus = cdp_params_focus_preview(fields.len(), second_input.is_some());
     let apply_focus = cdp_params_focus_apply(fields.len(), second_input.is_some());
-    let preview_label = if preview.is_some() { " [Preview \u{2713}]" } else { " [Preview]" };
+    // The checkmark means "Apply will splice exactly what you last heard" — so it must
+    // track the same structural staleness check the Apply fast path uses (values +
+    // second-input; range/rate can't change while the dialog is modal), not bare
+    // `is_some()`, which stayed lit after edits that had already invalidated the cache.
+    let preview_fresh = preview.as_ref().is_some_and(|p| {
+        p.values.len() == fields.len()
+            && p.values.iter().zip(fields).all(|(v, f)| *v == f.to_value())
+            && p.second_input_doc == second_input.as_ref().and_then(|s| s.selected_doc_index())
+    });
+    let preview_label = if preview_fresh { " [Preview \u{2713}]" } else { " [Preview]" };
     let preview_style = if focus == preview_focus { cursor_style } else { hint_style };
     let apply_style = if focus == apply_focus { cursor_style } else { hint_style };
     lines.push(Line::from(vec![
