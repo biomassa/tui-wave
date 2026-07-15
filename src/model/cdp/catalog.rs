@@ -149,27 +149,106 @@ mod tests {
         assert_eq!(keys.len(), count_before, "duplicate process keys in built-in catalog");
     }
 
+    /// Checks one `TableColumn`-shaped bounds set (used directly by `Table` columns, and
+    /// reused for each of `HiliteBand`'s five numeric fields).
+    fn assert_column_sane(proc_key: &str, param_name: &str, col: &super::super::def::TableColumn) {
+        assert!(
+            col.min <= col.max,
+            "{proc_key}: param {param_name:?} column {:?} has min {} > max {}",
+            col.name,
+            col.min,
+            col.max
+        );
+        assert!(
+            col.default >= col.min && col.default <= col.max,
+            "{proc_key}: param {param_name:?} column {:?} default {} out of range [{}, {}]",
+            col.name,
+            col.default,
+            col.min,
+            col.max
+        );
+    }
+
     #[test]
     fn builtin_number_params_have_sane_ranges() {
         use super::super::def::ParamKind;
         let (catalog, _) = CdpCatalog::load(None);
         for proc in &catalog.processes {
             for param in &proc.params {
-                if let ParamKind::Number { min, max, default, .. } = param.kind {
-                    assert!(
-                        min <= max,
-                        "{}: param {:?} has min {min} > max {max}",
-                        proc.key,
-                        param.name
-                    );
-                    assert!(
-                        default >= min && default <= max,
-                        "{}: param {:?} default {default} out of range [{min}, {max}]",
-                        proc.key,
-                        param.name
-                    );
+                match &param.kind {
+                    ParamKind::Number { min, max, default, .. } => {
+                        assert!(
+                            *min <= *max,
+                            "{}: param {:?} has min {min} > max {max}",
+                            proc.key,
+                            param.name
+                        );
+                        assert!(
+                            *default >= *min && *default <= *max,
+                            "{}: param {:?} default {default} out of range [{min}, {max}]",
+                            proc.key,
+                            param.name
+                        );
+                    }
+                    ParamKind::Table { columns, .. } => {
+                        for col in columns {
+                            assert_column_sane(&proc.key, &param.name, col);
+                        }
+                    }
+                    ParamKind::MarkerTimeList { min, max, default, markers, .. } => {
+                        assert!(
+                            *min <= *max,
+                            "{}: param {:?} has min {min} > max {max}",
+                            proc.key,
+                            param.name
+                        );
+                        assert!(
+                            *default >= *min && *default <= *max,
+                            "{}: param {:?} default {default} out of range [{min}, {max}]",
+                            proc.key,
+                            param.name
+                        );
+                        assert!(
+                            !markers.is_empty(),
+                            "{}: param {:?} declares no marker characters at all",
+                            proc.key,
+                            param.name
+                        );
+                    }
+                    ParamKind::HiliteBand { lofrq, hifrq, amp1, amp2, transpose } => {
+                        for col in [lofrq, hifrq, amp1, amp2, transpose] {
+                            assert_column_sane(&proc.key, &param.name, col);
+                        }
+                    }
+                    ParamKind::Toggle { .. } | ParamKind::Choice { .. } => {}
                 }
             }
+        }
+    }
+
+    /// Every process's title must reveal which CDP binary it came from (e.g. "Blur
+    /// Average", "Hilite Band") — the browser's Groups column filters by `subcategory` (a
+    /// semantic category like "spectrum"), not by binary, so without this the process's CDP
+    /// family is invisible anywhere in the UI (user report, 2026-07-14). Checked
+    /// space-insensitively (title with spaces removed must contain the bin name) since a
+    /// title can legitimately spell a compound bin name as separate words, e.g. tapdelay's
+    /// "Tap Delay". The handful of processes literally titled after their own bin (e.g.
+    /// blur's own "Blur" entry) trivially satisfy this too, so there's no exclusion list to
+    /// maintain — this only ever needs updating if a new hand-authored entry's title
+    /// forgets the bin name.
+    #[test]
+    fn builtin_titles_reveal_their_own_cdp_binary() {
+        let (catalog, _) = CdpCatalog::load(None);
+        for proc in &catalog.processes {
+            let squashed_title = proc.title.to_lowercase().replace(' ', "");
+            let bin_lower = proc.bin.to_lowercase();
+            assert!(
+                squashed_title.contains(&bin_lower),
+                "{}: title {:?} doesn't reveal its own CDP binary {:?}",
+                proc.key,
+                proc.title,
+                proc.bin
+            );
         }
     }
 

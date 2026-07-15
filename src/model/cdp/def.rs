@@ -23,6 +23,13 @@ pub enum Category {
 /// sharing a prefix (e.g. `distcut`'s `cutout0.wav`, `cutout1.wav`, …) instead of one
 /// result — each file becomes its own new buffer instead of being spliced into the
 /// selection (see `pipeline::plan_wav_glob`).
+///
+/// `Curve` is unlike every other variant: it carries no audio at all. Both sides of a
+/// `repitch` pitch-curve-to-pitch-curve transform (`invert`, `smooth`, `quantise`, ...,
+/// CDP-Ext-Plan.md Phase 4 "hard tier") always declare `input = "curve"` and
+/// `output = "curve"` together — the "infile" is a `model::curve::PitchCurve`'s own
+/// breakpoint text, never an open audio `Document`, and the result replaces that curve's
+/// points rather than being spliced into any buffer (see `pipeline::plan_curve_job`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IoKind {
@@ -32,6 +39,7 @@ pub enum IoKind {
     DualWav,
     DualAna,
     WavGlob,
+    Curve,
 }
 
 /// How a `Number` parameter's raw slider value (0-100 for percentage-based scales) maps to
@@ -93,6 +101,69 @@ pub enum ParamValue {
     /// differing only in what the numbers mean, which lives in the param's own
     /// name/description rather than the type).
     List(Vec<f64>),
+    /// A multi-column datafile: one row per line, each row a fixed number of
+    /// space-separated values matching `ParamKind::Table`'s `columns` — e.g. tapdelay's
+    /// `time amp [pan]` taps, or repeater's `start end repeat-count delay` segments. Each
+    /// inner `Vec<f64>`'s length always equals the param's column count.
+    Table(Vec<Vec<f64>>),
+    /// A time list where each entry additionally carries a single-character marker
+    /// concatenated directly onto the time with no separator (e.g. `"a0.3"`, never `"a
+    /// 0.3"`) — `focus freeze`'s bespoke datafile shape (CDP-Ext-Plan.md Tier 1b), confirmed
+    /// against the real binary: a space between marker and time is rejected as an "unknown
+    /// time flag." Genuinely a different shape from `Table` (which always writes
+    /// whitespace-separated columns), so it gets its own variant rather than a special case
+    /// bolted onto that one.
+    MarkerTimeList(Vec<(char, f64)>),
+    /// `hilite band`'s bitflag-conditional per-row shape (CDP-Ext-Plan.md Tier 1b) — see
+    /// `HiliteBandRow`'s own doc comment for the row shape.
+    HiliteBand(Vec<HiliteBandRow>),
+}
+
+/// One row of `hilite band`'s per-band data: a frequency band (`lofrq`/`hifrq`) plus up to
+/// three independently-gated adjustments. `amp_bit`/`ramp_bit`/`transpose_bit`/`add_bit`
+/// mirror the datafile's 4-bit flag exactly — confirmed against the real binary: `add_bit`
+/// is only ever meaningful (and only ever written) when `transpose_bit` is also set
+/// ("Cannot add_in partials without first transposing"), and `ramp_bit` needs no
+/// `amp_bit` (a `ramp_bit`-alone row ramps from the band's own original level to `amp2`).
+/// `amp1`/`amp2`/`transpose_value`/`transpose_additive` are always present in memory —
+/// never lost when their governing bit toggles off in the editor — but only the ones whose
+/// bit is currently set are ever written to the datafile (`model::cdp::pipeline`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct HiliteBandRow {
+    pub lofrq: f64,
+    pub hifrq: f64,
+    pub amp_bit: bool,
+    pub ramp_bit: bool,
+    pub transpose_bit: bool,
+    pub add_bit: bool,
+    pub amp1: f64,
+    pub amp2: f64,
+    pub transpose_value: f64,
+    /// The `+` prefix on the datafile's transpose value — additive Hz instead of a
+    /// multiplier. Only meaningful (and only ever written) when `transpose_bit` is set.
+    pub transpose_additive: bool,
+}
+
+/// One column of a `ParamKind::Table` param — the per-column counterpart to `Number`'s own
+/// min/max/step/default/scale, since a table has no single set of bounds covering every
+/// column (e.g. tapdelay's `time`/`amp`/`pan` columns each have their own real-world range).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TableColumn {
+    pub name: String,
+    pub min: f64,
+    pub max: f64,
+    pub step: f64,
+    pub default: f64,
+    pub scale: NumberScale,
+    /// True for a column CDP requires to be a whole number (e.g. repeater's Repeat Count —
+    /// confirmed by hand: "Non-integer repeat value" — or `blur weave`'s step list —
+    /// "Invalid character in weave file" on a decimal). Distinct from range clamping (which
+    /// every column already gets): a value like `2.5` can sit well inside `min`/`max` and
+    /// still be rejected by CDP for not being an integer at all, so this is checked and
+    /// rounded separately at commit time in the UI. `#[serde(default)]` so existing catalog
+    /// entries (where no column needs this) don't need updating.
+    #[serde(default)]
+    pub integer: bool,
 }
 
 /// The shape of one parameter: its range/default for a slider, or its set of named options.
@@ -106,6 +177,13 @@ pub enum ParamKind {
         default: f64,
         exponential: bool,
         scale: NumberScale,
+        /// True for a param CDP requires to be a whole number — see `TableColumn.integer`'s
+        /// doc comment for the full rationale; this is the same flag, just for a plain
+        /// `Number` param (and, via `ParamDef.required_list`'s reuse of this `ParamKind`,
+        /// for a `required_list` field's entries too). `#[serde(default)]` so existing
+        /// catalog entries don't need updating.
+        #[serde(default)]
+        integer: bool,
     },
     Toggle {
         default: bool,
@@ -113,6 +191,52 @@ pub enum ParamKind {
     Choice {
         options: Vec<String>,
         default: usize,
+    },
+    /// A multi-column datafile param (CDP-Ext-Plan.md Tier 1b's "bespoke multi-column"
+    /// shape, e.g. tapdelay's `time amp [pan]` taps or repeater's `start end repeat-count
+    /// delay` segments) — always required (there's no bare-constant alternative, the same
+    /// way `ParamDef.required_list`/`required_envelope` fields work, but expressed as its
+    /// own `ParamKind` rather than a flag bolted onto `Number` since no single set of
+    /// min/max/step/default covers more than one column). `time_column` is the index of
+    /// the column that must stay strictly ascending across rows (mirrors
+    /// `ParamDef.list_is_time_sequence`, e.g. tapdelay's `time` column), or `None` when row
+    /// order is unconstrained (e.g. repeater's segments, which may overlap or run backward
+    /// in the source).
+    Table {
+        columns: Vec<TableColumn>,
+        /// `#[serde(default)]`: most `Table` params (e.g. repeater's) have no ordering
+        /// constraint at all, so a catalog entry can omit this key entirely rather than
+        /// writing `time_column = false` — TOML has no `null`, so without this attribute a
+        /// missing key would be a hard deserialize error, not an implicit `None`.
+        #[serde(default)]
+        time_column: Option<usize>,
+    },
+    /// `focus freeze`'s bespoke marker-prefixed time list (CDP-Ext-Plan.md Tier 1b) — always
+    /// required, same rationale as `Table`. `markers` is the catalog-declared set of valid
+    /// marker characters (`['a', 'b']` for every process that uses this today, but not
+    /// hardcoded in case a future one uses a different alphabet); entries must stay strictly
+    /// ascending by time across rows (confirmed against the real binary: "Time values out of
+    /// sequence"), so unlike `Table` there's no `time_column`/`None` choice to make — time
+    /// ordering always applies.
+    MarkerTimeList {
+        markers: Vec<char>,
+        min: f64,
+        max: f64,
+        step: f64,
+        default: f64,
+        scale: NumberScale,
+    },
+    /// `hilite band`'s bitflag-conditional per-row shape (CDP-Ext-Plan.md Tier 1b) — see
+    /// `HiliteBandRow`'s doc comment for the row semantics. Each field reuses `TableColumn`
+    /// for its bounds rather than introducing yet another bounds struct, even though there's
+    /// only ever one column of each here — the shape (name/min/max/step/default/scale) is
+    /// identical to what a table column already needs.
+    HiliteBand {
+        lofrq: TableColumn,
+        hifrq: TableColumn,
+        amp1: TableColumn,
+        amp2: TableColumn,
+        transpose: TableColumn,
     },
 }
 
@@ -127,6 +251,34 @@ impl ParamKind {
             ParamKind::Number { default, .. } => ParamValue::Number(*default),
             ParamKind::Toggle { default } => ParamValue::Toggle(*default),
             ParamKind::Choice { default, .. } => ParamValue::Choice(*default),
+            // One row, each column at its own default — mirrors how the UI seeds a
+            // never-yet-configured table field (`App::open_cdp_table_editor`).
+            ParamKind::Table { columns, .. } => {
+                ParamValue::Table(vec![columns.iter().map(|c| c.default).collect()])
+            }
+            // One entry, at the param's own default time and its first declared marker —
+            // mirrors how the UI seeds a never-yet-configured field
+            // (`App::open_cdp_marker_time_list_editor`).
+            ParamKind::MarkerTimeList { markers, default, .. } => {
+                ParamValue::MarkerTimeList(vec![(*markers.first().unwrap_or(&'a'), *default)])
+            }
+            // One row with `amp_bit` set (the simplest always-valid starting state — CDP
+            // itself rejects an all-bits-off row as a "Zero bitflag"), at each numeric
+            // field's own catalog default.
+            ParamKind::HiliteBand { lofrq, hifrq, amp1, amp2, transpose } => {
+                ParamValue::HiliteBand(vec![HiliteBandRow {
+                    lofrq: lofrq.default,
+                    hifrq: hifrq.default,
+                    amp_bit: true,
+                    ramp_bit: false,
+                    transpose_bit: false,
+                    add_bit: false,
+                    amp1: amp1.default,
+                    amp2: amp2.default,
+                    transpose_value: transpose.default,
+                    transpose_additive: false,
+                }])
+            }
         }
     }
 }
@@ -250,6 +402,17 @@ pub struct ProcessDef {
     /// it, without touching the float32 precision every other process still gets.
     #[serde(default)]
     pub requires_simple_wav_input: bool,
+    /// Only meaningful for `IoKind::Curve` processes: true when this subprogram's own raw
+    /// result is CDP's *binary* pitchdata format rather than the plain-text time/Hz
+    /// breakpoint format (e.g. `repitch generate`'s usage text is explicit: "CREATE BINARY
+    /// PITCHDATA FILE..."; most curve-in/curve-out subprograms accept either format on the
+    /// way in per `repitch getpitch`'s own usage text — "either of these may be reused in
+    /// other pitch-manipulating options" — but don't all document which they *emit*).
+    /// `pipeline::plan_curve_job` appends a `repitch pchtotext` normalization step whenever
+    /// this is true, so `PlannedJob.output_curve` always names a plain-text file regardless
+    /// — `model::curve::parse_breakpoints` never needs to understand the binary format.
+    #[serde(default)]
+    pub curve_output_binary: bool,
     /// Ordered — this order is exactly the order these values appear as positional
     /// arguments on the CDP command line (flagged params are still emitted in this order,
     /// just as `-x<value>` tokens instead of bare ones). A process with no parameters emits
@@ -279,6 +442,7 @@ mod tests {
                 default: 5.0,
                 exponential: false,
                 scale: NumberScale::Plain,
+                integer: false,
             },
         }
     }
@@ -300,6 +464,7 @@ mod tests {
             stereo_native: false,
             output_is_stereo: false,
             requires_simple_wav_input: false,
+            curve_output_binary: false,
             params: vec![sample_number()],
         };
 
@@ -348,7 +513,181 @@ mod tests {
             stereo_native: false,
             output_is_stereo: false,
             requires_simple_wav_input: false,
+            curve_output_binary: false,
             params: vec![toggle, choice],
+        };
+
+        let text = toml::to_string(&def).expect("serialize");
+        let back: ProcessDef = toml::from_str(&text).expect("deserialize");
+        assert_eq!(def, back);
+    }
+
+    /// `ParamKind::Table`'s nested `columns` (an array of `TableColumn` structs) must
+    /// survive a TOML round-trip cleanly — validated in isolation before any UI/pipeline
+    /// code is built on top of it, since a doubly-nested array-of-tables under
+    /// `#[serde(flatten)]`'s tag is exactly the kind of shape that can surprise a TOML
+    /// serializer.
+    #[test]
+    fn table_param_with_multiple_columns_round_trips_through_toml() {
+        let table = ParamDef {
+            name: "Taps".into(),
+            description: "Delay taps".into(),
+            flag: None,
+            automatable: false,
+            required_envelope: false,
+            required_list: false,
+            list_is_time_sequence: false,
+            kind: ParamKind::Table {
+                columns: vec![
+                    TableColumn {
+                        name: "Time".into(),
+                        min: 0.0,
+                        max: 60.0,
+                        step: 0.01,
+                        default: 0.1,
+                        scale: NumberScale::Plain,
+                        integer: false,
+                    },
+                    TableColumn {
+                        name: "Amp".into(),
+                        min: 0.0,
+                        max: 1.0,
+                        step: 0.01,
+                        default: 0.5,
+                        scale: NumberScale::Plain,
+                        integer: false,
+                    },
+                    TableColumn {
+                        name: "Pan".into(),
+                        min: -1.0,
+                        max: 1.0,
+                        step: 0.01,
+                        default: 0.0,
+                        scale: NumberScale::Plain,
+                        integer: false,
+                    },
+                ],
+                time_column: Some(0),
+            },
+        };
+        let def = ProcessDef {
+            key: "tapdelay_tapdelay".into(),
+            bin: "tapdelay".into(),
+            subprog: None,
+            mode: None,
+            title: "Tap Delay".into(),
+            category: Category::Time,
+            subcategory: "delay".into(),
+            short_description: "Multi-tap delay".into(),
+            description: "Full description.".into(),
+            input: IoKind::Wav,
+            output: IoKind::Wav,
+            stereo_native: false,
+            output_is_stereo: true,
+            requires_simple_wav_input: false,
+            curve_output_binary: false,
+            params: vec![table],
+        };
+
+        let text = toml::to_string(&def).expect("serialize");
+        let back: ProcessDef = toml::from_str(&text).expect("deserialize");
+        assert_eq!(def, back);
+    }
+
+    /// `ParamKind::MarkerTimeList`'s `markers: Vec<char>` must survive a TOML round-trip —
+    /// validated in isolation like the `Table` schema above, since `char` isn't a native
+    /// TOML type (it round-trips as a one-character string) and is worth confirming before
+    /// any UI/pipeline code depends on it.
+    #[test]
+    fn marker_time_list_param_round_trips_through_toml() {
+        let param = ParamDef {
+            name: "Freeze Times".into(),
+            description: "Times at which the spectrum is frozen".into(),
+            flag: None,
+            automatable: false,
+            required_envelope: false,
+            required_list: false,
+            list_is_time_sequence: false,
+            kind: ParamKind::MarkerTimeList {
+                markers: vec!['a', 'b'],
+                min: 0.0,
+                max: 7200.0,
+                step: 0.01,
+                default: 0.1,
+                scale: NumberScale::CappedAtInputDuration,
+            },
+        };
+        let def = ProcessDef {
+            key: "focus_freeze_1".into(),
+            bin: "focus".into(),
+            subprog: Some("freeze".into()),
+            mode: Some("1".into()),
+            title: "Freeze (Amplitude)".into(),
+            category: Category::Pvoc,
+            subcategory: "spectrum".into(),
+            short_description: "Freeze spectral amplitudes".into(),
+            description: "Full description.".into(),
+            input: IoKind::Ana,
+            output: IoKind::Ana,
+            stereo_native: false,
+            output_is_stereo: false,
+            requires_simple_wav_input: false,
+            curve_output_binary: false,
+            params: vec![param],
+        };
+
+        let text = toml::to_string(&def).expect("serialize");
+        let back: ProcessDef = toml::from_str(&text).expect("deserialize");
+        assert_eq!(def, back);
+    }
+
+    /// `ParamKind::HiliteBand`'s five `TableColumn`-shaped fields must survive a TOML
+    /// round-trip — validated in isolation before any UI/pipeline code depends on it, same
+    /// discipline as the `Table`/`MarkerTimeList` schemas above.
+    #[test]
+    fn hilite_band_param_round_trips_through_toml() {
+        let bounds = |name: &str, min, max, default| TableColumn {
+            name: name.into(),
+            min,
+            max,
+            step: 0.1,
+            default,
+            scale: NumberScale::Plain,
+            integer: false,
+        };
+        let param = ParamDef {
+            name: "Bands".into(),
+            description: "Frequency bands to process independently".into(),
+            flag: None,
+            automatable: false,
+            required_envelope: false,
+            required_list: false,
+            list_is_time_sequence: false,
+            kind: ParamKind::HiliteBand {
+                lofrq: bounds("Lo Freq", 20.0, 20000.0, 200.0),
+                hifrq: bounds("Hi Freq", 20.0, 20000.0, 2000.0),
+                amp1: bounds("Amp 1", 0.0, 10.0, 1.0),
+                amp2: bounds("Amp 2", 0.0, 10.0, 1.0),
+                transpose: bounds("Transpose", -10000.0, 10000.0, 1.0),
+            },
+        };
+        let def = ProcessDef {
+            key: "hilite_band".into(),
+            bin: "hilite".into(),
+            subprog: Some("band".into()),
+            mode: None,
+            title: "Band".into(),
+            category: Category::Pvoc,
+            subcategory: "spectrum".into(),
+            short_description: "Split spectrum into bands".into(),
+            description: "Full description.".into(),
+            input: IoKind::Ana,
+            output: IoKind::Ana,
+            stereo_native: false,
+            output_is_stereo: false,
+            requires_simple_wav_input: false,
+            curve_output_binary: false,
+            params: vec![param],
         };
 
         let text = toml::to_string(&def).expect("serialize");

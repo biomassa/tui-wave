@@ -170,7 +170,13 @@ enum CdpField {
     /// `ParamValue::Breakpoints` instead of parsing `input` whenever it's set. `input` keeps
     /// whatever constant value was last live so switching back to constant mode (the
     /// editor's 'c' key) doesn't lose it.
-    Number { input: TextInput, min: f64, max: f64, step: f64, envelope: Option<Vec<(f64, f64)>> },
+    /// `integer`: true for a param CDP requires to be a whole number (`ParamKind::Number.integer`'s
+    /// doc comment) — checked and rounded to the nearest whole number wherever a value is
+    /// committed (typing here has no discrete "commit" moment the way the sub-editors do, so
+    /// `App::cdp_validate_fields` blocks Apply/Preview on a non-integer value instead of
+    /// silently rounding while the user is still typing; `cdp_nudge_number` does round, since
+    /// Up/Down already is a discrete commit).
+    Number { input: TextInput, min: f64, max: f64, step: f64, integer: bool, envelope: Option<Vec<(f64, f64)>> },
     Toggle { on: bool },
     /// `options` is cloned from the `ParamKind::Choice` at construction time so cycling it
     /// (Left/Right) never needs a catalog lookup back through the current selection.
@@ -180,26 +186,65 @@ enum CdpField {
     /// fallback to fall back *to*: the argv token is always a list-file path. `values`
     /// starts empty ("not set yet") until `App::open_cdp_list_editor` commits at least one
     /// entry — no wrapping `Option` needed, an empty `Vec` already means "unset."
-    /// `min`/`max`/`step` bound each entry, same rationale as `Number`'s.
-    List { values: Vec<f64>, min: f64, max: f64, step: f64 },
+    /// `min`/`max`/`step` bound each entry, same rationale as `Number`'s; `integer` is
+    /// rounded to on commit exactly like `Table`'s per-column flag (`commit_cdp_list_cell_edit`).
+    List { values: Vec<f64>, min: f64, max: f64, step: f64, integer: bool },
+    /// A `ParamKind::Table` field (CDP-Ext-Plan.md Tier 1b's "bespoke multi-column" shape,
+    /// e.g. tapdelay's `time amp [pan]` taps) — always required, same rationale as `List`
+    /// above, just with more than one value per row. `rows` starts with exactly one row
+    /// (seeded from each column's default — see `App::open_cdp_table_editor`) rather than
+    /// empty like `List`: unlike a plain value/time list, a table's columns have no
+    /// meaningful "unset" representation *and* every catalog table param needs at least a
+    /// starting row's worth of real numbers for CDP to accept it at all, so "not configured
+    /// yet" isn't a state worth modeling here — there is always at least one seeded row the
+    /// moment the field exists. `columns` is cloned from `ParamKind::Table` at construction
+    /// time, same rationale as `Number`/`List`'s own bounds; `time_column` mirrors
+    /// `ParamDef.list_is_time_sequence`'s ordering constraint, generalized to whichever
+    /// column (if any) must stay strictly ascending across rows.
+    Table { rows: Vec<Vec<f64>>, columns: Vec<crate::model::cdp::TableColumn>, time_column: Option<usize> },
+    /// A `ParamKind::MarkerTimeList` field (`focus freeze`'s bespoke marker-prefixed time
+    /// list, CDP-Ext-Plan.md Tier 1b) — always required, same "no unset state" rationale as
+    /// `Table`: `entries` starts with exactly one `(marker, time)` pair, seeded from the
+    /// param's own default (first declared marker, default time). `markers`/`min`/`max`/
+    /// `step` are cloned from `ParamKind::MarkerTimeList` at construction time, same
+    /// rationale as every other field's own bounds. Entries must stay strictly ascending by
+    /// time across rows (confirmed against the real binary), so unlike `Table` there's no
+    /// per-field choice here — the constraint always applies.
+    MarkerTimeList { entries: Vec<(char, f64)>, markers: Vec<char>, min: f64, max: f64, step: f64 },
+    /// A `ParamKind::HiliteBand` field (`hilite band`'s bitflag-conditional per-row shape,
+    /// CDP-Ext-Plan.md Tier 1b) — always required, same "no unset state" rationale as
+    /// `Table`: `rows` starts with exactly one row (`amp_bit` set, the simplest always-valid
+    /// starting state — see `ParamKind::default_value`'s doc comment for why an all-bits-off
+    /// row is rejected outright). `lofrq`/`hifrq`/`amp1`/`amp2`/`transpose` are cloned from
+    /// `ParamKind::HiliteBand` at construction time, same rationale as every other field's
+    /// own bounds.
+    HiliteBand {
+        rows: Vec<crate::model::cdp::HiliteBandRow>,
+        lofrq: crate::model::cdp::TableColumn,
+        hifrq: crate::model::cdp::TableColumn,
+        amp1: crate::model::cdp::TableColumn,
+        amp2: crate::model::cdp::TableColumn,
+        transpose: crate::model::cdp::TableColumn,
+    },
 }
 
 impl CdpField {
     fn from_default(param: &crate::model::cdp::ParamDef) -> Self {
         use crate::model::cdp::ParamKind;
         if param.required_list {
-            let ParamKind::Number { min, max, step, .. } = &param.kind else {
+            let ParamKind::Number { min, max, step, integer, .. } = &param.kind else {
                 panic!("required_list param {:?} is not a Number kind", param.name);
             };
-            return CdpField::List { values: Vec::new(), min: *min, max: *max, step: *step };
+            return CdpField::List { values: Vec::new(), min: *min, max: *max, step: *step, integer: *integer };
         }
         match &param.kind {
-            ParamKind::Number { default, min, max, step, .. } => {
+            ParamKind::Number { default, min, max, step, integer, .. } => {
                 CdpField::Number {
                     input: TextInput::fresh(format_cdp_float_for_display(*default)),
                     min: *min,
                     max: *max,
                     step: *step,
+                    integer: *integer,
                     envelope: None,
                 }
             }
@@ -207,6 +252,43 @@ impl CdpField {
             ParamKind::Choice { options, default } => {
                 CdpField::Choice { options: options.clone(), selected: *default }
             }
+            // One seeded row (each column at its own default) rather than empty — see
+            // `CdpField::Table`'s doc comment for why a table field has no "unset" state.
+            ParamKind::Table { columns, time_column } => CdpField::Table {
+                rows: vec![columns.iter().map(|c| c.default).collect()],
+                columns: columns.clone(),
+                time_column: *time_column,
+            },
+            // One seeded entry (first declared marker, default time) — same "no unset
+            // state" rationale as `Table`.
+            ParamKind::MarkerTimeList { markers, min, max, step, default, .. } => CdpField::MarkerTimeList {
+                entries: vec![(*markers.first().unwrap_or(&'a'), *default)],
+                markers: markers.clone(),
+                min: *min,
+                max: *max,
+                step: *step,
+            },
+            // One seeded row with `amp_bit` set (the simplest always-valid starting state —
+            // see `ParamKind::default_value`'s doc comment for why all-bits-off is rejected).
+            ParamKind::HiliteBand { lofrq, hifrq, amp1, amp2, transpose } => CdpField::HiliteBand {
+                rows: vec![crate::model::cdp::HiliteBandRow {
+                    lofrq: lofrq.default,
+                    hifrq: hifrq.default,
+                    amp_bit: true,
+                    ramp_bit: false,
+                    transpose_bit: false,
+                    add_bit: false,
+                    amp1: amp1.default,
+                    amp2: amp2.default,
+                    transpose_value: transpose.default,
+                    transpose_additive: false,
+                }],
+                lofrq: lofrq.clone(),
+                hifrq: hifrq.clone(),
+                amp1: amp1.clone(),
+                amp2: amp2.clone(),
+                transpose: transpose.clone(),
+            },
         }
     }
 
@@ -219,30 +301,86 @@ impl CdpField {
     fn from_value(param: &crate::model::cdp::ParamDef, value: &crate::model::cdp::ParamValue) -> Self {
         use crate::model::cdp::{ParamKind, ParamValue};
         match (&param.kind, value) {
-            (ParamKind::Number { min, max, step, .. }, ParamValue::Number(v)) => CdpField::Number {
+            (ParamKind::Number { min, max, step, integer, .. }, ParamValue::Number(v)) => CdpField::Number {
                 input: TextInput::fresh(format_cdp_float_for_display(*v)),
                 min: *min,
                 max: *max,
                 step: *step,
+                integer: *integer,
                 envelope: None,
             },
-            (ParamKind::Number { min, max, step, .. }, ParamValue::Breakpoints(points)) => CdpField::Number {
+            (ParamKind::Number { min, max, step, integer, .. }, ParamValue::Breakpoints(points)) => CdpField::Number {
                 input: TextInput::fresh(format_cdp_float_for_display(
                     points.first().map(|&(_, v)| v).unwrap_or(0.0),
                 )),
                 min: *min,
                 max: *max,
                 step: *step,
+                integer: *integer,
                 envelope: Some(points.clone()),
             },
-            (ParamKind::Number { min, max, step, .. }, ParamValue::List(values)) => {
-                CdpField::List { values: values.clone(), min: *min, max: *max, step: *step }
+            (ParamKind::Number { min, max, step, integer, .. }, ParamValue::List(values)) => {
+                CdpField::List { values: values.clone(), min: *min, max: *max, step: *step, integer: *integer }
             }
             (ParamKind::Toggle { .. }, ParamValue::Toggle(on)) => CdpField::Toggle { on: *on },
             (ParamKind::Choice { options, .. }, ParamValue::Choice(i)) => CdpField::Choice {
                 options: options.clone(),
                 selected: (*i).min(options.len().saturating_sub(1)),
             },
+            (ParamKind::Table { columns, time_column }, ParamValue::Table(rows)) => CdpField::Table {
+                // A saved preset's row count is trusted as-is (unlike a *type* mismatch,
+                // which falls through to `from_default` below) — an empty `rows` would
+                // leave the table editor with no cell to select, so fall back to one
+                // default-seeded row exactly like `from_default` rather than accepting it.
+                rows: if rows.is_empty() {
+                    vec![columns.iter().map(|c| c.default).collect()]
+                } else {
+                    rows.clone()
+                },
+                columns: columns.clone(),
+                time_column: *time_column,
+            },
+            (ParamKind::MarkerTimeList { markers, min, max, step, .. }, ParamValue::MarkerTimeList(entries)) => {
+                CdpField::MarkerTimeList {
+                    // Same empty-preset-value fallback as `Table` above — a preset's
+                    // out-of-band edge case, not the never-configured-field path.
+                    entries: if entries.is_empty() {
+                        vec![(*markers.first().unwrap_or(&'a'), *min)]
+                    } else {
+                        entries.clone()
+                    },
+                    markers: markers.clone(),
+                    min: *min,
+                    max: *max,
+                    step: *step,
+                }
+            }
+            (ParamKind::HiliteBand { lofrq, hifrq, amp1, amp2, transpose }, ParamValue::HiliteBand(rows)) => {
+                CdpField::HiliteBand {
+                    // Same empty-preset-value fallback as `Table`/`MarkerTimeList` above.
+                    rows: if rows.is_empty() {
+                        vec![crate::model::cdp::HiliteBandRow {
+                            lofrq: lofrq.default,
+                            hifrq: hifrq.default,
+                            amp_bit: true,
+                            ramp_bit: false,
+                            transpose_bit: false,
+                            add_bit: false,
+                            amp1: amp1.default,
+                            amp2: amp2.default,
+                            transpose_value: transpose.default,
+                            transpose_additive: false,
+                        }]
+                    } else {
+                        rows.clone()
+                    },
+                    lofrq: lofrq.clone(),
+                    hifrq: hifrq.clone(),
+                    amp1: amp1.clone(),
+                    amp2: amp2.clone(),
+                    transpose: transpose.clone(),
+                }
+            }
             _ => CdpField::from_default(param),
         }
     }
@@ -257,6 +395,9 @@ impl CdpField {
             CdpField::Toggle { on } => ParamValue::Toggle(*on),
             CdpField::Choice { selected, .. } => ParamValue::Choice(*selected),
             CdpField::List { values, .. } => ParamValue::List(values.clone()),
+            CdpField::Table { rows, .. } => ParamValue::Table(rows.clone()),
+            CdpField::MarkerTimeList { entries, .. } => ParamValue::MarkerTimeList(entries.clone()),
+            CdpField::HiliteBand { rows, .. } => ParamValue::HiliteBand(rows.clone()),
         }
     }
 }
@@ -273,13 +414,33 @@ fn format_cdp_float_for_display(v: f64) -> String {
     if s.contains('.') { s } else { format!("{s}.0") }
 }
 
-/// Nudges a focused `CdpField::Number` by `sign * step`, clamped to its range — Up/Down's
-/// role in the params dialog (Left/Right is reserved for the field's own text cursor, or
-/// for cycling a `Choice`). No-op for any other field kind.
-fn cdp_nudge_number(field: Option<&mut CdpField>, sign: f64) {
-    let Some(CdpField::Number { input, min, max, step, .. }) = field else { return };
+/// Whether `c` can start or continue typing a replacement number into a selected cell of
+/// the list editor (`CdpListEdit`) or table editor (`CdpTableEdit`) — the same character
+/// set already used everywhere else in this app for a signed-decimal numeric `TextInput`
+/// (`App::dialog_accepts`).
+fn is_cdp_table_edit_char(c: char) -> bool {
+    c.is_ascii_digit() || c == '-' || c == '.'
+}
+
+/// Nudges a focused `CdpField::Number` by a flat `sign * (1.0, or 0.1 when `fine`)`,
+/// clamped to its range — Up/Down's role in the params dialog (Left/Right is reserved for
+/// the field's own text cursor, or for cycling a `Choice`). No-op for any other field kind.
+///
+/// Deliberately a fixed 1.0/0.1 rather than the catalog's own (per-param, often much finer)
+/// `step` — regression fix (user report): using `step` directly here made every plain Up
+/// press advance by e.g. 0.1 with no distinction from Shift+Up at all (nothing in this path
+/// checked the Shift modifier), and repeatedly re-parsing/re-adding a value like 0.1 in f64
+/// visibly accumulated binary-fraction noise on screen ("1.8000000000000003"). Rounding the
+/// result to 6 decimal places kills that noise outright (CDP's own params are never
+/// meaningfully precise to more than a handful of decimals) regardless of which flat step is
+/// used.
+fn cdp_nudge_number(field: Option<&mut CdpField>, sign: f64, fine: bool) {
+    let Some(CdpField::Number { input, min, max, integer, .. }) = field else { return };
+    let delta = if fine { 0.1 } else { 1.0 };
     let current = input.value().trim().parse::<f64>().unwrap_or(*min);
-    let next = (current + sign * *step).clamp(*min, *max);
+    let next = ((current + sign * delta) * 1e6).round() / 1e6;
+    let next = if *integer { next.round() } else { next };
+    let next = next.clamp(*min, *max);
     *input = TextInput::new(format_cdp_float_for_display(next));
 }
 
@@ -425,6 +586,23 @@ enum Dialog {
         /// either breakpoint-shaped or list-shaped, never both), same take-over-all-key-
         /// handling shape.
         list_edit: Option<CdpListEdit>,
+        /// `Some` while the multi-column table editor (`render_cdp_table_editor`) is open
+        /// for one of `fields`' `Table`-kind params — mutually exclusive with both
+        /// `envelope` and `list_edit` (a field is exactly one of Number/List/Table shaped),
+        /// same take-over-all-key-handling shape.
+        table_edit: Option<CdpTableEdit>,
+        /// `Some` while the marker-prefixed time-list editor
+        /// (`render_cdp_marker_time_list_editor`) is open for one of `fields`'
+        /// `MarkerTimeList`-kind params — mutually exclusive with `envelope`/`list_edit`/
+        /// `table_edit` (a field is exactly one of Number/List/Table/MarkerTimeList
+        /// shaped), same take-over-all-key-handling shape.
+        marker_time_list_edit: Option<CdpMarkerTimeListEdit>,
+        /// `Some` while `hilite band`'s bitflag-conditional row editor
+        /// (`render_cdp_hilite_band_editor`) is open for one of `fields`' `HiliteBand`-kind
+        /// params — mutually exclusive with `envelope`/`list_edit`/`table_edit`/
+        /// `marker_time_list_edit` (a field is exactly one shape), same take-over-all-
+        /// key-handling shape.
+        hilite_band_edit: Option<CdpHiliteBandEdit>,
         presets: Vec<crate::model::cdp::preset::CdpPreset>,
         preset_selected: Option<usize>,
         save_prompt: Option<TextInput>,
@@ -450,6 +628,11 @@ enum Dialog {
     CdpOutput { title: String, lines: Vec<String>, scroll: usize },
     /// Generic single-message info/error popup with an Enter/Esc-to-dismiss button.
     Info { message: String },
+    /// The standalone pitch-curve editor (CDP-Ext-Plan.md Phase 4 "hard tier"), opened via
+    /// `App::open_curve_editor` from the Buffers panel. Unlike `CdpParams`'s per-field
+    /// sub-editors, this is a top-level dialog with no browser/params dialog underneath it
+    /// — Esc/Enter both close it outright (see `CurveEditorState`'s doc comment).
+    CurveEditor(CurveEditorState),
 }
 
 /// The second-input picker state for a dual-input CDP process (combine/morph/vocode/...):
@@ -508,14 +691,24 @@ struct CdpEnvelopeEdit {
 ///
 /// `is_time_sequence` mirrors `ParamDef.list_is_time_sequence` (looked up once at open
 /// time rather than re-checked per keystroke): when true, `App::handle_cdp_list_key`
-/// constrains Up/Down and 'n' to keep `values` strictly ascending (CDP's own requirement
-/// for e.g. `grain reposition`'s TIMEFILE — confirmed by hand: a submitted list with times
-/// out of order fails with "Sync times out of sequence", found via the user manually
-/// testing this exact editor). `time_max` is the *practical* nudge/clamp bound for a
+/// constrains a typed value on commit to keep `values` strictly ascending (CDP's own
+/// requirement for e.g. `grain reposition`'s TIMEFILE — confirmed by hand: a submitted list
+/// with times out of order fails with "Sync times out of sequence", found via the user
+/// manually testing this exact editor). `time_max` is the *practical* clamp bound for a
 /// time-sequence field: the real selection's duration in seconds, not the catalog's own
 /// (necessarily generous) `max` — the same reasoning `CdpEnvelopeEdit.time_max` already
 /// uses for its time axis, extended here since a time-sequence list's entries are exactly
 /// the same kind of value. Unused (left at the catalog `max`) for a non-time-sequence list.
+///
+/// Arrow keys purely move `selected` (a spreadsheet-style cursor, not a value nudge) —
+/// typing a digit/`-`/`.` is how a value actually changes, via `editing`: a `TextInput`
+/// seeded (`TextInput::fresh`) with the selected entry's current value the moment typing
+/// starts, so the first keystroke replaces it rather than appending. Any key that isn't a
+/// continuation of that typing (an arrow, `n`, Delete, Enter — everything but another
+/// digit/`-`/`.`/Backspace) commits `editing`'s parsed-and-clamped value into `values` and
+/// clears it back to `None` first, so navigating away from a cell always saves what you
+/// typed into it. Esc discards the whole session regardless, per this app's existing
+/// editor-cancel convention — there's no separate per-cell escape.
 struct CdpListEdit {
     field_index: usize,
     values: Vec<f64>,
@@ -523,6 +716,193 @@ struct CdpListEdit {
     original: Vec<f64>,
     is_time_sequence: bool,
     time_max: f64,
+    editing: Option<TextInput>,
+}
+
+/// State for the multi-column table editor, active while `Dialog::CdpParams.table_edit` is
+/// `Some` — the `ParamKind::Table` counterpart to `CdpListEdit`, generalized to more than
+/// one column per row (CDP-Ext-Plan.md Tier 1b's "bespoke multi-column" shape, e.g.
+/// tapdelay's `time amp [pan]` taps, or repeater's `start end repeat-count delay`
+/// segments). Exactly the same arrows-select/type-to-overwrite interaction model as
+/// `CdpListEdit` (see that struct's doc comment) — the only real difference is having two
+/// axes to navigate instead of one: `selected_col`/`selected_row` together pick one cell,
+/// Left/Right move between columns and Up/Down between rows (unlike `CdpListEdit`, which
+/// wires all four arrows to the same single axis since a 1-column table has no real
+/// horizontal/vertical distinction).
+///
+/// `rows` always starts with at least one row (never empty — see `CdpField::Table`'s doc
+/// comment for why a table field has no "unset" state the way `CdpListEdit`'s `values` can
+/// be), so unlike `CdpListEdit` there's no seed-on-open step here: `App::open_cdp_table_editor`
+/// just clones the field's current rows as-is. `original` snapshots them for Esc to restore.
+///
+/// `time_column`/`time_max` mirror `CdpListEdit.is_time_sequence`/`time_max` exactly,
+/// applied to whichever single column index (if any) must stay strictly ascending across
+/// rows — `None` when row order is unconstrained (e.g. repeater's segments, which may
+/// overlap or run backward in the source).
+struct CdpTableEdit {
+    field_index: usize,
+    rows: Vec<Vec<f64>>,
+    selected_row: usize,
+    selected_col: usize,
+    original: Vec<Vec<f64>>,
+    time_column: Option<usize>,
+    time_max: f64,
+    editing: Option<TextInput>,
+}
+
+/// The always-ascending time bound a hand-edited curve's Time column is clamped to — a
+/// generous safety cap, not a real CDP-enforced limit (there's no selection/duration this
+/// editor is scoped to the way `CdpTableEdit.time_max` is; a curve is its own document).
+/// Matches `MarkerTimeList`'s own generous `max` for the same param shape.
+const CURVE_EDITOR_TIME_MAX: f64 = 7200.0;
+/// Hz bounds for a hand-edited curve's Value column — CDP's own MIDI-pitch-equivalent
+/// range (roughly 9Hz to just under 22kHz) rather than an audio-domain sample-rate-capped
+/// range, since a curve isn't tied to any one file's sample rate.
+const CURVE_EDITOR_HZ_MIN: f64 = 9.0;
+const CURVE_EDITOR_HZ_MAX: f64 = 21000.0;
+const CURVE_EDITOR_TIME_STEP: f64 = 0.1;
+
+/// State for the standalone pitch-curve editor (`Dialog::CurveEditor`) — edits
+/// `App.curves[curve_index]`'s points directly, committing through
+/// `App.curve_histories[curve_index]` on Enter rather than writing into any `CdpField`:
+/// unlike every `*_edit` struct above, a curve isn't one param inside a running
+/// `CdpParams` session, it's its own document (CDP-Ext-Plan.md Phase 4 "hard tier").
+/// Otherwise the same two-column (Time, Hz) shape and interaction model as `CdpTableEdit`
+/// with an always-ascending time column (`handle_curve_editor_key`'s doc comment has the
+/// full key model).
+struct CurveEditorState {
+    curve_index: usize,
+    /// A working copy — `App.curves[curve_index].points` itself is never touched until
+    /// Enter explicitly commits it via `CurveHistory::apply`, so unlike `CdpTableEdit`
+    /// (which writes back into the live `CdpField` on every close, requiring its own
+    /// `original` snapshot to restore on Esc), there's nothing for Esc to undo here beyond
+    /// just dropping this state.
+    points: Vec<(f64, f64)>,
+    selected_row: usize,
+    /// 0 = Time, 1 = Hz.
+    selected_col: usize,
+    editing: Option<TextInput>,
+}
+
+/// State for the marker-prefixed time-list editor, active while
+/// `Dialog::CdpParams.marker_time_list_edit` is `Some` — `focus freeze`'s bespoke datafile
+/// shape (CDP-Ext-Plan.md Tier 1b), modeled as a 2-column table (Marker, Time) reusing
+/// `CdpTableEdit`'s row/column navigation conventions without being a `CdpTableEdit` itself:
+/// column 0 (Marker) isn't numeric, so typing/clamping don't apply to it the way they do to
+/// every real `CdpTableEdit` column. Left/Right moves between the Marker and Time columns,
+/// Up/Down between rows, exactly like a table; typing a digit/`-`/`.` edits the Time column
+/// exactly like `CdpListEdit`. When the Marker column is selected, pressing one of the
+/// field's declared `markers` characters (`'a'`/`'b'`) sets the selected row's marker
+/// directly — mnemonic, matching CDP's own literal marker letters, rather than a toggle key
+/// (confirmed as the preferred model; the alternative considered was a dedicated toggle key
+/// cycling between markers regardless of which column has focus).
+///
+/// `entries` always starts with at least one `(marker, time)` pair (never empty — same "no
+/// unset state" rationale as `CdpField::Table`), so there's no seed-on-open step:
+/// `App::open_cdp_marker_time_list_editor` just clones the field's current entries as-is.
+/// Time values must stay strictly ascending across rows (confirmed against the real
+/// binary — "Time values out of sequence"), so `time_max` mirrors
+/// `CdpListEdit.time_max`/`CdpTableEdit.time_max` exactly: the real selection's duration in
+/// seconds, not the catalog's own generous safety-cap `max`.
+struct CdpMarkerTimeListEdit {
+    field_index: usize,
+    entries: Vec<(char, f64)>,
+    selected_row: usize,
+    /// 0 = Marker column, 1 = Time column.
+    selected_col: usize,
+    original: Vec<(char, f64)>,
+    markers: Vec<char>,
+    time_max: f64,
+    editing: Option<TextInput>,
+}
+
+/// `CdpHiliteBandEdit.selected_col`'s 10 possible cell positions — `hilite band`'s bitflag-
+/// conditional row shape (CDP-Ext-Plan.md Tier 1b): 2 fixed numeric fields, 4 checkboxes,
+/// and 3 more numeric fields plus a sign checkbox that only apply when their governing bit
+/// is set. Cells 0-5 are always visible; 6 needs `amp_bit`, 7 needs `ramp_bit`, 8/9 need
+/// `transpose_bit` — see `hb_cell_visible`.
+const HB_LOFRQ: usize = 0;
+const HB_HIFRQ: usize = 1;
+const HB_AMP_BIT: usize = 2;
+const HB_RAMP_BIT: usize = 3;
+const HB_TRANSPOSE_BIT: usize = 4;
+const HB_ADD_BIT: usize = 5;
+const HB_AMP1: usize = 6;
+const HB_AMP2: usize = 7;
+const HB_SIGN: usize = 8;
+const HB_TRANSPOSE: usize = 9;
+const HB_CELL_COUNT: usize = 10;
+
+/// Whether `cell` currently applies to `row` — cells 0-5 always do; 6/7/8/9 are gated
+/// behind their governing bit (`ParamKind::HiliteBand`'s doc comment has the real-binary
+/// findings behind each gate).
+fn hb_cell_visible(row: &crate::model::cdp::HiliteBandRow, cell: usize) -> bool {
+    match cell {
+        HB_LOFRQ | HB_HIFRQ | HB_AMP_BIT | HB_RAMP_BIT | HB_TRANSPOSE_BIT | HB_ADD_BIT => true,
+        HB_AMP1 => row.amp_bit,
+        HB_AMP2 => row.ramp_bit,
+        HB_SIGN | HB_TRANSPOSE => row.transpose_bit,
+        _ => false,
+    }
+}
+
+/// Whether `cell` is a checkbox (toggled with Space) rather than a numeric field (typed
+/// into directly).
+fn hb_cell_is_bit(cell: usize) -> bool {
+    matches!(cell, HB_AMP_BIT | HB_RAMP_BIT | HB_TRANSPOSE_BIT | HB_ADD_BIT | HB_SIGN)
+}
+
+/// The nearest visible cell at or before `from` in `row`, or `from` itself if none exists
+/// (every row always has cells 0-5 visible, so this only fails to move at all when `from`
+/// is already the leftmost visible cell).
+fn hb_prev_visible_col(row: &crate::model::cdp::HiliteBandRow, from: usize) -> usize {
+    let mut c = from;
+    while c > 0 {
+        c -= 1;
+        if hb_cell_visible(row, c) {
+            return c;
+        }
+    }
+    from
+}
+
+/// The nearest visible cell at or after `from` in `row`, or `from` itself if none exists.
+fn hb_next_visible_col(row: &crate::model::cdp::HiliteBandRow, from: usize) -> usize {
+    let mut c = from;
+    while c + 1 < HB_CELL_COUNT {
+        c += 1;
+        if hb_cell_visible(row, c) {
+            return c;
+        }
+    }
+    from
+}
+
+/// State for `hilite band`'s bitflag-conditional row editor, active while
+/// `Dialog::CdpParams.hilite_band_edit` is `Some` (CDP-Ext-Plan.md Tier 1b). Reuses the same
+/// arrows-select/type-to-overwrite model as `CdpTableEdit`/`CdpMarkerTimeListEdit` — Left/
+/// Right move between cells in the current row (skipping any cell `hb_cell_visible` says
+/// doesn't apply, via `hb_prev_visible_col`/`hb_next_visible_col`), Up/Down move between
+/// rows, typing a digit/`-`/`.` edits a numeric cell. The one genuinely new piece: 4 of the
+/// 10 possible cells are checkboxes, not numbers (`hb_cell_is_bit`) — Space toggles the
+/// selected checkbox rather than starting a typed edit, confirmed as the preferred design
+/// over a dedicated toggle-key-regardless-of-focus alternative. Toggling `HB_TRANSPOSE_BIT`
+/// off also force-clears `HB_ADD_BIT` on that row (confirmed preferred over leaving an
+/// always-invalid bit-4-without-bit-3 combination for CDP to reject at Apply time) — see
+/// `App::handle_cdp_hilite_band_key`.
+///
+/// `rows` always starts with at least one row (`amp_bit` set — see `CdpField::HiliteBand`'s
+/// doc comment for why an all-bits-off row is invalid), so there's no seed-on-open step.
+/// No row ordering constraint at all (unlike `Table`'s optional `time_column`/
+/// `CdpMarkerTimeListEdit`'s always-on one) — `hilite band`'s frequency bands are
+/// independent of each other, confirmed by the binary's usage text never mentioning order.
+struct CdpHiliteBandEdit {
+    field_index: usize,
+    rows: Vec<crate::model::cdp::HiliteBandRow>,
+    selected_row: usize,
+    selected_col: usize,
+    original: Vec<crate::model::cdp::HiliteBandRow>,
+    editing: Option<TextInput>,
 }
 
 /// A cached successful Preview run, kept alongside `Dialog::CdpParams` so an unchanged-
@@ -706,6 +1086,14 @@ pub struct App {
     /// must never cross buffers — each `Command` stores sample data from the document it
     /// was applied to, so replaying it against a different document would corrupt it.
     pub histories: Vec<History>,
+    /// Open pitch curves (CDP-Ext-Plan.md Phase 4 "hard tier") — folded into the Buffers
+    /// panel alongside `documents` (tagged distinctly, see `buffer_names`) rather than
+    /// given their own panel, per the UX decision this shipped under. A curve is never
+    /// "active" the way a document is (there's no waveform to view) — selecting one in
+    /// the panel opens `Dialog::CurveEditor` instead of calling `switch_to_buffer`.
+    pub curves: Vec<crate::model::curve::PitchCurve>,
+    /// Index-parallel to `curves`, same reasoning as `histories`.
+    pub curve_histories: Vec<crate::model::curve_history::CurveHistory>,
     pub clipboard: Clipboard,
     pub menu: MenuBar,
     pub toolbar: Toolbar,
@@ -950,6 +1338,8 @@ impl App {
             audio,
             audio_sample_rate,
             histories,
+            curves: Vec::new(),
+            curve_histories: Vec::new(),
             clipboard: Clipboard::default(),
             menu: MenuBar::new(&menu_shortcuts),
             toolbar: Toolbar::new(&toolbar_shortcuts),
@@ -1032,13 +1422,68 @@ impl App {
         }
     }
 
+    /// Documents first, then open curves (tagged `[Curve]`) appended after — one flat list
+    /// for `BufferPanel` to render/select over. `documents.len()` is the split point: any
+    /// selected index at or beyond it refers to `curves[index - documents.len()]`, never a
+    /// document (see `activate_buffer_panel_selection`).
     fn buffer_names(&self) -> Vec<String> {
-        (0..self.documents.len())
-            .map(|i| {
-                let prefix = if self.documents[i].dirty { "*" } else { "" };
-                format!("{}{}", prefix, self.buffer_name(i))
-            })
-            .collect()
+        let docs = (0..self.documents.len()).map(|i| {
+            let prefix = if self.documents[i].dirty { "*" } else { "" };
+            format!("{}{}", prefix, self.buffer_name(i))
+        });
+        let curves = self.curves.iter().map(|c| {
+            let prefix = if c.dirty { "*" } else { "" };
+            format!("{}[Curve] {}", prefix, c.name)
+        });
+        docs.chain(curves).collect()
+    }
+
+    /// Commits the Buffers-panel selection: switches to it if it's a document, opens the
+    /// standalone curve editor if it's a curve (see `buffer_names`' doc comment for the
+    /// index split). Used by both the Enter-key (`Action::SwitchBuffer`) and mouse-click
+    /// paths so they stay in sync — unlike `move_buffer_selection`'s Up/Down cursor
+    /// movement, which deliberately does NOT open the curve editor on every keystroke.
+    fn activate_buffer_panel_selection(&mut self) {
+        let index = self.buffer_panel.selected;
+        if index < self.documents.len() {
+            self.switch_to_buffer(index);
+        } else if let Some(curve_index) = index.checked_sub(self.documents.len()) {
+            self.open_curve_editor(curve_index);
+        }
+    }
+
+    fn open_curve_editor(&mut self, curve_index: usize) {
+        let Some(curve) = self.curves.get(curve_index) else { return };
+        self.dialog = Some(Dialog::CurveEditor(CurveEditorState {
+            curve_index,
+            points: curve.points.clone(),
+            selected_row: 0,
+            selected_col: 1, // Hz -- the more commonly hand-edited of the two
+            editing: None,
+        }));
+    }
+
+    /// Commits a `CurveEditorState`'s in-progress typed cell (`edit.editing`, if any) into
+    /// `edit.points[edit.selected_row]` — the curve-editor counterpart to
+    /// `commit_cdp_table_cell_edit`, always applying the ascending-neighbor clamp on the
+    /// Time column (column 0) the same way `CdpMarkerTimeListEdit`'s Time column does,
+    /// since every curve's points must stay time-ordered.
+    fn commit_curve_editor_cell(edit: &mut CurveEditorState) {
+        const MIN_GAP: f64 = 0.001;
+        let Some(input) = edit.editing.take() else { return };
+        let Ok(parsed) = input.value().trim().parse::<f64>() else { return };
+        let r = edit.selected_row;
+        if edit.selected_col == 0 {
+            let lower = if r == 0 { 0.0 } else { edit.points[r - 1].0 + MIN_GAP };
+            let upper = if r + 1 == edit.points.len() {
+                CURVE_EDITOR_TIME_MAX
+            } else {
+                edit.points[r + 1].0 - MIN_GAP
+            };
+            edit.points[r].0 = parsed.clamp(lower.min(upper), upper.max(lower));
+        } else {
+            edit.points[r].1 = parsed.clamp(CURVE_EDITOR_HZ_MIN, CURVE_EDITOR_HZ_MAX);
+        }
     }
 
     fn switch_to_buffer(&mut self, index: usize) {
@@ -1571,6 +2016,10 @@ impl App {
             }
             Dialog::CdpRunning { .. } | Dialog::CdpOutput { .. } => None,
             Dialog::Info { .. } => None,
+            // Has its own early-intercepted key handling (`handle_curve_editor_key`) with
+            // no plain `TextInput` field of its own — the in-progress typed cell lives in
+            // `CurveEditorState.editing` instead.
+            Dialog::CurveEditor(_) => None,
         }
     }
 
@@ -1617,12 +2066,28 @@ impl App {
     }
 
     fn handle_dialog_key(&mut self, key: KeyEvent) {
+        if let Some(Dialog::CurveEditor(_)) = &self.dialog {
+            self.handle_curve_editor_key(key);
+            return;
+        }
         if let Some(Dialog::CdpParams { envelope: Some(_), .. }) = &self.dialog {
             self.handle_cdp_envelope_key(key);
             return;
         }
         if let Some(Dialog::CdpParams { list_edit: Some(_), .. }) = &self.dialog {
             self.handle_cdp_list_key(key);
+            return;
+        }
+        if let Some(Dialog::CdpParams { table_edit: Some(_), .. }) = &self.dialog {
+            self.handle_cdp_table_key(key);
+            return;
+        }
+        if let Some(Dialog::CdpParams { marker_time_list_edit: Some(_), .. }) = &self.dialog {
+            self.handle_cdp_marker_time_list_key(key);
+            return;
+        }
+        if let Some(Dialog::CdpParams { hilite_band_edit: Some(_), .. }) = &self.dialog {
+            self.handle_cdp_hilite_band_key(key);
             return;
         }
         if let Some(Dialog::CdpParams { save_prompt: Some(_), .. }) = &self.dialog {
@@ -1740,8 +2205,8 @@ impl App {
                     }
                 }
                 Some(Dialog::CdpParams {
-                    catalog_index, fields, second_input, focus, error, preview, envelope, list_edit,
-                    presets, preset_selected, save_prompt, scroll,
+                    catalog_index, fields, second_input, focus, error, preview, envelope, list_edit, table_edit,
+                    marker_time_list_edit, hilite_band_edit, presets, preset_selected, save_prompt, scroll,
                 }) => {
                     // Enter's default action is Apply (from anywhere, including the preset
                     // row — a highlighted preset's values, or the process's defaults, are
@@ -1754,8 +2219,8 @@ impl App {
                         crate::cdp::JobPurpose::Apply
                     };
                     self.dialog = Some(Dialog::CdpParams {
-                        catalog_index, fields, second_input, focus, error, preview, envelope, list_edit,
-                        presets, preset_selected, save_prompt, scroll,
+                        catalog_index, fields, second_input, focus, error, preview, envelope, list_edit, table_edit,
+                        marker_time_list_edit, hilite_band_edit, presets, preset_selected, save_prompt, scroll,
                     });
                     self.cdp_run(purpose);
                 }
@@ -1766,6 +2231,10 @@ impl App {
                 }
                 Some(Dialog::CdpOutput { .. }) => {} // just dismiss
                 Some(Dialog::Info { .. }) => {} // just dismiss
+                // Unreachable in practice: `handle_dialog_key` intercepts and returns early
+                // whenever `self.dialog` is `Some(Dialog::CurveEditor(_))`, via
+                // `handle_curve_editor_key` — required only for match exhaustiveness.
+                Some(Dialog::CurveEditor(_)) => {}
                 None => {}
             },
             KeyCode::Esc => {
@@ -1857,7 +2326,7 @@ impl App {
                         *selected = selected.saturating_sub(1);
                     }
                     Some(Dialog::CdpParams { fields, focus, .. }) if *focus != CDP_PRESET_FOCUS => {
-                        cdp_nudge_number(fields.get_mut(*focus - 1), 1.0);
+                        cdp_nudge_number(fields.get_mut(*focus - 1), 1.0, key.modifiers.contains(KeyModifiers::SHIFT));
                     }
                     Some(Dialog::CdpOutput { scroll, .. }) => *scroll = scroll.saturating_sub(1),
                     _ => {}
@@ -1875,7 +2344,7 @@ impl App {
                         }
                     }
                     Some(Dialog::CdpParams { fields, focus, .. }) if *focus != CDP_PRESET_FOCUS => {
-                        cdp_nudge_number(fields.get_mut(*focus - 1), -1.0);
+                        cdp_nudge_number(fields.get_mut(*focus - 1), -1.0, key.modifiers.contains(KeyModifiers::SHIFT));
                     }
                     Some(Dialog::CdpOutput { scroll, lines, .. }) => {
                         *scroll = (*scroll + 1).min(lines.len().saturating_sub(1));
@@ -1962,7 +2431,13 @@ impl App {
             KeyCode::Char('e')
                 if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
-                if !self.open_cdp_envelope_editor() && !self.open_cdp_list_editor() && self.dialog_accepts('e') {
+                if !self.open_cdp_envelope_editor()
+                    && !self.open_cdp_list_editor()
+                    && !self.open_cdp_table_editor()
+                    && !self.open_cdp_marker_time_list_editor()
+                    && !self.open_cdp_hilite_band_editor()
+                    && self.dialog_accepts('e')
+                {
                     if let Some(input) = self.dialog_input() {
                         input.insert('e');
                     }
@@ -2379,6 +2854,9 @@ impl App {
             preview: None,
             envelope: None,
             list_edit: None,
+            table_edit: None,
+            marker_time_list_edit: None,
+            hilite_band_edit: None,
             presets,
             preset_selected: None,
             save_prompt: None,
@@ -2561,85 +3039,99 @@ impl App {
         let Some(Dialog::CdpParams { list_edit: dialog_list_edit, .. }) = self.dialog.as_mut() else {
             return false;
         };
-        *dialog_list_edit =
-            Some(CdpListEdit { field_index, values: seeded, selected: 0, original, is_time_sequence, time_max });
+        *dialog_list_edit = Some(CdpListEdit {
+            field_index,
+            values: seeded,
+            selected: 0,
+            original,
+            is_time_sequence,
+            time_max,
+            editing: None,
+        });
         true
+    }
+
+    /// Commits a `CdpListEdit`'s in-progress typed cell (`edit.editing`, if any) into
+    /// `edit.values[edit.selected]`: parses the buffer as `f64`, clamps it to `min`/`max`
+    /// (and, for a time-sequence field, additionally between its immediate neighbors — the
+    /// same `MIN_GAP`-separated neighbor clamp the old nudge-based editor used, so a typed
+    /// value can never put `values` out of the strictly-ascending order CDP requires), then
+    /// clears `editing` back to `None`. An unparseable buffer (e.g. just "-", or empty after
+    /// backspacing everything) silently discards the edit, leaving the previous value
+    /// untouched — there is no separate per-cell error state to show.
+    fn commit_cdp_list_cell_edit(edit: &mut CdpListEdit, min: f64, max: f64, effective_max: f64, integer: bool) {
+        const MIN_GAP: f64 = 0.001;
+        let Some(input) = edit.editing.take() else { return };
+        let Ok(parsed) = input.value().trim().parse::<f64>() else { return };
+        // Rounded before the range/ordering clamp below, so an integer field's neighbor gap
+        // (`MIN_GAP`) still measures against the value it'll actually be clamped to.
+        let parsed = if integer { parsed.round() } else { parsed };
+        let i = edit.selected;
+        edit.values[i] = if edit.is_time_sequence {
+            let lower = if i == 0 { min } else { edit.values[i - 1] + MIN_GAP };
+            let upper = if i + 1 == edit.values.len() { effective_max } else { edit.values[i + 1] - MIN_GAP };
+            parsed.clamp(lower.min(upper), upper.max(lower))
+        } else {
+            parsed.clamp(min, max)
+        };
     }
 
     /// All key handling while `Dialog::CdpParams.list_edit` is `Some` — the `required_list`
     /// counterpart to `handle_cdp_envelope_key`, dispatched the same way (checked at the top
     /// of `handle_dialog_key`, mutually exclusive with the envelope path since a field is
-    /// never both). Left/Right selects an entry; Del/Backspace removes it (kept at a
-    /// minimum of 1 — unlike the envelope editor's 2-point minimum, a single-entry list is
-    /// perfectly meaningful here); Esc discards every edit made this session, Enter commits.
+    /// never both).
     ///
-    /// Up/Down and 'n' branch on `edit.is_time_sequence` (`ParamDef.list_is_time_sequence`'s
-    /// doc comment has the full "why," found via a user manually testing this exact editor
-    /// against `grain_reposition` and hitting CDP's real "Sync times out of sequence"
-    /// rejection): for a time-sequence field they're constrained the same way the envelope
-    /// editor's own time-move already is — Up/Down clamps a value between its immediate
-    /// neighbors (never past them, so `values` can't go out of order no matter how it's
-    /// nudged) using the real selection's duration as the practical range instead of the
-    /// catalog's own generous `max`, and 'n' inserts at the midpoint between the selected
-    /// entry and its neighbor (or, with only one entry so far, offset by one `step` from it)
-    /// rather than a flat duplicate, which would create two equal — also rejected — times.
-    /// A non-time-sequence field (e.g. `grain repitch`'s per-grain transpositions) keeps the
-    /// original unconstrained behavior: any order is fine, so Up/Down only clamps to the
-    /// catalog's own `min`/`max` and 'n' duplicates the selected value.
+    /// Arrows are pure cell selection, spreadsheet-style, never a value nudge: Left/Up move
+    /// to the previous entry, Right/Down to the next (all four are wired since a
+    /// single-column list has no real "horizontal" vs "vertical" distinction). Typing a
+    /// digit/`-`/`.` starts (or continues) replacing the selected entry's value — see
+    /// `CdpListEdit`'s doc comment — committed by `commit_cdp_list_cell_edit` the moment any
+    /// other key (an arrow, `n`, Delete, Enter) is pressed. `n` and Delete/Backspace (when
+    /// not mid-edit) are unchanged from before this migration: `n` branches on
+    /// `edit.is_time_sequence` (`ParamDef.list_is_time_sequence`'s doc comment has the full
+    /// "why," found via a user manually testing this exact editor against `grain_reposition`
+    /// and hitting CDP's real "Sync times out of sequence" rejection) to insert at the
+    /// midpoint between the selected entry and its neighbor rather than a flat duplicate
+    /// (which would create two equal — also rejected — times); a non-time-sequence field
+    /// (e.g. `grain repitch`'s per-grain transpositions) just duplicates. Delete/Backspace
+    /// removes the selected entry, kept at a minimum of 1 (unlike the envelope editor's
+    /// 2-point minimum, a single-entry list is perfectly meaningful here). Esc discards
+    /// every edit made this session (including any in-progress typed cell), Enter commits.
     fn handle_cdp_list_key(&mut self, key: KeyEvent) {
         let Some(Dialog::CdpParams { list_edit: Some(edit), fields, .. }) = self.dialog.as_mut() else { return };
         let field_index = edit.field_index;
-        let Some(CdpField::List { min, max, step, .. }) = fields.get(field_index) else { return };
-        let (min, max, step) = (*min, *max, *step);
-        let committed_values = edit.values.clone();
-        let original = edit.original.clone();
+        let Some(CdpField::List { min, max, step, integer, .. }) = fields.get(field_index) else { return };
+        let (min, max, step, integer) = (*min, *max, *step, *integer);
         // A time-sequence field's practical range is the real selection's duration, not
         // the catalog's own safety-cap `max` (e.g. "up to 2 hours") — see this fn's doc
         // comment and `CdpListEdit.time_max`'s.
         let effective_max = if edit.is_time_sequence { max.min(edit.time_max) } else { max };
-        // Minimum gap enforced between neighboring time-sequence entries so they can never
-        // become exactly equal (also rejected by CDP as "out of sequence") — same constant
-        // the envelope editor's own neighbor-clamped time-move already uses.
-        const MIN_GAP: f64 = 0.001;
+
+        // Continuing to type into the currently-selected cell: every other key below first
+        // commits whatever's been typed so far (see `commit_cdp_list_cell_edit`) before
+        // acting, so navigating away from, or submitting, a cell always saves it.
+        let continues_typing = matches!(key.code, KeyCode::Char(c) if is_cdp_table_edit_char(c))
+            || (edit.editing.is_some() && key.code == KeyCode::Backspace);
+        if !continues_typing {
+            Self::commit_cdp_list_cell_edit(edit, min, max, effective_max, integer);
+        }
 
         match key.code {
-            KeyCode::Left => {
+            KeyCode::Char(c) if is_cdp_table_edit_char(c) => {
+                let current = edit.values[edit.selected];
+                edit.editing.get_or_insert_with(|| TextInput::fresh(format_cdp_float_for_display(current))).insert(c);
+                return;
+            }
+            KeyCode::Backspace if edit.editing.is_some() => {
+                edit.editing.as_mut().unwrap().backspace();
+                return;
+            }
+            KeyCode::Left | KeyCode::Up => {
                 edit.selected = edit.selected.saturating_sub(1);
                 return;
             }
-            KeyCode::Right => {
+            KeyCode::Right | KeyCode::Down => {
                 edit.selected = (edit.selected + 1).min(edit.values.len().saturating_sub(1));
-                return;
-            }
-            KeyCode::Up => {
-                let i = edit.selected;
-                let value_step = if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    step
-                } else {
-                    ((effective_max - min) / 40.0).max(step)
-                };
-                if edit.is_time_sequence {
-                    let upper =
-                        if i + 1 == edit.values.len() { effective_max } else { edit.values[i + 1] - MIN_GAP };
-                    edit.values[i] = (edit.values[i] + value_step).min(upper.max(edit.values[i])).max(min);
-                } else {
-                    edit.values[i] = (edit.values[i] + value_step).clamp(min, max);
-                }
-                return;
-            }
-            KeyCode::Down => {
-                let i = edit.selected;
-                let value_step = if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    step
-                } else {
-                    ((effective_max - min) / 40.0).max(step)
-                };
-                if edit.is_time_sequence {
-                    let lower = if i == 0 { min } else { edit.values[i - 1] + MIN_GAP };
-                    edit.values[i] = (edit.values[i] - value_step).max(lower.min(edit.values[i])).min(effective_max);
-                } else {
-                    edit.values[i] = (edit.values[i] - value_step).clamp(min, max);
-                }
                 return;
             }
             KeyCode::Char('n') => {
@@ -2682,7 +3174,10 @@ impl App {
         }
 
         // Only the closing actions (Esc/Enter) reach here — `edit`/`fields` are no longer
-        // borrowed past this point, so `self.dialog` can be freely re-borrowed.
+        // borrowed past this point, so `self.dialog` can be freely re-borrowed. Any
+        // in-progress typed cell was already committed into `edit.values` above.
+        let committed_values = edit.values.clone();
+        let original = edit.original.clone();
         match key.code {
             KeyCode::Esc => {
                 if let Some(Dialog::CdpParams { fields, list_edit, .. }) = self.dialog.as_mut() {
@@ -2698,6 +3193,732 @@ impl App {
                         *field_values = committed_values;
                     }
                     *list_edit = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Opens the multi-column table editor for whichever `CdpField::Table` is currently
+    /// focused in `Dialog::CdpParams` ('e' key) — the `ParamKind::Table` counterpart to
+    /// `open_cdp_list_editor`. Returns `false` (a no-op, falls through to typing 'e' as
+    /// ordinary text) when there's no such dialog, focus isn't on a field, or the field
+    /// isn't a Table. Unlike `open_cdp_envelope_editor`/`open_cdp_list_editor`, this doesn't
+    /// gate on `param.automatable` — a Table field has no optional-automation mode to gate
+    /// behind (see `CdpField::Table`'s doc comment), so 'e' always opens it unconditionally.
+    fn open_cdp_table_editor(&mut self) -> bool {
+        let Some(Dialog::CdpParams { fields, focus, .. }) = &self.dialog else { return false };
+        if *focus == CDP_PRESET_FOCUS {
+            return false;
+        }
+        let field_index = *focus - 1;
+        let Some(CdpField::Table { rows, time_column, .. }) = fields.get(field_index) else {
+            return false;
+        };
+
+        let idx = self.active_document;
+        let range = self.operation_range(idx, self.snap_to_zero).unwrap_or((0, 0));
+        let time_max = self
+            .documents
+            .get(idx)
+            .map(|doc| (range.1 - range.0) as f64 / doc.sample_rate as f64)
+            .filter(|&d| d > 0.0)
+            .unwrap_or(1.0);
+
+        let original = rows.clone();
+        let rows = rows.clone();
+        let time_column = *time_column;
+
+        let Some(Dialog::CdpParams { table_edit: dialog_table_edit, .. }) = self.dialog.as_mut() else {
+            return false;
+        };
+        *dialog_table_edit = Some(CdpTableEdit {
+            field_index,
+            rows,
+            selected_row: 0,
+            selected_col: 0,
+            original,
+            time_column,
+            time_max,
+            editing: None,
+        });
+        true
+    }
+
+    /// Commits a `CdpTableEdit`'s in-progress typed cell (`edit.editing`, if any) into
+    /// `edit.rows[edit.selected_row][edit.selected_col]` — the `CdpTableEdit` counterpart to
+    /// `commit_cdp_list_cell_edit`, differing only in reading the selected *column*'s own
+    /// bounds (each column has independent min/max, unlike `CdpListEdit`'s single shared
+    /// range) and, when that column is `edit.time_column`, clamping between neighboring
+    /// *rows*' values in that same column.
+    fn commit_cdp_table_cell_edit(edit: &mut CdpTableEdit, columns: &[crate::model::cdp::TableColumn]) {
+        const MIN_GAP: f64 = 0.001;
+        let Some(input) = edit.editing.take() else { return };
+        let Ok(parsed) = input.value().trim().parse::<f64>() else { return };
+        let r = edit.selected_row;
+        let c = edit.selected_col;
+        let col = &columns[c];
+        let parsed = if col.integer { parsed.round() } else { parsed };
+        edit.rows[r][c] = if edit.time_column == Some(c) {
+            let effective_max = col.max.min(edit.time_max);
+            let lower = if r == 0 { col.min } else { edit.rows[r - 1][c] + MIN_GAP };
+            let upper = if r + 1 == edit.rows.len() { effective_max } else { edit.rows[r + 1][c] - MIN_GAP };
+            parsed.clamp(lower.min(upper), upper.max(lower))
+        } else {
+            parsed.clamp(col.min, col.max)
+        };
+    }
+
+    /// All key handling while `Dialog::CdpParams.table_edit` is `Some` — the
+    /// `ParamKind::Table` counterpart to `handle_cdp_list_key`, dispatched the same way
+    /// (checked at the top of `handle_dialog_key`, mutually exclusive with the envelope/list
+    /// paths since a field is exactly one of Number/List/Table shaped).
+    ///
+    /// Arrows are pure cell selection, spreadsheet-style, never a value nudge: Left/Right
+    /// move between columns in the current row, Up/Down between rows (unlike
+    /// `CdpListEdit`, which wires all four arrows to its single column — a table genuinely
+    /// has two axes). Typing a digit/`-`/`.` starts (or continues) replacing the selected
+    /// cell's value, committed by `commit_cdp_table_cell_edit` the moment any other key (an
+    /// arrow, `n`, Delete, Enter) is pressed — exactly `CdpListEdit`'s model, generalized to
+    /// a (row, col) pair instead of a single index. `n` inserts a new row after the
+    /// selected one: when `edit.time_column` is set, the new row's time-column value is the
+    /// midpoint between the selected row and its neighbor (or, with only one row so far,
+    /// offset by that column's own `step`) with every other column duplicated from the
+    /// selected row — mirroring `CdpListEdit`'s time-sequence 'n' exactly, just applied to
+    /// one column of a wider row; with no time column, 'n' duplicates the whole row
+    /// verbatim. Delete/Backspace removes the selected row, kept at a minimum of 1 (a
+    /// single-row table, e.g. one delay tap, is perfectly meaningful).
+    fn handle_cdp_table_key(&mut self, key: KeyEvent) {
+        let Some(Dialog::CdpParams { table_edit: Some(edit), fields, .. }) = self.dialog.as_mut() else {
+            return;
+        };
+        let field_index = edit.field_index;
+        let Some(CdpField::Table { columns, .. }) = fields.get(field_index) else { return };
+        // Cloned so `edit` (borrowed from `self.dialog`) can be mutated freely below without
+        // fighting the borrow checker over `fields`' own borrow of `self.dialog`.
+        let columns = columns.clone();
+
+        let continues_typing = matches!(key.code, KeyCode::Char(c) if is_cdp_table_edit_char(c))
+            || (edit.editing.is_some() && key.code == KeyCode::Backspace);
+        if !continues_typing {
+            Self::commit_cdp_table_cell_edit(edit, &columns);
+        }
+
+        match key.code {
+            KeyCode::Char(c) if is_cdp_table_edit_char(c) => {
+                let current = edit.rows[edit.selected_row][edit.selected_col];
+                edit.editing.get_or_insert_with(|| TextInput::fresh(format_cdp_float_for_display(current))).insert(c);
+                return;
+            }
+            KeyCode::Backspace if edit.editing.is_some() => {
+                edit.editing.as_mut().unwrap().backspace();
+                return;
+            }
+            KeyCode::Left => {
+                edit.selected_col = edit.selected_col.saturating_sub(1);
+                return;
+            }
+            KeyCode::Right => {
+                edit.selected_col = (edit.selected_col + 1).min(columns.len().saturating_sub(1));
+                return;
+            }
+            KeyCode::Up => {
+                edit.selected_row = edit.selected_row.saturating_sub(1);
+                return;
+            }
+            KeyCode::Down => {
+                edit.selected_row = (edit.selected_row + 1).min(edit.rows.len().saturating_sub(1));
+                return;
+            }
+            KeyCode::Char('n') => {
+                let r = edit.selected_row;
+                if let Some(tc) = edit.time_column {
+                    let col = &columns[tc];
+                    let effective_max = col.max.min(edit.time_max);
+                    if edit.rows.len() == 1 {
+                        let mut new_row = edit.rows[0].clone();
+                        let cur_t = edit.rows[0][tc];
+                        let new_t =
+                            if cur_t + col.step <= effective_max { cur_t + col.step } else { (cur_t - col.step).max(col.min) };
+                        new_row[tc] = new_t;
+                        if new_t >= cur_t {
+                            edit.rows.push(new_row);
+                            edit.selected_row = 1;
+                        } else {
+                            edit.rows.insert(0, new_row);
+                            edit.selected_row = 0;
+                        }
+                    } else {
+                        let (lo_i, hi_i) = if r + 1 < edit.rows.len() { (r, r + 1) } else { (r - 1, r) };
+                        let mid_t = (edit.rows[lo_i][tc] + edit.rows[hi_i][tc]) / 2.0;
+                        let mut new_row = edit.rows[r].clone();
+                        new_row[tc] = mid_t;
+                        edit.rows.insert(hi_i, new_row);
+                        edit.selected_row = hi_i;
+                    }
+                } else {
+                    let new_row = edit.rows[r].clone();
+                    edit.rows.insert(r + 1, new_row);
+                    edit.selected_row = r + 1;
+                }
+                return;
+            }
+            KeyCode::Delete | KeyCode::Backspace => {
+                if edit.rows.len() > 1 {
+                    edit.rows.remove(edit.selected_row);
+                    edit.selected_row = edit.selected_row.min(edit.rows.len() - 1);
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        // Only the closing actions (Esc/Enter) reach here — `edit`/`fields` are no longer
+        // borrowed past this point, so `self.dialog` can be freely re-borrowed. Any
+        // in-progress typed cell was already committed into `edit.rows` above.
+        let committed_rows = edit.rows.clone();
+        let original = edit.original.clone();
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(Dialog::CdpParams { fields, table_edit, .. }) = self.dialog.as_mut() {
+                    if let Some(CdpField::Table { rows: field_rows, .. }) = fields.get_mut(field_index) {
+                        *field_rows = original;
+                    }
+                    *table_edit = None;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(Dialog::CdpParams { fields, table_edit, .. }) = self.dialog.as_mut() {
+                    if let Some(CdpField::Table { rows: field_rows, .. }) = fields.get_mut(field_index) {
+                        *field_rows = committed_rows;
+                    }
+                    *table_edit = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// All key handling while `Dialog::CurveEditor` is the active dialog — the standalone
+    /// counterpart to `handle_cdp_table_key`, operating on `App.curves`/`curve_histories`
+    /// directly instead of a `CdpParams` field. Same navigation/typing model as every other
+    /// row/cell editor in this app: Left/Right move between the Time (0) and Hz (1) columns,
+    /// Up/Down between points; typing a digit/`-`/`.` starts (or continues) replacing the
+    /// selected cell, committed by `commit_curve_editor_cell` the moment any other key is
+    /// pressed. `n` inserts a new point after the selected one at the midpoint time between
+    /// it and its neighbor (or, with only one point so far, offset by
+    /// `CURVE_EDITOR_TIME_STEP`), carrying over the Hz value — mirrors `CdpTableEdit`'s own
+    /// time-column 'n' exactly. Delete/Backspace removes the selected point, kept at a
+    /// minimum of 1. Enter commits the whole session via `CurveHistory::apply` (labeled
+    /// "Edit Curve"); Esc discards back to `edit.original` — there's no "back to the
+    /// browser" the way `CdpParams`'s sub-editors have, since a curve editor has nothing
+    /// underneath it.
+    fn handle_curve_editor_key(&mut self, key: KeyEvent) {
+        let Some(Dialog::CurveEditor(edit)) = self.dialog.as_mut() else { return };
+
+        let continues_typing = matches!(key.code, KeyCode::Char(c) if is_cdp_table_edit_char(c))
+            || (edit.editing.is_some() && key.code == KeyCode::Backspace);
+        if !continues_typing {
+            Self::commit_curve_editor_cell(edit);
+        }
+
+        match key.code {
+            KeyCode::Char(c) if is_cdp_table_edit_char(c) => {
+                let current = if edit.selected_col == 0 {
+                    edit.points[edit.selected_row].0
+                } else {
+                    edit.points[edit.selected_row].1
+                };
+                edit.editing.get_or_insert_with(|| TextInput::fresh(format_cdp_float_for_display(current))).insert(c);
+                return;
+            }
+            KeyCode::Backspace if edit.editing.is_some() => {
+                edit.editing.as_mut().unwrap().backspace();
+                return;
+            }
+            KeyCode::Left => {
+                edit.selected_col = edit.selected_col.saturating_sub(1);
+                return;
+            }
+            KeyCode::Right => {
+                edit.selected_col = (edit.selected_col + 1).min(1);
+                return;
+            }
+            KeyCode::Up => {
+                edit.selected_row = edit.selected_row.saturating_sub(1);
+                return;
+            }
+            KeyCode::Down => {
+                edit.selected_row = (edit.selected_row + 1).min(edit.points.len().saturating_sub(1));
+                return;
+            }
+            KeyCode::Char('n') => {
+                let r = edit.selected_row;
+                if edit.points.len() == 1 {
+                    let (cur_t, hz) = edit.points[0];
+                    let new_t = if cur_t + CURVE_EDITOR_TIME_STEP <= CURVE_EDITOR_TIME_MAX {
+                        cur_t + CURVE_EDITOR_TIME_STEP
+                    } else {
+                        (cur_t - CURVE_EDITOR_TIME_STEP).max(0.0)
+                    };
+                    if new_t >= cur_t {
+                        edit.points.push((new_t, hz));
+                        edit.selected_row = 1;
+                    } else {
+                        edit.points.insert(0, (new_t, hz));
+                        edit.selected_row = 0;
+                    }
+                } else {
+                    let (lo_i, hi_i) = if r + 1 < edit.points.len() { (r, r + 1) } else { (r - 1, r) };
+                    let mid_t = (edit.points[lo_i].0 + edit.points[hi_i].0) / 2.0;
+                    let hz = edit.points[r].1;
+                    edit.points.insert(hi_i, (mid_t, hz));
+                    edit.selected_row = hi_i;
+                }
+                return;
+            }
+            KeyCode::Delete | KeyCode::Backspace => {
+                if edit.points.len() > 1 {
+                    edit.points.remove(edit.selected_row);
+                    edit.selected_row = edit.selected_row.min(edit.points.len() - 1);
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        // Only the closing actions (Esc/Enter) reach here — any in-progress typed cell was
+        // already committed into `edit.points` above.
+        let curve_index = edit.curve_index;
+        let committed_points = edit.points.clone();
+        match key.code {
+            KeyCode::Esc => {
+                self.dialog = None;
+            }
+            KeyCode::Enter => {
+                self.dialog = None;
+                if let (Some(curve), Some(history)) =
+                    (self.curves.get_mut(curve_index), self.curve_histories.get_mut(curve_index))
+                {
+                    history.apply(committed_points, "Edit Curve", curve);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Opens the marker-prefixed time-list editor for whichever `CdpField::MarkerTimeList`
+    /// is currently focused in `Dialog::CdpParams` ('e' key) — the
+    /// `ParamKind::MarkerTimeList` counterpart to `open_cdp_table_editor`. Returns `false`
+    /// (a no-op) when there's no such dialog, focus isn't on a field, or the field isn't a
+    /// MarkerTimeList. No `automatable` gate, same rationale as the table editor: there's no
+    /// optional-automation mode to gate behind.
+    fn open_cdp_marker_time_list_editor(&mut self) -> bool {
+        let Some(Dialog::CdpParams { fields, focus, .. }) = &self.dialog else { return false };
+        if *focus == CDP_PRESET_FOCUS {
+            return false;
+        }
+        let field_index = *focus - 1;
+        let Some(CdpField::MarkerTimeList { entries, markers, .. }) = fields.get(field_index) else {
+            return false;
+        };
+
+        let idx = self.active_document;
+        let range = self.operation_range(idx, self.snap_to_zero).unwrap_or((0, 0));
+        let time_max = self
+            .documents
+            .get(idx)
+            .map(|doc| (range.1 - range.0) as f64 / doc.sample_rate as f64)
+            .filter(|&d| d > 0.0)
+            .unwrap_or(1.0);
+
+        let original = entries.clone();
+        let entries = entries.clone();
+        let markers = markers.clone();
+
+        let Some(Dialog::CdpParams { marker_time_list_edit: dialog_edit, .. }) = self.dialog.as_mut() else {
+            return false;
+        };
+        *dialog_edit = Some(CdpMarkerTimeListEdit {
+            field_index,
+            entries,
+            selected_row: 0,
+            selected_col: 1, // Time column -- the more commonly-edited of the two
+            original,
+            markers,
+            time_max,
+            editing: None,
+        });
+        true
+    }
+
+    /// Commits a `CdpMarkerTimeListEdit`'s in-progress typed Time cell (`edit.editing`, if
+    /// any) into `edit.entries[edit.selected_row].1` — the `CdpMarkerTimeListEdit`
+    /// counterpart to `commit_cdp_table_cell_edit`, always applying the ascending-neighbor
+    /// clamp (unlike `Table`, every `MarkerTimeList` requires strictly ascending times, so
+    /// there's no per-field "does this column need it" choice to make). A no-op when the
+    /// Marker column is selected — there's nothing to commit there, since 'a'/'b' set the
+    /// marker directly rather than through a typed buffer.
+    fn commit_cdp_marker_time_list_cell_edit(edit: &mut CdpMarkerTimeListEdit, min: f64, max: f64) {
+        const MIN_GAP: f64 = 0.001;
+        if edit.selected_col != 1 {
+            return;
+        }
+        let Some(input) = edit.editing.take() else { return };
+        let Ok(parsed) = input.value().trim().parse::<f64>() else { return };
+        let r = edit.selected_row;
+        let effective_max = max.min(edit.time_max);
+        let lower = if r == 0 { min } else { edit.entries[r - 1].1 + MIN_GAP };
+        let upper = if r + 1 == edit.entries.len() { effective_max } else { edit.entries[r + 1].1 - MIN_GAP };
+        edit.entries[r].1 = parsed.clamp(lower.min(upper), upper.max(lower));
+    }
+
+    /// All key handling while `Dialog::CdpParams.marker_time_list_edit` is `Some` — the
+    /// `ParamKind::MarkerTimeList` counterpart to `handle_cdp_table_key`, dispatched the same
+    /// way (checked at the top of `handle_dialog_key`, mutually exclusive with the envelope/
+    /// list/table paths since a field is exactly one of Number/List/Table/MarkerTimeList
+    /// shaped).
+    ///
+    /// Left/Right move between the Marker (0) and Time (1) columns; Up/Down move between
+    /// rows — same navigation shape as `handle_cdp_table_key`. On the Time column, typing a
+    /// digit/`-`/`.` starts (or continues) replacing the time, committed by
+    /// `commit_cdp_marker_time_list_cell_edit` the moment any other key is pressed, with the
+    /// ascending-neighbor clamp always applied (`CdpMarkerTimeListEdit`'s doc comment). On
+    /// the Marker column, pressing one of the field's declared `markers` characters (e.g.
+    /// 'a'/'b') sets the selected row's marker directly. `n` inserts a new row after the
+    /// selected one at the midpoint time between it and its neighbor (or, with only one row
+    /// so far, offset by `step`), carrying over the selected row's marker — mirrors
+    /// `CdpListEdit`'s time-sequence 'n' exactly. Delete/Backspace removes the selected row,
+    /// kept at a minimum of 1.
+    fn handle_cdp_marker_time_list_key(&mut self, key: KeyEvent) {
+        let Some(Dialog::CdpParams { marker_time_list_edit: Some(edit), fields, .. }) = self.dialog.as_mut() else {
+            return;
+        };
+        let field_index = edit.field_index;
+        let Some(CdpField::MarkerTimeList { min, max, step, .. }) = fields.get(field_index) else { return };
+        let (min, max, step) = (*min, *max, *step);
+        let effective_max = max.min(edit.time_max);
+
+        // A marker character (e.g. 'a'/'b') sets the selected row's marker directly,
+        // whenever the Marker column is selected -- checked ahead of the generic
+        // is-this-a-typing-char gate below, since a marker char could otherwise collide
+        // with `is_cdp_table_edit_char` if it were ever a digit (it never is in practice,
+        // but this ordering makes that impossible by construction rather than by
+        // convention).
+        if edit.selected_col == 0 {
+            if let KeyCode::Char(c) = key.code {
+                if edit.markers.contains(&c) {
+                    edit.entries[edit.selected_row].0 = c;
+                    return;
+                }
+            }
+        }
+
+        let continues_typing = matches!(key.code, KeyCode::Char(c) if is_cdp_table_edit_char(c))
+            || (edit.editing.is_some() && key.code == KeyCode::Backspace);
+        if !continues_typing {
+            Self::commit_cdp_marker_time_list_cell_edit(edit, min, max);
+        }
+
+        match key.code {
+            KeyCode::Char(c) if edit.selected_col == 1 && is_cdp_table_edit_char(c) => {
+                let current = edit.entries[edit.selected_row].1;
+                edit.editing.get_or_insert_with(|| TextInput::fresh(format_cdp_float_for_display(current))).insert(c);
+                return;
+            }
+            KeyCode::Backspace if edit.editing.is_some() => {
+                edit.editing.as_mut().unwrap().backspace();
+                return;
+            }
+            KeyCode::Left => {
+                edit.selected_col = edit.selected_col.saturating_sub(1);
+                return;
+            }
+            KeyCode::Right => {
+                edit.selected_col = (edit.selected_col + 1).min(1);
+                return;
+            }
+            KeyCode::Up => {
+                edit.selected_row = edit.selected_row.saturating_sub(1);
+                return;
+            }
+            KeyCode::Down => {
+                edit.selected_row = (edit.selected_row + 1).min(edit.entries.len().saturating_sub(1));
+                return;
+            }
+            KeyCode::Char('n') => {
+                let r = edit.selected_row;
+                let marker = edit.entries[r].0;
+                if edit.entries.len() == 1 {
+                    let cur_t = edit.entries[0].1;
+                    let new_t = if cur_t + step <= effective_max { cur_t + step } else { (cur_t - step).max(min) };
+                    if new_t >= cur_t {
+                        edit.entries.push((marker, new_t));
+                        edit.selected_row = 1;
+                    } else {
+                        edit.entries.insert(0, (marker, new_t));
+                        edit.selected_row = 0;
+                    }
+                } else {
+                    let (lo_i, hi_i) = if r + 1 < edit.entries.len() { (r, r + 1) } else { (r - 1, r) };
+                    let mid_t = (edit.entries[lo_i].1 + edit.entries[hi_i].1) / 2.0;
+                    edit.entries.insert(hi_i, (marker, mid_t));
+                    edit.selected_row = hi_i;
+                }
+                return;
+            }
+            KeyCode::Delete | KeyCode::Backspace => {
+                if edit.entries.len() > 1 {
+                    edit.entries.remove(edit.selected_row);
+                    edit.selected_row = edit.selected_row.min(edit.entries.len() - 1);
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        // Only the closing actions (Esc/Enter) reach here — `edit`/`fields` are no longer
+        // borrowed past this point, so `self.dialog` can be freely re-borrowed. Any
+        // in-progress typed cell was already committed into `edit.entries` above.
+        let committed_entries = edit.entries.clone();
+        let original = edit.original.clone();
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(Dialog::CdpParams { fields, marker_time_list_edit, .. }) = self.dialog.as_mut() {
+                    if let Some(CdpField::MarkerTimeList { entries: field_entries, .. }) = fields.get_mut(field_index) {
+                        *field_entries = original;
+                    }
+                    *marker_time_list_edit = None;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(Dialog::CdpParams { fields, marker_time_list_edit, .. }) = self.dialog.as_mut() {
+                    if let Some(CdpField::MarkerTimeList { entries: field_entries, .. }) = fields.get_mut(field_index) {
+                        *field_entries = committed_entries;
+                    }
+                    *marker_time_list_edit = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Opens `hilite band`'s bitflag-conditional row editor for whichever
+    /// `CdpField::HiliteBand` is currently focused in `Dialog::CdpParams` ('e' key) — the
+    /// `ParamKind::HiliteBand` counterpart to `open_cdp_table_editor`. No `automatable`
+    /// gate, same rationale as every other required-datafile editor: there's no
+    /// optional-automation mode to gate behind.
+    fn open_cdp_hilite_band_editor(&mut self) -> bool {
+        let Some(Dialog::CdpParams { fields, focus, .. }) = &self.dialog else { return false };
+        if *focus == CDP_PRESET_FOCUS {
+            return false;
+        }
+        let field_index = *focus - 1;
+        let Some(CdpField::HiliteBand { rows, .. }) = fields.get(field_index) else {
+            return false;
+        };
+
+        let original = rows.clone();
+        let rows = rows.clone();
+
+        let Some(Dialog::CdpParams { hilite_band_edit: dialog_edit, .. }) = self.dialog.as_mut() else {
+            return false;
+        };
+        *dialog_edit = Some(CdpHiliteBandEdit {
+            field_index,
+            rows,
+            selected_row: 0,
+            selected_col: HB_LOFRQ,
+            original,
+            editing: None,
+        });
+        true
+    }
+
+    /// Commits a `CdpHiliteBandEdit`'s in-progress typed numeric cell (`edit.editing`, if
+    /// any) into the selected row/column — the `CdpHiliteBandEdit` counterpart to
+    /// `commit_cdp_table_cell_edit`, dispatching to the right row field and column bounds by
+    /// `edit.selected_col` (a no-op on a checkbox cell — there's nothing to commit there,
+    /// since Space toggles those directly rather than through a typed buffer). No ascending
+    /// constraint anywhere (`hilite band`'s bands are independent, unordered).
+    fn commit_cdp_hilite_band_cell_edit(
+        edit: &mut CdpHiliteBandEdit,
+        lofrq: &crate::model::cdp::TableColumn,
+        hifrq: &crate::model::cdp::TableColumn,
+        amp1: &crate::model::cdp::TableColumn,
+        amp2: &crate::model::cdp::TableColumn,
+        transpose: &crate::model::cdp::TableColumn,
+    ) {
+        if hb_cell_is_bit(edit.selected_col) {
+            return;
+        }
+        let Some(input) = edit.editing.take() else { return };
+        let Ok(parsed) = input.value().trim().parse::<f64>() else { return };
+        let round_if = |col: &crate::model::cdp::TableColumn, v: f64| if col.integer { v.round() } else { v };
+        let row = &mut edit.rows[edit.selected_row];
+        match edit.selected_col {
+            HB_LOFRQ => row.lofrq = round_if(lofrq, parsed).clamp(lofrq.min, lofrq.max),
+            HB_HIFRQ => row.hifrq = round_if(hifrq, parsed).clamp(hifrq.min, hifrq.max),
+            HB_AMP1 => row.amp1 = round_if(amp1, parsed).clamp(amp1.min, amp1.max),
+            HB_AMP2 => row.amp2 = round_if(amp2, parsed).clamp(amp2.min, amp2.max),
+            HB_TRANSPOSE => row.transpose_value = round_if(transpose, parsed).clamp(transpose.min, transpose.max),
+            _ => {}
+        }
+    }
+
+    /// All key handling while `Dialog::CdpParams.hilite_band_edit` is `Some` — the
+    /// `ParamKind::HiliteBand` counterpart to `handle_cdp_table_key`, dispatched the same
+    /// way (checked at the top of `handle_dialog_key`, mutually exclusive with every other
+    /// sub-editor since a field is exactly one shape).
+    ///
+    /// Left/Right move between cells in the current row, skipping any cell that doesn't
+    /// currently apply (`hb_prev_visible_col`/`hb_next_visible_col`, per `hb_cell_visible`);
+    /// Up/Down move between rows, re-clamping `selected_col` to the new row's own visible
+    /// cells (a defensive step — in practice a bit-governed cell can only ever be reached
+    /// while its bit is already set, so this should never actually move focus, but costs
+    /// nothing to guarantee). On a numeric cell, typing a digit/`-`/`.` edits it exactly
+    /// like `CdpTableEdit`; on a checkbox cell (`hb_cell_is_bit`), Space toggles it instead —
+    /// confirmed as the preferred design over a dedicated toggle-key-regardless-of-focus
+    /// alternative. Turning `HB_TRANSPOSE_BIT` off force-clears `HB_ADD_BIT` on that row too
+    /// (confirmed preferred over leaving an always-CDP-rejected bit-4-without-bit-3
+    /// combination for Apply time to catch). `n` duplicates the selected row (no ordering
+    /// constraint to seed a midpoint against — `hilite band`'s bands are independent);
+    /// Delete/Backspace removes it, kept at a minimum of 1.
+    fn handle_cdp_hilite_band_key(&mut self, key: KeyEvent) {
+        let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), fields, .. }) = self.dialog.as_mut() else {
+            return;
+        };
+        let field_index = edit.field_index;
+        let Some(CdpField::HiliteBand { lofrq, hifrq, amp1, amp2, transpose, .. }) = fields.get(field_index) else {
+            return;
+        };
+        let (lofrq, hifrq, amp1, amp2, transpose) =
+            (lofrq.clone(), hifrq.clone(), amp1.clone(), amp2.clone(), transpose.clone());
+
+        let is_numeric_cell = !hb_cell_is_bit(edit.selected_col);
+        let continues_typing = (is_numeric_cell && matches!(key.code, KeyCode::Char(c) if is_cdp_table_edit_char(c)))
+            || (edit.editing.is_some() && key.code == KeyCode::Backspace);
+        if !continues_typing {
+            Self::commit_cdp_hilite_band_cell_edit(edit, &lofrq, &hifrq, &amp1, &amp2, &transpose);
+        }
+
+        match key.code {
+            KeyCode::Char(c) if is_numeric_cell && is_cdp_table_edit_char(c) => {
+                let row = &edit.rows[edit.selected_row];
+                let current = match edit.selected_col {
+                    HB_LOFRQ => row.lofrq,
+                    HB_HIFRQ => row.hifrq,
+                    HB_AMP1 => row.amp1,
+                    HB_AMP2 => row.amp2,
+                    HB_TRANSPOSE => row.transpose_value,
+                    _ => 0.0,
+                };
+                edit.editing.get_or_insert_with(|| TextInput::fresh(format_cdp_float_for_display(current))).insert(c);
+                return;
+            }
+            KeyCode::Backspace if edit.editing.is_some() => {
+                edit.editing.as_mut().unwrap().backspace();
+                return;
+            }
+            KeyCode::Char(' ') if hb_cell_is_bit(edit.selected_col) => {
+                let row = &mut edit.rows[edit.selected_row];
+                match edit.selected_col {
+                    HB_AMP_BIT => row.amp_bit = !row.amp_bit,
+                    HB_RAMP_BIT => row.ramp_bit = !row.ramp_bit,
+                    HB_TRANSPOSE_BIT => {
+                        row.transpose_bit = !row.transpose_bit;
+                        if !row.transpose_bit {
+                            row.add_bit = false;
+                        }
+                    }
+                    // Bit 4 (add) is only meaningful with bit 3 (transpose) also set —
+                    // confirmed against the real binary ("Cannot add_in partials without
+                    // first transposing"). Ignored (not toggled) while bit 3 is off, rather
+                    // than silently enabling bit 3 as a side effect of this key.
+                    HB_ADD_BIT if row.transpose_bit => row.add_bit = !row.add_bit,
+                    HB_SIGN => row.transpose_additive = !row.transpose_additive,
+                    _ => {}
+                }
+                // No re-clamp needed: every cell a Space-toggle can be pressed from (2-5,
+                // 8) stays visible regardless of what it just toggled — the only bit that
+                // gates another cell's visibility (HB_TRANSPOSE_BIT, which gates 8/9) is
+                // itself always visible, and toggling HB_SIGN (cell 8) only ever touches
+                // `transpose_additive`, never `transpose_bit`.
+                return;
+            }
+            KeyCode::Left => {
+                let row = &edit.rows[edit.selected_row];
+                edit.selected_col = hb_prev_visible_col(row, edit.selected_col);
+                return;
+            }
+            KeyCode::Right => {
+                let row = &edit.rows[edit.selected_row];
+                edit.selected_col = hb_next_visible_col(row, edit.selected_col);
+                return;
+            }
+            KeyCode::Up => {
+                edit.selected_row = edit.selected_row.saturating_sub(1);
+                let row = &edit.rows[edit.selected_row];
+                if !hb_cell_visible(row, edit.selected_col) {
+                    edit.selected_col = hb_prev_visible_col(row, edit.selected_col);
+                }
+                return;
+            }
+            KeyCode::Down => {
+                edit.selected_row = (edit.selected_row + 1).min(edit.rows.len().saturating_sub(1));
+                let row = &edit.rows[edit.selected_row];
+                if !hb_cell_visible(row, edit.selected_col) {
+                    edit.selected_col = hb_prev_visible_col(row, edit.selected_col);
+                }
+                return;
+            }
+            KeyCode::Char('n') => {
+                // A plain duplicate would create two rows with the exact same frequency
+                // band, which CDP always rejects as overlapping ("Frequency bands 1 and 2
+                // in data file overlap") — found by hand (2026-07-14). Shifting the new
+                // row's band to start exactly where the selected row's ends (same
+                // bandwidth, clamped to the Hi Freq column's own max) keeps the two rows
+                // touching rather than overlapping, which the real binary does accept, so
+                // 'n' produces an immediately valid table by default.
+                let r = edit.selected_row;
+                let mut new_row = edit.rows[r];
+                let bandwidth = new_row.hifrq - new_row.lofrq;
+                new_row.lofrq = new_row.hifrq.min(hifrq.max);
+                new_row.hifrq = (new_row.lofrq + bandwidth).min(hifrq.max);
+                edit.rows.insert(r + 1, new_row);
+                edit.selected_row = r + 1;
+                return;
+            }
+            KeyCode::Delete | KeyCode::Backspace => {
+                if edit.rows.len() > 1 {
+                    edit.rows.remove(edit.selected_row);
+                    edit.selected_row = edit.selected_row.min(edit.rows.len() - 1);
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        // Only the closing actions (Esc/Enter) reach here — `edit`/`fields` are no longer
+        // borrowed past this point, so `self.dialog` can be freely re-borrowed. Any
+        // in-progress typed cell was already committed into `edit.rows` above.
+        let committed_rows = edit.rows.clone();
+        let original = edit.original.clone();
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(Dialog::CdpParams { fields, hilite_band_edit, .. }) = self.dialog.as_mut() {
+                    if let Some(CdpField::HiliteBand { rows: field_rows, .. }) = fields.get_mut(field_index) {
+                        *field_rows = original;
+                    }
+                    *hilite_band_edit = None;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(Dialog::CdpParams { fields, hilite_band_edit, .. }) = self.dialog.as_mut() {
+                    if let Some(CdpField::HiliteBand { rows: field_rows, .. }) = fields.get_mut(field_index) {
+                        *field_rows = committed_rows;
+                    }
+                    *hilite_band_edit = None;
                 }
             }
             _ => {}
@@ -3066,7 +4287,7 @@ impl App {
     ) -> Option<usize> {
         use crate::model::cdp::ParamKind;
         for (i, (param, field)) in def.params.iter().zip(fields).enumerate() {
-            if let (ParamKind::Number { min, max, .. }, CdpField::Number { input, envelope, .. }) =
+            if let (ParamKind::Number { min, max, integer, .. }, CdpField::Number { input, envelope, .. }) =
                 (&param.kind, field)
             {
                 if param.required_envelope {
@@ -3075,8 +4296,13 @@ impl App {
                     }
                     continue;
                 }
+                // A plain Number field has no discrete "commit" moment the way the table/
+                // list sub-editors do (it's a live `TextInput`, only ever read at Apply
+                // time), so an `integer`-flagged param blocks Apply here instead of
+                // silently rounding while the user is still typing — e.g. repeater's Repeat
+                // Count, which CDP itself rejects outright ("Non-integer repeat value").
                 match input.value().trim().parse::<f64>() {
-                    Ok(v) if v >= *min && v <= *max => {}
+                    Ok(v) if v >= *min && v <= *max && (!*integer || v.fract() == 0.0) => {}
                     _ => return Some(i),
                 }
             }
@@ -3093,6 +4319,41 @@ impl App {
                     return Some(i);
                 }
                 if param.list_is_time_sequence && values.windows(2).any(|w| w[0] >= w[1]) {
+                    return Some(i);
+                }
+            }
+            // A `CdpField::Table` field always has at least one row (`CdpField::Table`'s
+            // doc comment — there's no "unset" state to block on, unlike `List`), so the
+            // only thing worth checking here is the same defense-in-depth ascending-order
+            // guard `List` has above: `handle_cdp_table_key` already keeps a time-column
+            // strictly ascending across rows by construction, but a saved preset from
+            // before that constraint existed could still carry an out-of-order table.
+            if let CdpField::Table { rows, time_column: Some(tc), .. } = field {
+                if rows.windows(2).any(|w| w[0][*tc] >= w[1][*tc]) {
+                    return Some(i);
+                }
+            }
+            // A `MarkerTimeList` field always requires strictly ascending times — unlike
+            // `Table`, there's no per-field choice here — same defense-in-depth rationale.
+            if let CdpField::MarkerTimeList { entries, .. } = field {
+                if entries.windows(2).any(|w| w[0].1 >= w[1].1) {
+                    return Some(i);
+                }
+            }
+            // `hilite band`'s frequency bands must not overlap — confirmed against the
+            // real binary ("Frequency bands N and M in data file overlap"); touching
+            // exactly at a shared boundary is fine (rejected only on a strict overlap, not
+            // `<=`). `App::handle_cdp_hilite_band_key`'s 'n' already avoids creating one by
+            // construction, but a saved preset (or direct typing of two colliding bands)
+            // could still produce one — checked here as defense in depth, same rationale
+            // as every other structural constraint above.
+            if let CdpField::HiliteBand { rows, .. } = field {
+                let overlaps = (0..rows.len()).any(|a| {
+                    (a + 1..rows.len()).any(|b| {
+                        rows[a].lofrq.max(rows[b].lofrq) < rows[a].hifrq.min(rows[b].hifrq)
+                    })
+                });
+                if overlaps {
                     return Some(i);
                 }
             }
@@ -3121,7 +4382,8 @@ impl App {
         let reopen = |focus: usize, error: String, fields: Vec<CdpField>, second_input: Option<CdpSecondInput>, preview: Option<CdpPreview>, presets: Vec<crate::model::cdp::preset::CdpPreset>, preset_selected: Option<usize>| {
             Dialog::CdpParams {
                 catalog_index, fields, second_input, focus, error: Some(error), preview,
-                envelope: None, list_edit: None, presets, preset_selected, save_prompt: None, scroll: 0,
+                envelope: None, list_edit: None, table_edit: None, marker_time_list_edit: None,
+                hilite_band_edit: None, presets, preset_selected, save_prompt: None, scroll: 0,
             }
         };
 
@@ -3416,6 +4678,9 @@ impl App {
                                     }),
                                     envelope: None,
                                     list_edit: None,
+                                    table_edit: None,
+                                    marker_time_list_edit: None,
+                                    hilite_band_edit: None,
                                     presets: pending.presets,
                                     preset_selected: pending.preset_selected,
                                     save_prompt: None,
@@ -4337,7 +5602,7 @@ impl App {
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             if let Some(idx) = self.buffer_panel.hit_test(mouse.column, mouse.row) {
                 self.buffer_panel.selected = idx;
-                self.switch_to_buffer(idx);
+                self.activate_buffer_panel_selection();
                 return;
             }
         }
@@ -4751,7 +6016,7 @@ impl App {
                 return;
             }
             Action::SwitchBuffer => {
-                self.switch_to_buffer(self.buffer_panel.selected);
+                self.activate_buffer_panel_selection();
                 return;
             }
             Action::SearchBuffers => {
@@ -6574,8 +7839,8 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, catalog: &crate
             );
         }
         Dialog::CdpParams {
-            catalog_index, fields, second_input, focus, error, preview, envelope, list_edit,
-            presets, preset_selected, save_prompt, scroll,
+            catalog_index, fields, second_input, focus, error, preview, envelope, list_edit, table_edit,
+            marker_time_list_edit, hilite_band_edit, presets, preset_selected, save_prompt, scroll,
         } => {
             let def = catalog.processes.get(*catalog_index);
             if let Some(edit) = envelope {
@@ -6583,6 +7848,15 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, catalog: &crate
             }
             if let Some(edit) = list_edit {
                 return render_cdp_list_editor(frame, area, fields, edit, def);
+            }
+            if let Some(edit) = table_edit {
+                return render_cdp_table_editor(frame, area, fields, edit, def);
+            }
+            if let Some(edit) = marker_time_list_edit {
+                return render_cdp_marker_time_list_editor(frame, area, fields, edit, def);
+            }
+            if let Some(edit) = hilite_band_edit {
+                return render_cdp_hilite_band_editor(frame, area, fields, edit, def);
             }
             return render_cdp_params_dialog(
                 frame, area, def, fields, second_input.as_ref(), *focus, error, preview,
@@ -6599,6 +7873,9 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, catalog: &crate
         }
         Dialog::CdpSetup { input, error } => {
             return render_cdp_setup_dialog(frame, area, input, error.as_deref());
+        }
+        Dialog::CurveEditor(edit) => {
+            return render_curve_editor(frame, area, edit);
         }
         _ => {}
     }
@@ -6625,7 +7902,8 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, catalog: &crate
         | Dialog::CdpBrowser { .. }
         | Dialog::CdpParams { .. }
         | Dialog::CdpRunning { .. }
-        | Dialog::CdpOutput { .. } => {
+        | Dialog::CdpOutput { .. }
+        | Dialog::CurveEditor(_) => {
             unreachable!("handled by match arms above")
         }
     };
@@ -7236,11 +8514,12 @@ fn render_cdp_list_editor(
     let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
     let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
     let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
 
     // Sized to fit the widest hint line, not a fixed guess — a fixed 50 cols cut off "n:insert"
     // (and would cut off the range text too, for a process whose min/max are wide enough) on
     // any terminal, not just narrow ones, since `Paragraph` here has no wrap set.
-    let hint_line_1 = " \u{2190}\u{2192}:entry  \u{2191}\u{2193}:value  Shift+\u{2191}\u{2193}:fine value  n:insert  Del:remove";
+    let hint_line_1 = " \u{2190}\u{2192}\u{2191}\u{2193}:select  type:edit value  n:insert  Del:remove";
     let hint_line_2 = format!(" Enter:save  Esc:cancel  range {}", format_cdp_range(min, max));
     let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()) as u16;
     let width = (content_width + 2).max(50).min(area.width);
@@ -7270,7 +8549,25 @@ fn render_cdp_list_editor(
     let mut rendered_rows = 0;
     for (i, &v) in edit.values.iter().enumerate().skip(scroll_top).take(list_rows) {
         let style = if i == edit.selected { selected_style } else { base };
-        let text = format!(" {:>3}: {}", i + 1, format_cdp_float_for_display(v));
+        let prefix = format!(" {:>3}: ", i + 1);
+        // The selected row shows the in-progress typed buffer (with a cursor) instead of
+        // the committed value while `edit.editing` is `Some` — the same
+        // before/cursor/after cursor rendering every other `TextInput` field in this app
+        // uses.
+        if i == edit.selected {
+            if let Some(input) = &edit.editing {
+                let (before, under, after) = input.split_at_cursor();
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, style),
+                    Span::styled(before, style),
+                    Span::styled(under, cursor_style),
+                    Span::styled(after, style),
+                ]));
+                rendered_rows += 1;
+                continue;
+            }
+        }
+        let text = format!("{prefix}{}", format_cdp_float_for_display(v));
         lines.push(Line::from(Span::styled(text, style)));
         rendered_rows += 1;
     }
@@ -7279,12 +8576,10 @@ fn render_cdp_list_editor(
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
-        Span::styled(" \u{2190}\u{2192}", hint_style),
-        Span::styled(":entry  ", label_style),
-        Span::styled("\u{2191}\u{2193}", hint_style),
-        Span::styled(":value  ", label_style),
-        Span::styled("Shift+\u{2191}\u{2193}", hint_style),
-        Span::styled(":fine value  ", label_style),
+        Span::styled(" \u{2190}\u{2192}\u{2191}\u{2193}", hint_style),
+        Span::styled(":select  ", label_style),
+        Span::styled("type", hint_style),
+        Span::styled(":edit value  ", label_style),
         Span::styled("n", hint_style),
         Span::styled(":insert  ", label_style),
         Span::styled("Del", hint_style),
@@ -7296,6 +8591,495 @@ fn render_cdp_list_editor(
         Span::styled("Esc", hint_style),
         Span::styled(":cancel  ", label_style),
         Span::styled(format!("range {}", format_cdp_range(min, max)), dim_style),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+    Vec::new()
+}
+
+/// Fixed visible-row count for `render_cdp_table_editor`, matching `CDP_LIST_EDITOR_ROWS`'s
+/// own "plain scrolling, no graphics mode, no reason to size off the terminal" rationale.
+const CDP_TABLE_EDITOR_ROWS: usize = 16;
+
+/// The standalone pitch-curve editor's popup: a fixed 2-column table (Time, Hz) — the
+/// `Dialog::CurveEditor` counterpart to `render_cdp_table_editor`, simplified since the
+/// column shape never varies (no `columns: &[TableColumn]` to read, no `fields`/`def`
+/// context) and every column's bounds are the fixed `CURVE_EDITOR_*` constants rather than
+/// catalog-declared ones.
+fn render_curve_editor(frame: &mut Frame, area: Rect, edit: &CurveEditorState) -> Vec<Rect> {
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+    let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+
+    let col_names = ["Time", "Hz"];
+    let col_widths: [usize; 2] = [0, 1].map(|c| {
+        let widest_value = edit.points.iter().map(|p| {
+            format_cdp_float_for_display(if c == 0 { p.0 } else { p.1 }).len()
+        }).max().unwrap_or(0);
+        col_names[c].len().max(widest_value).max(4)
+    });
+
+    let hint_line_1 = " \u{2190}\u{2192}\u{2191}\u{2193}:select  type:edit value  n:insert  Del:remove";
+    let hint_line_2 = " Enter:save  Esc:cancel";
+    let header_width: usize = 5 + col_widths.iter().map(|w| w + 2).sum::<usize>();
+    let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()).max(header_width) as u16;
+    let width = (content_width + 2).max(50).min(area.width);
+    let height = (1 + 1 + CDP_TABLE_EDITOR_ROWS as u16 + 1 + 2 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let block = Block::default()
+        .title(" Curve Editor ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = vec![Line::raw("")];
+
+    let mut header = String::from("      ");
+    for (name, &w) in col_names.iter().zip(&col_widths) {
+        header.push_str(&format!("{:<w$}  ", name));
+    }
+    lines.push(Line::from(Span::styled(header, label_style)));
+
+    let table_rows = CDP_TABLE_EDITOR_ROWS;
+    let scroll_top = edit.selected_row.saturating_sub(table_rows.saturating_sub(1));
+    let mut rendered_rows = 0;
+    for (r, &(t, hz)) in edit.points.iter().enumerate().skip(scroll_top).take(table_rows) {
+        let row_style = if r == edit.selected_row { selected_style } else { base };
+        let mut spans = vec![Span::styled(format!(" {:>3}: ", r + 1), row_style)];
+        for (c, (&v, &w)) in [t, hz].iter().zip(&col_widths).enumerate() {
+            if r == edit.selected_row && c == edit.selected_col {
+                if let Some(input) = &edit.editing {
+                    let (before, under, after) = input.split_at_cursor();
+                    spans.push(Span::styled(before.clone(), row_style));
+                    spans.push(Span::styled(under, cursor_style));
+                    spans.push(Span::styled(format!("{after:<pad$}  ", pad = w.saturating_sub(before.len() + 1)), row_style));
+                    continue;
+                }
+                let text = format_cdp_float_for_display(v);
+                spans.push(Span::styled(format!("{text:<w$}"), cursor_style));
+                spans.push(Span::styled("  ", row_style));
+                continue;
+            }
+            let text = format_cdp_float_for_display(v);
+            spans.push(Span::styled(format!("{text:<w$}  "), row_style));
+        }
+        lines.push(Line::from(spans));
+        rendered_rows += 1;
+    }
+    for _ in rendered_rows..table_rows {
+        lines.push(Line::raw(""));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(" \u{2190}\u{2192}\u{2191}\u{2193}", hint_style),
+        Span::styled(":select  ", label_style),
+        Span::styled("type", hint_style),
+        Span::styled(":edit value  ", label_style),
+        Span::styled("n", hint_style),
+        Span::styled(":insert  ", label_style),
+        Span::styled("Del", hint_style),
+        Span::styled(":remove", label_style),
+    ]));
+    let (range_min, range_max) =
+        if edit.selected_col == 0 { (0.0, CURVE_EDITOR_TIME_MAX) } else { (CURVE_EDITOR_HZ_MIN, CURVE_EDITOR_HZ_MAX) };
+    lines.push(Line::from(vec![
+        Span::styled(" Enter", hint_style),
+        Span::styled(":save  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
+        Span::styled(format!("  {}", format_cdp_range(range_min, range_max)), dim_style),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+    Vec::new()
+}
+
+/// The multi-column table editor: rows of values, each row's cells space-separated under
+/// their column's own name — the `ParamKind::Table` counterpart to `render_cdp_list_editor`,
+/// generalized to more than one column per row (`CdpTableEdit`'s doc comment has the key
+/// semantics). Keyboard-only, matching the list editor's own simplicity — no mouse
+/// hit-testing yet. The selected *row* is highlighted (`selected_style`); within it, the
+/// selected *column*'s own cell is additionally reverse-videoed (`cursor_style`) so which
+/// exact cell Left/Right/Up/Down would move from — or typing would replace — is visible at
+/// a glance, not just which row.
+fn render_cdp_table_editor(
+    frame: &mut Frame,
+    area: Rect,
+    fields: &[CdpField],
+    edit: &CdpTableEdit,
+    def: Option<&crate::model::cdp::ProcessDef>,
+) -> Vec<Rect> {
+    let Some(CdpField::Table { columns, .. }) = fields.get(edit.field_index) else {
+        return Vec::new();
+    };
+    let param = def.and_then(|d| d.params.get(edit.field_index));
+    let param_name = param.map(|p| p.name.as_str()).unwrap_or("Table");
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+    let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+
+    // Each column's on-screen width is the longer of its own name and every row's formatted
+    // value in it — the same "computed from actual content, not a fixed guess" convention
+    // `cdp_params_column_widths` already established for the main params dialog (a fixed
+    // guess is exactly what let a long label collide with its own range there).
+    let col_widths: Vec<usize> = columns
+        .iter()
+        .enumerate()
+        .map(|(c, col)| {
+            let widest_value = edit.rows.iter().map(|row| format_cdp_float_for_display(row[c]).len()).max().unwrap_or(0);
+            col.name.chars().count().max(widest_value).max(4)
+        })
+        .collect();
+
+    let hint_line_1 = " \u{2190}\u{2192}\u{2191}\u{2193}:select  type:edit value  n:insert  Del:remove";
+    let hint_line_2 = " Enter:save  Esc:cancel";
+    let header_width: usize = 5 + col_widths.iter().map(|w| w + 2).sum::<usize>();
+    let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()).max(header_width) as u16;
+    let width = (content_width + 2).max(50).min(area.width);
+    // header spacer + column-header row + TABLE_ROWS + blank + 2 hint lines, + 2 border.
+    let height = (1 + 1 + CDP_TABLE_EDITOR_ROWS as u16 + 1 + 2 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let block = Block::default()
+        .title(format!("Table: {param_name}"))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = vec![Line::raw("")];
+
+    // Column header row.
+    let mut header = String::from("      ");
+    for (col, &w) in columns.iter().zip(&col_widths) {
+        header.push_str(&format!("{:<w$}  ", col.name));
+    }
+    lines.push(Line::from(Span::styled(header, label_style)));
+
+    // Fixed at the constant (not clamped to `inner.height`), matching `render_cdp_list_editor`.
+    let table_rows = CDP_TABLE_EDITOR_ROWS;
+    let scroll_top = edit.selected_row.saturating_sub(table_rows.saturating_sub(1));
+    let mut rendered_rows = 0;
+    for (r, row) in edit.rows.iter().enumerate().skip(scroll_top).take(table_rows) {
+        let row_style = if r == edit.selected_row { selected_style } else { base };
+        let mut spans = vec![Span::styled(format!(" {:>3}: ", r + 1), row_style)];
+        for (c, (&v, &w)) in row.iter().zip(&col_widths).enumerate() {
+            // The selected cell shows the in-progress typed buffer (with a cursor) instead
+            // of the committed value while `edit.editing` is `Some` — same
+            // before/cursor/after rendering every other `TextInput` field in this app uses.
+            if r == edit.selected_row && c == edit.selected_col {
+                if let Some(input) = &edit.editing {
+                    let (before, under, after) = input.split_at_cursor();
+                    spans.push(Span::styled(before.clone(), row_style));
+                    spans.push(Span::styled(under, cursor_style));
+                    spans.push(Span::styled(format!("{after:<pad$}  ", pad = w.saturating_sub(before.len() + 1)), row_style));
+                    continue;
+                }
+                let text = format_cdp_float_for_display(v);
+                spans.push(Span::styled(format!("{text:<w$}"), cursor_style));
+                spans.push(Span::styled("  ", row_style));
+                continue;
+            }
+            let text = format_cdp_float_for_display(v);
+            spans.push(Span::styled(format!("{text:<w$}  "), row_style));
+        }
+        lines.push(Line::from(spans));
+        rendered_rows += 1;
+    }
+    for _ in rendered_rows..table_rows {
+        lines.push(Line::raw(""));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(" \u{2190}\u{2192}\u{2191}\u{2193}", hint_style),
+        Span::styled(":select  ", label_style),
+        Span::styled("type", hint_style),
+        Span::styled(":edit value  ", label_style),
+        Span::styled("n", hint_style),
+        Span::styled(":insert  ", label_style),
+        Span::styled("Del", hint_style),
+        Span::styled(":remove", label_style),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" Enter", hint_style),
+        Span::styled(":save  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
+        Span::styled(
+            format!("  {}", columns.get(edit.selected_col).map(|c| format_cdp_range(c.min, c.max)).unwrap_or_default()),
+            dim_style,
+        ),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+    Vec::new()
+}
+
+/// The marker-prefixed time-list editor: a fixed 2-column table (Marker, Time) — the
+/// `ParamKind::MarkerTimeList` counterpart to `render_cdp_table_editor`, simpler since the
+/// column shape never varies (always exactly Marker + Time, unlike a general `Table`'s
+/// catalog-declared column count). The selected row is highlighted; within it, the selected
+/// column's own cell is additionally reverse-videoed, same convention as
+/// `render_cdp_table_editor`. Keyboard-only, no mouse hit-testing yet.
+fn render_cdp_marker_time_list_editor(
+    frame: &mut Frame,
+    area: Rect,
+    fields: &[CdpField],
+    edit: &CdpMarkerTimeListEdit,
+    def: Option<&crate::model::cdp::ProcessDef>,
+) -> Vec<Rect> {
+    let Some(CdpField::MarkerTimeList { min, max, .. }) = fields.get(edit.field_index) else {
+        return Vec::new();
+    };
+    let (min, max) = (*min, *max);
+    let param = def.and_then(|d| d.params.get(edit.field_index));
+    let param_name = param.map(|p| p.name.as_str()).unwrap_or("Marked List");
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+    let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+
+    const MARKER_WIDTH: usize = 6;
+    let time_width = edit.entries.iter().map(|(_, t)| format_cdp_float_for_display(*t).len()).max().unwrap_or(0).max(4);
+
+    let marker_keys: String = edit.markers.iter().collect();
+    let hint_line_1 = format!(" \u{2190}\u{2192}\u{2191}\u{2193}:select  {marker_keys}:set marker  type:edit time  n:insert  Del:remove");
+    let hint_line_2 = " Enter:save  Esc:cancel";
+    let header_width = 5 + MARKER_WIDTH + 2 + time_width + 2;
+    let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()).max(header_width) as u16;
+    let width = (content_width + 2).max(50).min(area.width);
+    let height = (1 + 1 + CDP_TABLE_EDITOR_ROWS as u16 + 1 + 2 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let block = Block::default()
+        .title(format!("Marked List: {param_name}"))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = vec![Line::raw("")];
+    lines.push(Line::from(Span::styled(
+        format!("      {:<MARKER_WIDTH$}  {:<time_width$}", "Marker", "Time"),
+        label_style,
+    )));
+
+    let table_rows = CDP_TABLE_EDITOR_ROWS;
+    let scroll_top = edit.selected_row.saturating_sub(table_rows.saturating_sub(1));
+    let mut rendered_rows = 0;
+    for (r, &(marker, time)) in edit.entries.iter().enumerate().skip(scroll_top).take(table_rows) {
+        let row_style = if r == edit.selected_row { selected_style } else { base };
+        let mut spans = vec![Span::styled(format!(" {:>3}: ", r + 1), row_style)];
+
+        // Marker column (0).
+        if r == edit.selected_row && edit.selected_col == 0 {
+            spans.push(Span::styled(format!("{:<MARKER_WIDTH$}", marker.to_string()), cursor_style));
+            spans.push(Span::styled("  ", row_style));
+        } else {
+            spans.push(Span::styled(format!("{:<MARKER_WIDTH$}  ", marker), row_style));
+        }
+
+        // Time column (1) — shows the in-progress typed buffer (with a cursor) instead of
+        // the committed value while `edit.editing` is `Some`, same convention every other
+        // `TextInput`-backed field in this app uses.
+        if r == edit.selected_row && edit.selected_col == 1 {
+            if let Some(input) = &edit.editing {
+                let (before, under, after) = input.split_at_cursor();
+                spans.push(Span::styled(before.clone(), row_style));
+                spans.push(Span::styled(under, cursor_style));
+                spans.push(Span::styled(
+                    format!("{after:<pad$}", pad = time_width.saturating_sub(before.len() + 1)),
+                    row_style,
+                ));
+            } else {
+                let text = format_cdp_float_for_display(time);
+                spans.push(Span::styled(format!("{text:<time_width$}"), cursor_style));
+            }
+        } else {
+            let text = format_cdp_float_for_display(time);
+            spans.push(Span::styled(format!("{text:<time_width$}"), row_style));
+        }
+        lines.push(Line::from(spans));
+        rendered_rows += 1;
+    }
+    for _ in rendered_rows..table_rows {
+        lines.push(Line::raw(""));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(" \u{2190}\u{2192}\u{2191}\u{2193}", hint_style),
+        Span::styled(":select  ", label_style),
+        Span::styled(marker_keys.clone(), hint_style),
+        Span::styled(":set marker  ", label_style),
+        Span::styled("type", hint_style),
+        Span::styled(":edit time  ", label_style),
+        Span::styled("n", hint_style),
+        Span::styled(":insert  ", label_style),
+        Span::styled("Del", hint_style),
+        Span::styled(":remove", label_style),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" Enter", hint_style),
+        Span::styled(":save  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
+        Span::styled(format!("  time range {}", format_cdp_range(min, max)), dim_style),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+    Vec::new()
+}
+
+/// One cell's display text for `render_cdp_hilite_band_editor` — a checkbox cell always
+/// shows its own short label plus `[X]`/`[ ]` (self-descriptive, since unlike
+/// `render_cdp_table_editor`'s fixed columns there's no per-row-constant header this variable
+/// shape could use instead); a numeric cell shows its formatted value alone.
+fn hb_cell_text(row: &crate::model::cdp::HiliteBandRow, cell: usize) -> String {
+    match cell {
+        HB_LOFRQ => format_cdp_float_for_display(row.lofrq),
+        HB_HIFRQ => format_cdp_float_for_display(row.hifrq),
+        HB_AMP_BIT => format!("Amp[{}]", if row.amp_bit { "X" } else { " " }),
+        HB_RAMP_BIT => format!("Ramp[{}]", if row.ramp_bit { "X" } else { " " }),
+        HB_TRANSPOSE_BIT => format!("Transp[{}]", if row.transpose_bit { "X" } else { " " }),
+        HB_ADD_BIT => format!("Add[{}]", if row.add_bit { "X" } else { " " }),
+        HB_AMP1 => format_cdp_float_for_display(row.amp1),
+        HB_AMP2 => format_cdp_float_for_display(row.amp2),
+        HB_SIGN => format!("Sign[{}]", if row.transpose_additive { "+Hz" } else { "x" }),
+        HB_TRANSPOSE => format_cdp_float_for_display(row.transpose_value),
+        _ => String::new(),
+    }
+}
+
+/// `hilite band`'s bitflag-conditional row editor: each row shows lofrq/hifrq plus its 4
+/// checkboxes, and only the numeric/sign cells whose governing bit is currently set
+/// (`hb_cell_visible`) — the `ParamKind::HiliteBand` counterpart to `render_cdp_table_editor`,
+/// with no fixed column header (there's no fixed column *set* to label, since each row's
+/// visible cell count varies) since every cell's own text already names itself. The
+/// selected row is highlighted; within it, the selected cell is additionally
+/// reverse-videoed, same convention as every other CDP sub-editor in this file.
+fn render_cdp_hilite_band_editor(
+    frame: &mut Frame,
+    area: Rect,
+    fields: &[CdpField],
+    edit: &CdpHiliteBandEdit,
+    def: Option<&crate::model::cdp::ProcessDef>,
+) -> Vec<Rect> {
+    let Some(CdpField::HiliteBand { .. }) = fields.get(edit.field_index) else {
+        return Vec::new();
+    };
+    let param = def.and_then(|d| d.params.get(edit.field_index));
+    let param_name = param.map(|p| p.name.as_str()).unwrap_or("Bands");
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+
+    let hint_line_1 = " \u{2190}\u{2192}\u{2191}\u{2193}:select  Space:toggle  type:edit value  n:insert  Del:remove";
+    let hint_line_2 = " Enter:save  Esc:cancel";
+    let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()) as u16;
+    let width = (content_width + 2).max(60).min(area.width);
+    let height = (1 + CDP_TABLE_EDITOR_ROWS as u16 + 1 + 2 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let block = Block::default()
+        .title(format!("Bands: {param_name}"))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = vec![Line::raw("")];
+
+    let table_rows = CDP_TABLE_EDITOR_ROWS;
+    let scroll_top = edit.selected_row.saturating_sub(table_rows.saturating_sub(1));
+    let mut rendered_rows = 0;
+    for (r, row) in edit.rows.iter().enumerate().skip(scroll_top).take(table_rows) {
+        let row_style = if r == edit.selected_row { selected_style } else { base };
+        let mut spans = vec![Span::styled(format!(" {:>3}: ", r + 1), row_style)];
+        for cell in 0..HB_CELL_COUNT {
+            if !hb_cell_visible(row, cell) {
+                continue;
+            }
+            if r == edit.selected_row && cell == edit.selected_col {
+                if let Some(input) = &edit.editing {
+                    let (before, under, after) = input.split_at_cursor();
+                    spans.push(Span::styled(before.clone(), row_style));
+                    spans.push(Span::styled(under, cursor_style));
+                    spans.push(Span::styled(format!("{after}  "), row_style));
+                    continue;
+                }
+                spans.push(Span::styled(hb_cell_text(row, cell), cursor_style));
+                spans.push(Span::styled("  ", row_style));
+                continue;
+            }
+            spans.push(Span::styled(format!("{}  ", hb_cell_text(row, cell)), row_style));
+        }
+        lines.push(Line::from(spans));
+        rendered_rows += 1;
+    }
+    for _ in rendered_rows..table_rows {
+        lines.push(Line::raw(""));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(" \u{2190}\u{2192}\u{2191}\u{2193}", hint_style),
+        Span::styled(":select  ", label_style),
+        Span::styled("Space", hint_style),
+        Span::styled(":toggle  ", label_style),
+        Span::styled("type", hint_style),
+        Span::styled(":edit value  ", label_style),
+        Span::styled("n", hint_style),
+        Span::styled(":insert  ", label_style),
+        Span::styled("Del", hint_style),
+        Span::styled(":remove", label_style),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" Enter", hint_style),
+        Span::styled(":save  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
     ]));
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -7715,6 +9499,25 @@ fn render_cdp_params_dialog(
                 Span::styled(label, label_style_here),
                 Span::styled(format!("{:<range_width$}", ""), range_style),
                 Span::styled(format!(" list ({} items, e to edit)", values.len()), point_style),
+            ]),
+            // A table field always has at least one seeded row (`CdpField::Table`'s doc
+            // comment) — unlike List/required_envelope there's no "not set" state to show.
+            CdpField::Table { rows, .. } => Line::from(vec![
+                Span::styled(label, label_style_here),
+                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(format!(" table ({} rows, e to edit)", rows.len()), point_style),
+            ]),
+            // Same "always has at least one seeded entry" rationale as `Table`.
+            CdpField::MarkerTimeList { entries, .. } => Line::from(vec![
+                Span::styled(label, label_style_here),
+                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(format!(" marked list ({} entries, e to edit)", entries.len()), point_style),
+            ]),
+            // Same "always has at least one seeded row" rationale as `Table`.
+            CdpField::HiliteBand { rows, .. } => Line::from(vec![
+                Span::styled(label, label_style_here),
+                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(format!(" bands ({} rows, e to edit)", rows.len()), point_style),
             ]),
         };
         lines.push(line);
@@ -8439,6 +10242,48 @@ mod tests {
         }
     }
 
+    /// Regression test (user report): plain Up/Down in the main params dialog must nudge a
+    /// `Number` field by a flat 1.0, and Shift+Up/Down by a flat 0.1 — not the catalog's own
+    /// (often much finer) `step`, which previously applied to plain Up/Down with no
+    /// distinction from Shift at all (both nudged by the same `step`).
+    #[test]
+    fn plain_updown_nudges_by_one_shift_updown_by_a_tenth() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        open_blur_avrg_with_field_focused(&mut app); // "Channels", default 6.0
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected a Number field") };
+        assert_eq!(input.value(), "7.0", "plain Up should nudge by a flat 1.0");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected a Number field") };
+        assert_eq!(input.value(), "7.1", "Shift+Up should nudge by a flat 0.1");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected a Number field") };
+        assert_eq!(input.value(), "6.1", "plain Down should nudge by a flat 1.0");
+    }
+
+    /// Regression test (user report): repeated Shift+Up/Down nudges must not accumulate
+    /// binary-fraction noise in the displayed value (e.g. "1.8000000000000003") — the fix
+    /// rounds the result to 6 decimal places after every nudge.
+    #[test]
+    fn repeated_fine_nudges_do_not_accumulate_floating_point_noise() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        open_blur_avrg_with_field_focused(&mut app); // "Channels", default 6.0
+
+        for _ in 0..7 {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        }
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected a Number field") };
+        assert_eq!(input.value(), "6.7", "7 fine nudges of 0.1 from 6.0 should read exactly 6.7, no float noise");
+    }
+
     /// Tab from the preset row moves focus into the first field (or straight to
     /// Preview/Apply for a process with none); a further Tab past the last control wraps
     /// back around to the preset row, closing the cycle.
@@ -8719,13 +10564,23 @@ mod tests {
         assert_eq!(edit.values.len(), 1);
     }
 
+    /// Types `s` character-by-character into whatever cell/field is currently focused,
+    /// via the same `handle_dialog_key` path a real keystroke takes — for the list/table
+    /// editors' type-to-overwrite model (arrows are pure navigation now, so typing is the
+    /// only way a value actually changes).
+    fn type_str(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+    }
+
     /// Regression test for a real bug found by manual testing: submitting `grain_reposition`
     /// with out-of-order onset times ("2700.0, 1800.0") crashed with CDP's own "Sync times
     /// out of sequence" error. `grain_reposition`'s "Grain Onset Times" is a time-sequence
-    /// list (`ParamDef.list_is_time_sequence`) — Up must never nudge an entry past its next
-    /// neighbor, no matter how many times it's pressed.
+    /// list (`ParamDef.list_is_time_sequence`) — typing a replacement value that would put
+    /// an entry past its next neighbor must clamp on commit, never actually cross it.
     #[test]
-    fn time_sequence_up_nudge_cannot_cross_the_next_entry() {
+    fn typing_a_value_past_the_next_entry_clamps_on_commit() {
         let mut app = new_app(Some(doc(1.0, 44100)), None);
         open_grain_reposition_with_field_focused(&mut app);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
@@ -8734,12 +10589,11 @@ mod tests {
         assert_eq!(edit.values.len(), 2);
         assert_eq!(edit.selected, 1, "'n' should select the newly inserted (later) entry");
 
-        // Select the first (earlier) entry and hammer Up on it — it must approach but never
-        // reach or cross the second entry's value.
+        // Select the first (earlier) entry and type a value wildly past the second entry's.
         app.handle_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-        for _ in 0..200 {
-            app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        }
+        type_str(&mut app, "999999");
+        // Committing (by navigating away) must clamp, not accept the typed value outright.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
 
         let Some(Dialog::CdpParams { list_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
         assert!(
@@ -8756,26 +10610,31 @@ mod tests {
         assert!(App::cdp_validate_fields(def, fields).is_none());
     }
 
-    /// Regression test for the other half of the same manual-testing bug report: the coarse
-    /// Up/Down nudge step for a time-sequence field must scale off the real selection's
-    /// duration, not the catalog's own generous safety-cap `max` (`grain_reposition`'s
-    /// "Grain Onset Times" allows up to 7200s so long *files* aren't artificially capped —
-    /// but a coarse step sized off that cap alone jumps by ~180s per press, useless and
-    /// immediately out-of-range-feeling against a short real selection).
+    /// Regression test for the other half of the same manual-testing bug report: a typed
+    /// value for a time-sequence field must clamp to the real selection's duration on
+    /// commit, not the catalog's own generous safety-cap `max` (`grain_reposition`'s "Grain
+    /// Onset Times" allows up to 7200s so long *files* aren't artificially capped — but
+    /// accepting a typed value anywhere up to that cap against a short real selection would
+    /// silently produce a value CDP's own "Sync times out of sequence"-adjacent range checks
+    /// would reject at Apply time).
     #[test]
-    fn time_sequence_coarse_nudge_scales_with_selection_duration_not_catalog_max() {
-        let mut app = new_app(Some(doc(2.0, 44100)), None); // a short, 2-second selection
+    fn typing_a_value_beyond_the_selection_duration_clamps_to_it_not_the_catalog_max() {
+        let mut app = new_app(Some(doc(1.0, 44100)), None); // a 1-second selection
         open_grain_reposition_with_field_focused(&mut app);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
 
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        // Catalog max is 7200.0 -- typing 500 is well within it but far past the real 1s
+        // selection this field's practical range should actually be bounded by.
+        type_str(&mut app, "500");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-        let Some(Dialog::CdpParams { list_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::List { values, .. }) = fields.first() else { panic!("expected a List field") };
         assert!(
-            edit.values[0] < 1.0,
-            "one coarse Up on a 2s selection should move well under a second, not the \
-             catalog max's ~180s-per-press (got {})",
-            edit.values[0]
+            values[0] <= 1.0,
+            "500 typed against a 1s selection should clamp to ~1.0 (the selection's real \
+             duration), not be accepted near the catalog's 7200.0 max (got {})",
+            values[0]
         );
     }
 
@@ -8842,6 +10701,908 @@ mod tests {
             App::cdp_validate_fields(def, fields).is_none(),
             "a set required_list field should no longer block validation"
         );
+    }
+
+    /// Typing a digit into a selected cell replaces its previous value outright (starts
+    /// fresh, like every other prefilled `TextInput` field in this app) rather than
+    /// appending to it — the core of the arrows-select/type-to-overwrite model.
+    #[test]
+    fn typing_into_a_list_cell_overwrites_the_previous_value() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None); // a 10-second selection
+        open_grain_reposition_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        type_str(&mut app, "0.5");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::List { values, .. }) = fields.first() else { panic!("expected a List field") };
+        assert!((values[0] - 0.5).abs() < 1e-9, "expected 0.5, got {}", values[0]);
+    }
+
+    /// Backspace while mid-edit removes the last typed character from the in-progress
+    /// buffer (ordinary text editing) rather than deleting the row — row deletion only
+    /// happens when Backspace/Delete is pressed *without* an active typed edit.
+    #[test]
+    fn backspace_while_typing_edits_the_buffer_not_the_row() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None); // a 10-second selection
+        open_grain_reposition_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        type_str(&mut app, "0");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        type_str(&mut app, "5");
+        let Some(Dialog::CdpParams { list_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.values.len(), 1, "backspace mid-edit must not delete the row");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::List { values, .. }) = fields.first() else { panic!("expected a List field") };
+        assert!((values[0] - 5.0).abs() < 1e-9, "expected 5.0 (the '0' replaced by '5'), got {}", values[0]);
+    }
+
+    /// An unparseable in-progress buffer (e.g. a lone "-") silently discards the edit on
+    /// commit, leaving the cell's previous value untouched rather than erroring or zeroing
+    /// it out.
+    #[test]
+    fn unparseable_typed_buffer_discards_the_edit_on_commit() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_grain_reposition_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { list_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        let original = edit.values[0];
+
+        type_str(&mut app, "-");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::List { values, .. }) = fields.first() else { panic!("expected a List field") };
+        assert_eq!(values[0], original, "an unparseable buffer must leave the previous value untouched");
+    }
+
+    /// Opens `Dialog::CdpParams` for `tapdelay_tapdelay`, focused on its "Taps" field (the
+    /// 4th param: Tap Gain, Feedback, Mix, Taps, Trail Time) — the shared setup for the
+    /// `CdpField::Table` tests below (CDP-Ext-Plan.md Tier 1b's multi-column shape).
+    fn open_tapdelay_with_taps_field_focused(app: &mut App) {
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "tapdelay_tapdelay")
+            .expect("tapdelay_tapdelay should be in the catalog");
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = 4;
+        }
+    }
+
+    /// A table field always starts with exactly one row, seeded from each column's own
+    /// default — unlike `required_list`, there is no "unset" state (`CdpField::Table`'s doc
+    /// comment).
+    #[test]
+    fn table_field_starts_with_one_seeded_row() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_tapdelay_with_taps_field_focused(&mut app);
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::Table { rows, columns, .. }) = fields.get(3) else { panic!("expected a Table field") };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], columns.iter().map(|c| c.default).collect::<Vec<_>>());
+    }
+
+    /// 'e' opens the table editor unconditionally, regardless of `automatable` — unlike
+    /// `required_list`/`required_envelope`, a Table field has no optional-automation mode to
+    /// gate behind (see `open_cdp_table_editor`'s doc comment).
+    #[test]
+    fn opening_a_table_field_shows_the_seeded_row() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_tapdelay_with_taps_field_focused(&mut app);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { table_edit: Some(edit), .. }) = &app.dialog else {
+            panic!("expected the table editor to be open");
+        };
+        assert_eq!(edit.rows.len(), 1);
+        assert_eq!(edit.selected_row, 0);
+        assert_eq!(edit.selected_col, 0);
+    }
+
+    /// Left/Right move between columns in the current row; Up/Down move between rows — the
+    /// two real axes a table has, unlike `CdpListEdit`'s single-column list where all four
+    /// arrows do the same thing.
+    #[test]
+    fn arrows_navigate_rows_and_columns_independently() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_tapdelay_with_taps_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)); // now 2 rows
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { table_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.selected_col, 2, "Right should advance the column, not the row");
+        assert_eq!(edit.selected_row, 1, "row must stay wherever 'n' left it");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { table_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.selected_row, 0, "Up should move the row, not the column");
+        assert_eq!(edit.selected_col, 2, "column must stay wherever Right left it");
+    }
+
+    /// Typing into a cell overwrites its previous value, exactly like `CdpListEdit` — the
+    /// only difference is picking one of several columns first.
+    #[test]
+    fn typing_into_a_table_cell_overwrites_the_previous_value() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_tapdelay_with_taps_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)); // -> Amp column
+
+        type_str(&mut app, "0.9");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::Table { rows, .. }) = fields.get(3) else { panic!("expected a Table field") };
+        assert!((rows[0][1] - 0.9).abs() < 1e-9, "expected Amp=0.9, got {}", rows[0][1]);
+    }
+
+    /// The Time column (`time_column = Some(0)` for tapdelay) must clamp on commit rather
+    /// than let a typed value cross the next row's time — the table-editor counterpart to
+    /// `typing_a_value_past_the_next_entry_clamps_on_commit`.
+    #[test]
+    fn typing_a_time_column_value_past_the_next_row_clamps_on_commit() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_tapdelay_with_taps_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)); // now 2 rows, row 1 selected
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)); // back to row 0
+
+        type_str(&mut app, "999999");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)); // commits by navigating away
+
+        let Some(Dialog::CdpParams { table_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert!(
+            edit.rows[0][0] < edit.rows[1][0],
+            "row 0's time ({}) must stay strictly before row 1's ({})",
+            edit.rows[0][0],
+            edit.rows[1][0]
+        );
+    }
+
+    /// A non-time column (e.g. Pan, range [-1, 1]) clamps to its own column bounds on
+    /// commit, independent of any other column's range — table columns don't share bounds
+    /// the way a plain `CdpListEdit`'s single column does.
+    #[test]
+    fn typing_a_value_beyond_a_columns_own_range_clamps_to_it() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_tapdelay_with_taps_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)); // -> Pan column
+
+        type_str(&mut app, "5");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::Table { rows, .. }) = fields.get(3) else { panic!("expected a Table field") };
+        assert_eq!(rows[0][2], 1.0, "Pan's own max is 1.0, unrelated to Time's or Amp's range");
+    }
+
+    /// 'n' inserts a new row after the selected one; Del removes it, kept at a minimum of 1
+    /// (a single-tap table, e.g. one delay tap, is perfectly meaningful) — the table-editor
+    /// counterpart to `list_editor_insert_and_delete_entries`.
+    #[test]
+    fn table_editor_insert_and_delete_rows() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_tapdelay_with_taps_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { table_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.rows.len(), 2, "'n' should insert a new row");
+        assert_eq!(edit.selected_row, 1, "'n' should select the newly inserted row");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { table_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.rows.len(), 1, "Del should remove the selected row");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { table_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.rows.len(), 1, "Del must not remove the last remaining row");
+    }
+
+    /// Esc discards every edit made this session, restoring the field to its pre-edit
+    /// (single default-seeded row) state — mirrors `esc_discards_list_edits`.
+    #[test]
+    fn esc_discards_table_edits() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_tapdelay_with_taps_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::Table { rows: original, .. }) = fields.get(3) else { panic!("expected a Table field") };
+        let original = original.clone();
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        type_str(&mut app, "0.9");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { table_edit, fields, .. }) = &app.dialog else {
+            panic!("expected CdpParams to still be open (Esc closes the editor, not the dialog)");
+        };
+        assert!(table_edit.is_none(), "editor should be closed");
+        let Some(CdpField::Table { rows, .. }) = fields.get(3) else { panic!("expected a Table field") };
+        assert_eq!(*rows, original, "field must revert to its pre-edit state after Esc");
+    }
+
+    // -- standalone pitch-curve editor (Dialog::CurveEditor, Tier 2 "hard tier") ---------
+
+    fn app_with_one_curve() -> App {
+        let mut app = new_app(None, None);
+        app.curves.push(crate::model::curve::PitchCurve::new("test_curve", vec![(0.0, 220.0), (1.0, 440.0)]));
+        app.curve_histories.push(crate::model::curve_history::CurveHistory::new());
+        app
+    }
+
+    #[test]
+    fn buffer_names_lists_curves_after_documents_tagged_distinctly() {
+        let mut app = new_app(Some(doc(1.0, 100)), None);
+        app.curves.push(crate::model::curve::PitchCurve::new("mycurve", vec![(0.0, 100.0)]));
+        let names = app.buffer_names();
+        assert_eq!(names.len(), 2);
+        assert!(names[1].contains("[Curve]"), "curve entries should be tagged, got {:?}", names[1]);
+        assert!(names[1].contains("mycurve"));
+    }
+
+    #[test]
+    fn buffer_names_tags_a_dirty_curve_with_an_asterisk_like_a_dirty_document() {
+        let mut app = new_app(None, None);
+        let mut curve = crate::model::curve::PitchCurve::new("mycurve", vec![(0.0, 100.0)]);
+        curve.dirty = true;
+        app.curves.push(curve);
+        assert!(app.buffer_names()[0].starts_with('*'));
+    }
+
+    #[test]
+    fn activating_a_curve_row_in_the_buffer_panel_opens_the_curve_editor_not_switch_to_buffer() {
+        let mut app = new_app(Some(doc(1.0, 100)), None);
+        app.curves.push(crate::model::curve::PitchCurve::new("mycurve", vec![(0.0, 220.0)]));
+        app.curve_histories.push(crate::model::curve_history::CurveHistory::new());
+        app.buffer_panel.selected = 1; // index 0 is the document, index 1 is the curve
+        app.activate_buffer_panel_selection();
+        assert!(matches!(app.dialog, Some(Dialog::CurveEditor(_))));
+    }
+
+    #[test]
+    fn activating_a_document_row_still_switches_buffers_as_before() {
+        let mut app = new_app(Some(doc(1.0, 100)), None);
+        app.documents.push(doc(2.0, 100));
+        app.histories.push(History::new());
+        app.buffer_panel.selected = 1;
+        app.activate_buffer_panel_selection();
+        assert_eq!(app.active_document, 1);
+        assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn typing_into_the_hz_column_overwrites_the_previous_value() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        type_str(&mut app, "330");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.curves[0].points[0], (0.0, 330.0));
+        assert!(app.curves[0].dirty);
+    }
+
+    #[test]
+    fn left_arrow_moves_to_the_time_column_and_typing_edits_it() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)); // Hz -> Time
+        type_str(&mut app, "0.5");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.curves[0].points[0], (0.5, 220.0));
+    }
+
+    #[test]
+    fn typing_a_time_value_past_the_next_points_time_clamps_on_commit() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)); // -> Time column
+
+        type_str(&mut app, "999999");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(
+            app.curves[0].points[0].0 < app.curves[0].points[1].0,
+            "point 0's time must stay strictly before point 1's"
+        );
+    }
+
+    #[test]
+    fn curve_editor_insert_and_delete_points() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let Some(Dialog::CurveEditor(edit)) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.points.len(), 3, "'n' should insert a new point");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        let Some(Dialog::CurveEditor(edit)) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.points.len(), 1, "Del must not remove the last remaining point");
+    }
+
+    #[test]
+    fn esc_discards_curve_edits_leaving_the_curve_untouched() {
+        let mut app = app_with_one_curve();
+        app.curves[0].dirty = false; // as if just saved/loaded
+        let original = app.curves[0].points.clone();
+        app.open_curve_editor(0);
+        type_str(&mut app, "999");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(app.dialog.is_none());
+        assert_eq!(app.curves[0].points, original);
+        assert!(!app.curves[0].dirty, "an untouched curve should not become dirty from a discarded edit");
+    }
+
+    #[test]
+    fn enter_commits_through_curve_history_so_undo_restores_the_previous_points() {
+        let mut app = app_with_one_curve();
+        let original = app.curves[0].points.clone();
+        app.open_curve_editor(0);
+        type_str(&mut app, "330");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_ne!(app.curves[0].points, original);
+
+        let curve = &mut app.curves[0];
+        assert!(app.curve_histories[0].undo(curve));
+        assert_eq!(app.curves[0].points, original);
+    }
+
+    /// Regression test for a real user report: typing a fractional value into a table
+    /// column CDP requires to be a whole number (repeater's Repeat Count — real binary
+    /// error: "Non-integer repeat value") must round to the nearest integer on commit,
+    /// not submit the fraction verbatim for CDP to reject.
+    #[test]
+    fn typing_a_fraction_into_an_integer_table_column_rounds_on_commit() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_tapdelay_with_taps_field_focused(&mut app); // reused just for a Table field; switch process below
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "repeater_repeater_1")
+            .expect("repeater_repeater_1 should be in the catalog");
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = 1; // "Segments" table
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)); // -> Repeat Count column
+
+        type_str(&mut app, "2.7");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::Table { rows, .. }) = fields.first() else { panic!("expected a Table field") };
+        assert_eq!(rows[0][2], 3.0, "2.7 should round to 3, not submit a fraction CDP would reject");
+    }
+
+    /// Same regression, for the `required_list` shape (`blur weave`'s Weave Steps — real
+    /// binary error: "Invalid character in weave file" on a decimal).
+    #[test]
+    fn typing_a_fraction_into_an_integer_list_rounds_on_commit() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "blur_weave")
+            .expect("blur_weave should be in the catalog");
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = 1;
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        type_str(&mut app, "3.4");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::List { values, .. }) = fields.first() else { panic!("expected a List field") };
+        assert_eq!(values[0], 3.0, "3.4 should round to 3");
+    }
+
+    /// A plain `Number` field CDP requires to be an integer has no discrete commit moment
+    /// to silently round at (it's a live `TextInput`, only read at Apply time), so a
+    /// non-integer value blocks Apply/Preview instead — verified directly against
+    /// `cdp_validate_fields` with a synthetic integer-flagged param, since no shipped
+    /// catalog process currently uses a plain (non-table, non-list) integer `Number` field.
+    #[test]
+    fn non_integer_plain_number_field_blocks_validation() {
+        use crate::model::cdp::{Category, IoKind, ParamDef, ParamKind};
+        let def = crate::model::cdp::ProcessDef {
+            key: "test_integer_number".into(),
+            bin: "modify".into(),
+            subprog: None,
+            mode: None,
+            title: "Test".into(),
+            category: Category::Time,
+            subcategory: "test".into(),
+            short_description: String::new(),
+            description: String::new(),
+            input: IoKind::Wav,
+            output: IoKind::Wav,
+            stereo_native: false,
+            output_is_stereo: false,
+            requires_simple_wav_input: false,
+            curve_output_binary: false,
+            params: vec![ParamDef {
+                name: "Count".into(),
+                description: String::new(),
+                flag: None,
+                automatable: false,
+                required_envelope: false,
+                required_list: false,
+                list_is_time_sequence: false,
+                kind: ParamKind::Number {
+                    min: 1.0,
+                    max: 10.0,
+                    step: 1.0,
+                    default: 2.0,
+                    exponential: false,
+                    scale: crate::model::cdp::def::NumberScale::Plain,
+                    integer: true,
+                },
+            }],
+        };
+        let mut fields = vec![CdpField::from_default(&def.params[0])];
+        assert!(App::cdp_validate_fields(&def, &fields).is_none(), "the integer default should validate fine");
+
+        let CdpField::Number { input, .. } = &mut fields[0] else { unreachable!() };
+        *input = TextInput::new("2.5");
+        assert_eq!(
+            App::cdp_validate_fields(&def, &fields),
+            Some(0),
+            "a fractional value in an integer-flagged Number field must block validation"
+        );
+    }
+
+    /// A saved-preset-style out-of-order table on the time column must still block
+    /// Apply/Preview as defense in depth, even though `handle_cdp_table_key` itself can
+    /// never produce one — mirrors the equivalent `CdpField::List` check.
+    #[test]
+    fn out_of_order_time_column_blocks_validation() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_tapdelay_with_taps_field_focused(&mut app);
+        let Some(Dialog::CdpParams { fields, .. }) = app.dialog.as_mut() else { panic!("no dialog") };
+        if let Some(CdpField::Table { rows, .. }) = fields.get_mut(3) {
+            *rows = vec![vec![2.0, 0.5, 0.0], vec![1.0, 0.5, 0.0]]; // out of order
+        }
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let def = app.cdp_catalog.processes.iter().find(|p| p.key == "tapdelay_tapdelay").unwrap();
+        assert!(App::cdp_validate_fields(def, fields).is_some());
+    }
+
+    /// Opens `Dialog::CdpParams` for `focus_freeze_1`, focused on its one
+    /// `MarkerTimeList` field, "Freeze Times" — the shared setup for the tests below
+    /// (CDP-Ext-Plan.md Tier 1b's marker-prefixed time-list shape).
+    fn open_focus_freeze_with_field_focused(app: &mut App) {
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "focus_freeze_1")
+            .expect("focus_freeze_1 should be in the catalog");
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = 1;
+        }
+    }
+
+    /// A marker-time-list field always starts with exactly one entry, seeded from the
+    /// param's own default time and first declared marker — same "no unset state"
+    /// rationale as `CdpField::Table`.
+    #[test]
+    fn marker_time_list_field_starts_with_one_seeded_entry() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_focus_freeze_with_field_focused(&mut app);
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::MarkerTimeList { entries, markers, .. }) = fields.first() else {
+            panic!("expected a MarkerTimeList field")
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, markers[0]);
+    }
+
+    /// 'e' opens the editor with the Time column focused by default (the more commonly
+    /// edited of the two) — no `automatable` gate, same rationale as the table editor.
+    #[test]
+    fn opening_a_marker_time_list_field_focuses_the_time_column() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_focus_freeze_with_field_focused(&mut app);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { marker_time_list_edit: Some(edit), .. }) = &app.dialog else {
+            panic!("expected the marker-time-list editor to be open");
+        };
+        assert_eq!(edit.entries.len(), 1);
+        assert_eq!(edit.selected_col, 1, "should start on the Time column");
+    }
+
+    /// Pressing 'a' or 'b' while the Marker column is selected sets the selected row's
+    /// marker directly (the design confirmed with the user) — not a toggle key, and typing
+    /// a marker character has no effect on the Time column.
+    #[test]
+    fn pressing_a_marker_character_sets_the_selected_rows_marker() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_focus_freeze_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)); // -> Marker column
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { marker_time_list_edit: Some(edit), .. }) = &app.dialog else {
+            panic!("no editor")
+        };
+        assert_eq!(edit.entries[0].0, 'b');
+    }
+
+    /// Typing digits edits the Time column exactly like `CdpListEdit`, but only when the
+    /// Time column is actually selected — pressing a digit while the Marker column is
+    /// selected must not start an edit there (there is nothing numeric to type into).
+    #[test]
+    fn typing_edits_the_time_column_only_when_selected() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_focus_freeze_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        type_str(&mut app, "0.5");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::MarkerTimeList { entries, .. }) = fields.first() else {
+            panic!("expected a MarkerTimeList field")
+        };
+        assert!((entries[0].1 - 0.5).abs() < 1e-9, "expected time 0.5, got {}", entries[0].1);
+    }
+
+    /// A typed time that would cross the next row's time must clamp on commit, exactly like
+    /// `CdpListEdit`'s own time-sequence field — every `MarkerTimeList` requires strictly
+    /// ascending times, with no per-field choice the way `Table`'s `time_column` has.
+    #[test]
+    fn typing_a_time_past_the_next_entry_clamps_on_commit() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_focus_freeze_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)); // now 2 entries
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)); // back to row 0
+
+        type_str(&mut app, "999999");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)); // commits by navigating away
+
+        let Some(Dialog::CdpParams { marker_time_list_edit: Some(edit), .. }) = &app.dialog else {
+            panic!("no editor")
+        };
+        assert!(
+            edit.entries[0].1 < edit.entries[1].1,
+            "row 0's time ({}) must stay strictly before row 1's ({})",
+            edit.entries[0].1,
+            edit.entries[1].1
+        );
+    }
+
+    /// 'n' inserts a new row after the selected one, carrying over its marker; Del removes
+    /// it, kept at a minimum of 1 — the marker-time-list counterpart to
+    /// `table_editor_insert_and_delete_rows`.
+    #[test]
+    fn marker_time_list_insert_and_delete_entries() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_focus_freeze_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)); // row 0 marker = 'b'
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { marker_time_list_edit: Some(edit), .. }) = &app.dialog else {
+            panic!("no editor")
+        };
+        assert_eq!(edit.entries.len(), 2, "'n' should insert a new entry");
+        assert_eq!(edit.selected_row, 1, "'n' should select the newly inserted row");
+        assert_eq!(edit.entries[1].0, 'b', "the new row should carry over the selected row's marker");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { marker_time_list_edit: Some(edit), .. }) = &app.dialog else {
+            panic!("no editor")
+        };
+        assert_eq!(edit.entries.len(), 1, "Del should remove the selected entry");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { marker_time_list_edit: Some(edit), .. }) = &app.dialog else {
+            panic!("no editor")
+        };
+        assert_eq!(edit.entries.len(), 1, "Del must not remove the last remaining entry");
+    }
+
+    /// Esc discards every edit made this session, restoring the field to its pre-edit
+    /// (single default-seeded entry) state — mirrors `esc_discards_table_edits`.
+    #[test]
+    fn esc_discards_marker_time_list_edits() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_focus_freeze_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::MarkerTimeList { entries: original, .. }) = fields.first() else {
+            panic!("expected a MarkerTimeList field")
+        };
+        let original = original.clone();
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        type_str(&mut app, "0.9");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { marker_time_list_edit, fields, .. }) = &app.dialog else {
+            panic!("expected CdpParams to still be open (Esc closes the editor, not the dialog)");
+        };
+        assert!(marker_time_list_edit.is_none(), "editor should be closed");
+        let Some(CdpField::MarkerTimeList { entries, .. }) = fields.first() else {
+            panic!("expected a MarkerTimeList field")
+        };
+        assert_eq!(*entries, original, "field must revert to its pre-edit state after Esc");
+    }
+
+    /// A saved-preset-style out-of-order marker-time-list must still block Apply/Preview as
+    /// defense in depth, even though `handle_cdp_marker_time_list_key` itself can never
+    /// produce one — mirrors the equivalent `CdpField::Table` check.
+    #[test]
+    fn out_of_order_marker_time_list_blocks_validation() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_focus_freeze_with_field_focused(&mut app);
+        let Some(Dialog::CdpParams { fields, .. }) = app.dialog.as_mut() else { panic!("no dialog") };
+        if let Some(CdpField::MarkerTimeList { entries, .. }) = fields.get_mut(0) {
+            *entries = vec![('a', 2.0), ('a', 1.0)]; // out of order
+        }
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let def = app.cdp_catalog.processes.iter().find(|p| p.key == "focus_freeze_1").unwrap();
+        assert!(App::cdp_validate_fields(def, fields).is_some());
+    }
+
+    /// Opens `Dialog::CdpParams` for `hilite_band`, focused on its one `HiliteBand` field,
+    /// "Bands" — the shared setup for the tests below (CDP-Ext-Plan.md Tier 1b's
+    /// bitflag-conditional row shape).
+    fn open_hilite_band_with_field_focused(app: &mut App) {
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "hilite_band")
+            .expect("hilite_band should be in the catalog");
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = 1;
+        }
+    }
+
+    /// A hilite-band field always starts with exactly one row, `amp_bit` set (the simplest
+    /// always-valid starting state — an all-bits-off row is rejected by CDP as a "Zero
+    /// bitflag") — same "no unset state" rationale as `CdpField::Table`.
+    #[test]
+    fn hilite_band_field_starts_with_one_seeded_row_amp_bit_set() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_hilite_band_with_field_focused(&mut app);
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::HiliteBand { rows, .. }) = fields.first() else { panic!("expected a HiliteBand field") };
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].amp_bit, "the seeded row must have a bit set (all-bits-off is invalid)");
+        assert!(!rows[0].ramp_bit && !rows[0].transpose_bit && !rows[0].add_bit);
+    }
+
+    /// Left/Right skip cells that don't currently apply (e.g. Amp1 while `amp_bit` is off) —
+    /// the one genuinely new navigation behavior this editor has over `CdpTableEdit`'s fixed
+    /// columns.
+    #[test]
+    fn arrows_skip_cells_that_do_not_currently_apply() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_hilite_band_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        // Starting row has only amp_bit set, so from LoFreq (0), Right should walk
+        // HiFreq(1) -> AmpBit(2) -> RampBit(3) -> TransposeBit(4) -> AddBit(5) -> Amp1(6),
+        // skipping Amp2/Sign/Transpose entirely (their bits are off).
+        let expected = [HB_HIFRQ, HB_AMP_BIT, HB_RAMP_BIT, HB_TRANSPOSE_BIT, HB_ADD_BIT, HB_AMP1];
+        for &want in &expected {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+            let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else {
+                panic!("no editor")
+            };
+            assert_eq!(edit.selected_col, want, "expected to land on cell {want}");
+        }
+        // One more Right should stay put (Amp1 is the last visible cell on this row).
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.selected_col, HB_AMP1);
+    }
+
+    /// Space toggles the selected checkbox; toggling `amp_bit` on reveals the Amp1 cell to
+    /// Right-navigation immediately.
+    #[test]
+    fn space_toggles_the_selected_checkbox() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_hilite_band_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)); // HiFreq
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)); // AmpBit
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert!(!edit.rows[0].amp_bit, "Space should have toggled amp_bit off");
+    }
+
+    /// Turning `transpose_bit` off force-clears `add_bit` on the same row — confirmed as
+    /// the preferred design over leaving an always-CDP-rejected bit-4-without-bit-3
+    /// combination for Apply time to catch.
+    #[test]
+    fn turning_off_transpose_bit_clears_add_bit() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_hilite_band_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        // Navigate to TransposeBit and turn it on, then to AddBit and turn it on too.
+        for _ in 0..4 {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        }
+        let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.selected_col, HB_TRANSPOSE_BIT);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)); // transpose_bit on
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)); // AddBit
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)); // add_bit on
+        let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert!(edit.rows[0].transpose_bit && edit.rows[0].add_bit);
+
+        // Navigate back to TransposeBit and turn it off.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert!(!edit.rows[0].transpose_bit, "transpose_bit should now be off");
+        assert!(!edit.rows[0].add_bit, "add_bit must be force-cleared along with it");
+    }
+
+    /// Pressing Space on `add_bit` while `transpose_bit` is off is a no-op (rather than
+    /// silently enabling `transpose_bit` as a side effect) — confirmed as the preferred
+    /// design.
+    #[test]
+    fn add_bit_cannot_be_enabled_while_transpose_bit_is_off() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_hilite_band_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        for _ in 0..5 {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        }
+        let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.selected_col, HB_ADD_BIT);
+        assert!(!edit.rows[0].transpose_bit);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert!(!edit.rows[0].add_bit, "add_bit must not turn on while transpose_bit is off");
+    }
+
+    /// Typing digits edits a numeric cell exactly like `CdpTableEdit`.
+    #[test]
+    fn typing_edits_a_numeric_cell() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_hilite_band_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        type_str(&mut app, "150");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::HiliteBand { rows, .. }) = fields.first() else { panic!("expected a HiliteBand field") };
+        assert!((rows[0].lofrq - 150.0).abs() < 1e-9, "expected LoFreq 150.0, got {}", rows[0].lofrq);
+    }
+
+    /// 'n' duplicates the selected row (no ordering constraint to seed a midpoint against —
+    /// `hilite band`'s bands are independent); Del removes it, kept at a minimum of 1.
+    #[test]
+    fn hilite_band_insert_and_delete_rows() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_hilite_band_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.rows.len(), 2, "'n' should insert a new row");
+        assert_eq!(edit.selected_row, 1, "'n' should select the newly inserted row");
+        // Not a plain duplicate: an identical frequency band is always rejected by CDP as
+        // overlapping, so 'n' shifts the new row to start exactly where the selected row's
+        // band ends (same bandwidth) — touching, not overlapping.
+        let original = edit.rows[0];
+        let new_row = edit.rows[1];
+        assert_eq!(new_row.lofrq, original.hifrq, "new row should start where the original ends");
+        assert_eq!(new_row.hifrq - new_row.lofrq, original.hifrq - original.lofrq, "bandwidth should carry over");
+        assert_eq!(new_row.amp_bit, original.amp_bit, "non-frequency fields should still carry over");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.rows.len(), 1, "Del should remove the selected row");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.rows.len(), 1, "Del must not remove the last remaining row");
+    }
+
+    /// Esc discards every edit made this session, restoring the field to its pre-edit
+    /// (single default-seeded row) state — mirrors `esc_discards_table_edits`.
+    #[test]
+    fn esc_discards_hilite_band_edits() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_hilite_band_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::HiliteBand { rows: original, .. }) = fields.first() else {
+            panic!("expected a HiliteBand field")
+        };
+        let original = original.clone();
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        type_str(&mut app, "999");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { hilite_band_edit, fields, .. }) = &app.dialog else {
+            panic!("expected CdpParams to still be open (Esc closes the editor, not the dialog)");
+        };
+        assert!(hilite_band_edit.is_none(), "editor should be closed");
+        let Some(CdpField::HiliteBand { rows, .. }) = fields.first() else { panic!("expected a HiliteBand field") };
+        assert_eq!(*rows, original, "field must revert to its pre-edit state after Esc");
+    }
+
+    /// Regression test for a real user report: 'n' used to insert an exact duplicate row,
+    /// which CDP always rejects as an overlapping frequency band (identical lofrq/hifrq is
+    /// the degenerate case of overlap) — confirmed the fix directly here rather than only
+    /// via the general insert/delete test, since this was a real bug a user hit.
+    #[test]
+    fn inserted_row_does_not_overlap_the_original_bands_frequency_range() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_hilite_band_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::HiliteBand { rows, .. }) = fields.first() else { panic!("expected a HiliteBand field") };
+        assert_eq!(rows.len(), 2);
+        let overlaps = rows[0].lofrq.max(rows[1].lofrq) < rows[0].hifrq.min(rows[1].hifrq);
+        assert!(!overlaps, "rows {:?} and {:?} must not overlap", rows[0], rows[1]);
+        let def = app.cdp_catalog.processes.iter().find(|p| p.key == "hilite_band").unwrap();
+        assert!(App::cdp_validate_fields(def, fields).is_none(), "the post-insert table should already validate cleanly");
+    }
+
+    /// A saved-preset-style overlapping pair of bands must still block Apply/Preview as
+    /// defense in depth, even though `handle_cdp_hilite_band_key`'s 'n' avoids creating one
+    /// by construction — mirrors the equivalent `CdpField::Table`/`MarkerTimeList` checks.
+    #[test]
+    fn overlapping_hilite_bands_block_validation() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        open_hilite_band_with_field_focused(&mut app);
+        let Some(Dialog::CdpParams { fields, .. }) = app.dialog.as_mut() else { panic!("no dialog") };
+        if let Some(CdpField::HiliteBand { rows, .. }) = fields.get_mut(0) {
+            let mut second = rows[0];
+            second.lofrq = rows[0].lofrq + 1.0; // overlaps rows[0]'s [lofrq, hifrq] range
+            rows.push(second);
+        }
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let def = app.cdp_catalog.processes.iter().find(|p| p.key == "hilite_band").unwrap();
+        assert!(App::cdp_validate_fields(def, fields).is_some());
     }
 
     /// `interp_cdp_envelope` is exactly CDP's own breakpoint semantics: piecewise-linear
@@ -9242,6 +12003,7 @@ mod tests {
             }],
             output_files: Vec::new(),
             glob_output: Some(crate::model::cdp::pipeline::GlobOutputSpec { prefix: "g".into() }),
+            output_curve: None,
             brk_files: Vec::new(),
             deferred_window_params: Vec::new(),
             needs_simple_wav_input: false,
@@ -9506,6 +12268,7 @@ mod tests {
                 dest_channels: vec![0],
             }],
             glob_output: None,
+            output_curve: None,
             brk_files: Vec::new(),
             deferred_window_params: Vec::new(),
             needs_simple_wav_input: false,

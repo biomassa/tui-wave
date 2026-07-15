@@ -2,6 +2,8 @@ pub mod bwf;
 pub mod cdp;
 pub mod clipboard;
 pub mod command;
+pub mod curve;
+pub mod curve_history;
 pub mod document;
 pub mod dsp;
 pub mod history;

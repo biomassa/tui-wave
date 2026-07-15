@@ -15,7 +15,7 @@ key = "stretch_time_1"
 bin = "stretch"
 subprog = "time"
 mode = "1"
-title = "Time Stretch (Spectral)"
+title = "Stretch Time Stretch (Spectral)"
 category = "pvoc"
 subcategory = "time"
 short_description = "Stretches or compresses duration in the frequency domain, pitch unaffected"
@@ -48,7 +48,7 @@ key = "extend_iterate_1"
 bin = "extend"
 subprog = "iterate"
 mode = "1"
-title = "Iterate"
+title = "Extend Iterate"
 category = "time"
 subcategory = "texture"
 short_description = "Repeats the sound in a fluid, randomised stream to fill a target duration"
@@ -217,7 +217,7 @@ scale = "plain"
 key = "sfecho_echo"
 bin = "sfecho"
 subprog = "echo"
-title = "Echo"
+title = "Sfecho Echo"
 category = "time"
 subcategory = "delay"
 short_description = "Adds a simple decaying echo"
@@ -392,7 +392,7 @@ flag = "-t"
 key = "tremenv_tremenv"
 bin = "tremenv"
 subprog = "tremenv"
-title = "Tremolo Envelope"
+title = "Tremenv Tremolo Envelope"
 category = "time"
 subcategory = "modulation"
 short_description = "Applies a narrowing tremolo after each amplitude peak"
@@ -457,7 +457,7 @@ scale = "plain"
 key = "topantail2_topantail"
 bin = "topantail2"
 subprog = "topantail"
-title = "Trim Silent Ends"
+title = "Topantail2 Trim Silent Ends"
 category = "time"
 subcategory = "envelope"
 short_description = "Trims silence from the start and/or end of a sound based on level"
@@ -511,7 +511,7 @@ flag = "-s"
 key = "distmore_double"
 bin = "distmore"
 subprog = "double"
-title = "Waveset Double"
+title = "Distmore Waveset Double"
 category = "time"
 subcategory = "distort"
 short_description = "Doubles (or more) the frequency of each waveset"
@@ -540,7 +540,7 @@ scale = "plain"
 key = "hilite_pluck"
 bin = "hilite"
 subprog = "pluck"
-title = "Emphasise Changes"
+title = "Hilite Emphasise Changes"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Emphasises spectral changes, boosting newly-prominent partials"
@@ -569,7 +569,7 @@ scale = "plain"
 key = "synth_spectra"
 bin = "synth"
 subprog = "spectra"
-title = "Spectral Band"
+title = "Synth Spectral Band"
 category = "time"
 subcategory = "synthesis"
 short_description = "Generates a stereo band of filtered noise focused around a centre frequency"
@@ -781,7 +781,7 @@ flag = "-s"
 key = "grainex_extend"
 bin = "grainex"
 subprog = "extend"
-title = "Extend Grain Area"
+title = "Grainex Extend Grain Area"
 category = "time"
 subcategory = "texture"
 short_description = "Finds grains in a sound and extends the area that contains them"
@@ -859,7 +859,7 @@ key = "distrep_distrep_1"
 bin = "distrep"
 subprog = "distrep"
 mode = "1"
-title = "Waveset Repeat (Stretch)"
+title = "Distrep Waveset Repeat (Stretch)"
 category = "time"
 subcategory = "distort"
 short_description = "Time-stretches by repeating groups of wavesets, with brief splices"
@@ -927,7 +927,7 @@ key = "distrep_distrep_2"
 bin = "distrep"
 subprog = "distrep"
 mode = "2"
-title = "Waveset Repeat (No Stretch)"
+title = "Distrep Waveset Repeat (No Stretch)"
 category = "time"
 subcategory = "distort"
 short_description = "Repeats groups of wavesets, then skips cycles to avoid time-stretching"
@@ -995,7 +995,7 @@ key = "distshift_distshift_1"
 bin = "distshift"
 subprog = "distshift"
 mode = "1"
-title = "Waveset Shift"
+title = "Distshift Waveset Shift"
 category = "time"
 subcategory = "distort"
 short_description = "Shifts alternate groups of half-wavesets forward in time"
@@ -1037,7 +1037,7 @@ key = "distshift_distshift_2"
 bin = "distshift"
 subprog = "distshift"
 mode = "2"
-title = "Waveset Swap"
+title = "Distshift Waveset Swap"
 category = "time"
 subcategory = "distort"
 short_description = "Swaps alternate groups of half-wavesets"
@@ -1067,7 +1067,7 @@ key = "envel_impose_1"
 bin = "envel"
 subprog = "impose"
 mode = "1"
-title = "Impose Envelope From Sound"
+title = "Envel Impose Envelope From Sound"
 category = "time"
 subcategory = "envelope"
 short_description = "Imposes the amplitude envelope of a second sound onto this one"
@@ -1104,7 +1104,7 @@ key = "envel_replace_1"
 bin = "envel"
 subprog = "replace"
 mode = "1"
-title = "Replace Envelope From Sound"
+title = "Envel Replace Envelope From Sound"
 category = "time"
 subcategory = "envelope"
 short_description = "Replaces the amplitude envelope with one extracted from a second sound"
@@ -1135,7 +1135,7 @@ key = "envel_tremolo_1"
 bin = "envel"
 subprog = "tremolo"
 mode = "1"
-title = "Tremolo"
+title = "Envel Tremolo"
 category = "time"
 subcategory = "modulation"
 short_description = "Applies a simple linearly-interpolated tremolo"
@@ -1185,7 +1185,7 @@ scale = "plain"
 key = "envel_swell"
 bin = "envel"
 subprog = "swell"
-title = "Swell"
+title = "Envel Swell"
 category = "time"
 subcategory = "envelope"
 short_description = "Fades the sound in to and out from a single peak moment"
@@ -1223,7 +1223,7 @@ key = "envel_attack_4"
 bin = "envel"
 subprog = "attack"
 mode = "4"
-title = "Emphasise Attack (At Peak)"
+title = "Envel Emphasise Attack (At Peak)"
 category = "time"
 subcategory = "envelope"
 short_description = "Emphasises the sound's attack at its point of maximum level"
@@ -1276,7 +1276,7 @@ scale = "plain"
 key = "envel_pluck"
 bin = "envel"
 subprog = "pluck"
-title = "Pluck Start"
+title = "Envel Pluck Start"
 category = "time"
 subcategory = "envelope"
 short_description = "Adds a plucked-string-style attack to the start of a mono sound"
@@ -1344,7 +1344,7 @@ key = "envel_dovetail_1"
 bin = "envel"
 subprog = "dovetail"
 mode = "1"
-title = "Dovetail"
+title = "Envel Dovetail"
 category = "time"
 subcategory = "envelope"
 short_description = "Fades in the start and fades out the end of a sound"
@@ -1402,7 +1402,7 @@ key = "envel_curtail_3"
 bin = "envel"
 subprog = "curtail"
 mode = "3"
-title = "Curtail"
+title = "Envel Curtail"
 category = "time"
 subcategory = "envelope"
 short_description = "Fades the sound to zero starting at a chosen time, to the end of the file"
@@ -1440,7 +1440,7 @@ key = "envel_warp_1"
 bin = "envel"
 subprog = "warp"
 mode = "1"
-title = "Normalise Envelope"
+title = "Envel Normalise Envelope"
 category = "time"
 subcategory = "envelope"
 short_description = "Expands the envelope so its highest point reaches full scale"
@@ -1467,7 +1467,7 @@ key = "envel_warp_2"
 bin = "envel"
 subprog = "warp"
 mode = "2"
-title = "Reverse Envelope"
+title = "Envel Reverse Envelope"
 category = "time"
 subcategory = "envelope"
 short_description = "Time-reverses the sound's amplitude envelope"
@@ -1493,7 +1493,7 @@ scale = "plain"
 key = "spec_grab"
 bin = "spec"
 subprog = "grab"
-title = "Grab Analysis Window"
+title = "Spec Grab Analysis Window"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Grabs a single analysis window at a given time and holds it as a static spectrum"
@@ -1524,7 +1524,7 @@ key = "pitch_transp_1"
 bin = "pitch"
 subprog = "transp"
 mode = "1"
-title = "Octave Transpose Above"
+title = "Pitch Octave Transpose Above"
 category = "pvoc"
 subcategory = "pitch"
 short_description = "Transposes frequencies above a split point up an octave"
@@ -1616,7 +1616,7 @@ key = "pitch_pick_1"
 bin = "pitch"
 subprog = "pick"
 mode = "1"
-title = "Pick Harmonic Partials"
+title = "Pitch Pick Harmonic Partials"
 category = "pvoc"
 subcategory = "pitch"
 short_description = "Keeps only spectral channels that might hold partials of a harmonic series"
@@ -1660,7 +1660,7 @@ key = "sorter_sorter_1"
 bin = "sorter"
 subprog = "sorter"
 mode = "1"
-title = "Sort To Crescendo"
+title = "Sorter Sort To Crescendo"
 category = "time"
 subcategory = "texture"
 short_description = "Chops the sound into elements and reorders them into a crescendo"
@@ -1700,7 +1700,7 @@ key = "sorter_sorter_2"
 bin = "sorter"
 subprog = "sorter"
 mode = "2"
-title = "Sort To Decrescendo"
+title = "Sorter Sort To Decrescendo"
 category = "time"
 subcategory = "texture"
 short_description = "Chops the sound into elements and reorders them into a decrescendo"
@@ -1740,7 +1740,7 @@ key = "sorter_sorter_3"
 bin = "sorter"
 subprog = "sorter"
 mode = "3"
-title = "Sort To Accelerando"
+title = "Sorter Sort To Accelerando"
 category = "time"
 subcategory = "texture"
 short_description = "Chops the sound into elements and reorders them into an accelerando"
@@ -1780,7 +1780,7 @@ key = "sorter_sorter_4"
 bin = "sorter"
 subprog = "sorter"
 mode = "4"
-title = "Sort To Ritardando"
+title = "Sorter Sort To Ritardando"
 category = "time"
 subcategory = "texture"
 short_description = "Chops the sound into elements and reorders them into a ritardando"
@@ -1821,7 +1821,7 @@ flag = "-s"
 key = "grain_reverse"
 bin = "grain"
 subprog = "reverse"
-title = "Reverse Grain Order"
+title = "Grain Reverse Grain Order"
 category = "time"
 subcategory = "texture"
 short_description = "Reverses the order of grains without reversing the grains themselves"
@@ -1851,7 +1851,7 @@ flag = "-l"
 key = "grain_duplicate"
 bin = "grain"
 subprog = "duplicate"
-title = "Duplicate Grains"
+title = "Grain Duplicate Grains"
 category = "time"
 subcategory = "texture"
 short_description = "Repeats each grain in the source a number of times"
@@ -1936,7 +1936,7 @@ flag = "-l"
 key = "grain_omit"
 bin = "grain"
 subprog = "omit"
-title = "Omit Grains"
+title = "Grain Omit Grains"
 category = "time"
 subcategory = "texture"
 short_description = "Keeps only a chosen proportion of grains, dropping the rest"
@@ -1992,7 +1992,7 @@ key = "envel_warp_3"
 bin = "envel"
 subprog = "warp"
 mode = "3"
-title = "Exaggerate Envelope"
+title = "Envel Exaggerate Envelope"
 category = "time"
 subcategory = "envelope"
 short_description = "Exaggerates or softens the contour of the amplitude envelope"
@@ -2031,7 +2031,7 @@ key = "envel_warp_4"
 bin = "envel"
 subprog = "warp"
 mode = "4"
-title = "Attenuate Envelope"
+title = "Envel Attenuate Envelope"
 category = "time"
 subcategory = "envelope"
 short_description = "Attenuates the amplitude envelope by a fixed amount"
@@ -2070,7 +2070,7 @@ key = "envel_warp_5"
 bin = "envel"
 subprog = "warp"
 mode = "5"
-title = "Lift Envelope"
+title = "Envel Lift Envelope"
 category = "time"
 subcategory = "envelope"
 short_description = "Lifts the amplitude envelope by a fixed amount"
@@ -2109,7 +2109,7 @@ key = "envel_warp_7"
 bin = "envel"
 subprog = "warp"
 mode = "7"
-title = "Flatten Envelope"
+title = "Envel Flatten Envelope"
 category = "time"
 subcategory = "envelope"
 short_description = "Flattens (smooths) the amplitude envelope's contour"
@@ -2148,7 +2148,7 @@ key = "envel_warp_9"
 bin = "envel"
 subprog = "warp"
 mode = "9"
-title = "Invert Envelope"
+title = "Envel Invert Envelope"
 category = "time"
 subcategory = "envelope"
 short_description = "Inverts the amplitude envelope around a mirror level"
@@ -2202,7 +2202,7 @@ key = "envel_warp_10"
 bin = "envel"
 subprog = "warp"
 mode = "10"
-title = "Limit Envelope"
+title = "Envel Limit Envelope"
 category = "time"
 subcategory = "envelope"
 short_description = "Squeezes loud levels of the envelope down towards a limit"
@@ -2253,7 +2253,7 @@ key = "envel_warp_12"
 bin = "envel"
 subprog = "warp"
 mode = "12"
-title = "Expand Envelope"
+title = "Envel Expand Envelope"
 category = "time"
 subcategory = "envelope"
 short_description = "Squeezes quiet levels of the envelope up towards a threshold"
@@ -2316,7 +2316,7 @@ key = "hilite_arpeg_1"
 bin = "hilite"
 subprog = "arpeg"
 mode = "1"
-title = "Arpeggiate (On)"
+title = "Hilite Arpeggiate (On)"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Sweeps a band through the spectrum, playing only the components inside it"
@@ -2369,7 +2369,7 @@ key = "filter_phasing_1"
 bin = "filter"
 subprog = "phasing"
 mode = "1"
-title = "Allpass Filter"
+title = "Filter Allpass Filter"
 category = "time"
 subcategory = "filter"
 short_description = "Phase-shifts the sound through an allpass filter"
@@ -2408,7 +2408,7 @@ key = "filter_phasing_2"
 bin = "filter"
 subprog = "phasing"
 mode = "2"
-title = "Phasing Effect"
+title = "Filter Phasing Effect"
 category = "time"
 subcategory = "filter"
 short_description = "Applies a classic sweeping phaser effect"
@@ -2447,7 +2447,7 @@ key = "filter_sweeping_1"
 bin = "filter"
 subprog = "sweeping"
 mode = "1"
-title = "Sweeping Notch Filter"
+title = "Filter Sweeping Notch Filter"
 category = "time"
 subcategory = "filter"
 short_description = "A notch (band-reject) filter whose focus frequency sweeps over a range"
@@ -2522,7 +2522,7 @@ key = "filter_sweeping_2"
 bin = "filter"
 subprog = "sweeping"
 mode = "2"
-title = "Sweeping Band-Pass Filter"
+title = "Filter Sweeping Band-Pass Filter"
 category = "time"
 subcategory = "filter"
 short_description = "A band-pass filter whose focus frequency sweeps over a range"
@@ -2597,7 +2597,7 @@ key = "filter_sweeping_3"
 bin = "filter"
 subprog = "sweeping"
 mode = "3"
-title = "Sweeping Low-Pass Filter"
+title = "Filter Sweeping Low-Pass Filter"
 category = "time"
 subcategory = "filter"
 short_description = "A low-pass filter whose cutoff frequency sweeps over a range"
@@ -2672,7 +2672,7 @@ key = "filter_sweeping_4"
 bin = "filter"
 subprog = "sweeping"
 mode = "4"
-title = "Sweeping High-Pass Filter"
+title = "Filter Sweeping High-Pass Filter"
 category = "time"
 subcategory = "filter"
 short_description = "A high-pass filter whose cutoff frequency sweeps over a range"
@@ -2747,7 +2747,7 @@ key = "modify_space_1"
 bin = "modify"
 subprog = "space"
 mode = "1"
-title = "Pan"
+title = "Modify Pan"
 category = "time"
 subcategory = "space"
 short_description = "Positions or moves a mono sound in a stereo field"
@@ -2787,7 +2787,7 @@ key = "modify_space_2"
 bin = "modify"
 subprog = "space"
 mode = "2"
-title = "Mirror Stereo Position"
+title = "Modify Mirror Stereo Position"
 category = "time"
 subcategory = "space"
 short_description = "Inverts left/right stereo positions in a stereo file"
@@ -2802,7 +2802,7 @@ key = "modify_space_4"
 bin = "modify"
 subprog = "space"
 mode = "4"
-title = "Narrow Stereo Image"
+title = "Modify Narrow Stereo Image"
 category = "time"
 subcategory = "space"
 short_description = "Narrows (or widens/inverts) the stereo image of a sound"
@@ -2832,7 +2832,7 @@ scale = "plain"
 key = "modify_shudder"
 bin = "modify"
 subprog = "shudder"
-title = "Shudder"
+title = "Modify Shudder"
 category = "time"
 subcategory = "modulation"
 short_description = "Applies randomised amplitude shudders across the stereo field"
@@ -3104,7 +3104,7 @@ key = "envel_curtail_1"
 bin = "envel"
 subprog = "curtail"
 mode = "1"
-title = "Curtail (Fade Between Times)"
+title = "Envel Curtail (Fade Between Times)"
 category = "time"
 subcategory = "envelope"
 short_description = "Fades the sound to zero between two chosen times"
@@ -3151,7 +3151,7 @@ key = "envel_curtail_2"
 bin = "envel"
 subprog = "curtail"
 mode = "2"
-title = "Curtail (Fade From Start Time)"
+title = "Envel Curtail (Fade From Start Time)"
 category = "time"
 subcategory = "envelope"
 short_description = "Fades the sound to zero over a chosen duration starting at a chosen time"
@@ -3198,7 +3198,7 @@ key = "envel_attack_1"
 bin = "envel"
 subprog = "attack"
 mode = "1"
-title = "Emphasise Attack (At Gate)"
+title = "Envel Emphasise Attack (At Gate)"
 category = "time"
 subcategory = "envelope"
 short_description = "Emphasises the sound's attack at the point it first exceeds a level"
@@ -3264,7 +3264,7 @@ key = "envel_attack_2"
 bin = "envel"
 subprog = "attack"
 mode = "2"
-title = "Emphasise Attack (Near Time)"
+title = "Envel Emphasise Attack (Near Time)"
 category = "time"
 subcategory = "envelope"
 short_description = "Emphasises the sound's attack at the loudest moment near a chosen time"
@@ -3330,7 +3330,7 @@ key = "envel_dovetail_2"
 bin = "envel"
 subprog = "dovetail"
 mode = "2"
-title = "Dovetail (Steep)"
+title = "Envel Dovetail (Steep)"
 category = "time"
 subcategory = "envelope"
 short_description = "Fades in the start and fades out the end with a steeper, doubly-exponential curve"
@@ -3372,7 +3372,7 @@ key = "pitch_transp_2"
 bin = "pitch"
 subprog = "transp"
 mode = "2"
-title = "Octave Transpose Below"
+title = "Pitch Octave Transpose Below"
 category = "pvoc"
 subcategory = "pitch"
 short_description = "Transposes frequencies below a split point down an octave"
@@ -3412,7 +3412,7 @@ key = "pitch_transp_3"
 bin = "pitch"
 subprog = "transp"
 mode = "3"
-title = "Octave Transpose Above & Below"
+title = "Pitch Octave Transpose Above & Below"
 category = "pvoc"
 subcategory = "pitch"
 short_description = "Octave-transposes both above and below a split point, away from it"
@@ -3452,7 +3452,7 @@ key = "pitch_pick_2"
 bin = "pitch"
 subprog = "pick"
 mode = "2"
-title = "Pick Octave Partials"
+title = "Pitch Pick Octave Partials"
 category = "pvoc"
 subcategory = "pitch"
 short_description = "Keeps only spectral channels that might hold octave partials"
@@ -3495,7 +3495,7 @@ key = "pitch_pick_3"
 bin = "pitch"
 subprog = "pick"
 mode = "3"
-title = "Pick Odd Harmonic Partials"
+title = "Pitch Pick Odd Harmonic Partials"
 category = "pvoc"
 subcategory = "pitch"
 short_description = "Keeps only spectral channels that might hold odd harmonic partials"
@@ -3538,7 +3538,7 @@ key = "hilite_arpeg_2"
 bin = "hilite"
 subprog = "arpeg"
 mode = "2"
-title = "Arpeggiate (Boost)"
+title = "Hilite Arpeggiate (Boost)"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Sweeps a band through the spectrum, amplifying the components inside it"
@@ -3590,7 +3590,7 @@ key = "hilite_arpeg_5"
 bin = "hilite"
 subprog = "arpeg"
 mode = "5"
-title = "Arpeggiate (Below Band Only)"
+title = "Hilite Arpeggiate (Below Band Only)"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Sweeps a band through the spectrum, playing only components below it"
@@ -3642,7 +3642,7 @@ flag = "-a"
 key = "spec_gate"
 bin = "spec"
 subprog = "gate"
-title = "Spectral Gate"
+title = "Spec Spectral Gate"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Eliminates spectral channel data below a threshold amplitude"
@@ -3668,7 +3668,7 @@ scale = "plain"
 key = "chanphase_chanphase"
 bin = "chanphase"
 subprog = "chanphase"
-title = "Invert Channel Phase"
+title = "Chanphase Invert Channel Phase"
 category = "time"
 subcategory = "channels"
 short_description = "Inverts the phase of one channel of a multichannel sound"
@@ -3695,7 +3695,7 @@ key = "waveform_make_1"
 bin = "waveform"
 subprog = "make"
 mode = "1"
-title = "Make Wavetable (By Cycle Count)"
+title = "Waveform Make Wavetable (By Cycle Count)"
 category = "time"
 subcategory = "synthesis"
 short_description = "Extracts a symmetric wavetable from a chosen number of half-wavesets"
@@ -3738,7 +3738,7 @@ key = "waveform_make_2"
 bin = "waveform"
 subprog = "make"
 mode = "2"
-title = "Make Wavetable (By Duration)"
+title = "Waveform Make Wavetable (By Duration)"
 category = "time"
 subcategory = "synthesis"
 short_description = "Extracts a symmetric wavetable from a chosen duration of source, cut at zero-crossings"
@@ -3781,7 +3781,7 @@ key = "retime_retime_13"
 bin = "retime"
 subprog = "retime"
 mode = "13"
-title = "Move Peak To Time"
+title = "Retime Move Peak To Time"
 category = "time"
 subcategory = "time"
 short_description = "Finds the sound's peak and moves all data so the peak lands at a chosen time"
@@ -3807,7 +3807,7 @@ scale = "plain"
 key = "tostereo_tostereo"
 bin = "tostereo"
 subprog = "tostereo"
-title = "Diverge To/From Stereo"
+title = "Tostereo Diverge To/From Stereo"
 category = "time"
 subcategory = "space"
 short_description = "Makes a stereo file start (or end) mixed to mono and diverge to real stereo"
@@ -3924,7 +3924,7 @@ key = "distcut_distcut_1"
 bin = "distcut"
 subprog = "distcut"
 mode = "1"
-title = "Cut Into Wavecycle Groups"
+title = "Distcut Cut Into Wavecycle Groups"
 category = "time"
 subcategory = "segment"
 short_description = "Cuts the sound into separate files, one per group of wavesets, each with a falling envelope"
@@ -3994,7 +3994,7 @@ flag = "-c"
 key = "focus_hold"
 bin = "focus"
 subprog = "hold"
-title = "Hold"
+title = "Focus Hold"
 category = "pvoc"
 subcategory = "time"
 short_description = "Freezes the spectrum at chosen times, each held for a given duration"
@@ -4313,7 +4313,7 @@ default = false
 key = "grain_reposition"
 bin = "grain"
 subprog = "reposition"
-title = "Reposition"
+title = "Grain Reposition"
 category = "time"
 subcategory = "texture"
 short_description = "Repositions a grainy sound's grain onsets to a specified list of times"
@@ -4418,7 +4418,7 @@ key = "grain_repitch_1"
 bin = "grain"
 subprog = "repitch"
 mode = "1"
-title = "Repitch (Cycle)"
+title = "Grain Repitch (Cycle)"
 category = "time"
 subcategory = "texture"
 short_description = "Repitches each grain in turn to a list of transpositions, cycling back to the start"
@@ -4510,7 +4510,7 @@ key = "grain_repitch_2"
 bin = "grain"
 subprog = "repitch"
 mode = "2"
-title = "Repitch (Repeat)"
+title = "Grain Repitch (Repeat)"
 category = "time"
 subcategory = "texture"
 short_description = "Plays each grain at every listed transposition before moving to the next grain"
@@ -4602,7 +4602,7 @@ key = "grain_rerhythm_1"
 bin = "grain"
 subprog = "rerhythm"
 mode = "1"
-title = "Rerhythm (Cycle)"
+title = "Grain Rerhythm (Cycle)"
 category = "time"
 subcategory = "texture"
 short_description = "Lengthens or shortens each grain in turn by a list of duration-multipliers, cycling back to the start"
@@ -4694,7 +4694,7 @@ key = "grain_rerhythm_2"
 bin = "grain"
 subprog = "rerhythm"
 mode = "2"
-title = "Rerhythm (Repeat)"
+title = "Grain Rerhythm (Repeat)"
 category = "time"
 subcategory = "texture"
 short_description = "Plays each grain at every listed retiming before moving to the next grain"
@@ -5068,7 +5068,7 @@ scale = "plain"
 key = "caltrain_caltrain"
 bin = "caltrain"
 subprog = "caltrain"
-title = "Spectral Train Blur"
+title = "Caltrain Spectral Train Blur"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Time-blurs the upper spectrum while optionally protecting the bass"
@@ -5120,7 +5120,7 @@ key = "cantor_set_1"
 bin = "cantor"
 subprog = "set"
 mode = "1"
-title = "Gradual Hole (Percentage)"
+title = "Cantor Gradual Hole (Percentage)"
 category = "time"
 subcategory = "texture"
 short_description = "Gradually cuts a growing hole in the center of a sound, one buffer per stage"
@@ -5216,7 +5216,7 @@ key = "cantor_set_3"
 bin = "cantor"
 subprog = "set"
 mode = "3"
-title = "Gradual Hole (Vibrato Layers)"
+title = "Cantor Gradual Hole (Vibrato Layers)"
 category = "time"
 subcategory = "texture"
 short_description = "Cuts a hole in the center of a sound with layered vibrato, one buffer per stage"
@@ -5316,7 +5316,7 @@ scale = "plain"
 key = "distortt_repeat"
 bin = "distortt"
 subprog = "repeat"
-title = "Waveset Group Repeat"
+title = "Distortt Waveset Group Repeat"
 category = "time"
 subcategory = "distort"
 short_description = "Repeats groups of wavesets to extend a sound"
@@ -5398,7 +5398,7 @@ flag = "-t"
 key = "frfractal_fractal"
 bin = "frfractal"
 subprog = "fractal"
-title = "Fractalize"
+title = "Frfractal Fractalize"
 category = "time"
 subcategory = "distort"
 short_description = "Creates a fractalized, self-layered version of a sound"
@@ -5539,7 +5539,7 @@ scale = "plain"
 key = "hover2_hover2"
 bin = "hover2"
 subprog = "hover2"
-title = "Hover (Mirrored)"
+title = "Hover2 Hover (Mirrored)"
 category = "time"
 subcategory = "texture"
 short_description = "Zigzag-reads a sound from a zero-crossing, mirroring each read"
@@ -5656,7 +5656,7 @@ key = "strans_multi_1"
 bin = "strans"
 subprog = "multi"
 mode = "1"
-title = "Speed Change"
+title = "Strans Speed Change"
 category = "time"
 subcategory = "time"
 short_description = "Changes playback speed (and pitch along with it)"
@@ -5691,7 +5691,7 @@ key = "strans_multi_2"
 bin = "strans"
 subprog = "multi"
 mode = "2"
-title = "Pitch Transpose"
+title = "Strans Pitch Transpose"
 category = "time"
 subcategory = "pitch"
 short_description = "Transposes pitch without changing duration"
@@ -5726,7 +5726,7 @@ key = "strans_multi_3"
 bin = "strans"
 subprog = "multi"
 mode = "3"
-title = "Speed Ramp"
+title = "Strans Speed Ramp"
 category = "time"
 subcategory = "time"
 short_description = "Accelerates smoothly to a target speed by a chosen time"
@@ -5778,7 +5778,7 @@ key = "strans_multi_4"
 bin = "strans"
 subprog = "multi"
 mode = "4"
-title = "Vibrato"
+title = "Strans Vibrato"
 category = "time"
 subcategory = "modulation"
 short_description = "Adds vibrato to a sound"
@@ -6390,7 +6390,7 @@ key = "synfilt_synfilt_1"
 bin = "synfilt"
 subprog = "synfilt"
 mode = "1"
-title = "Synth Filtered Noise (Single Pitch)"
+title = "Synfilt Synth Filtered Noise (Single Pitch)"
 category = "time"
 subcategory = "synthesis"
 short_description = "Synthesizes noise shaped by a time-varying pitched filterbank"
@@ -6507,7 +6507,7 @@ flag = "-o"
 key = "clicknew_clicks"
 bin = "clicknew"
 subprog = "clicks"
-title = "Click Track"
+title = "Clicknew Click Track"
 category = "time"
 subcategory = "synthesis"
 short_description = "Generates a click track from a list of times"
@@ -6544,7 +6544,7 @@ key = "distmark_distmark_1"
 bin = "distmark"
 subprog = "distmark"
 mode = "1"
-title = "Distort At Marks"
+title = "Distmark Distort At Marks"
 category = "time"
 subcategory = "texture"
 short_description = "Interpolates between waveset-groups at marked points in a mono sound"
@@ -6627,7 +6627,7 @@ key = "distmark_distmark_2"
 bin = "distmark"
 subprog = "distmark"
 mode = "2"
-title = "Distort At Marks (Alternate Blocks)"
+title = "Distmark Distort At Marks (Alternate Blocks)"
 category = "time"
 subcategory = "texture"
 short_description = "Interpolates within alternate marked blocks in a mono sound"
@@ -7494,7 +7494,7 @@ flag = "-a"
 key = "selfsim_selfsim"
 bin = "selfsim"
 subprog = "selfsim"
-title = "Self-Similarity"
+title = "Selfsim Self-Similarity"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Replaces spectral windows with the most similar, louder window(s)"
@@ -7795,7 +7795,7 @@ key = "superaccu_superaccu_1"
 bin = "superaccu"
 subprog = "superaccu"
 mode = "1"
-title = "Spectral Hold"
+title = "Superaccu Spectral Hold"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Sustains each spectral band until louder data appears in it"
@@ -7848,7 +7848,7 @@ key = "superaccu_superaccu_2"
 bin = "superaccu"
 subprog = "superaccu"
 mode = "2"
-title = "Spectral Hold (Tempered)"
+title = "Superaccu Spectral Hold (Tempered)"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Sustains each spectral band, forcing new resonances to the tempered scale"
@@ -8379,7 +8379,7 @@ flag = "-e"
 [[process]]
 key = "fastconv_fastconv"
 bin = "fastconv"
-title = "Convolve"
+title = "Fastconv Convolve"
 category = "time"
 subcategory = "filter"
 short_description = "Convolves a sound with an impulse response from another buffer"
@@ -8462,7 +8462,7 @@ key = "specsphinx_specsphinx_1"
 bin = "specsphinx"
 subprog = "specsphinx"
 mode = "1"
-title = "Impose Channel Amplitudes"
+title = "Specsphinx Impose Channel Amplitudes"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Imposes the channel amplitudes of a second sound onto this one's channel frequencies"
@@ -8503,7 +8503,7 @@ key = "specsphinx_specsphinx_2"
 bin = "specsphinx"
 subprog = "specsphinx"
 mode = "2"
-title = "Multiply Spectra"
+title = "Specsphinx Multiply Spectra"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Multiplies this sound's spectrum by a second sound's spectrum"
@@ -8544,7 +8544,7 @@ key = "spectwin_spectwin_1"
 bin = "spectwin"
 subprog = "spectwin"
 mode = "1"
-title = "Spectral Blend (Formant vs Formant)"
+title = "Spectwin Spectral Blend (Formant vs Formant)"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Blends this sound's formant envelope against a second sound's formant envelope"
@@ -8624,7 +8624,7 @@ key = "spectwin_spectwin_2"
 bin = "spectwin"
 subprog = "spectwin"
 mode = "2"
-title = "Spectral Blend (Formant vs Total)"
+title = "Spectwin Spectral Blend (Formant vs Total)"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Blends this sound's formant envelope against a second sound's total envelope"
@@ -8704,7 +8704,7 @@ key = "spectwin_spectwin_3"
 bin = "spectwin"
 subprog = "spectwin"
 mode = "3"
-title = "Spectral Blend (Total vs Formant)"
+title = "Spectwin Spectral Blend (Total vs Formant)"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Blends this sound's total envelope against a second sound's formant envelope"
@@ -8784,7 +8784,7 @@ key = "spectwin_spectwin_4"
 bin = "spectwin"
 subprog = "spectwin"
 mode = "4"
-title = "Spectral Blend (Total vs Total)"
+title = "Spectwin Spectral Blend (Total vs Total)"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Blends this sound's total envelope against a second sound's total envelope"
@@ -9007,7 +9007,7 @@ key = "pitch_pick_4"
 bin = "pitch"
 subprog = "pick"
 mode = "4"
-title = "Retain Linear Steps"
+title = "Pitch Retain Linear Steps"
 category = "pvoc"
 subcategory = "filter"
 short_description = "Keeps only spectral channels at successive linear frequency steps from a fundamental"
@@ -9059,7 +9059,7 @@ key = "pitch_pick_5"
 bin = "pitch"
 subprog = "pick"
 mode = "5"
-title = "Retain Harmonic Series Plus Linear Displacement"
+title = "Pitch Retain Harmonic Series Plus Linear Displacement"
 category = "pvoc"
 subcategory = "filter"
 short_description = "Keeps harmonic partials, each displaced by a linear frequency offset"
@@ -9111,7 +9111,7 @@ key = "repitch_transpose_1"
 bin = "repitch"
 subprog = "transpose"
 mode = "1"
-title = "Transpose Spectrum (Frequency Ratio)"
+title = "Repitch Transpose Spectrum (Frequency Ratio)"
 category = "pvoc"
 subcategory = "pitch"
 short_description = "Transposes the spectrum by a frequency ratio, moving the spectral envelope with it"
@@ -9172,7 +9172,7 @@ key = "repitch_transpose_2"
 bin = "repitch"
 subprog = "transpose"
 mode = "2"
-title = "Transpose Spectrum (Octaves)"
+title = "Repitch Transpose Spectrum (Octaves)"
 category = "pvoc"
 subcategory = "pitch"
 short_description = "Transposes the spectrum by a number of octaves, moving the spectral envelope with it"
@@ -9233,7 +9233,7 @@ key = "repitch_transpose_3"
 bin = "repitch"
 subprog = "transpose"
 mode = "3"
-title = "Transpose Spectrum (Semitones)"
+title = "Repitch Transpose Spectrum (Semitones)"
 category = "pvoc"
 subcategory = "pitch"
 short_description = "Transposes the spectrum by a number of semitones, moving the spectral envelope with it"
@@ -9294,7 +9294,7 @@ key = "repitch_transposef_1"
 bin = "repitch"
 subprog = "transposef"
 mode = "1"
-title = "Transpose Spectrum, Keep Envelope (Frequency Ratio)"
+title = "Repitch Transpose Spectrum, Keep Envelope (Frequency Ratio)"
 category = "pvoc"
 subcategory = "pitch"
 short_description = "Transposes the spectrum by a frequency ratio, keeping the original spectral envelope"
@@ -9381,7 +9381,7 @@ key = "repitch_transposef_2"
 bin = "repitch"
 subprog = "transposef"
 mode = "2"
-title = "Transpose Spectrum, Keep Envelope (Octaves)"
+title = "Repitch Transpose Spectrum, Keep Envelope (Octaves)"
 category = "pvoc"
 subcategory = "pitch"
 short_description = "Transposes the spectrum by a number of octaves, keeping the original spectral envelope"
@@ -9465,7 +9465,7 @@ key = "repitch_transposef_3"
 bin = "repitch"
 subprog = "transposef"
 mode = "3"
-title = "Transpose Spectrum, Keep Envelope (Semitones)"
+title = "Repitch Transpose Spectrum, Keep Envelope (Semitones)"
 category = "pvoc"
 subcategory = "pitch"
 short_description = "Transposes the spectrum by a number of semitones, keeping the original spectral envelope"
@@ -9549,7 +9549,7 @@ key = "pitch_tune_1"
 bin = "pitch"
 subprog = "tune"
 mode = "1"
-title = "Tune To Pitch Template (Hz)"
+title = "Pitch Tune To Pitch Template (Hz)"
 category = "pvoc"
 subcategory = "pitch"
 short_description = "Replaces spectral frequencies with harmonics of a set of specified pitches"
@@ -9603,7 +9603,7 @@ key = "pitch_tune_2"
 bin = "pitch"
 subprog = "tune"
 mode = "2"
-title = "Tune To Pitch Template (MIDI)"
+title = "Pitch Tune To Pitch Template (MIDI)"
 category = "pvoc"
 subcategory = "pitch"
 short_description = "Replaces spectral frequencies with harmonics of a set of specified MIDI pitches"
@@ -9656,7 +9656,7 @@ flag = "-c"
 key = "pitch_chordf_chordf"
 bin = "pitch"
 subprog = "chordf"
-title = "Chord From Spectrum"
+title = "Pitch Chord From Spectrum"
 category = "pvoc"
 subcategory = "pitch"
 short_description = "Superimposes transposed versions of the spectrum within its own spectral envelope"
@@ -9740,7 +9740,7 @@ flag = "-x"
 key = "pitch_chord_chord"
 bin = "pitch"
 subprog = "chord"
-title = "Chord From Sound"
+title = "Pitch Chord From Sound"
 category = "pvoc"
 subcategory = "pitch"
 short_description = "Superimposes transposed versions of a sound on the original"
@@ -9796,3 +9796,2239 @@ automatable = false
 kind = "toggle"
 default = false
 flag = "-x"
+
+# ---- Tier 1b (2026-07-13): blur weave -- fits the existing required_list mechanism as-is,
+# no new editor needed. CDP itself enforces the real (file-duration-dependent) step range at
+# runtime with a clear error ("Weave value N out of range (-X to Y) for this file") --
+# verified against the real binary -- so the catalog's own min/max stay a generous static
+# safety cap, same as every other Plain-scale param whose true ceiling isn't capturable by an
+# existing NumberScale variant.
+
+[[process]]
+key = "blur_weave"
+bin = "blur"
+subprog = "weave"
+title = "Blur Weave"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Weaves through the sound's analysis windows in a repeating step sequence"
+description = "Moves through the sound's spectral analysis windows following a repeating sequence of steps (in windows, forward or backward) rather than playing them in their original order -- can create anything from a subtle time-smear to a fully scrambled, stuttering re-ordering of the sound's spectral content, depending on the step sequence."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Weave Steps"
+description = "Repeating sequence of steps (in analysis windows, positive = forward, negative = backward) through the sound"
+automatable = true
+required_list = true
+kind = "number"
+min = -1000.0
+max = 1000.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+integer = true
+
+# ---- Tier 1b (2026-07-13): tapdelay -- the first shipped ParamKind::Table process. Always
+# emits a pan value for every tap (default 0.0 = centre) rather than making it a true
+# optional column: verified against the real binary that a present-but-centred pan on every
+# row still forces genuine stereo output deterministically, so `output_is_stereo` can stay a
+# static catalog fact instead of needing a dynamic-channel-count mechanism (an otherwise
+# real, unbuilt gap -- see CDP-Ext-Plan.md). `-f` (force float-precision output) is
+# deliberately not exposed: CDP's own default already matches the infile's format, and this
+# app's infile is always float32 unless `requires_simple_wav_input` -- so omitting the flag
+# gets the same effective precision without a param that adds no real user-facing choice.
+[[process]]
+key = "tapdelay_tapdelay"
+bin = "tapdelay"
+title = "Tap Delay"
+category = "time"
+subcategory = "delay"
+short_description = "Stereo multi-tapped delay with panning"
+description = "Feeds the source into a delay line and reads back a set of independently-timed, -gained, and -panned taps, plus a feedback loop through the whole delay line -- can build anything from a single slap-back echo to a dense, panned rhythmic cascade depending on the tap table."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = true
+# Same WAVE_FORMAT_EXTENSIBLE incompatibility as rmverb/reverb: confirmed by hand
+# (2026-07-14) that tapdelay fails ("unable to open outfile") against the float32 WAV
+# `hound` writes for any >16-bit input, but succeeds against the identical audio written as
+# plain 16-bit PCM.
+requires_simple_wav_input = true
+
+[[process.params]]
+name = "Tap Gain"
+description = "Gain factor applied to the delay line's output (typically around 0.25)"
+automatable = false
+kind = "number"
+min = 0.01
+max = 2.0
+step = 0.01
+default = 0.25
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Feedback"
+description = "Proportion of the delay line's output fed back into itself"
+automatable = false
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Mix"
+description = "Proportion of the source mixed in with the delayed output"
+automatable = false
+kind = "number"
+min = 0.0
+max = 0.99
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Taps"
+description = "Delay taps: each row is a time/amplitude/pan triple; times must stay strictly ascending"
+automatable = false
+kind = "table"
+time_column = 0
+
+[[process.params.columns]]
+name = "Time"
+min = 0.001
+max = 60.0
+step = 0.01
+default = 0.1
+scale = "plain"
+
+[[process.params.columns]]
+name = "Amp"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+scale = "plain"
+
+[[process.params.columns]]
+name = "Pan"
+min = -1.0
+max = 1.0
+step = 0.01
+default = 0.0
+scale = "plain"
+
+[[process.params]]
+name = "Trail Time"
+description = "Extra time (beyond the source's own duration) for the delay taps to play out"
+automatable = false
+kind = "number"
+min = 0.0
+max = 60.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+
+# ---- Tier 1b (2026-07-14): repeater -- second ParamKind::Table process, first with no
+# ascending-order constraint (time_column omitted entirely -- segments may overlap or run
+# backward per the binary's own usage text). Real ranges probed by hand against the binary:
+# Repeat Count must be either exactly 0 ("no repeat") or an integer >= 2 (1 is specifically
+# rejected -- "Repeat value less than 2"); mode 3's Accel/Warp/Fade ranges came back as clean
+# CDP-reported errors (e.g. "Value (0.0) out of range (1.0 to 10.0)"). SEED (-s), despite
+# being fully documented in the usage text, is rejected outright by this binary build
+# ("Unknown flag -s") -- dropped, same "usage text/binary mismatch, not a tui-wave bug"
+# precedent as iterline's earlier removal. RAND's real range differs by mode (1-2 for modes
+# 1/3, 1-8 for mode 2) per the binary's own usage text.
+
+[[process]]
+key = "repeater_repeater_1"
+bin = "repeater"
+subprog = "repeater"
+mode = "1"
+title = "Repeater (Delay)"
+category = "time"
+subcategory = "texture"
+short_description = "Repeats specified segments of the source in place, spaced by a delay"
+description = "Plays the source while repeating a table of specified segments in place -- each row repeats that segment a given number of times, spaced by a delay between the start of one repeat and the next."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = true
+
+[[process.params]]
+name = "Segments"
+description = "Segments to repeat: each row is a start time/end time/repeat count/delay quadruple. Segments may overlap or run backward, but each must span at least 0.010s"
+automatable = false
+kind = "table"
+
+[[process.params.columns]]
+name = "Start"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.1
+scale = "capped_at_input_duration"
+
+[[process.params.columns]]
+name = "End"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.2
+scale = "capped_at_input_duration"
+
+[[process.params.columns]]
+name = "Repeat Count"
+min = 0.0
+max = 1000.0
+step = 1.0
+default = 2.0
+scale = "plain"
+integer = true
+
+[[process.params.columns]]
+name = "Delay"
+min = -1.0
+max = 10.0
+step = 0.01
+default = 0.05
+scale = "plain"
+
+[[process.params]]
+name = "Randomize Delay"
+description = "Multiplier range for randomizing each repeat's delay (1 = no randomization)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 2.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-r"
+
+[[process.params]]
+name = "Randomize Pitch"
+description = "Semitone range for randomizing the pitch of each repeat (0 = no randomization)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-p"
+
+[[process]]
+key = "repeater_repeater_2"
+bin = "repeater"
+subprog = "repeater"
+mode = "2"
+title = "Repeater (Offset)"
+category = "time"
+subcategory = "texture"
+short_description = "Repeats specified segments of the source in place, spaced by a gap"
+description = "The same segment-repeating process as Repeater (Delay), but each row's 4th value is the gap between the end of one repeat and the start of the next, rather than the delay between their starts."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = true
+
+[[process.params]]
+name = "Segments"
+description = "Segments to repeat: each row is a start time/end time/repeat count/offset quadruple. Segments may overlap or run backward, but each must span at least 0.010s"
+automatable = false
+kind = "table"
+
+[[process.params.columns]]
+name = "Start"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.1
+scale = "capped_at_input_duration"
+
+[[process.params.columns]]
+name = "End"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.2
+scale = "capped_at_input_duration"
+
+[[process.params.columns]]
+name = "Repeat Count"
+min = 0.0
+max = 1000.0
+step = 1.0
+default = 2.0
+scale = "plain"
+integer = true
+
+[[process.params.columns]]
+name = "Offset"
+min = -1.0
+max = 10.0
+step = 0.01
+default = 0.05
+scale = "plain"
+
+[[process.params]]
+name = "Randomize Offset"
+description = "Multiplier range for randomizing each repeat's offset (1 = no randomization)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 8.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-r"
+
+[[process.params]]
+name = "Randomize Pitch"
+description = "Semitone range for randomizing the pitch of each repeat (0 = no randomization)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-p"
+
+[[process]]
+key = "repeater_repeater_3"
+bin = "repeater"
+subprog = "repeater"
+mode = "3"
+title = "Repeater (Dimming)"
+category = "time"
+subcategory = "texture"
+short_description = "Repeats segments with an accelerating, decaying 'bouncing object' effect"
+description = "The same segment-repeating process as Repeater (Delay), but the delay/segment length shortens and decays over the repeats, like a bouncing object coming to rest."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = true
+
+[[process.params]]
+name = "Segments"
+description = "Segments to repeat: each row is a start time/end time/repeat count/delay quadruple. Segments may overlap or run backward, but each must span at least 0.010s"
+automatable = false
+kind = "table"
+
+[[process.params.columns]]
+name = "Start"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.1
+scale = "capped_at_input_duration"
+
+[[process.params.columns]]
+name = "End"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.2
+scale = "capped_at_input_duration"
+
+[[process.params.columns]]
+name = "Repeat Count"
+min = 0.0
+max = 1000.0
+step = 1.0
+default = 2.0
+scale = "plain"
+integer = true
+
+[[process.params.columns]]
+name = "Delay"
+min = -1.0
+max = 10.0
+step = 0.01
+default = 0.05
+scale = "plain"
+
+[[process.params]]
+name = "Acceleration"
+description = "How much the delay/segment shortens by the end of the repeats (2 = shortens to half)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 10.0
+step = 0.01
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Warp"
+description = "Warps the rate of delay-change over the repeats (1 = no warp, >1 = shortens less initially and more later)"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Fade Shape"
+description = "Decay curve shape (1 = linear, >1 = fast then slow decay, <1 = slow then fast)"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Randomize Delay"
+description = "Multiplier range for randomizing each repeat's delay (1 = no randomization)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 2.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+flag = "-r"
+
+[[process.params]]
+name = "Randomize Pitch"
+description = "Semitone range for randomizing the pitch of each repeat (0 = no randomization)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+flag = "-p"
+
+# ---- Tier 1b (2026-07-14): focus freeze -- the first shipped ParamKind::MarkerTimeList
+# process. Confirmed against the real binary: the marker character must be concatenated
+# directly onto the time with no separator ("a0.3", never "a 0.3" -- the latter is rejected
+# as an "unknown time flag"); a bare time with no marker at all is rejected outright ("No
+# flags given in freeze data"), so the marker is genuinely mandatory, not the optional-
+# looking thing the usage text's "MAY be preceded by" wording suggests. Times must stay
+# strictly ascending across rows ("Time values out of sequence"). Also found: an 'a' marker
+# followed later by any 'b' marker is rejected as an "Impossible time sequence" -- a real,
+# data-dependent constraint of the freeze algorithm itself, left to CDP's own runtime error
+# rather than replicated client-side (every other combination -- aa, ba, bb -- succeeds).
+
+[[process]]
+key = "focus_freeze_1"
+bin = "focus"
+subprog = "freeze"
+mode = "1"
+title = "Focus Freeze (Amplitude)"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Freezes the spectral amplitudes at given times"
+description = "Freezes the sound's channel amplitudes at a list of marked times, holding each frozen window's amplitude either forward from an 'after' marker or backward from a 'before' marker until the next freeze point -- can suspend a sound's dynamic shape while its pitch content keeps evolving."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Freeze Times"
+description = "Times (seconds) at which the spectrum is frozen, each marked 'a' (freeze applies after this time) or 'b' (freeze applies before this time)"
+automatable = false
+kind = "marker_time_list"
+markers = ["a", "b"]
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.1
+scale = "capped_at_input_duration"
+
+[[process]]
+key = "focus_freeze_2"
+bin = "focus"
+subprog = "freeze"
+mode = "2"
+title = "Focus Freeze (Frequency)"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Freezes the spectral frequencies at given times"
+description = "The same marked-time freeze as Freeze (Amplitude), but freezes the sound's channel frequencies instead -- suspends the sound's pitch content while its amplitude keeps evolving."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Freeze Times"
+description = "Times (seconds) at which the spectrum is frozen, each marked 'a' (freeze applies after this time) or 'b' (freeze applies before this time)"
+automatable = false
+kind = "marker_time_list"
+markers = ["a", "b"]
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.1
+scale = "capped_at_input_duration"
+
+[[process]]
+key = "focus_freeze_3"
+bin = "focus"
+subprog = "freeze"
+mode = "3"
+title = "Focus Freeze (Amplitude & Frequency)"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Freezes both spectral amplitudes and frequencies at given times"
+description = "The same marked-time freeze as Freeze (Amplitude)/(Frequency), but freezes both the sound's channel amplitudes and frequencies together -- fully suspends the sound at each frozen moment."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Freeze Times"
+description = "Times (seconds) at which the spectrum is frozen, each marked 'a' (freeze applies after this time) or 'b' (freeze applies before this time)"
+automatable = false
+kind = "marker_time_list"
+markers = ["a", "b"]
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.1
+scale = "capped_at_input_duration"
+
+# ---- Tier 1b (2026-07-14): hilite band -- the first (and most complex) shipped
+# ParamKind::HiliteBand process. Real ranges/behavior probed by hand against the binary:
+# lofrq/hifrq must be > 0 (a negative value is rejected: "freq -100.00 out of range (>0 to
+# 22050.000000[nyquist])"), but the upper bound is lenient in practice (a hifrq well past
+# nyquist still succeeded) and lofrq > hifrq is accepted without error -- so both use a
+# plain generous 1.0-22050.0 range rather than a dynamic per-sample-rate scale. amp1/amp2
+# accept negative values (phase inversion) and large multipliers without complaint. The
+# transpose value is the one genuine hazard found: a NEGATIVE plain multiplier crashes the
+# binary outright ("INTERNAL ERROR: (Bug?) -ve frequency in
+# get_channel_corresponding_to_frq()"), while 0 and positive multipliers, and negative
+# *additive* Hz values (the '+' prefix mode), are all fine -- the catalog's own min is
+# floored at 0.0 to rule out the crash entirely (a real CDP bug, not a tui-wave one, same
+# "tighten the range past a found crash boundary" precedent as frfractal's Layers/Splice
+# Length), even though this means negative-Hz additive shifts aren't reachable through this
+# UI -- a narrower but safe tradeoff given the alternative is a real crash.
+
+[[process]]
+key = "hilite_band"
+bin = "hilite"
+subprog = "band"
+title = "Hilite Band"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Splits the spectrum into bands and processes each independently"
+description = "Splits the sound's spectrum into independent frequency bands, each optionally given its own amplitude change (constant or ramped) and/or pitch transpose (as a frequency multiplier or an additive Hz shift, optionally superimposed on the original rather than replacing it) -- a flexible per-band spectral EQ/transpose tool."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Bands"
+description = "Frequency bands to process independently: each row is a lo/hi frequency range plus optional amplitude and/or transpose adjustments"
+automatable = false
+kind = "hilite_band"
+
+[process.params.lofrq]
+name = "Lo Freq"
+min = 1.0
+max = 22050.0
+step = 1.0
+default = 200.0
+scale = "plain"
+
+[process.params.hifrq]
+name = "Hi Freq"
+min = 1.0
+max = 22050.0
+step = 1.0
+default = 2000.0
+scale = "plain"
+
+[process.params.amp1]
+name = "Amp 1"
+min = -10.0
+max = 10.0
+step = 0.1
+default = 1.0
+scale = "plain"
+
+[process.params.amp2]
+name = "Amp 2"
+min = -10.0
+max = 10.0
+step = 0.1
+default = 1.0
+scale = "plain"
+
+[process.params.transpose]
+name = "Transpose"
+min = 0.0
+max = 1000.0
+step = 0.1
+default = 1.0
+scale = "plain"
+
+# ---- Psow batch (2026-07-15): pitch-synchronous-grain (FOF) family ----
+# `psow` has 17 subprograms operating on pitch-synchronous grains extracted via a
+# breakpoint pitch-envelope analysis (`pitch-brkpnt-data`, CDP's own bfil format --
+# exactly the `required_envelope` shape already used elsewhere in this catalog, e.g.
+# `focus_hold`/`rotor_rotor_1`). Every subprogram here takes a plain WAV directly (no
+# `.ana` analysis file appears anywhere in any subprogram's usage text), hence
+# `category = "time"` throughout. Bounds below were confirmed by hand against the real
+# binary (feeding an out-of-range sentinel at each numeric argv position and reading back
+# CDP's own "Value (...) out of range (min to max)" message) rather than trusting the
+# usage text's own claimed ranges, which in several cases turned out to be wrong (noted
+# per-process below). No fractional-value rejection was found anywhere in this family
+# (every conceptually-integer count/index accepted a fractional probe value with exit 0),
+# so no param here sets `integer = true` -- consistent with this catalog's existing policy
+# of only setting that flag when hand-confirmed against a real rejection.
+#
+# Three of the 17 subprograms are deliberately NOT included:
+# - `synth` (skipped per plan): its `[oscdatafile]` argument is a bespoke per-mode format
+#   (freq/amp pairs, midipitch/amp pairs, or an unexplained "filter varibank" format) that
+#   needs real research before it can be catalogued -- none of `ParamKind`'s existing
+#   shapes obviously fit it sight unseen.
+# - `locate` (skipped): its usage is `psow locate infil pitch-brkpnt-data time` -- there is
+#   no `outfile` at all. It prints a computed time to stdout rather than writing a sound
+#   file, so it doesn't fit this app's Command/pipeline shape (which always plans an
+#   argv `outfile` token and reads back a resulting WAV) at all, independent of any
+#   ParamKind question.
+# - `chop` (skipped): `psow chop infile outfile pitch-brkpnt-data time-grain-pairs`
+#   confirmed (by hand) to write MULTIPLE numbered output files (`outfile.wav`,
+#   `outfile_001.wav`, `outfile_002.wav`, ...) for a multi-cut-point input -- a genuine
+#   multi-output process like `distcut`/`envcut`, which this catalog already models via
+#   `IoKind::WavGlob`. But `WavGlob`'s planner (`pipeline::plan_wav_glob`) hardcodes the
+#   literal prefix `"cutout"` and assumes CDP's own contiguous-from-0 `<prefix>N.wav`
+#   naming (`distcut`/`envcut`'s convention) -- `chop`'s actual naming (base name unchanged
+#   for the first file, then `_001`/`_002` zero-padded with an underscore for the rest)
+#   doesn't match that hardcoded shape at all. Fitting it would mean generalizing
+#   `plan_wav_glob`'s prefix/numbering assumption in `pipeline.rs`, which this batch was
+#   told not to touch -- skipped rather than forced.
+
+[[process]]
+key = "psow_stretch"
+bin = "psow"
+subprog = "stretch"
+title = "Psow Stretch"
+category = "time"
+subcategory = "texture"
+short_description = "Timestretches/transposes a sound by repositioning its pitch-synchronous grains"
+description = """
+Time-stretches (or shrinks) a sound by repositioning its pitch-synchronous grains (FOFs) \
+along the timeline without stretching the grains themselves -- a chunk of grains is \
+retained as-is while the gaps between chunks are stretched, giving a different character \
+to plain phase-vocoder time-stretching.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitch Envelope"
+description = "Breakpoint pitch envelope (Hz) tracking the source's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Timestretch"
+description = "Proportion by which the sound is stretched (or shrunk); 1.0 is unchanged (CDP-confirmed range 0.1-10.0)"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Grain Count"
+description = "Number of grains in a chunk retained as-is between stretched gaps"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "psow_dupl"
+bin = "psow"
+subprog = "dupl"
+title = "Psow Duplicate Grains"
+category = "time"
+subcategory = "texture"
+short_description = "Timestretches a sound by duplicating (rather than repositioning) its pitch-synchronous grains"
+description = """
+Time-stretches a sound by duplicating each chunk of pitch-synchronous grains (FOFs) a \
+given number of times, rather than repositioning gaps between chunks the way Psow Stretch \
+does -- gives a more repetitive, stuttering character to the stretch.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitch Envelope"
+description = "Breakpoint pitch envelope (Hz) tracking the source's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Repeat Count"
+description = "Number of repetitions of each grain chunk (CDP-confirmed range 2-256)"
+automatable = false
+kind = "number"
+min = 2.0
+max = 256.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Grain Count"
+description = "Number of grains in a chunk"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "psow_delete"
+bin = "psow"
+subprog = "delete"
+title = "Psow Delete Grains"
+category = "time"
+subcategory = "texture"
+short_description = "Time-shrinks a sound by deleting a proportion of its pitch-synchronous grain chunks"
+description = """
+Shrinks a sound's duration by deleting a proportion of its pitch-synchronous grain chunks \
+(FOFs) -- a Prop Keep of 2 keeps 1 chunk in every 2, 7 keeps 1 in every 7, and so on.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+# NOTE: the real binary's own usage text prints itself as "psow del infile outfile ..."
+# (confirmed against `psow delete` with no args) -- but the actual argv keyword this app
+# must pass is "delete" (confirmed against the real binary: `psow delete ...` runs the
+# process correctly, while `psow del ...` exits 255 with no usage text or error message at
+# all). Cosmetic usage-text mismatch, not an argv-shape bug.
+
+[[process.params]]
+name = "Pitch Envelope"
+description = "Breakpoint pitch envelope (Hz) tracking the source's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Prop Keep"
+description = "Proportion of grain chunks to keep: 2 keeps 1 in 2, 7 keeps 1 in 7, etc (CDP-confirmed range 2-20)"
+automatable = false
+kind = "number"
+min = 2.0
+max = 20.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Grain Count"
+description = "Number of grains in a chunk"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "psow_strtrans"
+bin = "psow"
+subprog = "strtrans"
+title = "Psow Stretch And Transpose"
+category = "time"
+subcategory = "texture"
+short_description = "Timestretches and transposes a sound by repositioning and overlapping its pitch-synchronous grains"
+description = """
+Time-stretches and transposes a sound by repositioning its pitch-synchronous grains (FOFs) \
+and overlapping successive chunks -- the Transposition amount doubles as the amount of \
+overlap between chunks, so it interacts with Timestretch in ways CDP's own documentation \
+describes as unpredictable.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitch Envelope"
+description = "Breakpoint pitch envelope (Hz) tracking the source's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Timestretch"
+description = "Proportion by which the sound is stretched; 1.0 is unchanged (CDP-confirmed range 1.0-10.0 -- note this excludes the sub-1.0 shrink values Psow Stretch allows)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 10.0
+step = 0.01
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Grain Count"
+description = "Number of grains in a chunk retained as-is between stretched gaps (CDP-confirmed range 1-32767, much wider than Psow Stretch/Duplicate/Delete's 1-256)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 32767.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Transposition"
+description = "Transposition in semitones; also sets the overlap between successive grain chunks, so it interacts with Timestretch unpredictably (CDP's own usage text's warning)"
+automatable = false
+kind = "number"
+min = -24.0
+max = 24.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "psow_features_1"
+bin = "psow"
+subprog = "features"
+mode = "1"
+title = "Psow Impose Vocal Features (Transpose+Timewarp)"
+category = "time"
+subcategory = "pitch"
+short_description = "Imposes vocal-type FOF features on a sound, transposing pitch together with a time-warp"
+description = """
+Imposes new vocal-type features (vibrato, spectral transposition, hoarseness, \
+subharmonics...) on a sound while preserving or modifying its pitch-synchronous grains \
+(FOFs). Mode 1 accompanies the pitch transposition with a time-warp: transposing up also \
+shortens the sound.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitch Envelope"
+description = "Breakpoint pitch envelope (Hz) tracking the source's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Grain Count"
+description = "Number of grains in a chunk retained as-is"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Transposition"
+description = "Pitch transposition in semitones; in this mode accompanied by a time-warp (pitch up shortens the sound) (CDP-confirmed range -48 to 96)"
+automatable = false
+kind = "number"
+min = -48.0
+max = 96.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Vibrato Frequency"
+description = "Frequency (Hz) of any added vibrato"
+automatable = true
+kind = "number"
+min = 0.0
+max = 20.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Vibrato Depth"
+description = "Depth (semitones) of any added vibrato"
+automatable = true
+kind = "number"
+min = 0.0
+max = 3.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Spectral Transposition"
+description = "Transposition of the spectrum (not the fundamental) in semitones"
+automatable = true
+kind = "number"
+min = -24.0
+max = 24.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Hoarseness"
+description = "Degree of hoarseness imposed on the voice"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Attenuation"
+description = "Attenuation, potentially needed when FOF-Stretching is used"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Subharmonic Number"
+description = "Amount by which the fundamental is divided to generate a subharmonic; 0 or 1 gives no subharmonic"
+automatable = false
+kind = "number"
+min = 0.0
+max = 8.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Subharmonic Amp"
+description = "Level of any introduced subharmonic"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "FOF Stretching"
+description = "Time-extension of individual FOFs -- does not stretch the sound itself (usage text claims a range of 1-512; CDP actually enforces 1-4096)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 4096.0
+step = 1.0
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Alternative Algorithm"
+description = "Use an alternative algorithm for FOF-stretching"
+flag = "-a"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "psow_features_2"
+bin = "psow"
+subprog = "features"
+mode = "2"
+title = "Psow Impose Vocal Features (Transpose+Lower Pitch)"
+category = "time"
+subcategory = "pitch"
+short_description = "Imposes vocal-type FOF features on a sound, adding a transposed pitch alongside the original"
+description = """
+Imposes new vocal-type features (vibrato, spectral transposition, hoarseness, \
+subharmonics...) on a sound while preserving or modifying its pitch-synchronous grains \
+(FOFs). Mode 2 accompanies the pitch transposition with an additional lower pitch, rather \
+than Mode 1's time-warp.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitch Envelope"
+description = "Breakpoint pitch envelope (Hz) tracking the source's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Grain Count"
+description = "Number of grains in a chunk retained as-is"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Transposition"
+description = "Pitch transposition in semitones; in this mode accompanied by an additional lower pitch rather than a time-warp (CDP-confirmed range -48 to 96)"
+automatable = false
+kind = "number"
+min = -48.0
+max = 96.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Vibrato Frequency"
+description = "Frequency (Hz) of any added vibrato"
+automatable = true
+kind = "number"
+min = 0.0
+max = 20.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Vibrato Depth"
+description = "Depth (semitones) of any added vibrato"
+automatable = true
+kind = "number"
+min = 0.0
+max = 3.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Spectral Transposition"
+description = "Transposition of the spectrum (not the fundamental) in semitones"
+automatable = true
+kind = "number"
+min = -24.0
+max = 24.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Hoarseness"
+description = "Degree of hoarseness imposed on the voice"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Attenuation"
+description = "Attenuation, potentially needed when FOF-Stretching is used"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Subharmonic Number"
+description = "Amount by which the fundamental is divided to generate a subharmonic; 0 or 1 gives no subharmonic"
+automatable = false
+kind = "number"
+min = 0.0
+max = 8.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Subharmonic Amp"
+description = "Level of any introduced subharmonic"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "FOF Stretching"
+description = "Time-extension of individual FOFs -- does not stretch the sound itself (usage text claims a range of 1-512; CDP actually enforces 1-4096)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 4096.0
+step = 1.0
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Alternative Algorithm"
+description = "Use an alternative algorithm for FOF-stretching"
+flag = "-a"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "psow_grab"
+bin = "psow"
+subprog = "grab"
+title = "Psow Grab Grain"
+category = "time"
+subcategory = "texture"
+short_description = "Grabs a pitch-synchronous grain (or grain stream) from a sound to build a new one"
+description = """
+Grabs a pitch-synchronous grain (FOF) at a chosen time and uses it to build a new sound, \
+either a single frozen grain (Duration 0) or a stream of repeated/overlapped copies of it.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitch Envelope"
+description = "Breakpoint pitch envelope (Hz) tracking the source's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Time"
+description = "Time at which to grab the grain(s)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.2
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Output Duration"
+description = "Duration of the output; 0 grabs a single frozen grain (chunk) rather than a stream"
+automatable = false
+kind = "number"
+min = 0.0
+max = 32767.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "output_duration_seconds"
+
+[[process.params]]
+name = "Grain Count"
+description = "Number of grains in a chunk"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Spectrum Transposition"
+description = "Transposition of the spectrum (not the fundamental); despite its usage text calling this 'semitones', CDP actually enforces a 0.001-100 ratio range (1.0 = unchanged) and rejects a literal 0 -- treated here as a ratio, not semitones"
+automatable = true
+kind = "number"
+min = 0.001
+max = 100.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Density"
+description = "Rate at which grabbed chunks succeed one another: 1 follows on, 2 overlaps by 2 (can transpose up an octave without changing the spectrum), 0.5 separates chunks by an equivalent silence"
+automatable = true
+kind = "number"
+min = 0.125
+max = 8.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Randomisation"
+description = "Randomisation of grain-chunk position in the output; introduces noisiness"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Overall output gain; CDP rejects a literal 0 outright (\"ZERO output gain specified\") -- may need reducing when Density > 1"
+automatable = true
+kind = "number"
+min = 0.01
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "psow_sustain"
+bin = "psow"
+subprog = "sustain"
+title = "Psow Sustain Grain"
+category = "time"
+subcategory = "texture"
+short_description = "Freezes and sustains a sound on one pitch-synchronous grain, extending it to a new duration"
+description = """
+Freezes a sound on a single pitch-synchronous grain (FOF) at a chosen time and sustains it \
+to a longer output duration, with optional vibrato and transposition applied only to the \
+expanded grain.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitch Envelope"
+description = "Breakpoint pitch envelope (Hz) tracking the source's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Time"
+description = "Time at which to freeze the grain(s)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.2
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Output Duration"
+description = "Duration of the output, greater than the input's own duration (CDP-confirmed range 1-32767)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 32767.0
+step = 0.01
+default = 2.0
+exponential = true
+scale = "output_duration_seconds"
+
+[[process.params]]
+name = "Grain Count"
+description = "Number of grains in a chunk"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Vibrato Frequency"
+description = "Frequency (Hz) of any added vibrato, added only to the expanded grain"
+automatable = true
+kind = "number"
+min = 0.0
+max = 20.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Vibrato Depth"
+description = "Depth (semitones) of any added vibrato"
+automatable = true
+kind = "number"
+min = 0.0
+max = 3.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Transposition"
+description = "Transposition (semitones) of the grain -- time zero for this parameter's own automation is the start of the expanded grain, not (necessarily) the start of the sound (CDP-confirmed range -48 to 24)"
+automatable = true
+kind = "number"
+min = -48.0
+max = 24.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Loudness contour of the entire output (CDP-confirmed range 0-10, wider than most other gain params in this family)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Smooth Grabbed FOFs"
+description = "Smooth the grabbed FOFs"
+flag = "-s"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "psow_sustain2"
+bin = "psow"
+subprog = "sustain2"
+title = "Psow Sustain Grain (By Time Range)"
+category = "time"
+subcategory = "texture"
+short_description = "Freezes and sustains a sound on a specified grain, chosen by a start/end time range instead of a pitch envelope"
+description = """
+Freezes a sound on the grain spanning a specified start/end time range and sustains it to \
+a longer output duration -- unlike Psow Sustain Grain, this variant needs no pitch \
+envelope at all, locating the grain purely from the given time range (with an optional \
+zero-crossing nudge to fine-tune the cut points).
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Start"
+description = "Time at which to cut the start of the grain"
+automatable = false
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.2
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "End"
+description = "Time of the end of the grain"
+automatable = false
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.4
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Output Duration"
+description = "Duration of the output, greater than the input's own duration (CDP-confirmed range 1-32767)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 32767.0
+step = 0.01
+default = 2.0
+exponential = true
+scale = "output_duration_seconds"
+
+[[process.params]]
+name = "Vibrato Frequency"
+description = "Frequency (Hz) of any added vibrato"
+automatable = true
+kind = "number"
+min = 0.0
+max = 20.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Vibrato Depth"
+description = "Depth (semitones) of any added vibrato"
+automatable = true
+kind = "number"
+min = 0.0
+max = 3.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Nudge"
+description = "Moves the selected grain's position by this many zero-crossings"
+automatable = false
+kind = "number"
+min = -24.0
+max = 24.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "psow_interp"
+bin = "psow"
+subprog = "interp"
+title = "Psow Interpolate Grains"
+category = "time"
+subcategory = "texture"
+short_description = "Interpolates between two pitch-synchronous grains from two different sounds to build a new one"
+description = """
+Interpolates between a single pitch-synchronous grain (FOF) from this sound and one from \
+a second open buffer, sustaining the first, morphing across, then sustaining the second. \
+Each input MUST already contain a single grabbed grain (e.g. the output of Psow Grab \
+Grain with Output Duration 0) rather than a full recording -- CDP rejects an ordinary \
+multi-grain sound outright with "File 1 is not a valid pitch-sync grain file".
+"""
+input = "dual_wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+# NOTE (2026-07-15, confirmed via `TUI_WAVE_CDP_SMOKE=1 cargo test catalog_smoke_test`):
+# this entry is the one catalog_smoke_test failure this batch introduces, and it's a
+# fixture-content issue rather than an argv-shape bug -- the smoke harness's mono_sine
+# fixture is an ordinary full recording, not a single pre-grabbed grain, so CDP correctly
+# rejects it ("File 1 is not a valid pitch-sync grain file"), the same class of exclusion
+# already listed in `cdp::runner`'s `KNOWN_FIXTURE_FAILURES` (e.g. grain_reverse/
+# grainex_extend's "No grains found" against a constant tone). `psow_interp` should be
+# added to that list, but this batch was told not to touch `src/cdp/runner.rs` -- flagging
+# here for whoever picks that up next.
+
+[[process.params]]
+name = "Start Duration"
+description = "Duration to sustain the initial grain"
+automatable = false
+kind = "number"
+min = 0.0
+max = 32767.0
+step = 0.01
+default = 0.2
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Interp Duration"
+description = "Duration of the interpolation between the two grains"
+automatable = false
+kind = "number"
+min = 0.0
+max = 32767.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "End Duration"
+description = "Duration to sustain the final grain"
+automatable = false
+kind = "number"
+min = 0.0
+max = 32767.0
+step = 0.01
+default = 0.2
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Vibrato Frequency"
+description = "Frequency (Hz) of any added vibrato"
+automatable = true
+kind = "number"
+min = 0.0
+max = 20.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Vibrato Depth"
+description = "Depth (semitones) of any added vibrato"
+automatable = true
+kind = "number"
+min = 0.0
+max = 3.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Tremolo Frequency"
+description = "Frequency (Hz) of any added tremolo"
+automatable = true
+kind = "number"
+min = 0.0
+max = 30.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Tremolo Depth"
+description = "Depth of any added tremolo"
+automatable = true
+kind = "number"
+min = 0.0
+max = 10.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "psow_impose"
+bin = "psow"
+subprog = "impose"
+title = "Psow Impose Grains On Sound"
+category = "time"
+subcategory = "combine"
+short_description = "Imposes the vocal FOFs of this sound onto a second sound (another open buffer)"
+description = """
+Imposes the pitch-synchronous grains (FOFs) of this sound onto a second sound from \
+another open buffer, applying the first sound's vocal-like grain character to the \
+second's own amplitude envelope.
+"""
+input = "dual_wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+# NOTE: the real binary's own usage text prints itself as "psow synth infile1 infile2
+# outfile ..." (confirmed against `psow impose` with no args) -- but the actual argv
+# keyword this app must pass is "impose" (confirmed against the real binary: `psow impose
+# ...` runs the process correctly and produces real output). Cosmetic usage-text mismatch
+# (most likely copy-pasted from the unrelated `psow synth` subprogram's help text), not an
+# argv-shape bug.
+
+[[process.params]]
+name = "Pitch Envelope"
+description = "Breakpoint pitch envelope (Hz) tracking the first sound's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Depth"
+description = "Depth of application of the first sound's FOFs onto the second sound"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Window Size"
+description = "Window size (ms) used to track the second sound's envelope for normalisation"
+automatable = false
+kind = "number"
+min = 1.0
+max = 200.0
+step = 1.0
+default = 20.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gate"
+description = "Level (dB) in the second sound below which it's assumed to be silence"
+automatable = false
+kind = "number"
+min = -96.0
+max = 0.0
+step = 1.0
+default = -40.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "psow_split"
+bin = "psow"
+subprog = "split"
+title = "Psow Split Grains"
+category = "time"
+subcategory = "pitch"
+short_description = "Splits vocal FOFs into a subharmonic component and an upwardly-transposed component"
+description = """
+Splits a sound's pitch-synchronous grains (FOFs) into a subharmonic (lower, divided-pitch) \
+component and an upwardly-transposed component, mixed back together at a chosen balance.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitch Envelope"
+description = "Breakpoint pitch envelope (Hz) tracking the source's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Subharmonic Number"
+description = "Divides the source frequency to produce the subharmonic component"
+automatable = false
+kind = "number"
+min = 3.0
+max = 8.0
+step = 1.0
+default = 3.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Up Transposition"
+description = "Upward transposition, in semitones, of the transposed component"
+automatable = true
+kind = "number"
+min = 0.0
+max = 48.0
+step = 0.1
+default = 12.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Balance"
+description = "Level of the up-transposed component relative to the subharmonic component"
+automatable = true
+kind = "number"
+min = 0.0
+max = 8.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "psow_space"
+bin = "psow"
+subprog = "space"
+title = "Psow Space Grains"
+category = "time"
+subcategory = "space"
+short_description = "Splits alternating vocal FOFs between different spatial (stereo) locations"
+description = """
+Splits alternating pitch-synchronous grains (FOFs) between different positions across the \
+stereo field, producing a stereo result even from a mono source -- a spatialised sibling \
+of Psow Split Grains.
+"""
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = true
+
+[[process.params]]
+name = "Pitch Envelope"
+description = "Breakpoint pitch envelope (Hz) tracking the source's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Subharmonic Number"
+description = "Divides the source frequency to produce the subharmonic used for spatial alternation"
+automatable = false
+kind = "number"
+min = 2.0
+max = 5.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Separation"
+description = "Spatial separation of alternate FOFs: 0 is centred (no separation), 1 alternates to the widest spread starting right, -1 starting left"
+automatable = true
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Balance"
+description = "Left:right balance of the spatially-separated components (usage text claims a range of 0-8; CDP actually enforces 0.001-1000 -- 1.0 is equal, >1 biases right by division, <1 biases left by multiplication)"
+automatable = true
+kind = "number"
+min = 0.001
+max = 1000.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Hi-Suppress"
+description = "Suppression of high-frequency components"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "psow_interleave"
+bin = "psow"
+subprog = "interleave"
+title = "Psow Interleave Grains"
+category = "time"
+subcategory = "combine"
+short_description = "Interleaves vocal FOFs from two different sounds into one new sound"
+description = """
+Interleaves pitch-synchronous grains (FOFs) from this sound and a second sound (another \
+open buffer) into a single new stream, biasing the result's pitch and mixing the two \
+sounds' relative loudness and density.
+"""
+input = "dual_wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitch Envelope 1"
+description = "Breakpoint pitch envelope (Hz) tracking the first sound's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Envelope 2"
+description = "Breakpoint pitch envelope (Hz) tracking the second sound's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Group Length"
+description = "Number of FOFs in each manipulated segment (CDP-confirmed range 1-16)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 16.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Bias"
+description = "Biases the output pitch toward one sound or the other: 0 is no bias, 1 fully biased to the first sound, -1 to the second"
+automatable = true
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Level Balance"
+description = "Level balance of the two sounds' components in the output: 1.0 is equal, >1 favours the first sound, <1 the second"
+automatable = true
+kind = "number"
+min = 0.0001
+max = 10000.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Weight"
+description = "Relative number of components taken from each sound: 1.0 is equal, >1 favours the first sound, <1 the second"
+automatable = true
+kind = "number"
+min = 0.0625
+max = 16.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "psow_replace"
+bin = "psow"
+subprog = "replace"
+title = "Psow Replace Grains"
+category = "time"
+subcategory = "combine"
+short_description = "Combines the vocal FOFs of this sound with the pitch of a second sound"
+description = """
+Combines the pitch-synchronous grains (FOFs) of this sound with the pitch contour of a \
+second sound (another open buffer) -- both inputs must already carry pitched grains.
+"""
+input = "dual_wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitch Envelope 1"
+description = "Breakpoint pitch envelope (Hz) tracking the first sound's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Envelope 2"
+description = "Breakpoint pitch envelope (Hz) tracking the second sound's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Group Count"
+description = "Number of FOFs in a chunk (CDP-confirmed range 1-16)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 16.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "psow_cutatgrain_1"
+bin = "psow"
+subprog = "cutatgrain"
+mode = "1"
+title = "Psow Cut At Grain (Keep Before)"
+category = "time"
+subcategory = "texture"
+short_description = "Cuts a sound at the grain boundary nearest a chosen time, keeping the part before it"
+description = """
+Cuts the sound at the exact start of the pitch-synchronous grain (FOF) nearest a chosen \
+time, retaining only the part of the sound BEFORE that grain.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitch Envelope"
+description = "Breakpoint pitch envelope (Hz) tracking the source's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Time"
+description = "Time at which to cut the file (snapped to the nearest grain-start boundary)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.2
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process]]
+key = "psow_cutatgrain_2"
+bin = "psow"
+subprog = "cutatgrain"
+mode = "2"
+title = "Psow Cut At Grain (Keep After)"
+category = "time"
+subcategory = "texture"
+short_description = "Cuts a sound at the grain boundary nearest a chosen time, keeping the part at and after it"
+description = """
+Cuts the sound at the exact start of the pitch-synchronous grain (FOF) nearest a chosen \
+time, retaining only the part of the sound AT AND AFTER that grain.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitch Envelope"
+description = "Breakpoint pitch envelope (Hz) tracking the source's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Time"
+description = "Time at which to cut the file (snapped to the nearest grain-start boundary)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.2
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process]]
+key = "psow_reinforce_1"
+bin = "psow"
+subprog = "reinforce"
+mode = "1"
+title = "Psow Reinforce Harmonics"
+category = "time"
+subcategory = "pitch"
+short_description = "Reinforces chosen harmonics of a sound's pitch-synchronous grains at specified relative levels"
+description = """
+Reinforces the harmonic content of a sound's pitch-synchronous grains (FOFs): a table of \
+harmonic-number/level pairs specifies which harmonics to boost and by how much, relative \
+to the source.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+# NOTE: usage text implies fractional harmonic numbers are only valid in Mode 2 ("In MODE
+# 2, the harmonics may be fractional"); confirmed by hand that Mode 1 accepts a fractional
+# harmonic number (e.g. 2.5) with exit 0 too. Usage-text/binary mismatch -- no `integer`
+# flag set on the column as a result, consistent with this catalog's policy of only
+# marking a field integer-only on a confirmed real rejection.
+
+[[process.params]]
+name = "Reinforcement Data"
+description = "Table of harmonic-number/level pairs: which harmonics to reinforce, and by how much relative to the source (CDP-confirmed harmonic range 2-256, level range >0-16)"
+automatable = false
+kind = "table"
+
+[[process.params.columns]]
+name = "Harmonic Number"
+min = 2.0
+max = 256.0
+step = 1.0
+default = 2.0
+scale = "plain"
+
+[[process.params.columns]]
+name = "Level"
+min = 0.0001
+max = 16.0
+step = 0.01
+default = 1.0
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Envelope"
+description = "Breakpoint pitch envelope (Hz) tracking the source's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Delay"
+description = "Onset delay (ms) of the added harmonics (CDP-confirmed range 0-1000)"
+flag = "-d"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1000.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Omit Coincident FOFs"
+description = "Omit FOFs generated for higher harmonics that coincide with FOFs of lower harmonics"
+flag = "-s"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "psow_reinforce_2"
+bin = "psow"
+subprog = "reinforce"
+mode = "2"
+title = "Psow Reinforce Inharmonic Partials"
+category = "time"
+subcategory = "pitch"
+short_description = "Reinforces chosen inharmonic partials of a sound's pitch-synchronous grains at specified relative levels"
+description = """
+Reinforces a sound's pitch-synchronous grains (FOFs) with inharmonic partials: a table of \
+(possibly fractional) harmonic-number/level pairs specifies which partials to add and by \
+how much, relative to the source.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Reinforcement Data"
+description = "Table of harmonic-number/level pairs (fractional harmonic numbers allowed): which inharmonic partials to add, and by how much relative to the source (CDP-confirmed harmonic range >1-256, level range >0-16)"
+automatable = false
+kind = "table"
+
+[[process.params.columns]]
+name = "Harmonic Number"
+min = 1.01
+max = 256.0
+step = 0.01
+default = 1.5
+scale = "plain"
+
+[[process.params.columns]]
+name = "Level"
+min = 0.0001
+max = 16.0
+step = 0.01
+default = 1.0
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Envelope"
+description = "Breakpoint pitch envelope (Hz) tracking the source's fundamental -- may contain silence-gap zeros but must contain some real frequency values (never a pitch-tracking zero)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Weight"
+description = "Sustain of the added inharmonic components: higher weight sustains longer (CDP-confirmed range 1-256; a very high weight may overflow CDP's own buffers per its usage text)"
+flag = "-w"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 0.1
+default = 4.0
+exponential = true
+scale = "plain"
