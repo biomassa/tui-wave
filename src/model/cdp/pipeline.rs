@@ -138,6 +138,12 @@ pub struct PlannedJob {
     /// `Some` only for a glob-output process (`IoKind::WavGlob`); `output_files` is always
     /// empty in that case — the two are mutually exclusive result shapes.
     pub glob_output: Option<GlobOutputSpec>,
+    /// `Some` only for a curve-in/curve-out process (`IoKind::Curve` — the `repitch` family's
+    /// pitch-curve transforms, CDP-Ext-Plan.md Phase 4 "hard tier"). Names the relative temp
+    /// file holding the job's final result as plain-text time/Hz breakpoint pairs — never
+    /// spliced into an audio `Document` the way `output_files`/`glob_output` are, instead
+    /// read back into a `model::curve::PitchCurve`. Mutually exclusive with both of those.
+    pub output_curve: Option<String>,
     pub brk_files: Vec<(String, String)>,
     pub deferred_window_params: Vec<DeferredWindowParam>,
     /// Copied straight from `ProcessDef.requires_simple_wav_input` — carried on the planned
@@ -377,6 +383,93 @@ fn plan_param(
             brk_files.push((relative_name.clone(), contents));
             ParamPlan { arg: format_arg(&param.flag, &relative_name), deferred: None }
         }
+        // A multi-column datafile (`ParamKind::Table`, e.g. tapdelay's `time amp [pan]`
+        // taps): one row per line, each row's values space-separated in column order,
+        // each resolved through its own column's `NumberScale` — the same "extra text
+        // file, argv token is its filename" mechanism `List`/`Breakpoints` already use,
+        // just with more than one value per line. None of the catalog's table params use
+        // `PercentOfAnaWindowCount`, so — like `List` — every column resolves outright.
+        ParamValue::Table(rows) => {
+            let super::def::ParamKind::Table { columns, .. } = &param.kind else {
+                unreachable!("Table value paired with non-Table ParamKind")
+            };
+            let relative_name = format!("table_{brk_index}.txt");
+            let contents = rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .zip(columns)
+                        .map(|(&v, col)| {
+                            format_number(scale_number_value(col.scale, v, duration_secs, pvoc, sample_rate))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            brk_files.push((relative_name.clone(), contents));
+            ParamPlan { arg: format_arg(&param.flag, &relative_name), deferred: None }
+        }
+        // `focus freeze`'s bespoke shape: marker character concatenated directly onto the
+        // time value with no separator (`"a0.3"`, never `"a 0.3"` — confirmed against the
+        // real binary, which rejects the latter as an "unknown time flag"). None of the
+        // catalog's marker-time-list params use `PercentOfAnaWindowCount`, so — like
+        // `List`/`Table` — the time resolves outright via `scale_number_value`.
+        ParamValue::MarkerTimeList(entries) => {
+            let super::def::ParamKind::MarkerTimeList { scale, .. } = &param.kind else {
+                unreachable!("MarkerTimeList value paired with non-MarkerTimeList ParamKind")
+            };
+            let relative_name = format!("marktime_{brk_index}.txt");
+            let contents = entries
+                .iter()
+                .map(|&(marker, t)| format!("{marker}{}", format_number(scale_number_value(*scale, t, duration_secs, pvoc, sample_rate))))
+                .collect::<Vec<_>>()
+                .join("\n");
+            brk_files.push((relative_name.clone(), contents));
+            ParamPlan { arg: format_arg(&param.flag, &relative_name), deferred: None }
+        }
+        // `hilite band`'s bitflag-conditional shape: each line is `lofrq hifrq BITFLAG
+        // [amp1] [amp2] [[+]transpose]` — the bitflag is a literal 4-character '0'/'1'
+        // string (confirmed against the real binary), and each trailing value is present
+        // only when its governing bit is set, in that fixed order. None of the catalog's
+        // hilite band fields use `PercentOfAnaWindowCount`, so every numeric field
+        // resolves outright via `scale_number_value`.
+        ParamValue::HiliteBand(rows) => {
+            let super::def::ParamKind::HiliteBand { lofrq, hifrq, amp1, amp2, transpose } = &param.kind else {
+                unreachable!("HiliteBand value paired with non-HiliteBand ParamKind")
+            };
+            let relative_name = format!("hiliteband_{brk_index}.txt");
+            let resolve = |col: &super::def::TableColumn, v: f64| {
+                format_number(scale_number_value(col.scale, v, duration_secs, pvoc, sample_rate))
+            };
+            let contents = rows
+                .iter()
+                .map(|row| {
+                    let mut tokens = vec![
+                        resolve(lofrq, row.lofrq),
+                        resolve(hifrq, row.hifrq),
+                        format!(
+                            "{}{}{}{}",
+                            row.amp_bit as u8, row.ramp_bit as u8, row.transpose_bit as u8, row.add_bit as u8
+                        ),
+                    ];
+                    if row.amp_bit {
+                        tokens.push(resolve(amp1, row.amp1));
+                    }
+                    if row.ramp_bit {
+                        tokens.push(resolve(amp2, row.amp2));
+                    }
+                    if row.transpose_bit {
+                        let value = resolve(transpose, row.transpose_value);
+                        tokens.push(if row.transpose_additive { format!("+{value}") } else { value });
+                    }
+                    tokens.join(" ")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            brk_files.push((relative_name.clone(), contents));
+            ParamPlan { arg: format_arg(&param.flag, &relative_name), deferred: None }
+        }
     }
 }
 
@@ -467,7 +560,11 @@ pub fn plan_job(
     }
 
     let expected_inputs = match def.input {
-        IoKind::None => 0,
+        // `Curve` never reaches this function in practice (see `IoKind::Curve`'s doc
+        // comment — callers use `plan_curve_job` instead), but the match must stay
+        // exhaustive; 0 lets a stray call fall through to the dispatch below's own
+        // `UnsupportedInV1` rather than a spurious `InputCountMismatch` first.
+        IoKind::None | IoKind::Curve => 0,
         // `WavGlob` is output-only (see its doc comment) and never valid as `def.input` — a
         // catalog bug, not a real input arity, but the match must stay exhaustive.
         IoKind::Wav | IoKind::Ana | IoKind::WavGlob => 1,
@@ -517,6 +614,12 @@ pub fn plan_job(
         IoKind::WavGlob => Err(PlanError::UnsupportedInV1 {
             reason: "WavGlob is not a valid input kind".into(),
         }),
+        // Curve processes carry no audio `InputSpec` at all — the caller must use
+        // `plan_curve_job` directly instead of routing through this audio-only dispatch
+        // (see `IoKind::Curve`'s doc comment).
+        IoKind::Curve => Err(PlanError::UnsupportedInV1 {
+            reason: "Curve processes must be planned via plan_curve_job, not plan_job".into(),
+        }),
     }
 }
 
@@ -557,6 +660,7 @@ fn plan_wav_glob(
         input_files: vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0] }],
         output_files: Vec::new(),
         glob_output: Some(GlobOutputSpec { prefix }),
+        output_curve: None,
         brk_files,
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
@@ -589,6 +693,7 @@ fn plan_synthesis(
         output_files: vec![OutputWavSpec { relative_name: "out.wav".into(), dest_channels }],
         brk_files,
         glob_output: None,
+        output_curve: None,
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
     })
@@ -643,6 +748,7 @@ fn plan_wav(
             output_files: vec![OutputWavSpec { relative_name: "out.wav".into(), dest_channels }],
             brk_files,
             glob_output: None,
+            output_curve: None,
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
         });
@@ -672,7 +778,7 @@ fn plan_wav(
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, brk_files, deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, brk_files, deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 /// Dual-input time-domain process: `bin subprog [mode] inA inB out params...`. Lanes work
@@ -728,6 +834,7 @@ fn plan_dual_wav(
             }],
             brk_files,
             glob_output: None,
+            output_curve: None,
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
         });
@@ -766,7 +873,7 @@ fn plan_dual_wav(
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, brk_files, deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, brk_files, deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 /// Dual-input spectral process: per channel lane, `pvoc anal` both inputs, run the process
@@ -850,7 +957,7 @@ fn plan_dual_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, brk_files, deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, brk_files, deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 fn plan_ana(
@@ -925,7 +1032,137 @@ fn plan_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, brk_files, deferred_window_params, needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, brk_files, deferred_window_params, needs_simple_wav_input: def.requires_simple_wav_input })
+}
+
+/// Plans a curve-in/curve-out process (`IoKind::Curve` on both sides) — the `repitch`
+/// family's pitch-curve transforms (`invert`, `smooth`, `quantise`, ..., CDP-Ext-Plan.md
+/// Phase 4 "hard tier"). No audio anywhere: `curve_points` (an open `model::curve::
+/// PitchCurve`'s own points, not a `Document`) is written as the job's "infile" using the
+/// same plain-text time/Hz breakpoint format `Breakpoints` params already write, reusing
+/// the existing `brk_files` write-a-text-file mechanism for what is, for this one job,
+/// the *main* input rather than an auxiliary param datafile. The result is never spliced
+/// into any audio buffer — `PlannedJob.output_curve` names the relative file to read back
+/// as a new curve's points instead.
+///
+/// Curve params never need a duration- or sample-rate-dependent `NumberScale` (there's no
+/// selection being processed, no `.ana` file, no real input length) — every param on a
+/// catalog-authored `Curve` process must use `NumberScale::Plain`; the placeholder
+/// `duration_secs = 0.0`/`sample_rate = 44100` passed to `build_process_args` only matters
+/// for the other scales, which curve processes never use.
+pub fn plan_curve_job(def: &ProcessDef, values: &[ParamValue], curve_points: &[(f64, f64)]) -> Result<PlannedJob, PlanError> {
+    if def.input != IoKind::Curve || def.output != IoKind::Curve {
+        return Err(PlanError::UnsupportedInV1 {
+            reason: "plan_curve_job requires IoKind::Curve on both input and output".into(),
+        });
+    }
+
+    let mut brk_files = vec![(
+        "curve_in.txt".to_string(),
+        crate::model::curve::format_breakpoints(curve_points),
+    )];
+    let raw_outfile = if def.curve_output_binary { "curve_raw_out.pch" } else { "curve_out.txt" };
+    let (args, deferred) = build_process_args(
+        def,
+        values,
+        &["curve_in.txt"],
+        raw_outfile,
+        0.0,
+        &PvocSettings::default(),
+        44100,
+        &mut brk_files,
+    )?;
+    debug_assert!(deferred.is_empty(), "curve processes never carry ana-window-count params");
+
+    let mut steps = vec![Invocation {
+        bin: def.bin.clone(),
+        args,
+        label: process_label(def),
+        expected_output: raw_outfile.to_string(),
+    }];
+    let output_curve = if def.curve_output_binary {
+        // `repitch pchtotext` (CONVERT BINARY PITCH DATA TO TEXTFILE) is itself a `repitch`
+        // subprogram, not a separate binary — normalizes any subprogram whose own raw
+        // result is CDP's binary pitchdata format so `model::curve::parse_breakpoints`
+        // never has to understand that format.
+        steps.push(Invocation {
+            bin: "repitch".to_string(),
+            args: vec!["pchtotext".to_string(), raw_outfile.to_string(), "curve_out.txt".to_string()],
+            label: "repitch pchtotext".to_string(),
+            expected_output: "curve_out.txt".to_string(),
+        });
+        "curve_out.txt".to_string()
+    } else {
+        raw_outfile.to_string()
+    };
+
+    Ok(PlannedJob {
+        steps,
+        input_files: Vec::new(),
+        output_files: Vec::new(),
+        glob_output: None,
+        output_curve: Some(output_curve),
+        brk_files,
+        deferred_window_params: Vec::new(),
+        needs_simple_wav_input: false,
+    })
+}
+
+/// Plans the "Extract Pitch Curve" action (the *producing* end of Phase 4 "hard tier" —
+/// unlike every process in the catalog, this one isn't a `ProcessDef` at all, since it's
+/// the one asymmetric shape in this whole family: audio *in*, curve *out*. `repitch
+/// getpitch` won't accept a plain WAV directly (confirmed against the real binary:
+/// "Application doesn't work with this type of infile") — it needs a `.ana` file, so this
+/// wraps the selection in `pvoc anal` first, exactly like `plan_ana` does for a real
+/// catalog process, then runs `repitch getpitch 2 <ana> <resynth.wav> <pitch.txt>` (mode 2:
+/// the plain-text breakpoint output, never the binary pitchfile of mode 1 — this app's
+/// pitch curves are always plain text, per `model::curve::PitchCurve`). `PlannedJob.
+/// output_curve` names `pitch.txt`, reusing the exact same runner-side "read this file back
+/// as curve points, not audio" path `plan_curve_job`'s jobs already use — `resynth.wav`
+/// (getpitch's "if resynthesized, produces tone at detected pitch" side output) is written
+/// but never read back; nothing needs it.
+///
+/// Only ever takes the *first* channel of a multi-channel selection — a pitch curve is one
+/// melodic line, not a per-channel concept, so there is no stereo-lane-splitting the way
+/// ordinary audio processes have.
+pub fn plan_extract_pitch_curve(pvoc: &PvocSettings) -> PlannedJob {
+    let steps = vec![
+        Invocation {
+            bin: "pvoc".into(),
+            args: vec![
+                "anal".into(),
+                "1".into(),
+                "in.wav".into(),
+                "in.ana".into(),
+                format!("-c{}", pvoc.points),
+                format!("-o{}", pvoc.overlap),
+            ],
+            label: "pvoc anal".into(),
+            expected_output: "in.ana".into(),
+        },
+        Invocation {
+            bin: "repitch".into(),
+            args: vec![
+                "getpitch".into(),
+                "2".into(),
+                "in.ana".into(),
+                "resynth.wav".into(),
+                "pitch.txt".into(),
+            ],
+            label: "repitch getpitch".into(),
+            expected_output: "pitch.txt".into(),
+        },
+    ];
+    PlannedJob {
+        steps,
+        input_files: vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0] }],
+        output_files: Vec::new(),
+        glob_output: None,
+        output_curve: Some("pitch.txt".into()),
+        brk_files: Vec::new(),
+        deferred_window_params: Vec::new(),
+        needs_simple_wav_input: false,
+    }
 }
 
 #[cfg(test)]
@@ -942,7 +1179,7 @@ mod tests {
             required_envelope: false,
             required_list: false,
             list_is_time_sequence: false,
-            kind: ParamKind::Number { min, max, step: 1.0, default, exponential: false, scale },
+            kind: ParamKind::Number { min, max, step: 1.0, default, exponential: false, scale, integer: false },
         }
     }
 
@@ -962,6 +1199,7 @@ mod tests {
             stereo_native: false,
             output_is_stereo: false,
             requires_simple_wav_input: false,
+            curve_output_binary: false,
             params: vec![number_param("Speed", -96.0, 96.0, 0.0, NumberScale::Plain)],
         }
     }
@@ -1246,6 +1484,7 @@ mod tests {
                 default: 1.0,
                 exponential: false,
                 scale: NumberScale::Plain,
+                integer: false,
             },
         }];
         let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
@@ -1445,6 +1684,88 @@ mod tests {
         let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
         let err = plan_job(&def, &[], std::slice::from_ref(&input), &PvocSettings::default()).unwrap_err();
         assert!(matches!(err, PlanError::ParamCountMismatch { expected: 1, actual: 0 }));
+    }
+
+    // -- plan_curve_job (IoKind::Curve, Phase 4 "hard tier") -----------------------------
+
+    fn curve_def() -> ProcessDef {
+        let mut def = base_def(IoKind::Curve, IoKind::Curve);
+        def.bin = "repitch".into();
+        def.subprog = Some("invert".into());
+        def.mode = Some("1".into());
+        def
+    }
+
+    #[test]
+    fn plan_curve_job_writes_the_curve_as_the_main_input_and_names_the_result() {
+        let def = curve_def();
+        let points = vec![(0.0, 220.0), (1.0, 440.0)];
+        let job = plan_curve_job(&def, &[ParamValue::Number(0.0)], &points).unwrap();
+
+        assert_eq!(job.steps.len(), 1);
+        assert_eq!(job.steps[0].bin, "repitch");
+        assert_eq!(job.steps[0].args, vec!["invert", "1", "curve_in.txt", "curve_out.txt", "0"]);
+        assert_eq!(job.input_files, Vec::new());
+        assert_eq!(job.output_files, Vec::new());
+        assert_eq!(job.output_curve, Some("curve_out.txt".to_string()));
+        let (name, contents) = job.brk_files.first().expect("curve written as a brk_files entry");
+        assert_eq!(name, "curve_in.txt");
+        assert_eq!(contents, "0 220\n1 440");
+    }
+
+    #[test]
+    fn plan_curve_job_normalizes_a_binary_result_via_repitch_pchtotext() {
+        let mut def = curve_def();
+        def.subprog = Some("generate".into());
+        def.mode = None;
+        def.curve_output_binary = true;
+        let job = plan_curve_job(&def, &[ParamValue::Number(0.0)], &[(0.0, 100.0)]).unwrap();
+
+        assert_eq!(job.steps.len(), 2);
+        assert_eq!(job.steps[0].expected_output, "curve_raw_out.pch");
+        assert_eq!(job.steps[1].bin, "repitch");
+        assert_eq!(job.steps[1].args, vec!["pchtotext", "curve_raw_out.pch", "curve_out.txt"]);
+        assert_eq!(job.output_curve, Some("curve_out.txt".to_string()));
+    }
+
+    #[test]
+    fn plan_curve_job_rejects_a_process_not_declared_as_curve_both_sides() {
+        let def = base_def(IoKind::Wav, IoKind::Curve);
+        let err = plan_curve_job(&def, &[ParamValue::Number(0.0)], &[(0.0, 1.0)]).unwrap_err();
+        assert!(matches!(err, PlanError::UnsupportedInV1 { .. }));
+    }
+
+    #[test]
+    fn plan_job_rejects_a_curve_process_directing_the_caller_to_plan_curve_job() {
+        let def = curve_def();
+        let err = plan_job(&def, &[ParamValue::Number(0.0)], &[], &PvocSettings::default()).unwrap_err();
+        assert!(matches!(err, PlanError::UnsupportedInV1 { .. }));
+    }
+
+    // -- plan_extract_pitch_curve ("Extract Pitch Curve" action, the asymmetric ana-in/
+    //    curve-out shape `plan_curve_job` doesn't cover) ----------------------------------
+
+    #[test]
+    fn plan_extract_pitch_curve_wraps_in_pvoc_anal_then_repitch_getpitch_mode_2() {
+        let job = plan_extract_pitch_curve(&PvocSettings::default());
+
+        assert_eq!(job.steps.len(), 2);
+        assert_eq!(job.steps[0].bin, "pvoc");
+        assert_eq!(job.steps[0].args, vec!["anal", "1", "in.wav", "in.ana", "-c1024", "-o3"]);
+        assert_eq!(job.steps[1].bin, "repitch");
+        assert_eq!(job.steps[1].args, vec!["getpitch", "2", "in.ana", "resynth.wav", "pitch.txt"]);
+        assert_eq!(job.output_curve, Some("pitch.txt".to_string()));
+        assert_eq!(job.output_files, Vec::new());
+        assert_eq!(
+            job.input_files,
+            vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0] }]
+        );
+    }
+
+    #[test]
+    fn plan_extract_pitch_curve_only_takes_the_first_channel() {
+        let job = plan_extract_pitch_curve(&PvocSettings::default());
+        assert_eq!(job.input_files[0].source_channels, vec![0], "pitch is one melodic line, not per-channel");
     }
 
     // -- .ana decfactor header parsing (Phase 0 spike S5) --------------------------------

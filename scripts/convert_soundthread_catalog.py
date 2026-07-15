@@ -206,6 +206,28 @@ def convert_param(param):
     raise ValueError(f"unhandled uitype {uitype!r} for param {param.get('paramname')!r}")
 
 
+def display_title(bin_name, raw_title):
+    """Prefixes `raw_title` with the capitalized CDP binary name (e.g. "Blur Average" for
+    bin=blur, title=Average) -- the browser's Groups column filters by subcategory (a
+    semantic category like "spectrum"), not by binary, so without this prefix a process's
+    CDP family is invisible anywhere in the UI. Skips the prefix when it would duplicate:
+    title already equals the bin name (e.g. blur's own "Blur" self-titled entry), already
+    starts with "<Bin> " (e.g. clip's "Clip Fraction"), or -- checked space-insensitively --
+    the title's own leading word(s) already spell out the bin name split into separate words
+    (e.g. tapdelay's title "Tap Delay" already reads as "tapdelay" once spaces are removed,
+    so prefixing would produce the redundant "Tapdelay Tap Delay")."""
+    bin_display = bin_name[:1].upper() + bin_name[1:]
+    lower_title = raw_title.strip().lower()
+    lower_bin = bin_name.strip().lower()
+    if lower_title == lower_bin or lower_title.startswith(lower_bin + " "):
+        return raw_title
+    title_words = raw_title.split(" ")
+    for n in range(1, len(title_words) + 1):
+        if "".join(title_words[:n]).lower() == lower_bin:
+            return raw_title
+    return f"{bin_display} {raw_title}"
+
+
 def convert_process(key, entry, known_bins):
     bin_name, subprog, mode = split_key(key, known_bins)
     params_in_order = [
@@ -225,7 +247,7 @@ def convert_process(key, entry, known_bins):
         "bin": bin_name,
         "subprog": subprog,
         "mode": mode,
-        "title": entry["title"],
+        "title": display_title(bin_name, entry["title"]),
         "category": CATEGORY[entry["category"]],
         "subcategory": resolve_subcategory(key, entry.get("subcategory", "")),
         "short_description": entry.get("short_description", ""),
