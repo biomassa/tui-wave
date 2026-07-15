@@ -8,5 +8,5 @@ pub mod preset;
 pub mod recent;
 
 pub use catalog::CdpCatalog;
-pub use def::{Category, IoKind, ParamDef, ParamKind, ParamValue, ProcessDef};
+pub use def::{Category, HiliteBandRow, IoKind, ParamDef, ParamKind, ParamValue, ProcessDef, TableColumn};
 pub use pipeline::{plan_job, InputSpec, PlanError, PvocSettings};

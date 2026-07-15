@@ -51,6 +51,12 @@ pub struct Job {
 pub struct JobOutput {
     pub results: Vec<Vec<Vec<f32>>>,
     pub sample_rate: u32,
+    /// `Some` only for a curve job (`PlannedJob.output_curve` — `IoKind::Curve`, the
+    /// `repitch` pitch-curve transforms); `results` is always empty in that case, mirroring
+    /// how `glob_output`/`output_files` are already mutually exclusive result shapes. The
+    /// caller (UI layer) replaces an open `model::curve::PitchCurve`'s points with this
+    /// rather than splicing anything into an audio `Document`.
+    pub curve_points: Option<Vec<(f64, f64)>>,
 }
 
 #[derive(Debug)]
@@ -346,6 +352,18 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
     if let Some(glob) = &job.planned.glob_output {
         return load_glob_outputs(glob, job.input_sample_rate, temp_dir);
     }
+    if let Some(relative_name) = &job.planned.output_curve {
+        let path = temp_dir.join(relative_name);
+        let text = std::fs::read_to_string(&path).map_err(|e| CdpError::OutputRead {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        })?;
+        let points = crate::model::curve::parse_breakpoints(&text).map_err(|e| CdpError::OutputRead {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        })?;
+        return Ok(JobOutput { results: Vec::new(), sample_rate: job.input_sample_rate, curve_points: Some(points) });
+    }
 
     let max_channel = job
         .planned
@@ -376,7 +394,7 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
         c.resize(max_len, 0.0);
     }
 
-    Ok(JobOutput { results: vec![channels], sample_rate })
+    Ok(JobOutput { results: vec![channels], sample_rate, curve_points: None })
 }
 
 /// Loads every `<prefix>N.wav` (N = 0, 1, 2, …) found in `temp_dir`, in numeric order, as
@@ -406,7 +424,7 @@ fn load_glob_outputs(
     if results.is_empty() {
         return Err(CdpError::NoOutput { step: format!("{}0.wav", glob.prefix) });
     }
-    Ok(JobOutput { results, sample_rate })
+    Ok(JobOutput { results, sample_rate, curve_points: None })
 }
 
 #[cfg(test)]
@@ -440,6 +458,7 @@ mod tests {
                 dest_channels: vec![0],
             }],
             glob_output: None,
+            output_curve: None,
             brk_files: Vec::new(),
             deferred_window_params: Vec::new(),
             needs_simple_wav_input: false,
@@ -504,6 +523,7 @@ mod tests {
             }],
             output_files: Vec::new(),
             glob_output: Some(crate::model::cdp::pipeline::GlobOutputSpec { prefix: "cutout".into() }),
+            output_curve: None,
             brk_files: Vec::new(),
             deferred_window_params: Vec::new(),
             needs_simple_wav_input: false,
@@ -529,6 +549,50 @@ mod tests {
         for segment in &output.results {
             assert_eq!(segment[0].len(), 4, "each copied segment should round-trip the same 4 samples");
         }
+    }
+
+    /// A curve job (`PlannedJob.output_curve`, e.g. `repitch invert`) writes its curve as a
+    /// plain text file (via `brk_files`, same mechanism envelope params already use) and
+    /// reads the result back as points rather than audio -- exercised with a fake shell
+    /// step (standing in for a real `repitch` invocation) that just copies the input file
+    /// to the expected output name, matching this file's established "no real CDP needed
+    /// for pure runner-mechanics tests" precedent.
+    #[test]
+    fn curve_job_reads_the_result_back_as_points_not_audio() {
+        let steps = vec![Invocation {
+            bin: "cp".into(),
+            args: vec!["curve_in.txt".into(), "curve_out.txt".into()],
+            label: "fake repitch invert".into(),
+            expected_output: "curve_out.txt".into(),
+        }];
+        let planned = PlannedJob {
+            steps,
+            input_files: Vec::new(),
+            output_files: Vec::new(),
+            glob_output: None,
+            output_curve: Some("curve_out.txt".into()),
+            brk_files: vec![("curve_in.txt".into(), "0 220\n1 440".into())],
+            deferred_window_params: Vec::new(),
+            needs_simple_wav_input: false,
+        };
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 6,
+            cdp_dir: PathBuf::from("/bin"),
+            planned,
+            inputs: Vec::new(),
+            input_sample_rate: 44100,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(5))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("job should succeed");
+        assert!(output.results.is_empty(), "a curve job never produces spliceable audio");
+        assert_eq!(output.curve_points, Some(vec![(0.0, 220.0), (1.0, 440.0)]));
     }
 
     #[test]
@@ -1099,6 +1163,348 @@ mod tests {
         assert!((ratio - 2.0).abs() < 0.05, "joining a file to itself should ~double duration, got ratio {ratio}");
     }
 
+    /// Exercises the first shipped `ParamKind::Table` process end-to-end: a real multi-row
+    /// tap table (3 taps, ascending times, varied amp/pan) through the actual pipeline/
+    /// runner — the catalog smoke test only ever drives a table param with its single
+    /// default-seeded row, so a bug specific to multiple rows (argv/datafile shape, or the
+    /// per-column `NumberScale` resolution) would get through it untested. Also pins the
+    /// `requires_simple_wav_input` fix: tapdelay failed ("unable to open outfile") against
+    /// the float32 WAVE_FORMAT_EXTENSIBLE input this app would otherwise send it, the same
+    /// root cause `rmverb`/`reverb` hit before.
+    #[test]
+    fn tapdelay_with_a_multi_row_tap_table_produces_real_stereo_output() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("tapdelay_tapdelay").expect("tapdelay_tapdelay in catalog");
+
+        use crate::model::cdp::ParamValue as V;
+        let values = vec![
+            V::Number(0.25), // Tap Gain
+            V::Number(0.2),  // Feedback
+            V::Number(0.4),  // Mix
+            V::Table(vec![
+                vec![0.05, 0.8, -1.0], // time, amp, pan (hard left)
+                vec![0.15, 0.5, 0.0],  // centre
+                vec![0.30, 0.3, 1.0],  // hard right
+            ]),
+            V::Number(0.5), // Trail Time
+        ];
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            std::slice::from_ref(&input),
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+        // Positional argv: infile, outfile, tapgain, feedback, mix, taps-datafile, trailtime.
+        let args = &planned.steps[0].args;
+        assert_eq!(args[0], "in.wav");
+        assert_eq!(args[1], "out.wav");
+        assert_eq!(args[2], "0.25");
+        assert_eq!(args[3], "0.2");
+        assert_eq!(args[4], "0.4");
+        assert_eq!(args[6], "0.5");
+        let (_, table_contents) = planned.brk_files.first().expect("a table datafile");
+        assert_eq!(table_contents, "0.05 0.8 -1\n0.15 0.5 0\n0.3 0.3 1");
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 115,
+            cdp_dir,
+            planned,
+            inputs: vec![channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(30))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("tapdelay should succeed with a multi-row tap table");
+        assert_eq!(output.results[0].len(), 2, "panned taps must produce real stereo output");
+        let expected_secs = len_samples as f64 / sample_rate as f64 + 0.5; // + trail time
+        let actual_secs = output.results[0][0].len() as f64 / output.sample_rate as f64;
+        assert!(
+            (actual_secs - expected_secs).abs() < 0.1,
+            "expected ~{expected_secs:.2}s (source + trail time), got {actual_secs:.2}s"
+        );
+        for (i, channel) in output.results[0].iter().enumerate() {
+            assert!(channel.iter().any(|&s| s.abs() > 0.001), "channel {i} should have real audio");
+        }
+    }
+
+    /// Exercises `repeater`'s Table param with multiple *overlapping and out-of-order*
+    /// segments (row 2 starts earlier in the source than row 1) — the one catalog table
+    /// with no ascending-order constraint at all (unlike tapdelay's time column), so this
+    /// specifically confirms the app never enforces one where the real binary doesn't
+    /// require it, and that a real multi-row segment table (not just the single-row
+    /// smoke-test default) runs correctly end to end. ("Backtrack," per the binary's own
+    /// usage text, means later *rows* may read earlier source material than prior rows —
+    /// not that a single row's own end may precede its own start, which the real binary
+    /// rejects as a negative-duration segment.)
+    #[test]
+    fn repeater_with_overlapping_and_out_of_order_segments_succeeds() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("repeater_repeater_1").expect("repeater_repeater_1 in catalog");
+
+        use crate::model::cdp::ParamValue as V;
+        let values = vec![
+            V::Table(vec![
+                vec![0.5, 0.6, 3.0, 0.05],  // forward segment
+                vec![0.1, 0.3, 2.0, 0.05],  // starts earlier in the source than row 1
+                vec![0.4, 0.65, 2.0, 0.05], // overlaps both of the above
+            ]),
+            V::Number(1.0), // Randomize Delay: none
+            V::Number(0.0), // Randomize Pitch: none
+        ];
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            std::slice::from_ref(&input),
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+        let (_, table_contents) = planned.brk_files.first().expect("a table datafile");
+        assert_eq!(table_contents, "0.5 0.6 3 0.05\n0.1 0.3 2 0.05\n0.4 0.65 2 0.05");
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 116,
+            cdp_dir,
+            planned,
+            inputs: vec![channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(30))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("repeater should accept overlapping/backward segments without any client-side order rejection");
+        assert!(!output.results[0][0].is_empty());
+    }
+
+    /// Exercises `repeater` mode 3's extra positional params (Acceleration/Warp/Fade Shape,
+    /// which come *after* the table datafile in argv) plus the real repeat-count edge case
+    /// found by hand: 0 means "no repeat" and succeeds, but the real binary specifically
+    /// rejects 1 ("Repeat value less than 2") while accepting any integer >= 2 — this table
+    /// uses 0 on one row to pin that down against the real binary, not just the smoke
+    /// test's single-row default.
+    #[test]
+    fn repeater_mode_3_dimming_with_a_zero_repeat_count_row() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("repeater_repeater_3").expect("repeater_repeater_3 in catalog");
+
+        use crate::model::cdp::ParamValue as V;
+        let values = vec![
+            V::Table(vec![
+                vec![0.1, 0.2, 0.0, 0.05], // 0 repeats: play the segment once, untouched
+                vec![0.4, 0.5, 3.0, 0.05],
+            ]),
+            V::Number(2.0), // Acceleration
+            V::Number(1.0), // Warp
+            V::Number(1.0), // Fade Shape
+            V::Number(1.0), // Randomize Delay: none
+            V::Number(0.0), // Randomize Pitch: none
+        ];
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            std::slice::from_ref(&input),
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+        // Positional argv: subprog, mode, infile, outfile, table-datafile, accel, warp, fade.
+        let args = &planned.steps[0].args;
+        assert_eq!(args[0], "repeater");
+        assert_eq!(args[1], "3");
+        assert_eq!(args[2], "in.wav");
+        assert_eq!(args[3], "out.wav");
+        assert_eq!(args[5], "2");
+        assert_eq!(args[6], "1");
+        assert_eq!(args[7], "1");
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 117,
+            cdp_dir,
+            planned,
+            inputs: vec![channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(30))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("repeater mode 3 should accept a 0 repeat-count row and its own accel/warp/fade params");
+        assert!(!output.results[0][0].is_empty());
+    }
+
+    /// Exercises `focus freeze`'s `ParamKind::MarkerTimeList` end-to-end with multiple
+    /// entries — the smoke test only ever drives it with a single default entry, which
+    /// trivially satisfies both real constraints found by hand (strictly ascending times,
+    /// and never an 'a' marker followed later by a 'b' one). This pins down the datafile's
+    /// exact format (marker concatenated directly onto the time, no separator) against a
+    /// real multi-line file, using only 'a'-then-'a' and 'b'-then-'a' transitions (both
+    /// confirmed valid) to stay clear of the 'a'-then-'b' "Impossible time sequence" quirk.
+    #[test]
+    fn focus_freeze_with_multiple_marked_times_succeeds() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("focus_freeze_1").expect("focus_freeze_1 in catalog");
+
+        use crate::model::cdp::ParamValue as V;
+        let values = vec![V::MarkerTimeList(vec![('b', 0.2), ('a', 0.5), ('a', 0.8)])];
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            std::slice::from_ref(&input),
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+        let (_, datafile_contents) = planned.brk_files.first().expect("a marker-time datafile");
+        assert_eq!(datafile_contents, "b0.2\na0.5\na0.8", "marker must be concatenated directly onto the time, no separator");
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 118,
+            cdp_dir,
+            planned,
+            inputs: vec![channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(30))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("focus freeze should succeed with multiple marked times");
+        assert!(!output.results[0][0].is_empty());
+    }
+
+    /// Exercises `hilite band`'s bitflag-conditional rows end-to-end with several distinct
+    /// bit combinations in one table — the smoke test only ever drives it with the single
+    /// default row (`amp_bit` alone), which can't catch a datafile-shape bug specific to a
+    /// different combination or to multiple rows together. Covers: amp-only (bit 1), ramp
+    /// with both amp1/amp2 (bits 1+2), plain-multiplier transpose (bit 3), and transpose
+    /// with additive Hz + add-in (bits 3+4, `+` prefix) — one of each conditional shape the
+    /// datafile format supports.
+    #[test]
+    fn hilite_band_with_varied_bit_combinations_succeeds() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("hilite_band").expect("hilite_band in catalog");
+
+        use crate::model::cdp::{HiliteBandRow, ParamValue as V};
+        let rows = vec![
+            HiliteBandRow {
+                lofrq: 100.0,
+                hifrq: 800.0,
+                amp_bit: true,
+                ramp_bit: false,
+                transpose_bit: false,
+                add_bit: false,
+                amp1: 0.5,
+                amp2: 1.0,
+                transpose_value: 1.0,
+                transpose_additive: false,
+            },
+            HiliteBandRow {
+                lofrq: 800.0,
+                hifrq: 2000.0,
+                amp_bit: true,
+                ramp_bit: true,
+                transpose_bit: false,
+                add_bit: false,
+                amp1: 0.3,
+                amp2: 0.9,
+                transpose_value: 1.0,
+                transpose_additive: false,
+            },
+            HiliteBandRow {
+                lofrq: 2000.0,
+                hifrq: 4000.0,
+                amp_bit: false,
+                ramp_bit: false,
+                transpose_bit: true,
+                add_bit: false,
+                amp1: 1.0,
+                amp2: 1.0,
+                transpose_value: 1.5,
+                transpose_additive: false,
+            },
+            HiliteBandRow {
+                lofrq: 4000.0,
+                hifrq: 8000.0,
+                amp_bit: false,
+                ramp_bit: false,
+                transpose_bit: true,
+                add_bit: true,
+                amp1: 1.0,
+                amp2: 1.0,
+                transpose_value: 50.0,
+                transpose_additive: true,
+            },
+        ];
+        let values = vec![V::HiliteBand(rows)];
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            std::slice::from_ref(&input),
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+        let (_, datafile_contents) = planned.brk_files.first().expect("a hilite band datafile");
+        assert_eq!(
+            datafile_contents,
+            "100 800 1000 0.5\n800 2000 1100 0.3 0.9\n2000 4000 0010 1.5\n4000 8000 0011 +50"
+        );
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 119,
+            cdp_dir,
+            planned,
+            inputs: vec![channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(30))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("hilite band should succeed with varied bit combinations across multiple rows");
+        assert!(!output.results[0][0].is_empty());
+    }
+
     /// Exercises a `required_list` time-sequence param with a real multi-entry ascending
     /// list plus engaged flag params — the smoke test only ever drives such params with a
     /// single default entry and every flag at its (unemitted) default, so an argv-ordering
@@ -1479,6 +1885,12 @@ mod tests {
             "modify_space_4",
             "specfnu_specfnu_19",
             "tostereo_tostereo",
+            // psow_interp requires each input be a pre-grabbed single grain (e.g. via
+            // psow_grab with duration 0) -- fed an ordinary recording, the real binary
+            // hard-rejects it: "File 1 is not a valid pitch-sync grain file". A
+            // fixture-content issue, not a catalog bug (found while cataloging the psow
+            // family, 2026-07-15).
+            "psow_interp",
         ];
 
         let (catalog, warnings) = crate::model::cdp::CdpCatalog::load(None);
@@ -1533,7 +1945,7 @@ mod tests {
                 })
                 .collect();
             let input_count = match def.input {
-                crate::model::cdp::IoKind::None => 0,
+                crate::model::cdp::IoKind::None | crate::model::cdp::IoKind::Curve => 0,
                 crate::model::cdp::IoKind::Wav
                 | crate::model::cdp::IoKind::Ana
                 | crate::model::cdp::IoKind::WavGlob => 1,
