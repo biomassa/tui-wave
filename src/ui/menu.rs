@@ -113,6 +113,8 @@ impl MenuBar {
                 mnemonic: 'C',
                 entries: vec![
                     entry("CDP Process...",             Action::CdpProcess,            "Ctrl+p"),
+                    entry("Extract Pitch Curve",        Action::ExtractPitchCurve,     ""),
+                    entry("Load Pitch Curve...",         Action::LoadPitchCurve,        ""),
                     entry("Configure CDP Directory...",  Action::ConfigureCdpDirectory, ""),
                 ],
             },

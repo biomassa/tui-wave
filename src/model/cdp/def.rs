@@ -27,9 +27,10 @@ pub enum Category {
 /// `Curve` is unlike every other variant: it carries no audio at all. Both sides of a
 /// `repitch` pitch-curve-to-pitch-curve transform (`invert`, `smooth`, `quantise`, ...,
 /// CDP-Ext-Plan.md Phase 4 "hard tier") always declare `input = "curve"` and
-/// `output = "curve"` together — the "infile" is a `model::curve::PitchCurve`'s own
-/// breakpoint text, never an open audio `Document`, and the result replaces that curve's
-/// points rather than being spliced into any buffer (see `pipeline::plan_curve_job`).
+/// `output = "curve"` together — the real "infile" is CDP's own binary pitch-WAV format,
+/// spliced from a `model::curve::PitchCurve`'s `binary_template` and current points, never
+/// an open audio `Document`; the result replaces that curve's points and template rather
+/// than being spliced into any buffer (see `pipeline::plan_curve_transform_job`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IoKind {
@@ -402,17 +403,6 @@ pub struct ProcessDef {
     /// it, without touching the float32 precision every other process still gets.
     #[serde(default)]
     pub requires_simple_wav_input: bool,
-    /// Only meaningful for `IoKind::Curve` processes: true when this subprogram's own raw
-    /// result is CDP's *binary* pitchdata format rather than the plain-text time/Hz
-    /// breakpoint format (e.g. `repitch generate`'s usage text is explicit: "CREATE BINARY
-    /// PITCHDATA FILE..."; most curve-in/curve-out subprograms accept either format on the
-    /// way in per `repitch getpitch`'s own usage text — "either of these may be reused in
-    /// other pitch-manipulating options" — but don't all document which they *emit*).
-    /// `pipeline::plan_curve_job` appends a `repitch pchtotext` normalization step whenever
-    /// this is true, so `PlannedJob.output_curve` always names a plain-text file regardless
-    /// — `model::curve::parse_breakpoints` never needs to understand the binary format.
-    #[serde(default)]
-    pub curve_output_binary: bool,
     /// Ordered — this order is exactly the order these values appear as positional
     /// arguments on the CDP command line (flagged params are still emitted in this order,
     /// just as `-x<value>` tokens instead of bare ones). A process with no parameters emits
@@ -464,7 +454,6 @@ mod tests {
             stereo_native: false,
             output_is_stereo: false,
             requires_simple_wav_input: false,
-            curve_output_binary: false,
             params: vec![sample_number()],
         };
 
@@ -513,7 +502,6 @@ mod tests {
             stereo_native: false,
             output_is_stereo: false,
             requires_simple_wav_input: false,
-            curve_output_binary: false,
             params: vec![toggle, choice],
         };
 
@@ -585,7 +573,6 @@ mod tests {
             stereo_native: false,
             output_is_stereo: true,
             requires_simple_wav_input: false,
-            curve_output_binary: false,
             params: vec![table],
         };
 
@@ -632,7 +619,6 @@ mod tests {
             stereo_native: false,
             output_is_stereo: false,
             requires_simple_wav_input: false,
-            curve_output_binary: false,
             params: vec![param],
         };
 
@@ -686,7 +672,6 @@ mod tests {
             stereo_native: false,
             output_is_stereo: false,
             requires_simple_wav_input: false,
-            curve_output_binary: false,
             params: vec![param],
         };
 

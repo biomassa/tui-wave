@@ -20,14 +20,6 @@ impl CurveHistory {
         Self { undo_stack: Vec::new(), redo_stack: Vec::new(), limit: DEFAULT_LIMIT }
     }
 
-    pub fn can_undo(&self) -> bool {
-        !self.undo_stack.is_empty()
-    }
-
-    pub fn can_redo(&self) -> bool {
-        !self.redo_stack.is_empty()
-    }
-
     /// Replaces `curve`'s points with `new_points`, tagged `label` for the status bar and
     /// undo history. Clears the redo stack, same as `History::apply`.
     pub fn apply(&mut self, new_points: Vec<(f64, f64)>, label: impl Into<String>, curve: &mut PitchCurve) {
@@ -122,11 +114,9 @@ mod tests {
 
         history.apply(vec![(0.0, 200.0)], "Smooth", &mut c);
         history.undo(&mut c);
-        assert!(history.can_redo());
 
         history.apply(vec![(0.0, 250.0)], "Quantise", &mut c);
-        assert!(!history.can_redo());
-        assert!(!history.redo(&mut c));
+        assert!(!history.redo(&mut c), "redo should be unavailable after a new change replaced it");
     }
 
     #[test]
