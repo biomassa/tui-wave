@@ -9,4 +9,4 @@ pub mod recent;
 
 pub use catalog::CdpCatalog;
 pub use def::{Category, HiliteBandRow, IoKind, ParamDef, ParamKind, ParamValue, ProcessDef, TableColumn};
-pub use pipeline::{plan_job, InputSpec, PlanError, PvocSettings};
+pub use pipeline::{plan_extract_pitch_curve, plan_job, InputSpec, PlanError, PvocSettings};

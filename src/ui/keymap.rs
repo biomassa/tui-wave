@@ -70,6 +70,8 @@ pub enum Action {
     ExportRegions,
     CdpProcess,
     ConfigureCdpDirectory,
+    ExtractPitchCurve,
+    LoadPitchCurve,
     // Panel/modal commands (mostly dispatched contextually, not via the global keymap).
     Noop,
     OpenSelected,
@@ -394,6 +396,8 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "ExportRegions" => Some(Action::ExportRegions),
         "CdpProcess" => Some(Action::CdpProcess),
         "ConfigureCdpDirectory" => Some(Action::ConfigureCdpDirectory),
+        "ExtractPitchCurve" => Some(Action::ExtractPitchCurve),
+        "LoadPitchCurve" => Some(Action::LoadPitchCurve),
         _ => None,
     }
 }

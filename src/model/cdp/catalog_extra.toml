@@ -441,6 +441,8 @@ default = 10.0
 exponential = false
 scale = "plain"
 
+# integer = true: confirmed against the real binary (2026-07-15) -- usage text: "FINENESS
+# Squeeze width of tremenv (integer value >= 1)"; 4.5 -> INVALID DATA (4 works)
 [[process.params]]
 name = "Fineness"
 description = "Squeeze width of the tremolo effect (higher is finer)"
@@ -452,6 +454,7 @@ step = 1.0
 default = 4.0
 exponential = true
 scale = "plain"
+integer = true
 
 [[process]]
 key = "topantail2_topantail"
@@ -494,6 +497,8 @@ default = 0.01
 exponential = true
 scale = "plain"
 
+# integer = true: confirmed against the real binary (2026-07-15) -- -s15.5 -> INVALID DATA
+# (-s15 works)
 [[process.params]]
 name = "Splice Length"
 description = "Length of the splice applied at each trimmed edge, in milliseconds"
@@ -505,6 +510,7 @@ step = 1.0
 default = 15.0
 exponential = false
 scale = "plain"
+integer = true
 flag = "-s"
 
 [[process]]
@@ -524,6 +530,8 @@ output = "wav"
 stereo_native = false
 output_is_stereo = false
 
+# integer = true: confirmed against the real binary (2026-07-15) -- mult=2.5 -> "ERROR:
+# INVALID DATA" (2 works)
 [[process.params]]
 name = "Octave Step"
 description = "Number of octaves to step up (1-4)"
@@ -535,6 +543,7 @@ step = 1.0
 default = 1.0
 exponential = false
 scale = "plain"
+integer = true
 
 [[process]]
 key = "hilite_pluck"
@@ -729,6 +738,8 @@ default = 4.0
 exponential = false
 scale = "plain"
 
+# integer = true: confirmed against the real binary (2026-07-15) -- usage text: "PKCNT
+# Number of peaks in impulse (Range 1-200)"; pkcnt=8.5 -> INVALID DATA (8 works)
 [[process.params]]
 name = "Peak Count"
 description = "Number of peaks within each impulse"
@@ -740,6 +751,7 @@ step = 1.0
 default = 8.0
 exponential = true
 scale = "plain"
+integer = true
 
 [[process.params]]
 name = "Level"
@@ -872,6 +884,8 @@ output = "wav"
 stereo_native = false
 output_is_stereo = false
 
+# integer = true: confirmed against the real binary (2026-07-15) -- usage text: "MULTIPLIER:
+# (integer) is no. of times each wavecycle(grp) repeats"; 2.5 -> INVALID DATA
 [[process.params]]
 name = "Multiplier"
 description = "Number of times each waveset group repeats"
@@ -883,7 +897,10 @@ step = 1.0
 default = 2.0
 exponential = false
 scale = "plain"
+integer = true
 
+# integer = true: confirmed against the real binary (2026-07-15) -- usage text: "CYCLECNT:
+# (integer) is no. wavecycles in repeated groups"; 2.5 -> INVALID DATA
 [[process.params]]
 name = "Cycle Count"
 description = "Number of wavesets in each repeated group"
@@ -895,7 +912,10 @@ step = 1.0
 default = 2.0
 exponential = false
 scale = "plain"
+integer = true
 
+# integer = true: confirmed against the real binary (2026-07-15) -- -k2.5 -> INVALID DATA
+# (-k2 works)
 [[process.params]]
 name = "Skip Cycles"
 description = "Number of cycles to skip at the start of the file"
@@ -907,8 +927,11 @@ step = 1.0
 default = 0.0
 exponential = false
 scale = "plain"
+integer = true
 flag = "-k"
 
+# integer = true: confirmed against the real binary (2026-07-15) -- -s15.5 -> INVALID DATA
+# (-s15 works)
 [[process.params]]
 name = "Splice Length"
 description = "Length of the splice between repeated blocks, in milliseconds"
@@ -920,6 +943,7 @@ step = 1.0
 default = 15.0
 exponential = false
 scale = "plain"
+integer = true
 flag = "-s"
 
 [[process]]
@@ -940,6 +964,9 @@ output = "wav"
 stereo_native = false
 output_is_stereo = false
 
+# integer = true: confirmed against the real binary (2026-07-15) -- same distrep binary/usage
+# as mode 1 ("MULTIPLIER: (integer) is no. of times each wavecycle(grp) repeats"); 2.5 ->
+# INVALID DATA
 [[process.params]]
 name = "Multiplier"
 description = "Number of times each waveset group repeats"
@@ -951,7 +978,10 @@ step = 1.0
 default = 2.0
 exponential = false
 scale = "plain"
+integer = true
 
+# integer = true: confirmed against the real binary (2026-07-15) -- same distrep binary/usage
+# as mode 1 ("CYCLECNT: (integer) is no. wavecycles in repeated groups"); 2.5 -> INVALID DATA
 [[process.params]]
 name = "Cycle Count"
 description = "Number of wavesets in each repeated group"
@@ -963,7 +993,10 @@ step = 1.0
 default = 2.0
 exponential = false
 scale = "plain"
+integer = true
 
+# integer = true: confirmed against the real binary (2026-07-15) -- same as mode 1: -k2.5 ->
+# INVALID DATA (-k2 works)
 [[process.params]]
 name = "Skip Cycles"
 description = "Number of cycles to skip at the start of the file"
@@ -975,8 +1008,11 @@ step = 1.0
 default = 0.0
 exponential = false
 scale = "plain"
+integer = true
 flag = "-k"
 
+# integer = true: confirmed against the real binary (2026-07-15) -- same as mode 1: -s15.5 ->
+# INVALID DATA (-s15 works)
 [[process.params]]
 name = "Splice Length"
 description = "Length of the splice between repeated blocks, in milliseconds"
@@ -988,6 +1024,7 @@ step = 1.0
 default = 15.0
 exponential = false
 scale = "plain"
+integer = true
 flag = "-s"
 
 [[process]]
@@ -1008,6 +1045,8 @@ output = "wav"
 stereo_native = false
 output_is_stereo = false
 
+# integer = true: confirmed against the real binary (2026-07-15) -- grpcnt=2.5 -> INVALID
+# DATA (2 works)
 [[process.params]]
 name = "Group Count"
 description = "Size of the half-waveset groups to operate on (1 = single half-wavesets)"
@@ -1019,7 +1058,10 @@ step = 1.0
 default = 2.0
 exponential = false
 scale = "plain"
+integer = true
 
+# integer = true: confirmed against the real binary (2026-07-15) -- shift=1.5 -> INVALID
+# DATA (1 works)
 [[process.params]]
 name = "Shift"
 description = "Move alternate groups forward by this many waveset groups"
@@ -1031,6 +1073,7 @@ step = 1.0
 default = 1.0
 exponential = false
 scale = "plain"
+integer = true
 
 [[process]]
 key = "distshift_distshift_2"
@@ -1050,6 +1093,8 @@ output = "wav"
 stereo_native = false
 output_is_stereo = false
 
+# integer = true: confirmed against the real binary (2026-07-15) -- grpcnt=2.5 -> INVALID
+# DATA (mode 2 shares the distshift binary with mode 1)
 [[process.params]]
 name = "Group Count"
 description = "Size of the half-waveset groups to operate on (1 = single half-wavesets)"
@@ -1061,6 +1106,7 @@ step = 1.0
 default = 2.0
 exponential = false
 scale = "plain"
+integer = true
 
 [[process]]
 key = "envel_impose_1"
@@ -1289,6 +1335,8 @@ output = "wav"
 stereo_native = false
 output_is_stereo = false
 
+# integer = true: confirmed against the real binary (2026-07-15) -- startsamp=100.5 ->
+# INVALID DATA (usage text: "must be a sample AT A ZERO-CROSSING")
 [[process.params]]
 name = "Start Sample"
 description = "Sample (at a zero-crossing) at which the pluck attack ends"
@@ -1300,7 +1348,10 @@ step = 1.0
 default = 1000.0
 exponential = true
 scale = "plain"
+integer = true
 
+# integer = true: confirmed against the real binary (2026-07-15) -- wavelen=50.5 -> INVALID
+# DATA (usage text: "no of (absolute) samples")
 [[process.params]]
 name = "Wave Length"
 description = "Length of the pluck wavelength, in samples (should match the source's own wavelength here)"
@@ -1312,7 +1363,10 @@ step = 1.0
 default = 100.0
 exponential = true
 scale = "plain"
+integer = true
 
+# integer = true: confirmed against the real binary (2026-07-15) -- -a10.5 -> INVALID DATA
+# (usage text: "no of wavecycles")
 [[process.params]]
 name = "Attack Cycles"
 description = "Number of wave cycles in the pluck attack"
@@ -1324,8 +1378,10 @@ step = 1.0
 default = 32.0
 exponential = true
 scale = "plain"
+integer = true
 flag = "-a"
 
+# integer = true: confirmed against the real binary (2026-07-15) -- -d20.5 -> INVALID DATA
 [[process.params]]
 name = "Decay Rate"
 description = "Rate of decay of the pluck attack"
@@ -1337,6 +1393,7 @@ step = 1.0
 default = 48.0
 exponential = false
 scale = "plain"
+integer = true
 flag = "-d"
 
 [[process]]
@@ -1682,6 +1739,8 @@ default = 0.1
 exponential = true
 scale = "plain"
 
+# integer = true: confirmed against the real binary (2026-07-15) -- -s10.5 -> INVALID DATA
+# (-s10 works)
 [[process.params]]
 name = "Smooth"
 description = "Fade applied to each segment's start and end, in milliseconds"
@@ -1693,6 +1752,7 @@ step = 1.0
 default = 10.0
 exponential = true
 scale = "plain"
+integer = true
 flag = "-s"
 
 [[process]]
@@ -1722,6 +1782,8 @@ default = 0.1
 exponential = true
 scale = "plain"
 
+# integer = true: confirmed against the real binary (2026-07-15) -- same sorter binary/mode
+# family as mode 1: -s10.5 -> INVALID DATA (-s10 works)
 [[process.params]]
 name = "Smooth"
 description = "Fade applied to each segment's start and end, in milliseconds"
@@ -1733,6 +1795,7 @@ step = 1.0
 default = 10.0
 exponential = true
 scale = "plain"
+integer = true
 flag = "-s"
 
 [[process]]
@@ -1762,6 +1825,8 @@ default = 0.1
 exponential = true
 scale = "plain"
 
+# integer = true: confirmed against the real binary (2026-07-15) -- same sorter binary/mode
+# family as mode 1: -s10.5 -> INVALID DATA (-s10 works)
 [[process.params]]
 name = "Smooth"
 description = "Fade applied to each segment's start and end, in milliseconds"
@@ -1773,6 +1838,7 @@ step = 1.0
 default = 10.0
 exponential = true
 scale = "plain"
+integer = true
 flag = "-s"
 
 [[process]]
@@ -1802,6 +1868,8 @@ default = 0.1
 exponential = true
 scale = "plain"
 
+# integer = true: confirmed against the real binary (2026-07-15) -- same sorter binary/mode
+# family as mode 1: -s10.5 -> INVALID DATA (-s10 works)
 [[process.params]]
 name = "Smooth"
 description = "Fade applied to each segment's start and end, in milliseconds"
@@ -1813,6 +1881,7 @@ step = 1.0
 default = 10.0
 exponential = true
 scale = "plain"
+integer = true
 flag = "-s"
 
 # ---- Tier 0 batch 3 (2026-07-09) ------------------------------------------------------
@@ -1864,6 +1933,8 @@ output = "wav"
 stereo_native = false
 output_is_stereo = false
 
+# integer = true: confirmed against the real binary (2026-07-15) -- N=2.5 -> INVALID DATA
+# (N=2 works)
 [[process.params]]
 name = "Repetitions"
 description = "Number of times each grain is repeated"
@@ -1875,6 +1946,7 @@ step = 1.0
 default = 2.0
 exponential = false
 scale = "plain"
+integer = true
 
 [[process.params]]
 name = "Gate"
@@ -1950,6 +2022,8 @@ output = "wav"
 stereo_native = false
 output_is_stereo = false
 
+# integer = true: confirmed against the real binary (2026-07-15) -- keep=1.5 -> INVALID DATA
+# (1 works)
 [[process.params]]
 name = "Keep"
 description = "Number of grains to keep from each set"
@@ -1961,7 +2035,10 @@ step = 1.0
 default = 1.0
 exponential = false
 scale = "plain"
+integer = true
 
+# integer = true: confirmed against the real binary (2026-07-15) -- out-of=2.5 -> INVALID
+# DATA (2 works)
 [[process.params]]
 name = "Out Of"
 description = "Size of each set of grains that Keep is drawn from"
@@ -1973,6 +2050,7 @@ step = 1.0
 default = 2.0
 exponential = false
 scale = "plain"
+integer = true
 
 [[process.params]]
 name = "Gate"
@@ -5863,6 +5941,10 @@ default = 1.0
 exponential = false
 scale = "plain"
 
+# integer = true: confirmed against the real binary (2026-07-15) -- usage text: "FINENESS
+# Squeeze width of tremolo (integer value >= 1)"; empirically confirmed: Fineness=2.5 against
+# a real fixture produced byte-identical output to Fineness=3 (the binary silently rounds up
+# rather than using the fraction)
 [[process.params]]
 name = "Fineness"
 description = "Squeezes the width of the tremolo; higher values narrow it"
@@ -5874,6 +5956,7 @@ step = 1.0
 default = 1.0
 exponential = false
 scale = "plain"
+integer = true
 
 [[process]]
 key = "tremolo_tremolo_2"
@@ -5926,6 +6009,9 @@ default = 1.0
 exponential = false
 scale = "plain"
 
+# integer = true: confirmed against the real binary (2026-07-15) -- same tremolo binary and
+# usage text as tremolo_1 (item 27 in this batch); applied for consistency with that
+# confirmed sibling
 [[process.params]]
 name = "Fineness"
 description = "Squeezes the width of the tremolo; higher values narrow it"
@@ -5937,6 +6023,7 @@ step = 1.0
 default = 1.0
 exponential = false
 scale = "plain"
+integer = true
 
 # ---- Tier 1b batch 4 (2026-07-13): more required_envelope processes ----
 #
@@ -7718,6 +7805,8 @@ kind = "choice"
 options = ["1"]
 default = 0
 
+# integer = true: confirmed against the real binary (2026-07-15) -- "Neat subdivision is not
+# a multiple of 2 or 3" error when given 12.5 (12 succeeds)
 [[process.params]]
 name = "Subdivision"
 description = "Minimum division of the beat; must be greater than 4 and a multiple of 2 and/or 3"
@@ -7729,6 +7818,7 @@ step = 1.0
 default = 12.0
 exponential = false
 scale = "plain"
+integer = true
 
 [[process.params]]
 name = "Linger"
@@ -12032,3 +12122,611 @@ step = 0.1
 default = 4.0
 exponential = true
 scale = "plain"
+
+# ---- Tier 2 "hard tier" batch 1 (2026-07-16): first curve-in/curve-out repitch processes ----
+# See CDP-Ext-Plan.md Phase 4 -- these are the first catalog entries using IoKind::Curve on
+# both sides. Confirmed against the real binary that this whole family needs CDP's binary
+# pitch-WAV format, not plain text (`pipeline::plan_curve_transform_job` handles the
+# splice-into-a-template mechanics; catalog authoring here only needs to get bin/subprog/mode/
+# argv-order/param-range right, same as any other process). `stereo_native`/`output_is_stereo`
+# are meaningless for a curve process (no audio at all) and never consulted by
+# `plan_curve_transform_job` -- set to `false` as an inert placeholder, matching every other
+# required-but-unused-here field.
+
+[[process]]
+key = "repitch_pitchtosil"
+bin = "repitch"
+subprog = "pitchtosil"
+title = "Repitch Pitch To Silence"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Replaces pitched windows in a pitch curve with silence"
+description = "Marks every window CDP judged as pitched as silent instead, leaving only the unpitched (noise/silence) windows of the curve untouched. Confirmed against the real binary: succeeds even on a curve with no unpitched windows at all (the whole thing just becomes silence)."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
+
+[[process]]
+key = "repitch_noisetosil"
+bin = "repitch"
+subprog = "noisetosil"
+title = "Repitch Noise To Silence"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Replaces unpitched (noise) windows in a pitch curve with silence"
+description = "Marks every window CDP judged as unpitched (noise) as silent instead, leaving the pitched windows untouched -- the inverse of Pitch To Silence. Confirmed against the real binary: a curve with no unpitched windows at all is rejected (\"No silence inserted\") -- a genuine content-dependent CDP limitation, not a catalog bug."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
+
+# ---- Tier 2 "hard tier" batch 2 (2026-07-16): remaining repitch curve-transform processes ----
+# See CDP-Ext-Plan.md Phase 4. All entries below verified against the real binary (CDP 7.1
+# 2016) using a genuine `getpitch` mode-1 binary pitchfile derived from a synthesized 220Hz
+# tone (`synth wave` -> `pvoc anal` -> `repitch getpitch 1`), per this session's standing
+# curve-family methodology. Every subprogram in this family exposes 2+ modes where only the
+# odd-numbered/first mode gives "a pitchfile as output" (the rest give a transposition file,
+# a ratio/semitone-shaped concept out of scope for this app's Hz-based curve display) --
+# only pitchfile-output modes are cataloged here. All numeric ranges below are the exact
+# bounds CDP's own "Parameter[n] Value (...) out of range (lo to hi)" errors reported when
+# probed with an out-of-range value against the real binary and this specific test fixture
+# (a ~1.02s file at the default `pvoc anal` window); several (timestep/timeframe/trange/
+# srange/vibfreq) are themselves a function of the input file's own duration and analysis
+# window size ("duration of 1 analysis window to duration of entire file" per each
+# subprogram's usage text) -- the catalog bounds below are deliberately generous safety caps
+# (matching this catalog's existing convention for file-relative time fields, e.g. Grain
+# Onset Times' 7200s/2hr cap), not this one fixture's exact runtime-legal range; CDP enforces
+# the real per-file bounds itself at run time regardless of what the catalog allows through.
+#
+# `insertzeros`/`insertsil` datafile-format finding: probed empirically (as scoped) by
+# writing the same 4 times as a flat one-per-line list, a two-per-line "start end" list, and
+# a tab-separated list, then reading the resulting binary pitch-WAV's raw `data` chunk floats
+# directly (CDP's own `pchtotext` silently omits/bridges over unpitched-marker regions when
+# the surrounding curve is near-constant, so a text round-trip alone can't distinguish "did
+# nothing" from "worked but looks identical" -- confirmed this the hard way against a
+# real-binary result before trusting any negative result). All three delimiter variants
+# produced byte-identical output, and the marked regions landed exactly on the requested
+# time ranges (confirmed via direct chunk inspection: -1.0 sentinel values for `insertzeros`,
+# -2.0 for `insertsil`, appearing precisely between the given start/end pairs) -- CDP reads
+# the file as a flat whitespace-tokenized stream of numbers with no line-structure
+# requirement at all, i.e. exactly this catalog's existing `required_list` shape (an ordered,
+# strictly-ascending flat list), not a bespoke pairs format needing new infra. Mode 2
+# (sample-count data) was verified the same way and produced identical marked ranges to mode
+# 1's time-based data for the equivalent positions -- confirmed both modes are legitimate
+# alternate encodings of the same real action (not a pitchfile/transposition split), so both
+# are cataloged. The app has no built-in enforcement that a `required_list` entry count stays
+# even (each pair needs a start and an end) -- documented in each param's description as a
+# user-facing caveat rather than new validation infra.
+
+[[process]]
+key = "repitch_exag_1"
+bin = "repitch"
+subprog = "exag"
+mode = "1"
+title = "Repitch Exaggerate (Range)"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Exaggerates a pitch curve's intervals around a mean pitch by a fixed range"
+description = "Stretches every pitch interval in the curve away from (or toward) a chosen mean MIDI pitch by a constant multiplying range. Confirmed against the real binary: Mean Pitch is clamped to 0-127 and Range to 0-128 (CDP's own reported bounds); a Range of 0 is accepted (collapses everything to the mean) despite the usage text's informal \"> 0\"."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Mean Pitch"
+description = "MIDI note number (0-127) around which pitch intervals are stretched; may vary over time"
+automatable = true
+kind = "number"
+min = 0.0
+max = 127.0
+step = 0.1
+default = 60.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Range"
+description = "Exaggeration multiplier applied to every semitone interval from the mean pitch; may vary over time"
+automatable = true
+kind = "number"
+min = 0.0
+max = 128.0
+step = 0.1
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "repitch_exag_3"
+bin = "repitch"
+subprog = "exag"
+mode = "3"
+title = "Repitch Exaggerate (Contour)"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Exaggerates a pitch curve's contour (shape of movement) around a mean pitch"
+description = "Stretches the curve's up/down contour around a chosen mean MIDI pitch by a 0-1 contour-exaggeration factor, leaving the interval sizes themselves alone (that's mode 1's job -- this is the contour-only sibling mode). Confirmed against the real binary: Contour is clamped to the documented 0-1 range."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Mean Pitch"
+description = "MIDI note number (0-127) around which pitch contour is stretched; may vary over time"
+automatable = true
+kind = "number"
+min = 0.0
+max = 127.0
+step = 0.1
+default = 60.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Contour"
+description = "Contour-exaggeration factor (0 = no change, 1 = maximum); may vary over time"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "repitch_exag_5"
+bin = "repitch"
+subprog = "exag"
+mode = "5"
+title = "Repitch Exaggerate (Range + Contour)"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Exaggerates a pitch curve's intervals and contour together around a mean pitch"
+description = "Combines mode 1's interval-range exaggeration and mode 3's contour exaggeration in one pass, both measured from the same mean MIDI pitch. Confirmed against the real binary with all three params supplied together (argv order meanpch range contour, per the usage text)."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Mean Pitch"
+description = "MIDI note number (0-127) around which pitch intervals and contour are stretched; may vary over time"
+automatable = true
+kind = "number"
+min = 0.0
+max = 127.0
+step = 0.1
+default = 60.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Range"
+description = "Exaggeration multiplier applied to every semitone interval from the mean pitch; may vary over time"
+automatable = true
+kind = "number"
+min = 0.0
+max = 128.0
+step = 0.1
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Contour"
+description = "Contour-exaggeration factor (0 = no change, 1 = maximum); may vary over time"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "repitch_quantise_1"
+bin = "repitch"
+subprog = "quantise"
+mode = "1"
+title = "Repitch Quantise"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Quantises a pitch curve onto a fixed set of MIDI pitches"
+description = "Snaps every pitch value in the curve to the nearest entry in a user-supplied quantisation set of (possibly fractional) MIDI pitches. Confirmed against the real binary: quantisation-set entries are clamped to 0-127 and need not be in ascending order (a set of pitch classes, not a time sequence); a genuinely out-of-range entry (e.g. 200) is rejected outright with \"Pitch value out of range\" rather than being silently clamped."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Quantisation Set"
+description = "Ordered list of MIDI pitches (0-127, may be fractional) that the curve is quantised onto; order doesn't matter but at least one entry is required"
+automatable = true
+required_list = true
+kind = "number"
+min = 0.0
+max = 127.0
+step = 0.01
+default = 60.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Octave-Duplicate Set"
+description = "Duplicates the quantisation set in every octave transposition, so pitch class rather than exact octave is matched"
+flag = "-o"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "repitch_randomise_1"
+bin = "repitch"
+subprog = "randomise"
+mode = "1"
+title = "Repitch Randomise"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Randomly perturbs a pitch curve around its own contour"
+description = "Applies a random +/- variation to every pitch value, up to a maximum interval, at random timesteps no larger than a given maximum. Confirmed against the real binary: Max Interval clamped to 0-96 semitones, Timestep clamped to (roughly) one analysis-window duration through the whole file's duration in milliseconds for this fixture (an inherently file-relative bound -- the catalog range below is a generous safety cap, not this file's exact legal range). Slew is optional and, per the real binary's own rejection message, must be > 1 or < -1 (values between -1 and 1 inclusive are rejected outright, e.g. \"slew out of range: slew must be >1 or <-1\") -- there's no ParamKind that models an excluded middle range, so this constraint is documented here rather than enforced by the catalog."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Max Interval"
+description = "Maximum random pitch variation, in semitones (0-96); may vary over time"
+automatable = true
+kind = "number"
+min = 0.0
+max = 96.0
+step = 0.1
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Timestep"
+description = "Maximum random timestep between pitch fluctuations, in milliseconds (bounded below by one analysis window and above by the whole file's duration); may vary over time"
+automatable = true
+kind = "number"
+min = 1.0
+max = 7200000.0
+step = 1.0
+default = 50.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Slew"
+description = "Asymmetry between upward and downward variation range; must be greater than 1 or less than -1 (e.g. 2 doubles upward range, -3 triples downward range) -- values in between are rejected by CDP"
+flag = "-s"
+automatable = false
+kind = "number"
+min = -20.0
+max = 20.0
+step = 0.1
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "repitch_smooth_1"
+bin = "repitch"
+subprog = "smooth"
+mode = "1"
+title = "Repitch Smooth"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Smooths a pitch curve by interpolating over a moving time window"
+description = "Interpolates pitch values over a moving timeframe window, smoothing out fast fluctuations. Confirmed against the real binary: Timeframe clamped to (roughly) one analysis-window duration through the whole file's duration in milliseconds for this fixture (file-relative, same shape as Randomise's Timestep -- the catalog range is a generous safety cap). The optional Peak-Interpolate Mean Pitch shares Exaggerate's 0-127 MIDI range."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Timeframe"
+description = "Time window, in milliseconds, over which to interpolate pitch values (bounded below by one analysis window and above by the whole file's duration); may vary over time"
+automatable = true
+kind = "number"
+min = 1.0
+max = 7200000.0
+step = 1.0
+default = 50.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Peak Mean Pitch"
+description = "Interpolates between the peak displacement in each timeframe block instead of its raw values, measured from this MIDI mean pitch (0-127); omit to interpolate raw values directly"
+flag = "-p"
+automatable = true
+kind = "number"
+min = 0.0
+max = 127.0
+step = 0.1
+default = 60.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Hold At End"
+description = "At the end of the file, hold the last interpolated pitch value instead of interpolating onward to the last actual input value"
+flag = "-h"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "repitch_vibrato_1"
+bin = "repitch"
+subprog = "vibrato"
+mode = "1"
+title = "Repitch Vibrato"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Adds vibrato to a pitch curve"
+description = "Adds an oscillating vibrato to the curve at a given frequency and interval range around the curve's own central pitch. Confirmed against the real binary: Vibrato Range is clamped to 0-96 semitones; Vibrato Frequency's own upper bound is set by this fixture's analysis rate (roughly half the analysis window rate, i.e. file-relative) -- the catalog range below is a generous safety cap. A Vibrato Frequency of 0 is accepted (no audible vibrato) despite the usage text's informal \"> 0\"."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Vibrato Frequency"
+description = "Frequency of the vibrato oscillation itself, in Hz; may vary over time"
+automatable = true
+kind = "number"
+min = 0.0
+max = 200.0
+step = 0.1
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Vibrato Range"
+description = "Maximum interval the vibrato moves away from the central pitch, in semitones (0-96); may vary over time"
+automatable = true
+kind = "number"
+min = 0.0
+max = 96.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "repitch_approx_1"
+bin = "repitch"
+subprog = "approx"
+mode = "1"
+title = "Repitch Approximate"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Makes an approximate, randomly-perturbed copy of a pitch curve"
+description = "Produces a copy of the curve that randomly strays from the original in pitch, in the timing of its turning points, and/or in how finely its contour is scanned -- all three controls are optional and independently toggled by supplying (or omitting) their flag. Confirmed against the real binary: Pitch Range clamped to 0-96 semitones; Time Range and Scan Range are both clamped to file-relative millisecond bounds for this fixture (Scan Range's lower bound came out at roughly 8 analysis windows, matching the usage text's \"duration of 8 analwindows\") -- the catalog ranges below are generous safety caps, not this file's exact legal range."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitch Range"
+description = "Interval, in semitones, over which pitch randomly varies from the original (0-96)"
+flag = "-p"
+automatable = true
+kind = "number"
+min = 0.0
+max = 96.0
+step = 0.1
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Time Range"
+description = "Time interval, in milliseconds, by which a turning point's timing can stray from the original (bounded below by one analysis window and above by the whole file's duration)"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 1.0
+max = 7200000.0
+step = 1.0
+default = 50.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Scan Range"
+description = "Time interval, in milliseconds, over which the pitch contour is scanned to detect a rise or fall (bounded below by roughly 8 analysis windows and above by the whole file's duration)"
+flag = "-s"
+automatable = true
+kind = "number"
+min = 1.0
+max = 7200000.0
+step = 1.0
+default = 100.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "repitch_pchshift"
+bin = "repitch"
+subprog = "pchshift"
+title = "Repitch Pitch Shift"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Shifts every pitch in a pitch curve by a constant number of semitones"
+description = "Adds a fixed transposition (in semitones) to every value in the curve -- a single-shot version of Exaggerate/Vibrato's time-varying controls, with no mode number at all. Confirmed against the real binary: Transposition is clamped to -96 to 96 semitones."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Transposition"
+description = "Constant transposition applied to every pitch value, in semitones (-96 to 96)"
+automatable = false
+kind = "number"
+min = -96.0
+max = 96.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "repitch_insertzeros_1"
+bin = "repitch"
+subprog = "insertzeros"
+mode = "1"
+title = "Repitch Insert Zeros (Times)"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Marks time ranges in a pitch curve as unpitched"
+description = "Marks every window between each given start/end time pair as unpitched, the same -1.0 sentinel Pitch To Silence/Noise To Silence use internally. Confirmed against the real binary by reading the resulting binary pitch-WAV's raw data directly (pchtotext's own text round-trip silently bridges over near-constant unpitched regions and can't be trusted to show this): a flat, strictly-ascending list of times read as consecutive start/end pairs marks exactly those ranges as unpitched, regardless of whether the datafile is written one-per-line, two-per-line, or tab-separated -- CDP tokenizes it as a flat whitespace-separated stream. The app enforces strict ascending order on the list but not that its length is even; supply pairs (start1 end1 start2 end2 ...) by hand."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Zero Times"
+description = "Flat, strictly-ascending list of times (seconds) read as consecutive start/end pairs; every window between each pair is marked unpitched. Must contain an even number of entries (unenforced by this app)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "repitch_insertzeros_2"
+bin = "repitch"
+subprog = "insertzeros"
+mode = "2"
+title = "Repitch Insert Zeros (Sample Count)"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Marks sample-count ranges in a pitch curve as unpitched"
+description = "Same effect as the Times mode, but the datafile gives grouped sample counts (mono: sample index; stereo/multichannel: samples counted per channel-group) instead of seconds. Confirmed against the real binary by reading the resulting binary pitch-WAV's raw data directly: sample-count pairs equivalent (at this fixture's 44100Hz source rate) to the Times mode's own tested pairs mark identical unpitched ranges. A legitimate alternate encoding of the same real action, not a pitchfile/transposition split -- both modes are cataloged."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Zero Sample Counts"
+description = "Flat, strictly-ascending list of sample counts read as consecutive start/end pairs; every window between each pair is marked unpitched. Must contain an even number of entries (unenforced by this app)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 1000000000.0
+step = 1.0
+default = 0.0
+integer = true
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "repitch_insertsil_1"
+bin = "repitch"
+subprog = "insertsil"
+mode = "1"
+title = "Repitch Insert Silence (Times)"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Marks time ranges in a pitch curve as silent"
+description = "Marks every window between each given start/end time pair as silent, using a distinct -2.0 sentinel confirmed against the real binary's raw data (different from Insert Zeros' -1.0 unpitched sentinel -- silence and unpitched/noise are different curve states in CDP's own pitch data format). Verified the same way as Insert Zeros (direct binary chunk inspection, not a pchtotext round-trip, since pchtotext bridges over these regions when the surrounding curve is near-constant): datafile format and ordering behave identically to Insert Zeros' Times mode."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Silence Times"
+description = "Flat, strictly-ascending list of times (seconds) read as consecutive start/end pairs; every window between each pair is marked silent. Must contain an even number of entries (unenforced by this app)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "repitch_insertsil_2"
+bin = "repitch"
+subprog = "insertsil"
+mode = "2"
+title = "Repitch Insert Silence (Sample Count)"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Marks sample-count ranges in a pitch curve as silent"
+description = "Same effect as the Times mode, but the datafile gives grouped sample counts instead of seconds. Confirmed against the real binary the same way as Insert Zeros' Sample Count mode: sample-count pairs equivalent to the Times mode's own tested pairs mark identical silent ranges (the -2.0 sentinel) -- a legitimate alternate encoding of the same action, not a pitchfile/transposition split."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Silence Sample Counts"
+description = "Flat, strictly-ascending list of sample counts read as consecutive start/end pairs; every window between each pair is marked silent. Must contain an even number of entries (unenforced by this app)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 1000000000.0
+step = 1.0
+default = 0.0
+integer = true
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "repitch_interp_1"
+bin = "repitch"
+subprog = "interp"
+mode = "1"
+title = "Repitch Interpolate (Glide)"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Replaces noise/silence gaps in a pitch curve with a pitch glide"
+description = "Fills every unpitched or silent gap in the curve by gliding from the previous valid pitch to the next valid pitch. Confirmed against the real binary (no other params beyond mode/infile/outfile). Mode 2 (Sustain) is a separate cataloged entry, not a pitchfile/transposition split of this one -- both are legitimate alternative gap-filling strategies per the usage text."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
+
+[[process]]
+key = "repitch_interp_2"
+bin = "repitch"
+subprog = "interp"
+mode = "2"
+title = "Repitch Interpolate (Sustain)"
+category = "time"
+subcategory = "pitch curve"
+short_description = "Replaces noise/silence gaps in a pitch curve by sustaining the prior pitch"
+description = "Fills every unpitched or silent gap in the curve by sustaining the previous valid pitch until the next valid pitch appears (rather than gliding between them, as mode 1 does). Confirmed against the real binary (no other params beyond mode/infile/outfile)."
+input = "curve"
+output = "curve"
+stereo_native = false
+output_is_stereo = false
