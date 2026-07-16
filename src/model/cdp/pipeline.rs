@@ -144,7 +144,20 @@ pub struct PlannedJob {
     /// spliced into an audio `Document` the way `output_files`/`glob_output` are, instead
     /// read back into a `model::curve::PitchCurve`. Mutually exclusive with both of those.
     pub output_curve: Option<String>,
+    /// `Some` only for a curve-producing job (extraction or a transform) — the raw-byte
+    /// counterpart to `output_curve`. Every subprogram in this family both requires and
+    /// produces CDP's binary pitch-WAV format (confirmed against the real binary — see
+    /// `plan_curve_transform_job`'s doc comment), so this always names the *pre-
+    /// normalization* raw file, before the `repitch pchtotext` step that produces
+    /// `output_curve`'s plain-text file runs. Kept as the curve's next `binary_template`,
+    /// so a chain of transforms never needs to re-derive one from scratch.
+    pub output_curve_binary_template: Option<String>,
     pub brk_files: Vec<(String, String)>,
+    /// Raw-byte input files to write before running (parallel to `brk_files`, which is
+    /// text-only) — used for a curve-transform job's binary pitchfile input, spliced from a
+    /// template via `model::curve::splice_pitch_wav_data` before this job is even planned
+    /// (see `plan_curve_transform_job`).
+    pub binary_input_files: Vec<(String, Vec<u8>)>,
     pub deferred_window_params: Vec<DeferredWindowParam>,
     /// Copied straight from `ProcessDef.requires_simple_wav_input` — carried on the planned
     /// job (rather than the runner needing the `ProcessDef` again) so `cdp::runner`'s
@@ -661,7 +674,9 @@ fn plan_wav_glob(
         output_files: Vec::new(),
         glob_output: Some(GlobOutputSpec { prefix }),
         output_curve: None,
+        output_curve_binary_template: None,
         brk_files,
+        binary_input_files: Vec::new(),
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
     })
@@ -692,8 +707,10 @@ fn plan_synthesis(
         input_files: Vec::new(),
         output_files: vec![OutputWavSpec { relative_name: "out.wav".into(), dest_channels }],
         brk_files,
+        binary_input_files: Vec::new(),
         glob_output: None,
         output_curve: None,
+        output_curve_binary_template: None,
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
     })
@@ -747,8 +764,10 @@ fn plan_wav(
             }],
             output_files: vec![OutputWavSpec { relative_name: "out.wav".into(), dest_channels }],
             brk_files,
+            binary_input_files: Vec::new(),
             glob_output: None,
             output_curve: None,
+            output_curve_binary_template: None,
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
         });
@@ -778,7 +797,7 @@ fn plan_wav(
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, brk_files, deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 /// Dual-input time-domain process: `bin subprog [mode] inA inB out params...`. Lanes work
@@ -833,8 +852,10 @@ fn plan_dual_wav(
                 dest_channels: (0..a.channels.max(1)).collect(),
             }],
             brk_files,
+            binary_input_files: Vec::new(),
             glob_output: None,
             output_curve: None,
+            output_curve_binary_template: None,
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
         });
@@ -873,7 +894,7 @@ fn plan_dual_wav(
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, brk_files, deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 /// Dual-input spectral process: per channel lane, `pvoc anal` both inputs, run the process
@@ -957,7 +978,7 @@ fn plan_dual_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, brk_files, deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 fn plan_ana(
@@ -1032,40 +1053,68 @@ fn plan_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, brk_files, deferred_window_params, needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, brk_files, binary_input_files: Vec::new(), deferred_window_params, needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 /// Plans a curve-in/curve-out process (`IoKind::Curve` on both sides) — the `repitch`
 /// family's pitch-curve transforms (`invert`, `smooth`, `quantise`, ..., CDP-Ext-Plan.md
-/// Phase 4 "hard tier"). No audio anywhere: `curve_points` (an open `model::curve::
-/// PitchCurve`'s own points, not a `Document`) is written as the job's "infile" using the
-/// same plain-text time/Hz breakpoint format `Breakpoints` params already write, reusing
-/// the existing `brk_files` write-a-text-file mechanism for what is, for this one job,
-/// the *main* input rather than an auxiliary param datafile. The result is never spliced
-/// into any audio buffer — `PlannedJob.output_curve` names the relative file to read back
-/// as a new curve's points instead.
+/// Phase 4 "hard tier"). No audio anywhere, but — confirmed against the real binary the
+/// hard way, after an earlier plain-text version of this function shipped un-runnable —
+/// no plain text either: this whole family rejects a text pitchfile outright as its
+/// "infile", even CDP's own `pchtotext` round-trip of one ("Application doesn't work with
+/// this type of infile"). Only CDP's binary pitch-WAV format works.
+///
+/// Rather than trying to synthesize that format's header from nothing (`repitch generate`
+/// was tried as a text→binary bridge and produced two unexplained anomalies — a silently
+/// `.wav`-suffixed filename and a wildly oversized result — before this template approach
+/// was found), this always starts from `binary_template`: a real CDP-produced pitchfile
+/// (from `plan_extract_pitch_curve` or a prior transform's own result), confirmed to
+/// tolerate having *every* one of its `data` chunk's float values replaced while every
+/// other chunk (`fmt `, `PEAK`, `cue `, the `LIST`/`adtl`/`note` chunk carrying CDP's own
+/// "is a pitch file" marker) stays untouched. `current_points` — this app's own, possibly
+/// hand-edited, breakpoint representation — is resampled onto the template's exact
+/// per-window time grid (`model::curve::pitch_wav_grid_times`/`resample_to_grid`) and
+/// spliced in (`splice_pitch_wav_data`) before this job is even planned, so by the time a
+/// real CDP invocation happens the "infile" is indistinguishable from one CDP itself wrote.
+///
+/// The whole family also *writes* results in this same binary format, with the same
+/// `.wav`-auto-suffix quirk `plan_extract_pitch_curve` found for `getpitch` (confirmed
+/// against the real binary: `repitch invert`'s own declared outfile got `.wav` appended
+/// too) — so the raw result is always normalized through `repitch pchtotext` for display
+/// text (`PlannedJob.output_curve`), while the raw bytes themselves become the curve's
+/// *next* `binary_template` (`output_curve_binary_template`), so a chain of transforms
+/// keeps working without ever re-deriving a template from scratch.
 ///
 /// Curve params never need a duration- or sample-rate-dependent `NumberScale` (there's no
 /// selection being processed, no `.ana` file, no real input length) — every param on a
 /// catalog-authored `Curve` process must use `NumberScale::Plain`; the placeholder
 /// `duration_secs = 0.0`/`sample_rate = 44100` passed to `build_process_args` only matters
 /// for the other scales, which curve processes never use.
-pub fn plan_curve_job(def: &ProcessDef, values: &[ParamValue], curve_points: &[(f64, f64)]) -> Result<PlannedJob, PlanError> {
+pub fn plan_curve_transform_job(
+    def: &ProcessDef,
+    values: &[ParamValue],
+    binary_template: &[u8],
+    current_points: &[(f64, f64)],
+) -> Result<PlannedJob, PlanError> {
     if def.input != IoKind::Curve || def.output != IoKind::Curve {
         return Err(PlanError::UnsupportedInV1 {
-            reason: "plan_curve_job requires IoKind::Curve on both input and output".into(),
+            reason: "plan_curve_transform_job requires IoKind::Curve on both input and output".into(),
         });
     }
+    let grid = crate::model::curve::pitch_wav_grid_times(binary_template).ok_or_else(|| {
+        PlanError::UnsupportedInV1 { reason: "binary_template is not a valid CDP pitch WAV".into() }
+    })?;
+    let resampled = crate::model::curve::resample_to_grid(current_points, &grid);
+    let spliced = crate::model::curve::splice_pitch_wav_data(binary_template, &resampled).ok_or_else(|| {
+        PlanError::UnsupportedInV1 { reason: "curve point count doesn't match the template's grid".into() }
+    })?;
 
-    let mut brk_files = vec![(
-        "curve_in.txt".to_string(),
-        crate::model::curve::format_breakpoints(curve_points),
-    )];
-    let raw_outfile = if def.curve_output_binary { "curve_raw_out.pch" } else { "curve_out.txt" };
+    let mut brk_files = Vec::new();
+    let raw_outfile = "curve_raw_out.pch";
     let (args, deferred) = build_process_args(
         def,
         values,
-        &["curve_in.txt"],
+        &["curve_in.wav"],
         raw_outfile,
         0.0,
         &PvocSettings::default(),
@@ -1074,35 +1123,34 @@ pub fn plan_curve_job(def: &ProcessDef, values: &[ParamValue], curve_points: &[(
     )?;
     debug_assert!(deferred.is_empty(), "curve processes never carry ana-window-count params");
 
-    let mut steps = vec![Invocation {
-        bin: def.bin.clone(),
-        args,
-        label: process_label(def),
-        expected_output: raw_outfile.to_string(),
-    }];
-    let output_curve = if def.curve_output_binary {
-        // `repitch pchtotext` (CONVERT BINARY PITCH DATA TO TEXTFILE) is itself a `repitch`
-        // subprogram, not a separate binary — normalizes any subprogram whose own raw
-        // result is CDP's binary pitchdata format so `model::curve::parse_breakpoints`
-        // never has to understand that format.
-        steps.push(Invocation {
+    // CDP silently appends its own .wav suffix to any binary-pitch-data outfile, regardless
+    // of the literal name given (see this fn's doc comment) — declared here so the runner's
+    // post-step existence check looks for the file that will actually exist.
+    let raw_outfile_actual = format!("{raw_outfile}.wav");
+    let steps = vec![
+        Invocation {
+            bin: def.bin.clone(),
+            args,
+            label: process_label(def),
+            expected_output: raw_outfile_actual.clone(),
+        },
+        Invocation {
             bin: "repitch".to_string(),
-            args: vec!["pchtotext".to_string(), raw_outfile.to_string(), "curve_out.txt".to_string()],
+            args: vec!["pchtotext".to_string(), raw_outfile_actual.clone(), "curve_out.txt".to_string()],
             label: "repitch pchtotext".to_string(),
             expected_output: "curve_out.txt".to_string(),
-        });
-        "curve_out.txt".to_string()
-    } else {
-        raw_outfile.to_string()
-    };
+        },
+    ];
 
     Ok(PlannedJob {
         steps,
         input_files: Vec::new(),
         output_files: Vec::new(),
         glob_output: None,
-        output_curve: Some(output_curve),
+        output_curve: Some("curve_out.txt".to_string()),
+        output_curve_binary_template: Some(raw_outfile_actual),
         brk_files,
+        binary_input_files: vec![("curve_in.wav".to_string(), spliced)],
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: false,
     })
@@ -1114,13 +1162,22 @@ pub fn plan_curve_job(def: &ProcessDef, values: &[ParamValue], curve_points: &[(
 /// getpitch` won't accept a plain WAV directly (confirmed against the real binary:
 /// "Application doesn't work with this type of infile") — it needs a `.ana` file, so this
 /// wraps the selection in `pvoc anal` first, exactly like `plan_ana` does for a real
-/// catalog process, then runs `repitch getpitch 2 <ana> <resynth.wav> <pitch.txt>` (mode 2:
-/// the plain-text breakpoint output, never the binary pitchfile of mode 1 — this app's
-/// pitch curves are always plain text, per `model::curve::PitchCurve`). `PlannedJob.
-/// output_curve` names `pitch.txt`, reusing the exact same runner-side "read this file back
-/// as curve points, not audio" path `plan_curve_job`'s jobs already use — `resynth.wav`
-/// (getpitch's "if resynthesized, produces tone at detected pitch" side output) is written
-/// but never read back; nothing needs it.
+/// catalog process.
+///
+/// Uses `repitch getpitch` **mode 1** (the binary pitchfile), not mode 2's plain text —
+/// confirmed against the real binary that the whole curve-in/curve-out `repitch` family
+/// (`invert`, `smooth`, `quantise`, ...) rejects plain text outright, even CDP's own
+/// `pchtotext` round-trip of it ("Application doesn't work with this type of infile"); only
+/// the binary format is ever a valid "infile" for a transform. This app still displays a
+/// curve as plain text (`model::curve::PitchCurve.points`) — a `repitch pchtotext` step
+/// converts the binary result to text for that — but keeps the *real* binary bytes too
+/// (`output_curve_binary_template`) as `PitchCurve.binary_template`, the thing any later
+/// transform actually runs against (see that field's doc comment for the whole scheme,
+/// including why a hand-edit doesn't just get discarded).
+///
+/// `repitch getpitch` silently writes `<outfile>.wav`, ignoring the literal name given
+/// (confirmed against the real binary — the same family of quirk as `strands` mode 2's
+/// forced `0` suffix) — `expected_output`/the pchtotext step's input both account for this.
 ///
 /// Only ever takes the *first* channel of a multi-channel selection — a pitch curve is one
 /// melodic line, not a per-channel concept, so there is no stereo-lane-splitting the way
@@ -1144,12 +1201,18 @@ pub fn plan_extract_pitch_curve(pvoc: &PvocSettings) -> PlannedJob {
             bin: "repitch".into(),
             args: vec![
                 "getpitch".into(),
-                "2".into(),
+                "1".into(),
                 "in.ana".into(),
                 "resynth.wav".into(),
-                "pitch.txt".into(),
+                "pitch.pch".into(),
             ],
             label: "repitch getpitch".into(),
+            expected_output: "pitch.pch.wav".into(),
+        },
+        Invocation {
+            bin: "repitch".into(),
+            args: vec!["pchtotext".into(), "pitch.pch.wav".into(), "pitch.txt".into()],
+            label: "repitch pchtotext".into(),
             expected_output: "pitch.txt".into(),
         },
     ];
@@ -1159,7 +1222,9 @@ pub fn plan_extract_pitch_curve(pvoc: &PvocSettings) -> PlannedJob {
         output_files: Vec::new(),
         glob_output: None,
         output_curve: Some("pitch.txt".into()),
+        output_curve_binary_template: Some("pitch.pch.wav".into()),
         brk_files: Vec::new(),
+        binary_input_files: Vec::new(),
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: false,
     }
@@ -1199,7 +1264,6 @@ mod tests {
             stereo_native: false,
             output_is_stereo: false,
             requires_simple_wav_input: false,
-            curve_output_binary: false,
             params: vec![number_param("Speed", -96.0, 96.0, 0.0, NumberScale::Plain)],
         }
     }
@@ -1686,7 +1750,7 @@ mod tests {
         assert!(matches!(err, PlanError::ParamCountMismatch { expected: 1, actual: 0 }));
     }
 
-    // -- plan_curve_job (IoKind::Curve, Phase 4 "hard tier") -----------------------------
+    // -- plan_curve_transform_job (IoKind::Curve, Phase 4 "hard tier") -------------------
 
     fn curve_def() -> ProcessDef {
         let mut def = base_def(IoKind::Curve, IoKind::Curve);
@@ -1696,47 +1760,82 @@ mod tests {
         def
     }
 
-    #[test]
-    fn plan_curve_job_writes_the_curve_as_the_main_input_and_names_the_result() {
-        let def = curve_def();
-        let points = vec![(0.0, 220.0), (1.0, 440.0)];
-        let job = plan_curve_job(&def, &[ParamValue::Number(0.0)], &points).unwrap();
-
-        assert_eq!(job.steps.len(), 1);
-        assert_eq!(job.steps[0].bin, "repitch");
-        assert_eq!(job.steps[0].args, vec!["invert", "1", "curve_in.txt", "curve_out.txt", "0"]);
-        assert_eq!(job.input_files, Vec::new());
-        assert_eq!(job.output_files, Vec::new());
-        assert_eq!(job.output_curve, Some("curve_out.txt".to_string()));
-        let (name, contents) = job.brk_files.first().expect("curve written as a brk_files entry");
-        assert_eq!(name, "curve_in.txt");
-        assert_eq!(contents, "0 220\n1 440");
+    /// A minimal but structurally real CDP binary pitchfile — `fmt ` (IEEE float, mono,
+    /// `arate` as the sample-rate field) + `data` (`values` as float32 LE) — enough for
+    /// `plan_curve_transform_job` to read a grid from and splice into. Mirrors
+    /// `model::curve::tests::fake_pitch_wav` (duplicated rather than shared across module
+    /// boundaries for a handful of lines).
+    fn fake_binary_template(arate: u32, values: &[f32]) -> Vec<u8> {
+        let mut fmt_body = Vec::new();
+        fmt_body.extend_from_slice(&3u16.to_le_bytes());
+        fmt_body.extend_from_slice(&1u16.to_le_bytes());
+        fmt_body.extend_from_slice(&arate.to_le_bytes());
+        fmt_body.extend_from_slice(&(arate * 4).to_le_bytes());
+        fmt_body.extend_from_slice(&4u16.to_le_bytes());
+        fmt_body.extend_from_slice(&32u16.to_le_bytes());
+        let mut data_body = Vec::new();
+        for &v in values {
+            data_body.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&(fmt_body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&fmt_body);
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data_body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data_body);
+        out
     }
 
     #[test]
-    fn plan_curve_job_normalizes_a_binary_result_via_repitch_pchtotext() {
-        let mut def = curve_def();
-        def.subprog = Some("generate".into());
-        def.mode = None;
-        def.curve_output_binary = true;
-        let job = plan_curve_job(&def, &[ParamValue::Number(0.0)], &[(0.0, 100.0)]).unwrap();
+    fn plan_curve_transform_job_splices_the_curve_into_the_binary_template() {
+        let def = curve_def();
+        let template = fake_binary_template(2, &[219.7, 219.7]); // arate=2 -> grid [0.0, 0.5]
+        let points = vec![(0.0, 220.0), (0.5, 440.0)];
+        let job = plan_curve_transform_job(&def, &[ParamValue::Number(0.0)], &template, &points).unwrap();
 
         assert_eq!(job.steps.len(), 2);
-        assert_eq!(job.steps[0].expected_output, "curve_raw_out.pch");
+        assert_eq!(job.steps[0].bin, "repitch");
+        assert_eq!(job.steps[0].args, vec!["invert", "1", "curve_in.wav", "curve_raw_out.pch", "0"]);
+        // CDP forces its own .wav suffix onto any binary-pitch-data outfile.
+        assert_eq!(job.steps[0].expected_output, "curve_raw_out.pch.wav");
         assert_eq!(job.steps[1].bin, "repitch");
-        assert_eq!(job.steps[1].args, vec!["pchtotext", "curve_raw_out.pch", "curve_out.txt"]);
+        assert_eq!(job.steps[1].args, vec!["pchtotext", "curve_raw_out.pch.wav", "curve_out.txt"]);
         assert_eq!(job.output_curve, Some("curve_out.txt".to_string()));
+        assert_eq!(job.output_curve_binary_template, Some("curve_raw_out.pch.wav".to_string()));
+
+        let (name, spliced) = job.binary_input_files.first().expect("spliced binary input file");
+        assert_eq!(name, "curve_in.wav");
+        assert_eq!(spliced.len(), template.len(), "splicing must never change the file's size");
+        let data_offset = spliced.len() - 8; // this fixture's data chunk payload starts here
+        let vals: Vec<f32> = spliced[data_offset..]
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        assert_eq!(vals, vec![220.0, 440.0], "the curve's own points should replace the template's");
     }
 
     #[test]
-    fn plan_curve_job_rejects_a_process_not_declared_as_curve_both_sides() {
+    fn plan_curve_transform_job_rejects_a_process_not_declared_as_curve_both_sides() {
         let def = base_def(IoKind::Wav, IoKind::Curve);
-        let err = plan_curve_job(&def, &[ParamValue::Number(0.0)], &[(0.0, 1.0)]).unwrap_err();
+        let template = fake_binary_template(2, &[219.7, 219.7]);
+        let err = plan_curve_transform_job(&def, &[ParamValue::Number(0.0)], &template, &[(0.0, 1.0)]).unwrap_err();
         assert!(matches!(err, PlanError::UnsupportedInV1 { .. }));
     }
 
     #[test]
-    fn plan_job_rejects_a_curve_process_directing_the_caller_to_plan_curve_job() {
+    fn plan_curve_transform_job_rejects_a_template_that_isnt_a_valid_pitch_wav() {
+        let def = curve_def();
+        let err = plan_curve_transform_job(&def, &[ParamValue::Number(0.0)], b"not a riff file", &[(0.0, 1.0)])
+            .unwrap_err();
+        assert!(matches!(err, PlanError::UnsupportedInV1 { .. }));
+    }
+
+    #[test]
+    fn plan_job_rejects_a_curve_process_directing_the_caller_to_plan_curve_transform_job() {
         let def = curve_def();
         let err = plan_job(&def, &[ParamValue::Number(0.0)], &[], &PvocSettings::default()).unwrap_err();
         assert!(matches!(err, PlanError::UnsupportedInV1 { .. }));
@@ -1746,15 +1845,20 @@ mod tests {
     //    curve-out shape `plan_curve_job` doesn't cover) ----------------------------------
 
     #[test]
-    fn plan_extract_pitch_curve_wraps_in_pvoc_anal_then_repitch_getpitch_mode_2() {
+    fn plan_extract_pitch_curve_wraps_in_pvoc_anal_then_repitch_getpitch_mode_1_then_pchtotext() {
         let job = plan_extract_pitch_curve(&PvocSettings::default());
 
-        assert_eq!(job.steps.len(), 2);
+        assert_eq!(job.steps.len(), 3);
         assert_eq!(job.steps[0].bin, "pvoc");
         assert_eq!(job.steps[0].args, vec!["anal", "1", "in.wav", "in.ana", "-c1024", "-o3"]);
         assert_eq!(job.steps[1].bin, "repitch");
-        assert_eq!(job.steps[1].args, vec!["getpitch", "2", "in.ana", "resynth.wav", "pitch.txt"]);
+        assert_eq!(job.steps[1].args, vec!["getpitch", "1", "in.ana", "resynth.wav", "pitch.pch"]);
+        // getpitch silently writes <name>.wav regardless of the literal name given.
+        assert_eq!(job.steps[1].expected_output, "pitch.pch.wav");
+        assert_eq!(job.steps[2].bin, "repitch");
+        assert_eq!(job.steps[2].args, vec!["pchtotext", "pitch.pch.wav", "pitch.txt"]);
         assert_eq!(job.output_curve, Some("pitch.txt".to_string()));
+        assert_eq!(job.output_curve_binary_template, Some("pitch.pch.wav".to_string()));
         assert_eq!(job.output_files, Vec::new());
         assert_eq!(
             job.input_files,

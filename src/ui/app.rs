@@ -468,6 +468,15 @@ enum Dialog {
     RenameBuffer { index: usize, input: TextInput },
     /// Rename the file at `path` on disk (Files panel `r`). Esc cancels.
     RenameFile { path: PathBuf, input: TextInput },
+    /// Prompts for a path the first time a curve is saved (`App::save_or_prompt_curve`) —
+    /// `Ctrl+S` on a curve row already having a `path` saves straight to it with no dialog,
+    /// mirroring how a document with a known path behaves.
+    SaveCurveAs { curve_index: usize, input: TextInput },
+    /// "Load Pitch Curve..." (CDP menu) — prompts for a path, reads it via
+    /// `model::curve::load_curve` on Enter, and adds it as a new `App.curves` entry. A
+    /// loaded curve has no `binary_template` (see that field's doc comment), so it can be
+    /// viewed/hand-edited/re-saved but not run through a CDP transform until re-extracted.
+    LoadCurve { input: TextInput },
     /// Mix-to-mono: one TextInput per source channel (dB gain, or the literal "-inf" for
     /// silence). `focused` is the index of the currently-active field; Tab cycles through.
     /// `tanh_clip` enables a tanh soft-limiter on the mixed output (same as Gain's option).
@@ -677,6 +686,23 @@ struct CdpEnvelopeEdit {
     /// graphics-mode renderer can look up the actual audio for that span to draw as a pale
     /// reference waveform behind the curve, without recomputing the selection.
     range: (usize, usize),
+    /// `Some` while the 'c' ("use curve") picker overlay is open — only reachable on a
+    /// `required_envelope` field (a plain automatable field's 'c' means "revert to a
+    /// constant" instead, since it actually has one to revert to; a required_envelope field
+    /// never does, which is exactly the otherwise-unused key this repurposes). Lets a Hz-
+    /// shaped envelope (e.g. `psow`'s "Pitch Envelope" params) be filled from one of
+    /// `App.curves` instead of hand-drawn — see `App::apply_curve_to_envelope` for the
+    /// rescale-to-`time_max` math. Loads the rescaled curve into `points` for further
+    /// tweaking rather than committing immediately, so the graphical editor still gets the
+    /// final say (Enter still commits the whole session as normal).
+    curve_picker: Option<EnvelopeCurvePicker>,
+}
+
+/// The picker `CdpEnvelopeEdit.curve_picker` holds — `entries` are indices into
+/// `App.curves`, computed once when 'c' opens it.
+struct EnvelopeCurvePicker {
+    entries: Vec<usize>,
+    selected: usize,
 }
 
 /// State for the plain-list editor, active while `Dialog::CdpParams.list_edit` is `Some` —
@@ -781,6 +807,65 @@ struct CurveEditorState {
     selected_row: usize,
     /// 0 = Time, 1 = Hz.
     selected_col: usize,
+    editing: Option<TextInput>,
+    /// `Some` while the 't' ("transform") picker overlay is open — a small list of just the
+    /// curve-compatible (`IoKind::Curve` both sides) catalog processes, opened from inside
+    /// the editor rather than routing through the full `CdpBrowser`/`CdpParams` machinery
+    /// (that whole system is built around a `Document` target — `operation_range`,
+    /// `doc_index`, a second-input picker for dual-buffer processes — none of which apply
+    /// to a curve). Running the selected process always uses its catalog defaults for now
+    /// (every shipped curve-transform entry so far takes zero params); a real per-param
+    /// form is a follow-up once a non-trivial-param entry exists to build it against.
+    picker: Option<CurveTransformPicker>,
+}
+
+/// The small picker `CurveEditorState.picker` holds — `entries` are indices into
+/// `CdpCatalog::processes`, computed once when 't' opens it (the catalog doesn't change
+/// while a dialog is up, same assumption `Dialog::CdpBrowser` already makes).
+struct CurveTransformPicker {
+    entries: Vec<usize>,
+    selected: usize,
+    /// `Some` once Enter has picked a process from `entries` — the params-editing step
+    /// (`CurveTransformParams`). `entries`/`selected` are kept as-is while this is `Some`
+    /// so Esc from the params form goes back to the same list position rather than losing
+    /// it; only Esc from the *list* (this field still `None`) closes the picker entirely.
+    params: Option<CurveTransformParams>,
+}
+
+/// The params-editing step of the curve transform picker ('t' → pick a process → this).
+/// Reuses `CdpField` (the same `Number`/`Toggle`/`List` variants a normal `CdpParams`
+/// session uses) rather than inventing a new field representation, but with its own
+/// smaller navigation/dispatch (no second-input picker, no presets, no envelope/table/
+/// hilite-band sub-editors — no shipped curve-transform entry uses those shapes, only
+/// `Number`, `Toggle`, and `required_list`). Deliberately not built on `Dialog::CdpParams`
+/// itself: that whole system is wired around a `Document` target (`operation_range`,
+/// `doc_index`, a second-input buffer picker), none of which apply to a curve.
+struct CurveTransformParams {
+    catalog_index: usize,
+    fields: Vec<CdpField>,
+    /// `0..fields.len()` selects a field; `fields.len()` itself is the "Apply" row.
+    focus: usize,
+    /// Set by `run_curve_transform` when `cdp_validate_fields` blocks it (e.g. a
+    /// `required_list` field never configured) — shown inline, same as `Dialog::CdpParams`'s
+    /// own `error` field.
+    error: Option<String>,
+    list_edit: Option<CurveParamListEdit>,
+}
+
+/// State for editing a `required_list`-shaped curve-transform param ('e' on a `List` field
+/// in `CurveTransformParams`) — the curve-params counterpart to `CdpListEdit`, same
+/// arrows-select/type-to-overwrite/n-insert/Del-remove interaction model (see
+/// `CdpListEdit`'s doc comment for the full model). No `time_max` field: unlike a
+/// `Document` selection, a curve-transform param has no real duration to cap a
+/// time-sequence field's practical range against, so `CURVE_EDITOR_TIME_MAX` (the same
+/// generous fixed cap the standalone curve editor's own Time column already uses) stands
+/// in for it directly wherever `CdpListEdit` would consult `time_max`.
+struct CurveParamListEdit {
+    field_index: usize,
+    values: Vec<f64>,
+    selected: usize,
+    original: Vec<f64>,
+    is_time_sequence: bool,
     editing: Option<TextInput>,
 }
 
@@ -1246,6 +1331,22 @@ pub struct App {
     /// Second, independent audio engine for auditioning a `Preview` result without
     /// disturbing whatever's loaded/playing — mirrors `audition_audio`.
     cdp_preview_audio: Option<AudioEngine>,
+    /// `Some(source_name)` while an "Extract Pitch Curve" job (`App::extract_pitch_curve`)
+    /// is in flight — deliberately separate from `cdp_pending` rather than folded into it:
+    /// this action has no `ProcessDef`/`CdpParams` dialog behind it at all (it isn't a
+    /// catalog process — CDP-Ext-Plan.md Phase 4's one asymmetric audio-in/curve-out
+    /// shape), so there's no `fields`/`second_input`/`presets` to stash, and the result
+    /// becomes a new `App.curves` entry rather than being spliced into any `Document`.
+    /// `tick_cdp` checks this first, ahead of `cdp_pending`.
+    cdp_pending_curve_extraction: Option<String>,
+    /// `Some((curve_index, transform_title))` while a curve-transform job
+    /// (`App::run_curve_transform`) is in flight — same reasoning as
+    /// `cdp_pending_curve_extraction` (no `ProcessDef`/`CdpParams` session behind this
+    /// action either, since it's driven by the standalone curve editor's own picker, not
+    /// the normal `CdpBrowser`/`CdpParams` flow). The result replaces `curves[curve_index]`'s
+    /// points/`binary_template` via `CurveHistory::apply` (labeled `transform_title`) rather
+    /// than creating a new curve the way extraction does.
+    cdp_pending_curve_transform: Option<(usize, String)>,
 }
 
 /// Context for the CDP job currently running in `cdp_runner`, stashed when it's submitted
@@ -1393,6 +1494,8 @@ impl App {
             cdp_next_job_id: 0,
             cdp_pending: None,
             cdp_preview_audio: None,
+            cdp_pending_curve_extraction: None,
+            cdp_pending_curve_transform: None,
         }
     }
 
@@ -1460,7 +1563,391 @@ impl App {
             selected_row: 0,
             selected_col: 1, // Hz -- the more commonly hand-edited of the two
             editing: None,
+            picker: None,
         }));
+    }
+
+    /// 't' inside the standalone curve editor — opens the small transform picker, filtered
+    /// to just the catalog's curve-compatible (`IoKind::Curve` both sides) processes. Opens
+    /// even when the curve has no `binary_template` (a hand-created or loaded-from-text
+    /// curve) — `run_curve_transform` is where that's actually checked, once a process is
+    /// picked, so the failure message can be specific about *why*.
+    fn open_curve_transform_picker(&mut self) {
+        let entries: Vec<usize> = self
+            .cdp_catalog
+            .processes
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.input == crate::model::cdp::IoKind::Curve && p.output == crate::model::cdp::IoKind::Curve)
+            .map(|(i, _)| i)
+            .collect();
+        let Some(Dialog::CurveEditor(edit)) = self.dialog.as_mut() else { return };
+        edit.picker = Some(CurveTransformPicker { entries, selected: 0, params: None });
+    }
+
+    /// All key handling while `CurveEditorState.picker` is `Some` and its `params` step
+    /// hasn't started yet — Up/Down navigate the small list, Esc closes the picker (back to
+    /// the plain curve editor), Enter opens `CurveTransformParams` for the selected process.
+    fn handle_curve_transform_picker_key(&mut self, key: KeyEvent) {
+        let Some(Dialog::CurveEditor(edit)) = self.dialog.as_mut() else { return };
+        let Some(picker) = edit.picker.as_mut() else { return };
+        match key.code {
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => {
+                picker.selected = (picker.selected + 1).min(picker.entries.len().saturating_sub(1));
+            }
+            KeyCode::Esc => edit.picker = None,
+            KeyCode::Enter => {
+                let Some(&catalog_index) = picker.entries.get(picker.selected) else {
+                    edit.picker = None;
+                    return;
+                };
+                let Some(def) = self.cdp_catalog.processes.get(catalog_index) else { return };
+                let fields: Vec<CdpField> = def.params.iter().map(CdpField::from_default).collect();
+                let Some(Dialog::CurveEditor(edit)) = self.dialog.as_mut() else { return };
+                if let Some(picker) = edit.picker.as_mut() {
+                    picker.params = Some(CurveTransformParams {
+                        catalog_index,
+                        focus: 0,
+                        error: None,
+                        list_edit: None,
+                        fields,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// All key handling while `CurveTransformPicker.params` is `Some` (and its own
+    /// `list_edit` isn't) — Tab/Shift+Tab cycle `focus` across `fields.len() + 1` positions
+    /// (each field, then a trailing "Apply" row); Up/Down nudge the focused `Number` field
+    /// (`cdp_nudge_number`, same fn a normal `CdpParams` session's Number fields use); Space
+    /// flips a focused `Toggle`; `e` opens `CurveParamListEdit` for a focused `List`; typing
+    /// a digit/`-`/`.` edits a focused `Number`'s `TextInput` directly (no discrete "commit"
+    /// moment, same as `CdpParams`'s own Number fields — `cdp_validate_fields` is what
+    /// blocks an out-of-range value, at Enter-on-Apply time). Enter on the Apply row runs
+    /// the transform (`run_curve_transform`); Esc backs out to the plain picker list.
+    fn handle_curve_transform_params_key(&mut self, key: KeyEvent) {
+        let Some(Dialog::CurveEditor(edit)) = self.dialog.as_mut() else { return };
+        let Some(params) = edit.picker.as_mut().and_then(|p| p.params.as_mut()) else { return };
+        let field_count = params.fields.len();
+
+        if let KeyCode::Char(c) = key.code {
+            if params.focus < field_count && is_cdp_table_edit_char(c) {
+                if let Some(CdpField::Number { input, .. }) = params.fields.get_mut(params.focus) {
+                    input.insert(c);
+                }
+                return;
+            }
+        }
+
+        match key.code {
+            KeyCode::Backspace if params.focus < field_count => {
+                if let Some(CdpField::Number { input, .. }) = params.fields.get_mut(params.focus) {
+                    input.backspace();
+                }
+            }
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                params.focus = if params.focus == 0 { field_count } else { params.focus - 1 };
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                params.focus = (params.focus + 1).min(field_count);
+            }
+            KeyCode::Up => {
+                if params.focus < field_count {
+                    cdp_nudge_number(params.fields.get_mut(params.focus), 1.0, key.modifiers.contains(KeyModifiers::SHIFT));
+                } else {
+                    params.focus = params.focus.saturating_sub(1);
+                }
+            }
+            KeyCode::Char(' ') if params.focus < field_count => {
+                if let Some(CdpField::Toggle { on }) = params.fields.get_mut(params.focus) {
+                    *on = !*on;
+                }
+            }
+            KeyCode::Char('e') if params.focus < field_count => {
+                self.open_curve_param_list_editor();
+            }
+            KeyCode::Esc => {
+                if let Some(picker) = edit.picker.as_mut() {
+                    picker.params = None;
+                }
+            }
+            KeyCode::Enter if params.focus == field_count => {
+                let catalog_index = params.catalog_index;
+                self.run_curve_transform(catalog_index);
+            }
+            _ => {}
+        }
+    }
+
+    /// 'e' inside `CurveTransformParams` on a focused `List` field — opens
+    /// `CurveParamListEdit`, seeded from the catalog's own default the same way
+    /// `open_cdp_list_editor` seeds a never-yet-configured (empty) list: one entry at the
+    /// param's default value (clamped into `0..CURVE_EDITOR_TIME_MAX` for a time-sequence
+    /// field, since there's no real selection duration to clamp against here).
+    fn open_curve_param_list_editor(&mut self) {
+        let Some(Dialog::CurveEditor(edit)) = self.dialog.as_ref() else { return };
+        let Some(params) = edit.picker.as_ref().and_then(|p| p.params.as_ref()) else { return };
+        let field_index = params.focus;
+        let Some(CdpField::List { values, .. }) = params.fields.get(field_index) else { return };
+        let Some(def) = self.cdp_catalog.processes.get(params.catalog_index) else { return };
+        let Some(param) = def.params.get(field_index) else { return };
+        if !param.automatable {
+            return;
+        }
+        let is_time_sequence = param.list_is_time_sequence;
+        let original = values.clone();
+        let seeded = if original.is_empty() {
+            let crate::model::cdp::ParamKind::Number { default, min, .. } = &param.kind else {
+                return;
+            };
+            let seed_value = if is_time_sequence { default.clamp(*min, CURVE_EDITOR_TIME_MAX.max(*min)) } else { *default };
+            vec![seed_value]
+        } else {
+            original.clone()
+        };
+
+        let Some(Dialog::CurveEditor(edit)) = self.dialog.as_mut() else { return };
+        let Some(list_edit) = edit.picker.as_mut().and_then(|p| p.params.as_mut()).map(|p| &mut p.list_edit) else {
+            return;
+        };
+        *list_edit = Some(CurveParamListEdit { field_index, values: seeded, selected: 0, original, is_time_sequence, editing: None });
+    }
+
+    /// Commits a `CurveParamListEdit`'s in-progress typed cell — the curve-params
+    /// counterpart to `commit_cdp_list_cell_edit` (see that fn's doc comment; identical
+    /// logic, just against `CURVE_EDITOR_TIME_MAX` instead of a real selection's duration).
+    fn commit_curve_param_list_cell_edit(edit: &mut CurveParamListEdit, min: f64, max: f64, effective_max: f64, integer: bool) {
+        const MIN_GAP: f64 = 0.001;
+        let Some(input) = edit.editing.take() else { return };
+        let Ok(parsed) = input.value().trim().parse::<f64>() else { return };
+        let parsed = if integer { parsed.round() } else { parsed };
+        let i = edit.selected;
+        edit.values[i] = if edit.is_time_sequence {
+            let lower = if i == 0 { min } else { edit.values[i - 1] + MIN_GAP };
+            let upper = if i + 1 == edit.values.len() { effective_max } else { edit.values[i + 1] - MIN_GAP };
+            parsed.clamp(lower.min(upper), upper.max(lower))
+        } else {
+            parsed.clamp(min, max)
+        };
+    }
+
+    /// All key handling while `CurveTransformParams.list_edit` is `Some` — the curve-params
+    /// counterpart to `handle_cdp_list_key` (see that fn's doc comment for the full
+    /// arrows-select/type-to-overwrite/n-insert/Del-remove model, identical here).
+    fn handle_curve_param_list_key(&mut self, key: KeyEvent) {
+        let Some(Dialog::CurveEditor(edit)) = self.dialog.as_mut() else { return };
+        let Some(params) = edit.picker.as_mut().and_then(|p| p.params.as_mut()) else { return };
+        let Some(list_edit) = params.list_edit.as_mut() else { return };
+        let field_index = list_edit.field_index;
+        let Some(CdpField::List { min, max, step, integer, .. }) = params.fields.get(field_index) else { return };
+        let (min, max, step, integer) = (*min, *max, *step, *integer);
+        let effective_max = if list_edit.is_time_sequence { max.min(CURVE_EDITOR_TIME_MAX) } else { max };
+
+        let continues_typing = matches!(key.code, KeyCode::Char(c) if is_cdp_table_edit_char(c))
+            || (list_edit.editing.is_some() && key.code == KeyCode::Backspace);
+        if !continues_typing {
+            Self::commit_curve_param_list_cell_edit(list_edit, min, max, effective_max, integer);
+        }
+
+        match key.code {
+            KeyCode::Char(c) if is_cdp_table_edit_char(c) => {
+                let current = list_edit.values[list_edit.selected];
+                list_edit.editing.get_or_insert_with(|| TextInput::fresh(format_cdp_float_for_display(current))).insert(c);
+                return;
+            }
+            KeyCode::Backspace if list_edit.editing.is_some() => {
+                list_edit.editing.as_mut().unwrap().backspace();
+                return;
+            }
+            KeyCode::Left | KeyCode::Up => {
+                list_edit.selected = list_edit.selected.saturating_sub(1);
+                return;
+            }
+            KeyCode::Right | KeyCode::Down => {
+                list_edit.selected = (list_edit.selected + 1).min(list_edit.values.len().saturating_sub(1));
+                return;
+            }
+            KeyCode::Char('n') => {
+                let i = list_edit.selected;
+                if list_edit.is_time_sequence {
+                    if list_edit.values.len() == 1 {
+                        let new_time = if list_edit.values[0] + step <= effective_max {
+                            list_edit.values[0] + step
+                        } else {
+                            (list_edit.values[0] - step).max(min)
+                        };
+                        if new_time >= list_edit.values[0] {
+                            list_edit.values.push(new_time);
+                            list_edit.selected = 1;
+                        } else {
+                            list_edit.values.insert(0, new_time);
+                            list_edit.selected = 0;
+                        }
+                    } else {
+                        let (lo_i, hi_i) = if i + 1 < list_edit.values.len() { (i, i + 1) } else { (i - 1, i) };
+                        let mid = (list_edit.values[lo_i] + list_edit.values[hi_i]) / 2.0;
+                        list_edit.values.insert(hi_i, mid);
+                        list_edit.selected = hi_i;
+                    }
+                } else {
+                    let v = list_edit.values[i];
+                    list_edit.values.insert(i + 1, v);
+                    list_edit.selected = i + 1;
+                }
+                return;
+            }
+            KeyCode::Delete | KeyCode::Backspace => {
+                if list_edit.values.len() > 1 {
+                    list_edit.values.remove(list_edit.selected);
+                    list_edit.selected = list_edit.selected.min(list_edit.values.len() - 1);
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        let committed_values = list_edit.values.clone();
+        let original = list_edit.original.clone();
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(CdpField::List { values, .. }) = params.fields.get_mut(field_index) {
+                    *values = original;
+                }
+                params.list_edit = None;
+            }
+            KeyCode::Enter => {
+                if let Some(CdpField::List { values, .. }) = params.fields.get_mut(field_index) {
+                    *values = committed_values;
+                }
+                params.list_edit = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Runs the picked curve-transform process against the open curve's current (possibly
+    /// hand-edited) points and its `binary_template` — the real CDP invocation the picker
+    /// exists to reach, using whatever values `CurveTransformParams.fields` currently holds
+    /// (`CdpField::to_value`, the same production conversion a normal `CdpParams` session's
+    /// Apply uses). Blocked by `cdp_validate_fields` first (shared, generic over
+    /// `&[CdpField]` — not coupled to `Dialog::CdpParams` at all), same as a real process.
+    /// Reuses `Dialog::CdpRunning` for progress display, tracked via
+    /// `cdp_pending_curve_transform` rather than `cdp_pending` — same reasoning as
+    /// `extract_pitch_curve`'s own separate tracking (no `ProcessDef`/`CdpParams` session
+    /// underneath a curve action).
+    fn run_curve_transform(&mut self, catalog_index: usize) {
+        let Some(def) = self.cdp_catalog.processes.get(catalog_index).cloned() else { return };
+        let Some(Dialog::CurveEditor(edit)) = self.dialog.as_mut() else { return };
+        let Some(picker) = edit.picker.as_mut() else { return };
+        let Some(params) = picker.params.as_mut() else { return };
+        if let Some(bad) = Self::cdp_validate_fields(&def, &params.fields) {
+            params.error = Some("value out of range".into());
+            params.focus = bad;
+            return;
+        }
+        let values: Vec<_> = params.fields.iter().map(CdpField::to_value).collect();
+
+        let curve_index = edit.curve_index;
+        let current_points = edit.points.clone();
+        let Some(curve) = self.curves.get(curve_index) else { return };
+        let Some(template) = curve.binary_template.clone() else {
+            self.dialog = Some(Dialog::Info {
+                message: "This curve has no CDP-extracted source to run a transform against \u{2014} extract it from audio first.".into(),
+            });
+            return;
+        };
+
+        let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
+        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+            self.dialog = Some(Dialog::CdpSetup { input: TextInput::new(self.config.cdp_dir.clone()), error: Some("CDP directory no longer valid".into()) });
+            return;
+        }
+
+        let planned = match crate::model::cdp::pipeline::plan_curve_transform_job(&def, &values, &template, &current_points) {
+            Ok(p) => p,
+            Err(err) => {
+                self.dialog = Some(Dialog::Info { message: cdp_plan_error_message(&err) });
+                return;
+            }
+        };
+
+        let step_total = planned.steps.len();
+        let job_id = self.cdp_next_job_id;
+        self.cdp_next_job_id += 1;
+        self.cdp_pending_curve_transform = Some((curve_index, def.title.clone()));
+        self.cdp_runner.submit(crate::cdp::Job {
+            id: job_id,
+            cdp_dir,
+            planned,
+            inputs: Vec::new(),
+            input_sample_rate: 44100,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+        self.dialog = Some(Dialog::CdpRunning {
+            job_id,
+            title: def.title,
+            step_label: "Starting…".into(),
+            step_index: 0,
+            step_total,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+    }
+
+    /// `Ctrl+S` on a curve row in a focused Buffers panel — saves straight to `path` if the
+    /// curve already has one (mirroring a document with a known path), otherwise prompts
+    /// for a filename via `Dialog::SaveCurveAs`.
+    fn save_or_prompt_curve(&mut self, curve_index: usize) {
+        let Some(curve) = self.curves.get(curve_index) else { return };
+        if let Some(path) = curve.path.clone() {
+            if crate::model::curve::save_curve(curve, &path).is_ok() {
+                self.curves[curve_index].dirty = false;
+            }
+            return;
+        }
+        let default_name = format!("{}.txt", curve.name.replace(' ', "_"));
+        self.dialog = Some(Dialog::SaveCurveAs { curve_index, input: TextInput::fresh(default_name) });
+    }
+
+    /// Enter from `Dialog::SaveCurveAs` — saves into the Files panel's current directory
+    /// under `file_name` (mirroring `rename_buffer`'s own directory choice for a
+    /// never-yet-saved buffer) and remembers the path for future plain `Ctrl+S` saves.
+    fn save_curve_as(&mut self, curve_index: usize, file_name: &str) {
+        if file_name.is_empty() {
+            return;
+        }
+        let Some(curve) = self.curves.get(curve_index) else { return };
+        let path = self.file_panel.directory.join(file_name);
+        if crate::model::curve::save_curve(curve, &path).is_err() {
+            return;
+        }
+        if let Some(curve) = self.curves.get_mut(curve_index) {
+            curve.path = Some(path);
+            curve.dirty = false;
+        }
+    }
+
+    /// Enter from `Dialog::LoadCurve` — reads `path` (expanding a leading `~`, same
+    /// convention `App::open_directory` already uses) via `model::curve::load_curve` and
+    /// adds it as a new curve. Silently does nothing on a bad path/unparseable file, same
+    /// as `open_directory`'s own failure handling — the dialog has already closed by the
+    /// time this runs (this is an Enter-key arm on an already-`take()`n `self.dialog`), so
+    /// there's nothing to leave open for a retry; re-opening "Load Pitch Curve..." starts fresh.
+    fn load_curve_from_path(&mut self, path: &str) {
+        if path.is_empty() {
+            return;
+        }
+        let expanded = if let Some(rest) = path.strip_prefix('~') {
+            dirs_home().map(|home| format!("{home}{rest}")).unwrap_or_else(|| path.to_string())
+        } else {
+            path.to_string()
+        };
+        let Ok(curve) = crate::model::curve::load_curve(&expanded) else { return };
+        self.curves.push(curve);
+        self.curve_histories.push(crate::model::curve_history::CurveHistory::new());
     }
 
     /// Commits a `CurveEditorState`'s in-progress typed cell (`edit.editing`, if any) into
@@ -1788,7 +2275,13 @@ impl App {
                 }
                 KeyCode::Char('/') => { self.handle_action(Action::SearchBuffers); true }
                 // Contextual buffer commands (^r/^a differ from the global Reverse/SaveAll).
-                KeyCode::Char('s') | KeyCode::Char('S') if ctrl => { self.handle_action(Action::Save); true }
+                KeyCode::Char('s') | KeyCode::Char('S') if ctrl => {
+                    match self.buffer_panel.selected.checked_sub(self.documents.len()) {
+                        Some(curve_index) => self.save_or_prompt_curve(curve_index),
+                        None => self.handle_action(Action::Save),
+                    }
+                    true
+                }
                 KeyCode::Char('w') | KeyCode::Char('W') if ctrl => { self.handle_action(Action::CloseBuffer); true }
                 KeyCode::Char('r') | KeyCode::Char('R') if ctrl => { self.handle_action(Action::RenameBuffer); true }
                 KeyCode::Char('a') | KeyCode::Char('A') if ctrl => { self.handle_action(Action::SaveAll); true }
@@ -1970,7 +2463,9 @@ impl App {
             | Dialog::RenameMarker { input, .. }
             | Dialog::OpenDirectory { input }
             | Dialog::RenameBuffer { input, .. }
-            | Dialog::RenameFile { input, .. } => Some(input),
+            | Dialog::RenameFile { input, .. }
+            | Dialog::SaveCurveAs { input, .. }
+            | Dialog::LoadCurve { input } => Some(input),
             Dialog::Gain { input, right_input, focused, per_channel, is_stereo, .. } => {
                 let rows = GainRows::new(*is_stereo, *per_channel);
                 let f = *focused;
@@ -2066,8 +2561,32 @@ impl App {
     }
 
     fn handle_dialog_key(&mut self, key: KeyEvent) {
+        if let Some(Dialog::CurveEditor(CurveEditorState {
+            picker: Some(CurveTransformPicker { params: Some(CurveTransformParams { list_edit: Some(_), .. }), .. }),
+            ..
+        })) = &self.dialog
+        {
+            self.handle_curve_param_list_key(key);
+            return;
+        }
+        if let Some(Dialog::CurveEditor(CurveEditorState {
+            picker: Some(CurveTransformPicker { params: Some(_), .. }),
+            ..
+        })) = &self.dialog
+        {
+            self.handle_curve_transform_params_key(key);
+            return;
+        }
+        if let Some(Dialog::CurveEditor(CurveEditorState { picker: Some(_), .. })) = &self.dialog {
+            self.handle_curve_transform_picker_key(key);
+            return;
+        }
         if let Some(Dialog::CurveEditor(_)) = &self.dialog {
             self.handle_curve_editor_key(key);
+            return;
+        }
+        if let Some(Dialog::CdpParams { envelope: Some(CdpEnvelopeEdit { curve_picker: Some(_), .. }), .. }) = &self.dialog {
+            self.handle_envelope_curve_picker_key(key);
             return;
         }
         if let Some(Dialog::CdpParams { envelope: Some(_), .. }) = &self.dialog {
@@ -2134,6 +2653,12 @@ impl App {
                 }
                 Some(Dialog::RenameFile { path, input }) => {
                     self.rename_file(&path, &ensure_wav_extension(input.value().trim()));
+                }
+                Some(Dialog::SaveCurveAs { curve_index, input }) => {
+                    self.save_curve_as(curve_index, input.value().trim());
+                }
+                Some(Dialog::LoadCurve { input }) => {
+                    self.load_curve_from_path(input.value().trim());
                 }
                 Some(Dialog::MixToMono { inputs, tanh_clip, .. }) => {
                     let inputs_snapshot = inputs.clone();
@@ -2972,7 +3497,7 @@ impl App {
         let Some(Dialog::CdpParams { envelope: dialog_envelope, .. }) = self.dialog.as_mut() else {
             return false;
         };
-        *dialog_envelope = Some(CdpEnvelopeEdit { field_index, points, selected: 0, original, time_max, range });
+        *dialog_envelope = Some(CdpEnvelopeEdit { field_index, points, selected: 0, original, time_max, range, curve_picker: None });
         true
     }
 
@@ -3482,6 +4007,10 @@ impl App {
                     edit.points.remove(edit.selected_row);
                     edit.selected_row = edit.selected_row.min(edit.points.len() - 1);
                 }
+                return;
+            }
+            KeyCode::Char('t') => {
+                self.open_curve_transform_picker();
                 return;
             }
             _ => {}
@@ -4031,9 +4560,20 @@ impl App {
                     *envelope = None;
                 }
             }
-            // No-op for a `required_envelope` field — it has no valid constant
-            // representation to revert to (see `ParamDef::required_envelope`'s doc comment).
-            KeyCode::Char('c') if required_envelope => {}
+            // A `required_envelope` field has no valid constant representation to revert to
+            // (see `ParamDef::required_envelope`'s doc comment), which is exactly why this
+            // key is free to repurpose here as "use curve" instead — opens
+            // `EnvelopeCurvePicker` if there's at least one open curve to offer; a no-op
+            // otherwise, same as before this existed.
+            KeyCode::Char('c') if required_envelope => {
+                if self.curves.is_empty() {
+                    return;
+                }
+                let entries: Vec<usize> = (0..self.curves.len()).collect();
+                if let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() {
+                    edit.curve_picker = Some(EnvelopeCurvePicker { entries, selected: 0 });
+                }
+            }
             KeyCode::Char('c') => {
                 if let Some(Dialog::CdpParams { fields, envelope, .. }) = self.dialog.as_mut() {
                     if let Some(CdpField::Number { envelope: field_env, .. }) = fields.get_mut(field_index) {
@@ -4052,6 +4592,74 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// All key handling while `CdpEnvelopeEdit.curve_picker` is `Some` — Up/Down navigate
+    /// the list of open curves, Esc closes it (back to the plain graphical envelope editor,
+    /// not the whole `CdpParams` dialog), Enter loads the selected curve into the envelope
+    /// editor's own `points` via `rescale_curve_to_envelope` — this does not itself commit
+    /// the field; the graphical editor's own Enter still does that, so the loaded shape can
+    /// still be tweaked first.
+    fn handle_envelope_curve_picker_key(&mut self, key: KeyEvent) {
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() else { return };
+        let Some(picker) = edit.curve_picker.as_mut() else { return };
+        match key.code {
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => {
+                picker.selected = (picker.selected + 1).min(picker.entries.len().saturating_sub(1));
+            }
+            KeyCode::Esc => edit.curve_picker = None,
+            KeyCode::Enter => {
+                let Some(&curve_index) = picker.entries.get(picker.selected) else {
+                    edit.curve_picker = None;
+                    return;
+                };
+                if curve_index >= self.curves.len() {
+                    return;
+                }
+                let field_index = edit.field_index;
+                let (min, max) = match self.dialog.as_ref() {
+                    Some(Dialog::CdpParams { fields, .. }) => match fields.get(field_index) {
+                        Some(CdpField::Number { min, max, .. }) => (*min, *max),
+                        _ => return,
+                    },
+                    _ => return,
+                };
+                let rescaled = self.rescale_curve_to_envelope(curve_index, min, max);
+                let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() else { return };
+                edit.points = rescaled;
+                edit.selected = edit.selected.min(edit.points.len().saturating_sub(1));
+                edit.curve_picker = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Rescales `App.curves[curve_index]`'s points to fit `CdpEnvelopeEdit.time_max` (the
+    /// current selection's duration) — the curve's own time axis is normalized to `0..1`
+    /// using its own first/last point, then stretched across `time_max`, preserving the
+    /// curve's shape regardless of how long the source audio it was extracted from was, per
+    /// the UX decision this shipped under. Each resulting value is clamped into the target
+    /// envelope field's own `min..max` (a curve's real Hz range may exceed a given process's
+    /// declared range). A single-point (or empty) curve can't be normalized this way (no
+    /// span to divide by) — placed at time 0 instead, clamped the same way.
+    fn rescale_curve_to_envelope(&self, curve_index: usize, min: f64, max: f64) -> Vec<(f64, f64)> {
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_ref() else {
+            return Vec::new();
+        };
+        let time_max = edit.time_max;
+        let Some(curve) = self.curves.get(curve_index) else { return Vec::new() };
+        let Some(&(first_t, _)) = curve.points.first() else { return Vec::new() };
+        let Some(&(last_t, _)) = curve.points.last() else { return Vec::new() };
+        let span = last_t - first_t;
+        curve
+            .points
+            .iter()
+            .map(|&(t, v)| {
+                let rescaled_t = if span > 0.0 { (t - first_t) / span * time_max } else { 0.0 };
+                (rescaled_t, v.clamp(min, max))
+            })
+            .collect()
     }
 
     /// Left (`forward = false`)/Right (`forward = true`) within `Dialog::CdpParams`: on the
@@ -4525,6 +5133,60 @@ impl App {
         });
     }
 
+    /// "Extract Pitch Curve" (CDP-Ext-Plan.md Phase 4 "hard tier") — runs `pvoc anal` +
+    /// `repitch getpitch` on the current selection (`pipeline::plan_extract_pitch_curve`)
+    /// and, once the job completes, adds the result as a new `App.curves` entry. Unlike
+    /// `cdp_run`, this isn't driven by a `ProcessDef`/`CdpParams` dialog at all — it's the
+    /// one asymmetric audio-in/curve-out shape in this whole family, hardcoded rather than
+    /// catalog-authored (see `plan_extract_pitch_curve`'s doc comment for why). Reuses
+    /// `Dialog::CdpRunning` for progress display and `cdp_runner`/`CdpEvent` for execution —
+    /// the same machinery every catalog process's job already runs through — just tracked
+    /// via the separate `cdp_pending_curve_extraction` rather than `cdp_pending`.
+    fn extract_pitch_curve(&mut self) {
+        let idx = self.active_document;
+        let Some(doc) = self.documents.get(idx) else { return };
+        let Some(range) = self.operation_range(idx, self.snap_to_zero) else {
+            self.dialog = Some(Dialog::Info { message: "No audio selected to extract a pitch curve from.".into() });
+            return;
+        };
+
+        let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
+        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+            self.dialog = Some(Dialog::CdpSetup { input: TextInput::new(self.config.cdp_dir.clone()), error: Some("CDP directory no longer valid".into()) });
+            return;
+        }
+
+        let planned = crate::model::cdp::plan_extract_pitch_curve(&crate::model::cdp::PvocSettings::default());
+        let step_total = planned.steps.len();
+        let job_id = self.cdp_next_job_id;
+        self.cdp_next_job_id += 1;
+
+        if let Some(audio) = self.audio.as_ref() {
+            if audio.is_playing() {
+                audio.pause();
+            }
+        }
+
+        self.cdp_pending_curve_extraction = Some(self.buffer_name(idx));
+        self.cdp_runner.submit(crate::cdp::Job {
+            id: job_id,
+            cdp_dir,
+            planned,
+            inputs: vec![doc.slice(range.0..range.1)],
+            input_sample_rate: doc.sample_rate,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+        self.dialog = Some(Dialog::CdpRunning {
+            job_id,
+            title: "Extract Pitch Curve".into(),
+            step_label: "Starting…".into(),
+            step_index: 0,
+            step_total,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+    }
+
     /// Drops the preview audition engine, if any — mirrors `stop_audition`. Called whenever
     /// the CDP dialog closes or a field edit invalidates the cached preview.
     fn stop_cdp_preview_audio(&mut self) {
@@ -4559,6 +5221,80 @@ impl App {
                     }
                 }
                 crate::cdp::CdpEvent::Finished { job, purpose, result } => {
+                    if let Some(source_name) = self.cdp_pending_curve_extraction.take() {
+                        if !matches!(self.dialog, Some(Dialog::CdpRunning { job_id, .. }) if job_id == job) {
+                            continue;
+                        }
+                        self.stop_cdp_preview_audio();
+                        self.dialog = match result {
+                            Ok(output) => match output.curve_points {
+                                Some(points) if !points.is_empty() => {
+                                    let mut curve = crate::model::curve::PitchCurve::new(
+                                        format!("{source_name} pitch"),
+                                        points,
+                                    );
+                                    if let Some(template) = output.curve_binary_template {
+                                        curve = curve.with_binary_template(template);
+                                    }
+                                    self.curves.push(curve);
+                                    self.curve_histories.push(crate::model::curve_history::CurveHistory::new());
+                                    None
+                                }
+                                _ => Some(Dialog::Info {
+                                    message: "No pitch detected in the selection.".into(),
+                                }),
+                            },
+                            Err(err) => Some(Dialog::CdpOutput {
+                                title: "CDP Error".into(),
+                                lines: cdp_error_lines(&err),
+                                scroll: 0,
+                            }),
+                        };
+                        continue;
+                    }
+                    if let Some((curve_index, title)) = self.cdp_pending_curve_transform.take() {
+                        if !matches!(self.dialog, Some(Dialog::CdpRunning { job_id, .. }) if job_id == job) {
+                            continue;
+                        }
+                        self.stop_cdp_preview_audio();
+                        self.dialog = match result {
+                            Ok(output) => match output.curve_points {
+                                Some(points) if !points.is_empty() => {
+                                    if let (Some(curve), Some(history)) = (
+                                        self.curves.get_mut(curve_index),
+                                        self.curve_histories.get_mut(curve_index),
+                                    ) {
+                                        history.apply(points, title, curve);
+                                        if let Some(template) = output.curve_binary_template {
+                                            curve.binary_template = Some(template);
+                                        }
+                                    }
+                                    // Reopen the editor on the transformed result — unlike
+                                    // extraction (which returns to the Buffers panel), the
+                                    // user was already looking at this curve and expects to
+                                    // see what the transform did to it.
+                                    let points = self.curves.get(curve_index).map(|c| c.points.clone()).unwrap_or_default();
+                                    Some(Dialog::CurveEditor(CurveEditorState {
+                                        curve_index,
+                                        points,
+                                        selected_row: 0,
+                                        selected_col: 1,
+                                        editing: None,
+                                        picker: None,
+                                    }))
+                                }
+                                _ => Some(Dialog::Info {
+                                    message: "The transform produced an empty curve.".into(),
+                                }),
+                            },
+                            Err(err) => Some(Dialog::CdpOutput {
+                                title: "CDP Error".into(),
+                                lines: cdp_error_lines(&err),
+                                scroll: 0,
+                            }),
+                        };
+                        continue;
+                    }
                     let Some(pending) = self.cdp_pending.take() else { continue };
                     // Only act on the job the currently-shown `CdpRunning` dialog is
                     // actually waiting on — guards against a stray event arriving after the
@@ -5993,6 +6729,28 @@ impl App {
             return;
         }
 
+        // Ctrl+Z/Ctrl+Y with a curve row selected in a focused Buffers panel targets that
+        // curve's own `CurveHistory` instead of the active document's — the only way to
+        // reach a curve's undo/redo from *outside* the standalone editor (inside it, Enter/
+        // Esc already cover "keep this edit"/"discard this edit", and applying a transform
+        // is itself one `CurveHistory::apply` step). Falls through to the normal
+        // document-targeted handling below when the Buffers panel isn't focused, or its
+        // selection is a document row.
+        if matches!(action, Action::Undo | Action::Redo) && self.buffer_panel.focused {
+            if let Some(curve_index) = self.buffer_panel.selected.checked_sub(self.documents.len()) {
+                if let (Some(curve), Some(history)) =
+                    (self.curves.get_mut(curve_index), self.curve_histories.get_mut(curve_index))
+                {
+                    if action == Action::Undo {
+                        history.undo(curve);
+                    } else {
+                        history.redo(curve);
+                    }
+                }
+                return;
+            }
+        }
+
         // Panel/modal commands — work regardless of focus (e.g. a toolbar click).
         match action {
             Action::Noop => return,
@@ -6368,6 +7126,16 @@ impl App {
             return;
         }
 
+        if action == Action::ExtractPitchCurve {
+            self.extract_pitch_curve();
+            return;
+        }
+
+        if action == Action::LoadPitchCurve {
+            self.dialog = Some(Dialog::LoadCurve { input: TextInput::fresh(String::new()) });
+            return;
+        }
+
         if action == Action::NewFromLeft || action == Action::NewFromRight {
             let channel_idx = if action == Action::NewFromLeft { 0 } else { 1 };
             let result = self.active_doc().and_then(|d| {
@@ -6498,7 +7266,9 @@ impl App {
             | Action::ResetConfig
             | Action::ExportRegions
             | Action::CdpProcess
-            | Action::ConfigureCdpDirectory => unreachable!(),
+            | Action::ConfigureCdpDirectory
+            | Action::ExtractPitchCurve
+            | Action::LoadPitchCurve => unreachable!(),
             // Cursor movement is identical whether or not it extends a selection; the
             // selection side-effect is applied in the second match below.
             Action::MoveCursorLeft | Action::ExtendSelectionLeft => {
@@ -7258,7 +8028,7 @@ impl App {
         let dialog_rects = self
             .dialog
             .as_ref()
-            .map(|d| render_dialog(frame, area, d, &self.cdp_catalog))
+            .map(|d| render_dialog(frame, area, d, &self.cdp_catalog, &self.curve_histories, &self.curves))
             .unwrap_or_default();
         if !dialog_rects.is_empty() {
             self.dialog_n_interactive = dialog_rects.len().saturating_sub(1);
@@ -7805,7 +8575,14 @@ fn render_fade_dialog(frame: &mut Frame, area: Rect, title: &str, curve: FadeCur
     ]
 }
 
-fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, catalog: &crate::model::cdp::CdpCatalog) -> Vec<Rect> {
+fn render_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    dialog: &Dialog,
+    catalog: &crate::model::cdp::CdpCatalog,
+    curve_histories: &[crate::model::curve_history::CurveHistory],
+    curves: &[crate::model::curve::PitchCurve],
+) -> Vec<Rect> {
     match dialog {
         Dialog::MixToMono { inputs, focused, tanh_clip } => {
             return render_mix_to_mono_dialog(frame, area, inputs, *focused, *tanh_clip);
@@ -7844,7 +8621,7 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, catalog: &crate
         } => {
             let def = catalog.processes.get(*catalog_index);
             if let Some(edit) = envelope {
-                return render_cdp_envelope_editor(frame, area, fields, edit, def);
+                return render_cdp_envelope_editor(frame, area, fields, edit, def, curves);
             }
             if let Some(edit) = list_edit {
                 return render_cdp_list_editor(frame, area, fields, edit, def);
@@ -7875,7 +8652,7 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, catalog: &crate
             return render_cdp_setup_dialog(frame, area, input, error.as_deref());
         }
         Dialog::CurveEditor(edit) => {
-            return render_curve_editor(frame, area, edit);
+            return render_curve_editor(frame, area, edit, catalog, curve_histories);
         }
         _ => {}
     }
@@ -7892,6 +8669,8 @@ fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, catalog: &crate
         Dialog::OpenDirectory { input } => ("Open Directory", " Path: ".into(), Some(input), " ".into()),
         Dialog::RenameBuffer { input, .. } => ("Rename Buffer", " New name: ".into(), Some(input), " ".into()),
         Dialog::RenameFile { input, .. } => ("Rename File", " New name: ".into(), Some(input), " ".into()),
+        Dialog::SaveCurveAs { input, .. } => ("Save Curve", " File name: ".into(), Some(input), " ".into()),
+        Dialog::LoadCurve { input } => ("Load Pitch Curve", " Path: ".into(), Some(input), " ".into()),
         Dialog::Gain { .. }
         | Dialog::FadeIn { .. }
         | Dialog::FadeOut { .. }
@@ -8332,7 +9111,11 @@ fn render_cdp_envelope_editor(
     fields: &[CdpField],
     edit: &CdpEnvelopeEdit,
     def: Option<&crate::model::cdp::ProcessDef>,
+    curves: &[crate::model::curve::PitchCurve],
 ) -> Vec<Rect> {
+    if let Some(picker) = &edit.curve_picker {
+        return render_envelope_curve_picker(frame, area, picker, curves);
+    }
     let Some(CdpField::Number { min, max, .. }) = fields.get(edit.field_index) else {
         return Vec::new();
     };
@@ -8459,10 +9242,14 @@ fn render_cdp_envelope_editor(
         Span::styled(":remove  ", label_style),
     ];
     // A required datafile field has no valid constant to revert to (`ParamDef.required_envelope`'s
-    // doc comment) — 'c' is a no-op there, so the hint that advertises it is omitted too.
+    // doc comment) — 'c' is repurposed there as "use curve" instead (only advertised when
+    // there's actually a curve to offer; otherwise it'd still be a no-op).
     if !required_envelope {
         hint_spans.push(Span::styled("c", hint_style));
         hint_spans.push(Span::styled(":constant  ", label_style));
+    } else if !curves.is_empty() {
+        hint_spans.push(Span::styled("c", hint_style));
+        hint_spans.push(Span::styled(":use curve  ", label_style));
     }
     hint_spans.push(Span::styled("Enter", hint_style));
     hint_spans.push(Span::styled(":save  ", label_style));
@@ -8484,6 +9271,66 @@ fn render_cdp_envelope_editor(
 
     frame.render_widget(Paragraph::new(lines), inner);
     vec![layout.grid]
+}
+
+/// The "use curve" picker `CdpEnvelopeEdit.curve_picker` opens ('c' on a `required_envelope`
+/// field) — a flat list of every open curve's name, same visual/interaction conventions as
+/// `render_curve_transform_picker`.
+fn render_envelope_curve_picker(
+    frame: &mut Frame,
+    area: Rect,
+    picker: &EnvelopeCurvePicker,
+    curves: &[crate::model::curve::PitchCurve],
+) -> Vec<Rect> {
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
+
+    let names: Vec<&str> = picker.entries.iter().filter_map(|&i| curves.get(i)).map(|c| c.name.as_str()).collect();
+
+    let hint_line = " \u{2191}\u{2193}:select  Enter:use  Esc:cancel";
+    let content_width = names.iter().map(|n| n.chars().count()).max().unwrap_or(0).max(hint_line.chars().count());
+    let width = (content_width as u16 + 4).max(30).min(area.width);
+    let rows = names.len().max(1);
+    let height = (rows as u16 + 1 + 2 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let block = Block::default()
+        .title(" Use Pitch Curve ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = Vec::new();
+    if names.is_empty() {
+        lines.push(Line::from(Span::styled(" (no open curves)", label_style)));
+    } else {
+        for (i, name) in names.iter().enumerate() {
+            let style = if i == picker.selected { selected_style } else { base };
+            lines.push(Line::from(Span::styled(format!(" {name}"), style)));
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(" \u{2191}\u{2193}", hint_style),
+        Span::styled(":select  ", label_style),
+        Span::styled("Enter", hint_style),
+        Span::styled(":use  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+    Vec::new()
 }
 
 /// Fixed visible-row count for `render_cdp_list_editor` — a plain scrolling list, no
@@ -8606,7 +9453,18 @@ const CDP_TABLE_EDITOR_ROWS: usize = 16;
 /// column shape never varies (no `columns: &[TableColumn]` to read, no `fields`/`def`
 /// context) and every column's bounds are the fixed `CURVE_EDITOR_*` constants rather than
 /// catalog-declared ones.
-fn render_curve_editor(frame: &mut Frame, area: Rect, edit: &CurveEditorState) -> Vec<Rect> {
+fn render_curve_editor(
+    frame: &mut Frame,
+    area: Rect,
+    edit: &CurveEditorState,
+    catalog: &crate::model::cdp::CdpCatalog,
+    curve_histories: &[crate::model::curve_history::CurveHistory],
+) -> Vec<Rect> {
+    if let Some(picker) = &edit.picker {
+        return render_curve_transform_picker(frame, area, picker, catalog);
+    }
+    let last_label = curve_histories.get(edit.curve_index).and_then(|h| h.last_label());
+
     let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
     let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
     let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
@@ -8622,10 +9480,15 @@ fn render_curve_editor(frame: &mut Frame, area: Rect, edit: &CurveEditorState) -
         col_names[c].len().max(widest_value).max(4)
     });
 
+    let title = match last_label {
+        Some(label) => format!(" Curve Editor \u{2014} {label} "),
+        None => " Curve Editor ".to_string(),
+    };
+
     let hint_line_1 = " \u{2190}\u{2192}\u{2191}\u{2193}:select  type:edit value  n:insert  Del:remove";
-    let hint_line_2 = " Enter:save  Esc:cancel";
+    let hint_line_2 = " Enter:save  Esc:cancel  t:transform";
     let header_width: usize = 5 + col_widths.iter().map(|w| w + 2).sum::<usize>();
-    let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()).max(header_width) as u16;
+    let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()).max(header_width).max(title.chars().count()) as u16;
     let width = (content_width + 2).max(50).min(area.width);
     let height = (1 + 1 + CDP_TABLE_EDITOR_ROWS as u16 + 1 + 2 + 2).min(area.height);
     let popup = Rect {
@@ -8637,7 +9500,7 @@ fn render_curve_editor(frame: &mut Frame, area: Rect, edit: &CurveEditorState) -
     frame.render_widget(ratatui::widgets::Clear, popup);
 
     let block = Block::default()
-        .title(" Curve Editor ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
@@ -8698,10 +9561,282 @@ fn render_curve_editor(frame: &mut Frame, area: Rect, edit: &CurveEditorState) -
         Span::styled(" Enter", hint_style),
         Span::styled(":save  ", label_style),
         Span::styled("Esc", hint_style),
-        Span::styled(":cancel", label_style),
+        Span::styled(":cancel  ", label_style),
+        Span::styled("t", hint_style),
+        Span::styled(":transform", label_style),
         Span::styled(format!("  {}", format_cdp_range(range_min, range_max)), dim_style),
     ]));
 
+    frame.render_widget(Paragraph::new(lines), inner);
+    Vec::new()
+}
+
+/// The small "apply a transform" picker `CurveEditorState.picker` opens ('t' inside the
+/// curve editor) — a flat list of just the curve-compatible catalog processes, no groups
+/// column the way `CdpBrowser` has (there are only a handful of these, no need to filter).
+fn render_curve_transform_picker(
+    frame: &mut Frame,
+    area: Rect,
+    picker: &CurveTransformPicker,
+    catalog: &crate::model::cdp::CdpCatalog,
+) -> Vec<Rect> {
+    if let Some(params) = &picker.params {
+        return render_curve_transform_params(frame, area, params, catalog);
+    }
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
+
+    let titles: Vec<&str> = picker
+        .entries
+        .iter()
+        .filter_map(|&i| catalog.processes.get(i))
+        .map(|p| p.title.as_str())
+        .collect();
+
+    let hint_line = " \u{2191}\u{2193}:select  Enter:configure  Esc:cancel";
+    let content_width = titles.iter().map(|t| t.chars().count()).max().unwrap_or(0).max(hint_line.chars().count());
+    let width = (content_width as u16 + 4).max(30).min(area.width);
+    let rows = titles.len().max(1);
+    let height = (rows as u16 + 1 + 2 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let block = Block::default()
+        .title(" Apply Transform ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = Vec::new();
+    if titles.is_empty() {
+        lines.push(Line::from(Span::styled(" (no curve-compatible processes)", label_style)));
+    } else {
+        for (i, title) in titles.iter().enumerate() {
+            let style = if i == picker.selected { selected_style } else { base };
+            lines.push(Line::from(Span::styled(format!(" {title}"), style)));
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(" \u{2191}\u{2193}", hint_style),
+        Span::styled(":select  ", label_style),
+        Span::styled("Enter", hint_style),
+        Span::styled(":configure  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+    Vec::new()
+}
+
+/// The params-editing form for a picked curve-transform process (`CurveTransformParams`) —
+/// a flat list of fields (Tab/Shift+Tab cycles focus, shown with the focused one
+/// reverse-videoed) followed by a trailing "Apply" row, deliberately much plainer than
+/// `render_cdp_params_dialog` (no preset row, no second-input row, no per-field automation
+/// toggle — none of that applies to a curve). `List`-kind fields show their entry count
+/// rather than values inline (`e` opens the full `CurveParamListEdit` to see/edit them).
+fn render_curve_transform_params(
+    frame: &mut Frame,
+    area: Rect,
+    params: &CurveTransformParams,
+    catalog: &crate::model::cdp::CdpCatalog,
+) -> Vec<Rect> {
+    if let Some(list_edit) = &params.list_edit {
+        return render_curve_param_list_editor(frame, area, params, list_edit, catalog);
+    }
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+    let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+
+    let def = catalog.processes.get(params.catalog_index);
+    let title = def.map(|d| d.title.as_str()).unwrap_or("Transform");
+    let param_names: Vec<&str> = def.map(|d| d.params.iter().map(|p| p.name.as_str()).collect()).unwrap_or_default();
+
+    let name_width = param_names.iter().map(|n| n.chars().count()).max().unwrap_or(0).max(4);
+    let mut lines = Vec::new();
+    for (i, field) in params.fields.iter().enumerate() {
+        let name = param_names.get(i).copied().unwrap_or("?");
+        let row_style = if i == params.focus { selected_style } else { base };
+        let value_text = match field {
+            CdpField::Number { input, .. } => input.value().to_string(),
+            CdpField::Toggle { on } => if *on { "on".to_string() } else { "off".to_string() },
+            CdpField::List { values, .. } => {
+                if values.is_empty() { "(not set)".to_string() } else { format!("{} value(s)", values.len()) }
+            }
+            _ => "?".to_string(),
+        };
+        if i == params.focus {
+            if let CdpField::Number { input, .. } = field {
+                let (before, under, after) = input.split_at_cursor();
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {name:<name_width$}  "), label_style),
+                    Span::styled(before.clone(), row_style),
+                    Span::styled(under, cursor_style),
+                    Span::styled(after.clone(), row_style),
+                ]));
+                continue;
+            }
+        }
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {name:<name_width$}  "), label_style),
+            Span::styled(value_text, row_style),
+        ]));
+    }
+    let apply_style = if params.focus == params.fields.len() { selected_style } else { base };
+    lines.push(Line::from(Span::styled(" Apply", apply_style)));
+
+    let hint_line_1 = " Tab:next field  \u{2191}\u{2193}:nudge  space:toggle  e:edit list";
+    let hint_line_2 = " Enter:apply/select  Esc:back";
+    let header_width = 4 + name_width + 20;
+    let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()).max(header_width);
+    let width = (content_width as u16 + 4).max(40).min(area.width);
+    let height = (lines.len() as u16 + 1 + 2 + 2 + if params.error.is_some() { 1 } else { 0 }).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let block = Block::default()
+        .title(format!(" {title} "))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let error_style = Style::default().fg(theme::RED).bg(theme::SURFACE0);
+    let mut out = lines;
+    out.push(Line::raw(""));
+    if let Some(error) = &params.error {
+        out.push(Line::from(Span::styled(format!(" ! {error}"), error_style)));
+    }
+    out.push(Line::from(vec![
+        Span::styled(" Tab", hint_style),
+        Span::styled(":next field  ", label_style),
+        Span::styled("\u{2191}\u{2193}", hint_style),
+        Span::styled(":nudge  ", label_style),
+        Span::styled("space", hint_style),
+        Span::styled(":toggle  ", label_style),
+        Span::styled("e", hint_style),
+        Span::styled(":edit list", label_style),
+    ]));
+    let range_text = match params.fields.get(params.focus) {
+        Some(CdpField::Number { min, max, .. }) => format!("  {}", format_cdp_range(*min, *max)),
+        _ => String::new(),
+    };
+    out.push(Line::from(vec![
+        Span::styled(" Enter", hint_style),
+        Span::styled(":apply/select  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":back", label_style),
+        Span::styled(range_text, dim_style),
+    ]));
+
+    frame.render_widget(Paragraph::new(out), inner);
+    Vec::new()
+}
+
+/// `CurveParamListEdit`'s popup — a fixed single-column list, the curve-params counterpart
+/// to `render_cdp_list_editor` (same visual/interaction conventions, see that fn's
+/// neighbors for precedent).
+fn render_curve_param_list_editor(
+    frame: &mut Frame,
+    area: Rect,
+    params: &CurveTransformParams,
+    list_edit: &CurveParamListEdit,
+    catalog: &crate::model::cdp::CdpCatalog,
+) -> Vec<Rect> {
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+
+    let param_name = catalog
+        .processes
+        .get(params.catalog_index)
+        .and_then(|d| d.params.get(list_edit.field_index))
+        .map(|p| p.name.as_str())
+        .unwrap_or("List");
+
+    let table_rows = CDP_LIST_EDITOR_ROWS;
+    let scroll_top = list_edit.selected.saturating_sub(table_rows.saturating_sub(1));
+    let mut lines = Vec::new();
+    let mut rendered = 0;
+    for (i, &v) in list_edit.values.iter().enumerate().skip(scroll_top).take(table_rows) {
+        let row_style = if i == list_edit.selected { selected_style } else { base };
+        if i == list_edit.selected {
+            if let Some(input) = &list_edit.editing {
+                let (before, under, after) = input.split_at_cursor();
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {:>3}: ", i + 1), row_style),
+                    Span::styled(before.clone(), row_style),
+                    Span::styled(under, cursor_style),
+                    Span::styled(after.clone(), row_style),
+                ]));
+                rendered += 1;
+                continue;
+            }
+        }
+        lines.push(Line::from(Span::styled(format!(" {:>3}: {}", i + 1, format_cdp_float_for_display(v)), row_style)));
+        rendered += 1;
+    }
+    for _ in rendered..table_rows {
+        lines.push(Line::raw(""));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(" \u{2190}\u{2192}\u{2191}\u{2193}", hint_style),
+        Span::styled(":select  ", label_style),
+        Span::styled("type", hint_style),
+        Span::styled(":edit  ", label_style),
+        Span::styled("n", hint_style),
+        Span::styled(":insert  ", label_style),
+        Span::styled("Del", hint_style),
+        Span::styled(":remove", label_style),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" Enter", hint_style),
+        Span::styled(":save  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
+    ]));
+
+    let content_width = 40usize;
+    let width = (content_width as u16).max(30).min(area.width);
+    let height = (table_rows as u16 + 1 + 2 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+    let block = Block::default()
+        .title(format!(" {param_name} "))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
     frame.render_widget(Paragraph::new(lines), inner);
     Vec::new()
 }
@@ -10439,6 +11574,118 @@ mod tests {
         assert_eq!(v0, v2, "start and end return to the same value — a small, unobtrusive default bump");
     }
 
+    // -- 'c' repurposed as "use curve" on a required_envelope field ---------------------
+
+    #[test]
+    fn c_on_a_required_envelope_field_opens_the_curve_picker_when_curves_exist() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        app.curves.push(crate::model::curve::PitchCurve::new("mycurve", vec![(0.0, 220.0), (1.0, 440.0)]));
+        open_focus_hold_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        let picker = edit.curve_picker.as_ref().expect("'c' should open the curve picker");
+        assert_eq!(picker.entries, vec![0]);
+    }
+
+    #[test]
+    fn c_on_a_required_envelope_field_is_a_noop_with_no_curves_open() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        assert!(app.curves.is_empty());
+        open_focus_hold_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert!(edit.curve_picker.is_none(), "no curves to offer, so 'c' should stay a no-op");
+    }
+
+    /// Regression check: 'c' on a *non*-required_envelope automatable field must still mean
+    /// "revert to constant" (its original behavior) even when curves are open — the
+    /// repurposing only applies to a `required_envelope` field, which has no constant to
+    /// revert to in the first place.
+    #[test]
+    fn c_on_a_non_required_envelope_field_still_reverts_to_constant() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        app.curves.push(crate::model::curve::PitchCurve::new("mycurve", vec![(0.0, 220.0)]));
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "blur_avrg")
+            .expect("blur_avrg should be in the catalog");
+        app.open_cdp_params(catalog_index);
+        // blur_avrg's "Channels" is automatable but not required_envelope.
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = 1;
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { fields, envelope, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(envelope.is_none(), "'c' should close the editor and commit as a constant, not open a curve picker");
+        let Some(CdpField::Number { envelope, .. }) = fields.first() else { panic!("expected a Number field") };
+        assert!(envelope.is_none(), "should have reverted to a constant, not stayed in automation mode");
+    }
+
+    #[test]
+    fn esc_from_the_curve_picker_returns_to_the_envelope_editor() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        app.curves.push(crate::model::curve::PitchCurve::new("mycurve", vec![(0.0, 220.0)]));
+        open_focus_hold_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let original_points = {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
+            edit.points.clone()
+        };
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else {
+            panic!("expected the plain envelope editor to still be open, not the whole dialog closed")
+        };
+        assert!(edit.curve_picker.is_none());
+        assert_eq!(edit.points, original_points, "Esc from the picker must not touch the envelope's own points");
+    }
+
+    #[test]
+    fn enter_on_the_curve_picker_rescales_the_curve_to_fit_time_max_and_clamps_to_range() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        // focus_hold's field range is 0.0-30.0 -- pick Hz-like values that exceed it on one
+        // end, to also exercise the clamp.
+        app.curves.push(crate::model::curve::PitchCurve::new(
+            "mycurve",
+            vec![(0.0, 10.0), (2.0, 50.0), (4.0, 20.0)],
+        ));
+        open_focus_hold_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let time_max = {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
+            edit.time_max
+        };
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else {
+            panic!("Enter on the picker should load the curve and stay in the plain envelope editor")
+        };
+        assert!(edit.curve_picker.is_none());
+        assert_eq!(edit.points.len(), 3);
+        // Times rescaled from the curve's own 0..4 span onto 0..time_max.
+        assert!((edit.points[0].0 - 0.0).abs() < 1e-9);
+        assert!((edit.points[1].0 - time_max / 2.0).abs() < 1e-9);
+        assert!((edit.points[2].0 - time_max).abs() < 1e-9);
+        // Values clamped into the field's own 0.0-30.0 range -- 50.0 -> 30.0.
+        assert_eq!(edit.points[0].1, 10.0);
+        assert_eq!(edit.points[1].1, 30.0);
+        assert_eq!(edit.points[2].1, 20.0);
+    }
+
     /// Apply/Preview must be blocked with a validation error while a `required_envelope`
     /// field is still unset — its `input` text is never the submitted value (`to_value`
     /// would otherwise silently emit a `ParamValue::Number` that CDP rejects as an
@@ -11063,6 +12310,453 @@ mod tests {
         assert_eq!(app.curves[0].points, original);
     }
 
+    // -- curve transform picker ('t' inside the curve editor) ---------------------------
+
+    #[test]
+    fn t_opens_a_picker_listing_only_curve_compatible_processes() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+
+        let Some(Dialog::CurveEditor(edit)) = &app.dialog else { panic!("no editor") };
+        let picker = edit.picker.as_ref().expect("picker should be open");
+        assert!(!picker.entries.is_empty(), "the shipped repitch_pitchtosil/noisetosil entries should be found");
+        for &i in &picker.entries {
+            let def = &app.cdp_catalog.processes[i];
+            assert_eq!(def.input, crate::model::cdp::IoKind::Curve);
+            assert_eq!(def.output, crate::model::cdp::IoKind::Curve);
+        }
+    }
+
+    #[test]
+    fn esc_closes_the_picker_back_to_the_plain_editor_not_the_whole_dialog() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        let Some(Dialog::CurveEditor(edit)) = &app.dialog else {
+            panic!("expected the curve editor to still be open, just with the picker closed")
+        };
+        assert!(edit.picker.is_none());
+    }
+
+    #[test]
+    fn down_arrow_moves_the_picker_selection() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        let Some(Dialog::CurveEditor(edit)) = &app.dialog else { panic!("no editor") };
+        let entry_count = edit.picker.as_ref().unwrap().entries.len();
+        if entry_count < 2 {
+            return; // nothing to navigate between yet
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let Some(Dialog::CurveEditor(edit)) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.picker.as_ref().unwrap().selected, 1);
+    }
+
+    // -- curve transform params-editing form ---------------------------------------------
+
+    /// Opens the picker and selects `key` by scanning `entries` for it, then presses Enter
+    /// to open `CurveTransformParams` for it. Panics if `key` isn't a cataloged
+    /// curve-compatible process — every test using this names a real shipped entry.
+    fn open_curve_transform_params_for(app: &mut App, key: &str) {
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        let target_catalog_index =
+            app.cdp_catalog.processes.iter().position(|p| p.key == key).unwrap_or_else(|| panic!("no catalog entry {key:?}"));
+        let Some(Dialog::CurveEditor(edit)) = app.dialog.as_mut() else { panic!("no editor") };
+        let picker = edit.picker.as_mut().expect("picker should be open");
+        picker.selected = picker.entries.iter().position(|&i| i == target_catalog_index).unwrap_or_else(|| {
+            panic!("{key:?} not found in the curve-transform picker's entries")
+        });
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    fn curve_transform_params(app: &App) -> &CurveTransformParams {
+        let Some(Dialog::CurveEditor(edit)) = &app.dialog else { panic!("no editor") };
+        edit.picker.as_ref().and_then(|p| p.params.as_ref()).expect("params form should be open")
+    }
+
+    #[test]
+    fn enter_on_the_picker_opens_a_params_form_instead_of_running_immediately() {
+        let mut app = app_with_one_curve();
+        app.curves[0].binary_template = Some(b"unused in this test".to_vec());
+        app.open_curve_editor(0);
+        open_curve_transform_params_for(&mut app, "repitch_exag_1");
+
+        let params = curve_transform_params(&app);
+        assert_eq!(params.fields.len(), 2, "Mean Pitch + Range");
+        assert_eq!(params.focus, 0);
+        assert!(app.cdp_pending_curve_transform.is_none(), "should not have run yet");
+    }
+
+    #[test]
+    fn tab_cycles_focus_across_fields_and_the_apply_row() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        open_curve_transform_params_for(&mut app, "repitch_exag_1");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(curve_transform_params(&app).focus, 1);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(curve_transform_params(&app).focus, 2, "should land on the trailing Apply row");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
+        assert_eq!(curve_transform_params(&app).focus, 1);
+    }
+
+    #[test]
+    fn up_down_nudge_the_focused_number_field() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        open_curve_transform_params_for(&mut app, "repitch_exag_1"); // focus 0 = Mean Pitch
+
+        let before: f64 = {
+            let Some(CdpField::Number { input, .. }) = curve_transform_params(&app).fields.first() else { panic!() };
+            input.value().parse().unwrap()
+        };
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        let after: f64 = {
+            let Some(CdpField::Number { input, .. }) = curve_transform_params(&app).fields.first() else { panic!() };
+            input.value().parse().unwrap()
+        };
+        assert_eq!(after, before + 1.0, "Up should nudge by 1.0, matching every other Number field's convention");
+    }
+
+    #[test]
+    fn typing_directly_overwrites_the_focused_number_field() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        open_curve_transform_params_for(&mut app, "repitch_exag_1");
+
+        for c in "72".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let Some(CdpField::Number { input, .. }) = curve_transform_params(&app).fields.first() else { panic!() };
+        assert_eq!(input.value(), "72");
+    }
+
+    #[test]
+    fn space_toggles_the_focused_toggle_field() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        open_curve_transform_params_for(&mut app, "repitch_quantise_1");
+        // Tab to the -o toggle field (Mean/Range-style Number fields come first; scan for it).
+        let toggle_index = curve_transform_params(&app)
+            .fields
+            .iter()
+            .position(|f| matches!(f, CdpField::Toggle { .. }))
+            .expect("quantise should have its -o toggle field");
+        for _ in 0..toggle_index {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+        let before = matches!(curve_transform_params(&app).fields[toggle_index], CdpField::Toggle { on: true });
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let after = matches!(curve_transform_params(&app).fields[toggle_index], CdpField::Toggle { on: true });
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn e_opens_the_list_editor_for_a_required_list_field_and_enter_commits_it() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        open_curve_transform_params_for(&mut app, "repitch_quantise_1");
+        let list_index = curve_transform_params(&app)
+            .fields
+            .iter()
+            .position(|f| matches!(f, CdpField::List { .. }))
+            .expect("quantise should have its q-set required_list field");
+        for _ in 0..list_index {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+        assert!(
+            matches!(curve_transform_params(&app).fields[list_index], CdpField::List { ref values, .. } if values.is_empty()),
+            "a never-configured required_list field should start empty"
+        );
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert!(curve_transform_params(&app).list_edit.is_some(), "'e' should open the list editor");
+
+        type_str(&mut app, "64");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(curve_transform_params(&app).list_edit.is_none(), "Enter should close the list editor");
+        let Some(CdpField::List { values, .. }) = curve_transform_params(&app).fields.get(list_index) else { panic!() };
+        assert_eq!(values, &vec![64.0]);
+    }
+
+    #[test]
+    fn esc_from_the_list_editor_discards_back_to_the_params_form() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        open_curve_transform_params_for(&mut app, "repitch_quantise_1");
+        let list_index = curve_transform_params(&app)
+            .fields
+            .iter()
+            .position(|f| matches!(f, CdpField::List { .. }))
+            .unwrap();
+        for _ in 0..list_index {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        type_str(&mut app, "64");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(curve_transform_params(&app).list_edit.is_none());
+        let Some(CdpField::List { values, .. }) = curve_transform_params(&app).fields.get(list_index) else { panic!() };
+        assert!(values.is_empty(), "Esc should discard the edit, leaving the field unset");
+    }
+
+    #[test]
+    fn esc_from_the_params_form_goes_back_to_the_picker_list_not_the_whole_dialog() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        open_curve_transform_params_for(&mut app, "repitch_exag_1");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        let Some(Dialog::CurveEditor(edit)) = &app.dialog else { panic!("expected the editor to still be open") };
+        let picker = edit.picker.as_ref().expect("should be back at the picker list, not closed entirely");
+        assert!(picker.params.is_none());
+    }
+
+    #[test]
+    fn apply_with_an_unset_required_list_field_blocks_with_an_error() {
+        let mut app = app_with_one_curve();
+        app.curves[0].binary_template = Some(b"fake template".to_vec());
+        app.open_curve_editor(0);
+        open_curve_transform_params_for(&mut app, "repitch_quantise_1");
+        // Jump straight to Apply without ever configuring the required q-set list.
+        let field_count = curve_transform_params(&app).fields.len();
+        if let Some(Dialog::CurveEditor(edit)) = app.dialog.as_mut() {
+            if let Some(params) = edit.picker.as_mut().and_then(|p| p.params.as_mut()) {
+                params.focus = field_count;
+            }
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.cdp_pending_curve_transform.is_none(), "should not have submitted a job");
+        assert!(curve_transform_params(&app).error.is_some(), "should show a validation error inline");
+    }
+
+    #[test]
+    fn typed_edit_survives_into_to_value_which_is_what_run_curve_transform_actually_submits() {
+        // `run_curve_transform` builds its job from `params.fields.iter().map(CdpField::to_value)`
+        // (see that fn) -- this confirms a typed edit through the params form's own key
+        // handling round-trips through that exact conversion, without needing a full
+        // job-dispatch to observe it.
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        open_curve_transform_params_for(&mut app, "repitch_exag_1");
+
+        for c in "72".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(curve_transform_params(&app).fields[0].to_value(), crate::model::cdp::ParamValue::Number(72.0));
+    }
+
+    #[test]
+    fn running_a_transform_on_a_curve_with_no_binary_template_shows_an_error() {
+        let mut app = app_with_one_curve();
+        assert!(app.curves[0].binary_template.is_none(), "app_with_one_curve's curve has no CDP lineage");
+        app.open_curve_editor(0);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // pick a process, opens its params form
+
+        // Jump straight to the Apply row regardless of how many params the picked process
+        // has — this test only cares about the missing-binary_template guard, not any
+        // specific process's field count.
+        if let Some(Dialog::CurveEditor(edit)) = app.dialog.as_mut() {
+            if let Some(params) = edit.picker.as_mut().and_then(|p| p.params.as_mut()) {
+                params.focus = params.fields.len();
+            }
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(
+            matches!(app.dialog, Some(Dialog::Info { .. })),
+            "should explain the curve has nothing to run a transform against, not silently no-op"
+        );
+    }
+
+    /// End-to-end: picking a transform submits a real `cdp::runner::Job` built from
+    /// `plan_curve_transform_job`, and its `Finished` event (driven through `tick_cdp`, a
+    /// fake `cp`-based step standing in for a real CDP binary — same "no real CDP install
+    /// needed" precedent as `curve_extraction_apply_adds_a_new_curve_buffer`) both commits
+    /// the new points through `CurveHistory` (undoable) and updates the curve's
+    /// `binary_template` for a further chained transform, then reopens the editor on the
+    /// result rather than returning to the Buffers panel.
+    #[test]
+    fn running_a_transform_updates_the_curve_through_history_and_reopens_the_editor() {
+        let mut app = app_with_one_curve();
+        app.curves[0].binary_template = Some(b"fake original template bytes".to_vec());
+        let original_points = app.curves[0].points.clone();
+
+        app.cdp_pending_curve_transform = Some((0, "Fake Transform".into()));
+        app.dialog = Some(Dialog::CdpRunning {
+            job_id: 9,
+            title: "Fake Transform".into(),
+            step_label: String::new(),
+            step_index: 0,
+            step_total: 1,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+        let planned = crate::model::cdp::pipeline::PlannedJob {
+            steps: vec![crate::model::cdp::pipeline::Invocation {
+                bin: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "printf '0 100\\n1 200\\n' > curve_out.txt && printf 'fake new template bytes' > curve_raw_out.pch.wav".into(),
+                ],
+                label: "fake transform".into(),
+                expected_output: "curve_out.txt".into(),
+            }],
+            input_files: Vec::new(),
+            output_files: Vec::new(),
+            glob_output: None,
+            output_curve: Some("curve_out.txt".into()),
+            output_curve_binary_template: Some("curve_raw_out.pch.wav".into()),
+            brk_files: Vec::new(),
+            binary_input_files: Vec::new(),
+            deferred_window_params: Vec::new(),
+            needs_simple_wav_input: false,
+        };
+        app.cdp_runner.submit(crate::cdp::Job {
+            id: 9,
+            cdp_dir: std::path::PathBuf::from("/bin"),
+            planned,
+            inputs: Vec::new(),
+            input_sample_rate: 44100,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.cdp_pending_curve_transform.is_some() && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert_eq!(app.curves[0].points, vec![(0.0, 100.0), (1.0, 200.0)]);
+        assert_eq!(app.curves[0].binary_template.as_deref(), Some(b"fake new template bytes".as_slice()));
+        assert!(
+            matches!(&app.dialog, Some(Dialog::CurveEditor(edit)) if edit.curve_index == 0),
+            "should reopen the editor on the transformed curve, not return to the Buffers panel"
+        );
+
+        let curve = &mut app.curves[0];
+        assert!(app.curve_histories[0].undo(curve), "the transform should be one undoable CurveHistory step");
+        assert_eq!(app.curves[0].points, original_points);
+    }
+
+    // -- Ctrl+Z/Ctrl+Y reaching a curve's own history from the Buffers panel -------------
+
+    #[test]
+    fn undo_with_a_curve_row_selected_in_a_focused_buffer_panel_targets_that_curve() {
+        let mut app = app_with_one_curve();
+        let original = app.curves[0].points.clone();
+        app.curve_histories[0].apply(vec![(0.0, 999.0)], "Test Edit", &mut app.curves[0]);
+        assert_ne!(app.curves[0].points, original);
+
+        app.buffer_panel.focused = true;
+        app.buffer_panel.selected = app.documents.len(); // index 0 is the curve (no documents open)
+        app.handle_action(Action::Undo);
+
+        assert_eq!(app.curves[0].points, original, "Ctrl+Z should undo the curve's own last change");
+    }
+
+    #[test]
+    fn redo_with_a_curve_row_selected_restores_the_undone_change() {
+        let mut app = app_with_one_curve();
+        app.curve_histories[0].apply(vec![(0.0, 999.0)], "Test Edit", &mut app.curves[0]);
+        let edited = app.curves[0].points.clone();
+
+        app.buffer_panel.focused = true;
+        app.buffer_panel.selected = app.documents.len();
+        app.handle_action(Action::Undo);
+        app.handle_action(Action::Redo);
+
+        assert_eq!(app.curves[0].points, edited);
+    }
+
+    #[test]
+    fn undo_with_a_document_row_selected_still_targets_the_active_document() {
+        let mut app = new_app(Some(doc(1.0, 100)), None);
+        app.curves.push(crate::model::curve::PitchCurve::new("mycurve", vec![(0.0, 220.0)]));
+        app.curve_histories.push(crate::model::curve_history::CurveHistory::new());
+        app.curve_histories[0].apply(vec![(0.0, 999.0)], "Test Edit", &mut app.curves[0]);
+        let curve_points_before_undo = app.curves[0].points.clone();
+
+        app.buffer_panel.focused = true;
+        app.buffer_panel.selected = 0; // the document, not the curve
+        app.handle_action(Action::Undo);
+
+        assert_eq!(app.curves[0].points, curve_points_before_undo, "undo should not have touched the curve at all");
+    }
+
+    // -- curve save/load menu hookup -----------------------------------------------------
+
+    #[test]
+    fn ctrl_s_on_a_never_saved_curve_opens_the_save_dialog_prefilled_with_its_name() {
+        let mut app = app_with_one_curve();
+        app.buffer_panel.focused = true;
+        app.buffer_panel.selected = app.documents.len(); // the curve
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        let Some(Dialog::SaveCurveAs { curve_index, input }) = &app.dialog else {
+            panic!("expected the Save Curve dialog to open for a never-saved curve")
+        };
+        assert_eq!(*curve_index, 0);
+        assert_eq!(input.value(), "test_curve.txt");
+    }
+
+    #[test]
+    fn save_curve_as_then_load_pitch_curve_round_trips() {
+        let dir = std::env::temp_dir().join(format!("tui-wave-curve-save-load-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = new_app(None, Some(dir.clone()));
+        app.curves.push(crate::model::curve::PitchCurve::new("roundtrip", vec![(0.0, 220.0), (1.0, 440.0)]));
+        app.curve_histories.push(crate::model::curve_history::CurveHistory::new());
+
+        app.save_curve_as(0, "roundtrip.txt");
+        assert!(!app.curves[0].dirty, "should be marked clean once saved");
+        assert_eq!(app.curves[0].path, Some(dir.join("roundtrip.txt")));
+
+        app.load_curve_from_path(dir.join("roundtrip.txt").to_str().unwrap());
+        assert_eq!(app.curves.len(), 2, "loading should add a second curve, not replace the first");
+        assert_eq!(app.curves[1].points, app.curves[0].points);
+        assert_eq!(app.curves[1].name, "roundtrip");
+        assert!(app.curves[1].binary_template.is_none(), "a loaded curve has no CDP lineage to transform with");
+
+        std::fs::remove_file(dir.join("roundtrip.txt")).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn ctrl_s_on_a_curve_with_an_existing_path_saves_directly_with_no_dialog() {
+        let dir = std::env::temp_dir().join(format!("tui-wave-curve-direct-save-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("existing.txt");
+        std::fs::write(&path, "0 100\n1 200").unwrap();
+
+        let mut app = new_app(None, Some(dir.clone()));
+        let mut curve = crate::model::curve::PitchCurve::new("existing", vec![(0.0, 999.0)]);
+        curve.path = Some(path.clone());
+        curve.dirty = true;
+        app.curves.push(curve);
+        app.curve_histories.push(crate::model::curve_history::CurveHistory::new());
+
+        app.buffer_panel.focused = true;
+        app.buffer_panel.selected = 0;
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        assert!(app.dialog.is_none(), "an existing path should save directly, no prompt");
+        assert!(!app.curves[0].dirty);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "0 999");
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
     /// Regression test for a real user report: typing a fractional value into a table
     /// column CDP requires to be a whole number (repeater's Repeat Count — real binary
     /// error: "Non-integer repeat value") must round to the nearest integer on commit,
@@ -11141,7 +12835,6 @@ mod tests {
             stereo_native: false,
             output_is_stereo: false,
             requires_simple_wav_input: false,
-            curve_output_binary: false,
             params: vec![ParamDef {
                 name: "Count".into(),
                 description: String::new(),
@@ -12004,7 +13697,9 @@ mod tests {
             output_files: Vec::new(),
             glob_output: Some(crate::model::cdp::pipeline::GlobOutputSpec { prefix: "g".into() }),
             output_curve: None,
+            output_curve_binary_template: None,
             brk_files: Vec::new(),
+            binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
             needs_simple_wav_input: false,
         };
@@ -12033,6 +13728,75 @@ mod tests {
             assert_eq!(doc.channels[0].len(), 4, "each new buffer should hold the copied 4 samples");
             assert!(doc.dirty, "a never-saved new buffer should start dirty");
         }
+    }
+
+    /// A curve-extraction job's `Finished(Ok(..))` event (`cdp_pending_curve_extraction`,
+    /// not `cdp_pending`) adds a new `App.curves` entry instead of splicing audio —
+    /// exercises `App::tick_cdp`'s curve-extraction branch end-to-end through the real
+    /// `cdp_runner`, using a fake `/bin/sh` step (no real CDP install needed) that writes a
+    /// breakpoint text file directly, mirroring `glob_output_apply_opens_one_new_buffer_per_result`'s
+    /// own "no real CDP needed" precedent.
+    #[test]
+    fn curve_extraction_apply_adds_a_new_curve_buffer() {
+        let mut app = new_app(Some(doc(0.1, 4)), None);
+        app.cdp_pending_curve_extraction = Some("mysine.wav".into());
+        app.dialog = Some(Dialog::CdpRunning {
+            job_id: 7,
+            title: "Extract Pitch Curve".into(),
+            step_label: String::new(),
+            step_index: 0,
+            step_total: 1,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let planned = crate::model::cdp::pipeline::PlannedJob {
+            steps: vec![crate::model::cdp::pipeline::Invocation {
+                bin: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "printf '0 220\\n1 440\\n' > pitch.txt && printf 'fake pitchfile bytes' > pitch.pch".into(),
+                ],
+                label: "fake getpitch".into(),
+                expected_output: "pitch.txt".into(),
+            }],
+            input_files: Vec::new(),
+            output_files: Vec::new(),
+            glob_output: None,
+            output_curve: Some("pitch.txt".into()),
+            output_curve_binary_template: Some("pitch.pch".into()),
+            brk_files: Vec::new(),
+            binary_input_files: Vec::new(),
+            deferred_window_params: Vec::new(),
+            needs_simple_wav_input: false,
+        };
+        app.cdp_runner.submit(crate::cdp::Job {
+            id: 7,
+            cdp_dir: std::path::PathBuf::from("/bin"),
+            planned,
+            inputs: Vec::new(),
+            input_sample_rate: 44100,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.dialog.is_some() && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(app.dialog.is_none(), "the CdpRunning dialog should close once the job finishes");
+        assert!(app.cdp_pending_curve_extraction.is_none());
+        assert_eq!(app.curves.len(), 1);
+        assert_eq!(app.curves[0].name, "mysine.wav pitch");
+        assert_eq!(app.curves[0].points, vec![(0.0, 220.0), (1.0, 440.0)]);
+        assert_eq!(
+            app.curves[0].binary_template.as_deref(),
+            Some(b"fake pitchfile bytes".as_slice()),
+            "extraction should also capture the real binary pitchfile, needed to run any CDP transform later"
+        );
+        assert_eq!(app.curve_histories.len(), 1, "should get its own history slot too");
+        assert_eq!(app.documents.len(), 1, "a curve result must never become a new audio buffer");
     }
 
     /// `App::cdp_groups` always starts with `CDP_GROUP_ALL` then `CDP_GROUP_RECENT`,
@@ -12269,7 +14033,9 @@ mod tests {
             }],
             glob_output: None,
             output_curve: None,
+            output_curve_binary_template: None,
             brk_files: Vec::new(),
+            binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
             needs_simple_wav_input: false,
         };

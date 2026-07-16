@@ -57,6 +57,11 @@ pub struct JobOutput {
     /// caller (UI layer) replaces an open `model::curve::PitchCurve`'s points with this
     /// rather than splicing anything into an audio `Document`.
     pub curve_points: Option<Vec<(f64, f64)>>,
+    /// `Some` only when `PlannedJob.output_curve_binary_template` was set — the raw bytes
+    /// of a real CDP binary pitchfile the caller should keep as the curve's new
+    /// `PitchCurve.binary_template` (for chaining into a further transform, or for baking a
+    /// later hand-edit back into via `model::curve::splice_pitch_wav_data`).
+    pub curve_binary_template: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -152,6 +157,7 @@ fn run_job_body(
 ) -> Result<JobOutput, CdpError> {
     write_inputs(job, temp_dir)?;
     write_brk_files(job, temp_dir)?;
+    write_binary_input_files(job, temp_dir)?;
 
     let total = job.planned.steps.len();
     for (index, step) in job.planned.steps.iter().enumerate() {
@@ -211,6 +217,20 @@ fn write_inputs(job: &Job, temp_dir: &Path) -> Result<(), CdpError> {
 
 fn write_brk_files(job: &Job, temp_dir: &Path) -> Result<(), CdpError> {
     for (name, contents) in &job.planned.brk_files {
+        std::fs::write(temp_dir.join(name), contents).map_err(|e| CdpError::Spawn {
+            step: format!("write {name}"),
+            message: e.to_string(),
+        })?;
+    }
+    Ok(())
+}
+
+/// Writes a curve-transform job's raw-byte input file(s) — a binary pitch WAV already
+/// spliced with a (possibly hand-edited) curve's points by `plan_curve_transform_job`
+/// before this job was ever submitted. Parallel to `write_brk_files`, just for bytes
+/// instead of text.
+fn write_binary_input_files(job: &Job, temp_dir: &Path) -> Result<(), CdpError> {
+    for (name, contents) in &job.planned.binary_input_files {
         std::fs::write(temp_dir.join(name), contents).map_err(|e| CdpError::Spawn {
             step: format!("write {name}"),
             message: e.to_string(),
@@ -362,7 +382,22 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
             path: path.display().to_string(),
             message: e.to_string(),
         })?;
-        return Ok(JobOutput { results: Vec::new(), sample_rate: job.input_sample_rate, curve_points: Some(points) });
+        let curve_binary_template = match &job.planned.output_curve_binary_template {
+            Some(relative_name) => {
+                let path = temp_dir.join(relative_name);
+                Some(std::fs::read(&path).map_err(|e| CdpError::OutputRead {
+                    path: path.display().to_string(),
+                    message: e.to_string(),
+                })?)
+            }
+            None => None,
+        };
+        return Ok(JobOutput {
+            results: Vec::new(),
+            sample_rate: job.input_sample_rate,
+            curve_points: Some(points),
+            curve_binary_template,
+        });
     }
 
     let max_channel = job
@@ -394,7 +429,7 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
         c.resize(max_len, 0.0);
     }
 
-    Ok(JobOutput { results: vec![channels], sample_rate, curve_points: None })
+    Ok(JobOutput { results: vec![channels], sample_rate, curve_points: None, curve_binary_template: None })
 }
 
 /// Loads every `<prefix>N.wav` (N = 0, 1, 2, …) found in `temp_dir`, in numeric order, as
@@ -424,7 +459,7 @@ fn load_glob_outputs(
     if results.is_empty() {
         return Err(CdpError::NoOutput { step: format!("{}0.wav", glob.prefix) });
     }
-    Ok(JobOutput { results, sample_rate, curve_points: None })
+    Ok(JobOutput { results, sample_rate, curve_points: None, curve_binary_template: None })
 }
 
 #[cfg(test)]
@@ -459,7 +494,9 @@ mod tests {
             }],
             glob_output: None,
             output_curve: None,
+            output_curve_binary_template: None,
             brk_files: Vec::new(),
+            binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
             needs_simple_wav_input: false,
         }
@@ -524,7 +561,9 @@ mod tests {
             output_files: Vec::new(),
             glob_output: Some(crate::model::cdp::pipeline::GlobOutputSpec { prefix: "cutout".into() }),
             output_curve: None,
+            output_curve_binary_template: None,
             brk_files: Vec::new(),
+            binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
             needs_simple_wav_input: false,
         };
@@ -571,7 +610,9 @@ mod tests {
             output_files: Vec::new(),
             glob_output: None,
             output_curve: Some("curve_out.txt".into()),
+            output_curve_binary_template: None,
             brk_files: vec![("curve_in.txt".into(), "0 220\n1 440".into())],
+            binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
             needs_simple_wav_input: false,
         };
