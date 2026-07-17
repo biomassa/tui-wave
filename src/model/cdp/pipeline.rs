@@ -514,10 +514,41 @@ fn build_process_args(
         args.push(mode.clone());
     }
     args.extend(infiles.iter().map(|s| s.to_string()));
-    args.push(outfile.to_string());
 
     let mut deferred = Vec::new();
+    // Two passes rather than one: a handful of real CDP processes (`pitch altharms`/
+    // `octmove`, `formants put`) place a required datafile *between* the input and output
+    // filenames — `ParamDef.before_outfile` marks which param(s) need that. Emitting those
+    // first, then `outfile`, then everything else (the overwhelmingly common case) gets
+    // every process's real argv order right without the common case paying for it: a
+    // process with no `before_outfile` params behaves exactly as it always has, since the
+    // first pass simply emits nothing and the second pass is byte-identical to the old
+    // single-pass loop.
     for (i, (param, value)) in def.params.iter().zip(values).enumerate() {
+        if !param.before_outfile {
+            continue;
+        }
+        let plan = plan_param(param, value, duration_secs, pvoc, sample_rate, brk_files, i);
+        if let Some(token) = plan.arg {
+            match plan.deferred {
+                Some(DeferredParamKind::Arg { flag, percent }) => {
+                    deferred.push(DeferredWindowTarget::Arg { arg_index: args.len(), flag, percent });
+                }
+                Some(DeferredParamKind::BrkFile { relative_name, points }) => {
+                    deferred.push(DeferredWindowTarget::BrkFile { relative_name, points });
+                }
+                None => {}
+            }
+            args.push(token);
+        }
+    }
+
+    args.push(outfile.to_string());
+
+    for (i, (param, value)) in def.params.iter().zip(values).enumerate() {
+        if param.before_outfile {
+            continue;
+        }
         let plan = plan_param(param, value, duration_secs, pvoc, sample_rate, brk_files, i);
         if let Some(token) = plan.arg {
             match plan.deferred {
@@ -1244,6 +1275,7 @@ mod tests {
             required_envelope: false,
             required_list: false,
             list_is_time_sequence: false,
+            before_outfile: false,
             kind: ParamKind::Number { min, max, step: 1.0, default, exponential: false, scale, integer: false },
         }
     }
@@ -1283,6 +1315,31 @@ mod tests {
             job.output_files,
             vec![OutputWavSpec { relative_name: "out.wav".into(), dest_channels: vec![0] }]
         );
+    }
+
+    /// `ParamDef.before_outfile` (the `pitch altharms`/`formants put` datafile-before-outfile
+    /// gap) places that param's token between the infile(s) and `outfile`, while every other
+    /// param stays after `outfile` in its normal declared order -- both groups keep their own
+    /// relative order, mirroring how a real multi-param before/after mix would look.
+    #[test]
+    fn before_outfile_param_is_emitted_between_infile_and_outfile() {
+        let mut def = base_def(IoKind::Wav, IoKind::Wav);
+        let mut datafile_param = number_param("Datafile", 0.0, 1.0, 0.0, NumberScale::Plain);
+        datafile_param.required_envelope = true;
+        datafile_param.automatable = true;
+        datafile_param.before_outfile = true;
+        def.params = vec![datafile_param, number_param("After", -96.0, 96.0, 0.0, NumberScale::Plain)];
+
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let job = plan_job(
+            &def,
+            &[ParamValue::Breakpoints(vec![(0.0, 0.5)]), ParamValue::Number(10.0)],
+            std::slice::from_ref(&input),
+            &PvocSettings::default(),
+        )
+        .unwrap();
+
+        assert_eq!(job.steps[0].args, vec!["speed", "2", "in.wav", "brk_0.txt", "out.wav", "10"]);
     }
 
     #[test]
@@ -1372,6 +1429,7 @@ mod tests {
                 required_envelope: false,
                 required_list: false,
                 list_is_time_sequence: false,
+            before_outfile: false,
                 kind: ParamKind::Toggle { default: false },
             },
             ParamDef {
@@ -1382,6 +1440,7 @@ mod tests {
                 required_envelope: false,
                 required_list: false,
                 list_is_time_sequence: false,
+            before_outfile: false,
                 kind: ParamKind::Choice { options: vec!["44100".into(), "48000".into()], default: 0 },
             },
         ];
@@ -1541,6 +1600,7 @@ mod tests {
             required_envelope: false,
             required_list: false,
             list_is_time_sequence: false,
+            before_outfile: false,
             kind: ParamKind::Number {
                 min: 0.0,
                 max: 2.0,
