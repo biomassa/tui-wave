@@ -8964,17 +8964,265 @@ flag = "-r"
 # pitchfile-out -- deferred pending a first-class pitch-curve document concept.
 
 # `pitch altharms`/`pitch octmove` were tried here and, despite the required_envelope
-# pitchfile format being confirmed to work (see above), deliberately NOT included: their
-# real argv order is `infile pitchfile outfile` -- the pitchfile comes BEFORE outfile, not
-# after it. Every process shape this pipeline builds (`plan_wav`/`plan_ana`/etc.) hardcodes
-# infile(s) then outfile as the first tokens, with all params (including datafile params)
-# emitted afterward -- there's no way to place a required param before outfile with the
-# current architecture. Confirmed by reproducing the exact failure: our runner emitted
+# pitchfile format being confirmed to work (see above), deliberately NOT included at the
+# time: their real argv order is `infile pitchfile outfile` -- the pitchfile comes BEFORE
+# outfile, not after it, and no process shape this pipeline built could place a required
+# param before outfile yet. Confirmed by reproducing the exact failure: our runner emitted
 # `[infile, outfile, brk_file...]`, and CDP read our *outfile's own name* as the pitchfile
-# argument, failing with "Can't open brkpntfile <outfile> to read data." Revisit if/when
-# `plan_ana` gains support for a datafile param positioned before outfile -- a real gap this
-# session found, not previously anticipated by any of the required_envelope/required_list
-# infra built so far (every prior datafile param came after outfile in its real argv).
+# argument, failing with "Can't open brkpntfile <outfile> to read data."
+#
+# ---- Follow-up (2026-07-17): the datafile-before-outfile gap is now solved ----
+# `ParamDef.before_outfile` (see `def.rs`) marks a param whose argv token belongs between
+# the infile(s) and outfile; `pipeline::build_process_args` emits every `before_outfile`
+# param first, then outfile, then everything else -- exactly the shape this pair of
+# processes (and `formants put`, if it's ever added) needs. `pitch_altharms_1`/`_2` and
+# `pitch_octmove_1`/`_2`/`_3` below are the first two processes to use it, both confirmed
+# against the real binary with the same required_envelope text pitchfile shape noted above.
+#
+# One real caveat worth keeping in mind for whoever uses these: CDP's own usage text says
+# "PITCHFILE must be derived from infile" -- i.e. it wants the *actual detected pitch* of
+# the exact same audio being processed (e.g. via Extract Pitch Curve, CDP-Ext-Plan.md
+# Phase 4), not an arbitrary hand-drawn envelope. The `required_envelope` field here will
+# happily accept any hand-drawn breakpoint curve without error (CDP doesn't validate that
+# the pitchfile "belongs" to the input signal), but the harmonic-deletion/octave-transpose
+# math these two processes do is built around a real pitch track -- a made-up curve will
+# run without error but likely won't do anything musically sensible. There's no UI path
+# yet to feed a stored `PitchCurve` (the Tier 2 pitch-curve document type) directly into a
+# `required_envelope` field -- that's the still-open "wiring a stored curve into
+# required_envelope params" item.
+
+[[process]]
+key = "pitch_altharms_1"
+bin = "pitch"
+subprog = "altharms"
+mode = "1"
+title = "Pitch Delete Alternate Harmonics (Odd)"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Deletes odd harmonics, usually producing an octave-up transposition with no formant change"
+description = "Deletes every odd-numbered harmonic from the spectrum, following a pitch track derived from the same sound (see the comment above this entry for what the Pitchfile field needs to actually contain). Usually produces an octave-up transposition while leaving the formant/timbre character alone -- unlike a plain pitch-shift, which also shifts the formants."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitchfile"
+description = "Time/Hz breakpoint pitch track of this same sound (see the comment above this catalog entry -- CDP expects a real detected pitch track, not an arbitrary curve)"
+automatable = true
+required_envelope = true
+before_outfile = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Alternative Reconstruction"
+description = "Uses an alternative spectral reconstruction method"
+flag = "-x"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "pitch_altharms_2"
+bin = "pitch"
+subprog = "altharms"
+mode = "2"
+title = "Pitch Delete Alternate Harmonics (Even)"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Deletes even harmonics from the spectrum"
+description = "Deletes every even-numbered harmonic from the spectrum, following a pitch track derived from the same sound (see this file's note above `pitch_altharms_1` for what the Pitchfile field needs to actually contain)."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitchfile"
+description = "Time/Hz breakpoint pitch track of this same sound (see this file's note above `pitch_altharms_1` -- CDP expects a real detected pitch track, not an arbitrary curve)"
+automatable = true
+required_envelope = true
+before_outfile = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Alternative Reconstruction"
+description = "Uses an alternative spectral reconstruction method"
+flag = "-x"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "pitch_octmove_1"
+bin = "pitch"
+subprog = "octmove"
+mode = "1"
+title = "Pitch Octave Move (Up)"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Transposes upward in whole harmonic-series steps without shifting the formants"
+description = "Transposes the sound upward by a whole harmonic-series ratio (2 = an octave, 3 = an octave and a fifth, etc.) following a pitch track derived from the same sound (see this file's note above `pitch_altharms_1` for what the Pitchfile field needs to actually contain), without shifting the formants the way a plain pitch-shift would."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitchfile"
+description = "Time/Hz breakpoint pitch track of this same sound (see this file's note above `pitch_altharms_1` -- CDP expects a real detected pitch track, not an arbitrary curve)"
+automatable = true
+required_envelope = true
+before_outfile = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Quicksearch Formants"
+description = "Uses a faster, less accurate formant search"
+flag = "-i"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Transposition Ratio"
+description = "Harmonic-series transposition ratio (2 = an octave up, 3 = an octave and a fifth, etc. -- confirmed against the real binary: range 2-4096)"
+automatable = false
+kind = "number"
+min = 2.0
+max = 4096.0
+step = 1.0
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "pitch_octmove_2"
+bin = "pitch"
+subprog = "octmove"
+mode = "2"
+title = "Pitch Octave Move (Down)"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Transposes downward in whole harmonic-series steps without shifting the formants"
+description = "Transposes the sound downward by a whole harmonic-series ratio (2 = an octave, 3 = an octave and a fifth, etc.) following a pitch track derived from the same sound (see this file's note above `pitch_altharms_1` for what the Pitchfile field needs to actually contain), without shifting the formants the way a plain pitch-shift would."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitchfile"
+description = "Time/Hz breakpoint pitch track of this same sound (see this file's note above `pitch_altharms_1` -- CDP expects a real detected pitch track, not an arbitrary curve)"
+automatable = true
+required_envelope = true
+before_outfile = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Quicksearch Formants"
+description = "Uses a faster, less accurate formant search"
+flag = "-i"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Transposition Ratio"
+description = "Harmonic-series transposition ratio (2 = an octave down, 3 = an octave and a fifth down, etc. -- confirmed against the real binary: range 2-4096)"
+automatable = false
+kind = "number"
+min = 2.0
+max = 4096.0
+step = 1.0
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "pitch_octmove_3"
+bin = "pitch"
+subprog = "octmove"
+mode = "3"
+title = "Pitch Octave Move (Down, Bass-Reinforced)"
+category = "pvoc"
+subcategory = "pitch"
+short_description = "Transposes downward in whole harmonic-series steps with added bass reinforcement"
+description = "Transposes the sound downward by a whole harmonic-series ratio, following a pitch track derived from the same sound (see this file's note above `pitch_altharms_1` for what the Pitchfile field needs to actually contain), with an additional bass-reinforcement amount layered in."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitchfile"
+description = "Time/Hz breakpoint pitch track of this same sound (see this file's note above `pitch_altharms_1` -- CDP expects a real detected pitch track, not an arbitrary curve)"
+automatable = true
+required_envelope = true
+before_outfile = true
+kind = "number"
+min = 20.0
+max = 10000.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Quicksearch Formants"
+description = "Uses a faster, less accurate formant search"
+flag = "-i"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Transposition Ratio"
+description = "Harmonic-series transposition ratio (2 = an octave down, 3 = an octave and a fifth down, etc. -- confirmed against the real binary: range 2-4096)"
+automatable = false
+kind = "number"
+min = 2.0
+max = 4096.0
+step = 1.0
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Bass Boost"
+description = "Amount of bass reinforcement to add (confirmed against the real binary: range 0-50; may vary over time)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 50.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
 
 [[process]]
 key = "pitch_transp_5"

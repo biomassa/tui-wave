@@ -2251,11 +2251,11 @@ scale = "plain"
 key = "formants_vocode"
 bin = "formants"
 subprog = "vocode"
-title = "Formants Formant Vocode"
+title = "Formants Formant Vocode (Pitch Bands)"
 category = "pvoc"
 subcategory = "combine"
-short_description = "Impose the formants of one sound onto another"
-description = "This process takes an analysis of the formants (the dynamic envelope of the most prominent frequencies) from the second inlet and imposes it over the sound in the first inlet. This allows you to create a blend of the two sounds where the timbre of the first inlet will take on the shape and emphasis of the second."
+short_description = "Impose the formants of one sound onto another, sized in pitch-bands-per-octave"
+description = "This process takes an analysis of the formants (the dynamic envelope of the most prominent frequencies) from the second inlet and imposes it over the sound in the first inlet. This allows you to create a blend of the two sounds where the timbre of the first inlet will take on the shape and emphasis of the second. This variant sizes the formant envelope in musically-spaced pitch bands per octave -- see 'Formants Formant Vocode (Frequency Bands)' for the equal-Hz-width alternative (CDP's real -f/-p flags are two different ways to size the same underlying analysis; this catalog has no way to offer one field with a user-chosen unit, so each is its own process)."
 input = "dual_ana"
 output = "ana"
 stereo_native = false
@@ -2263,7 +2263,7 @@ output_is_stereo = false
 
 [[process.params]]
 name = "Formant Bands"
-description = "The number of frequency bands to identify and impose on the sound"
+description = "Number of pitch-bands per octave to identify and impose on the sound"
 flag = "-p"
 automatable = false
 kind = "number"
@@ -2297,6 +2297,85 @@ min = 5.0
 max = 20000.0
 step = 0.01
 default = 20000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Adjustment to the imposed signal's loudness (confirmed against the real binary: values very close to 0 up to 10.0 are accepted, 0 itself is rejected)"
+flag = "-g"
+automatable = false
+kind = "number"
+min = 0.000002
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "formants_vocode_freq"
+bin = "formants"
+subprog = "vocode"
+title = "Formants Formant Vocode (Frequency Bands)"
+category = "pvoc"
+subcategory = "combine"
+short_description = "Impose the formants of one sound onto another, sized in equal-Hz-width bands"
+description = "This process takes an analysis of the formants (the dynamic envelope of the most prominent frequencies) from the second inlet and imposes it over the sound in the first inlet. This allows you to create a blend of the two sounds where the timbre of the first inlet will take on the shape and emphasis of the second. This variant sizes the formant envelope in equal-width frequency channels -- see 'Formants Formant Vocode (Pitch Bands)' for the musically-spaced alternative (CDP's real -f/-p flags are two different ways to size the same underlying analysis; this catalog has no way to offer one field with a user-chosen unit, so each is its own process)."
+input = "dual_ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Frequency Bands"
+description = "Number of equally-spaced frequency channels per formant-envelope point (confirmed against the real binary: 1 works, 0 fails as too small, fractional values are accepted fine, and the real per-file ceiling can be as low as 256 -- a very high value may fail with \"Too many formant_bands requested\" depending on the actual analysis size)"
+flag = "-f"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "High Pass Cutoff"
+description = "Removes all frequencies below this point (in Hz)"
+flag = "-l"
+automatable = false
+kind = "number"
+min = 5.0
+max = 20000.0
+step = 0.01
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Low Pass Cutoff"
+description = "Removes all frequencies above this point (in Hz)"
+flag = "-h"
+automatable = false
+kind = "number"
+min = 5.0
+max = 20000.0
+step = 0.01
+default = 20000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Adjustment to the imposed signal's loudness (confirmed against the real binary: values very close to 0 up to 10.0 are accepted, 0 itself is rejected)"
+flag = "-g"
+automatable = false
+kind = "number"
+min = 0.000002
+max = 10.0
+step = 0.01
+default = 1.0
 exponential = true
 scale = "plain"
 

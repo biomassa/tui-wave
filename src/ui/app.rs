@@ -12843,6 +12843,7 @@ mod tests {
                 required_envelope: false,
                 required_list: false,
                 list_is_time_sequence: false,
+                before_outfile: false,
                 kind: ParamKind::Number {
                     min: 1.0,
                     max: 10.0,
