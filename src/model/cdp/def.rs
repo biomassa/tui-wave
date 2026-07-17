@@ -346,6 +346,20 @@ pub struct ParamDef {
     /// picking a real position in a short file.
     #[serde(default)]
     pub list_is_time_sequence: bool,
+    /// True for a param whose real CDP argv position is *before* `outfile` rather than
+    /// after it (e.g. `pitch altharms infile pitchfile outfile`, `formants put mode infile
+    /// fmntfile outfile` — the required datafile sits between the input and output
+    /// filenames). Every `required_envelope`/`required_list` param this catalog shipped
+    /// before this field existed had its datafile positioned *after* `outfile` in the real
+    /// argv, which is why `pipeline::build_process_args` always assumed that shape — this
+    /// is the first time that assumption needed an escape hatch. At most one param on a
+    /// given process is expected to need this (CDP's own datafile-before-outfile processes
+    /// only ever have one such datafile), but `build_process_args` handles any number by
+    /// emitting every `true`-flagged param (in declared order) before `outfile`, then every
+    /// other param (in declared order) after it — the same relative ordering either group
+    /// would already get on its own.
+    #[serde(default)]
+    pub before_outfile: bool,
     #[serde(flatten)]
     pub kind: ParamKind,
 }
@@ -425,6 +439,7 @@ mod tests {
             required_envelope: false,
             required_list: false,
             list_is_time_sequence: false,
+            before_outfile: false,
             kind: ParamKind::Number {
                 min: 2.0,
                 max: 64.0,
@@ -472,6 +487,7 @@ mod tests {
             required_envelope: false,
             required_list: false,
             list_is_time_sequence: false,
+            before_outfile: false,
             kind: ParamKind::Toggle { default: false },
         };
         let choice = ParamDef {
@@ -482,6 +498,7 @@ mod tests {
             required_envelope: false,
             required_list: false,
             list_is_time_sequence: false,
+            before_outfile: false,
             kind: ParamKind::Choice {
                 options: vec!["44100".into(), "48000".into()],
                 default: 0,
@@ -525,6 +542,7 @@ mod tests {
             required_envelope: false,
             required_list: false,
             list_is_time_sequence: false,
+            before_outfile: false,
             kind: ParamKind::Table {
                 columns: vec![
                     TableColumn {
@@ -595,6 +613,7 @@ mod tests {
             required_envelope: false,
             required_list: false,
             list_is_time_sequence: false,
+            before_outfile: false,
             kind: ParamKind::MarkerTimeList {
                 markers: vec!['a', 'b'],
                 min: 0.0,
@@ -649,6 +668,7 @@ mod tests {
             required_envelope: false,
             required_list: false,
             list_is_time_sequence: false,
+            before_outfile: false,
             kind: ParamKind::HiliteBand {
                 lofrq: bounds("Lo Freq", 20.0, 20000.0, 200.0),
                 hifrq: bounds("Hi Freq", 20.0, 20000.0, 2000.0),
