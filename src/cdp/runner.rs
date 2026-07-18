@@ -62,6 +62,13 @@ pub struct JobOutput {
     /// `PitchCurve.binary_template` (for chaining into a further transform, or for baking a
     /// later hand-edit back into via `model::curve::splice_pitch_wav_data`).
     pub curve_binary_template: Option<Vec<u8>>,
+    /// `Some` only for a job producing a `model::formant::FormantBuffer`
+    /// (`PlannedJob.output_formant_buffer` — CDP-Ext-Plan.md Phase 5's `formants get`/
+    /// `oneform get`); `results` is always empty in that case, same mutual-exclusivity as
+    /// `curve_points`. The raw bytes of the named temp file, verbatim — there's no
+    /// text/binary split to make here the way `curve_points`/`curve_binary_template` have,
+    /// since formant data has no plain-text representation at all.
+    pub formant_buffer_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -397,6 +404,21 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
             sample_rate: job.input_sample_rate,
             curve_points: Some(points),
             curve_binary_template,
+            formant_buffer_bytes: None,
+        });
+    }
+    if let Some(relative_name) = &job.planned.output_formant_buffer {
+        let path = temp_dir.join(relative_name);
+        let bytes = std::fs::read(&path).map_err(|e| CdpError::OutputRead {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        })?;
+        return Ok(JobOutput {
+            results: Vec::new(),
+            sample_rate: job.input_sample_rate,
+            curve_points: None,
+            curve_binary_template: None,
+            formant_buffer_bytes: Some(bytes),
         });
     }
 
@@ -429,7 +451,7 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
         c.resize(max_len, 0.0);
     }
 
-    Ok(JobOutput { results: vec![channels], sample_rate, curve_points: None, curve_binary_template: None })
+    Ok(JobOutput { results: vec![channels], sample_rate, curve_points: None, curve_binary_template: None, formant_buffer_bytes: None })
 }
 
 /// Loads every `<prefix>N.wav` (N = 0, 1, 2, …) found in `temp_dir`, in numeric order, as
@@ -459,7 +481,7 @@ fn load_glob_outputs(
     if results.is_empty() {
         return Err(CdpError::NoOutput { step: format!("{}0.wav", glob.prefix) });
     }
-    Ok(JobOutput { results, sample_rate, curve_points: None, curve_binary_template: None })
+    Ok(JobOutput { results, sample_rate, curve_points: None, curve_binary_template: None, formant_buffer_bytes: None })
 }
 
 #[cfg(test)]
@@ -484,6 +506,33 @@ mod tests {
         }
     }
 
+    /// Runs one job synchronously to completion and returns its `JobOutput` — used by
+    /// `catalog_smoke_test` to produce a real Formant/Snapshot buffer up front (via
+    /// `plan_extract_formants`/`plan_oneform_get`) before driving any catalog entry with a
+    /// `FormantBufferRef` param, since a fake byte blob would fail as an unparseable formant
+    /// file rather than exercising the argv shape the smoke test actually cares about.
+    fn run_smoke_prereq_job(
+        runner: &CdpRunner,
+        cdp_dir: &Path,
+        planned: PlannedJob,
+        inputs: Vec<Vec<Vec<f32>>>,
+        sample_rate: u32,
+        id: u64,
+    ) -> JobOutput {
+        runner.submit(Job {
+            id,
+            cdp_dir: cdp_dir.to_path_buf(),
+            planned,
+            inputs,
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+        let CdpEvent::Finished { result, .. } = recv_finished(runner, Duration::from_secs(30)) else {
+            unreachable!()
+        };
+        result.expect("smoke-test prerequisite formant/snapshot extraction job should succeed")
+    }
+
     fn empty_planned_job(steps: Vec<Invocation>, output_relative_name: &str) -> PlannedJob {
         PlannedJob {
             steps,
@@ -494,7 +543,7 @@ mod tests {
             }],
             glob_output: None,
             output_curve: None,
-            output_curve_binary_template: None,
+            output_curve_binary_template: None, output_formant_buffer: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -561,7 +610,7 @@ mod tests {
             output_files: Vec::new(),
             glob_output: Some(crate::model::cdp::pipeline::GlobOutputSpec { prefix: "cutout".into() }),
             output_curve: None,
-            output_curve_binary_template: None,
+            output_curve_binary_template: None, output_formant_buffer: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -610,7 +659,7 @@ mod tests {
             output_files: Vec::new(),
             glob_output: None,
             output_curve: Some("curve_out.txt".into()),
-            output_curve_binary_template: None,
+            output_curve_binary_template: None, output_formant_buffer: None,
             brk_files: vec![("curve_in.txt".into(), "0 220\n1 440".into())],
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -1939,6 +1988,17 @@ mod tests {
 
         let runner = CdpRunner::new();
         let mut failures = Vec::new();
+        // `ParamValue::FormantBufferRef` (CDP-Ext-Plan.md Phase 5) carries no data of its
+        // own (see its doc comment) — same "app layer injects the real bytes after plan_job"
+        // scheme as production (`App::cdp_run`, once built), just done here instead against
+        // a real Formant/Snapshot buffer extracted from this fixture via the real binaries,
+        // since a fake byte blob would fail immediately as an unparseable formant file
+        // rather than exercising the argv shape this test actually cares about. Computed
+        // lazily (`Option`, filled on first need) and cached rather than up front, so a
+        // catalog with no `FormantBufferRef` params at all (true today, before this Phase 5
+        // work) pays zero extra cost.
+        let mut formant_buffer_bytes: Option<Vec<u8>> = None;
+        let mut snapshot_buffer_bytes: Option<Vec<u8>> = None;
         for (i, def) in catalog.processes.iter().enumerate() {
             if KNOWN_FIXTURE_FAILURES.contains(&def.key.as_str()) {
                 continue;
@@ -1994,7 +2054,7 @@ mod tests {
             };
             let inputs_spec = vec![input; input_count];
 
-            let planned = match crate::model::cdp::plan_job(
+            let mut planned = match crate::model::cdp::plan_job(
                 def,
                 &values,
                 &inputs_spec,
@@ -2007,6 +2067,59 @@ mod tests {
                     continue;
                 }
             };
+
+            for param in &def.params {
+                let crate::model::cdp::ParamKind::FormantBufferRef { buffer_kind, relative_name } = &param.kind
+                else {
+                    continue;
+                };
+                let bytes = match buffer_kind {
+                    crate::model::formant::FormantBufferKind::Formant => formant_buffer_bytes
+                        .get_or_insert_with(|| {
+                            run_smoke_prereq_job(
+                                &runner,
+                                &cdp_dir,
+                                crate::model::cdp::plan_extract_formants(&crate::model::cdp::PvocSettings::default()),
+                                vec![channels.clone()],
+                                sample_rate,
+                                8_000,
+                            )
+                            .formant_buffer_bytes
+                            .expect("formants get should produce formant_buffer_bytes")
+                        })
+                        .clone(),
+                    crate::model::formant::FormantBufferKind::Snapshot => {
+                        if snapshot_buffer_bytes.is_none() {
+                            let formant_bytes = formant_buffer_bytes.get_or_insert_with(|| {
+                                run_smoke_prereq_job(
+                                    &runner,
+                                    &cdp_dir,
+                                    crate::model::cdp::plan_extract_formants(&crate::model::cdp::PvocSettings::default()),
+                                    vec![channels.clone()],
+                                    sample_rate,
+                                    8_000,
+                                )
+                                .formant_buffer_bytes
+                                .expect("formants get should produce formant_buffer_bytes")
+                            });
+                            snapshot_buffer_bytes = Some(
+                                run_smoke_prereq_job(
+                                    &runner,
+                                    &cdp_dir,
+                                    crate::model::cdp::plan_oneform_get(formant_bytes, duration_secs / 2.0),
+                                    Vec::new(),
+                                    sample_rate,
+                                    8_001,
+                                )
+                                .formant_buffer_bytes
+                                .expect("oneform get should produce formant_buffer_bytes"),
+                            );
+                        }
+                        snapshot_buffer_bytes.clone().unwrap()
+                    }
+                };
+                planned.binary_input_files.push((relative_name.clone(), bytes));
+            }
 
             runner.submit(Job {
                 id: 10_000 + i as u64,

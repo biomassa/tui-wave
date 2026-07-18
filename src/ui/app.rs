@@ -226,6 +226,19 @@ enum CdpField {
         amp2: crate::model::cdp::TableColumn,
         transpose: crate::model::cdp::TableColumn,
     },
+    /// A `ParamKind::FormantBufferRef` field (CDP-Ext-Plan.md Phase 5) — `selected` starts
+    /// `None` ("never picked") since, unlike every other field kind, there's no catalog
+    /// default to seed from at all: the value is a runtime reference to one of
+    /// `App.formant_buffers`, not something a catalog author could write down. Set by
+    /// `FormantBufferPicker` (mirrors `EnvelopeCurvePicker`'s existing precedent for
+    /// pitch-curve fields). `buffer_kind` is cloned from `ParamKind::FormantBufferRef` at
+    /// construction time, same rationale as every other field's own bounds — it's what the
+    /// picker filters `App.formant_buffers` by (a `formants put` field only offers
+    /// `[Formant]` buffers, `oneform put` only `[Snapshot]`).
+    FormantBufferRef {
+        selected: Option<usize>,
+        buffer_kind: crate::model::formant::FormantBufferKind,
+    },
 }
 
 impl CdpField {
@@ -289,6 +302,9 @@ impl CdpField {
                 amp2: amp2.clone(),
                 transpose: transpose.clone(),
             },
+            ParamKind::FormantBufferRef { buffer_kind, .. } => {
+                CdpField::FormantBufferRef { selected: None, buffer_kind: *buffer_kind }
+            }
         }
     }
 
@@ -398,6 +414,11 @@ impl CdpField {
             CdpField::Table { rows, .. } => ParamValue::Table(rows.clone()),
             CdpField::MarkerTimeList { entries, .. } => ParamValue::MarkerTimeList(entries.clone()),
             CdpField::HiliteBand { rows, .. } => ParamValue::HiliteBand(rows.clone()),
+            // The picked buffer index never leaves the UI layer — `cdp_run`'s job-submission
+            // path reads `selected` directly to inject the buffer's bytes into
+            // `PlannedJob.binary_input_files` (see `ParamValue::FormantBufferRef`'s doc
+            // comment) rather than routing "which buffer" through `ParamValue` at all.
+            CdpField::FormantBufferRef { .. } => ParamValue::FormantBufferRef,
         }
     }
 }
@@ -612,6 +633,13 @@ enum Dialog {
         /// `marker_time_list_edit` (a field is exactly one shape), same take-over-all-
         /// key-handling shape.
         hilite_band_edit: Option<CdpHiliteBandEdit>,
+        /// `Some` while the "pick a buffer" picker (`render_cdp_formant_picker`) is open for
+        /// one of `fields`' `FormantBufferRef`-kind params (CDP-Ext-Plan.md Phase 5) —
+        /// mutually exclusive with every other sub-editor above, same take-over-all-key-
+        /// handling shape. Unlike every other sub-editor, there's nothing to hand-edit here
+        /// (see `CdpField::FormantBufferRef`'s doc comment) — this just lists
+        /// `App.formant_buffers` (filtered by `buffer_kind`) and commits the chosen index.
+        formant_picker: Option<FormantBufferPicker>,
         presets: Vec<crate::model::cdp::preset::CdpPreset>,
         preset_selected: Option<usize>,
         save_prompt: Option<TextInput>,
@@ -642,6 +670,18 @@ enum Dialog {
     /// sub-editors, this is a top-level dialog with no browser/params dialog underneath it
     /// — Esc/Enter both close it outright (see `CurveEditorState`'s doc comment).
     CurveEditor(CurveEditorState),
+    /// Read-only summary for `App.formant_buffers[buffer_index]` (CDP-Ext-Plan.md Phase 5),
+    /// opened via `App::open_formant_info` from the Buffers panel. Unlike `CurveEditor`,
+    /// there is deliberately no editing here at all — the UX decision this shipped under,
+    /// since formant data has no hand-editable representation (see `model::formant`'s doc
+    /// comments). Esc/Enter both close it, same as `Info`.
+    FormantInfo { buffer_index: usize },
+    /// "Freeze snapshot" ('f' inside `Dialog::FormantInfo`, only for a `[Formant]` buffer —
+    /// there's nothing further to freeze from an already-frozen `[Snapshot]`) — prompts for
+    /// the time (in seconds) to freeze, then runs `App::freeze_formant_snapshot`. Esc cancels
+    /// back to nothing (not back to `FormantInfo`, mirroring every other simple text prompt
+    /// in this app, e.g. `RenameBuffer`).
+    FreezeFormantSnapshot { buffer_index: usize, input: TextInput },
 }
 
 /// The second-input picker state for a dual-input CDP process (combine/morph/vocode/...):
@@ -701,6 +741,18 @@ struct CdpEnvelopeEdit {
 /// The picker `CdpEnvelopeEdit.curve_picker` holds — `entries` are indices into
 /// `App.curves`, computed once when 'c' opens it.
 struct EnvelopeCurvePicker {
+    entries: Vec<usize>,
+    selected: usize,
+}
+
+/// The picker `Dialog::CdpParams.formant_picker` holds (CDP-Ext-Plan.md Phase 5) — `entries`
+/// are indices into `App.formant_buffers` already filtered to the focused field's
+/// `buffer_kind` (a `formants put` field only ever offers `[Formant]` buffers, `oneform put`
+/// only `[Snapshot]`), computed once when 'b' opens it. Same shape as `EnvelopeCurvePicker`,
+/// just a top-level `Dialog::CdpParams` slot rather than nested under an envelope edit —
+/// `FormantBufferRef` fields have no graphical envelope to nest inside at all.
+struct FormantBufferPicker {
+    field_index: usize,
     entries: Vec<usize>,
     selected: usize,
 }
@@ -1179,6 +1231,13 @@ pub struct App {
     pub curves: Vec<crate::model::curve::PitchCurve>,
     /// Index-parallel to `curves`, same reasoning as `histories`.
     pub curve_histories: Vec<crate::model::curve_history::CurveHistory>,
+    /// Open formant/snapshot buffers (CDP-Ext-Plan.md Phase 5 "Tier 3") — folded into the
+    /// Buffers panel alongside `documents`/`curves` (tagged `[Formant]`/`[Snapshot]` via
+    /// `FormantBufferKind::tag`), per the same UX decision `curves` shipped under. Unlike a
+    /// curve, a formant buffer has no hand-editable representation at all (see
+    /// `model::formant`'s doc comments) — selecting one in the panel opens a read-only
+    /// "Formant Info" popup instead of an editor.
+    pub formant_buffers: Vec<crate::model::formant::FormantBuffer>,
     pub clipboard: Clipboard,
     pub menu: MenuBar,
     pub toolbar: Toolbar,
@@ -1347,6 +1406,20 @@ pub struct App {
     /// points/`binary_template` via `CurveHistory::apply` (labeled `transform_title`) rather
     /// than creating a new curve the way extraction does.
     cdp_pending_curve_transform: Option<(usize, String)>,
+    /// `Some(source_name)` while an "Extract Formants" job (`App::extract_formants`,
+    /// CDP-Ext-Plan.md Phase 5) is in flight — same rationale as
+    /// `cdp_pending_curve_extraction`: no `ProcessDef`/`CdpParams` session behind this
+    /// action (it isn't a catalog process), so the result becomes a new
+    /// `App.formant_buffers` entry (`FormantBufferKind::Formant`) rather than being spliced
+    /// into a `Document`. `tick_cdp` checks this alongside `cdp_pending_curve_extraction`.
+    cdp_pending_formant_extraction: Option<String>,
+    /// `Some(source_buffer_index)` while a "freeze snapshot" job (`App::freeze_formant_snapshot`,
+    /// `oneform get`) is in flight — the index of the `[Formant]` buffer being frozen, kept
+    /// only so the completed job's result can be named after it. Same no-`CdpParams`-session
+    /// rationale as the extraction fields above; the result becomes a new
+    /// `App.formant_buffers` entry (`FormantBufferKind::Snapshot`) rather than replacing
+    /// anything in place.
+    cdp_pending_snapshot_freeze: Option<usize>,
 }
 
 /// Context for the CDP job currently running in `cdp_runner`, stashed when it's submitted
@@ -1441,6 +1514,7 @@ impl App {
             histories,
             curves: Vec::new(),
             curve_histories: Vec::new(),
+            formant_buffers: Vec::new(),
             clipboard: Clipboard::default(),
             menu: MenuBar::new(&menu_shortcuts),
             toolbar: Toolbar::new(&toolbar_shortcuts),
@@ -1496,6 +1570,8 @@ impl App {
             cdp_preview_audio: None,
             cdp_pending_curve_extraction: None,
             cdp_pending_curve_transform: None,
+            cdp_pending_formant_extraction: None,
+            cdp_pending_snapshot_freeze: None,
         }
     }
 
@@ -1525,10 +1601,12 @@ impl App {
         }
     }
 
-    /// Documents first, then open curves (tagged `[Curve]`) appended after — one flat list
-    /// for `BufferPanel` to render/select over. `documents.len()` is the split point: any
-    /// selected index at or beyond it refers to `curves[index - documents.len()]`, never a
-    /// document (see `activate_buffer_panel_selection`).
+    /// Documents first, then open curves (tagged `[Curve]`), then open formant/snapshot
+    /// buffers (tagged `[Formant]`/`[Snapshot]`) appended last — one flat list for
+    /// `BufferPanel` to render/select over. `documents.len()` is the first split point (any
+    /// selected index at or beyond it refers to `curves`/`formant_buffers` instead of a
+    /// document); `documents.len() + curves.len()` is the second (see
+    /// `activate_buffer_panel_selection`).
     fn buffer_names(&self) -> Vec<String> {
         let docs = (0..self.documents.len()).map(|i| {
             let prefix = if self.documents[i].dirty { "*" } else { "" };
@@ -1538,21 +1616,56 @@ impl App {
             let prefix = if c.dirty { "*" } else { "" };
             format!("{}[Curve] {}", prefix, c.name)
         });
-        docs.chain(curves).collect()
+        // No dirty marker: unlike a document/curve, a formant buffer has no save action at
+        // all (`model::formant::FormantBuffer`'s doc comment) — there's nothing "dirty"
+        // relative to, since there's no saved-on-disk state to compare against.
+        let formants = self.formant_buffers.iter().map(|b| format!("{} {}", b.kind.tag(), b.name));
+        docs.chain(curves).chain(formants).collect()
     }
 
     /// Commits the Buffers-panel selection: switches to it if it's a document, opens the
-    /// standalone curve editor if it's a curve (see `buffer_names`' doc comment for the
-    /// index split). Used by both the Enter-key (`Action::SwitchBuffer`) and mouse-click
-    /// paths so they stay in sync — unlike `move_buffer_selection`'s Up/Down cursor
-    /// movement, which deliberately does NOT open the curve editor on every keystroke.
+    /// standalone curve editor if it's a curve, or the read-only Formant Info popup if it's
+    /// a formant/snapshot buffer (see `buffer_names`' doc comment for the index split). Used
+    /// by both the Enter-key (`Action::SwitchBuffer`) and mouse-click paths so they stay in
+    /// sync — unlike `move_buffer_selection`'s Up/Down cursor movement, which deliberately
+    /// does NOT open the curve editor/info popup on every keystroke.
     fn activate_buffer_panel_selection(&mut self) {
         let index = self.buffer_panel.selected;
         if index < self.documents.len() {
             self.switch_to_buffer(index);
-        } else if let Some(curve_index) = index.checked_sub(self.documents.len()) {
-            self.open_curve_editor(curve_index);
+        } else if let Some(rest) = index.checked_sub(self.documents.len()) {
+            if rest < self.curves.len() {
+                self.open_curve_editor(rest);
+            } else if let Some(formant_index) = rest.checked_sub(self.curves.len()) {
+                self.open_formant_info(formant_index);
+            }
         }
+    }
+
+    /// Opens the read-only "Formant Info" popup for `App.formant_buffers[formant_index]`
+    /// (Buffers-panel Enter on a `[Formant]`/`[Snapshot]` row) — the UX decision this
+    /// shipped under: unlike a pitch curve, formant data has no hand-editable representation
+    /// at all (CDP itself offers no formant-curve-to-formant-curve transform — see
+    /// `model::formant`'s doc comments), so there is no editor to open, only a summary.
+    fn open_formant_info(&mut self, formant_index: usize) {
+        if self.formant_buffers.get(formant_index).is_none() {
+            return;
+        }
+        self.dialog = Some(Dialog::FormantInfo { buffer_index: formant_index });
+    }
+
+    /// 'f' inside `Dialog::FormantInfo` — opens the "freeze snapshot" time prompt for a
+    /// `[Formant]` buffer (CDP-Ext-Plan.md Phase 5's `oneform get`). Returns `false` (no-op)
+    /// for a `[Snapshot]` buffer or any other active dialog, mirroring
+    /// `open_cdp_formant_picker`'s own "not applicable here" shape.
+    fn open_freeze_snapshot_prompt(&mut self) -> bool {
+        let Some(Dialog::FormantInfo { buffer_index }) = self.dialog else { return false };
+        let Some(buffer) = self.formant_buffers.get(buffer_index) else { return false };
+        if buffer.kind != crate::model::formant::FormantBufferKind::Formant {
+            return false;
+        }
+        self.dialog = Some(Dialog::FreezeFormantSnapshot { buffer_index, input: TextInput::fresh("0.0".to_string()) });
+        true
     }
 
     fn open_curve_editor(&mut self, curve_index: usize) {
@@ -2465,7 +2578,8 @@ impl App {
             | Dialog::RenameBuffer { input, .. }
             | Dialog::RenameFile { input, .. }
             | Dialog::SaveCurveAs { input, .. }
-            | Dialog::LoadCurve { input } => Some(input),
+            | Dialog::LoadCurve { input }
+            | Dialog::FreezeFormantSnapshot { input, .. } => Some(input),
             Dialog::Gain { input, right_input, focused, per_channel, is_stereo, .. } => {
                 let rows = GainRows::new(*is_stereo, *per_channel);
                 let f = *focused;
@@ -2515,6 +2629,7 @@ impl App {
             // no plain `TextInput` field of its own — the in-progress typed cell lives in
             // `CurveEditorState.editing` instead.
             Dialog::CurveEditor(_) => None,
+            Dialog::FormantInfo { .. } => None,
         }
     }
 
@@ -2525,6 +2640,7 @@ impl App {
                 c.is_ascii_digit() || c == '-' || c == '.'
             }
             Some(Dialog::Resample { .. }) => c.is_ascii_digit(),
+            Some(Dialog::FreezeFormantSnapshot { .. }) => c.is_ascii_digit() || c == '.',
             Some(Dialog::MixToMono { .. }) => {
                 c.is_ascii_digit() || matches!(c, '-' | '.' | 'i' | 'n' | 'f')
             }
@@ -2609,6 +2725,10 @@ impl App {
             self.handle_cdp_hilite_band_key(key);
             return;
         }
+        if let Some(Dialog::CdpParams { formant_picker: Some(_), .. }) = &self.dialog {
+            self.handle_cdp_formant_picker_key(key);
+            return;
+        }
         if let Some(Dialog::CdpParams { save_prompt: Some(_), .. }) = &self.dialog {
             self.handle_cdp_preset_save_prompt_key(key);
             return;
@@ -2659,6 +2779,11 @@ impl App {
                 }
                 Some(Dialog::LoadCurve { input }) => {
                     self.load_curve_from_path(input.value().trim());
+                }
+                Some(Dialog::FreezeFormantSnapshot { buffer_index, input }) => {
+                    if let Ok(time_secs) = input.value().trim().parse::<f64>() {
+                        self.freeze_formant_snapshot(buffer_index, time_secs);
+                    }
                 }
                 Some(Dialog::MixToMono { inputs, tanh_clip, .. }) => {
                     let inputs_snapshot = inputs.clone();
@@ -2731,7 +2856,7 @@ impl App {
                 }
                 Some(Dialog::CdpParams {
                     catalog_index, fields, second_input, focus, error, preview, envelope, list_edit, table_edit,
-                    marker_time_list_edit, hilite_band_edit, presets, preset_selected, save_prompt, scroll,
+                    marker_time_list_edit, hilite_band_edit, formant_picker, presets, preset_selected, save_prompt, scroll,
                 }) => {
                     // Enter's default action is Apply (from anywhere, including the preset
                     // row — a highlighted preset's values, or the process's defaults, are
@@ -2745,7 +2870,7 @@ impl App {
                     };
                     self.dialog = Some(Dialog::CdpParams {
                         catalog_index, fields, second_input, focus, error, preview, envelope, list_edit, table_edit,
-                        marker_time_list_edit, hilite_band_edit, presets, preset_selected, save_prompt, scroll,
+                        marker_time_list_edit, hilite_band_edit, formant_picker, presets, preset_selected, save_prompt, scroll,
                     });
                     self.cdp_run(purpose);
                 }
@@ -2756,6 +2881,7 @@ impl App {
                 }
                 Some(Dialog::CdpOutput { .. }) => {} // just dismiss
                 Some(Dialog::Info { .. }) => {} // just dismiss
+                Some(Dialog::FormantInfo { .. }) => {} // just dismiss
                 // Unreachable in practice: `handle_dialog_key` intercepts and returns early
                 // whenever `self.dialog` is `Some(Dialog::CurveEditor(_))`, via
                 // `handle_curve_editor_key` — required only for match exhaustiveness.
@@ -2965,6 +3091,35 @@ impl App {
                 {
                     if let Some(input) = self.dialog_input() {
                         input.insert('e');
+                    }
+                    self.refresh_cdp_browser_filter();
+                }
+            }
+            // 'b' opens the "pick a buffer" picker for a focused `FormantBufferRef` field
+            // (CDP-Ext-Plan.md Phase 5) — free to repurpose for the same reason 'e'/'s'/'d'
+            // are above (a focused Number field's `dialog_accepts` rejects letters anyway).
+            KeyCode::Char('b')
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if !self.open_cdp_formant_picker() && self.dialog_accepts('b') {
+                    if let Some(input) = self.dialog_input() {
+                        input.insert('b');
+                    }
+                    self.refresh_cdp_browser_filter();
+                }
+            }
+            // 'f' inside the read-only Formant Info popup opens the "freeze snapshot" time
+            // prompt (CDP-Ext-Plan.md Phase 5's `oneform get`) — only for a `[Formant]`
+            // buffer, never a `[Snapshot]` (there's nothing further to freeze from an
+            // already-frozen instant). A no-op everywhere else, same "free to repurpose"
+            // rationale as 'e'/'b' above (`Dialog::FormantInfo` has no typed input at all —
+            // `dialog_input` returns `None` for it — so this never collides with typing).
+            KeyCode::Char('f')
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if !self.open_freeze_snapshot_prompt() && self.dialog_accepts('f') {
+                    if let Some(input) = self.dialog_input() {
+                        input.insert('f');
                     }
                     self.refresh_cdp_browser_filter();
                 }
@@ -3382,6 +3537,7 @@ impl App {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
+            formant_picker: None,
             presets,
             preset_selected: None,
             save_prompt: None,
@@ -4454,6 +4610,75 @@ impl App {
         }
     }
 
+    /// Opens the "pick a buffer" picker for whichever `CdpField::FormantBufferRef` is
+    /// currently focused in `Dialog::CdpParams` ('b' key, CDP-Ext-Plan.md Phase 5) — the
+    /// `ParamKind::FormantBufferRef` counterpart to `open_cdp_hilite_band_editor`, but there's
+    /// no data to seed an editor with (see `CdpField::FormantBufferRef`'s doc comment): just a
+    /// list of `App.formant_buffers` filtered to the field's own `buffer_kind`, computed once
+    /// here. A no-op (returns `false`) if there's no matching buffer open yet, same as
+    /// `EnvelopeCurvePicker`'s "no open curves" case.
+    fn open_cdp_formant_picker(&mut self) -> bool {
+        let Some(Dialog::CdpParams { fields, focus, .. }) = &self.dialog else { return false };
+        if *focus == CDP_PRESET_FOCUS {
+            return false;
+        }
+        let field_index = *focus - 1;
+        let Some(CdpField::FormantBufferRef { buffer_kind, .. }) = fields.get(field_index) else {
+            return false;
+        };
+        let buffer_kind = *buffer_kind;
+        let entries: Vec<usize> = self
+            .formant_buffers
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.kind == buffer_kind)
+            .map(|(i, _)| i)
+            .collect();
+        if entries.is_empty() {
+            return false;
+        }
+        let Some(Dialog::CdpParams { formant_picker, .. }) = self.dialog.as_mut() else {
+            return false;
+        };
+        *formant_picker = Some(FormantBufferPicker { field_index, entries, selected: 0 });
+        true
+    }
+
+    /// All key handling while `Dialog::CdpParams.formant_picker` is `Some` — Up/Down navigate
+    /// the filtered list of open buffers, Esc closes it without changing the field's
+    /// selection, Enter commits the highlighted buffer's index into the field's `selected`.
+    /// Mirrors `handle_envelope_curve_picker_key`, just as a top-level `CdpParams` sub-mode
+    /// rather than nested under an envelope edit.
+    fn handle_cdp_formant_picker_key(&mut self, key: KeyEvent) {
+        let Some(Dialog::CdpParams { formant_picker: Some(picker), .. }) = self.dialog.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => {
+                picker.selected = (picker.selected + 1).min(picker.entries.len().saturating_sub(1));
+            }
+            KeyCode::Esc => {
+                if let Some(Dialog::CdpParams { formant_picker, .. }) = self.dialog.as_mut() {
+                    *formant_picker = None;
+                }
+            }
+            KeyCode::Enter => {
+                let field_index = picker.field_index;
+                let chosen = picker.entries.get(picker.selected).copied();
+                if let Some(Dialog::CdpParams { fields, formant_picker, .. }) = self.dialog.as_mut() {
+                    if let Some(chosen) = chosen {
+                        if let Some(CdpField::FormantBufferRef { selected, .. }) = fields.get_mut(field_index) {
+                            *selected = Some(chosen);
+                        }
+                    }
+                    *formant_picker = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// All key handling while `Dialog::CdpParams.envelope` is `Some` — a completely
     /// separate routing path from the rest of `handle_dialog_key` (dispatched at its very
     /// top), so the two never interleave. See `CdpEnvelopeEdit`'s doc comment for what each
@@ -4965,6 +5190,12 @@ impl App {
                     return Some(i);
                 }
             }
+            // A `FormantBufferRef` field has no catalog default at all (see its doc
+            // comment) — `None` always means "never picked," which must block Apply/Preview
+            // exactly like an empty `required_list`/`required_envelope` field above.
+            if let CdpField::FormantBufferRef { selected: None, .. } = field {
+                return Some(i);
+            }
         }
         None
     }
@@ -4991,7 +5222,7 @@ impl App {
             Dialog::CdpParams {
                 catalog_index, fields, second_input, focus, error: Some(error), preview,
                 envelope: None, list_edit: None, table_edit: None, marker_time_list_edit: None,
-                hilite_band_edit: None, presets, preset_selected, save_prompt: None, scroll: 0,
+                hilite_band_edit: None, formant_picker: None, presets, preset_selected, save_prompt: None, scroll: 0,
             }
         };
 
@@ -5069,13 +5300,15 @@ impl App {
         }
 
         let planned = crate::model::cdp::plan_job(&def, &values, &input_specs, &crate::model::cdp::PvocSettings::default());
-        let planned = match planned {
+        let mut planned = match planned {
             Ok(p) => p,
             Err(err) => {
                 self.dialog = Some(reopen(focus, cdp_plan_error_message(&err), fields, second_input, preview, presets, preset_selected));
                 return;
             }
         };
+
+        Self::splice_formant_buffer_refs(&def, &fields, &self.formant_buffers, &mut planned);
 
         let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
         if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
@@ -5133,6 +5366,33 @@ impl App {
         });
     }
 
+    /// A `FormantBufferRef` field's picked buffer never travels through `ParamValue` at all
+    /// (see that type's doc comment) — `cdp_validate_fields` already guarantees every such
+    /// field has `selected: Some(_)` by the time `cdp_run` calls this, so this just resolves
+    /// each one to the real buffer's bytes and splices them into `planned.binary_input_files`
+    /// at the param's own declared `relative_name`, the same "extra file written into the
+    /// job's temp dir" mechanism `brk_files`/`binary_input_files` already provide for every
+    /// other datafile-shaped param. A standalone associated function (rather than inlined
+    /// into `cdp_run`) so it's testable without driving a real CDP subprocess.
+    fn splice_formant_buffer_refs(
+        def: &crate::model::cdp::ProcessDef,
+        fields: &[CdpField],
+        formant_buffers: &[crate::model::formant::FormantBuffer],
+        planned: &mut crate::model::cdp::pipeline::PlannedJob,
+    ) {
+        for (param, field) in def.params.iter().zip(fields) {
+            if let (
+                crate::model::cdp::ParamKind::FormantBufferRef { relative_name, .. },
+                CdpField::FormantBufferRef { selected: Some(buf_idx), .. },
+            ) = (&param.kind, field)
+            {
+                if let Some(buffer) = formant_buffers.get(*buf_idx) {
+                    planned.binary_input_files.push((relative_name.clone(), buffer.bytes.clone()));
+                }
+            }
+        }
+    }
+
     /// "Extract Pitch Curve" (CDP-Ext-Plan.md Phase 4 "hard tier") — runs `pvoc anal` +
     /// `repitch getpitch` on the current selection (`pipeline::plan_extract_pitch_curve`)
     /// and, once the job completes, adds the result as a new `App.curves` entry. Unlike
@@ -5179,6 +5439,98 @@ impl App {
         self.dialog = Some(Dialog::CdpRunning {
             job_id,
             title: "Extract Pitch Curve".into(),
+            step_label: "Starting…".into(),
+            step_index: 0,
+            step_total,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+    }
+
+    /// "Extract Formants" (CDP-Ext-Plan.md Phase 5) — runs `pvoc anal` + `formants get` on
+    /// the current selection (`pipeline::plan_extract_formants`) and, once the job
+    /// completes, adds the result as a new `App.formant_buffers` entry
+    /// (`FormantBufferKind::Formant`). Mirrors `extract_pitch_curve` exactly — the same
+    /// asymmetric audio-in/buffer-out shape, hardcoded rather than catalog-authored, tracked
+    /// via the separate `cdp_pending_formant_extraction` rather than `cdp_pending`.
+    fn extract_formants(&mut self) {
+        let idx = self.active_document;
+        let Some(doc) = self.documents.get(idx) else { return };
+        let Some(range) = self.operation_range(idx, self.snap_to_zero) else {
+            self.dialog = Some(Dialog::Info { message: "No audio selected to extract formants from.".into() });
+            return;
+        };
+
+        let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
+        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+            self.dialog = Some(Dialog::CdpSetup { input: TextInput::new(self.config.cdp_dir.clone()), error: Some("CDP directory no longer valid".into()) });
+            return;
+        }
+
+        let planned = crate::model::cdp::plan_extract_formants(&crate::model::cdp::PvocSettings::default());
+        let step_total = planned.steps.len();
+        let job_id = self.cdp_next_job_id;
+        self.cdp_next_job_id += 1;
+
+        if let Some(audio) = self.audio.as_ref() {
+            if audio.is_playing() {
+                audio.pause();
+            }
+        }
+
+        self.cdp_pending_formant_extraction = Some(self.buffer_name(idx));
+        self.cdp_runner.submit(crate::cdp::Job {
+            id: job_id,
+            cdp_dir,
+            planned,
+            inputs: vec![doc.slice(range.0..range.1)],
+            input_sample_rate: doc.sample_rate,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+        self.dialog = Some(Dialog::CdpRunning {
+            job_id,
+            title: "Extract Formants".into(),
+            step_label: "Starting…".into(),
+            step_index: 0,
+            step_total,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+    }
+
+    /// "Freeze snapshot" (CDP-Ext-Plan.md Phase 5's `oneform get`) — freezes a single instant
+    /// of an open `[Formant]` buffer into a new `[Snapshot]` buffer, triggered from a key
+    /// inside the read-only Formant Info popup (`Dialog::FormantInfo`) rather than the
+    /// waveform selection, since this operates on an *already-extracted* formant buffer, not
+    /// the current audio. Unlike `extract_formants`/`extract_pitch_curve`, there's no audio
+    /// input at all (`plan_oneform_get`'s doc comment) — just the source buffer's bytes and
+    /// a time value, so this never touches `self.documents`/`operation_range`.
+    fn freeze_formant_snapshot(&mut self, buffer_index: usize, time_secs: f64) {
+        let Some(buffer) = self.formant_buffers.get(buffer_index) else { return };
+
+        let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
+        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+            self.dialog = Some(Dialog::CdpSetup { input: TextInput::new(self.config.cdp_dir.clone()), error: Some("CDP directory no longer valid".into()) });
+            return;
+        }
+
+        let planned = crate::model::cdp::plan_oneform_get(&buffer.bytes, time_secs);
+        let step_total = planned.steps.len();
+        let job_id = self.cdp_next_job_id;
+        self.cdp_next_job_id += 1;
+
+        self.cdp_pending_snapshot_freeze = Some(buffer_index);
+        self.cdp_runner.submit(crate::cdp::Job {
+            id: job_id,
+            cdp_dir,
+            planned,
+            inputs: Vec::new(),
+            input_sample_rate: 44100,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+        self.dialog = Some(Dialog::CdpRunning {
+            job_id,
+            title: "Freeze Snapshot".into(),
             step_label: "Starting…".into(),
             step_index: 0,
             step_total,
@@ -5285,6 +5637,62 @@ impl App {
                                 }
                                 _ => Some(Dialog::Info {
                                     message: "The transform produced an empty curve.".into(),
+                                }),
+                            },
+                            Err(err) => Some(Dialog::CdpOutput {
+                                title: "CDP Error".into(),
+                                lines: cdp_error_lines(&err),
+                                scroll: 0,
+                            }),
+                        };
+                        continue;
+                    }
+                    if let Some(source_name) = self.cdp_pending_formant_extraction.take() {
+                        if !matches!(self.dialog, Some(Dialog::CdpRunning { job_id, .. }) if job_id == job) {
+                            continue;
+                        }
+                        self.dialog = match result {
+                            Ok(output) => match output.formant_buffer_bytes {
+                                Some(bytes) if !bytes.is_empty() => {
+                                    self.formant_buffers.push(crate::model::formant::FormantBuffer::new(
+                                        crate::model::formant::FormantBufferKind::Formant,
+                                        format!("{source_name} formants"),
+                                        bytes,
+                                        format!("Extracted from {source_name}"),
+                                    ));
+                                    None
+                                }
+                                _ => Some(Dialog::Info {
+                                    message: "No formants extracted from the selection.".into(),
+                                }),
+                            },
+                            Err(err) => Some(Dialog::CdpOutput {
+                                title: "CDP Error".into(),
+                                lines: cdp_error_lines(&err),
+                                scroll: 0,
+                            }),
+                        };
+                        continue;
+                    }
+                    if let Some(source_index) = self.cdp_pending_snapshot_freeze.take() {
+                        if !matches!(self.dialog, Some(Dialog::CdpRunning { job_id, .. }) if job_id == job) {
+                            continue;
+                        }
+                        let source_name =
+                            self.formant_buffers.get(source_index).map(|b| b.name.clone()).unwrap_or_default();
+                        self.dialog = match result {
+                            Ok(output) => match output.formant_buffer_bytes {
+                                Some(bytes) if !bytes.is_empty() => {
+                                    self.formant_buffers.push(crate::model::formant::FormantBuffer::new(
+                                        crate::model::formant::FormantBufferKind::Snapshot,
+                                        format!("{source_name} snapshot"),
+                                        bytes,
+                                        format!("Frozen from {source_name}"),
+                                    ));
+                                    None
+                                }
+                                _ => Some(Dialog::Info {
+                                    message: "Freezing the snapshot produced no data.".into(),
                                 }),
                             },
                             Err(err) => Some(Dialog::CdpOutput {
@@ -5417,6 +5825,7 @@ impl App {
                                     table_edit: None,
                                     marker_time_list_edit: None,
                                     hilite_band_edit: None,
+                                    formant_picker: None,
                                     presets: pending.presets,
                                     preset_selected: pending.preset_selected,
                                     save_prompt: None,
@@ -7136,6 +7545,11 @@ impl App {
             return;
         }
 
+        if action == Action::ExtractFormants {
+            self.extract_formants();
+            return;
+        }
+
         if action == Action::NewFromLeft || action == Action::NewFromRight {
             let channel_idx = if action == Action::NewFromLeft { 0 } else { 1 };
             let result = self.active_doc().and_then(|d| {
@@ -7268,7 +7682,8 @@ impl App {
             | Action::CdpProcess
             | Action::ConfigureCdpDirectory
             | Action::ExtractPitchCurve
-            | Action::LoadPitchCurve => unreachable!(),
+            | Action::LoadPitchCurve
+            | Action::ExtractFormants => unreachable!(),
             // Cursor movement is identical whether or not it extends a selection; the
             // selection side-effect is applied in the second match below.
             Action::MoveCursorLeft | Action::ExtendSelectionLeft => {
@@ -8028,7 +8443,7 @@ impl App {
         let dialog_rects = self
             .dialog
             .as_ref()
-            .map(|d| render_dialog(frame, area, d, &self.cdp_catalog, &self.curve_histories, &self.curves))
+            .map(|d| render_dialog(frame, area, d, &self.cdp_catalog, &self.curve_histories, &self.curves, &self.formant_buffers))
             .unwrap_or_default();
         if !dialog_rects.is_empty() {
             self.dialog_n_interactive = dialog_rects.len().saturating_sub(1);
@@ -8582,6 +8997,7 @@ fn render_dialog(
     catalog: &crate::model::cdp::CdpCatalog,
     curve_histories: &[crate::model::curve_history::CurveHistory],
     curves: &[crate::model::curve::PitchCurve],
+    formant_buffers: &[crate::model::formant::FormantBuffer],
 ) -> Vec<Rect> {
     match dialog {
         Dialog::MixToMono { inputs, focused, tanh_clip } => {
@@ -8617,7 +9033,7 @@ fn render_dialog(
         }
         Dialog::CdpParams {
             catalog_index, fields, second_input, focus, error, preview, envelope, list_edit, table_edit,
-            marker_time_list_edit, hilite_band_edit, presets, preset_selected, save_prompt, scroll,
+            marker_time_list_edit, hilite_band_edit, formant_picker, presets, preset_selected, save_prompt, scroll,
         } => {
             let def = catalog.processes.get(*catalog_index);
             if let Some(edit) = envelope {
@@ -8635,9 +9051,12 @@ fn render_dialog(
             if let Some(edit) = hilite_band_edit {
                 return render_cdp_hilite_band_editor(frame, area, fields, edit, def);
             }
+            if let Some(picker) = formant_picker {
+                return render_cdp_formant_picker(frame, area, picker, formant_buffers);
+            }
             return render_cdp_params_dialog(
                 frame, area, def, fields, second_input.as_ref(), *focus, error, preview,
-                presets, *preset_selected, save_prompt.as_ref(), *scroll,
+                presets, *preset_selected, save_prompt.as_ref(), *scroll, formant_buffers,
             );
         }
         Dialog::CdpRunning { title, step_label, step_index, step_total, started, purpose, .. } => {
@@ -8653,6 +9072,9 @@ fn render_dialog(
         }
         Dialog::CurveEditor(edit) => {
             return render_curve_editor(frame, area, edit, catalog, curve_histories);
+        }
+        Dialog::FormantInfo { buffer_index } => {
+            return render_formant_info_dialog(frame, area, formant_buffers.get(*buffer_index));
         }
         _ => {}
     }
@@ -8671,6 +9093,9 @@ fn render_dialog(
         Dialog::RenameFile { input, .. } => ("Rename File", " New name: ".into(), Some(input), " ".into()),
         Dialog::SaveCurveAs { input, .. } => ("Save Curve", " File name: ".into(), Some(input), " ".into()),
         Dialog::LoadCurve { input } => ("Load Pitch Curve", " Path: ".into(), Some(input), " ".into()),
+        Dialog::FreezeFormantSnapshot { input, .. } => {
+            ("Freeze Snapshot", " Time (s): ".into(), Some(input), " ".into())
+        }
         Dialog::Gain { .. }
         | Dialog::FadeIn { .. }
         | Dialog::FadeOut { .. }
@@ -8682,7 +9107,8 @@ fn render_dialog(
         | Dialog::CdpParams { .. }
         | Dialog::CdpRunning { .. }
         | Dialog::CdpOutput { .. }
-        | Dialog::CurveEditor(_) => {
+        | Dialog::CurveEditor(_)
+        | Dialog::FormantInfo { .. } => {
             unreachable!("handled by match arms above")
         }
     };
@@ -9313,6 +9739,72 @@ fn render_envelope_curve_picker(
     let mut lines = Vec::new();
     if names.is_empty() {
         lines.push(Line::from(Span::styled(" (no open curves)", label_style)));
+    } else {
+        for (i, name) in names.iter().enumerate() {
+            let style = if i == picker.selected { selected_style } else { base };
+            lines.push(Line::from(Span::styled(format!(" {name}"), style)));
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(" \u{2191}\u{2193}", hint_style),
+        Span::styled(":select  ", label_style),
+        Span::styled("Enter", hint_style),
+        Span::styled(":use  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+    Vec::new()
+}
+
+/// `Dialog::CdpParams.formant_picker` opens ('b' on a `FormantBufferRef` field) — a flat list
+/// of every open buffer matching the field's `buffer_kind`, tagged the same way the Buffers
+/// panel tags them (`FormantBufferKind::tag`). Same visual/interaction conventions as
+/// `render_envelope_curve_picker`.
+fn render_cdp_formant_picker(
+    frame: &mut Frame,
+    area: Rect,
+    picker: &FormantBufferPicker,
+    formant_buffers: &[crate::model::formant::FormantBuffer],
+) -> Vec<Rect> {
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
+
+    let names: Vec<String> = picker
+        .entries
+        .iter()
+        .filter_map(|&i| formant_buffers.get(i))
+        .map(|b| format!("{} {}", b.kind.tag(), b.name))
+        .collect();
+
+    let hint_line = " \u{2191}\u{2193}:select  Enter:use  Esc:cancel";
+    let content_width = names.iter().map(|n| n.chars().count()).max().unwrap_or(0).max(hint_line.chars().count());
+    let width = (content_width as u16 + 4).max(30).min(area.width);
+    let rows = names.len().max(1);
+    let height = (rows as u16 + 1 + 2 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let block = Block::default()
+        .title(" Use Formant Buffer ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = Vec::new();
+    if names.is_empty() {
+        lines.push(Line::from(Span::styled(" (no matching buffers)", label_style)));
     } else {
         for (i, name) in names.iter().enumerate() {
             let style = if i == picker.selected { selected_style } else { base };
@@ -10470,6 +10962,7 @@ fn render_cdp_params_dialog(
     preset_selected: Option<usize>,
     save_prompt: Option<&TextInput>,
     _scroll: usize,
+    formant_buffers: &[crate::model::formant::FormantBuffer],
 ) -> Vec<Rect> {
     let Some(def) = def else { return Vec::new() };
     let (label_width, range_width) = cdp_params_column_widths(def);
@@ -10654,6 +11147,26 @@ fn render_cdp_params_dialog(
                 Span::styled(format!("{:<range_width$}", ""), range_style),
                 Span::styled(format!(" bands ({} rows, e to edit)", rows.len()), point_style),
             ]),
+            // No catalog default exists to show (`CdpField::FormantBufferRef`'s doc
+            // comment) — same "(not set)" treatment as `required_envelope`/`required_list`
+            // above, just opened with 'b' (`FormantBufferPicker`) instead of 'e'.
+            CdpField::FormantBufferRef { selected: None, .. } => Line::from(vec![
+                Span::styled(label, label_style_here),
+                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(" (not set — b to pick)", dim_style),
+            ]),
+            CdpField::FormantBufferRef { selected: Some(idx), buffer_kind } => {
+                let name = formant_buffers
+                    .get(*idx)
+                    .filter(|b| b.kind == *buffer_kind)
+                    .map(|b| format!("{} {}", b.kind.tag(), b.name))
+                    .unwrap_or_else(|| "(missing — b to pick)".to_string());
+                Line::from(vec![
+                    Span::styled(label, label_style_here),
+                    Span::styled(format!("{:<range_width$}", ""), range_style),
+                    Span::styled(format!(" {name}"), base),
+                ])
+            }
         };
         lines.push(line);
     }
@@ -10858,6 +11371,68 @@ fn render_info_dialog(frame: &mut Frame, area: Rect, message: &str) -> Vec<Rect>
     );
     let row_w = popup.width.saturating_sub(2);
     // hints bar is interactive (closes the dialog).
+    vec![Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 }]
+}
+
+/// Read-only summary for a `[Formant]`/`[Snapshot]` Buffers-panel row (`App::open_formant_info`)
+/// — deliberately just a handful of facts (name, kind, source, duration) with no editable
+/// field at all, since CDP itself offers no formant-curve transform to edit *toward* (see
+/// `model::formant`'s doc comments). `buffer` is `None` only if the index went stale between
+/// opening the dialog and this render (e.g. the buffer was closed) — shown as a plain
+/// message rather than panicking.
+fn render_formant_info_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    buffer: Option<&crate::model::formant::FormantBuffer>,
+) -> Vec<Rect> {
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+
+    let Some(buffer) = buffer else {
+        return render_info_dialog(frame, area, "This buffer is no longer open.");
+    };
+
+    let duration = crate::model::formant::read_formant_duration_secs(&buffer.bytes)
+        .map(|s| format!("{s:.3} s"))
+        .unwrap_or_else(|| "(unknown)".to_string());
+
+    let width = 50u16.min(area.width);
+    let height = 8u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+    let close_line = Line::from(vec![
+        Span::styled(" Enter", hint_style),
+        Span::styled("/Esc:close", label_style),
+    ]);
+    let row = |label: &'static str, value: String| {
+        Line::from(vec![Span::styled(format!(" {label:<9}", ), dim_style), Span::styled(value, base)])
+    };
+    let block = Block::default()
+        .title("Formant Info")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::raw(""),
+            row("Name", buffer.name.clone()),
+            row("Kind", buffer.kind.tag().to_string()),
+            row("Source", buffer.source_label.clone()),
+            row("Duration", duration),
+            Line::raw(""),
+            close_line,
+        ])
+        .block(block),
+        popup,
+    );
+    let row_w = popup.width.saturating_sub(2);
     vec![Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 }]
 }
 
@@ -12616,6 +13191,7 @@ mod tests {
             glob_output: None,
             output_curve: Some("curve_out.txt".into()),
             output_curve_binary_template: Some("curve_raw_out.pch.wav".into()),
+            output_formant_buffer: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -13698,7 +14274,7 @@ mod tests {
             output_files: Vec::new(),
             glob_output: Some(crate::model::cdp::pipeline::GlobOutputSpec { prefix: "g".into() }),
             output_curve: None,
-            output_curve_binary_template: None,
+            output_curve_binary_template: None, output_formant_buffer: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -13766,6 +14342,7 @@ mod tests {
             glob_output: None,
             output_curve: Some("pitch.txt".into()),
             output_curve_binary_template: Some("pitch.pch".into()),
+            output_formant_buffer: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -13798,6 +14375,308 @@ mod tests {
         );
         assert_eq!(app.curve_histories.len(), 1, "should get its own history slot too");
         assert_eq!(app.documents.len(), 1, "a curve result must never become a new audio buffer");
+    }
+
+    /// A formants-extraction job's `Finished(Ok(..))` event (`cdp_pending_formant_extraction`)
+    /// adds a new `App.formant_buffers` entry (`FormantBufferKind::Formant`) instead of
+    /// splicing audio — mirrors `curve_extraction_apply_adds_a_new_curve_buffer`'s own fake
+    /// `/bin/sh` step precedent, just producing `output_formant_buffer` instead of
+    /// `output_curve`.
+    #[test]
+    fn formant_extraction_apply_adds_a_new_formant_buffer() {
+        let mut app = new_app(Some(doc(0.1, 4)), None);
+        app.cdp_pending_formant_extraction = Some("mysine.wav".into());
+        app.dialog = Some(Dialog::CdpRunning {
+            job_id: 7,
+            title: "Extract Formants".into(),
+            step_label: String::new(),
+            step_index: 0,
+            step_total: 1,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let planned = crate::model::cdp::pipeline::PlannedJob {
+            steps: vec![crate::model::cdp::pipeline::Invocation {
+                bin: "sh".into(),
+                args: vec!["-c".into(), "printf 'fake formant bytes' > out.for".into()],
+                label: "fake formants get".into(),
+                expected_output: "out.for".into(),
+            }],
+            input_files: Vec::new(),
+            output_files: Vec::new(),
+            glob_output: None,
+            output_curve: None,
+            output_curve_binary_template: None,
+            output_formant_buffer: Some("out.for".into()),
+            brk_files: Vec::new(),
+            binary_input_files: Vec::new(),
+            deferred_window_params: Vec::new(),
+            needs_simple_wav_input: false,
+        };
+        app.cdp_runner.submit(crate::cdp::Job {
+            id: 7,
+            cdp_dir: std::path::PathBuf::from("/bin"),
+            planned,
+            inputs: Vec::new(),
+            input_sample_rate: 44100,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.dialog.is_some() && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(app.dialog.is_none(), "the CdpRunning dialog should close once the job finishes");
+        assert!(app.cdp_pending_formant_extraction.is_none());
+        assert_eq!(app.formant_buffers.len(), 1);
+        assert_eq!(app.formant_buffers[0].kind, crate::model::formant::FormantBufferKind::Formant);
+        assert_eq!(app.formant_buffers[0].name, "mysine.wav formants");
+        assert_eq!(app.formant_buffers[0].bytes, b"fake formant bytes".to_vec());
+        assert_eq!(app.documents.len(), 1, "a formant result must never become a new audio buffer");
+    }
+
+    /// A snapshot-freeze job's `Finished(Ok(..))` event (`cdp_pending_snapshot_freeze`) adds
+    /// a new `App.formant_buffers` entry tagged `FormantBufferKind::Snapshot`, named after
+    /// the source `[Formant]` buffer it froze.
+    #[test]
+    fn snapshot_freeze_apply_adds_a_new_snapshot_buffer_named_after_its_source() {
+        let mut app = new_app(Some(doc(0.1, 4)), None);
+        app.formant_buffers.push(crate::model::formant::FormantBuffer::new(
+            crate::model::formant::FormantBufferKind::Formant,
+            "mysine.wav formants",
+            b"source formant bytes".to_vec(),
+            "test",
+        ));
+        app.cdp_pending_snapshot_freeze = Some(0);
+        app.dialog = Some(Dialog::CdpRunning {
+            job_id: 9,
+            title: "Freeze Snapshot".into(),
+            step_label: String::new(),
+            step_index: 0,
+            step_total: 1,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let planned = crate::model::cdp::pipeline::PlannedJob {
+            steps: vec![crate::model::cdp::pipeline::Invocation {
+                bin: "sh".into(),
+                args: vec!["-c".into(), "printf 'fake snapshot bytes' > moment.1f.wav".into()],
+                label: "fake oneform get".into(),
+                expected_output: "moment.1f.wav".into(),
+            }],
+            input_files: Vec::new(),
+            output_files: Vec::new(),
+            glob_output: None,
+            output_curve: None,
+            output_curve_binary_template: None,
+            output_formant_buffer: Some("moment.1f.wav".into()),
+            brk_files: Vec::new(),
+            binary_input_files: Vec::new(),
+            deferred_window_params: Vec::new(),
+            needs_simple_wav_input: false,
+        };
+        app.cdp_runner.submit(crate::cdp::Job {
+            id: 9,
+            cdp_dir: std::path::PathBuf::from("/bin"),
+            planned,
+            inputs: Vec::new(),
+            input_sample_rate: 44100,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.dialog.is_some() && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(app.dialog.is_none(), "the CdpRunning dialog should close once the job finishes");
+        assert!(app.cdp_pending_snapshot_freeze.is_none());
+        assert_eq!(app.formant_buffers.len(), 2, "the source buffer stays; a new one is added");
+        assert_eq!(app.formant_buffers[1].kind, crate::model::formant::FormantBufferKind::Snapshot);
+        assert_eq!(app.formant_buffers[1].name, "mysine.wav formants snapshot");
+        assert_eq!(app.formant_buffers[1].bytes, b"fake snapshot bytes".to_vec());
+    }
+
+    /// 'f' inside `Dialog::FormantInfo` opens the freeze-snapshot time prompt only for a
+    /// `[Formant]` buffer — a `[Snapshot]` buffer has nothing further to freeze from (it's
+    /// already a frozen instant), so 'f' there must be a no-op.
+    #[test]
+    fn freeze_snapshot_prompt_only_opens_for_a_formant_buffer_not_a_snapshot() {
+        let mut app = new_app(Some(doc(0.1, 4)), None);
+        app.formant_buffers.push(crate::model::formant::FormantBuffer::new(
+            crate::model::formant::FormantBufferKind::Snapshot,
+            "a snapshot",
+            vec![],
+            "test",
+        ));
+        app.dialog = Some(Dialog::FormantInfo { buffer_index: 0 });
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(
+            matches!(app.dialog, Some(Dialog::FormantInfo { .. })),
+            "'f' on a Snapshot buffer should be a no-op, not open the freeze prompt"
+        );
+
+        app.formant_buffers.push(crate::model::formant::FormantBuffer::new(
+            crate::model::formant::FormantBufferKind::Formant,
+            "a formant curve",
+            vec![],
+            "test",
+        ));
+        app.dialog = Some(Dialog::FormantInfo { buffer_index: 1 });
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(
+            matches!(app.dialog, Some(Dialog::FreezeFormantSnapshot { buffer_index: 1, .. })),
+            "'f' on a Formant buffer should open the freeze prompt"
+        );
+    }
+
+    /// `App::splice_formant_buffer_refs` (`cdp_run`'s `FormantBufferRef` resolution): a
+    /// picked field's buffer bytes land in `PlannedJob.binary_input_files` at the param's own
+    /// declared `relative_name`, tested directly against the pure helper rather than driving
+    /// a full CDP subprocess — `plan_job`/`cdp_run` never need to run for this, only the
+    /// splice logic itself.
+    #[test]
+    fn splice_formant_buffer_refs_resolves_the_picked_buffers_bytes() {
+        use crate::model::cdp::{Category, IoKind, ParamDef, ParamKind, ProcessDef};
+        let formant_buffers = vec![
+            crate::model::formant::FormantBuffer::new(
+                crate::model::formant::FormantBufferKind::Formant,
+                "not picked",
+                b"wrong bytes".to_vec(),
+                "test",
+            ),
+            crate::model::formant::FormantBuffer::new(
+                crate::model::formant::FormantBufferKind::Formant,
+                "picked",
+                b"picked buffer bytes".to_vec(),
+                "test",
+            ),
+        ];
+        let def = ProcessDef {
+            key: "test_formant_put".into(),
+            bin: "formants".into(),
+            subprog: Some("put".into()),
+            mode: Some("1".into()),
+            title: "Test Formant Put".into(),
+            category: Category::Time,
+            subcategory: "test".into(),
+            short_description: String::new(),
+            description: String::new(),
+            input: IoKind::Ana,
+            output: IoKind::Ana,
+            stereo_native: false,
+            output_is_stereo: false,
+            requires_simple_wav_input: false,
+            params: vec![ParamDef {
+                name: "Formants".into(),
+                description: String::new(),
+                flag: None,
+                automatable: false,
+                required_envelope: false,
+                required_list: false,
+                list_is_time_sequence: false,
+                before_outfile: true,
+                kind: ParamKind::FormantBufferRef {
+                    buffer_kind: crate::model::formant::FormantBufferKind::Formant,
+                    relative_name: "fmnt.for".into(),
+                },
+            }],
+        };
+        let fields = vec![CdpField::FormantBufferRef {
+            selected: Some(1),
+            buffer_kind: crate::model::formant::FormantBufferKind::Formant,
+        }];
+        let mut planned = crate::model::cdp::pipeline::PlannedJob {
+            steps: Vec::new(),
+            input_files: Vec::new(),
+            output_files: Vec::new(),
+            glob_output: None,
+            output_curve: None,
+            output_curve_binary_template: None,
+            output_formant_buffer: None,
+            brk_files: Vec::new(),
+            binary_input_files: Vec::new(),
+            deferred_window_params: Vec::new(),
+            needs_simple_wav_input: false,
+        };
+
+        App::splice_formant_buffer_refs(&def, &fields, &formant_buffers, &mut planned);
+
+        assert_eq!(
+            planned.binary_input_files,
+            vec![("fmnt.for".to_string(), b"picked buffer bytes".to_vec())],
+            "should splice the SELECTED buffer's bytes (index 1), not the unpicked one"
+        );
+    }
+
+    /// A field with `selected: None` (shouldn't happen in practice — `cdp_validate_fields`
+    /// blocks Apply/Preview until one is picked — but defense in depth) must not panic and
+    /// must not add a spurious `binary_input_files` entry.
+    #[test]
+    fn splice_formant_buffer_refs_is_a_noop_when_nothing_is_selected() {
+        use crate::model::cdp::{Category, IoKind, ParamDef, ParamKind, ProcessDef};
+        let formant_buffers = vec![crate::model::formant::FormantBuffer::new(
+            crate::model::formant::FormantBufferKind::Formant,
+            "buf",
+            b"bytes".to_vec(),
+            "test",
+        )];
+        let def = ProcessDef {
+            key: "test_formant_put".into(),
+            bin: "formants".into(),
+            subprog: Some("put".into()),
+            mode: Some("1".into()),
+            title: "Test Formant Put".into(),
+            category: Category::Time,
+            subcategory: "test".into(),
+            short_description: String::new(),
+            description: String::new(),
+            input: IoKind::Ana,
+            output: IoKind::Ana,
+            stereo_native: false,
+            output_is_stereo: false,
+            requires_simple_wav_input: false,
+            params: vec![ParamDef {
+                name: "Formants".into(),
+                description: String::new(),
+                flag: None,
+                automatable: false,
+                required_envelope: false,
+                required_list: false,
+                list_is_time_sequence: false,
+                before_outfile: true,
+                kind: ParamKind::FormantBufferRef {
+                    buffer_kind: crate::model::formant::FormantBufferKind::Formant,
+                    relative_name: "fmnt.for".into(),
+                },
+            }],
+        };
+        let fields = vec![CdpField::FormantBufferRef {
+            selected: None,
+            buffer_kind: crate::model::formant::FormantBufferKind::Formant,
+        }];
+        let mut planned = crate::model::cdp::pipeline::PlannedJob {
+            steps: Vec::new(),
+            input_files: Vec::new(),
+            output_files: Vec::new(),
+            glob_output: None,
+            output_curve: None,
+            output_curve_binary_template: None,
+            output_formant_buffer: None,
+            brk_files: Vec::new(),
+            binary_input_files: Vec::new(),
+            deferred_window_params: Vec::new(),
+            needs_simple_wav_input: false,
+        };
+
+        App::splice_formant_buffer_refs(&def, &fields, &formant_buffers, &mut planned);
+
+        assert!(planned.binary_input_files.is_empty());
     }
 
     /// `App::cdp_groups` always starts with `CDP_GROUP_ALL` then `CDP_GROUP_RECENT`,
@@ -14034,7 +14913,7 @@ mod tests {
             }],
             glob_output: None,
             output_curve: None,
-            output_curve_binary_template: None,
+            output_curve_binary_template: None, output_formant_buffer: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -15720,6 +16599,148 @@ mod tests {
             app.documents[0].channels[0][99].abs() < 0.1,
             "fade-out should reach near silence by the last sample"
         );
+    }
+
+    /// Builds a minimal `Dialog::CdpParams` with a single focused `CdpField::FormantBufferRef`
+    /// field of `buffer_kind` — there's no shipped catalog entry using this param kind yet
+    /// (CDP-Ext-Plan.md Phase 5's `formants_put`/`oneform_put` land separately), so this
+    /// mirrors `non_integer_plain_number_field_blocks_validation`'s approach of constructing
+    /// the field directly rather than going through `open_cdp_params`. `catalog_index` is a
+    /// dummy 0 — `open_cdp_formant_picker`/`handle_cdp_formant_picker_key` never look at it.
+    fn open_formant_ref_dialog(app: &mut App, buffer_kind: crate::model::formant::FormantBufferKind) {
+        let field = CdpField::FormantBufferRef { selected: None, buffer_kind };
+        app.dialog = Some(Dialog::CdpParams {
+            catalog_index: 0,
+            fields: vec![field],
+            second_input: None,
+            focus: 1,
+            error: None,
+            preview: None,
+            envelope: None,
+            list_edit: None,
+            table_edit: None,
+            marker_time_list_edit: None,
+            hilite_band_edit: None,
+            formant_picker: None,
+            presets: Vec::new(),
+            preset_selected: None,
+            save_prompt: None,
+            scroll: 0,
+        });
+    }
+
+    /// A `FormantBufferRef` field has no catalog default at all (`CdpField::FormantBufferRef`'s
+    /// doc comment) — `cdp_validate_fields` must block Apply/Preview until a buffer is
+    /// actually picked, same "no unset state may pass" rule as `required_list`/
+    /// `required_envelope`.
+    #[test]
+    fn formant_buffer_ref_field_blocks_validation_until_picked() {
+        use crate::model::cdp::{Category, IoKind, ParamDef, ParamKind};
+        use crate::model::formant::FormantBufferKind;
+        let def = crate::model::cdp::ProcessDef {
+            key: "test_formant_ref".into(),
+            bin: "formants".into(),
+            subprog: Some("put".into()),
+            mode: None,
+            title: "Test".into(),
+            category: Category::Time,
+            subcategory: "test".into(),
+            short_description: String::new(),
+            description: String::new(),
+            input: IoKind::Wav,
+            output: IoKind::Wav,
+            stereo_native: false,
+            output_is_stereo: false,
+            requires_simple_wav_input: false,
+            params: vec![ParamDef {
+                name: "Formants".into(),
+                description: String::new(),
+                flag: None,
+                automatable: false,
+                required_envelope: false,
+                required_list: false,
+                list_is_time_sequence: false,
+                before_outfile: true,
+                kind: ParamKind::FormantBufferRef {
+                    buffer_kind: FormantBufferKind::Formant,
+                    relative_name: "fmnt.for".into(),
+                },
+            }],
+        };
+        let fields = vec![CdpField::from_default(&def.params[0])];
+        assert_eq!(
+            App::cdp_validate_fields(&def, &fields),
+            Some(0),
+            "a never-picked FormantBufferRef field must block Apply/Preview"
+        );
+    }
+
+    /// `open_cdp_formant_picker`'s entries are filtered to the focused field's `buffer_kind` —
+    /// a `formants put` field must never offer a `[Snapshot]` buffer (`oneform get`'s output),
+    /// and vice versa, since the two are never interchangeable (`ParamKind::FormantBufferRef`'s
+    /// doc comment).
+    #[test]
+    fn formant_picker_only_lists_buffers_matching_the_field_kind() {
+        use crate::model::formant::{FormantBuffer, FormantBufferKind};
+        let mut app = new_app(Some(doc(1.0, 44100)), None);
+        app.formant_buffers = vec![
+            FormantBuffer::new(FormantBufferKind::Snapshot, "snap1", vec![], "test"),
+            FormantBuffer::new(FormantBufferKind::Formant, "curve1", vec![], "test"),
+            FormantBuffer::new(FormantBufferKind::Formant, "curve2", vec![], "test"),
+        ];
+        open_formant_ref_dialog(&mut app, FormantBufferKind::Formant);
+        assert!(app.open_cdp_formant_picker(), "should open with 2 matching buffers present");
+        let Some(Dialog::CdpParams { formant_picker: Some(picker), .. }) = &app.dialog else {
+            panic!("expected the formant picker to be open");
+        };
+        assert_eq!(picker.entries, vec![1, 2], "must exclude the Snapshot buffer at index 0");
+    }
+
+    /// A field with no matching buffer open yet is a no-op ('b' does nothing), same as
+    /// `EnvelopeCurvePicker`'s "no open curves" case — there's nothing useful to show.
+    #[test]
+    fn formant_picker_is_a_noop_with_no_matching_buffer_open() {
+        use crate::model::formant::FormantBufferKind;
+        let mut app = new_app(Some(doc(1.0, 44100)), None);
+        open_formant_ref_dialog(&mut app, FormantBufferKind::Formant);
+        assert!(!app.open_cdp_formant_picker());
+        let Some(Dialog::CdpParams { formant_picker, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(formant_picker.is_none());
+    }
+
+    /// Enter commits the highlighted buffer's index into the field's `selected`; Esc closes
+    /// the picker without changing it — mirrors `handle_envelope_curve_picker_key`'s own
+    /// commit/cancel behavior.
+    #[test]
+    fn formant_picker_enter_commits_selection_esc_cancels() {
+        use crate::model::formant::{FormantBuffer, FormantBufferKind};
+        let mut app = new_app(Some(doc(1.0, 44100)), None);
+        app.formant_buffers = vec![
+            FormantBuffer::new(FormantBufferKind::Formant, "curve1", vec![], "test"),
+            FormantBuffer::new(FormantBufferKind::Formant, "curve2", vec![], "test"),
+        ];
+        open_formant_ref_dialog(&mut app, FormantBufferKind::Formant);
+        assert!(app.open_cdp_formant_picker());
+
+        // Esc first: must leave the field unset.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { formant_picker, fields, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(formant_picker.is_none(), "Esc should close the picker");
+        let Some(CdpField::FormantBufferRef { selected, .. }) = fields.first() else {
+            panic!("expected a FormantBufferRef field")
+        };
+        assert_eq!(*selected, None, "Esc must not change the field's selection");
+
+        // Reopen, move down to the second entry, commit with Enter.
+        assert!(app.open_cdp_formant_picker());
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { formant_picker, fields, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(formant_picker.is_none(), "Enter should close the picker");
+        let Some(CdpField::FormantBufferRef { selected, .. }) = fields.first() else {
+            panic!("expected a FormantBufferRef field")
+        };
+        assert_eq!(*selected, Some(1), "Enter should commit the highlighted buffer's index");
     }
 }
 
