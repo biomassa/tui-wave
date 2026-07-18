@@ -12978,3 +12978,299 @@ input = "curve"
 output = "curve"
 stereo_native = false
 output_is_stereo = false
+
+# formants_put_1/_2 and oneform_put_1/_2 (CDP-Ext-Plan.md Phase 5 "Tier 3") -- the two
+# audio-in/audio-out consumers of a stored formant/snapshot buffer, using the new
+# `ParamKind::FormantBufferRef` param kind (`model/cdp/def.rs`) rather than a hand-editable
+# datafile shape: research this session confirmed CDP's `formants`/`oneform` binaries offer
+# no formant-curve-to-formant-curve transform family at all, so there's nothing to hand-edit
+# and the UI always resolves this param to "pick one of my open buffers" instead. Both
+# processes place the buffer positionally *between* infile and outfile in their real argv
+# (`formants put mode infile fmntfile outfile`, `oneform put mode inanalfile 1f-infile
+# outanalfile`), hence `before_outfile = true` on the Formants/Snapshot param -- confirmed
+# against the real binary's own usage text for both.
+#
+# `relative_name`'s extension is NOT uniform across the two: `formants get` writes its
+# buffer with no `.wav` suffix at all (confirmed: literally `out.for`), and `formants put`
+# reads that same bare name back fine -- but `oneform put` flatly refuses to open a
+# `.wav`-less `1F-INFILE` at all ("cannot open input file moment.1f to read data",
+# confirmed against the real binary with a renamed copy of a real `oneform get` output),
+# even though the bytes are byte-for-byte identical to the `.wav`-suffixed original `oneform
+# get` produced. Hence `formants_put_*`'s `relative_name = "fmnt.for"` but
+# `oneform_put_*`'s `relative_name = "moment.1f.wav"` -- each matching its own binary's own
+# read-side quirk, not a copy-paste inconsistency.
+#
+# High Pass Cutoff (-l)/Low Pass Cutoff (-h)/Gain (-g) ranges confirmed empirically against
+# the real binary for both processes (identical ranges on both): -l/-h accept 5.0 to the
+# analysis file's own Nyquist (22050.0 for the 44.1kHz test file used -- this app has no way
+# to know a given file's actual Nyquist at catalog-authoring time, so 20000.0 is used as a
+# safe cap under most common sample rates, mirroring `formants_vocode`'s own High/Low Pass
+# Cutoff params); -g accepts 0.000002 to 40.0 -- notably wider than `formants_vocode`'s own
+# Gain param (0.000002 to 10.0), confirming gain range is NOT uniform across the `formants`
+# binary's own subprograms and must be verified per-process, never assumed.
+#
+# `formants put`'s Quicksearch Formants toggle (-i) is, per CDP's own usage text, valid only
+# in mode 1 (`formants put 1 ... [-i] ...` vs `formants put 2 ... [no -i] ...`) -- exposed
+# only on the mode-1 entry below, mirroring how this catalog already splits other
+# usage-text-documented per-mode flag differences into separate entries rather than exposing
+# a flag the real binary's own grammar doesn't list for that mode.
+
+[[process]]
+key = "formants_put_1"
+bin = "formants"
+subprog = "put"
+mode = "1"
+title = "Formants Put (Replace)"
+category = "pvoc"
+subcategory = "combine"
+short_description = "Imposes a captured formant envelope on a sound, replacing its own formants"
+description = "Replaces this sound's own dynamic formant envelope with one previously extracted from another sound (or an earlier state of this one) via Extract Formants. Mode 1 additionally offers a faster, less accurate 'quicksearch' formant search; Mode 2 (a separate cataloged entry) always uses the accurate search and layers the new envelope on top of the sound's own rather than fully replacing it."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Formants"
+description = "The captured formant envelope to impose (pick one of your open [Formant] buffers -- see Extract Formants)"
+automatable = false
+before_outfile = true
+kind = "formant_buffer_ref"
+buffer_kind = "formant"
+relative_name = "fmnt.for"
+
+[[process.params]]
+name = "Quicksearch Formants"
+description = "Uses a faster, less accurate formant search (mode 1 only, per CDP's own usage text)"
+flag = "-i"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "High Pass Cutoff"
+description = "Removes all frequencies below this point (in Hz)"
+flag = "-l"
+automatable = false
+kind = "number"
+min = 5.0
+max = 20000.0
+step = 0.01
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Low Pass Cutoff"
+description = "Removes all frequencies above this point (in Hz)"
+flag = "-h"
+automatable = false
+kind = "number"
+min = 5.0
+max = 20000.0
+step = 0.01
+default = 20000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Adjustment to the imposed formants' loudness (confirmed against the real binary: 0.000002 to 40.0 accepted -- wider than Formants Formant Vocode's own 10.0 cap for the same-named param, not assumed uniform across the formants binary's subprograms)"
+flag = "-g"
+automatable = false
+kind = "number"
+min = 0.000002
+max = 40.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "formants_put_2"
+bin = "formants"
+subprog = "put"
+mode = "2"
+title = "Formants Put (Layer)"
+category = "pvoc"
+subcategory = "combine"
+short_description = "Imposes a captured formant envelope on top of a sound's own formants"
+description = "Layers a captured formant envelope (from Extract Formants) on top of this sound's own dynamic formants, rather than fully replacing them as Mode 1 (a separate cataloged entry) does. Has no quicksearch option -- CDP's own usage text lists -i only for mode 1."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Formants"
+description = "The captured formant envelope to impose (pick one of your open [Formant] buffers -- see Extract Formants)"
+automatable = false
+before_outfile = true
+kind = "formant_buffer_ref"
+buffer_kind = "formant"
+relative_name = "fmnt.for"
+
+[[process.params]]
+name = "High Pass Cutoff"
+description = "Removes all frequencies below this point (in Hz)"
+flag = "-l"
+automatable = false
+kind = "number"
+min = 5.0
+max = 20000.0
+step = 0.01
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Low Pass Cutoff"
+description = "Removes all frequencies above this point (in Hz)"
+flag = "-h"
+automatable = false
+kind = "number"
+min = 5.0
+max = 20000.0
+step = 0.01
+default = 20000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Adjustment to the imposed formants' loudness (confirmed against the real binary: 0.000002 to 40.0)"
+flag = "-g"
+automatable = false
+kind = "number"
+min = 0.000002
+max = 40.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "oneform_put_1"
+bin = "oneform"
+subprog = "put"
+mode = "1"
+title = "Oneform Put (Impose)"
+category = "pvoc"
+subcategory = "combine"
+short_description = "Imposes a single frozen formant snapshot on a sound's spectrum"
+description = "Imposes a single, time-frozen spectral-envelope snapshot (captured via the 'freeze snapshot' action on an open [Formant] buffer) on this sound's spectrum, as a constant unchanging timbral color rather than a time-varying formant curve (that's Formants Put's job, a separate process family). Mode 1 imposes the snapshot on top of the sound's own spectrum; Mode 2 (a separate cataloged entry) instead attempts to replace the sound's own formants with it."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Snapshot"
+description = "The frozen formant snapshot to impose (pick one of your open [Snapshot] buffers -- see the 'freeze snapshot' action)"
+automatable = false
+before_outfile = true
+kind = "formant_buffer_ref"
+buffer_kind = "snapshot"
+relative_name = "moment.1f.wav"
+
+[[process.params]]
+name = "High Pass Cutoff"
+description = "Removes all frequencies below this point (in Hz)"
+flag = "-l"
+automatable = false
+kind = "number"
+min = 5.0
+max = 20000.0
+step = 0.01
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Low Pass Cutoff"
+description = "Removes all frequencies above this point (in Hz)"
+flag = "-h"
+automatable = false
+kind = "number"
+min = 5.0
+max = 20000.0
+step = 0.01
+default = 20000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Overall gain on the output (confirmed against the real binary: 0.000002 to 40.0)"
+flag = "-g"
+automatable = false
+kind = "number"
+min = 0.000002
+max = 40.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "oneform_put_2"
+bin = "oneform"
+subprog = "put"
+mode = "2"
+title = "Oneform Put (Replace)"
+category = "pvoc"
+subcategory = "combine"
+short_description = "Attempts to replace a sound's own formants with a single frozen snapshot"
+description = "Attempts to replace this sound's own dynamic formants entirely with a single, time-frozen spectral-envelope snapshot (captured via the 'freeze snapshot' action), rather than layering it on top as Mode 1 (a separate cataloged entry) does."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Snapshot"
+description = "The frozen formant snapshot to impose (pick one of your open [Snapshot] buffers -- see the 'freeze snapshot' action)"
+automatable = false
+before_outfile = true
+kind = "formant_buffer_ref"
+buffer_kind = "snapshot"
+relative_name = "moment.1f.wav"
+
+[[process.params]]
+name = "High Pass Cutoff"
+description = "Removes all frequencies below this point (in Hz)"
+flag = "-l"
+automatable = false
+kind = "number"
+min = 5.0
+max = 20000.0
+step = 0.01
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Low Pass Cutoff"
+description = "Removes all frequencies above this point (in Hz)"
+flag = "-h"
+automatable = false
+kind = "number"
+min = 5.0
+max = 20000.0
+step = 0.01
+default = 20000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Overall gain on the output (confirmed against the real binary: 0.000002 to 40.0)"
+flag = "-g"
+automatable = false
+kind = "number"
+min = 0.000002
+max = 40.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"

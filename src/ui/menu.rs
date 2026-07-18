@@ -115,6 +115,7 @@ impl MenuBar {
                     entry("CDP Process...",             Action::CdpProcess,            "Ctrl+p"),
                     entry("Extract Pitch Curve",        Action::ExtractPitchCurve,     ""),
                     entry("Load Pitch Curve...",         Action::LoadPitchCurve,        ""),
+                    entry("Extract Formants",           Action::ExtractFormants,       ""),
                     entry("Configure CDP Directory...",  Action::ConfigureCdpDirectory, ""),
                 ],
             },

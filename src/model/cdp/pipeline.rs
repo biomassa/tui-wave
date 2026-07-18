@@ -152,6 +152,14 @@ pub struct PlannedJob {
     /// `output_curve`'s plain-text file runs. Kept as the curve's next `binary_template`,
     /// so a chain of transforms never needs to re-derive one from scratch.
     pub output_curve_binary_template: Option<String>,
+    /// `Some` only for a job producing a `model::formant::FormantBuffer` (CDP-Ext-Plan.md
+    /// Phase 5 — `plan_extract_formants`'s `formants get` or `plan_oneform_get`'s `oneform
+    /// get`), mutually exclusive with `output_curve`/`glob_output`/`output_files`. Unlike a
+    /// pitch curve there's no plain-text representation to normalize into at all (formant
+    /// data has no hand-editable shape — see `model::formant`'s doc comments), so this just
+    /// names the relative temp file whose raw bytes become the new buffer's content
+    /// verbatim.
+    pub output_formant_buffer: Option<String>,
     pub brk_files: Vec<(String, String)>,
     /// Raw-byte input files to write before running (parallel to `brk_files`, which is
     /// text-only) — used for a curve-transform job's binary pitchfile input, spliced from a
@@ -483,6 +491,19 @@ fn plan_param(
             brk_files.push((relative_name.clone(), contents));
             ParamPlan { arg: format_arg(&param.flag, &relative_name), deferred: None }
         }
+        // The buffer's actual bytes never flow through here — `ParamValue::FormantBufferRef`
+        // carries no data (see its doc comment); the app layer injects the picked buffer's
+        // bytes into `PlannedJob.binary_input_files` at this same `relative_name` after
+        // `plan_job` returns. This arm only needs to emit the argv token itself, which is
+        // always the catalog-declared `relative_name` verbatim (never flag-prefixed — every
+        // real CDP process with this param shape, `formants put`/`oneform put`, takes it as
+        // a bare positional filename).
+        ParamValue::FormantBufferRef => {
+            let super::def::ParamKind::FormantBufferRef { relative_name, .. } = &param.kind else {
+                unreachable!("FormantBufferRef value paired with non-FormantBufferRef ParamKind")
+            };
+            ParamPlan { arg: format_arg(&param.flag, relative_name), deferred: None }
+        }
     }
 }
 
@@ -705,7 +726,7 @@ fn plan_wav_glob(
         output_files: Vec::new(),
         glob_output: Some(GlobOutputSpec { prefix }),
         output_curve: None,
-        output_curve_binary_template: None,
+        output_curve_binary_template: None, output_formant_buffer: None,
         brk_files,
         binary_input_files: Vec::new(),
         deferred_window_params: Vec::new(),
@@ -741,7 +762,7 @@ fn plan_synthesis(
         binary_input_files: Vec::new(),
         glob_output: None,
         output_curve: None,
-        output_curve_binary_template: None,
+        output_curve_binary_template: None, output_formant_buffer: None,
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
     })
@@ -798,7 +819,7 @@ fn plan_wav(
             binary_input_files: Vec::new(),
             glob_output: None,
             output_curve: None,
-            output_curve_binary_template: None,
+            output_curve_binary_template: None, output_formant_buffer: None,
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
         });
@@ -828,7 +849,7 @@ fn plan_wav(
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 /// Dual-input time-domain process: `bin subprog [mode] inA inB out params...`. Lanes work
@@ -886,7 +907,7 @@ fn plan_dual_wav(
             binary_input_files: Vec::new(),
             glob_output: None,
             output_curve: None,
-            output_curve_binary_template: None,
+            output_curve_binary_template: None, output_formant_buffer: None,
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
         });
@@ -925,7 +946,7 @@ fn plan_dual_wav(
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 /// Dual-input spectral process: per channel lane, `pvoc anal` both inputs, run the process
@@ -1009,7 +1030,7 @@ fn plan_dual_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 fn plan_ana(
@@ -1084,7 +1105,7 @@ fn plan_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, brk_files, binary_input_files: Vec::new(), deferred_window_params, needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, brk_files, binary_input_files: Vec::new(), deferred_window_params, needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 /// Plans a curve-in/curve-out process (`IoKind::Curve` on both sides) — the `repitch`
@@ -1180,6 +1201,7 @@ pub fn plan_curve_transform_job(
         glob_output: None,
         output_curve: Some("curve_out.txt".to_string()),
         output_curve_binary_template: Some(raw_outfile_actual),
+        output_formant_buffer: None,
         brk_files,
         binary_input_files: vec![("curve_in.wav".to_string(), spliced)],
         deferred_window_params: Vec::new(),
@@ -1254,8 +1276,98 @@ pub fn plan_extract_pitch_curve(pvoc: &PvocSettings) -> PlannedJob {
         glob_output: None,
         output_curve: Some("pitch.txt".into()),
         output_curve_binary_template: Some("pitch.pch.wav".into()),
+        output_formant_buffer: None,
         brk_files: Vec::new(),
         binary_input_files: Vec::new(),
+        deferred_window_params: Vec::new(),
+        needs_simple_wav_input: false,
+    }
+}
+
+/// Plans the "Extract Formants" action (CDP-Ext-Plan.md Phase 5, the producing end of the
+/// same asymmetric shape `plan_extract_pitch_curve` has — audio *in*, buffer *out*). `formants
+/// get` won't accept a plain WAV directly (it needs a `.ana` file, same as `repitch getpitch`),
+/// so this wraps the selection in `pvoc anal` first.
+///
+/// Unlike `repitch getpitch`, `formants get` does **not** silently append `.wav` to its
+/// declared outfile (confirmed against the real binary: a run with `outfile = "out.for"`
+/// produced literally `out.for`, not `out.for.wav`) — a different quirk from the pitch-curve
+/// family that must be handled separately rather than assumed uniform.
+///
+/// `-p8` (8 pitch-bands-per-octave) is a fixed default rather than a user-facing choice —
+/// mirrors `plan_extract_pitch_curve`'s own zero-config simplicity (no dialog, just one
+/// action on the current selection); `formants_vocode`'s catalog entry already exposes the
+/// `-p`/`-f` choice for anyone who wants a different band count applied *during* vocoding.
+///
+/// Only ever takes the *first* channel of a multi-channel selection, same rationale as
+/// `plan_extract_pitch_curve`: a formant envelope is one spectral shape, not a per-channel
+/// concept in this app's UI.
+pub fn plan_extract_formants(pvoc: &PvocSettings) -> PlannedJob {
+    let steps = vec![
+        Invocation {
+            bin: "pvoc".into(),
+            args: vec![
+                "anal".into(),
+                "1".into(),
+                "in.wav".into(),
+                "in.ana".into(),
+                format!("-c{}", pvoc.points),
+                format!("-o{}", pvoc.overlap),
+            ],
+            label: "pvoc anal".into(),
+            expected_output: "in.ana".into(),
+        },
+        Invocation {
+            bin: "formants".into(),
+            args: vec!["get".into(), "in.ana".into(), "out.for".into(), "-p8".into()],
+            label: "formants get".into(),
+            expected_output: "out.for".into(),
+        },
+    ];
+    PlannedJob {
+        steps,
+        input_files: vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0] }],
+        output_files: Vec::new(),
+        glob_output: None,
+        output_curve: None,
+        output_curve_binary_template: None,
+        output_formant_buffer: Some("out.for".into()),
+        brk_files: Vec::new(),
+        binary_input_files: Vec::new(),
+        deferred_window_params: Vec::new(),
+        needs_simple_wav_input: false,
+    }
+}
+
+/// Plans `oneform get` — CDP-Ext-Plan.md Phase 5's "freeze snapshot" action, the second
+/// asymmetric shape this family needs. Unlike `plan_extract_formants` (audio in, buffer out)
+/// this one's input is itself a `[Formant]` buffer's raw bytes (`oneform get`'s own usage
+/// text: `oneform get informantfile 1f-outfile time`) — there's no audio and no `pvoc anal`
+/// step at all, just one CDP invocation with the caller-picked buffer spliced in as a plain
+/// `binary_input_files` entry (the same "write raw bytes, argv token is the filename"
+/// mechanism `plan_curve_transform_job` already uses for a pitch-curve template).
+///
+/// `oneform get` **does** silently append `.wav` to its declared outfile (confirmed against
+/// the real binary — the opposite of `formants get`'s behavior, so this is not assumed
+/// uniform across the family), hence `expected_output`/`output_formant_buffer` both naming
+/// `moment.1f.wav` rather than the literal `moment.1f` passed on the command line.
+pub fn plan_oneform_get(formant_buffer_bytes: &[u8], time_secs: f64) -> PlannedJob {
+    let steps = vec![Invocation {
+        bin: "oneform".into(),
+        args: vec!["get".into(), "in.for".into(), "moment.1f".into(), format_number(time_secs)],
+        label: "oneform get".into(),
+        expected_output: "moment.1f.wav".into(),
+    }];
+    PlannedJob {
+        steps,
+        input_files: Vec::new(),
+        output_files: Vec::new(),
+        glob_output: None,
+        output_curve: None,
+        output_curve_binary_template: None,
+        output_formant_buffer: Some("moment.1f.wav".into()),
+        brk_files: Vec::new(),
+        binary_input_files: vec![("in.for".to_string(), formant_buffer_bytes.to_vec())],
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: false,
     }
@@ -1930,6 +2042,55 @@ mod tests {
     fn plan_extract_pitch_curve_only_takes_the_first_channel() {
         let job = plan_extract_pitch_curve(&PvocSettings::default());
         assert_eq!(job.input_files[0].source_channels, vec![0], "pitch is one melodic line, not per-channel");
+    }
+
+    // -- plan_extract_formants ("Extract Formants" action, CDP-Ext-Plan.md Phase 5's own
+    //    asymmetric ana-in/buffer-out shape) -----------------------------------------------
+
+    #[test]
+    fn plan_extract_formants_wraps_in_pvoc_anal_then_formants_get() {
+        let job = plan_extract_formants(&PvocSettings::default());
+
+        assert_eq!(job.steps.len(), 2);
+        assert_eq!(job.steps[0].bin, "pvoc");
+        assert_eq!(job.steps[0].args, vec!["anal", "1", "in.wav", "in.ana", "-c1024", "-o3"]);
+        assert_eq!(job.steps[1].bin, "formants");
+        assert_eq!(job.steps[1].args, vec!["get", "in.ana", "out.for", "-p8"]);
+        // Unlike getpitch, formants get does NOT append .wav to its declared outfile.
+        assert_eq!(job.steps[1].expected_output, "out.for");
+        assert_eq!(job.output_formant_buffer, Some("out.for".to_string()));
+        assert_eq!(job.output_curve, None);
+        assert_eq!(job.output_files, Vec::new());
+        assert_eq!(
+            job.input_files,
+            vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0] }]
+        );
+    }
+
+    #[test]
+    fn plan_extract_formants_only_takes_the_first_channel() {
+        let job = plan_extract_formants(&PvocSettings::default());
+        assert_eq!(job.input_files[0].source_channels, vec![0], "a formant envelope is one spectral shape, not per-channel");
+    }
+
+    // -- plan_oneform_get ("freeze snapshot" action, the Formant-buffer-in/Snapshot-buffer-out
+    //    shape — no audio, no pvoc anal step at all) --------------------------------------
+
+    #[test]
+    fn plan_oneform_get_splices_the_buffer_in_and_names_the_wav_suffixed_output() {
+        let job = plan_oneform_get(b"fake formant buffer bytes", 0.5);
+
+        assert_eq!(job.steps.len(), 1);
+        assert_eq!(job.steps[0].bin, "oneform");
+        assert_eq!(job.steps[0].args, vec!["get", "in.for", "moment.1f", "0.5"]);
+        // Unlike formants get, oneform get DOES append .wav to its declared outfile.
+        assert_eq!(job.steps[0].expected_output, "moment.1f.wav");
+        assert_eq!(job.output_formant_buffer, Some("moment.1f.wav".to_string()));
+        assert_eq!(
+            job.binary_input_files,
+            vec![("in.for".to_string(), b"fake formant buffer bytes".to_vec())]
+        );
+        assert!(job.input_files.is_empty(), "no audio input at all for this shape");
     }
 
     // -- .ana decfactor header parsing (Phase 0 spike S5) --------------------------------
