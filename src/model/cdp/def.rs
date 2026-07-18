@@ -118,6 +118,13 @@ pub enum ParamValue {
     /// `hilite band`'s bitflag-conditional per-row shape (CDP-Ext-Plan.md Tier 1b) — see
     /// `HiliteBandRow`'s own doc comment for the row shape.
     HiliteBand(Vec<HiliteBandRow>),
+    /// Carries no data itself — unlike every other variant, "which buffer" is a runtime UI
+    /// selection (`CdpField::FormantBufferRef`'s picked index into `App.formant_buffers`),
+    /// not a portable value that belongs in a saved job. `plan_param` always emits the
+    /// paired `ParamKind::FormantBufferRef`'s `relative_name` literally; the actual bytes
+    /// are injected into `PlannedJob.binary_input_files` by the app layer after `plan_job`
+    /// returns, the same bypass `ParamKind::FormantBufferRef`'s own doc comment describes.
+    FormantBufferRef,
 }
 
 /// One row of `hilite band`'s per-band data: a frequency band (`lofrq`/`hifrq`) plus up to
@@ -239,6 +246,24 @@ pub enum ParamKind {
         amp2: TableColumn,
         transpose: TableColumn,
     },
+    /// A required reference to a stored, opaque `model::formant::FormantBuffer` (CDP-Ext-Plan.md
+    /// Phase 5) — `formants put`'s `fmntfile`, `oneform put`'s `1f-infile`. Unlike every
+    /// other datafile-shaped param, there is no hand-drawable alternative at all (confirmed:
+    /// `formants`/`oneform` offer no way to author this data except by extracting it from a
+    /// real sound) — the UI always resolves this to "pick one of my open Formant/Snapshot
+    /// buffers" (`ui/app.rs`'s `FormantBufferPicker`), never a breakpoint editor.
+    /// `buffer_kind` says which of the two buffer shapes this param needs (they're never
+    /// interchangeable — `formants put` always wants a whole curve, `oneform put` always
+    /// wants a frozen snapshot). `relative_name` is the fixed temp filename this param's
+    /// argv token always resolves to (`pipeline::plan_param` just emits it literally, every
+    /// time — the actual *bytes* written there come from whichever buffer the user picked,
+    /// injected directly into `PlannedJob.binary_input_files` by the app layer, bypassing
+    /// `ParamValue` entirely since "which buffer" is a runtime UI selection, not a portable
+    /// value).
+    FormantBufferRef {
+        buffer_kind: crate::model::formant::FormantBufferKind,
+        relative_name: String,
+    },
 }
 
 impl ParamKind {
@@ -280,6 +305,11 @@ impl ParamKind {
                     transpose_additive: false,
                 }])
             }
+            // Real coverage needs an actual formant/snapshot buffer's bytes, which this
+            // value-less variant can't supply — the catalog smoke test special-cases
+            // `FormantBufferRef` params instead of driving them through this helper (see
+            // `cdp::runner`'s `KNOWN_FIXTURE_FAILURES`-adjacent handling).
+            ParamKind::FormantBufferRef { .. } => ParamValue::FormantBufferRef,
         }
     }
 }
