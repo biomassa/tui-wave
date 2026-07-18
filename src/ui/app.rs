@@ -1058,6 +1058,26 @@ struct CdpPreview {
     /// A-derived audio while claiming to have processed against B — the picker is the one
     /// dialog control `values`/`range` can't see change.
     second_input_doc: Option<usize>,
+    /// The picked buffer index of each `FormantBufferRef` field, in field order, when this
+    /// preview ran — the exact same blind spot `second_input_doc` closes, but for the
+    /// formant-buffer picker (CDP-Ext-Plan.md Phase 5). A picked buffer is a runtime
+    /// reference, not a portable `ParamValue`, so `to_value` never captures it and two
+    /// different picks produce identical `values`; without this, previewing with buffer A
+    /// then re-picking buffer B and hitting Apply would splice the stale A result.
+    formant_selections: Vec<Option<usize>>,
+}
+
+/// The picked buffer index of each `FormantBufferRef` field in `fields`, in field order —
+/// the piece of a `Dialog::CdpParams` form's state that `CdpField::to_value` deliberately
+/// can't capture (see `CdpPreview.formant_selections`). Compared in `cdp_preview_matches`.
+fn formant_field_selections(fields: &[CdpField]) -> Vec<Option<usize>> {
+    fields
+        .iter()
+        .filter_map(|f| match f {
+            CdpField::FormantBufferRef { selected, .. } => Some(*selected),
+            _ => None,
+        })
+        .collect()
 }
 
 /// `Dialog::CdpBrowser`'s control focus range is dynamic (one index per param field, then a
@@ -1164,6 +1184,10 @@ const TRANSIENT_THRESHOLD_MAX_DB: f32 = 24.0;
 enum Confirm {
     Quit,
     CloseBuffer(usize),
+    /// Close the curve at this `App.curves` index (Buffers panel `Ctrl+W` on a `[Curve]`
+    /// row), confirmed because a dirty curve carries unsaved edits — the curve counterpart
+    /// to `CloseBuffer`. Formant/snapshot buffers need no such confirm (no dirty concept).
+    CloseCurve(usize),
     ResetConfig,
     /// Delete this file from disk (Files panel `Del`). Irreversible, hence the confirm.
     DeleteFile(PathBuf),
@@ -1953,18 +1977,37 @@ impl App {
     /// underneath a curve action).
     fn run_curve_transform(&mut self, catalog_index: usize) {
         let Some(def) = self.cdp_catalog.processes.get(catalog_index).cloned() else { return };
-        let Some(Dialog::CurveEditor(edit)) = self.dialog.as_mut() else { return };
-        let Some(picker) = edit.picker.as_mut() else { return };
-        let Some(params) = picker.params.as_mut() else { return };
-        if let Some(bad) = Self::cdp_validate_fields(&def, &params.fields) {
-            params.error = Some("value out of range".into());
-            params.focus = bad;
-            return;
-        }
-        let values: Vec<_> = params.fields.iter().map(CdpField::to_value).collect();
+        // Read everything needed out of the editor/params form, then release the borrow so
+        // the hand-edit commit below can take `self.curves`/`self.curve_histories` mutably.
+        // A validation failure returns here with the editor still open (its inline error set).
+        let (curve_index, current_points, values) = {
+            let Some(Dialog::CurveEditor(edit)) = self.dialog.as_mut() else { return };
+            let Some(picker) = edit.picker.as_mut() else { return };
+            let Some(params) = picker.params.as_mut() else { return };
+            if let Some(bad) = Self::cdp_validate_fields(&def, &params.fields) {
+                params.error = Some("value out of range".into());
+                params.focus = bad;
+                return;
+            }
+            let values: Vec<_> = params.fields.iter().map(CdpField::to_value).collect();
+            (edit.curve_index, edit.points.clone(), values)
+        };
 
-        let curve_index = edit.curve_index;
-        let current_points = edit.points.clone();
+        // Commit the in-progress hand edit as its own history step *before* submitting the
+        // transform, so no failure path below (no template / bad CDP dir / plan error, or a
+        // run-time CDP failure surfaced later in `tick_cdp`) can discard it — every one of
+        // those replaces the `CurveEditor` dialog, and the edit lived only in `edit.points`
+        // until now (FABLE-REVIEW FR-3). A no-op when the editor's points already match the
+        // committed curve (opening the editor and transforming without touching anything).
+        if let (Some(curve), Some(history)) =
+            (self.curves.get_mut(curve_index), self.curve_histories.get_mut(curve_index))
+        {
+            if current_points != curve.points {
+                let template = curve.binary_template.clone();
+                history.apply(current_points.clone(), template, "Edit Curve", curve);
+            }
+        }
+
         let Some(curve) = self.curves.get(curve_index) else { return };
         let Some(template) = curve.binary_template.clone() else {
             self.dialog = Some(Dialog::Info {
@@ -2490,6 +2533,22 @@ impl App {
                 }
                 self.close_buffer(idx);
             }
+            Confirm::CloseCurve(curve_index) => {
+                if save {
+                    // A never-saved curve needs a filename first: `save_or_prompt_curve`
+                    // opens the Save-As prompt for it. The close then can't be auto-chained
+                    // through that prompt (the curve Save-As flow has no queue-then hook the
+                    // way documents do), so a curve without a path is saved-then-kept-open;
+                    // one with a path saves straight to it and closes now.
+                    let has_path = self.curves.get(curve_index).is_some_and(|c| c.path.is_some());
+                    self.save_or_prompt_curve(curve_index);
+                    if has_path {
+                        self.close_curve(curve_index);
+                    }
+                } else {
+                    self.close_curve(curve_index);
+                }
+            }
             Confirm::ResetConfig => {
                 self.reset_config_to_defaults();
             }
@@ -2781,8 +2840,31 @@ impl App {
                     self.load_curve_from_path(input.value().trim());
                 }
                 Some(Dialog::FreezeFormantSnapshot { buffer_index, input }) => {
-                    if let Ok(time_secs) = input.value().trim().parse::<f64>() {
-                        self.freeze_formant_snapshot(buffer_index, time_secs);
+                    // Validate inline rather than silently discarding a bad time or letting
+                    // an out-of-range one surface as a raw CDP error (FABLE-REVIEW FR-7). The
+                    // buffer's duration is the same value the info popup this prompt opened
+                    // from already displays.
+                    let duration = self
+                        .formant_buffers
+                        .get(buffer_index)
+                        .and_then(|b| crate::model::formant::read_formant_duration_secs(&b.bytes));
+                    match input.value().trim().parse::<f64>() {
+                        Ok(time_secs) if time_secs >= 0.0 && !duration.is_some_and(|d| time_secs >= d) => {
+                            self.freeze_formant_snapshot(buffer_index, time_secs);
+                        }
+                        Ok(_) => {
+                            let range = duration
+                                .map(|d| format!("between 0 and {d:.3}"))
+                                .unwrap_or_else(|| "0 or greater".to_string());
+                            self.dialog = Some(Dialog::Info {
+                                message: format!("Freeze time must be {range} seconds."),
+                            });
+                        }
+                        Err(_) => {
+                            self.dialog = Some(Dialog::Info {
+                                message: "Enter a freeze time in seconds (e.g. 0.5).".into(),
+                            });
+                        }
                     }
                 }
                 Some(Dialog::MixToMono { inputs, tanh_clip, .. }) => {
@@ -4185,7 +4267,15 @@ impl App {
                 if let (Some(curve), Some(history)) =
                     (self.curves.get_mut(curve_index), self.curve_histories.get_mut(curve_index))
                 {
-                    history.apply(committed_points, "Edit Curve", curve);
+                    // Only commit an actual change: opening the editor and pressing Enter
+                    // without touching anything must not dirty the curve or push a no-op undo
+                    // step (FABLE-REVIEW FR-8). A hand edit leaves the binary template
+                    // untouched — pass the curve's current one so undo/redo restore it
+                    // unchanged.
+                    if committed_points != curve.points {
+                        let template = curve.binary_template.clone();
+                        history.apply(committed_points, template, "Edit Curve", curve);
+                    }
                 }
             }
             _ => {}
@@ -4623,10 +4713,11 @@ impl App {
             return false;
         }
         let field_index = *focus - 1;
-        let Some(CdpField::FormantBufferRef { buffer_kind, .. }) = fields.get(field_index) else {
+        let Some(CdpField::FormantBufferRef { buffer_kind, selected }) = fields.get(field_index) else {
             return false;
         };
         let buffer_kind = *buffer_kind;
+        let current_pick = *selected;
         let entries: Vec<usize> = self
             .formant_buffers
             .iter()
@@ -4637,10 +4728,16 @@ impl App {
         if entries.is_empty() {
             return false;
         }
+        // Preselect the field's current pick (if any) rather than always index 0, so
+        // reopening the picker to check what's chosen doesn't silently switch it to the
+        // first entry on Enter (FABLE-REVIEW FR-9).
+        let selected = current_pick
+            .and_then(|buf| entries.iter().position(|&e| e == buf))
+            .unwrap_or(0);
         let Some(Dialog::CdpParams { formant_picker, .. }) = self.dialog.as_mut() else {
             return false;
         };
-        *formant_picker = Some(FormantBufferPicker { field_index, entries, selected: 0 });
+        *formant_picker = Some(FormantBufferPicker { field_index, entries, selected });
         true
     }
 
@@ -5100,11 +5197,13 @@ impl App {
         range: (usize, usize),
         sample_rate: u32,
         second_input_doc: Option<usize>,
+        formant_selections: &[Option<usize>],
     ) -> bool {
         preview.range == range
             && preview.values == values
             && preview.sample_rate == sample_rate
             && preview.second_input_doc == second_input_doc
+            && preview.formant_selections == formant_selections
     }
 
     /// Validates every field against its `ParamKind` range, returning the index of the
@@ -5257,7 +5356,7 @@ impl App {
         // result instead of re-running CDP.
         if matches!(purpose, crate::cdp::JobPurpose::Apply) {
             if let Some(cached) = &preview {
-                if Self::cdp_preview_matches(cached, &values, range, doc.sample_rate, second_doc_index) {
+                if Self::cdp_preview_matches(cached, &values, range, doc.sample_rate, second_doc_index, &formant_field_selections(&fields)) {
                     let label = format!("CDP: {}", def.title);
                     let channels = cached.channels.clone();
                     let tolerance = crate::commands::cdp::timing_tolerance(
@@ -5573,10 +5672,15 @@ impl App {
                     }
                 }
                 crate::cdp::CdpEvent::Finished { job, purpose, result } => {
+                    // Only act on the job the currently-shown `CdpRunning` dialog is actually
+                    // waiting on. Checked once, up front, *before* any `cdp_pending_*.take()`
+                    // below — a stray `Finished` for a different job must be dropped without
+                    // consuming a pending it doesn't own, or the real completion would find
+                    // `None` and its result would be lost (FABLE-REVIEW FR-5).
+                    if !matches!(self.dialog, Some(Dialog::CdpRunning { job_id, .. }) if job_id == job) {
+                        continue;
+                    }
                     if let Some(source_name) = self.cdp_pending_curve_extraction.take() {
-                        if !matches!(self.dialog, Some(Dialog::CdpRunning { job_id, .. }) if job_id == job) {
-                            continue;
-                        }
                         self.stop_cdp_preview_audio();
                         self.dialog = match result {
                             Ok(output) => match output.curve_points {
@@ -5605,9 +5709,6 @@ impl App {
                         continue;
                     }
                     if let Some((curve_index, title)) = self.cdp_pending_curve_transform.take() {
-                        if !matches!(self.dialog, Some(Dialog::CdpRunning { job_id, .. }) if job_id == job) {
-                            continue;
-                        }
                         self.stop_cdp_preview_audio();
                         self.dialog = match result {
                             Ok(output) => match output.curve_points {
@@ -5616,10 +5717,14 @@ impl App {
                                         self.curves.get_mut(curve_index),
                                         self.curve_histories.get_mut(curve_index),
                                     ) {
-                                        history.apply(points, title, curve);
-                                        if let Some(template) = output.curve_binary_template {
-                                            curve.binary_template = Some(template);
-                                        }
+                                        // The transform replaces the template too (its own
+                                        // binary output); fall back to the existing one if the
+                                        // job somehow produced none, matching the prior
+                                        // behavior. Captured in the same history step as the
+                                        // points so undo restores both (FABLE-REVIEW FR-4).
+                                        let new_template =
+                                            output.curve_binary_template.or_else(|| curve.binary_template.clone());
+                                        history.apply(points, new_template, title, curve);
                                     }
                                     // Reopen the editor on the transformed result — unlike
                                     // extraction (which returns to the Buffers panel), the
@@ -5648,9 +5753,6 @@ impl App {
                         continue;
                     }
                     if let Some(source_name) = self.cdp_pending_formant_extraction.take() {
-                        if !matches!(self.dialog, Some(Dialog::CdpRunning { job_id, .. }) if job_id == job) {
-                            continue;
-                        }
                         self.dialog = match result {
                             Ok(output) => match output.formant_buffer_bytes {
                                 Some(bytes) if !bytes.is_empty() => {
@@ -5675,9 +5777,6 @@ impl App {
                         continue;
                     }
                     if let Some(source_index) = self.cdp_pending_snapshot_freeze.take() {
-                        if !matches!(self.dialog, Some(Dialog::CdpRunning { job_id, .. }) if job_id == job) {
-                            continue;
-                        }
                         let source_name =
                             self.formant_buffers.get(source_index).map(|b| b.name.clone()).unwrap_or_default();
                         self.dialog = match result {
@@ -5703,13 +5802,9 @@ impl App {
                         };
                         continue;
                     }
+                    // The job-id match was already checked at the top of this `Finished` arm,
+                    // so if we reach here with a `cdp_pending` it's genuinely this job's.
                     let Some(pending) = self.cdp_pending.take() else { continue };
-                    // Only act on the job the currently-shown `CdpRunning` dialog is
-                    // actually waiting on — guards against a stray event arriving after the
-                    // dialog has already moved on for any reason.
-                    if !matches!(self.dialog, Some(Dialog::CdpRunning { job_id, .. }) if job_id == job) {
-                        continue;
-                    }
 
                     // Whatever this job's outcome, any still-playing preview clip from an
                     // earlier Preview is now stale — an Apply (success or error) leaves the
@@ -5807,6 +5902,7 @@ impl App {
                                     .second_input
                                     .as_ref()
                                     .and_then(CdpSecondInput::selected_doc_index);
+                                let formant_selections = formant_field_selections(&pending.fields);
                                 self.dialog = Some(Dialog::CdpParams {
                                     catalog_index: pending.catalog_index,
                                     fields: pending.fields,
@@ -5819,6 +5915,7 @@ impl App {
                                         channels,
                                         sample_rate: output.sample_rate,
                                         second_input_doc,
+                                        formant_selections,
                                     }),
                                     envelope: None,
                                     list_edit: None,
@@ -5975,6 +6072,68 @@ impl App {
             self.confirm = Some(Confirm::CloseBuffer(idx));
         } else {
             self.close_buffer(idx);
+        }
+    }
+
+    /// Routes `Ctrl+W` when the Buffers panel is focused: closes whichever row is selected —
+    /// a document, a `[Curve]`, or a `[Formant]`/`[Snapshot]` buffer (FABLE-REVIEW FR-6). The
+    /// three-segment index layout matches `buffer_names` (documents, then curves, then
+    /// formant buffers). A dirty document or curve confirms first; formant buffers close
+    /// immediately (no save/dirty concept). No modal dialog can be open here (a modal
+    /// intercepts keys before `handle_action`), so no dialog holds a now-stale index.
+    fn request_close_selected_buffer_row(&mut self) {
+        let selected = self.buffer_panel.selected;
+        if selected < self.documents.len() {
+            self.request_close_buffer(selected);
+            return;
+        }
+        let Some(rest) = selected.checked_sub(self.documents.len()) else { return };
+        if rest < self.curves.len() {
+            self.request_close_curve(rest);
+        } else if let Some(formant_index) = rest.checked_sub(self.curves.len()) {
+            self.close_formant_buffer(formant_index);
+        }
+    }
+
+    /// Closes curve `curve_index`, confirming first if it has unsaved edits.
+    fn request_close_curve(&mut self, curve_index: usize) {
+        if self.curves.get(curve_index).is_some_and(|c| c.dirty) {
+            self.confirm = Some(Confirm::CloseCurve(curve_index));
+        } else {
+            self.close_curve(curve_index);
+        }
+    }
+
+    /// Removes curve `curve_index` and its parallel history, then keeps the Buffers-panel
+    /// selection on a still-valid row.
+    fn close_curve(&mut self, curve_index: usize) {
+        if curve_index >= self.curves.len() {
+            return;
+        }
+        self.curves.remove(curve_index);
+        self.curve_histories.remove(curve_index);
+        self.clamp_buffer_selection();
+    }
+
+    /// Removes formant/snapshot buffer `formant_index`, then keeps the Buffers-panel
+    /// selection on a still-valid row. No dirty check — formant buffers have no save path.
+    fn close_formant_buffer(&mut self, formant_index: usize) {
+        if formant_index >= self.formant_buffers.len() {
+            return;
+        }
+        self.formant_buffers.remove(formant_index);
+        self.clamp_buffer_selection();
+    }
+
+    /// Clamps `buffer_panel.selected` to the last row after a curve/formant close shrank the
+    /// list — without this, closing the bottom row leaves the selection pointing one past
+    /// the end (harmless with the `.get()`-guarded consumers, but visibly wrong).
+    fn clamp_buffer_selection(&mut self) {
+        let total = self.documents.len() + self.curves.len() + self.formant_buffers.len();
+        if total == 0 {
+            self.buffer_panel.selected = 0;
+        } else if self.buffer_panel.selected >= total {
+            self.buffer_panel.selected = total - 1;
         }
     }
 
@@ -6512,6 +6671,20 @@ impl App {
     /// Saves every dirty document that already has a path. Documents that were never
     /// saved (no path) are skipped — Save All can't choose a filename for each; those still
     /// need an explicit Save As.
+    /// Whether any open document *or* curve is unsaved — the quit-confirmation trigger.
+    /// Formant/snapshot buffers are excluded on purpose: they have no save path or dirty
+    /// concept at all (`model::formant::FormantBuffer`), so there's nothing to lose by
+    /// quitting with them open.
+    fn any_dirty_buffers(&self) -> bool {
+        self.documents.iter().any(|d| d.dirty) || self.curves.iter().any(|c| c.dirty)
+    }
+
+    /// Total count of unsaved documents + curves, for the quit-confirmation message.
+    fn dirty_buffer_count(&self) -> usize {
+        self.documents.iter().filter(|d| d.dirty).count()
+            + self.curves.iter().filter(|c| c.dirty).count()
+    }
+
     fn save_all(&mut self) {
         for document in &mut self.documents {
             if !document.dirty {
@@ -6521,6 +6694,22 @@ impl App {
                 if save_wav(document, &path).is_ok() {
                     document.dirty = false;
                     self.file_panel.mark_dirty(&path, false);
+                }
+            }
+        }
+        // Curves that already have a path save straight to it, same as documents. A curve
+        // that was never saved (no path — e.g. a freshly extracted, then hand-edited one)
+        // can't be auto-saved without a filename prompt, which this app's Save-As queue only
+        // wires up for documents; such a curve stays dirty, and the quit confirmation the
+        // user is passing through still warned about it (they chose "save all & quit"
+        // knowing an unnamed buffer needs attention — the named ones are now safe).
+        for curve in &mut self.curves {
+            if !curve.dirty {
+                continue;
+            }
+            if let Some(path) = curve.path.clone() {
+                if crate::model::curve::save_curve(curve, &path).is_ok() {
+                    curve.dirty = false;
                 }
             }
         }
@@ -7129,8 +7318,10 @@ impl App {
 
     fn handle_action(&mut self, action: Action) {
         if action == Action::Quit {
-            // Warn if *any* open buffer is dirty, not just the active one.
-            if self.documents.iter().any(|doc| doc.dirty) {
+            // Warn if *any* open buffer is dirty, not just the active one. Curves count too
+            // (they're savable to disk via Ctrl+S and carry their own dirty flag) — formant
+            // buffers don't, since they have no save path or dirty concept at all.
+            if self.any_dirty_buffers() {
                 self.confirm = Some(Confirm::Quit);
             } else {
                 self.should_quit = true;
@@ -7194,7 +7385,14 @@ impl App {
                 return;
             }
             Action::CloseBuffer => {
-                self.request_close_buffer(self.active_document);
+                // From a focused Buffers panel, close the *selected* row (which may be a
+                // curve or formant buffer, not the active document); otherwise close the
+                // active document as before (FABLE-REVIEW FR-6).
+                if self.buffer_panel.focused {
+                    self.request_close_selected_buffer_row();
+                } else {
+                    self.request_close_buffer(self.active_document);
+                }
                 return;
             }
             Action::RenameBuffer => {
@@ -8412,12 +8610,15 @@ impl App {
         if let Some(confirm) = &self.confirm {
             let text = match confirm {
                 Confirm::Quit => {
-                    let n = self.documents.iter().filter(|d| d.dirty).count();
+                    let n = self.dirty_buffer_count();
                     let noun = if n == 1 { "buffer" } else { "buffers" };
                     format!(" {n} unsaved {noun} — (s)ave all & quit · (y) quit anyway · (Esc) cancel ")
                 }
                 Confirm::CloseBuffer(_) => {
                     " Unsaved buffer — (s)ave & close · (y) close anyway · (Esc) cancel ".to_string()
+                }
+                Confirm::CloseCurve(_) => {
+                    " Unsaved curve — (s)ave & close · (y) close anyway · (Esc) cancel ".to_string()
                 }
                 Confirm::ResetConfig => {
                     " Reset all keybindings to defaults? (existing config saved as .bak) — (y) reset · (Esc) cancel ".to_string()
@@ -11203,6 +11404,7 @@ fn render_cdp_params_dialog(
         p.values.len() == fields.len()
             && p.values.iter().zip(fields).all(|(v, f)| *v == f.to_value())
             && p.second_input_doc == second_input.as_ref().and_then(|s| s.selected_doc_index())
+            && p.formant_selections == formant_field_selections(fields)
     });
     let preview_label = if preview_fresh { " [Preview \u{2713}]" } else { " [Preview]" };
     let preview_style = if focus == preview_focus { cursor_style } else { hint_style };
@@ -13153,6 +13355,35 @@ mod tests {
         );
     }
 
+    /// A hand edit in the curve editor must survive a transform that fails at plan time —
+    /// the edit is committed to the curve (and undo history) *before* the transform is
+    /// attempted, so the failure's error dialog doesn't discard it (FABLE-REVIEW FR-3).
+    /// Uses the no-binary_template failure path, which is deterministic without real CDP.
+    #[test]
+    fn a_hand_edit_survives_a_transform_that_fails_at_plan_time() {
+        let mut app = app_with_one_curve();
+        assert!(app.curves[0].binary_template.is_none(), "no lineage → the transform will fail at plan time");
+        let original = app.curves[0].points.clone();
+        app.open_curve_editor(0);
+
+        // Hand-edit the first point's Hz in the editor's live (uncommitted) points.
+        // selected_col starts at 1 (Hz); overwrite it.
+        type_str(&mut app, "999");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // pick a process
+        if let Some(Dialog::CurveEditor(edit)) = app.dialog.as_mut() {
+            if let Some(params) = edit.picker.as_mut().and_then(|p| p.params.as_mut()) {
+                params.focus = params.fields.len(); // Apply row
+            }
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // Apply → fails (no template)
+
+        assert!(matches!(app.dialog, Some(Dialog::Info { .. })), "the no-template failure dialog should show");
+        assert_ne!(app.curves[0].points, original, "the hand edit must have been committed, not discarded");
+        assert_eq!(app.curves[0].points[0].1, 999.0, "the edited Hz value should be on the committed curve");
+        assert_eq!(app.curve_histories[0].last_label(), Some("Edit Curve"), "the edit should be an undoable step");
+    }
+
     /// End-to-end: picking a transform submits a real `cdp::runner::Job` built from
     /// `plan_curve_transform_job`, and its `Finished` event (driven through `tick_cdp`, a
     /// fake `cp`-based step standing in for a real CDP binary — same "no real CDP install
@@ -13230,7 +13461,7 @@ mod tests {
     fn undo_with_a_curve_row_selected_in_a_focused_buffer_panel_targets_that_curve() {
         let mut app = app_with_one_curve();
         let original = app.curves[0].points.clone();
-        app.curve_histories[0].apply(vec![(0.0, 999.0)], "Test Edit", &mut app.curves[0]);
+        app.curve_histories[0].apply(vec![(0.0, 999.0)], None, "Test Edit", &mut app.curves[0]);
         assert_ne!(app.curves[0].points, original);
 
         app.buffer_panel.focused = true;
@@ -13243,7 +13474,7 @@ mod tests {
     #[test]
     fn redo_with_a_curve_row_selected_restores_the_undone_change() {
         let mut app = app_with_one_curve();
-        app.curve_histories[0].apply(vec![(0.0, 999.0)], "Test Edit", &mut app.curves[0]);
+        app.curve_histories[0].apply(vec![(0.0, 999.0)], None, "Test Edit", &mut app.curves[0]);
         let edited = app.curves[0].points.clone();
 
         app.buffer_panel.focused = true;
@@ -13259,7 +13490,7 @@ mod tests {
         let mut app = new_app(Some(doc(1.0, 100)), None);
         app.curves.push(crate::model::curve::PitchCurve::new("mycurve", vec![(0.0, 220.0)]));
         app.curve_histories.push(crate::model::curve_history::CurveHistory::new());
-        app.curve_histories[0].apply(vec![(0.0, 999.0)], "Test Edit", &mut app.curves[0]);
+        app.curve_histories[0].apply(vec![(0.0, 999.0)], None, "Test Edit", &mut app.curves[0]);
         let curve_points_before_undo = app.curves[0].points.clone();
 
         app.buffer_panel.focused = true;
@@ -14535,6 +14766,32 @@ mod tests {
         );
     }
 
+    /// An empty or unparseable freeze time must surface a message and submit no job, rather
+    /// than silently closing the prompt (FABLE-REVIEW FR-7). (`dialog_accepts` already
+    /// restricts typing to digits/`.`, so these are the realistic bad inputs; an
+    /// out-of-range numeric time additionally needs a real formant file's duration, exercised
+    /// by `model::formant`'s own duration tests.)
+    #[test]
+    fn freeze_snapshot_rejects_empty_or_unparseable_time_without_submitting() {
+        let mut app = new_app(Some(doc(0.1, 4)), None);
+        app.formant_buffers.push(crate::model::formant::FormantBuffer::new(
+            crate::model::formant::FormantBufferKind::Formant,
+            "f",
+            b"not a real formant file".to_vec(), // duration unknown → only the parse check applies
+            "test",
+        ));
+
+        app.dialog = Some(Dialog::FreezeFormantSnapshot { buffer_index: 0, input: TextInput::fresh(String::new()) });
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::Info { .. })), "an empty time must show a message");
+        assert!(app.cdp_pending_snapshot_freeze.is_none(), "no freeze job should be submitted for an empty time");
+
+        app.dialog = Some(Dialog::FreezeFormantSnapshot { buffer_index: 0, input: TextInput::fresh("1.2.3".to_string()) });
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::Info { .. })), "an unparseable time must show a message");
+        assert!(app.cdp_pending_snapshot_freeze.is_none());
+    }
+
     /// `App::splice_formant_buffer_refs` (`cdp_run`'s `FormantBufferRef` resolution): a
     /// picked field's buffer bytes land in `PlannedJob.binary_input_files` at the param's own
     /// declared `relative_name`, tested directly against the pure helper rather than driving
@@ -14677,6 +14934,34 @@ mod tests {
         App::splice_formant_buffer_refs(&def, &fields, &formant_buffers, &mut planned);
 
         assert!(planned.binary_input_files.is_empty());
+    }
+
+    /// A cached Preview must be invalidated when the picked formant buffer changes, even
+    /// though `to_value` produces an identical `ParamValue::FormantBufferRef` for either
+    /// pick (FABLE-REVIEW FR-1). Without the `formant_selections` comparison, Apply would
+    /// splice the stale earlier-buffer result while claiming to process the newly-picked one.
+    #[test]
+    fn preview_cache_invalidates_when_the_picked_formant_buffer_changes() {
+        use crate::model::cdp::ParamValue;
+        let kind = crate::model::formant::FormantBufferKind::Formant;
+        // A preview captured while buffer index 0 was picked.
+        let preview = CdpPreview {
+            values: vec![ParamValue::FormantBufferRef],
+            range: (0, 100),
+            channels: Vec::new(),
+            sample_rate: 44100,
+            second_input_doc: None,
+            formant_selections: vec![Some(0)],
+        };
+        let values = vec![ParamValue::FormantBufferRef]; // identical for either pick
+
+        // Same pick → still fresh (fast-path Apply allowed).
+        let same = vec![CdpField::FormantBufferRef { selected: Some(0), buffer_kind: kind }];
+        assert!(App::cdp_preview_matches(&preview, &values, (0, 100), 44100, None, &formant_field_selections(&same)));
+
+        // Different pick → stale (must re-run CDP).
+        let different = vec![CdpField::FormantBufferRef { selected: Some(1), buffer_kind: kind }];
+        assert!(!App::cdp_preview_matches(&preview, &values, (0, 100), 44100, None, &formant_field_selections(&different)));
     }
 
     /// `App::cdp_groups` always starts with `CDP_GROUP_ALL` then `CDP_GROUP_RECENT`,
@@ -15489,6 +15774,45 @@ mod tests {
         assert!(!app.documents[1].dirty);
         assert!(app.documents[1].path.is_some());
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Quitting with a dirty *curve* (and only clean documents) must still trigger the quit
+    /// confirmation rather than silently discarding the curve edit (FABLE-REVIEW FR-2).
+    #[test]
+    fn quit_with_a_dirty_curve_and_clean_documents_still_confirms() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.documents[0].dirty = false;
+        app.curves.push(crate::model::curve::PitchCurve::new("c", vec![(0.0, 220.0)])); // new() is dirty
+        assert!(app.curves[0].dirty);
+
+        app.handle_action(Action::Quit);
+
+        assert!(!app.should_quit, "a dirty curve must block an immediate quit");
+        assert!(matches!(app.confirm, Some(Confirm::Quit)), "the quit confirmation must appear");
+    }
+
+    /// "(s)ave all & quit" saves a curve that already has a path, alongside documents
+    /// (FABLE-REVIEW FR-2).
+    #[test]
+    fn save_all_and_quit_saves_a_named_curve() {
+        let dir = std::env::temp_dir().join(format!("tui_wave_curve_quit_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let curve_path = dir.join("mycurve.txt");
+
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.documents[0].dirty = false;
+        let mut curve = crate::model::curve::PitchCurve::new("mycurve", vec![(0.0, 220.0), (1.0, 440.0)]);
+        curve.path = Some(curve_path.clone());
+        app.curves.push(curve);
+        app.confirm = Some(Confirm::Quit);
+
+        app.handle_confirm_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+
+        assert!(app.should_quit);
+        assert!(!app.curves[0].dirty, "the named curve should be saved and marked clean");
+        let saved = std::fs::read_to_string(&curve_path).unwrap();
+        assert!(saved.contains("220"), "the curve's points should be on disk");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -16326,6 +16650,69 @@ mod tests {
         assert_eq!(app.active_document, 0);
     }
 
+    /// Ctrl+W with a clean `[Curve]` row selected in a focused Buffers panel removes that
+    /// curve (and its parallel history), not the active document (FABLE-REVIEW FR-6).
+    #[test]
+    fn close_buffer_removes_a_selected_clean_curve_row() {
+        let mut app = new_app(Some(doc(0.1, 10)), None); // document at panel index 0
+        app.curves.push(crate::model::curve::PitchCurve::new("c0", vec![(0.0, 220.0)]));
+        app.curves.push(crate::model::curve::PitchCurve::new("c1", vec![(0.0, 330.0)]));
+        app.curve_histories.push(crate::model::curve_history::CurveHistory::new());
+        app.curve_histories.push(crate::model::curve_history::CurveHistory::new());
+        app.curves[0].dirty = false;
+        app.curves[1].dirty = false;
+
+        app.buffer_panel.focused = true;
+        app.buffer_panel.selected = 1; // documents.len()==1, so panel index 1 is curves[0]
+        app.handle_action(Action::CloseBuffer);
+
+        assert!(app.confirm.is_none(), "a clean curve should close without a confirm");
+        assert_eq!(app.curves.len(), 1);
+        assert_eq!(app.curves[0].name, "c1", "the correct curve was removed");
+        assert_eq!(app.curve_histories.len(), 1, "history must stay index-parallel");
+        assert_eq!(app.documents.len(), 1, "the active document must be untouched");
+    }
+
+    /// Ctrl+W on a *dirty* curve row confirms first; (y) then closes it (FABLE-REVIEW FR-6).
+    #[test]
+    fn close_buffer_on_a_dirty_curve_confirms_then_closes_on_y() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.curves.push(crate::model::curve::PitchCurve::new("c", vec![(0.0, 220.0)])); // new() is dirty
+        app.curve_histories.push(crate::model::curve_history::CurveHistory::new());
+        assert!(app.curves[0].dirty);
+
+        app.buffer_panel.focused = true;
+        app.buffer_panel.selected = 1;
+        app.handle_action(Action::CloseBuffer);
+        assert!(matches!(app.confirm, Some(Confirm::CloseCurve(0))), "a dirty curve must confirm before closing");
+
+        app.handle_confirm_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(app.curves.is_empty(), "(y) should discard and close the curve");
+        assert!(app.curve_histories.is_empty());
+    }
+
+    /// Ctrl+W on a `[Formant]`/`[Snapshot]` row closes it immediately — no dirty/save
+    /// concept, so no confirm — and clamps the selection to a still-valid row (FR-6).
+    #[test]
+    fn close_buffer_removes_a_selected_formant_row_without_confirm() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.formant_buffers.push(crate::model::formant::FormantBuffer::new(
+            crate::model::formant::FormantBufferKind::Formant,
+            "f0",
+            vec![],
+            "test",
+        ));
+
+        app.buffer_panel.focused = true;
+        app.buffer_panel.selected = 1; // documents(1) + curves(0) → panel index 1 is formant[0]
+        app.handle_action(Action::CloseBuffer);
+
+        assert!(app.confirm.is_none(), "formant buffers have no dirty concept — close immediately");
+        assert!(app.formant_buffers.is_empty());
+        assert_eq!(app.buffer_panel.selected, 0, "selection clamps back to the remaining document row");
+        assert_eq!(app.documents.len(), 1, "the active document must be untouched");
+    }
+
     /// Buffer search filters which buffers Up/Dn navigate, skipping non-matches.
     #[test]
     fn buffer_search_filters_navigation() {
@@ -16741,6 +17128,51 @@ mod tests {
             panic!("expected a FormantBufferRef field")
         };
         assert_eq!(*selected, Some(1), "Enter should commit the highlighted buffer's index");
+    }
+
+    /// Reopening the picker preselects the field's current pick, so pressing Enter to close
+    /// it doesn't silently switch the pick to the first entry (FABLE-REVIEW FR-9).
+    #[test]
+    fn formant_picker_preselects_the_current_pick_when_reopened() {
+        use crate::model::formant::{FormantBuffer, FormantBufferKind};
+        let mut app = new_app(Some(doc(1.0, 44100)), None);
+        app.formant_buffers = vec![
+            FormantBuffer::new(FormantBufferKind::Formant, "curve1", vec![], "test"),
+            FormantBuffer::new(FormantBufferKind::Formant, "curve2", vec![], "test"),
+        ];
+        open_formant_ref_dialog(&mut app, FormantBufferKind::Formant);
+        // Pick buffer index 1.
+        assert!(app.open_cdp_formant_picker());
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Reopen: the picker should highlight the current pick (entry position 1), and a bare
+        // Enter must keep it — not reset to entry 0.
+        assert!(app.open_cdp_formant_picker());
+        let Some(Dialog::CdpParams { formant_picker: Some(picker), .. }) = &app.dialog else {
+            panic!("expected the picker open")
+        };
+        assert_eq!(picker.selected, 1, "should preselect the currently-picked buffer");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::FormantBufferRef { selected, .. }) = fields.first() else {
+            panic!("expected a FormantBufferRef field")
+        };
+        assert_eq!(*selected, Some(1), "a bare Enter on reopen must keep the current pick, not reset to entry 0");
+    }
+
+    /// Opening the standalone curve editor and pressing Enter without touching anything must
+    /// not dirty the curve or push a no-op undo step (FABLE-REVIEW FR-8).
+    #[test]
+    fn curve_editor_enter_with_no_change_does_not_dirty_or_push_history() {
+        let mut app = app_with_one_curve();
+        app.curves[0].dirty = false; // as if freshly saved
+        app.open_curve_editor(0);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.dialog.is_none(), "Enter should close the editor");
+        assert!(!app.curves[0].dirty, "a no-change Enter must not dirty the curve");
+        assert_eq!(app.curve_histories[0].last_label(), None, "a no-change Enter must not push an undo step");
     }
 }
 
