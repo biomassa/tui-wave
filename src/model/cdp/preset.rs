@@ -227,4 +227,21 @@ mod tests {
         std::fs::write(dir.0.join("proc.toml"), "not valid toml {{{").unwrap();
         assert!(load_presets_in(&dir.0, "proc", 1).is_empty());
     }
+
+    /// `ParamValue::FormantBufferRef` is the only *unit* variant in the externally-tagged
+    /// `ParamValue` enum — serde serializes it as a bare string, landing in the same TOML
+    /// array as the other variants' inline tables (a heterogeneous array). Verified the
+    /// `toml` crate accepts that mix on both ends; this pins it against a future
+    /// toml-crate/serde change.
+    #[test]
+    fn formant_buffer_ref_value_round_trips_through_a_preset_file() {
+        let dir = TempDir::new("formant_ref");
+        let preset = CdpPreset {
+            name: "probe".into(),
+            values: vec![ParamValue::FormantBufferRef, ParamValue::Number(2.0), ParamValue::Toggle(true)],
+        };
+        save_preset_in(&dir.0, "probe_proc", preset.clone());
+        let loaded = load_presets_in(&dir.0, "probe_proc", 3);
+        assert_eq!(loaded, vec![preset], "FormantBufferRef unit variant must round-trip through a preset file");
+    }
 }
