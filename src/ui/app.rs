@@ -4937,12 +4937,11 @@ impl App {
             // A `required_envelope` field has no valid constant representation to revert to
             // (see `ParamDef::required_envelope`'s doc comment), which is exactly why this
             // key is free to repurpose here as "use curve" instead — opens
-            // `EnvelopeCurvePicker` if there's at least one open curve to offer; a no-op
-            // otherwise, same as before this existed.
+            // `EnvelopeCurvePicker`. Opened even with zero open curves: the picker then shows
+            // "(no open curves)" (`render_envelope_curve_picker`), which is real feedback,
+            // where the previous silent no-op left the user stuck in the editor wondering why
+            // nothing happened.
             KeyCode::Char('c') if required_envelope => {
-                if self.curves.is_empty() {
-                    return;
-                }
                 let entries: Vec<usize> = (0..self.curves.len()).collect();
                 if let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() {
                     edit.curve_picker = Some(EnvelopeCurvePicker { entries, selected: 0 });
@@ -9921,13 +9920,13 @@ fn render_cdp_envelope_editor(
         Span::styled(":remove  ", label_style),
     ];
     // A required datafile field has no valid constant to revert to (`ParamDef.required_envelope`'s
-    // doc comment) — 'c' is repurposed there as "use curve" instead (only advertised when
-    // there's actually a curve to offer; otherwise it'd still be a no-op).
+    // doc comment) — 'c' is repurposed there as "use curve" instead. Advertised even with no
+    // open curves, since 'c' now opens the picker regardless (it reports "(no open curves)"),
+    // so the hint matches the key's actual availability.
+    hint_spans.push(Span::styled("c", hint_style));
     if !required_envelope {
-        hint_spans.push(Span::styled("c", hint_style));
         hint_spans.push(Span::styled(":constant  ", label_style));
-    } else if !curves.is_empty() {
-        hint_spans.push(Span::styled("c", hint_style));
+    } else {
         hint_spans.push(Span::styled(":use curve  ", label_style));
     }
     hint_spans.push(Span::styled("Enter", hint_style));
@@ -12440,8 +12439,12 @@ mod tests {
         assert_eq!(picker.entries, vec![0]);
     }
 
+    /// With no curves open, 'c' still opens the picker — now showing an empty entry list so
+    /// it renders "(no open curves)" as feedback, rather than silently doing nothing and
+    /// leaving the user stuck in the editor (user report: pressing the key appeared to do
+    /// nothing, with no on-screen explanation).
     #[test]
-    fn c_on_a_required_envelope_field_is_a_noop_with_no_curves_open() {
+    fn c_on_a_required_envelope_field_opens_an_empty_picker_with_no_curves_open() {
         let mut app = new_app(Some(doc(0.1, 44100)), None);
         assert!(app.curves.is_empty());
         open_focus_hold_with_field_focused(&mut app);
@@ -12450,7 +12453,8 @@ mod tests {
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
 
         let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
-        assert!(edit.curve_picker.is_none(), "no curves to offer, so 'c' should stay a no-op");
+        let picker = edit.curve_picker.as_ref().expect("'c' should open the picker even with no curves, for feedback");
+        assert!(picker.entries.is_empty(), "the empty entry list renders as \"(no open curves)\"");
     }
 
     /// Regression check: 'c' on a *non*-required_envelope automatable field must still mean
