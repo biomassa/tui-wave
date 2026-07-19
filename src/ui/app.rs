@@ -1785,6 +1785,12 @@ impl App {
                     input.backspace();
                 }
             }
+            // Shift+Tab: most terminals emit BackTab, but some send Tab with the SHIFT
+            // modifier under the kitty keyboard protocol — accept both, same as the main
+            // CdpParams dialog's `cycle_dialog_focus` path.
+            KeyCode::BackTab => {
+                params.focus = if params.focus == 0 { field_count } else { params.focus - 1 };
+            }
             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 params.focus = if params.focus == 0 { field_count } else { params.focus - 1 };
             }
@@ -1811,9 +1817,20 @@ impl App {
                     picker.params = None;
                 }
             }
-            KeyCode::Enter if params.focus == field_count => {
+            // Enter "activates" the focused row: a required-list field opens its editor (the
+            // natural way to *set* the list — the hint's "select"), any other field or the
+            // Apply row runs the transform. Matches the main CdpParams dialog, where Enter
+            // applies and `e` (still accepted here too) opens a sub-editor.
+            KeyCode::Enter => {
+                let focus = params.focus;
+                let is_list_field =
+                    focus < field_count && matches!(params.fields.get(focus), Some(CdpField::List { .. }));
                 let catalog_index = params.catalog_index;
-                self.run_curve_transform(catalog_index);
+                if is_list_field {
+                    self.open_curve_param_list_editor();
+                } else {
+                    self.run_curve_transform(catalog_index);
+                }
             }
             _ => {}
         }
@@ -3344,6 +3361,11 @@ impl App {
             }
             return;
         }
+        // Deferred actions for the curve-transform params form: the click arm below sets these
+        // while `self.dialog` is borrowed, then they run once the borrow ends (opening the
+        // list editor / running the transform both need `&mut self`).
+        let mut curve_open_list = false;
+        let mut curve_run: Option<usize> = None;
         match self.dialog.as_mut() {
             Some(Dialog::Gain { focused, tanh_clip, per_channel, is_stereo, .. }) => {
                 let rows = GainRows::new(*is_stereo, *per_channel);
@@ -3420,7 +3442,37 @@ impl App {
                     }
                 }
             }
+            // Curve-transform params form (`render_curve_transform_params`'s rects: one per
+            // field, then the Apply row). Clicking a field focuses it — a List field opens
+            // its editor, a Toggle flips — and clicking Apply runs, mirroring Enter's own
+            // behavior. Only while the list sub-editor isn't open (its own rects mean
+            // different rows).
+            Some(Dialog::CurveEditor(CurveEditorState {
+                picker: Some(CurveTransformPicker { params: Some(params), .. }),
+                ..
+            })) if params.list_edit.is_none() => {
+                let field_count = params.fields.len();
+                if row < field_count {
+                    params.focus = row;
+                    match params.fields.get_mut(row) {
+                        Some(CdpField::Toggle { on }) => *on = !*on,
+                        Some(CdpField::List { .. }) => curve_open_list = true,
+                        _ => {}
+                    }
+                } else if row == field_count {
+                    params.focus = field_count;
+                    curve_run = Some(params.catalog_index);
+                }
+            }
             _ => {}
+        }
+        // Deferred curve-params actions (see the locals' declaration above): now that the
+        // `self.dialog` borrow has ended, these can take `&mut self`.
+        if curve_open_list {
+            self.open_curve_param_list_editor();
+        }
+        if let Some(catalog_index) = curve_run {
+            self.run_curve_transform(catalog_index);
         }
     }
 
@@ -10393,8 +10445,8 @@ fn render_curve_transform_params(
     let apply_style = if params.focus == params.fields.len() { selected_style } else { base };
     lines.push(Line::from(Span::styled(" Apply", apply_style)));
 
-    let hint_line_1 = " Tab:next field  \u{2191}\u{2193}:nudge  space:toggle  e:edit list";
-    let hint_line_2 = " Enter:apply/select  Esc:back";
+    let hint_line_1 = " Tab/Shift+Tab:field  \u{2191}\u{2193}:nudge  space:toggle  e/Enter:edit list";
+    let hint_line_2 = " Enter:edit list / apply  click:select  Esc:back";
     let header_width = 4 + name_width + 20;
     let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()).max(header_width);
     let width = (content_width as u16 + 4).max(40).min(area.width);
@@ -10415,20 +10467,25 @@ fn render_curve_transform_params(
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    let field_count = params.fields.len();
     let error_style = Style::default().fg(theme::RED).bg(theme::SURFACE0);
     let mut out = lines;
     out.push(Line::raw(""));
     if let Some(error) = &params.error {
         out.push(Line::from(Span::styled(format!(" ! {error}"), error_style)));
     }
+    // First hint row's line index within `out`: field rows (field_count) + Apply row (1) +
+    // the blank (1) + an optional error line — used both to render and to place the trailing
+    // click rect that submits.
+    let hints_line_index = field_count + 2 + params.error.is_some() as usize;
     out.push(Line::from(vec![
-        Span::styled(" Tab", hint_style),
-        Span::styled(":next field  ", label_style),
+        Span::styled(" Tab/Shift+Tab", hint_style),
+        Span::styled(":field  ", label_style),
         Span::styled("\u{2191}\u{2193}", hint_style),
         Span::styled(":nudge  ", label_style),
         Span::styled("space", hint_style),
         Span::styled(":toggle  ", label_style),
-        Span::styled("e", hint_style),
+        Span::styled("e/Enter", hint_style),
         Span::styled(":edit list", label_style),
     ]));
     let range_text = match params.fields.get(params.focus) {
@@ -10437,14 +10494,30 @@ fn render_curve_transform_params(
     };
     out.push(Line::from(vec![
         Span::styled(" Enter", hint_style),
-        Span::styled(":apply/select  ", label_style),
+        Span::styled(":edit list / apply  ", label_style),
+        Span::styled("click", hint_style),
+        Span::styled(":select  ", label_style),
         Span::styled("Esc", hint_style),
         Span::styled(":back", label_style),
         Span::styled(range_text, dim_style),
     ]));
 
     frame.render_widget(Paragraph::new(out), inner);
-    Vec::new()
+
+    // Clickable rects: one per field row, then the Apply row, then a trailing hints rect the
+    // generic mouse handler treats as "submit" (`dialog_n_interactive = len - 1`). Clicking a
+    // field focuses it (a List field opens its editor, a Toggle flips) and clicking Apply
+    // runs — all in `handle_dialog_row_click`'s curve-params arm. Mirrors how every other
+    // mouse-aware dialog records its rows (Gain, ExportRegions, CdpBrowser).
+    let row_rect = |line_index: usize| Rect {
+        x: inner.x,
+        y: inner.y + line_index as u16,
+        width: inner.width,
+        height: 1,
+    };
+    let mut rects: Vec<Rect> = (0..=field_count).map(row_rect).collect(); // fields + Apply
+    rects.push(row_rect(hints_line_index)); // trailing submit row
+    rects
 }
 
 /// `CurveParamListEdit`'s popup — a fixed single-column list, the curve-params counterpart
@@ -13260,6 +13333,109 @@ mod tests {
         assert!(curve_transform_params(&app).list_edit.is_none(), "Enter should close the list editor");
         let Some(CdpField::List { values, .. }) = curve_transform_params(&app).fields.get(list_index) else { panic!() };
         assert_eq!(values, &vec![64.0]);
+    }
+
+    /// Enter on a focused required-list field opens its editor — the natural way to *set* it,
+    /// matching the hint's "select" and the main CdpParams paradigm (user report: Enter did
+    /// nothing on the Quantisation Set field, leaving no way to set it).
+    #[test]
+    fn enter_on_a_required_list_field_opens_its_editor() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        open_curve_transform_params_for(&mut app, "repitch_quantise_1");
+        let list_index = curve_transform_params(&app)
+            .fields
+            .iter()
+            .position(|f| matches!(f, CdpField::List { .. }))
+            .expect("quantise should have its q-set required_list field");
+        for _ in 0..list_index {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(curve_transform_params(&app).list_edit.is_some(), "Enter on the list field should open its editor");
+    }
+
+    /// Shift+Tab (emitted as `BackTab` by most terminals) navigates the params form
+    /// backward — previously the handler only caught `Tab`+SHIFT, so BackTab was dead (user
+    /// report: Shift+Tab did not work).
+    #[test]
+    fn backtab_navigates_the_curve_params_form_backward() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        open_curve_transform_params_for(&mut app, "repitch_quantise_1");
+        // focus starts at 0; BackTab from 0 wraps to the Apply row (== field count).
+        let field_count = curve_transform_params(&app).fields.len();
+        app.handle_dialog_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(curve_transform_params(&app).focus, field_count, "BackTab from the first field should wrap to Apply");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(curve_transform_params(&app).focus, field_count - 1, "another BackTab should step to the last field");
+    }
+
+    /// Clicking a required-list field row opens its editor and focuses it — the mouse
+    /// counterpart to Enter/`e` (user report: mouse did nothing in this dialog).
+    #[test]
+    fn clicking_a_required_list_field_opens_its_editor() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        open_curve_transform_params_for(&mut app, "repitch_quantise_1");
+        let field_count = curve_transform_params(&app).fields.len();
+        let list_index = curve_transform_params(&app)
+            .fields
+            .iter()
+            .position(|f| matches!(f, CdpField::List { .. }))
+            .unwrap();
+        // Normally set at render time: field rows + the Apply row are interactive, the
+        // trailing hints row is the submit rect.
+        app.dialog_n_interactive = field_count + 1;
+
+        app.handle_dialog_row_click(list_index, 0);
+
+        let params = curve_transform_params(&app);
+        assert_eq!(params.focus, list_index, "the clicked field should get focus");
+        let list_edit = params.list_edit.as_ref().expect("clicking a list field should open its editor");
+        assert_eq!(list_edit.field_index, list_index);
+    }
+
+    /// Clicking a Toggle field flips it (mouse counterpart to Space).
+    #[test]
+    fn clicking_a_toggle_field_flips_it() {
+        let mut app = app_with_one_curve();
+        app.open_curve_editor(0);
+        open_curve_transform_params_for(&mut app, "repitch_quantise_1");
+        let field_count = curve_transform_params(&app).fields.len();
+        let toggle_index = curve_transform_params(&app)
+            .fields
+            .iter()
+            .position(|f| matches!(f, CdpField::Toggle { .. }))
+            .unwrap();
+        app.dialog_n_interactive = field_count + 1;
+        let before = matches!(curve_transform_params(&app).fields[toggle_index], CdpField::Toggle { on: true });
+
+        app.handle_dialog_row_click(toggle_index, 0);
+
+        let after = matches!(curve_transform_params(&app).fields[toggle_index], CdpField::Toggle { on: true });
+        assert_ne!(before, after, "clicking a Toggle field should flip it");
+        assert_eq!(curve_transform_params(&app).focus, toggle_index, "and focus it");
+    }
+
+    /// Clicking the Apply row runs the transform (mouse counterpart to Enter on Apply). With
+    /// the required q-set list still unset, that surfaces the same inline validation error a
+    /// keyboard Apply would — proving the click reached `run_curve_transform`, not nothing.
+    #[test]
+    fn clicking_the_apply_row_runs_the_transform() {
+        let mut app = app_with_one_curve();
+        app.curves[0].binary_template = Some(b"fake template".to_vec());
+        app.open_curve_editor(0);
+        open_curve_transform_params_for(&mut app, "repitch_quantise_1");
+        let field_count = curve_transform_params(&app).fields.len();
+        app.dialog_n_interactive = field_count + 1;
+
+        app.handle_dialog_row_click(field_count, 0); // the Apply row
+
+        assert!(
+            curve_transform_params(&app).error.is_some(),
+            "clicking Apply with the required list unset should run validation and show its error"
+        );
     }
 
     #[test]
