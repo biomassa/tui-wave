@@ -46,6 +46,18 @@ pub struct FormantBuffer {
     /// Human-readable note for the read-only info popup (`Dialog::FormantInfo`) — e.g. the
     /// source buffer's name and the extraction settings used. Purely descriptive.
     pub source_label: String,
+    /// Where this buffer's timeline begins, in seconds, within the audio it was extracted
+    /// from — i.e. the extraction selection's start (0.0 for a whole-file extraction). A
+    /// `Formant` buffer's own time axis always starts at 0, so mapping a document cursor
+    /// position back onto it ("Freeze Snapshot at Cursor", `App::freeze_snapshot_at_cursor`)
+    /// needs this offset: `buffer_time = cursor_seconds − source_start_seconds`. Left 0.0 for
+    /// a `Snapshot` (a single frozen instant with no meaningful timeline).
+    pub source_start_seconds: f64,
+    /// The Buffers-panel name of the document this `Formant` buffer was extracted from, so
+    /// "Freeze Snapshot at Cursor" can tell whether the current document already has a formant
+    /// extraction to reuse (vs. needing to auto-extract). Empty for a loaded/`Snapshot` buffer
+    /// with no originating document.
+    pub source_document_name: String,
 }
 
 impl FormantBuffer {
@@ -54,9 +66,30 @@ impl FormantBuffer {
     /// formant buffer is purely an extraction result with no hand-editable representation at
     /// all (this module's own doc comments); re-extracting one costs one CDP run, not lost
     /// work, so there's nothing here worth building session persistence for until a real need
-    /// shows up.
+    /// shows up. `source_start_seconds` defaults to 0.0 — set it with `with_source_start` when
+    /// the buffer was extracted from a mid-file selection.
     pub fn new(kind: FormantBufferKind, name: impl Into<String>, bytes: Vec<u8>, source_label: impl Into<String>) -> Self {
-        FormantBuffer { kind, name: name.into(), bytes, source_label: source_label.into() }
+        FormantBuffer {
+            kind,
+            name: name.into(),
+            bytes,
+            source_label: source_label.into(),
+            source_start_seconds: 0.0,
+            source_document_name: String::new(),
+        }
+    }
+
+    /// Records where this buffer's timeline begins within its source audio (the extraction
+    /// selection's start, in seconds) — see `source_start_seconds`.
+    pub fn with_source_start(mut self, seconds: f64) -> Self {
+        self.source_start_seconds = seconds;
+        self
+    }
+
+    /// Records the originating document's Buffers-panel name — see `source_document_name`.
+    pub fn with_source_document(mut self, name: impl Into<String>) -> Self {
+        self.source_document_name = name.into();
+        self
     }
 }
 

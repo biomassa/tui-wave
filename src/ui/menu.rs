@@ -116,6 +116,7 @@ impl MenuBar {
                     entry("Extract Pitch Curve",        Action::ExtractPitchCurve,     ""),
                     entry("Load Pitch Curve...",         Action::LoadPitchCurve,        ""),
                     entry("Extract Formants",           Action::ExtractFormants,       ""),
+                    entry("Freeze Formant Snapshot at Cursor", Action::FreezeSnapshotAtCursor, ""),
                     entry("Configure CDP Directory...",  Action::ConfigureCdpDirectory, ""),
                 ],
             },
