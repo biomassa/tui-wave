@@ -73,6 +73,7 @@ pub enum Action {
     ExtractPitchCurve,
     LoadPitchCurve,
     ExtractFormants,
+    FreezeSnapshotAtCursor,
     // Panel/modal commands (mostly dispatched contextually, not via the global keymap).
     Noop,
     OpenSelected,
@@ -400,6 +401,7 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "ExtractPitchCurve" => Some(Action::ExtractPitchCurve),
         "LoadPitchCurve" => Some(Action::LoadPitchCurve),
         "ExtractFormants" => Some(Action::ExtractFormants),
+        "FreezeSnapshotAtCursor" => Some(Action::FreezeSnapshotAtCursor),
         _ => None,
     }
 }

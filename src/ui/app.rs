@@ -676,12 +676,6 @@ enum Dialog {
     /// since formant data has no hand-editable representation (see `model::formant`'s doc
     /// comments). Esc/Enter both close it, same as `Info`.
     FormantInfo { buffer_index: usize },
-    /// "Freeze snapshot" ('f' inside `Dialog::FormantInfo`, only for a `[Formant]` buffer —
-    /// there's nothing further to freeze from an already-frozen `[Snapshot]`) — prompts for
-    /// the time (in seconds) to freeze, then runs `App::freeze_formant_snapshot`. Esc cancels
-    /// back to nothing (not back to `FormantInfo`, mirroring every other simple text prompt
-    /// in this app, e.g. `RenameBuffer`).
-    FreezeFormantSnapshot { buffer_index: usize, input: TextInput },
 }
 
 /// The second-input picker state for a dual-input CDP process (combine/morph/vocode/...):
@@ -1430,13 +1424,15 @@ pub struct App {
     /// points/`binary_template` via `CurveHistory::apply` (labeled `transform_title`) rather
     /// than creating a new curve the way extraction does.
     cdp_pending_curve_transform: Option<(usize, String)>,
-    /// `Some(source_name)` while an "Extract Formants" job (`App::extract_formants`,
-    /// CDP-Ext-Plan.md Phase 5) is in flight — same rationale as
+    /// `Some((source_name, source_start_seconds))` while an "Extract Formants" job
+    /// (`App::extract_formants`, CDP-Ext-Plan.md Phase 5) is in flight — same rationale as
     /// `cdp_pending_curve_extraction`: no `ProcessDef`/`CdpParams` session behind this
     /// action (it isn't a catalog process), so the result becomes a new
     /// `App.formant_buffers` entry (`FormantBufferKind::Formant`) rather than being spliced
-    /// into a `Document`. `tick_cdp` checks this alongside `cdp_pending_curve_extraction`.
-    cdp_pending_formant_extraction: Option<String>,
+    /// into a `Document`. `source_start_seconds` (the extraction selection's start) is
+    /// carried through so the finished buffer can record it for "Freeze Snapshot at Cursor".
+    /// `tick_cdp` checks this alongside `cdp_pending_curve_extraction`.
+    cdp_pending_formant_extraction: Option<(String, f64)>,
     /// `Some(source_buffer_index)` while a "freeze snapshot" job (`App::freeze_formant_snapshot`,
     /// `oneform get`) is in flight — the index of the `[Formant]` buffer being frozen, kept
     /// only so the completed job's result can be named after it. Same no-`CdpParams`-session
@@ -1444,6 +1440,12 @@ pub struct App {
     /// `App.formant_buffers` entry (`FormantBufferKind::Snapshot`) rather than replacing
     /// anything in place.
     cdp_pending_snapshot_freeze: Option<usize>,
+    /// `Some(cursor_seconds)` when "Freeze Snapshot at Cursor" had to auto-extract formants
+    /// first (the current document had no `[Formant]` buffer yet) — the absolute document
+    /// cursor time captured at invocation, so `tick_cdp` can chain the freeze onto the fresh
+    /// buffer the moment the extraction lands, instead of making the user run Extract Formants
+    /// by hand. Cleared whether the extraction succeeds or fails.
+    freeze_at_cursor_after_extract: Option<f64>,
 }
 
 /// Context for the CDP job currently running in `cdp_runner`, stashed when it's submitted
@@ -1596,6 +1598,7 @@ impl App {
             cdp_pending_curve_transform: None,
             cdp_pending_formant_extraction: None,
             cdp_pending_snapshot_freeze: None,
+            freeze_at_cursor_after_extract: None,
         }
     }
 
@@ -1678,19 +1681,6 @@ impl App {
         self.dialog = Some(Dialog::FormantInfo { buffer_index: formant_index });
     }
 
-    /// 'f' inside `Dialog::FormantInfo` — opens the "freeze snapshot" time prompt for a
-    /// `[Formant]` buffer (CDP-Ext-Plan.md Phase 5's `oneform get`). Returns `false` (no-op)
-    /// for a `[Snapshot]` buffer or any other active dialog, mirroring
-    /// `open_cdp_formant_picker`'s own "not applicable here" shape.
-    fn open_freeze_snapshot_prompt(&mut self) -> bool {
-        let Some(Dialog::FormantInfo { buffer_index }) = self.dialog else { return false };
-        let Some(buffer) = self.formant_buffers.get(buffer_index) else { return false };
-        if buffer.kind != crate::model::formant::FormantBufferKind::Formant {
-            return false;
-        }
-        self.dialog = Some(Dialog::FreezeFormantSnapshot { buffer_index, input: TextInput::fresh("0.0".to_string()) });
-        true
-    }
 
     fn open_curve_editor(&mut self, curve_index: usize) {
         let Some(curve) = self.curves.get(curve_index) else { return };
@@ -2654,8 +2644,7 @@ impl App {
             | Dialog::RenameBuffer { input, .. }
             | Dialog::RenameFile { input, .. }
             | Dialog::SaveCurveAs { input, .. }
-            | Dialog::LoadCurve { input }
-            | Dialog::FreezeFormantSnapshot { input, .. } => Some(input),
+            | Dialog::LoadCurve { input } => Some(input),
             Dialog::Gain { input, right_input, focused, per_channel, is_stereo, .. } => {
                 let rows = GainRows::new(*is_stereo, *per_channel);
                 let f = *focused;
@@ -2716,7 +2705,6 @@ impl App {
                 c.is_ascii_digit() || c == '-' || c == '.'
             }
             Some(Dialog::Resample { .. }) => c.is_ascii_digit(),
-            Some(Dialog::FreezeFormantSnapshot { .. }) => c.is_ascii_digit() || c == '.',
             Some(Dialog::MixToMono { .. }) => {
                 c.is_ascii_digit() || matches!(c, '-' | '.' | 'i' | 'n' | 'f')
             }
@@ -2855,34 +2843,6 @@ impl App {
                 }
                 Some(Dialog::LoadCurve { input }) => {
                     self.load_curve_from_path(input.value().trim());
-                }
-                Some(Dialog::FreezeFormantSnapshot { buffer_index, input }) => {
-                    // Validate inline rather than silently discarding a bad time or letting
-                    // an out-of-range one surface as a raw CDP error (FABLE-REVIEW FR-7). The
-                    // buffer's duration is the same value the info popup this prompt opened
-                    // from already displays.
-                    let duration = self
-                        .formant_buffers
-                        .get(buffer_index)
-                        .and_then(|b| crate::model::formant::read_formant_duration_secs(&b.bytes));
-                    match input.value().trim().parse::<f64>() {
-                        Ok(time_secs) if time_secs >= 0.0 && !duration.is_some_and(|d| time_secs >= d) => {
-                            self.freeze_formant_snapshot(buffer_index, time_secs);
-                        }
-                        Ok(_) => {
-                            let range = duration
-                                .map(|d| format!("between 0 and {d:.3}"))
-                                .unwrap_or_else(|| "0 or greater".to_string());
-                            self.dialog = Some(Dialog::Info {
-                                message: format!("Freeze time must be {range} seconds."),
-                            });
-                        }
-                        Err(_) => {
-                            self.dialog = Some(Dialog::Info {
-                                message: "Enter a freeze time in seconds (e.g. 0.5).".into(),
-                            });
-                        }
-                    }
                 }
                 Some(Dialog::MixToMono { inputs, tanh_clip, .. }) => {
                     let inputs_snapshot = inputs.clone();
@@ -3203,22 +3163,6 @@ impl App {
                 if !self.open_cdp_formant_picker() && self.dialog_accepts('b') {
                     if let Some(input) = self.dialog_input() {
                         input.insert('b');
-                    }
-                    self.refresh_cdp_browser_filter();
-                }
-            }
-            // 'f' inside the read-only Formant Info popup opens the "freeze snapshot" time
-            // prompt (CDP-Ext-Plan.md Phase 5's `oneform get`) — only for a `[Formant]`
-            // buffer, never a `[Snapshot]` (there's nothing further to freeze from an
-            // already-frozen instant). A no-op everywhere else, same "free to repurpose"
-            // rationale as 'e'/'b' above (`Dialog::FormantInfo` has no typed input at all —
-            // `dialog_input` returns `None` for it — so this never collides with typing).
-            KeyCode::Char('f')
-                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                if !self.open_freeze_snapshot_prompt() && self.dialog_accepts('f') {
-                    if let Some(input) = self.dialog_input() {
-                        input.insert('f');
                     }
                     self.refresh_cdp_browser_filter();
                 }
@@ -5628,7 +5572,11 @@ impl App {
             }
         }
 
-        self.cdp_pending_formant_extraction = Some(self.buffer_name(idx));
+        // The buffer's timeline starts at the extraction selection's start, in seconds —
+        // recorded on the finished buffer so "Freeze Snapshot at Cursor" can map a document
+        // cursor position back onto it (`freeze_snapshot_at_cursor`).
+        let source_start_seconds = range.0 as f64 / doc.sample_rate as f64;
+        self.cdp_pending_formant_extraction = Some((self.buffer_name(idx), source_start_seconds));
         self.cdp_runner.submit(crate::cdp::Job {
             id: job_id,
             cdp_dir,
@@ -5687,6 +5635,57 @@ impl App {
             started: std::time::Instant::now(),
             purpose: crate::cdp::JobPurpose::Apply,
         });
+    }
+
+    /// Index of the `[Formant]` buffer extracted from the document named `document_name`, if
+    /// one is open — how "Freeze Snapshot at Cursor" decides whether the current document
+    /// already has an extraction to reuse (vs. needing to auto-extract).
+    fn formant_buffer_for_document(&self, document_name: &str) -> Option<usize> {
+        use crate::model::formant::FormantBufferKind::Formant;
+        self.formant_buffers
+            .iter()
+            .position(|b| b.kind == Formant && b.source_document_name == document_name)
+    }
+
+    /// "Freeze Formant Snapshot at Cursor" (CDP menu) — freezes a `[Snapshot]` at the moment
+    /// the waveform's insertion point (cursor) sits at, with no manual steps: if the current
+    /// document already has a `[Formant]` extraction it's reused; otherwise Extract Formants
+    /// runs automatically and the freeze is chained onto its result (`tick_cdp`). The cursor
+    /// is a position in the *document*; the formant buffer's own timeline starts at its
+    /// extraction point (`source_start_seconds`), so the buffer-relative time is
+    /// `cursor_seconds − source_start_seconds`, clamped inside the buffer's duration.
+    fn freeze_snapshot_at_cursor(&mut self) {
+        let idx = self.active_document;
+        let Some(doc) = self.documents.get(idx) else {
+            self.dialog = Some(Dialog::Info { message: "Open an audio file first.".into() });
+            return;
+        };
+        let cursor_seconds = doc.cursor as f64 / doc.sample_rate.max(1) as f64;
+        let document_name = self.buffer_name(idx);
+
+        if let Some(target) = self.formant_buffer_for_document(&document_name) {
+            let buffer = &self.formant_buffers[target];
+            let duration = crate::model::formant::read_formant_duration_secs(&buffer.bytes);
+            let time = Self::snapshot_time_for_cursor(cursor_seconds, buffer.source_start_seconds, duration);
+            self.freeze_formant_snapshot(target, time);
+        } else {
+            // No formants for this document yet — extract them, and freeze onto the fresh
+            // buffer once it lands (`tick_cdp`'s `freeze_at_cursor_after_extract` chain).
+            self.freeze_at_cursor_after_extract = Some(cursor_seconds);
+            self.extract_formants();
+        }
+    }
+
+    /// Maps a document cursor position (seconds) onto a formant buffer's own timeline: shift
+    /// by the buffer's extraction start, floor at 0, and (when the duration is known) keep it
+    /// strictly inside the buffer — `oneform get` won't extract at/after the very end. Pure,
+    /// so the offset+clamp is unit-testable without a real CDP run.
+    fn snapshot_time_for_cursor(cursor_seconds: f64, source_start_seconds: f64, duration: Option<f64>) -> f64 {
+        let time = (cursor_seconds - source_start_seconds).max(0.0);
+        match duration {
+            Some(d) if d > 0.0 => time.min((d - 0.001).max(0.0)),
+            _ => time,
+        }
     }
 
     /// Drops the preview audition engine, if any — mirrors `stop_audition`. Called whenever
@@ -5803,16 +5802,20 @@ impl App {
                         };
                         continue;
                     }
-                    if let Some(source_name) = self.cdp_pending_formant_extraction.take() {
+                    if let Some((source_name, source_start_seconds)) = self.cdp_pending_formant_extraction.take() {
                         self.dialog = match result {
                             Ok(output) => match output.formant_buffer_bytes {
                                 Some(bytes) if !bytes.is_empty() => {
-                                    self.formant_buffers.push(crate::model::formant::FormantBuffer::new(
-                                        crate::model::formant::FormantBufferKind::Formant,
-                                        format!("{source_name} formants"),
-                                        bytes,
-                                        format!("Extracted from {source_name}"),
-                                    ));
+                                    self.formant_buffers.push(
+                                        crate::model::formant::FormantBuffer::new(
+                                            crate::model::formant::FormantBufferKind::Formant,
+                                            format!("{source_name} formants"),
+                                            bytes,
+                                            format!("Extracted from {source_name}"),
+                                        )
+                                        .with_source_start(source_start_seconds)
+                                        .with_source_document(source_name.clone()),
+                                    );
                                     None
                                 }
                                 _ => Some(Dialog::Info {
@@ -5825,6 +5828,25 @@ impl App {
                                 scroll: 0,
                             }),
                         };
+                        // Auto-chain: "Freeze Snapshot at Cursor" that had to extract first
+                        // freezes the moment the fresh buffer lands (no manual second step).
+                        // Only when the extraction actually produced a buffer (dialog cleared
+                        // to `None`); an extraction error already shows and drops the chain.
+                        if let Some(cursor_seconds) = self.freeze_at_cursor_after_extract.take() {
+                            if self.dialog.is_none() {
+                                if let Some(new_index) = self.formant_buffers.len().checked_sub(1) {
+                                    let buffer = &self.formant_buffers[new_index];
+                                    let duration =
+                                        crate::model::formant::read_formant_duration_secs(&buffer.bytes);
+                                    let time = Self::snapshot_time_for_cursor(
+                                        cursor_seconds,
+                                        buffer.source_start_seconds,
+                                        duration,
+                                    );
+                                    self.freeze_formant_snapshot(new_index, time);
+                                }
+                            }
+                        }
                         continue;
                     }
                     if let Some(source_index) = self.cdp_pending_snapshot_freeze.take() {
@@ -7799,6 +7821,11 @@ impl App {
             return;
         }
 
+        if action == Action::FreezeSnapshotAtCursor {
+            self.freeze_snapshot_at_cursor();
+            return;
+        }
+
         if action == Action::NewFromLeft || action == Action::NewFromRight {
             let channel_idx = if action == Action::NewFromLeft { 0 } else { 1 };
             let result = self.active_doc().and_then(|d| {
@@ -7932,7 +7959,8 @@ impl App {
             | Action::ConfigureCdpDirectory
             | Action::ExtractPitchCurve
             | Action::LoadPitchCurve
-            | Action::ExtractFormants => unreachable!(),
+            | Action::ExtractFormants
+            | Action::FreezeSnapshotAtCursor => unreachable!(),
             // Cursor movement is identical whether or not it extends a selection; the
             // selection side-effect is applied in the second match below.
             Action::MoveCursorLeft | Action::ExtendSelectionLeft => {
@@ -9345,9 +9373,6 @@ fn render_dialog(
         Dialog::RenameFile { input, .. } => ("Rename File", " New name: ".into(), Some(input), " ".into()),
         Dialog::SaveCurveAs { input, .. } => ("Save Curve", " File name: ".into(), Some(input), " ".into()),
         Dialog::LoadCurve { input } => ("Load Pitch Curve", " Path: ".into(), Some(input), " ".into()),
-        Dialog::FreezeFormantSnapshot { input, .. } => {
-            ("Freeze Snapshot", " Time (s): ".into(), Some(input), " ".into())
-        }
         Dialog::Gain { .. }
         | Dialog::FadeIn { .. }
         | Dialog::FadeOut { .. }
@@ -11672,8 +11697,27 @@ fn render_formant_info_dialog(
         .map(|s| format!("{s:.3} s"))
         .unwrap_or_else(|| "(unknown)".to_string());
 
+    let row = |label: &'static str, value: String| {
+        Line::from(vec![Span::styled(format!(" {label:<9}", ), dim_style), Span::styled(value, base)])
+    };
+    // Read-only — freezing a snapshot is the "Freeze Formant Snapshot at Cursor" CDP menu
+    // action now, not a key here.
+    let lines = vec![
+        Line::raw(""),
+        row("Name", buffer.name.clone()),
+        row("Kind", buffer.kind.tag().to_string()),
+        row("Source", buffer.source_label.clone()),
+        row("Duration", duration),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(" Enter", hint_style),
+            Span::styled("/Esc:close", label_style),
+        ]),
+    ];
+
+    // Height sized to fit every line + both borders, so nothing is clipped off the bottom.
     let width = 50u16.min(area.width);
-    let height = 8u16.min(area.height);
+    let height = (lines.len() as u16 + 2).min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -11681,31 +11725,12 @@ fn render_formant_info_dialog(
         height,
     };
     frame.render_widget(ratatui::widgets::Clear, popup);
-    let close_line = Line::from(vec![
-        Span::styled(" Enter", hint_style),
-        Span::styled("/Esc:close", label_style),
-    ]);
-    let row = |label: &'static str, value: String| {
-        Line::from(vec![Span::styled(format!(" {label:<9}", ), dim_style), Span::styled(value, base)])
-    };
     let block = Block::default()
         .title("Formant Info")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::raw(""),
-            row("Name", buffer.name.clone()),
-            row("Kind", buffer.kind.tag().to_string()),
-            row("Source", buffer.source_label.clone()),
-            row("Duration", duration),
-            Line::raw(""),
-            close_line,
-        ])
-        .block(block),
-        popup,
-    );
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
     let row_w = popup.width.saturating_sub(2);
     vec![Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 }]
 }
@@ -14796,7 +14821,7 @@ mod tests {
     #[test]
     fn formant_extraction_apply_adds_a_new_formant_buffer() {
         let mut app = new_app(Some(doc(0.1, 4)), None);
-        app.cdp_pending_formant_extraction = Some("mysine.wav".into());
+        app.cdp_pending_formant_extraction = Some(("mysine.wav".into(), 1.5));
         app.dialog = Some(Dialog::CdpRunning {
             job_id: 7,
             title: "Extract Formants".into(),
@@ -14846,6 +14871,10 @@ mod tests {
         assert_eq!(app.formant_buffers[0].kind, crate::model::formant::FormantBufferKind::Formant);
         assert_eq!(app.formant_buffers[0].name, "mysine.wav formants");
         assert_eq!(app.formant_buffers[0].bytes, b"fake formant bytes".to_vec());
+        assert_eq!(
+            app.formant_buffers[0].source_start_seconds, 1.5,
+            "the extraction selection's start must be recorded, for Freeze Snapshot at Cursor"
+        );
         assert_eq!(app.documents.len(), 1, "a formant result must never become a new audio buffer");
     }
 
@@ -14913,63 +14942,133 @@ mod tests {
         assert_eq!(app.formant_buffers[1].bytes, b"fake snapshot bytes".to_vec());
     }
 
-    /// 'f' inside `Dialog::FormantInfo` opens the freeze-snapshot time prompt only for a
-    /// `[Formant]` buffer — a `[Snapshot]` buffer has nothing further to freeze from (it's
-    /// already a frozen instant), so 'f' there must be a no-op.
+    /// The extract-then-freeze chain: when an "Extract Formants" job finishes while
+    /// `freeze_at_cursor_after_extract` is armed, `tick_cdp` freezes onto the fresh buffer in
+    /// the same pass (proven by the flag being consumed once the extraction lands). Uses a
+    /// fake `/bin/sh` step for the extraction, same precedent as the extraction test above.
     #[test]
-    fn freeze_snapshot_prompt_only_opens_for_a_formant_buffer_not_a_snapshot() {
+    fn extract_then_freeze_chain_consumes_the_armed_flag() {
         let mut app = new_app(Some(doc(0.1, 4)), None);
-        app.formant_buffers.push(crate::model::formant::FormantBuffer::new(
-            crate::model::formant::FormantBufferKind::Snapshot,
-            "a snapshot",
-            vec![],
-            "test",
-        ));
-        app.dialog = Some(Dialog::FormantInfo { buffer_index: 0 });
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
-        assert!(
-            matches!(app.dialog, Some(Dialog::FormantInfo { .. })),
-            "'f' on a Snapshot buffer should be a no-op, not open the freeze prompt"
-        );
+        app.cdp_pending_formant_extraction = Some(("mysine.wav".into(), 0.0));
+        app.freeze_at_cursor_after_extract = Some(0.05); // armed by freeze_snapshot_at_cursor
+        app.dialog = Some(Dialog::CdpRunning {
+            job_id: 11,
+            title: "Extract Formants".into(),
+            step_label: String::new(),
+            step_index: 0,
+            step_total: 1,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+        let planned = crate::model::cdp::pipeline::PlannedJob {
+            steps: vec![crate::model::cdp::pipeline::Invocation {
+                bin: "sh".into(),
+                args: vec!["-c".into(), "printf 'fake formant bytes' > out.for".into()],
+                label: "fake formants get".into(),
+                expected_output: "out.for".into(),
+            }],
+            input_files: Vec::new(),
+            output_files: Vec::new(),
+            glob_output: None,
+            output_curve: None,
+            output_curve_binary_template: None,
+            output_formant_buffer: Some("out.for".into()),
+            brk_files: Vec::new(),
+            binary_input_files: Vec::new(),
+            deferred_window_params: Vec::new(),
+            needs_simple_wav_input: false,
+        };
+        app.cdp_runner.submit(crate::cdp::Job {
+            id: 11,
+            cdp_dir: std::path::PathBuf::from("/bin"),
+            planned,
+            inputs: Vec::new(),
+            input_sample_rate: 44100,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
 
-        app.formant_buffers.push(crate::model::formant::FormantBuffer::new(
-            crate::model::formant::FormantBufferKind::Formant,
-            "a formant curve",
-            vec![],
-            "test",
-        ));
-        app.dialog = Some(Dialog::FormantInfo { buffer_index: 1 });
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.formant_buffers.is_empty() && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert_eq!(app.formant_buffers.len(), 1, "extraction added the formant buffer");
         assert!(
-            matches!(app.dialog, Some(Dialog::FreezeFormantSnapshot { buffer_index: 1, .. })),
-            "'f' on a Formant buffer should open the freeze prompt"
+            app.freeze_at_cursor_after_extract.is_none(),
+            "the chain must fire (and consume the flag) the moment the extraction lands"
         );
     }
 
-    /// An empty or unparseable freeze time must surface a message and submit no job, rather
-    /// than silently closing the prompt (FABLE-REVIEW FR-7). (`dialog_accepts` already
-    /// restricts typing to digits/`.`, so these are the realistic bad inputs; an
-    /// out-of-range numeric time additionally needs a real formant file's duration, exercised
-    /// by `model::formant`'s own duration tests.)
+    /// `snapshot_time_for_cursor` maps a document cursor onto a formant buffer's own timeline:
+    /// offset by the extraction start, floored at 0, clamped strictly inside the duration.
     #[test]
-    fn freeze_snapshot_rejects_empty_or_unparseable_time_without_submitting() {
-        let mut app = new_app(Some(doc(0.1, 4)), None);
-        app.formant_buffers.push(crate::model::formant::FormantBuffer::new(
-            crate::model::formant::FormantBufferKind::Formant,
-            "f",
-            b"not a real formant file".to_vec(), // duration unknown → only the parse check applies
-            "test",
-        ));
+    fn snapshot_time_for_cursor_offsets_and_clamps() {
+        // Whole-file extraction (start 0): cursor time passes straight through.
+        assert_eq!(App::snapshot_time_for_cursor(0.7, 0.0, Some(2.0)), 0.7);
+        // Extracted from a selection starting at 0.5s: buffer time is cursor − 0.5.
+        assert!((App::snapshot_time_for_cursor(0.7, 0.5, Some(2.0)) - 0.2).abs() < 1e-9);
+        // Cursor before the extraction start floors to 0.
+        assert_eq!(App::snapshot_time_for_cursor(0.3, 0.5, Some(2.0)), 0.0);
+        // Cursor past the buffer end clamps to just inside its duration.
+        assert!((App::snapshot_time_for_cursor(100.0, 0.0, Some(2.0)) - (2.0 - 0.001)).abs() < 1e-9);
+        // Unknown duration: no clamp, just the offset floor.
+        assert_eq!(App::snapshot_time_for_cursor(5.0, 1.0, None), 4.0);
+    }
 
-        app.dialog = Some(Dialog::FreezeFormantSnapshot { buffer_index: 0, input: TextInput::fresh(String::new()) });
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(app.dialog, Some(Dialog::Info { .. })), "an empty time must show a message");
-        assert!(app.cdp_pending_snapshot_freeze.is_none(), "no freeze job should be submitted for an empty time");
+    /// `formant_buffer_for_document` finds the `[Formant]` buffer extracted from a given
+    /// document (matched by name), ignoring `[Snapshot]`s and buffers from other documents —
+    /// how "Freeze Snapshot at Cursor" decides whether to reuse or auto-extract.
+    #[test]
+    fn formant_buffer_for_document_matches_by_source_document_name() {
+        use crate::model::formant::{FormantBuffer, FormantBufferKind};
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.formant_buffers.push(
+            FormantBuffer::new(FormantBufferKind::Snapshot, "snap", vec![], "t").with_source_document("a.wav"),
+        );
+        app.formant_buffers.push(
+            FormantBuffer::new(FormantBufferKind::Formant, "other", vec![], "t").with_source_document("other.wav"),
+        );
+        app.formant_buffers.push(
+            FormantBuffer::new(FormantBufferKind::Formant, "mine", vec![], "t").with_source_document("mine.wav"),
+        );
 
-        app.dialog = Some(Dialog::FreezeFormantSnapshot { buffer_index: 0, input: TextInput::fresh("1.2.3".to_string()) });
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(app.dialog, Some(Dialog::Info { .. })), "an unparseable time must show a message");
-        assert!(app.cdp_pending_snapshot_freeze.is_none());
+        assert_eq!(app.formant_buffer_for_document("mine.wav"), Some(2));
+        assert_eq!(app.formant_buffer_for_document("a.wav"), None, "a snapshot is not a reusable formant extraction");
+        assert_eq!(app.formant_buffer_for_document("nope.wav"), None);
+    }
+
+    /// "Freeze Snapshot at Cursor" with no formants for the current document yet auto-runs
+    /// Extract Formants (arming the chain) instead of forcing the user to do it manually.
+    /// Verified structurally without a real CDP run: the extraction submit path (invalid CDP
+    /// dir in tests) shows CdpSetup, but the chain flag must be armed first.
+    #[test]
+    fn freeze_snapshot_at_cursor_auto_extracts_when_no_formants_exist() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        assert!(app.formant_buffers.is_empty());
+        app.handle_action(Action::FreezeSnapshotAtCursor);
+        assert!(
+            app.freeze_at_cursor_after_extract.is_some(),
+            "with no formants yet, the action must arm the extract-then-freeze chain, not give up"
+        );
+    }
+
+    /// Reuse path: with a `[Formant]` buffer already extracted from the current document, the
+    /// action freezes directly and does NOT re-extract (the chain flag stays clear). Uses an
+    /// invalid CDP dir so no real job runs — only the branch choice is asserted.
+    #[test]
+    fn freeze_snapshot_at_cursor_reuses_an_existing_extraction() {
+        use crate::model::formant::{FormantBuffer, FormantBufferKind};
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        let name = app.buffer_name(0);
+        app.formant_buffers.push(
+            FormantBuffer::new(FormantBufferKind::Formant, "f", b"bytes".to_vec(), "t").with_source_document(name),
+        );
+        app.handle_action(Action::FreezeSnapshotAtCursor);
+        assert!(
+            app.freeze_at_cursor_after_extract.is_none(),
+            "an existing extraction should be reused, not re-extracted"
+        );
     }
 
     /// `App::splice_formant_buffer_refs` (`cdp_run`'s `FormantBufferRef` resolution): a
