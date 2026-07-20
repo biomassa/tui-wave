@@ -12275,7 +12275,7 @@ mod tests {
     #[test]
     fn cdp_process_action_opens_setup_when_dir_unset() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
-        assert_eq!(app.config.cdp_dir, "");
+        app.config.cdp_dir = String::new();
         app.handle_action(Action::CdpProcess);
         assert!(
             matches!(app.dialog, Some(Dialog::CdpSetup { .. })),
