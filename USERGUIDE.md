@@ -120,10 +120,11 @@ for what it is, full credits, and how to install or build it. tui-wave's built-i
 process definitions is adapted from [SoundThread](https://github.com/j-p-higgins/SoundThread)
 (MIT license, see `THIRD_PARTY_NOTICES.md`).
 
-**First run.** If no CDP directory is configured, the dialog asks for one — enter the path
-to the folder containing the CDP binaries (e.g. `pvoc`, `modify`, `blur`). You can change it
-later from **Options → Configure CDP Directory…**. The setting is saved in your config file
-(`cdp_dir`).
+**First run.** The CDP directory defaults to `~/cdp` (`~` resolved to your actual home
+directory at startup) — if that's where you unpacked or built CDP, no setup is needed. If it
+doesn't validate there, the dialog asks for one — enter the path to the folder containing the
+CDP binaries (e.g. `pvoc`, `modify`, `blur`). You can change it later from
+**Options → Configure CDP Directory…**. The setting is saved in your config file (`cdp_dir`).
 
 **Browsing.** A dedicated, fixed-size dialog (it doesn't resize as you scroll) lists every
 matching process with the highlighted one's description alongside it. Type to filter (matches

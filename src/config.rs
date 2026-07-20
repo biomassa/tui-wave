@@ -25,10 +25,12 @@ pub struct Config {
     /// where it renders correctly but feels slower than the text renderer), not as a gate
     /// to opt in. Has no effect at all on a terminal where graphics mode wasn't detected.
     pub graphics_mode: bool,
-    /// Path to the directory containing CDP (Composer's Desktop Project) binaries. Empty
-    /// when unset — the CDP process dialog prompts for it on first use rather than the menu
-    /// entry being conditionally disabled, matching this file's "never block startup on a
-    /// missing/invalid setting" philosophy. See `cdp::validate_cdp_dir`.
+    /// Path to the directory containing CDP (Composer's Desktop Project) binaries. Defaults
+    /// to `~/cdp` (see `default_cdp_dir`, `~` resolved against the real `$HOME` at startup,
+    /// not stored as a literal `~` — nothing downstream expands one) but still just a guess:
+    /// if it doesn't validate, the CDP process dialog prompts for the real path rather than
+    /// the menu entry being conditionally disabled, matching this file's "never block startup
+    /// on a missing/invalid setting" philosophy. See `cdp::validate_cdp_dir`.
     pub cdp_dir: String,
     /// Key bindings as `ActionName → [key-string, ...]`. Empty on first launch; the UI layer
     /// fills in all defaults (via `keymap::fill_missing_keybindings`) before building the
@@ -51,10 +53,22 @@ impl Default for Config {
             viewport_follows_playback: false,
             transient_threshold_db: 13.0,
             graphics_mode: true,
-            cdp_dir: String::new(),
+            cdp_dir: default_cdp_dir(),
             keybindings: HashMap::new(),
         }
     }
+}
+
+/// `~/cdp`, with `~` resolved against the real `$HOME` at startup — a plausible guess for
+/// where a user installed CDP, still validated (and re-prompted for if wrong) like any other
+/// `cdp_dir` value. Empty if `$HOME` can't be determined, so an unset config never blocks
+/// startup any more than before this default existed.
+fn default_cdp_dir() -> String {
+    std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(|home| format!("{home}/cdp"))
+        .unwrap_or_default()
 }
 
 impl Config {
@@ -154,6 +168,17 @@ mod tests {
         let toml_string = toml::to_string_pretty(&config).unwrap();
         let parsed: Config = toml::from_str(&toml_string).unwrap();
         assert_eq!(parsed, config);
+    }
+
+    /// Doesn't mutate `HOME` (many other tests build a `Config::default()` concurrently via
+    /// the real env var, so forcing it here would race them) — just checks the real,
+    /// already-set value resolves to `<home>/cdp`.
+    #[test]
+    fn default_cdp_dir_is_home_slash_cdp() {
+        match std::env::var("HOME").ok().filter(|h| !h.is_empty()) {
+            Some(home) => assert_eq!(default_cdp_dir(), format!("{home}/cdp")),
+            None => assert_eq!(default_cdp_dir(), ""),
+        }
     }
 
     #[test]

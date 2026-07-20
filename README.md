@@ -88,7 +88,9 @@ tui-wave includes a dialog-driven front-end (`Ctrl+P`, or **Process → CDP Proc
 [CDP](https://www.composersdesktop.com), a large suite of external, offline sound-transformation
 programs — spectral blurring, granulation, morphing, waveset distortion, time-stretching, and
 hundreds more. This is entirely optional: tui-wave works fully without it, and the feature simply
-stays unavailable (a first-use prompt explains why) until you configure a CDP directory.
+stays unavailable (a first-use prompt explains why) until you configure a CDP directory. The
+default binaries directory is `~/cdp` — if you unpack CDP there, it's picked up automatically
+with no setup prompt; anywhere else, just point the prompt at the real location.
 
 **About CDP.** Composer's Desktop Project was founded in 1986 in Yorkshire, UK by composers
 Andrew Bentley, Archer Endrich, Richard Orton, and Trevor Wishart, aiming to bring the kind of
@@ -128,9 +130,11 @@ it — download or build it yourself, then tell tui-wave where the binaries live
 - The older [CDP7](https://github.com/ComposersDesktop/CDP7) source builds the same way and is
   also compatible — tui-wave's process catalog doesn't depend on a specific CDP release.
 
-Then, in tui-wave, open the CDP dialog (`Ctrl+P`) — on first use it prompts for the directory
-containing the binaries; you can revisit it later via **Options → Configure CDP Directory…**.
-The path is saved to `cdp_dir` in your `config.toml`. See
+Then, in tui-wave, open the CDP dialog (`Ctrl+P`). tui-wave defaults `cdp_dir` to `~/cdp`
+(`~` resolved to your actual home directory at startup), so unpacking or building CDP straight
+into a `cdp` folder in your home directory needs no further setup. Anywhere else, the first-use
+prompt asks for the directory containing the binaries; you can revisit it later via
+**Options → Configure CDP Directory…**. The path is saved to `cdp_dir` in your `config.toml`. See
 [USERGUIDE.md](USERGUIDE.md#cdp-processes) for the full workflow: browsing, editing parameters,
 breakpoint automation, presets, preview/apply, and adding your own process definitions.
 
