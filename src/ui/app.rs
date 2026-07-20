@@ -157,6 +157,17 @@ fn cdp_error_lines(err: &crate::cdp::CdpError) -> Vec<String> {
     }
 }
 
+/// Which editor/picker a never-configured ("unset") field needs before it can run — Enter
+/// in `Dialog::CdpParams`'s main handler opens this instead of running Apply/Preview when
+/// the focused field is unset (see that handler's doc comment). Only the three field kinds
+/// with a genuine "unset" state are represented — `Table`/`MarkerTimeList`/`HiliteBand`
+/// always start seeded (`CdpField::Table`'s doc comment), so they're never unset.
+enum CdpFieldSetupKind {
+    Envelope,
+    List,
+    FormantBuffer,
+}
+
 /// One editable field in the `Dialog::CdpParams` form, mirroring a `ParamKind` from the
 /// catalog. Built fresh (from each param's default value) whenever `CdpParams` opens for a
 /// process, or loaded from a saved preset (`CdpField::from_value`).
@@ -443,6 +454,66 @@ fn is_cdp_table_edit_char(c: char) -> bool {
     c.is_ascii_digit() || c == '-' || c == '.'
 }
 
+/// A curve-in/curve-out process (e.g. Repitch Exaggerate/Smooth/...) — plannable only via
+/// `pipeline::plan_curve_transform_job` against an open `PitchCurve`'s binary template, never
+/// against a `Document`'s audio (`plan_job` itself rejects `IoKind::Curve` outright — see its
+/// own doc comment). The CDP browser (`App::cdp_filter_entries`) excludes these entirely,
+/// since Apply/Preview there always targets the active document and would fail immediately;
+/// the standalone curve editor's own 't' picker (`App::open_curve_transform_picker`) is the
+/// only place these are ever reachable.
+fn is_curve_only_process(p: &crate::model::cdp::ProcessDef) -> bool {
+    p.input == crate::model::cdp::IoKind::Curve && p.output == crate::model::cdp::IoKind::Curve
+}
+
+/// A `required_envelope` `Number` param that's genuinely a *pitch* envelope (an actual Hz
+/// curve — the `psow` family's "Pitch Envelope" fields, `pitch altharms`/`octmove`'s
+/// "Pitchfile") rather than some other required-envelope shape entirely (a duration/event
+/// curve like `focus_hold`'s Hold Times or `rotor`'s Event Envelope, or `fractal`'s
+/// arbitrary Shape) — matched by the exact, deliberately consistent field name the catalog
+/// already uses for this one specific meaning (confirmed against every `required_envelope`
+/// entry in the catalog: no non-pitch field uses either name). Backs the CDP browser's
+/// "pitch curve" badge — see that badge's own doc comment for why the distinction matters.
+fn is_pitch_curve_param(param: &crate::model::cdp::ParamDef) -> bool {
+    param.required_envelope
+        && matches!(param.kind, crate::model::cdp::ParamKind::Number { .. })
+        && matches!(param.name.as_str(), "Pitch Envelope" | "Pitchfile")
+}
+
+/// Capability badges shown next to a process's name in the CDP browser (`render_
+/// cdp_browser_dialog`) — a heads-up about mechanics beyond "type some numbers and Apply",
+/// in the order a user would need to act on them: pick a second buffer, pick a curve/
+/// formant/snapshot. Extends the pre-existing ">1 inputs" note (dual-input processes) with
+/// three more, one per non-obvious param shape a process can require:
+/// - "pitch curve": has a `FormantBufferRef`-free Hz-pitch `required_envelope` field
+///   (`is_pitch_curve_param`) — fillable from an open `PitchCurve` via the envelope
+///   editor's 'c' picker, or hand-drawn.
+/// - "formants": has a `FormantBufferRef { buffer_kind: Formant, .. }` field — needs an
+///   open `[Formant]` buffer (Extract Formants) to pick from via 'b'.
+/// - "snapshot": has a `FormantBufferRef { buffer_kind: Snapshot, .. }` field — needs an
+///   open `[Snapshot]` buffer (Freeze Formant Snapshot at Cursor) to pick from via 'b'.
+///
+/// A process could in principle show more than one (none currently do, but nothing here
+/// assumes otherwise) — all returned in this fixed order so the badge order never depends
+/// on catalog param order.
+fn cdp_process_badges(p: &crate::model::cdp::ProcessDef) -> Vec<&'static str> {
+    use crate::model::cdp::ParamKind;
+    use crate::model::formant::FormantBufferKind;
+    let mut badges = Vec::new();
+    if matches!(p.input, crate::model::cdp::IoKind::DualWav | crate::model::cdp::IoKind::DualAna) {
+        badges.push(">1 inputs");
+    }
+    if p.params.iter().any(is_pitch_curve_param) {
+        badges.push("pitch curve");
+    }
+    if p.params.iter().any(|param| matches!(&param.kind, ParamKind::FormantBufferRef { buffer_kind: FormantBufferKind::Formant, .. })) {
+        badges.push("formants");
+    }
+    if p.params.iter().any(|param| matches!(&param.kind, ParamKind::FormantBufferRef { buffer_kind: FormantBufferKind::Snapshot, .. })) {
+        badges.push("snapshot");
+    }
+    badges
+}
+
 /// Nudges a focused `CdpField::Number` by a flat `sign * (1.0, or 0.1 when `fine`)`,
 /// clamped to its range — Up/Down's role in the params dialog (Left/Right is reserved for
 /// the field's own text cursor, or for cycling a `Choice`). No-op for any other field kind.
@@ -463,6 +534,38 @@ fn cdp_nudge_number(field: Option<&mut CdpField>, sign: f64, fine: bool) {
     let next = if *integer { next.round() } else { next };
     let next = next.clamp(*min, *max);
     *input = TextInput::new(format_cdp_float_for_display(next));
+}
+
+/// Resolves which field a "smart" activation key (`b`:pick buffer, `e`:edit list/envelope/
+/// table/bands) should act on when pressed from *anywhere* in a `Dialog::CdpParams` form —
+/// not just when that exact field already has focus (user report: having to first navigate
+/// to a single buffer-pick field before `b` did anything was an unnecessary extra step,
+/// especially on a process with only one such field).
+///
+/// Priority: the currently-focused field, if it's eligible; else the first eligible field
+/// that still needs configuring (per `unset`); else the first eligible field at all; else
+/// `None` (no field of this kind exists on the process — the key falls through to its other
+/// meaning, e.g. plain text entry). `unset` only ever matters when more than one eligible
+/// field exists and none is focused — with a single eligible field (the overwhelmingly
+/// common case), this always lands on it immediately regardless of focus.
+fn resolve_smart_field_target(
+    fields: &[CdpField],
+    focus: usize,
+    eligible: impl Fn(usize, &CdpField) -> bool,
+    unset: impl Fn(usize, &CdpField) -> bool,
+) -> Option<usize> {
+    if focus != CDP_PRESET_FOCUS {
+        let current = focus - 1;
+        if fields.get(current).is_some_and(|f| eligible(current, f)) {
+            return Some(current);
+        }
+    }
+    fields
+        .iter()
+        .enumerate()
+        .find(|(i, f)| eligible(*i, f) && unset(*i, f))
+        .or_else(|| fields.iter().enumerate().find(|(i, f)| eligible(*i, f)))
+        .map(|(i, _)| i)
 }
 
 enum Dialog {
@@ -1705,7 +1808,7 @@ impl App {
             .processes
             .iter()
             .enumerate()
-            .filter(|(_, p)| p.input == crate::model::cdp::IoKind::Curve && p.output == crate::model::cdp::IoKind::Curve)
+            .filter(|(_, p)| is_curve_only_process(p))
             .map(|(i, _)| i)
             .collect();
         let Some(Dialog::CurveEditor(edit)) = self.dialog.as_mut() else { return };
@@ -2920,18 +3023,52 @@ impl App {
                     // Enter's default action is Apply (from anywhere, including the preset
                     // row — a highlighted preset's values, or the process's defaults, are
                     // always valid); it's Preview only when the user has explicitly tabbed
-                    // to the Preview button. `cdp_run` re-takes the dialog itself, so it's
-                    // restored here first rather than passed directly.
+                    // to the Preview button — EXCEPT when focus sits on a field that's still
+                    // "unset" (a never-configured required_envelope/required_list, or an
+                    // unpicked FormantBufferRef): running there is guaranteed to fail
+                    // `cdp_validate_fields` with a generic "value out of range" error, when
+                    // the field genuinely just needs to be configured — so Enter opens its
+                    // editor/picker instead (same UX as the standalone curve-transform
+                    // dialog). `Table`/`MarkerTimeList`/`HiliteBand` are never "unset" (they
+                    // always start seeded), so Enter on one of those still runs, same as any
+                    // already-configured field.
+                    let setup_kind = (focus != CDP_PRESET_FOCUS && focus <= fields.len())
+                        .then(|| focus - 1)
+                        .and_then(|i| {
+                            let def = self.cdp_catalog.processes.get(catalog_index)?;
+                            let param = def.params.get(i)?;
+                            match fields.get(i)? {
+                                CdpField::Number { envelope: None, .. } if param.required_envelope => {
+                                    Some(CdpFieldSetupKind::Envelope)
+                                }
+                                CdpField::List { values, .. } if values.is_empty() => Some(CdpFieldSetupKind::List),
+                                CdpField::FormantBufferRef { selected: None, .. } => {
+                                    Some(CdpFieldSetupKind::FormantBuffer)
+                                }
+                                _ => None,
+                            }
+                        });
                     let purpose = if focus == cdp_params_focus_preview(fields.len(), second_input.is_some()) {
                         crate::cdp::JobPurpose::Preview
                     } else {
                         crate::cdp::JobPurpose::Apply
                     };
+                    // `cdp_run` re-takes the dialog itself, and the `open_cdp_*` openers each
+                    // need `&mut self.dialog` too, so it's restored here first rather than
+                    // passed directly.
                     self.dialog = Some(Dialog::CdpParams {
                         catalog_index, fields, second_input, focus, error, preview, envelope, list_edit, table_edit,
                         marker_time_list_edit, hilite_band_edit, formant_picker, presets, preset_selected, save_prompt, scroll,
                     });
-                    self.cdp_run(purpose);
+                    let opened = match setup_kind {
+                        Some(CdpFieldSetupKind::Envelope) => self.open_cdp_envelope_editor(),
+                        Some(CdpFieldSetupKind::List) => self.open_cdp_list_editor(),
+                        Some(CdpFieldSetupKind::FormantBuffer) => self.open_cdp_formant_picker(),
+                        None => false,
+                    };
+                    if !opened {
+                        self.cdp_run(purpose);
+                    }
                 }
                 Some(d @ Dialog::CdpRunning { .. }) => {
                     // Hard-modal: a job is in flight, Enter does nothing (only Esc/cancel
@@ -3091,37 +3228,78 @@ impl App {
                 }
                 self.refresh_cdp_browser_filter();
             }
+            // Space toggles a checkbox/toggle row on the four dialogs that have one; every
+            // other dialog falls through to typing a literal space, same as any other
+            // character (`dialog_accepts`/`dialog_input`, the same fallback the 'e'/'b'/'s'/
+            // 'd' keys below already use). Regression fix (found auditing dialog UX
+            // consistency): before this, Space was unconditionally intercepted here for
+            // *every* dialog — so no plain-text field (CDP browser search, Rename Buffer/
+            // File/Marker, Open Directory, Save Curve As, Load Pitch Curve, CDP Setup) could
+            // ever contain a space at all, silently dropping the keystroke with no feedback.
             KeyCode::Char(' ') => {
-                match self.dialog.as_mut() {
+                let toggled = match self.dialog.as_mut() {
                     Some(Dialog::MixToMono { inputs, focused, tanh_clip }) => {
-                        if *focused == inputs.len() { *tanh_clip = !*tanh_clip; }
+                        if *focused == inputs.len() {
+                            *tanh_clip = !*tanh_clip;
+                            true
+                        } else {
+                            false
+                        }
                     }
                     Some(Dialog::Gain { focused, tanh_clip, per_channel, is_stereo, .. }) => {
                         let rows = GainRows::new(*is_stereo, *per_channel);
                         if Some(*focused) == rows.checkbox {
                             *per_channel = !*per_channel;
+                            true
                         } else if *focused == rows.tanh {
                             *tanh_clip = !*tanh_clip;
+                            true
+                        } else {
+                            false
                         }
                     }
                     Some(Dialog::ExportRegions {
                         focused, dither, depth, limit_length, normalize, fade_in, fade_out, ..
-                    }) => {
-                        match *focused {
-                            er_focus::DITHER => { if depth.supports_dither() { *dither = !*dither; } }
-                            er_focus::LIMIT_CB => *limit_length = !*limit_length,
-                            er_focus::NORMALIZE_CB => *normalize = !*normalize,
-                            er_focus::FADE_IN_CB => *fade_in = !*fade_in,
-                            er_focus::FADE_OUT_CB => *fade_out = !*fade_out,
-                            _ => {}
+                    }) => match *focused {
+                        er_focus::DITHER => {
+                            if depth.supports_dither() {
+                                *dither = !*dither;
+                            }
+                            true
                         }
-                    }
+                        er_focus::LIMIT_CB => {
+                            *limit_length = !*limit_length;
+                            true
+                        }
+                        er_focus::NORMALIZE_CB => {
+                            *normalize = !*normalize;
+                            true
+                        }
+                        er_focus::FADE_IN_CB => {
+                            *fade_in = !*fade_in;
+                            true
+                        }
+                        er_focus::FADE_OUT_CB => {
+                            *fade_out = !*fade_out;
+                            true
+                        }
+                        _ => false,
+                    },
                     Some(Dialog::CdpParams { fields, focus, .. }) if *focus != CDP_PRESET_FOCUS => {
                         if let Some(CdpField::Toggle { on }) = fields.get_mut(*focus - 1) {
                             *on = !*on;
+                            true
+                        } else {
+                            false
                         }
                     }
-                    _ => {}
+                    _ => false,
+                };
+                if !toggled && self.dialog_accepts(' ') {
+                    if let Some(input) = self.dialog_input() {
+                        input.insert(' ');
+                    }
+                    self.refresh_cdp_browser_filter();
                 }
             }
             // Tab cycles dialog focus forward; Shift+Tab (Tab+SHIFT under the kitty protocol,
@@ -3526,6 +3704,11 @@ impl App {
 
     /// Entries matching `query` (case-insensitive substring over key/title — the process's
     /// *name*, not its description) AND `group`, as indices into `cdp_catalog.processes`.
+    /// Always excludes curve-in/curve-out processes (`is_curve_only_process`) — this browser
+    /// only ever plans a job against the active document's audio, so one of those would fail
+    /// validation the instant Apply/Preview ran; they're reachable only from the standalone
+    /// curve editor's own 't' picker (`open_curve_transform_picker`), which targets a curve
+    /// instead.
     ///
     /// `group == CDP_GROUP_ALL` skips the group filter entirely (the pre-Phase-7 behavior);
     /// `group == CDP_GROUP_RECENT` returns entries in `recent`'s own most-recently-used
@@ -3546,18 +3729,19 @@ impl App {
                 || p.key.to_lowercase().contains(&query)
                 || p.title.to_lowercase().contains(&query)
         };
+        let is_eligible = |p: &crate::model::cdp::ProcessDef| !is_curve_only_process(p) && matches_query(p);
         if group == CDP_GROUP_RECENT {
             return recent
                 .iter()
                 .filter_map(|key| self.cdp_catalog.processes.iter().position(|p| &p.key == key))
-                .filter(|&i| matches_query(&self.cdp_catalog.processes[i]))
+                .filter(|&i| is_eligible(&self.cdp_catalog.processes[i]))
                 .collect();
         }
         self.cdp_catalog
             .processes
             .iter()
             .enumerate()
-            .filter(|(_, p)| (group == CDP_GROUP_ALL || p.subcategory == group) && matches_query(p))
+            .filter(|(_, p)| (group == CDP_GROUP_ALL || p.subcategory == group) && is_eligible(p))
             .map(|(i, _)| i)
             .collect()
     }
@@ -3667,33 +3851,35 @@ impl App {
     /// selected process. Called after every change to `entries`/`list_selected` (arrow
     /// navigation, a search edit that reshuffles the filtered list) — a no-op if no dialog
     /// is open or it isn't `CdpBrowser`.
-    /// Opens the breakpoint-curve editor for whichever `CdpField::Number` is currently
-    /// focused in `Dialog::CdpBrowser` ('e' key), if that's actually possible right now —
-    /// returns `false` (a no-op) when there's no such dialog, focus isn't on a field, the
-    /// field isn't a Number, or the process's own catalog metadata marks that param as not
-    /// `automatable` (CDP's own constraint on which params accept a `.brk` file). The 'e'
-    /// key handler falls through to typing 'e' as ordinary text when this returns `false`,
-    /// so every one of these guards has to hold before touching the dialog.
+    /// Opens the breakpoint-curve editor for an automatable `CdpField::Number` — "smart"
+    /// target resolution (`resolve_smart_field_target`'s doc comment): the focused field if
+    /// it's eligible, else the first not-yet-configured required-envelope field, else the
+    /// first eligible field at all. Returns `false` (a no-op) when there's no such dialog or
+    /// the process has no automatable Number field at all. The 'e' key handler falls through
+    /// to typing 'e' as ordinary text when this returns `false`.
     fn open_cdp_envelope_editor(&mut self) -> bool {
         let Some(Dialog::CdpParams { catalog_index, fields, focus, .. }) = &self.dialog else {
-            return false;
-        };
-        if *focus == CDP_PRESET_FOCUS {
-            return false;
-        }
-        let field_index = *focus - 1;
-        let Some(CdpField::Number { input, min, max, step, envelope, .. }) = fields.get(field_index) else {
             return false;
         };
         let Some(def) = self.cdp_catalog.processes.get(*catalog_index) else {
             return false;
         };
+        let eligible = |i: usize, f: &CdpField| {
+            matches!(f, CdpField::Number { .. }) && def.params.get(i).is_some_and(|p| p.automatable)
+        };
+        let unset = |i: usize, f: &CdpField| {
+            matches!(f, CdpField::Number { envelope: None, .. })
+                && def.params.get(i).is_some_and(|p| p.required_envelope)
+        };
+        let Some(field_index) = resolve_smart_field_target(fields, *focus, eligible, unset) else {
+            return false;
+        };
+        let Some(CdpField::Number { input, min, max, step, envelope, .. }) = fields.get(field_index) else {
+            return false;
+        };
         let Some(param) = def.params.get(field_index) else {
             return false;
         };
-        if !param.automatable {
-            return false;
-        }
 
         let current_value = input.value().trim().parse::<f64>().unwrap_or(*min).clamp(*min, *max);
         let original = envelope.clone();
@@ -3728,15 +3914,19 @@ impl App {
             }
         });
 
-        let Some(Dialog::CdpParams { envelope: dialog_envelope, .. }) = self.dialog.as_mut() else {
+        let Some(Dialog::CdpParams { focus: dialog_focus, envelope: dialog_envelope, .. }) = self.dialog.as_mut()
+        else {
             return false;
         };
+        *dialog_focus = field_index + 1; // smart-target may have jumped focus to this field
         *dialog_envelope = Some(CdpEnvelopeEdit { field_index, points, selected: 0, original, time_max, range, curve_picker: None });
         true
     }
 
-    /// Opens the plain-list editor for whichever `CdpField::List` is currently focused in
-    /// `Dialog::CdpParams` ('e' key) — the `required_list` counterpart to
+    /// Opens the plain-list editor for an automatable `CdpField::List` — same "smart" target
+    /// resolution as `open_cdp_envelope_editor` (see that fn's doc comment), preferring an
+    /// empty (never-configured) list over the focused field when neither is focused already.
+    /// The `required_list` counterpart to
     /// `open_cdp_envelope_editor`. Returns `false` (a no-op, falls through to typing 'e' as
     /// ordinary text) when there's no such dialog, focus isn't on a field, the field isn't a
     /// List, or the process's own catalog metadata marks that param as not `automatable`.
@@ -3744,22 +3934,22 @@ impl App {
         let Some(Dialog::CdpParams { catalog_index, fields, focus, .. }) = &self.dialog else {
             return false;
         };
-        if *focus == CDP_PRESET_FOCUS {
-            return false;
-        }
-        let field_index = *focus - 1;
-        let Some(CdpField::List { values, .. }) = fields.get(field_index) else {
+        let Some(def) = self.cdp_catalog.processes.get(*catalog_index) else {
             return false;
         };
-        let Some(def) = self.cdp_catalog.processes.get(*catalog_index) else {
+        let eligible = |i: usize, f: &CdpField| {
+            matches!(f, CdpField::List { .. }) && def.params.get(i).is_some_and(|p| p.automatable)
+        };
+        let unset = |_: usize, f: &CdpField| matches!(f, CdpField::List { values, .. } if values.is_empty());
+        let Some(field_index) = resolve_smart_field_target(fields, *focus, eligible, unset) else {
+            return false;
+        };
+        let Some(CdpField::List { values, .. }) = fields.get(field_index) else {
             return false;
         };
         let Some(param) = def.params.get(field_index) else {
             return false;
         };
-        if !param.automatable {
-            return false;
-        }
 
         let is_time_sequence = param.list_is_time_sequence;
         let idx = self.active_document;
@@ -3795,9 +3985,11 @@ impl App {
             original.clone()
         };
 
-        let Some(Dialog::CdpParams { list_edit: dialog_list_edit, .. }) = self.dialog.as_mut() else {
+        let Some(Dialog::CdpParams { focus: dialog_focus, list_edit: dialog_list_edit, .. }) = self.dialog.as_mut()
+        else {
             return false;
         };
+        *dialog_focus = field_index + 1; // smart-target may have jumped focus to this field
         *dialog_list_edit = Some(CdpListEdit {
             field_index,
             values: seeded,
@@ -3958,19 +4150,19 @@ impl App {
         }
     }
 
-    /// Opens the multi-column table editor for whichever `CdpField::Table` is currently
-    /// focused in `Dialog::CdpParams` ('e' key) — the `ParamKind::Table` counterpart to
-    /// `open_cdp_list_editor`. Returns `false` (a no-op, falls through to typing 'e' as
-    /// ordinary text) when there's no such dialog, focus isn't on a field, or the field
-    /// isn't a Table. Unlike `open_cdp_envelope_editor`/`open_cdp_list_editor`, this doesn't
-    /// gate on `param.automatable` — a Table field has no optional-automation mode to gate
-    /// behind (see `CdpField::Table`'s doc comment), so 'e' always opens it unconditionally.
+    /// Opens the multi-column table editor for a `CdpField::Table` — same "smart" target
+    /// resolution as `open_cdp_envelope_editor`. A `Table` field always has data (`CdpField::
+    /// Table`'s doc comment — there's no "unset" state), so with more than one Table field
+    /// and none focused this just lands on the first one. Unlike `open_cdp_envelope_editor`/
+    /// `open_cdp_list_editor`, this doesn't gate on `param.automatable` — a Table field has
+    /// no optional-automation mode to gate behind. Returns `false` (falls through to typing
+    /// 'e' as ordinary text) when there's no such dialog or the process has no Table field.
     fn open_cdp_table_editor(&mut self) -> bool {
         let Some(Dialog::CdpParams { fields, focus, .. }) = &self.dialog else { return false };
-        if *focus == CDP_PRESET_FOCUS {
+        let eligible = |_: usize, f: &CdpField| matches!(f, CdpField::Table { .. });
+        let Some(field_index) = resolve_smart_field_target(fields, *focus, eligible, |_, _| false) else {
             return false;
-        }
-        let field_index = *focus - 1;
+        };
         let Some(CdpField::Table { rows, time_column, .. }) = fields.get(field_index) else {
             return false;
         };
@@ -3988,9 +4180,11 @@ impl App {
         let rows = rows.clone();
         let time_column = *time_column;
 
-        let Some(Dialog::CdpParams { table_edit: dialog_table_edit, .. }) = self.dialog.as_mut() else {
+        let Some(Dialog::CdpParams { focus: dialog_focus, table_edit: dialog_table_edit, .. }) = self.dialog.as_mut()
+        else {
             return false;
         };
+        *dialog_focus = field_index + 1; // smart-target may have jumped focus to this field
         *dialog_table_edit = Some(CdpTableEdit {
             field_index,
             rows,
@@ -4278,18 +4472,16 @@ impl App {
         }
     }
 
-    /// Opens the marker-prefixed time-list editor for whichever `CdpField::MarkerTimeList`
-    /// is currently focused in `Dialog::CdpParams` ('e' key) — the
-    /// `ParamKind::MarkerTimeList` counterpart to `open_cdp_table_editor`. Returns `false`
-    /// (a no-op) when there's no such dialog, focus isn't on a field, or the field isn't a
-    /// MarkerTimeList. No `automatable` gate, same rationale as the table editor: there's no
-    /// optional-automation mode to gate behind.
+    /// Opens the marker-prefixed time-list editor for a `CdpField::MarkerTimeList` — same
+    /// "smart" target resolution as `open_cdp_envelope_editor`; always has data (no "unset"
+    /// state), same rationale as `open_cdp_table_editor`. The `ParamKind::MarkerTimeList`
+    /// counterpart to `open_cdp_table_editor`. No `automatable` gate either, same reasoning.
     fn open_cdp_marker_time_list_editor(&mut self) -> bool {
         let Some(Dialog::CdpParams { fields, focus, .. }) = &self.dialog else { return false };
-        if *focus == CDP_PRESET_FOCUS {
+        let eligible = |_: usize, f: &CdpField| matches!(f, CdpField::MarkerTimeList { .. });
+        let Some(field_index) = resolve_smart_field_target(fields, *focus, eligible, |_, _| false) else {
             return false;
-        }
-        let field_index = *focus - 1;
+        };
         let Some(CdpField::MarkerTimeList { entries, markers, .. }) = fields.get(field_index) else {
             return false;
         };
@@ -4307,9 +4499,12 @@ impl App {
         let entries = entries.clone();
         let markers = markers.clone();
 
-        let Some(Dialog::CdpParams { marker_time_list_edit: dialog_edit, .. }) = self.dialog.as_mut() else {
+        let Some(Dialog::CdpParams { focus: dialog_focus, marker_time_list_edit: dialog_edit, .. }) =
+            self.dialog.as_mut()
+        else {
             return false;
         };
+        *dialog_focus = field_index + 1; // smart-target may have jumped focus to this field
         *dialog_edit = Some(CdpMarkerTimeListEdit {
             field_index,
             entries,
@@ -4474,17 +4669,17 @@ impl App {
         }
     }
 
-    /// Opens `hilite band`'s bitflag-conditional row editor for whichever
-    /// `CdpField::HiliteBand` is currently focused in `Dialog::CdpParams` ('e' key) — the
+    /// Opens `hilite band`'s bitflag-conditional row editor for a `CdpField::HiliteBand` —
+    /// same "smart" target resolution as `open_cdp_envelope_editor`. The
     /// `ParamKind::HiliteBand` counterpart to `open_cdp_table_editor`. No `automatable`
     /// gate, same rationale as every other required-datafile editor: there's no
     /// optional-automation mode to gate behind.
     fn open_cdp_hilite_band_editor(&mut self) -> bool {
         let Some(Dialog::CdpParams { fields, focus, .. }) = &self.dialog else { return false };
-        if *focus == CDP_PRESET_FOCUS {
+        let eligible = |_: usize, f: &CdpField| matches!(f, CdpField::HiliteBand { .. });
+        let Some(field_index) = resolve_smart_field_target(fields, *focus, eligible, |_, _| false) else {
             return false;
-        }
-        let field_index = *focus - 1;
+        };
         let Some(CdpField::HiliteBand { rows, .. }) = fields.get(field_index) else {
             return false;
         };
@@ -4492,9 +4687,12 @@ impl App {
         let original = rows.clone();
         let rows = rows.clone();
 
-        let Some(Dialog::CdpParams { hilite_band_edit: dialog_edit, .. }) = self.dialog.as_mut() else {
+        let Some(Dialog::CdpParams { focus: dialog_focus, hilite_band_edit: dialog_edit, .. }) =
+            self.dialog.as_mut()
+        else {
             return false;
         };
+        *dialog_focus = field_index + 1; // smart-target may have jumped focus to this field
         *dialog_edit = Some(CdpHiliteBandEdit {
             field_index,
             rows,
@@ -4696,19 +4894,27 @@ impl App {
         }
     }
 
-    /// Opens the "pick a buffer" picker for whichever `CdpField::FormantBufferRef` is
-    /// currently focused in `Dialog::CdpParams` ('b' key, CDP-Ext-Plan.md Phase 5) — the
-    /// `ParamKind::FormantBufferRef` counterpart to `open_cdp_hilite_band_editor`, but there's
-    /// no data to seed an editor with (see `CdpField::FormantBufferRef`'s doc comment): just a
-    /// list of `App.formant_buffers` filtered to the field's own `buffer_kind`, computed once
-    /// here. A no-op (returns `false`) if there's no matching buffer open yet, same as
-    /// `EnvelopeCurvePicker`'s "no open curves" case.
+    /// Opens the "pick a buffer" picker for a `CdpField::FormantBufferRef` — same "smart"
+    /// target resolution as `open_cdp_envelope_editor` (user report: having to first
+    /// navigate to the one buffer-pick field before 'b' did anything was an unnecessary
+    /// extra step). Eligibility additionally requires at least one open buffer of the
+    /// field's own `buffer_kind` — a field with nothing to pick from is skipped in favor of
+    /// one that has something, same as the plain "no matching buffer at all" no-op case.
+    /// The `ParamKind::FormantBufferRef` counterpart to `open_cdp_hilite_band_editor`, but
+    /// there's no data to seed an editor with (see `CdpField::FormantBufferRef`'s doc
+    /// comment): just a list of `App.formant_buffers` filtered to the field's `buffer_kind`.
     fn open_cdp_formant_picker(&mut self) -> bool {
         let Some(Dialog::CdpParams { fields, focus, .. }) = &self.dialog else { return false };
-        if *focus == CDP_PRESET_FOCUS {
+        let has_open_buffer = |kind: crate::model::formant::FormantBufferKind| {
+            self.formant_buffers.iter().any(|b| b.kind == kind)
+        };
+        let eligible = |_: usize, f: &CdpField| {
+            matches!(f, CdpField::FormantBufferRef { buffer_kind, .. } if has_open_buffer(*buffer_kind))
+        };
+        let unset = |_: usize, f: &CdpField| matches!(f, CdpField::FormantBufferRef { selected: None, .. });
+        let Some(field_index) = resolve_smart_field_target(fields, *focus, eligible, unset) else {
             return false;
-        }
-        let field_index = *focus - 1;
+        };
         let Some(CdpField::FormantBufferRef { buffer_kind, selected }) = fields.get(field_index) else {
             return false;
         };
@@ -4721,18 +4927,16 @@ impl App {
             .filter(|(_, b)| b.kind == buffer_kind)
             .map(|(i, _)| i)
             .collect();
-        if entries.is_empty() {
-            return false;
-        }
         // Preselect the field's current pick (if any) rather than always index 0, so
         // reopening the picker to check what's chosen doesn't silently switch it to the
         // first entry on Enter (FABLE-REVIEW FR-9).
         let selected = current_pick
             .and_then(|buf| entries.iter().position(|&e| e == buf))
             .unwrap_or(0);
-        let Some(Dialog::CdpParams { formant_picker, .. }) = self.dialog.as_mut() else {
+        let Some(Dialog::CdpParams { focus: dialog_focus, formant_picker, .. }) = self.dialog.as_mut() else {
             return false;
         };
+        *dialog_focus = field_index + 1; // smart-target may have jumped focus to this field
         *formant_picker = Some(FormantBufferPicker { field_index, entries, selected });
         true
     }
@@ -11150,14 +11354,14 @@ fn render_cdp_browser_dialog(
                 base
             };
             let mut spans = vec![Span::styled(text, style)];
-            if matches!(d.input, crate::model::cdp::IoKind::DualWav | crate::model::cdp::IoKind::DualAna) {
-                // Pale, deliberately unobtrusive — this is a heads-up, not a warning. On a
-                // highlighted row, fold into that row's own single highlight color instead
-                // of layering a second accent on top of it (CLAUDE.md: a selected row uses
-                // one uniform highlight, same rule the menu/toolbar's shortcut-vs-selection
-                // styling already follows).
-                let note_style = if row == selected { style } else { Style::default().fg(theme::ANNOTATION).bg(theme::SURFACE0) };
-                spans.push(Span::styled(" >1 inputs", note_style));
+            // Pale, deliberately unobtrusive — a heads-up, not a warning. On a highlighted
+            // row, fold into that row's own single highlight color instead of layering a
+            // second accent on top of it (CLAUDE.md: a selected row uses one uniform
+            // highlight, same rule the menu/toolbar's shortcut-vs-selection styling already
+            // follows).
+            let note_style = if row == selected { style } else { Style::default().fg(theme::ANNOTATION).bg(theme::SURFACE0) };
+            for badge in cdp_process_badges(d) {
+                spans.push(Span::styled(format!(" {badge}"), note_style));
             }
             lines.push(Line::from(spans));
             rendered_rows += 1;
@@ -12410,6 +12614,34 @@ mod tests {
         }
     }
 
+    /// 'e' must open the envelope editor even from the Preset row (a freshly opened dialog's
+    /// starting focus) — the same smart-target fix as the formant-picker case, applied to
+    /// `open_cdp_envelope_editor`. Uses a real shipped catalog entry (`focus_hold`).
+    #[test]
+    fn e_opens_the_envelope_editor_from_the_preset_row_on_a_real_process() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "focus_hold")
+            .expect("focus_hold should be in the catalog");
+        app.open_cdp_params(catalog_index);
+        assert_eq!(
+            match &app.dialog {
+                Some(Dialog::CdpParams { focus, .. }) => *focus,
+                _ => panic!("no dialog"),
+            },
+            CDP_PRESET_FOCUS
+        );
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { envelope, focus, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(envelope.is_some(), "'e' should open the editor without the user pre-focusing the field");
+        assert_eq!(*focus, 1, "focus should jump to the required_envelope field");
+    }
+
     /// A fresh `required_envelope` field starts with no envelope at all (not a constant, not
     /// a pre-seeded breakpoint list) — the field is genuinely "not configured yet" until the
     /// user opens the editor once, matching the render-side "(not set — e to edit)" display.
@@ -12565,23 +12797,40 @@ mod tests {
         assert_eq!(edit.points[2].1, 20.0);
     }
 
-    /// Apply/Preview must be blocked with a validation error while a `required_envelope`
-    /// field is still unset — its `input` text is never the submitted value (`to_value`
-    /// would otherwise silently emit a `ParamValue::Number` that CDP rejects as an
-    /// unreadable file path), so `cdp_validate_fields` has to check `envelope.is_some()`
-    /// directly rather than the field's numeric range.
+    /// `cdp_validate_fields` must still block a `required_envelope` field that's still
+    /// unset — its `input` text is never the submitted value (`to_value` would otherwise
+    /// silently emit a `ParamValue::Number` that CDP rejects as an unreadable file path), so
+    /// validation has to check `envelope.is_some()` directly rather than the field's numeric
+    /// range. Checked directly (not through Enter, which now opens the editor for an unset
+    /// field instead of running — see `enter_on_an_unset_required_envelope_field_opens_its_editor`)
+    /// since a mouse click on Apply, or Enter with a *different* field focused, must still
+    /// hit this same block.
     #[test]
-    fn apply_is_blocked_until_a_required_envelope_field_is_set() {
+    fn cdp_validate_fields_blocks_an_unset_required_envelope_field() {
+        let app = new_app(Some(doc(0.1, 44100)), None);
+        let catalog_index = app.cdp_catalog.processes.iter().position(|p| p.key == "focus_hold").unwrap();
+        let def = &app.cdp_catalog.processes[catalog_index];
+        let fields: Vec<CdpField> = def.params.iter().map(CdpField::from_default).collect();
+        assert_eq!(App::cdp_validate_fields(def, &fields), Some(0), "the unset field should block");
+    }
+
+    /// Enter on a focused, still-unset `required_envelope` field opens its editor instead of
+    /// running Apply (which would otherwise immediately hit the block above with a generic
+    /// "value out of range" message) — the field genuinely just needs to be configured, so
+    /// that's what Enter should do first (matches the standalone curve-transform dialog's
+    /// existing "Enter opens the editor" behavior for the same field shape).
+    #[test]
+    fn enter_on_an_unset_required_envelope_field_opens_its_editor() {
         let mut app = new_app(Some(doc(0.1, 44100)), None);
         open_focus_hold_with_field_focused(&mut app);
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-        let Some(Dialog::CdpParams { error, focus, .. }) = &app.dialog else {
-            panic!("expected CdpParams still open after a blocked Apply");
+        let Some(Dialog::CdpParams { envelope, error, .. }) = &app.dialog else {
+            panic!("expected CdpParams still open");
         };
-        assert!(error.is_some(), "an unset required_envelope field should block Apply with an error");
-        assert_eq!(*focus, 1, "should focus the offending field");
+        assert!(envelope.is_some(), "Enter should open the envelope editor, not run and block");
+        assert!(error.is_none(), "no validation error should show — we redirected instead of running");
     }
 
     /// Once the user has opened the editor and committed points (Enter inside the editor),
@@ -12657,20 +12906,34 @@ mod tests {
         assert!(values.is_empty());
     }
 
-    /// Apply/Preview must be blocked with a validation error while a `required_list` field
-    /// is still unset (empty) — mirrors `apply_is_blocked_until_a_required_envelope_field_is_set`.
+    /// `cdp_validate_fields` must still block a `required_list` field that's still unset
+    /// (empty) — mirrors `cdp_validate_fields_blocks_an_unset_required_envelope_field`,
+    /// checked directly for the same reason (a mouse click on Apply, or Enter with a
+    /// *different* field focused, must still hit this block; Enter on the unset field
+    /// itself now opens its editor instead — see the test right below).
     #[test]
-    fn apply_is_blocked_until_a_required_list_field_is_set() {
+    fn cdp_validate_fields_blocks_an_unset_required_list_field() {
+        let app = new_app(Some(doc(0.1, 44100)), None);
+        let catalog_index = app.cdp_catalog.processes.iter().position(|p| p.key == "grain_reposition").unwrap();
+        let def = &app.cdp_catalog.processes[catalog_index];
+        let fields: Vec<CdpField> = def.params.iter().map(CdpField::from_default).collect();
+        assert_eq!(App::cdp_validate_fields(def, &fields), Some(0), "the unset field should block");
+    }
+
+    /// Enter on a focused, still-unset `required_list` field opens its editor instead of
+    /// running Apply — mirrors `enter_on_an_unset_required_envelope_field_opens_its_editor`.
+    #[test]
+    fn enter_on_an_unset_required_list_field_opens_its_editor() {
         let mut app = new_app(Some(doc(0.1, 44100)), None);
         open_grain_reposition_with_field_focused(&mut app);
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-        let Some(Dialog::CdpParams { error, focus, .. }) = &app.dialog else {
-            panic!("expected CdpParams still open after a blocked Apply");
+        let Some(Dialog::CdpParams { list_edit, error, .. }) = &app.dialog else {
+            panic!("expected CdpParams still open");
         };
-        assert!(error.is_some(), "an unset required_list field should block Apply with an error");
-        assert_eq!(*focus, 1, "should focus the offending field");
+        assert!(list_edit.is_some(), "Enter should open the list editor, not run and block");
+        assert!(error.is_none(), "no validation error should show — we redirected instead of running");
     }
 
     /// 'e' on a never-opened `required_list` field seeds exactly one entry at the param's
@@ -13822,6 +14085,34 @@ mod tests {
         let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
         let Some(CdpField::List { values, .. }) = fields.first() else { panic!("expected a List field") };
         assert_eq!(values[0], 3.0, "3.4 should round to 3");
+    }
+
+    /// 'e' must open the list editor even from the Preset row — same smart-target fix as the
+    /// envelope/formant-picker cases, applied to `open_cdp_list_editor`. Uses a real shipped
+    /// catalog entry (`blur_weave`).
+    #[test]
+    fn e_opens_the_list_editor_from_the_preset_row_on_a_real_process() {
+        let mut app = new_app(Some(doc(1.0, 441_000)), None);
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "blur_weave")
+            .expect("blur_weave should be in the catalog");
+        app.open_cdp_params(catalog_index);
+        assert_eq!(
+            match &app.dialog {
+                Some(Dialog::CdpParams { focus, .. }) => *focus,
+                _ => panic!("no dialog"),
+            },
+            CDP_PRESET_FOCUS
+        );
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { list_edit, focus, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(list_edit.is_some(), "'e' should open the editor without the user pre-focusing the field");
+        assert_eq!(*focus, 1, "focus should jump to the required_list field");
     }
 
     /// A plain `Number` field CDP requires to be an integer has no discrete commit moment
@@ -15243,6 +15534,98 @@ mod tests {
         assert!(!App::cdp_preview_matches(&preview, &values, (0, 100), 44100, None, &formant_field_selections(&different)));
     }
 
+    /// `cdp_process_badges` — one test per badge, each against a real shipped catalog entry
+    /// so this fails if the catalog shape ever drifts out from under it.
+    #[test]
+    fn cdp_process_badges_marks_dual_input_processes() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let p = app.cdp_catalog.processes.iter().find(|p| p.key == "fastconv_fastconv").expect("fastconv_fastconv (Convolve) is dual-input");
+        assert!(cdp_process_badges(p).contains(&">1 inputs"));
+    }
+
+    #[test]
+    fn cdp_process_badges_marks_pitch_curve_fields_but_not_unrelated_envelopes() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let psow = app.cdp_catalog.processes.iter().find(|p| p.key == "psow_stretch").expect("psow_stretch has a Pitch Envelope field");
+        assert!(cdp_process_badges(psow).contains(&"pitch curve"));
+
+        let altharms = app.cdp_catalog.processes.iter().find(|p| p.key == "pitch_altharms_1").expect("pitch_altharms_1 has a Pitchfile field");
+        assert!(cdp_process_badges(altharms).contains(&"pitch curve"));
+
+        // focus_hold's required_envelope field is Hold Times, not a pitch curve — must NOT
+        // get the badge just because it's required_envelope.
+        let unrelated = app.cdp_catalog.processes.iter().find(|p| p.key == "focus_hold").expect("focus_hold has a non-pitch required_envelope field");
+        assert!(!cdp_process_badges(unrelated).contains(&"pitch curve"));
+    }
+
+    #[test]
+    fn cdp_process_badges_marks_formants_and_snapshot_separately() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let put = app.cdp_catalog.processes.iter().find(|p| p.key == "formants_put_1").expect("formants_put_1 needs a [Formant] buffer");
+        let put_badges = cdp_process_badges(put);
+        assert!(put_badges.contains(&"formants"));
+        assert!(!put_badges.contains(&"snapshot"));
+
+        let oneform = app.cdp_catalog.processes.iter().find(|p| p.key == "oneform_put_1").expect("oneform_put_1 needs a [Snapshot] buffer");
+        let oneform_badges = cdp_process_badges(oneform);
+        assert!(oneform_badges.contains(&"snapshot"));
+        assert!(!oneform_badges.contains(&"formants"));
+    }
+
+    #[test]
+    fn cdp_process_badges_is_empty_for_a_plain_process() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let p = app.cdp_catalog.processes.iter().find(|p| p.key == "blur_avrg").expect("blur_avrg is a plain single-input process");
+        assert!(cdp_process_badges(p).is_empty());
+    }
+
+    /// End-to-end: the "pitch curve" badge must actually reach the rendered screen next to
+    /// the process it applies to, not just come out of `cdp_process_badges` in isolation.
+    #[test]
+    fn cdp_browser_renders_the_pitch_curve_badge_on_screen() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        app.open_cdp_browser();
+        type_str(&mut app, "psow_stretch"); // the key form; see the space-typing test below
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let mut text = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        assert!(text.contains("Psow Stretch"), "the search should have found the process");
+        assert!(text.contains("pitch curve"), "its pitch-curve badge should be visible on screen");
+    }
+
+    /// Space must type as a literal space in every plain-text dialog field — regression test
+    /// for a real bug found while auditing dialog UX consistency: `KeyCode::Char(' ')` was
+    /// unconditionally intercepted for ALL dialogs (only four actually use it, as a checkbox/
+    /// toggle key), so no free-text field anywhere in the app — CDP browser search, Rename
+    /// Buffer/File/Marker, Open Directory, Save Curve As, Load Pitch Curve, CDP Setup — could
+    /// ever contain a space; the keystroke was silently dropped with no feedback at all.
+    /// Covers a search box (multi-word query) and a rename dialog (a name with a space).
+    #[test]
+    fn space_types_a_literal_space_in_plain_text_dialogs() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        app.open_cdp_browser();
+        type_str(&mut app, "psow stretch");
+        let Some(Dialog::CdpBrowser { search, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(search.value(), "psow stretch");
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        app.dialog = Some(Dialog::RenameBuffer { index: 0, input: TextInput::fresh(String::new()) });
+        type_str(&mut app, "my new name");
+        let Some(Dialog::RenameBuffer { input, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(input.value(), "my new name");
+    }
+
     /// `App::cdp_groups` always starts with `CDP_GROUP_ALL` then `CDP_GROUP_RECENT`,
     /// followed by every real `subcategory` in the catalog, alphabetically sorted with no
     /// duplicates — the taxonomy `scripts/convert_soundthread_catalog.py` reconciles down to
@@ -15259,6 +15642,28 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(subcategories, sorted.as_slice(), "should already be sorted with no duplicates");
+    }
+
+    /// Curve-in/curve-out processes (Repitch Exaggerate/Smooth/...) must never appear in the
+    /// CDP browser — they can only ever be planned against an open `PitchCurve`'s binary
+    /// template (`plan_curve_transform_job`), never the active document's audio, so showing
+    /// them here would let a user pick one that's guaranteed to fail on Apply/Preview. They
+    /// stay reachable only from the standalone curve editor's own 't' picker.
+    #[test]
+    fn cdp_browser_never_lists_curve_only_processes() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        assert!(
+            app.cdp_catalog.processes.iter().any(is_curve_only_process),
+            "the catalog must actually have curve-only entries for this test to mean anything"
+        );
+        let entries = app.cdp_filter_entries("", CDP_GROUP_ALL, &[]);
+        for &i in &entries {
+            assert!(
+                !is_curve_only_process(&app.cdp_catalog.processes[i]),
+                "{} is curve-only and must not appear in the browser",
+                app.cdp_catalog.processes[i].key
+            );
+        }
     }
 
     /// Tab toggles `Dialog::CdpBrowser.group_focus`; while it's set, Up/Down move
@@ -17360,6 +17765,103 @@ mod tests {
             panic!("expected the formant picker to be open");
         };
         assert_eq!(picker.entries, vec![1, 2], "must exclude the Snapshot buffer at index 0");
+    }
+
+    /// 'b' must open the buffer picker even when focus is still on the Preset row (the
+    /// dialog's starting focus, `CDP_PRESET_FOCUS`) — reproduces the exact user report: on
+    /// "Oneform Put (Impose)", pressing 'b' without first navigating to the Snapshot field
+    /// did nothing. Uses the real shipped catalog entry, not a synthetic one, so this fails
+    /// if the catalog process shape ever changes underneath the smart-target logic.
+    #[test]
+    fn b_opens_the_picker_from_the_preset_row_on_a_real_process() {
+        use crate::model::formant::{FormantBuffer, FormantBufferKind};
+        let mut app = new_app(Some(doc(1.0, 44100)), None);
+        app.formant_buffers.push(FormantBuffer::new(FormantBufferKind::Snapshot, "s", vec![], "t"));
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "oneform_put_1")
+            .expect("oneform_put_1 should be in the catalog");
+        app.open_cdp_params(catalog_index);
+        assert_eq!(
+            match &app.dialog {
+                Some(Dialog::CdpParams { focus, .. }) => *focus,
+                _ => panic!("no dialog"),
+            },
+            CDP_PRESET_FOCUS,
+            "a freshly opened dialog starts focused on the preset row, same as the screenshot"
+        );
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { formant_picker, focus, fields, .. }) = &app.dialog else {
+            panic!("no dialog")
+        };
+        assert!(formant_picker.is_some(), "'b' should open the picker without the user pre-focusing the field");
+        let snapshot_field = fields.iter().position(|f| matches!(f, CdpField::FormantBufferRef { .. })).unwrap();
+        assert_eq!(*focus, snapshot_field + 1, "focus should jump to the Snapshot field");
+    }
+
+    /// Enter on a focused, still-unset `FormantBufferRef` field opens the buffer picker
+    /// instead of running Apply — mirrors `enter_on_an_unset_required_envelope_field_opens_its_editor`/
+    /// `enter_on_an_unset_required_list_field_opens_its_editor` for the third "unset"-capable
+    /// field kind.
+    #[test]
+    fn enter_on_an_unset_formant_buffer_ref_field_opens_the_picker() {
+        use crate::model::formant::{FormantBuffer, FormantBufferKind};
+        let mut app = new_app(Some(doc(1.0, 44100)), None);
+        app.formant_buffers.push(FormantBuffer::new(FormantBufferKind::Snapshot, "s", vec![], "t"));
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "oneform_put_1")
+            .expect("oneform_put_1 should be in the catalog");
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, fields, .. }) = app.dialog.as_mut() {
+            *focus = fields.iter().position(|f| matches!(f, CdpField::FormantBufferRef { .. })).unwrap() + 1;
+        }
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { formant_picker, error, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(formant_picker.is_some(), "Enter should open the picker, not run and block");
+        assert!(error.is_none(), "no validation error should show — we redirected instead of running");
+    }
+
+    /// With several eligible fields and none focused, the not-yet-configured one wins over
+    /// an already-set one — `resolve_smart_field_target`'s "unset" priority.
+    #[test]
+    fn smart_target_prefers_an_unset_field_over_an_already_set_one() {
+        use crate::model::formant::{FormantBuffer, FormantBufferKind};
+        let mut app = new_app(Some(doc(1.0, 44100)), None);
+        app.formant_buffers = vec![FormantBuffer::new(FormantBufferKind::Formant, "f", vec![], "t")];
+        app.dialog = Some(Dialog::CdpParams {
+            catalog_index: 0,
+            fields: vec![
+                CdpField::FormantBufferRef { selected: Some(0), buffer_kind: FormantBufferKind::Formant },
+                CdpField::FormantBufferRef { selected: None, buffer_kind: FormantBufferKind::Formant },
+            ],
+            second_input: None,
+            focus: CDP_PRESET_FOCUS,
+            error: None,
+            preview: None,
+            envelope: None,
+            list_edit: None,
+            table_edit: None,
+            marker_time_list_edit: None,
+            hilite_band_edit: None,
+            formant_picker: None,
+            presets: Vec::new(),
+            preset_selected: None,
+            save_prompt: None,
+            scroll: 0,
+        });
+
+        assert!(app.open_cdp_formant_picker());
+        let Some(Dialog::CdpParams { focus, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*focus, 2, "should target field index 1 (the unset one), not field 0");
     }
 
     /// A field with no matching buffer open yet is a no-op ('b' does nothing), same as
