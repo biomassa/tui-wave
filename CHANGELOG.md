@@ -1,5 +1,84 @@
 # Changelog
 
+## 2026-07-20
+
+- **USERGUIDE and README rewritten for accuracy and brevity.** `USERGUIDE.md` shrinks from
+  345 to 234 lines, consolidating redundant sections (e.g. the `i`/`f` toggles previously
+  listed under both Playback and Toggles) and tightening prose throughout. Adds the complete
+  Tier 2/3 CDP workflows (pitch curves, formants, freeze-at-cursor) that were missing
+  entirely, and documents the new capability badges (`>1 inputs`, `pitch curve`,
+  `formants`, `snapshot`) and buffer row types (`[Curve]`/`[Formant]`/`[Snapshot]`). Both
+  docs also fix a stale menu path — "Options → Configure CDP Directory" is now "CDP →
+  Configure CDP Directory" (the Options menu no longer exists).
+- **CDP dialog UX consistency audit.** `b`/`e` smart-activation keys now work from anywhere
+  in a CDP params form instead of only when the target field already has focus (priority:
+  the focused field if eligible, else the first not-yet-configured eligible field, else the
+  first eligible field). `Enter` on an unset required envelope/list field, or an unpicked
+  formant-buffer field, now opens its editor/picker instead of running Apply and
+  immediately failing with a generic "value out of range" error, matching the standalone
+  curve-transform dialog. The process browser gained capability badges for "pitch curve"
+  and "formants"/"snapshot" alongside the existing ">1 inputs", and curve-only transforms
+  (Repitch Exaggerate/Smooth/...) are now hidden from the main browser since they can only
+  ever run against an open pitch curve. Also fixed a real bug found while testing the
+  above: `Space` was unconditionally intercepted for every dialog, so no free-text field
+  anywhere — CDP browser search, every Rename dialog, Open Directory, Save Curve As, Load
+  Pitch Curve, CDP Setup — could contain a space; it now falls through to normal text
+  insertion except in the four dialogs that use it as a checkbox toggle.
+- The CDP directory now defaults to `~/cdp` (resolved against the real `$HOME` at startup)
+  before prompting, instead of always starting from an empty setting.
+- Bumped version to 1.2.0, covering Tier 2 (pitch curve extraction, editing, CDP
+  transforms) and Tier 3 (formant/snapshot buffers, freeze-at-cursor) of the CDP
+  integration, the dialog UX consistency audit above, and the new `~/cdp` default.
+
+## 2026-07-19
+
+- Added **"Freeze Formant Snapshot at Cursor"**, a new CDP menu action that freezes a
+  `[Snapshot]` buffer at the waveform cursor with no manual steps: it reuses an existing
+  `[Formant]` extraction on the current document, or runs Extract Formants automatically
+  first and chains the freeze onto its result. Replaces the old per-buffer freeze flow (the
+  `f` key and typed-time prompt in the Formant Info popup), which is now purely read-only.
+- Reworked the curve-transform params dialog (Repitch Quantise etc.) to match the main CDP
+  params dialog's UX, after a user report that it was a bespoke reimplementation that had
+  drifted: `Enter` on a required-list field now opens its editor (previously a no-op off
+  the Apply row), `Shift+Tab` navigates backward (previously dead — terminals emit
+  `BackTab`, which the handler didn't catch), and mouse clicks on form rows now
+  focus/open/toggle fields or run Apply.
+- Fixed the envelope `c` curve-picker giving no feedback when no curves were open — it now
+  always opens the picker, showing "(no open curves)" instead of silently doing nothing.
+
+## 2026-07-18
+
+- **Tier 3 of the CDP integration: formant and snapshot buffers.** CDP → Extract Formants
+  captures a selection's spectral envelope as a `[Formant]` buffer (best on voice or an
+  instrument with real timbre); Formants Put and Oneform Put impose a `[Formant]` or
+  `[Snapshot]` buffer onto other audio (Replace/Layer and Impose/Replace variants), and two
+  new pitch/frequency-band Formant Vocode processes round out the catalog additions.
+- Fixed the code-review findings in `FABLE-REVIEW.md` (FR-1 through FR-9), each with a
+  regression test: a stale Preview cache that didn't invalidate when the picked formant
+  buffer changed (could splice stale audio); dirty curves not counting toward the quit
+  confirmation and not being covered by Save All; an in-progress hand edit in the curve
+  editor being silently discarded on a failed transform; curve-template undo; a `tick_cdp`
+  job-id check that ran after (instead of before) consuming pending CDP results; `Ctrl+W`
+  not closing a focused curve/formant row in the Buffers panel; no inline validation on the
+  freeze-time prompt; a no-op `Enter` in the curve editor; and the formant-buffer picker not
+  preselecting the current pick.
+
+## 2026-07-17
+
+- Continued Tier 3 CDP work: formant-related catalog entries (Formants Put, Oneform Put,
+  and the pitch/frequency-band Formant Vocode processes) and their pipeline plumbing.
+
+## 2026-07-15 – 2026-07-16
+
+- **Tier 2 of the CDP integration: pitch curves.** CDP → Extract Pitch Curve analyses a
+  selection (best on a clear monophonic note/melody) into a `[Curve]` buffer with a
+  Time/Hz table editor — arrows select, typing overwrites, `n` inserts and `Delete` removes
+  points, `t` applies a CDP curve transform (quantise, smooth, vibrato, and the rest of the
+  new Repitch process family). A curve can drive any pitch-curve-badged process (e.g. Psow
+  Stretch) by loading it into the process's pitch field, rescaled to the selection; `Ctrl+S`
+  saves a curve to disk and CDP → Load Pitch Curve reads one back (a hand-typed or loaded
+  curve can be edited but can't run a transform, having no CDP source).
+
 ## 2026-07-13
 
 - **CDP: reverb re-added, dual-input processes marked in the browser, 36 new processes, and
