@@ -134,7 +134,7 @@ Then, in tui-wave, open the CDP dialog (`Ctrl+P`). tui-wave defaults `cdp_dir` t
 (`~` resolved to your actual home directory at startup), so unpacking or building CDP straight
 into a `cdp` folder in your home directory needs no further setup. Anywhere else, the first-use
 prompt asks for the directory containing the binaries; you can revisit it later via
-**Options → Configure CDP Directory…**. The path is saved to `cdp_dir` in your `config.toml`. See
+**CDP → Configure CDP Directory…**. The path is saved to `cdp_dir` in your `config.toml`. See
 [USERGUIDE.md](USERGUIDE.md#cdp-processes) for the full workflow: browsing, editing parameters,
 breakpoint automation, presets, preview/apply, and adding your own process definitions.
 
