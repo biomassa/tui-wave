@@ -137,7 +137,7 @@ See `docs/cdp-custom-process-example.toml` for a worked example.
 Some CDP processes take a **pitch curve** — a time/Hz contour — instead of a fixed number.
 
 1. **CDP → Extract Pitch Curve** analyses the selection (best on a clear monophonic
-   note/melody) and adds a `[Curve]` row to the Buffers panel.
+   note/melody) and adds a `[p]` row to the Buffers panel.
 2. `Enter` on that row opens a Time/Hz table editor: arrows select, type overwrites, `n`
    inserts, `Delete` removes, `t` applies a CDP curve transform (quantise, smooth, vibrato,
    pitch-shift, …), `Enter` commits, `Esc` discards. `Ctrl+Z`/`Ctrl+Y` here undo/redo the
@@ -150,14 +150,14 @@ Some CDP processes take a **pitch curve** — a time/Hz contour — instead of a
 
 ### Formants
 
-1. **CDP → Extract Formants** captures the selection's spectral envelope as a `[Formant]`
+1. **CDP → Extract Formants** captures the selection's spectral envelope as a `[f]`
    buffer (best on voice or an instrument with real timbre). `Enter` shows a read-only info
    popup.
 2. **CDP → Freeze Formant Snapshot at Cursor** freezes the timbre at the cursor into a
-   `[Snapshot]` buffer. If the current document has no formants yet, it extracts them first
+   `[s]` buffer. If the current document has no formants yet, it extracts them first
    automatically.
-3. Impose either onto other audio: open **Formants Put** (uses `[Formant]` buffers) or
-   **Oneform Put** (uses `[Snapshot]` buffers), press `b` to pick the buffer, then Apply.
+3. Impose either onto other audio: open **Formants Put** (uses `[f]` buffers) or
+   **Oneform Put** (uses `[s]` buffers), press `b` to pick the buffer, then Apply.
 
 ## Playback
 
@@ -189,7 +189,7 @@ filters, `Ctrl+O` opens a directory, `a` auditions without loading, `Ctrl+R` ren
 
 **Buffer panel** (middle) — `↑`/`↓` switch buffers, `/` filters, `Ctrl+S` saves, `Ctrl+W`
 closes, `Ctrl+R` renames (and its file, if any), `Ctrl+A` saves all. Rows are tagged by
-type: audio, `[Curve]`, `[Formant]`, `[Snapshot]`. A never-saved buffer shows as
+type: audio, `[p]`, `[f]`, `[s]`. A never-saved buffer shows as
 `_NEW_001`, `_NEW_002`, … until you name it.
 
 ## Toggles

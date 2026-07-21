@@ -14,11 +14,11 @@ pub enum FormantBufferKind {
 }
 
 impl FormantBufferKind {
-    /// The Buffers-panel tag (`buffer_names`' `[Curve]` precedent).
+    /// The Buffers-panel tag (`buffer_names`' `[p]` precedent).
     pub fn tag(self) -> &'static str {
         match self {
-            FormantBufferKind::Formant => "[Formant]",
-            FormantBufferKind::Snapshot => "[Snapshot]",
+            FormantBufferKind::Formant => "[f]",
+            FormantBufferKind::Snapshot => "[s]",
         }
     }
 }
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn kind_tag_distinguishes_formant_from_snapshot() {
-        assert_eq!(FormantBufferKind::Formant.tag(), "[Formant]");
-        assert_eq!(FormantBufferKind::Snapshot.tag(), "[Snapshot]");
+        assert_eq!(FormantBufferKind::Formant.tag(), "[f]");
+        assert_eq!(FormantBufferKind::Snapshot.tag(), "[s]");
     }
 }
