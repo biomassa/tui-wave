@@ -43,6 +43,7 @@ use super::theme;
 use super::toolbar::Toolbar;
 use super::viewport::Viewport;
 use super::waveform_cache::WaveformCache;
+use super::widgets::braille::{braille_char, DOT_BITS};
 use super::widgets::db_scale::{DbScaleWidget, DB_GUTTER_WIDTH};
 use super::widgets::cdp_envelope_image::{self, interp_cdp_envelope};
 use super::widgets::statusbar::StatusBar;
@@ -245,7 +246,7 @@ enum CdpField {
     /// pitch-curve fields). `buffer_kind` is cloned from `ParamKind::FormantBufferRef` at
     /// construction time, same rationale as every other field's own bounds — it's what the
     /// picker filters `App.formant_buffers` by (a `formants put` field only offers
-    /// `[Formant]` buffers, `oneform put` only `[Snapshot]`).
+    /// `[f]` buffers, `oneform put` only `[s]`).
     FormantBufferRef {
         selected: Option<usize>,
         buffer_kind: crate::model::formant::FormantBufferKind,
@@ -483,14 +484,18 @@ fn is_pitch_curve_param(param: &crate::model::cdp::ParamDef) -> bool {
 /// cdp_browser_dialog`) — a heads-up about mechanics beyond "type some numbers and Apply",
 /// in the order a user would need to act on them: pick a second buffer, pick a curve/
 /// formant/snapshot. Extends the pre-existing ">1 inputs" note (dual-input processes) with
-/// three more, one per non-obvious param shape a process can require:
-/// - "pitch curve": has a `FormantBufferRef`-free Hz-pitch `required_envelope` field
+/// three more, one per non-obvious param shape a process can require. Shortened to the same
+/// single-bracket-letter convention the Buffers panel uses for its `[p]`/`[f]`/`[s]` row
+/// tags (user report, 2026-07-21: the old full-word badges — "pitch curve", "formants",
+/// "snapshot" — routinely ran the process list's already-narrow column out of width, cutting
+/// off both the badge and the tail of the process title next to it):
+/// - "[p]": has a `FormantBufferRef`-free Hz-pitch `required_envelope` field
 ///   (`is_pitch_curve_param`) — fillable from an open `PitchCurve` via the envelope
 ///   editor's 'c' picker, or hand-drawn.
-/// - "formants": has a `FormantBufferRef { buffer_kind: Formant, .. }` field — needs an
-///   open `[Formant]` buffer (Extract Formants) to pick from via 'b'.
-/// - "snapshot": has a `FormantBufferRef { buffer_kind: Snapshot, .. }` field — needs an
-///   open `[Snapshot]` buffer (Freeze Formant Snapshot at Cursor) to pick from via 'b'.
+/// - "[f]": has a `FormantBufferRef { buffer_kind: Formant, .. }` field — needs an
+///   open `[f]` buffer (Extract Formants) to pick from via 'b'.
+/// - "[s]": has a `FormantBufferRef { buffer_kind: Snapshot, .. }` field — needs an
+///   open `[s]` buffer (Freeze Formant Snapshot at Cursor) to pick from via 'b'.
 ///
 /// A process could in principle show more than one (none currently do, but nothing here
 /// assumes otherwise) — all returned in this fixed order so the badge order never depends
@@ -503,13 +508,13 @@ fn cdp_process_badges(p: &crate::model::cdp::ProcessDef) -> Vec<&'static str> {
         badges.push(">1 inputs");
     }
     if p.params.iter().any(is_pitch_curve_param) {
-        badges.push("pitch curve");
+        badges.push("[p]");
     }
     if p.params.iter().any(|param| matches!(&param.kind, ParamKind::FormantBufferRef { buffer_kind: FormantBufferKind::Formant, .. })) {
-        badges.push("formants");
+        badges.push("[f]");
     }
     if p.params.iter().any(|param| matches!(&param.kind, ParamKind::FormantBufferRef { buffer_kind: FormantBufferKind::Snapshot, .. })) {
-        badges.push("snapshot");
+        badges.push("[s]");
     }
     badges
 }
@@ -669,6 +674,11 @@ enum Dialog {
         recent: Vec<String>,
         entries: Vec<usize>,
         selected: usize,
+        /// Mouse-wheel scroll offset into the Description column's word-wrapped text
+        /// (`App::handle_mouse`, `render_cdp_browser_dialog`'s `.scroll`) — reset to 0 at
+        /// every site that changes `selected` or re-filters `entries`, since a scroll
+        /// position only makes sense relative to the description it was scrolled into.
+        desc_scroll: u16,
     },
     /// The parameter-editing form for one CDP process, opened from `Dialog::CdpBrowser`
     /// (`App::open_cdp_params`). Esc closes this dialog outright — there is no "back to the
@@ -844,8 +854,8 @@ struct EnvelopeCurvePicker {
 
 /// The picker `Dialog::CdpParams.formant_picker` holds (CDP-Ext-Plan.md Phase 5) — `entries`
 /// are indices into `App.formant_buffers` already filtered to the focused field's
-/// `buffer_kind` (a `formants put` field only ever offers `[Formant]` buffers, `oneform put`
-/// only `[Snapshot]`), computed once when 'b' opens it. Same shape as `EnvelopeCurvePicker`,
+/// `buffer_kind` (a `formants put` field only ever offers `[f]` buffers, `oneform put`
+/// only `[s]`), computed once when 'b' opens it. Same shape as `EnvelopeCurvePicker`,
 /// just a top-level `Dialog::CdpParams` slot rather than nested under an envelope edit —
 /// `FormantBufferRef` fields have no graphical envelope to nest inside at all.
 struct FormantBufferPicker {
@@ -1281,7 +1291,7 @@ const TRANSIENT_THRESHOLD_MAX_DB: f32 = 24.0;
 enum Confirm {
     Quit,
     CloseBuffer(usize),
-    /// Close the curve at this `App.curves` index (Buffers panel `Ctrl+W` on a `[Curve]`
+    /// Close the curve at this `App.curves` index (Buffers panel `Ctrl+W` on a `[p]`
     /// row), confirmed because a dirty curve carries unsaved edits — the curve counterpart
     /// to `CloseBuffer`. Formant/snapshot buffers need no such confirm (no dirty concept).
     CloseCurve(usize),
@@ -1368,7 +1378,7 @@ pub struct App {
     /// Index-parallel to `curves`, same reasoning as `histories`.
     pub curve_histories: Vec<crate::model::curve_history::CurveHistory>,
     /// Open formant/snapshot buffers (CDP-Ext-Plan.md Phase 5 "Tier 3") — folded into the
-    /// Buffers panel alongside `documents`/`curves` (tagged `[Formant]`/`[Snapshot]` via
+    /// Buffers panel alongside `documents`/`curves` (tagged `[f]`/`[s]` via
     /// `FormantBufferKind::tag`), per the same UX decision `curves` shipped under. Unlike a
     /// curve, a formant buffer has no hand-editable representation at all (see
     /// `model::formant`'s doc comments) — selecting one in the panel opens a read-only
@@ -1437,6 +1447,11 @@ pub struct App {
     /// Clickable row rects from the last dialog render, used for mouse hit-testing.
     dialog_row_rects: Vec<Rect>,
     dialog_n_interactive: usize,
+    /// The full terminal frame `Rect` from the last render (`App::render`'s own `area`) —
+    /// needed outside render to recompute `Dialog::CdpBrowser`'s popup geometry
+    /// (`cdp_browser_layout`) for mouse-wheel hit-testing (`App::handle_mouse`), since a
+    /// `MouseEvent` carries only a column/row, not the layout that produced it.
+    last_frame_area: Rect,
     /// Buffer indices still waiting for a Save-As filename before `save_as_queue_then` can
     /// run — e.g. quitting with several never-saved buffers walks through one Save As
     /// prompt per buffer rather than silently skipping (and losing) them. Popped from the
@@ -1552,14 +1567,14 @@ pub struct App {
     /// `tick_cdp` checks this alongside `cdp_pending_curve_extraction`.
     cdp_pending_formant_extraction: Option<(String, f64)>,
     /// `Some(source_buffer_index)` while a "freeze snapshot" job (`App::freeze_formant_snapshot`,
-    /// `oneform get`) is in flight — the index of the `[Formant]` buffer being frozen, kept
+    /// `oneform get`) is in flight — the index of the `[f]` buffer being frozen, kept
     /// only so the completed job's result can be named after it. Same no-`CdpParams`-session
     /// rationale as the extraction fields above; the result becomes a new
     /// `App.formant_buffers` entry (`FormantBufferKind::Snapshot`) rather than replacing
     /// anything in place.
     cdp_pending_snapshot_freeze: Option<usize>,
     /// `Some(cursor_seconds)` when "Freeze Snapshot at Cursor" had to auto-extract formants
-    /// first (the current document had no `[Formant]` buffer yet) — the absolute document
+    /// first (the current document had no `[f]` buffer yet) — the absolute document
     /// cursor time captured at invocation, so `tick_cdp` can chain the freeze onto the fresh
     /// buffer the moment the extraction lands, instead of making the user run Extract Formants
     /// by hand. Cleared whether the extraction succeeds or fails.
@@ -1687,6 +1702,7 @@ impl App {
             save_as_focused: 0,
             dialog_row_rects: Vec::new(),
             dialog_n_interactive: 0,
+            last_frame_area: Rect::default(),
             save_as_queue: Vec::new(),
             save_as_queue_then: None,
             snap_to_zero: config.snap_to_zero,
@@ -1747,8 +1763,8 @@ impl App {
         }
     }
 
-    /// Documents first, then open curves (tagged `[Curve]`), then open formant/snapshot
-    /// buffers (tagged `[Formant]`/`[Snapshot]`) appended last — one flat list for
+    /// Documents first, then open curves (tagged `[p]`), then open formant/snapshot
+    /// buffers (tagged `[f]`/`[s]`) appended last — one flat list for
     /// `BufferPanel` to render/select over. `documents.len()` is the first split point (any
     /// selected index at or beyond it refers to `curves`/`formant_buffers` instead of a
     /// document); `documents.len() + curves.len()` is the second (see
@@ -1760,7 +1776,7 @@ impl App {
         });
         let curves = self.curves.iter().map(|c| {
             let prefix = if c.dirty { "*" } else { "" };
-            format!("{}[Curve] {}", prefix, c.name)
+            format!("{}[p] {}", prefix, c.name)
         });
         // No dirty marker: unlike a document/curve, a formant buffer has no save action at
         // all (`model::formant::FormantBuffer`'s doc comment) — there's nothing "dirty"
@@ -1789,7 +1805,7 @@ impl App {
     }
 
     /// Opens the read-only "Formant Info" popup for `App.formant_buffers[formant_index]`
-    /// (Buffers-panel Enter on a `[Formant]`/`[Snapshot]` row) — the UX decision this
+    /// (Buffers-panel Enter on a `[f]`/`[s]` row) — the UX decision this
     /// shipped under: unlike a pitch curve, formant data has no hand-editable representation
     /// at all (CDP itself offers no formant-curve-to-formant-curve transform — see
     /// `model::formant`'s doc comments), so there is no editor to open, only a summary.
@@ -3191,17 +3207,19 @@ impl App {
             // single-step one; PageUp/PageDown only ever act on the process list, regardless
             // of `group_focus`.
             KeyCode::PageUp => {
-                if let Some(Dialog::CdpBrowser { group_focus: false, selected, .. }) = self.dialog.as_mut() {
+                if let Some(Dialog::CdpBrowser { group_focus: false, selected, desc_scroll, .. }) = self.dialog.as_mut() {
                     *selected = selected.saturating_sub(CDP_BROWSER_PAGE_SIZE);
+                    *desc_scroll = 0;
                 } else if let Some(Dialog::CdpOutput { scroll, .. }) = self.dialog.as_mut() {
                     *scroll = scroll.saturating_sub(10);
                 }
             }
             KeyCode::PageDown => {
-                if let Some(Dialog::CdpBrowser { group_focus: false, entries, selected, .. }) = self.dialog.as_mut() {
+                if let Some(Dialog::CdpBrowser { group_focus: false, entries, selected, desc_scroll, .. }) = self.dialog.as_mut() {
                     if !entries.is_empty() {
                         *selected = (*selected + CDP_BROWSER_PAGE_SIZE).min(entries.len() - 1);
                     }
+                    *desc_scroll = 0;
                 } else if let Some(Dialog::CdpOutput { scroll, lines, .. }) = self.dialog.as_mut() {
                     *scroll = (*scroll + 10).min(lines.len().saturating_sub(1));
                 }
@@ -3212,8 +3230,9 @@ impl App {
                     return;
                 }
                 match self.dialog.as_mut() {
-                    Some(Dialog::CdpBrowser { selected, .. }) => {
+                    Some(Dialog::CdpBrowser { selected, desc_scroll, .. }) => {
                         *selected = selected.saturating_sub(1);
+                        *desc_scroll = 0;
                     }
                     Some(Dialog::CdpParams { fields, focus, .. }) if *focus != CDP_PRESET_FOCUS => {
                         cdp_nudge_number(fields.get_mut(*focus - 1), 1.0, key.modifiers.contains(KeyModifiers::SHIFT));
@@ -3228,10 +3247,11 @@ impl App {
                     return;
                 }
                 match self.dialog.as_mut() {
-                    Some(Dialog::CdpBrowser { entries, selected, .. }) => {
+                    Some(Dialog::CdpBrowser { entries, selected, desc_scroll, .. }) => {
                         if !entries.is_empty() {
                             *selected = (*selected + 1).min(entries.len() - 1);
                         }
+                        *desc_scroll = 0;
                     }
                     Some(Dialog::CdpParams { fields, focus, .. }) if *focus != CDP_PRESET_FOCUS => {
                         cdp_nudge_number(fields.get_mut(*focus - 1), -1.0, key.modifiers.contains(KeyModifiers::SHIFT));
@@ -3436,9 +3456,10 @@ impl App {
         let group = groups.get(*group_selected).cloned().unwrap_or_else(|| CDP_GROUP_ALL.to_string());
         let recent = recent.clone();
         let new_entries = self.cdp_filter_entries(&query, &group, &recent);
-        if let Some(Dialog::CdpBrowser { entries, selected, .. }) = &mut self.dialog {
+        if let Some(Dialog::CdpBrowser { entries, selected, desc_scroll, .. }) = &mut self.dialog {
             *entries = new_entries;
             *selected = 0;
+            *desc_scroll = 0;
         }
     }
 
@@ -3495,6 +3516,35 @@ impl App {
                 *focus = step(*focus, cdp_params_focus_apply(fields.len(), second_input.is_some()) + 1);
             }
             _ => {}
+        }
+    }
+
+    /// Mouse wheel over `Dialog::CdpBrowser`'s Processes or Description column
+    /// (`App::handle_mouse`, `MouseEventKind::ScrollUp`/`ScrollDown`) — the only two panels
+    /// in this dialog with more content than fits (user report, 2026-07-21). Hit-tests
+    /// against `cdp_browser_layout`'s column `Rect`s (the exact same geometry the renderer
+    /// just drew, so a scroll can never land on the wrong column) rather than
+    /// `dialog_row_rects`, which for this dialog holds per-row click targets, not the two
+    /// column regions a wheel event needs. A no-op for every other dialog.
+    fn handle_cdp_browser_scroll(&mut self, mouse: MouseEvent) {
+        let Some(Dialog::CdpBrowser { entries, selected, desc_scroll, .. }) = self.dialog.as_mut() else { return };
+        let pos = Position::new(mouse.column, mouse.row);
+        let layout = cdp_browser_layout(self.last_frame_area);
+        let delta: isize = if mouse.kind == MouseEventKind::ScrollUp { -1 } else { 1 };
+        if layout.processes_col.contains(pos) {
+            if !entries.is_empty() {
+                *selected = (*selected as isize + delta).clamp(0, entries.len() as isize - 1) as usize;
+            }
+            *desc_scroll = 0;
+        } else if layout.desc_col.contains(pos) {
+            let def = entries.get(*selected).and_then(|&i| self.cdp_catalog.processes.get(i));
+            if let Some(def) = def {
+                // Matches `desc_padded`'s own margin (1 column each side) in the renderer.
+                let width = layout.desc_col.width.saturating_sub(2);
+                let height = layout.desc_col.height;
+                let max_scroll = cdp_browser_desc_max_scroll(&def.description, width, height);
+                *desc_scroll = (*desc_scroll as isize + delta).clamp(0, max_scroll as isize) as u16;
+            }
         }
     }
 
@@ -3790,13 +3840,28 @@ impl App {
     }
 
     /// `Dialog::CdpBrowser`'s group list: `CDP_GROUP_ALL`, `CDP_GROUP_RECENT`, then every
-    /// real `subcategory` value in the catalog, alphabetically — the taxonomy
-    /// `scripts/convert_soundthread_catalog.py`'s `resolve_subcategory` reconciles down to
-    /// one clean set (see CDP-Ext-Plan.md Phase 7), used verbatim rather than re-derived
-    /// here.
+    /// real `subcategory` value in the catalog that has at least one entry this browser can
+    /// actually show, alphabetically — the taxonomy `scripts/convert_soundthread_catalog.py`'s
+    /// `resolve_subcategory` reconciles down to one clean set (see CDP-Ext-Plan.md Phase 7),
+    /// used verbatim rather than re-derived here. Filtered through the same
+    /// `is_curve_only_process` exclusion `cdp_filter_entries` applies (user report,
+    /// 2026-07-21): "pitch curve" is a real subcategory, but every process tagged with it is
+    /// curve-in/curve-out and therefore invisible to this browser (`cdp_filter_entries`
+    /// excludes those unconditionally — they're only reachable via the standalone curve
+    /// editor's own `t` picker, `App::open_curve_transform_picker`). Without this filter that
+    /// group would always list, always highlight-able, and always show "No matches" — a dead
+    /// end with no explanation. `psow`'s pitch-subcategory processes (e.g. "Psow Reinforce
+    /// Harmonics") are ordinary wav-in/wav-out and unaffected by this filter; they already
+    /// show up in the real "pitch" group, just further down its (long, unsorted-by-name)
+    /// list than a quick glance catches.
     fn cdp_groups(&self) -> Vec<String> {
-        let mut subcategories: Vec<String> =
-            self.cdp_catalog.processes.iter().map(|p| p.subcategory.clone()).collect();
+        let mut subcategories: Vec<String> = self
+            .cdp_catalog
+            .processes
+            .iter()
+            .filter(|p| !is_curve_only_process(p))
+            .map(|p| p.subcategory.clone())
+            .collect();
         subcategories.sort();
         subcategories.dedup();
         let mut groups = vec![CDP_GROUP_ALL.to_string(), CDP_GROUP_RECENT.to_string()];
@@ -3821,6 +3886,7 @@ impl App {
             recent,
             entries,
             selected: 0,
+            desc_scroll: 0,
         });
     }
 
@@ -5844,7 +5910,7 @@ impl App {
     }
 
     /// "Freeze snapshot" (CDP-Ext-Plan.md Phase 5's `oneform get`) — freezes a single instant
-    /// of an open `[Formant]` buffer into a new `[Snapshot]` buffer, triggered from a key
+    /// of an open `[f]` buffer into a new `[s]` buffer, triggered from a key
     /// inside the read-only Formant Info popup (`Dialog::FormantInfo`) rather than the
     /// waveform selection, since this operates on an *already-extracted* formant buffer, not
     /// the current audio. Unlike `extract_formants`/`extract_pitch_curve`, there's no audio
@@ -5884,7 +5950,7 @@ impl App {
         });
     }
 
-    /// Index of the `[Formant]` buffer extracted from the document named `document_name`, if
+    /// Index of the `[f]` buffer extracted from the document named `document_name`, if
     /// one is open — how "Freeze Snapshot at Cursor" decides whether the current document
     /// already has an extraction to reuse (vs. needing to auto-extract).
     fn formant_buffer_for_document(&self, document_name: &str) -> Option<usize> {
@@ -5894,9 +5960,9 @@ impl App {
             .position(|b| b.kind == Formant && b.source_document_name == document_name)
     }
 
-    /// "Freeze Formant Snapshot at Cursor" (CDP menu) — freezes a `[Snapshot]` at the moment
+    /// "Freeze Formant Snapshot at Cursor" (CDP menu) — freezes a `[s]` at the moment
     /// the waveform's insertion point (cursor) sits at, with no manual steps: if the current
-    /// document already has a `[Formant]` extraction it's reused; otherwise Extract Formants
+    /// document already has a `[f]` extraction it's reused; otherwise Extract Formants
     /// runs automatically and the freeze is chained onto its result (`tick_cdp`). The cursor
     /// is a position in the *document*; the formant buffer's own timeline starts at its
     /// extraction point (`source_start_seconds`), so the buffer-relative time is
@@ -6397,7 +6463,7 @@ impl App {
     }
 
     /// Routes `Ctrl+W` when the Buffers panel is focused: closes whichever row is selected —
-    /// a document, a `[Curve]`, or a `[Formant]`/`[Snapshot]` buffer (FABLE-REVIEW FR-6). The
+    /// a document, a `[p]`, or a `[f]`/`[s]` buffer (FABLE-REVIEW FR-6). The
     /// three-segment index layout matches `buffer_names` (documents, then curves, then
     /// formant buffers). A dirty document or curve confirms first; formant buffers close
     /// immediately (no save/dirty concept). No modal dialog can be open here (a modal
@@ -7174,6 +7240,9 @@ impl App {
         // waveform/panels behind it don't fire. Route left-clicks that land on an interactive
         // row to the appropriate handler; everything else is just swallowed.
         if self.dialog.is_some() || self.save_as_active {
+            if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                self.handle_cdp_browser_scroll(mouse);
+            }
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 let pos = Position::new(mouse.column, mouse.row);
                 let hit = self
@@ -8612,6 +8681,7 @@ impl App {
 
     fn render(&mut self, frame: &mut Frame) {
         let area: Rect = frame.area();
+        self.last_frame_area = area;
         let focus = self.focus();
         // Reserve the tallest set's height for every mode so the layout doesn't jump on Tab.
         let toolbar_height = self.toolbar.reserved_rows(area.width);
@@ -9013,8 +9083,21 @@ impl App {
         // block, just for the editor's grid instead of a whole channel pane; unlike that
         // block there's no `overlay_active` guard to worry about, since a dialog being open
         // is exactly the precondition for this branch running at all.
+        //
+        // Gated on `edit.curve_picker.is_none()` (NASTY BUG, user report 2026-07-21): once
+        // 'c' opens the "use curve" picker, `render_cdp_envelope_editor` early-returns
+        // `render_envelope_curve_picker`'s small popup instead of the grid — but that
+        // function returns an empty row-rect `Vec` (nothing in it is mouse-clickable), and
+        // `App::render`'s caller only overwrites `self.dialog_row_rects` `if
+        // !dialog_rects.is_empty()`. So with the picker open, `dialog_row_rects` still held
+        // last frame's *grid* `Rect` from before 'c' was pressed — and this match, not
+        // checking `curve_picker` at all, kept treating that stale grid `Rect` as valid and
+        // painting a brand new envelope bitmap into it every frame, completely obscuring the
+        // picker it was drawn on top of. Not a stale-image cleanup problem (the picker's own
+        // `Clear` widget handles that fine for plain text) — the bitmap was actively being
+        // redrawn onto the wrong, no-longer-current `Rect`.
         let envelope_curve = match &self.dialog {
-            Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) => {
+            Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) if edit.curve_picker.is_none() => {
                 fields.get(edit.field_index).and_then(|f| match f {
                     CdpField::Number { min, max, .. } => {
                         Some((edit.points.clone(), edit.selected, edit.time_max, *min, *max, edit.range))
@@ -9579,9 +9662,9 @@ fn render_dialog(
         Dialog::Info { message } => {
             return render_info_dialog(frame, area, message);
         }
-        Dialog::CdpBrowser { search, groups, group_selected, group_focus, entries, selected, .. } => {
+        Dialog::CdpBrowser { search, groups, group_selected, group_focus, entries, selected, desc_scroll, .. } => {
             return render_cdp_browser_dialog(
-                frame, area, search, groups, *group_selected, *group_focus, entries, *selected, catalog,
+                frame, area, search, groups, *group_selected, *group_focus, entries, *selected, *desc_scroll, catalog,
             );
         }
         Dialog::CdpParams {
@@ -9962,15 +10045,24 @@ fn format_cdp_range(min: f64, max: f64) -> String {
 }
 
 
+/// Continuous (sub-row) version of `cdp_envelope_value_to_row` — same `[min, max]` -> row
+/// mapping, max at the top, just not rounded to a whole row. `cdp_envelope_value_to_row`
+/// builds on this (rounded) for breakpoint/mouse cell mapping; the braille dot-matrix curve
+/// renderer (`render_cdp_envelope_editor`) uses the continuous form directly at 4x the row
+/// count for sub-cell precision.
+fn cdp_envelope_value_to_row_f64(v: f64, min: f64, max: f64, height: usize) -> f64 {
+    if height <= 1 || max <= min {
+        return 0.0;
+    }
+    let frac = ((v - min) / (max - min)).clamp(0.0, 1.0);
+    (1.0 - frac) * (height - 1) as f64
+}
+
 /// Maps a value in `[min, max]` to a grid row in `[0, height-1]`, row 0 being the *top* of
 /// the grid (the max end) — matches how the waveform/dB-scale widgets orient their vertical
 /// axis, so this reads the same way the rest of the app's plots do.
 fn cdp_envelope_value_to_row(v: f64, min: f64, max: f64, height: usize) -> usize {
-    if height <= 1 || max <= min {
-        return 0;
-    }
-    let frac = ((v - min) / (max - min)).clamp(0.0, 1.0);
-    ((1.0 - frac) * (height - 1) as f64).round() as usize
+    cdp_envelope_value_to_row_f64(v, min, max, height).round() as usize
 }
 
 /// Inverse of the rendering-time (time, value) → (col, row) mapping: given a mouse position
@@ -10023,15 +10115,20 @@ fn cdp_envelope_nearest_point(
         .min_by_key(|&(_, d)| d)
 }
 
-/// The ASCII breakpoint-curve editor, replacing the whole popup while
-/// `Dialog::CdpBrowser.envelope` is `Some` (see its doc comment for the interaction model —
-/// this is deliberately plain terminal characters rather than a bitmap; a kitty-graphics
-/// version of the same editor is a plausible future upgrade but out of scope here). The
-/// curve is drawn as a "staircase" — a vertical run of `│` wherever the interpolated value's
-/// row changes between adjacent columns, `─` where it doesn't — rather than true diagonal
-/// line segments, which keeps the per-cell logic to one row-difference comparison instead of
-/// sub-cell rasterization; breakpoints themselves are drawn as `●` (the selected one
-/// reverse-video) on top of that backdrop.
+/// The breakpoint-curve editor, replacing the whole popup while `Dialog::CdpBrowser.envelope`
+/// is `Some` (see its doc comment for the interaction model). This is the character-glyph
+/// renderer — always drawn first, then optionally occluded by a real bitmap
+/// (`cdp_envelope_image::rasterize_cdp_envelope`) when graphics mode is available, mirroring
+/// the waveform's own text/graphics split (see `App::render`'s "Graphics-mode envelope
+/// curve" comment). The curve is drawn as braille dot-matrix glyphs — 2 dot-columns per
+/// terminal column, 4 dot-rows per terminal row, same technique and sub-cell precision as
+/// `waveform::WaveformWidget::render_dots` — with consecutive dot-columns connected by a
+/// filled span (like a polyline) so it reads as a continuous line instead of a sparse
+/// scatter; `masks`/`prev_dot_row` below is the direct analogue of that widget's
+/// `render_dots` accumulation loop. Breakpoints themselves are drawn as `●` (the selected
+/// one reverse-video) on top of that backdrop, at the same whole-cell positions
+/// `cdp_envelope_point_cell` uses for mouse hit-testing — only the curve *between* points
+/// gained sub-cell resolution, not the points themselves.
 /// Pure layout for the envelope editor popup, shared by the renderer and
 /// `App::try_handle_cdp_envelope_mouse` so the two can never drift apart — the mouse handler
 /// needs the exact on-screen `grid` rect the renderer used to place breakpoints, and
@@ -10123,15 +10220,37 @@ fn render_cdp_envelope_editor(
     const Y_LABEL_WIDTH: usize = CDP_ENVELOPE_Y_LABEL_WIDTH as usize;
     let grid_width = layout.grid.width as usize;
 
-    // Precompute each column's interpolated row so the staircase logic only ever compares
-    // adjacent columns, never re-interpolates.
-    let rows_at_col: Vec<usize> = (0..grid_width)
-        .map(|col| {
-            let t = if grid_width <= 1 { 0.0 } else { edit.time_max * col as f64 / (grid_width - 1) as f64 };
-            let v = interp_cdp_envelope(&edit.points, t);
-            cdp_envelope_value_to_row(v, min, max, GRID_HEIGHT)
-        })
-        .collect();
+    // Braille dot-matrix curve: 2 dot-columns per terminal column, 4 dot-rows per terminal
+    // row. `masks` is row-major over the terminal grid (`GRID_HEIGHT` x `grid_width`);
+    // `prev_dot_row` threads continuously across every dot-column in the whole grid (not
+    // reset per terminal column) so consecutive dot-columns get a filled connecting span —
+    // the same "keep the trace continuous" trick `waveform_image`'s line mode uses, just at
+    // character-cell dot resolution instead of pixels.
+    let dot_cols = grid_width * 2;
+    let dot_rows_total = GRID_HEIGHT * 4;
+    let mut masks = vec![0u8; grid_width * GRID_HEIGHT];
+    let mut prev_dot_row: Option<f64> = None;
+    for dot_col in 0..dot_cols {
+        let t = if dot_cols <= 1 { 0.0 } else { edit.time_max * dot_col as f64 / (dot_cols - 1) as f64 };
+        let v = interp_cdp_envelope(&edit.points, t);
+        let curr_dot_row = cdp_envelope_value_to_row_f64(v, min, max, dot_rows_total);
+        let (lo, hi) = match prev_dot_row {
+            Some(prev) => (prev.min(curr_dot_row), prev.max(curr_dot_row)),
+            None => (curr_dot_row, curr_dot_row),
+        };
+        let lo_idx = lo.floor().max(0.0) as usize;
+        let hi_idx = (hi.ceil() as usize).min(dot_rows_total.saturating_sub(1));
+        let col = dot_col / 2;
+        let sub_col = dot_col % 2;
+        for dot_idx in lo_idx..=hi_idx {
+            let row = dot_idx / 4;
+            let local = dot_idx % 4;
+            if row < GRID_HEIGHT && col < grid_width {
+                masks[row * grid_width + col] |= DOT_BITS[local][sub_col];
+            }
+        }
+        prev_dot_row = Some(curr_dot_row);
+    }
 
     let mut lines = vec![Line::raw("")];
     for row in 0..GRID_HEIGHT {
@@ -10146,17 +10265,7 @@ fn render_cdp_envelope_editor(
         spans.push(Span::styled(y_label, dim_style));
 
         for col in 0..grid_width {
-            let this_row = rows_at_col[col];
-            let prev_row = if col == 0 { this_row } else { rows_at_col[col - 1] };
-            let ch = if row == this_row {
-                '\u{2500}' // ─
-            } else if (prev_row < this_row && row >= prev_row && row < this_row)
-                || (prev_row > this_row && row <= prev_row && row > this_row)
-            {
-                '\u{2502}' // │ connecting the previous column's row to this one
-            } else {
-                ' '
-            };
+            let ch = braille_char(masks[row * grid_width + col]);
             spans.push(Span::styled(ch.to_string(), base));
         }
         lines.push(Line::from(spans));
@@ -11295,6 +11404,53 @@ fn render_cdp_hilite_band_editor(
 /// own scrolling, which is what lets `row` mean the same "row index" in both columns.
 const CDP_BROWSER_LIST_ROWS: usize = 24;
 
+/// Width of `Dialog::CdpBrowser`'s Processes column — widened from 46 (user report,
+/// 2026-07-21: process titles plus their capability badges routinely ran past the old
+/// width, truncating both) at the Description column's expense, which absorbs whatever's
+/// left via its own `Constraint::Min`. Shared between `cdp_browser_layout` (the renderer)
+/// and nothing else currently, but kept as a named constant rather than an inline literal
+/// so the two can't drift if a future change needs to reference it elsewhere.
+const CDP_BROWSER_PROCESSES_WIDTH: u16 = 62;
+
+/// `Dialog::CdpBrowser`'s popup geometry, factored out of the renderer so
+/// `App::render`'s post-render capture of the Processes/Description column `Rect`s (for
+/// mouse-wheel hit-testing, `App::handle_mouse`) computes the exact same layout the
+/// renderer just drew — the same "shared math so a click/scroll can never disagree with
+/// what's on screen" principle `CDP_BROWSER_LIST_ROWS`'s own doc comment already states for
+/// row clicks.
+struct CdpBrowserLayout {
+    popup: Rect,
+    inner: Rect,
+    groups_col: Rect,
+    /// The Processes column's outer `Rect`, i.e. before `Block::borders(Borders::LEFT)`'s
+    /// own inset — good enough for scroll hit-testing (which only cares "is the mouse over
+    /// this column", not the exact 1-column border edge) without needing to duplicate the
+    /// renderer's own `Block::inner` call here too.
+    processes_col: Rect,
+    /// The Description column's outer `Rect` — see `processes_col`'s doc comment.
+    desc_col: Rect,
+}
+
+fn cdp_browser_layout(area: Rect) -> CdpBrowserLayout {
+    let width = 150u16.min(area.width);
+    // header spacer + search/label + blank + LIST_ROWS + blank + hints, + 2 border.
+    let height = (1 + 1 + 1 + CDP_BROWSER_LIST_ROWS as u16 + 1 + 1 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let inner = Block::default().borders(Borders::ALL).inner(popup);
+    let cols = Layout::horizontal([
+        Constraint::Length(CDP_GROUP_COL_WIDTH),
+        Constraint::Length(CDP_BROWSER_PROCESSES_WIDTH),
+        Constraint::Min(10),
+    ])
+    .split(inner);
+    CdpBrowserLayout { popup, inner, groups_col: cols[0], processes_col: cols[1], desc_col: cols[2] }
+}
+
 /// The CDP process browser: Groups on the left, the searchable process list in the middle,
 /// the highlighted process's full `description` on the right. Deliberately a *fixed*-size
 /// popup (width and height are constants, independent of `entries`/`groups`/the selected
@@ -11312,19 +11468,13 @@ fn render_cdp_browser_dialog(
     group_focus: bool,
     entries: &[usize],
     selected: usize,
+    desc_scroll: u16,
     catalog: &crate::model::cdp::CdpCatalog,
 ) -> Vec<Rect> {
     let def = entries.get(selected).and_then(|&i| catalog.processes.get(i));
 
-    let width = 150u16.min(area.width);
-    // header spacer + search/label + blank + LIST_ROWS + blank + hints, + 2 border.
-    let height = (1 + 1 + 1 + CDP_BROWSER_LIST_ROWS as u16 + 1 + 1 + 2).min(area.height);
-    let popup = Rect {
-        x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    };
+    let layout = cdp_browser_layout(area);
+    let popup = layout.popup;
     frame.render_widget(ratatui::widgets::Clear, popup);
 
     let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
@@ -11347,23 +11497,16 @@ fn render_cdp_browser_dialog(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
-    let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    const PROCESSES_WIDTH: u16 = 46;
-    let cols = Layout::horizontal([
-        Constraint::Length(CDP_GROUP_COL_WIDTH),
-        Constraint::Length(PROCESSES_WIDTH),
-        Constraint::Min(10),
-    ])
-    .split(inner);
-    let groups_col = cols[0];
+    let inner = layout.inner;
+    let groups_col = layout.groups_col;
     let processes_block = Block::default().borders(Borders::LEFT).border_style(Style::default().fg(theme::BORDER));
-    let processes_col = processes_block.inner(cols[1]);
-    frame.render_widget(processes_block, cols[1]);
+    let processes_col = processes_block.inner(layout.processes_col);
+    frame.render_widget(processes_block, layout.processes_col);
     let desc_block = Block::default().borders(Borders::LEFT).border_style(Style::default().fg(theme::BORDER));
-    let desc_col = desc_block.inner(cols[2]);
-    frame.render_widget(desc_block, cols[2]);
+    let desc_col = desc_block.inner(layout.desc_col);
+    frame.render_widget(desc_block, layout.desc_col);
 
     // Blank + label/search + blank precede the list in both columns, so a given row index
     // lands on the same screen line in either one.
@@ -11489,9 +11632,44 @@ fn render_cdp_browser_dialog(
         ],
         None => vec![Line::raw(""), Line::from(Span::styled("No matches", dim_style))],
     };
-    frame.render_widget(Paragraph::new(desc_lines).wrap(Wrap { trim: false }), desc_padded);
+    frame.render_widget(Paragraph::new(desc_lines).wrap(Wrap { trim: false }).scroll((desc_scroll, 0)), desc_padded);
 
     row_rects
+}
+
+/// Clamps `Dialog::CdpBrowser.desc_scroll` to the actual wrapped-line overflow of the
+/// currently-highlighted process's description (mouse-wheel scroll,
+/// `App::handle_mouse`) — greedy word-wrap at `width`, matching ratatui's own `Wrap` closely
+/// enough for a scroll bound (doesn't need to be pixel-exact, just never let the content
+/// scroll past its own last line). Mirrors `desc_padded`'s fixed header rows (title +
+/// separator + blank = 3 lines) before the description text itself.
+fn cdp_browser_desc_max_scroll(description: &str, width: u16, visible_height: u16) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    let width = width as usize;
+    let mut wrapped_lines = 0u16;
+    for paragraph in description.trim().split('\n') {
+        if paragraph.is_empty() {
+            wrapped_lines += 1;
+            continue;
+        }
+        let mut col = 0usize;
+        let mut lines_here = 1u16;
+        for word in paragraph.split_whitespace() {
+            let word_len = word.chars().count();
+            if col > 0 && col + 1 + word_len > width {
+                lines_here += 1;
+                col = word_len;
+            } else {
+                col += if col > 0 { 1 + word_len } else { word_len };
+            }
+        }
+        wrapped_lines += lines_here;
+    }
+    const HEADER_LINES: u16 = 3; // blank + title + separator, before the description text
+    let total = HEADER_LINES + wrapped_lines;
+    total.saturating_sub(visible_height)
 }
 
 /// The longest label and Number-range text across `def`'s params, used as fixed column
@@ -11946,7 +12124,7 @@ fn render_info_dialog(frame: &mut Frame, area: Rect, message: &str) -> Vec<Rect>
     vec![Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 }]
 }
 
-/// Read-only summary for a `[Formant]`/`[Snapshot]` Buffers-panel row (`App::open_formant_info`)
+/// Read-only summary for a `[f]`/`[s]` Buffers-panel row (`App::open_formant_info`)
 /// — deliberately just a handful of facts (name, kind, source, duration) with no editable
 /// field at all, since CDP itself offers no formant-curve transform to edit *toward* (see
 /// `model::formant`'s doc comments). `buffer` is `None` only if the index went stale between
@@ -12494,6 +12672,77 @@ mod tests {
         assert_eq!(*selected, 1);
     }
 
+    /// Mouse wheel over the Processes column moves `selected`, same as Down/Up — the
+    /// column-hit-testing half of the mouse-scroll feature (user report, 2026-07-21).
+    /// `last_frame_area` (needed by `handle_cdp_browser_scroll` to recompute the popup
+    /// layout) is only populated by an actual render, so this renders once before scrolling.
+    #[test]
+    fn mouse_wheel_over_processes_column_moves_selection() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_browser();
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let layout = cdp_browser_layout(app.last_frame_area);
+        let pos = (layout.processes_col.x + 2, layout.processes_col.y + 2);
+
+        app.handle_mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: pos.0, row: pos.1, modifiers: KeyModifiers::NONE });
+        let Some(Dialog::CdpBrowser { selected, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*selected, 1, "scrolling down over the Processes column should move selection down");
+
+        app.handle_mouse(MouseEvent { kind: MouseEventKind::ScrollUp, column: pos.0, row: pos.1, modifiers: KeyModifiers::NONE });
+        let Some(Dialog::CdpBrowser { selected, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*selected, 0, "scrolling back up should return to the top");
+    }
+
+    /// Mouse wheel over the Description column scrolls its text independently of
+    /// `selected` — the other half of the mouse-scroll feature. Picks a process with a long
+    /// enough `description` that it actually overflows the column at this terminal size, so
+    /// the scroll has somewhere real to go.
+    #[test]
+    fn mouse_wheel_over_description_column_scrolls_its_text() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_browser();
+        let longest = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !is_curve_only_process(p))
+            .max_by_key(|(_, p)| p.description.len())
+            .map(|(i, _)| i)
+            .expect("catalog should have at least one eligible process");
+        {
+            let Some(Dialog::CdpBrowser { entries, selected, .. }) = app.dialog.as_mut() else { panic!("no dialog") };
+            *selected = entries.iter().position(|&i| i == longest).expect("longest process should be in the unfiltered entry list");
+        }
+
+        // A narrow, short terminal (unlike the 160x50 used elsewhere) so the Description
+        // column is small enough that even the catalog's longest `description` overflows it
+        // — the popup is a fixed size independent of terminal size, but a small enough
+        // terminal still clamps that fixed size down (same `.min(area.width/height)` every
+        // other dialog in this file uses for overflow).
+        let mut terminal = Terminal::new(TestBackend::new(110, 15)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let layout = cdp_browser_layout(app.last_frame_area);
+        let pos = (layout.desc_col.x + 2, layout.desc_col.y + 2);
+
+        app.handle_mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: pos.0, row: pos.1, modifiers: KeyModifiers::NONE });
+        let Some(Dialog::CdpBrowser { desc_scroll, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(*desc_scroll > 0, "scrolling down over a long description should advance desc_scroll");
+
+        app.handle_mouse(MouseEvent { kind: MouseEventKind::ScrollUp, column: pos.0, row: pos.1, modifiers: KeyModifiers::NONE });
+        let Some(Dialog::CdpBrowser { desc_scroll, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*desc_scroll, 0, "scrolling back up should return to the top");
+    }
+
     /// Enter on the browser opens `Dialog::CdpParams` for the currently-selected process —
     /// the two-dialog flow's whole point: browsing never grows/shrinks a params form live,
     /// it commits to a completely separate dialog sized for that one process.
@@ -12838,6 +13087,55 @@ mod tests {
         let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
         let picker = edit.curve_picker.as_ref().expect("'c' should open the picker even with no curves, for feedback");
         assert!(picker.entries.is_empty(), "the empty entry list renders as \"(no open curves)\"");
+    }
+
+    /// NASTY BUG regression (user report, 2026-07-21): with graphics mode on, opening the
+    /// "use curve" picker from inside the envelope editor left the picker completely
+    /// obscured by the envelope's own bitmap curve, which kept getting redrawn every frame
+    /// on top of it. Root cause: the graphics-mode redraw block matched on `dialog.envelope`
+    /// being `Some` without checking `curve_picker`, and reused `dialog_row_rects.first()`
+    /// as the target `Rect` — but `render_envelope_curve_picker` returns an empty row-rect
+    /// `Vec`, so `dialog_row_rects` was never updated for the picker frame and still held
+    /// the *envelope grid's* `Rect` from the frame before 'c' was pressed. A render with the
+    /// picker open must therefore render its own popup text (title "Use Pitch Curve")
+    /// without a bitmap painted over any part of it. Uses `Picker::halfblocks()`, whose
+    /// output is plain glyph characters `TestBackend` can inspect directly (unlike
+    /// kitty/Sixel, which round-trip through out-of-band escapes this harness can't see).
+    #[test]
+    fn opening_the_curve_picker_in_graphics_mode_does_not_paint_over_it() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        app.curves.push(crate::model::curve::PitchCurve::new("mycurve", vec![(0.0, 220.0), (1.0, 440.0)]));
+        app.graphics_mode = true;
+        app.set_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+        open_focus_hold_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        // First render with the plain envelope editor open populates `dialog_row_rects` with
+        // the grid `Rect` and paints the graphics-mode bitmap into it -- the state the real
+        // bug needs already in place before 'c' is pressed.
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+            assert!(edit.curve_picker.is_some(), "'c' should have opened the picker");
+        }
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let mut text = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        assert!(text.contains("Use Pitch Curve"), "the picker's own popup must be visible, not painted over: {text:?}");
+        assert!(text.contains("mycurve"), "the picker's curve entry must be visible, not painted over: {text:?}");
     }
 
     /// Regression check: 'c' on a *non*-required_envelope automatable field must still mean
@@ -13464,7 +13762,7 @@ mod tests {
         app.curves.push(crate::model::curve::PitchCurve::new("mycurve", vec![(0.0, 100.0)]));
         let names = app.buffer_names();
         assert_eq!(names.len(), 2);
-        assert!(names[1].contains("[Curve]"), "curve entries should be tagged, got {:?}", names[1]);
+        assert!(names[1].contains("[p]"), "curve entries should be tagged, got {:?}", names[1]);
         assert!(names[1].contains("mycurve"));
     }
 
@@ -14807,6 +15105,38 @@ mod tests {
         MouseEvent { kind, column: col, row, modifiers }
     }
 
+    /// The envelope editor's curve now renders as braille dot-matrix glyphs (2x horizontal,
+    /// 4x vertical sub-cell resolution — same technique as
+    /// `waveform::WaveformWidget::render_dots`) instead of the old whole-cell `─`/`│`
+    /// staircase. Locks in that the switch actually happened, not just that
+    /// `render_cdp_envelope_editor` doesn't panic.
+    #[test]
+    fn envelope_curve_renders_as_braille_dots_not_the_old_staircase() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (mut app, grid, _cell0, _cell1) = open_cdp_envelope_editor_for_mouse_tests();
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let mut saw_braille = false;
+        let mut saw_staircase_glyph = false;
+        for y in grid.y..grid.y + grid.height {
+            for x in grid.x..grid.x + grid.width {
+                let Some(ch) = buffer[(x, y)].symbol().chars().next() else { continue };
+                if ('\u{2800}'..='\u{28ff}').contains(&ch) && ch != '\u{2800}' {
+                    saw_braille = true;
+                }
+                if ch == '\u{2500}' || ch == '\u{2502}' {
+                    saw_staircase_glyph = true;
+                }
+            }
+        }
+        assert!(saw_braille, "expected braille dot-matrix glyphs somewhere in the envelope grid");
+        assert!(!saw_staircase_glyph, "the old ─/│ staircase glyphs should no longer appear");
+    }
+
     /// A plain click near an existing (but not exactly on) breakpoint selects the *nearest*
     /// one, not just an exact hit — clicking is imprecise on a character grid, so "nearest"
     /// is what makes the feature usable at all.
@@ -14919,6 +15249,20 @@ mod tests {
         assert_eq!(cdp_envelope_value_to_row(100.0, 0.0, 100.0, 11), 0, "max value is the top row");
         assert_eq!(cdp_envelope_value_to_row(0.0, 0.0, 100.0, 11), 10, "min value is the bottom row");
         assert_eq!(cdp_envelope_value_to_row(50.0, 0.0, 100.0, 11), 5, "midpoint lands in the middle row");
+    }
+
+    /// The continuous form the braille curve renderer uses must land on the exact same
+    /// integer rows as the whole-row form (which now just rounds this) at whole-value
+    /// inputs, and must actually vary sub-row for in-between ones — otherwise the dot-matrix
+    /// curve would have no more precision than the old staircase it replaced.
+    #[test]
+    fn cdp_envelope_value_to_row_f64_is_continuous_and_matches_the_rounded_form_at_whole_rows() {
+        assert_eq!(cdp_envelope_value_to_row_f64(100.0, 0.0, 100.0, 11), 0.0);
+        assert_eq!(cdp_envelope_value_to_row_f64(0.0, 0.0, 100.0, 11), 10.0);
+        assert_eq!(cdp_envelope_value_to_row_f64(50.0, 0.0, 100.0, 11), 5.0);
+        // A quarter of the way down from max isn't a whole row at height 11 — the continuous
+        // form must resolve it exactly (2.5), not snap to 2 or 3 like the rounded form would.
+        assert_eq!(cdp_envelope_value_to_row_f64(75.0, 0.0, 100.0, 11), 2.5);
     }
 
     /// Regression test for the reported bug: `blur_blur`'s "Blurring" param has a catalog
@@ -15297,7 +15641,7 @@ mod tests {
 
     /// A snapshot-freeze job's `Finished(Ok(..))` event (`cdp_pending_snapshot_freeze`) adds
     /// a new `App.formant_buffers` entry tagged `FormantBufferKind::Snapshot`, named after
-    /// the source `[Formant]` buffer it froze.
+    /// the source `[f]` buffer it froze.
     #[test]
     fn snapshot_freeze_apply_adds_a_new_snapshot_buffer_named_after_its_source() {
         let mut app = new_app(Some(doc(0.1, 4)), None);
@@ -15433,8 +15777,8 @@ mod tests {
         assert_eq!(App::snapshot_time_for_cursor(5.0, 1.0, None), 4.0);
     }
 
-    /// `formant_buffer_for_document` finds the `[Formant]` buffer extracted from a given
-    /// document (matched by name), ignoring `[Snapshot]`s and buffers from other documents —
+    /// `formant_buffer_for_document` finds the `[f]` buffer extracted from a given
+    /// document (matched by name), ignoring `[s]`s and buffers from other documents —
     /// how "Freeze Snapshot at Cursor" decides whether to reuse or auto-extract.
     #[test]
     fn formant_buffer_for_document_matches_by_source_document_name() {
@@ -15470,7 +15814,7 @@ mod tests {
         );
     }
 
-    /// Reuse path: with a `[Formant]` buffer already extracted from the current document, the
+    /// Reuse path: with a `[f]` buffer already extracted from the current document, the
     /// action freezes directly and does NOT re-extract (the chain flag stays clear). Uses an
     /// invalid CDP dir so no real job runs — only the branch choice is asserted.
     #[test]
@@ -15673,29 +16017,29 @@ mod tests {
     fn cdp_process_badges_marks_pitch_curve_fields_but_not_unrelated_envelopes() {
         let app = new_app(Some(doc(0.1, 100)), None);
         let psow = app.cdp_catalog.processes.iter().find(|p| p.key == "psow_stretch").expect("psow_stretch has a Pitch Envelope field");
-        assert!(cdp_process_badges(psow).contains(&"pitch curve"));
+        assert!(cdp_process_badges(psow).contains(&"[p]"));
 
         let altharms = app.cdp_catalog.processes.iter().find(|p| p.key == "pitch_altharms_1").expect("pitch_altharms_1 has a Pitchfile field");
-        assert!(cdp_process_badges(altharms).contains(&"pitch curve"));
+        assert!(cdp_process_badges(altharms).contains(&"[p]"));
 
         // focus_hold's required_envelope field is Hold Times, not a pitch curve — must NOT
         // get the badge just because it's required_envelope.
         let unrelated = app.cdp_catalog.processes.iter().find(|p| p.key == "focus_hold").expect("focus_hold has a non-pitch required_envelope field");
-        assert!(!cdp_process_badges(unrelated).contains(&"pitch curve"));
+        assert!(!cdp_process_badges(unrelated).contains(&"[p]"));
     }
 
     #[test]
     fn cdp_process_badges_marks_formants_and_snapshot_separately() {
         let app = new_app(Some(doc(0.1, 100)), None);
-        let put = app.cdp_catalog.processes.iter().find(|p| p.key == "formants_put_1").expect("formants_put_1 needs a [Formant] buffer");
+        let put = app.cdp_catalog.processes.iter().find(|p| p.key == "formants_put_1").expect("formants_put_1 needs a [f] buffer");
         let put_badges = cdp_process_badges(put);
-        assert!(put_badges.contains(&"formants"));
-        assert!(!put_badges.contains(&"snapshot"));
+        assert!(put_badges.contains(&"[f]"));
+        assert!(!put_badges.contains(&"[s]"));
 
-        let oneform = app.cdp_catalog.processes.iter().find(|p| p.key == "oneform_put_1").expect("oneform_put_1 needs a [Snapshot] buffer");
+        let oneform = app.cdp_catalog.processes.iter().find(|p| p.key == "oneform_put_1").expect("oneform_put_1 needs a [s] buffer");
         let oneform_badges = cdp_process_badges(oneform);
-        assert!(oneform_badges.contains(&"snapshot"));
-        assert!(!oneform_badges.contains(&"formants"));
+        assert!(oneform_badges.contains(&"[s]"));
+        assert!(!oneform_badges.contains(&"[f]"));
     }
 
     #[test]
@@ -15727,7 +16071,7 @@ mod tests {
             }
         }
         assert!(text.contains("Psow Stretch"), "the search should have found the process");
-        assert!(text.contains("pitch curve"), "its pitch-curve badge should be visible on screen");
+        assert!(text.contains("[p]"), "its pitch-curve badge should be visible on screen");
     }
 
     /// Space must type as a literal space in every plain-text dialog field — regression test
@@ -15768,6 +16112,39 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(subcategories, sorted.as_slice(), "should already be sorted with no duplicates");
+    }
+
+    /// Regression (user report, 2026-07-21): "pitch curve" is a real `subcategory` in the
+    /// catalog, but every process tagged with it is curve-in/curve-out and therefore
+    /// excluded from this browser entirely (`cdp_browser_never_lists_curve_only_processes`
+    /// below) — so before this fix, highlighting "pitch curve" always showed "No matches", a
+    /// dead-end group with no way out. `cdp_groups` must not list any group that
+    /// `cdp_filter_entries` can never populate; every group it *does* list must return at
+    /// least one entry from "All"'s own eligible set.
+    #[test]
+    fn cdp_groups_never_lists_a_group_the_browser_can_only_ever_show_empty() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let groups = app.cdp_groups();
+        assert!(!groups.iter().any(|g| g == "pitch curve"), "\"pitch curve\" only has curve-only entries -- it must be filtered out");
+        for group in &groups[2..] {
+            let entries = app.cdp_filter_entries("", group, &[]);
+            assert!(!entries.is_empty(), "group {group:?} is listed but has no eligible entries");
+        }
+    }
+
+    /// Regression (user report, 2026-07-21): `psow`'s pitch-subcategory processes (e.g.
+    /// "Psow Reinforce Harmonics") are ordinary wav-in/wav-out and were never actually
+    /// excluded from the "pitch" group -- they just sit at the end of its (long,
+    /// catalog-order, not alphabetical) list, past what a single screenful shows.
+    #[test]
+    fn psow_pitch_processes_appear_in_the_real_pitch_group() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let entries = app.cdp_filter_entries("", "pitch", &[]);
+        let titles: Vec<&str> = entries.iter().map(|&i| app.cdp_catalog.processes[i].title.as_str()).collect();
+        assert!(
+            titles.iter().any(|t| t.starts_with("Psow")),
+            "expected at least one Psow process in the \"pitch\" group, got {titles:?}"
+        );
     }
 
     /// Curve-in/curve-out processes (Repitch Exaggerate/Smooth/...) must never appear in the
@@ -17460,7 +17837,7 @@ mod tests {
         assert_eq!(app.active_document, 0);
     }
 
-    /// Ctrl+W with a clean `[Curve]` row selected in a focused Buffers panel removes that
+    /// Ctrl+W with a clean `[p]` row selected in a focused Buffers panel removes that
     /// curve (and its parallel history), not the active document (FABLE-REVIEW FR-6).
     #[test]
     fn close_buffer_removes_a_selected_clean_curve_row() {
@@ -17501,7 +17878,7 @@ mod tests {
         assert!(app.curve_histories.is_empty());
     }
 
-    /// Ctrl+W on a `[Formant]`/`[Snapshot]` row closes it immediately — no dirty/save
+    /// Ctrl+W on a `[f]`/`[s]` row closes it immediately — no dirty/save
     /// concept, so no confirm — and clamps the selection to a still-valid row (FR-6).
     #[test]
     fn close_buffer_removes_a_selected_formant_row_without_confirm() {
@@ -17873,7 +18250,7 @@ mod tests {
     }
 
     /// `open_cdp_formant_picker`'s entries are filtered to the focused field's `buffer_kind` —
-    /// a `formants put` field must never offer a `[Snapshot]` buffer (`oneform get`'s output),
+    /// a `formants put` field must never offer a `[s]` buffer (`oneform get`'s output),
     /// and vice versa, since the two are never interchangeable (`ParamKind::FormantBufferRef`'s
     /// doc comment).
     #[test]

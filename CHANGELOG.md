@@ -29,6 +29,36 @@
 - Bumped version to 1.3.0, covering the dot-matrix waveform renderer (text and graphics
   mode), the amplitude gradient and its toggle, View menu checkmarks, and the
   selection-playback bound fix above.
+- **CDP UI cleanup pass** (user report):
+  - The CDP Process browser's Groups column no longer lists "pitch curve" — every process
+    tagged with that subcategory is curve-in/curve-out and was already unconditionally
+    excluded from this browser (`is_curve_only_process`), so the group could only ever show
+    "No matches". `App::cdp_groups` now filters subcategories through the same eligibility
+    check `cdp_filter_entries` applies, so a listed group is always populate-able.
+    (`psow`'s pitch-subcategory processes, e.g. "Psow Reinforce Harmonics", were never
+    actually excluded from the real "pitch" group — they just sit near the end of its long,
+    catalog-order list.)
+  - Buffers-panel row tags shortened: `[Curve]` → `[p]`, `[Formant]` → `[f]`, `[Snapshot]` →
+    `[s]` (`FormantBufferKind::tag`, `App::buffer_names`). The old full-word tags routinely
+    ran buffer names out of the panel's width.
+  - CDP Process browser capability badges shortened to the same convention: "pitch curve" →
+    `[p]`, "formants" → `[f]`, "snapshot" → `[s]` (`cdp_process_badges`) — the old full-word
+    badges plus a long process title regularly overflowed the process list's column.
+  - The Processes column widened (46 → 62 cols) at the Description column's expense
+    (`CDP_BROWSER_PROCESSES_WIDTH`), and the Description column is now mouse-wheel
+    scrollable when its text overflows the popup (`cdp_browser_desc_max_scroll`); the
+    Processes column is also mouse-wheel scrollable (moves `selected`, same as Up/Down).
+    Both are hit-tested against `cdp_browser_layout`, a geometry helper factored out of the
+    renderer so a scroll can never land on the wrong column.
+  - **Fixed (NASTY BUG):** opening the envelope editor's "use curve" picker (`c`) while
+    graphics mode was on left the picker completely obscured by the envelope's own bitmap
+    curve, redrawn on top of it every frame. The graphics-mode redraw block matched on
+    `dialog.envelope` being `Some` without checking whether the curve picker sub-overlay was
+    open, and reused `dialog_row_rects.first()` as its target `Rect` — but the picker's own
+    renderer returns an empty row-rect list, so `dialog_row_rects` never got updated for the
+    picker's frame and still held the *envelope grid's* stale `Rect` from the frame before
+    `c` was pressed. Now gated on `edit.curve_picker.is_none()`.
+- Bumped version to 1.3.1, covering the CDP UI cleanup pass above.
 
 ## 2026-07-20
 
