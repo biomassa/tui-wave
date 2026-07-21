@@ -2079,7 +2079,7 @@ mod tests {
                             run_smoke_prereq_job(
                                 &runner,
                                 &cdp_dir,
-                                crate::model::cdp::plan_extract_formants(&crate::model::cdp::PvocSettings::default()),
+                                crate::model::cdp::plan_extract_formants(&crate::model::cdp::PvocSettings::default(), crate::model::cdp::FormantExtractionMode::PitchWise(8)),
                                 vec![channels.clone()],
                                 sample_rate,
                                 8_000,
@@ -2094,7 +2094,7 @@ mod tests {
                                 run_smoke_prereq_job(
                                     &runner,
                                     &cdp_dir,
-                                    crate::model::cdp::plan_extract_formants(&crate::model::cdp::PvocSettings::default()),
+                                    crate::model::cdp::plan_extract_formants(&crate::model::cdp::PvocSettings::default(), crate::model::cdp::FormantExtractionMode::PitchWise(8)),
                                     vec![channels.clone()],
                                     sample_rate,
                                     8_000,
