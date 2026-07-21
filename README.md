@@ -1,6 +1,7 @@
 # tui-wave
 
 ![tui-wave screenshot](screenshot1.png)
+![tui-wave screenshot](screenshot2.png)
 
 A keyboard-driven **terminal audio editor** for Linux, macOS, and Windows, written in Rust (mouse works too). It opens WAV files and gives you a zoomable waveform you can navigate,
 play, and edit entirely from the keyboard: selection, cut/copy/paste, undo/redo, normalize, gain, fades, reverse, trim, resample, mix-to-mono, and timeline markers with transient

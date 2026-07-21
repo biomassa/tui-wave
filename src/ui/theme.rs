@@ -65,3 +65,85 @@ pub const WARNING_BG: Color = SURFACE1;
 /// the CDP browser's ">1 inputs" note) — deliberately dimmer than `SUBTEXT0`/`DB_SCALE`,
 /// which are for text that's still meant to be read at a glance.
 pub const ANNOTATION: Color = OVERLAY0;
+
+/// Dot-matrix waveform gradient stops (quiet -> loud): green -> yellow -> red, echoing
+/// btop's height-graded braille graphs, where dots near 0 dBFS read as "louder" than dots
+/// near the centerline. Used by both `waveform::WaveformWidget` (character glyphs) and
+/// `waveform_image::rasterize_waveform` (graphics-mode bitmap) when dot-matrix mode is
+/// enabled — the eighth-block renderer, and dot-matrix mode with gradient off, stay
+/// flat-colored at `WAVEFORM_DOT_LOW`. Graded by dB (via `dsp::linear_to_db`, see
+/// `gradient_color`), not raw linear position — most of a waveform's on-screen height is
+/// quiet in linear terms, so a linear-position gradient was nearly invisible in practice.
+pub const WAVEFORM_DOT_LOW: Color = Color::Rgb(0xa6, 0xe3, 0xa1);
+pub const WAVEFORM_DOT_MID: Color = YELLOW;
+pub const WAVEFORM_DOT_HIGH: Color = RED;
+
+/// Below this dB level, [`gradient_color`] returns `WAVEFORM_DOT_LOW` outright (no further
+/// gradation) — a linear-amplitude gradient was nearly invisible in practice, since most of
+/// a typical waveform's on-screen height sits at very quiet linear amplitudes even though it
+/// spans a wide, perceptually significant dB range (e.g. -18dB is already 12.5% of
+/// full-scale linearly). Chosen to roughly match the deepest dB gutter mark normally visible
+/// (`db_scale::DB_MARKS`), so the gradient's full range lines up with what's shown.
+pub const GRADIENT_FLOOR_DB: f32 = -30.0;
+
+/// dB level of the gradient's middle stop (`WAVEFORM_DOT_MID`, yellow) — the
+/// green→yellow→red ramp is two separate lerps meeting here, not one lerp across the full
+/// range, so yellow actually lands at -6dB instead of being skipped over on the way from
+/// green to red.
+pub const GRADIENT_MID_DB: f32 = -6.0;
+
+/// Maps a dB level to a point along the green (`GRADIENT_FLOOR_DB`) -> yellow
+/// (`GRADIENT_MID_DB`) -> red (0dB) dot-matrix gradient.
+pub fn gradient_color(db: f32) -> Color {
+    if db >= GRADIENT_MID_DB {
+        let t = ((db - GRADIENT_MID_DB) / -GRADIENT_MID_DB).clamp(0.0, 1.0);
+        lerp_color(WAVEFORM_DOT_MID, WAVEFORM_DOT_HIGH, t)
+    } else {
+        let t = ((db - GRADIENT_FLOOR_DB) / (GRADIENT_MID_DB - GRADIENT_FLOOR_DB)).clamp(0.0, 1.0);
+        lerp_color(WAVEFORM_DOT_LOW, WAVEFORM_DOT_MID, t)
+    }
+}
+
+/// Background fill for a selected column/span in dot-matrix mode: `WAVEFORM_DOT_LOW` dimmed
+/// toward `BASE`. A full-pane fill of the gradient's own saturated green reads far brighter
+/// than the same color used sparingly on individual dots (green dominates perceived
+/// luminance more than the bars renderer's pastel sky-blue selection does at the same
+/// saturation), so it's toned down to read as "selection," not a wall of neon green.
+pub fn dot_matrix_selection_bg() -> Color {
+    lerp_color(BASE, WAVEFORM_DOT_LOW, 0.45)
+}
+
+/// Linearly interpolates two `Color::Rgb` values by `t` (clamped to `[0.0, 1.0]`). Every
+/// color in this module is `Color::Rgb`, so the non-RGB branch is unreachable in practice —
+/// it falls back to `a` rather than panicking, since a themed color is never worth crashing
+/// the renderer over.
+pub fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) = (a, b) else {
+        return a;
+    };
+    let lerp = |x: u8, y: u8| -> u8 { (x as f32 + (y as f32 - x as f32) * t).round() as u8 };
+    Color::Rgb(lerp(ar, br), lerp(ag, bg), lerp(ab, bb))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lerp_color_hits_both_endpoints_and_the_midpoint() {
+        let a = Color::Rgb(0, 0, 0);
+        let b = Color::Rgb(100, 200, 50);
+        assert_eq!(lerp_color(a, b, 0.0), a);
+        assert_eq!(lerp_color(a, b, 1.0), b);
+        assert_eq!(lerp_color(a, b, 0.5), Color::Rgb(50, 100, 25));
+    }
+
+    #[test]
+    fn lerp_color_clamps_out_of_range_t() {
+        let a = Color::Rgb(10, 10, 10);
+        let b = Color::Rgb(20, 20, 20);
+        assert_eq!(lerp_color(a, b, -1.0), a);
+        assert_eq!(lerp_color(a, b, 2.0), b);
+    }
+}

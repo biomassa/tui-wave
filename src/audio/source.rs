@@ -126,6 +126,25 @@ mod tests {
         );
     }
 
+    /// `loop_end` with no `loop_start` (what `AudioEngine::play_bounded`/`seek_bounded` send)
+    /// must stop exactly at `loop_end` rather than wrapping or continuing to the file's
+    /// actual end — this is what keeps Space from playing a selection past its own end when
+    /// loop playback is off.
+    #[test]
+    fn loop_end_without_loop_start_stops_there_instead_of_wrapping_or_continuing() {
+        let data = Arc::new(vec![vec![0.1f32, 0.2, 0.3, 0.4, 0.5]]);
+        let position = Arc::new(AtomicUsize::new(0));
+        let playing = Arc::new(AtomicBool::new(true));
+        let mut source =
+            DocumentSource::new_looped(data, 44100, 0, position, playing.clone(), None, Some(3));
+        let yielded = std::iter::from_fn(|| source.next()).count();
+        assert_eq!(yielded, 3, "must stop at loop_end, not continue to the file's actual end (5 frames)");
+        assert!(
+            !playing.load(Ordering::Relaxed),
+            "a bounded (non-looping) source must clear `playing` once it hits loop_end"
+        );
+    }
+
     #[test]
     fn looping_source_keeps_playing_set() {
         let data = Arc::new(vec![vec![0.1f32, 0.2, 0.3, 0.4]]);

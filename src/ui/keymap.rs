@@ -38,6 +38,7 @@ pub enum Action {
     ToggleCursorFollowsPlayback,
     ToggleViewportFollowsPlayback,
     ToggleGraphicsMode,
+    ToggleDotMatrixGradient,
     SaveAs,
     SaveAll,
     ToggleZeroSnap,
@@ -86,6 +87,25 @@ pub enum Action {
     RenameBuffer,
     SwitchBuffer,
     SearchBuffers,
+}
+
+impl Action {
+    /// Whether this action's current on/off state should be shown as a checkmark next to its
+    /// label in whatever menu it appears in (see `MenuBar::active_actions`). Every toggle
+    /// entry in the View menu gets one, for a consistent "checked = on" reading across the
+    /// whole menu rather than mixing checkmarked and un-checkmarked toggles side by side.
+    pub fn is_checkable(self) -> bool {
+        matches!(
+            self,
+            Action::ToggleZeroSnap
+                | Action::ToggleFineMode
+                | Action::ToggleAutoVerticalZoom
+                | Action::ToggleCursorFollowsPlayback
+                | Action::ToggleViewportFollowsPlayback
+                | Action::ToggleGraphicsMode
+                | Action::ToggleDotMatrixGradient
+        )
+    }
 }
 
 pub fn map_key(key: KeyEvent) -> Option<Action> {
@@ -385,6 +405,7 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "ToggleCursorFollowsPlayback" => Some(Action::ToggleCursorFollowsPlayback),
         "ToggleViewportFollowsPlayback" => Some(Action::ToggleViewportFollowsPlayback),
         "ToggleGraphicsMode" => Some(Action::ToggleGraphicsMode),
+        "ToggleDotMatrixGradient" => Some(Action::ToggleDotMatrixGradient),
         "InsertMarker" => Some(Action::InsertMarker),
         "DeleteMarker" => Some(Action::DeleteMarker),
         "JumpPrevMarker" => Some(Action::JumpPrevMarker),
