@@ -46,6 +46,7 @@ use super::waveform_cache::WaveformCache;
 use super::widgets::braille::{braille_char, DOT_BITS};
 use super::widgets::db_scale::{DbScaleWidget, DB_GUTTER_WIDTH};
 use super::widgets::cdp_envelope_image::{self, interp_cdp_envelope};
+use super::widgets::formant_image;
 use super::widgets::statusbar::StatusBar;
 use super::widgets::waveform::WaveformWidget;
 use super::widgets::waveform_image;
@@ -1354,6 +1355,11 @@ pub struct App {
     /// stale image here is harmless (it's simply not drawn) rather than needing the same
     /// channel-count-driven `truncate` the waveform's Vec does.
     cdp_envelope_graphics_protocol: Option<ratatui_image::protocol::StatefulProtocol>,
+    /// `Dialog::FormantInfo`'s own graphics-mode protocol slot — same rationale as
+    /// `cdp_envelope_graphics_protocol` (a separate slot rather than sharing it, even though
+    /// the two dialogs are mutually exclusive, so a future change letting a dialog open
+    /// something else on top doesn't have to reason about slot reuse).
+    cdp_formant_graphics_protocol: Option<ratatui_image::protocol::StatefulProtocol>,
     /// All open documents (buffers). Index 0 is always the first file loaded; subsequent
     /// entries are created by "Copy to New" or loading additional files.
     pub documents: Vec<Document>,
@@ -1666,6 +1672,7 @@ impl App {
             dot_matrix_gradient: config.dot_matrix_gradient,
             graphics_protocols: Vec::new(),
             cdp_envelope_graphics_protocol: None,
+            cdp_formant_graphics_protocol: None,
             documents,
             active_document: 0,
             viewport: None,
@@ -1761,6 +1768,18 @@ impl App {
             Some(p) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "untitled".to_string()),
             None => format!("_NEW_{:03}", idx + 1),
         }
+    }
+
+    /// Strips a source document name's file extension (`"mono_sine.wav"` ->
+    /// `"mono_sine"`) before it's folded into a generated pitch-curve/formant/snapshot
+    /// buffer name (`"mono_sine pitch"`, not `"mono_sine.wav pitch"` — user report,
+    /// 2026-07-21: the extension is redundant noise once it's part of a longer descriptive
+    /// name, and it's what's tagged `[p]`/`[f]`/`[s]` in the Buffers panel already, not a
+    /// literal file). `buffer_name` itself is untouched — its own callers (the Buffers panel
+    /// row, the waveform header) still want the real extension. Falls back to the name
+    /// unchanged if it has none (e.g. `_NEW_001`).
+    fn strip_source_extension(name: &str) -> &str {
+        std::path::Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or(name)
     }
 
     /// Documents first, then open curves (tagged `[p]`), then open formant/snapshot
@@ -5834,7 +5853,7 @@ impl App {
             }
         }
 
-        self.cdp_pending_curve_extraction = Some(self.buffer_name(idx));
+        self.cdp_pending_curve_extraction = Some(Self::strip_source_extension(&self.buffer_name(idx)).to_string());
         self.cdp_runner.submit(crate::cdp::Job {
             id: job_id,
             cdp_dir,
@@ -5860,7 +5879,15 @@ impl App {
     /// (`FormantBufferKind::Formant`). Mirrors `extract_pitch_curve` exactly — the same
     /// asymmetric audio-in/buffer-out shape, hardcoded rather than catalog-authored, tracked
     /// via the separate `cdp_pending_formant_extraction` rather than `cdp_pending`.
-    fn extract_formants(&mut self) {
+    ///
+    /// `mode` picks pitch-wise (musically log-spaced bands, CDP's `-p`) vs. frequency-wise
+    /// (equal-Hz-width channels, `-f`) sizing — see `FormantExtractionMode`'s doc comment for
+    /// why both are offered as separate menu actions (`Action::ExtractFormants`/
+    /// `ExtractFormantsFreqwise`) rather than one action with a hidden default: pitch-wise
+    /// sampling can leave large stretches of a voiced recording's lower bands reading
+    /// near-zero simply because a harmonic series is sparser than the pitch-band grid down
+    /// there, and frequency-wise sampling doesn't have that particular blind spot.
+    fn extract_formants(&mut self, mode: crate::model::cdp::FormantExtractionMode) {
         let idx = self.active_document;
         let Some(doc) = self.documents.get(idx) else { return };
         let Some(range) = self.operation_range(idx, self.snap_to_zero) else {
@@ -5874,7 +5901,7 @@ impl App {
             return;
         }
 
-        let planned = crate::model::cdp::plan_extract_formants(&crate::model::cdp::PvocSettings::default());
+        let planned = crate::model::cdp::plan_extract_formants(&crate::model::cdp::PvocSettings::default(), mode);
         let step_total = planned.steps.len();
         let job_id = self.cdp_next_job_id;
         self.cdp_next_job_id += 1;
@@ -5889,6 +5916,16 @@ impl App {
         // recorded on the finished buffer so "Freeze Snapshot at Cursor" can map a document
         // cursor position back onto it (`freeze_snapshot_at_cursor`).
         let source_start_seconds = range.0 as f64 / doc.sample_rate as f64;
+        // Deliberately the raw `buffer_name` (`.wav` and all), not extension-stripped like
+        // `cdp_pending_curve_extraction` -- the completion handler stores this same string
+        // into the finished buffer's `source_document_name`, which `formant_buffer_for_document`
+        // later compares against a fresh `self.buffer_name(idx)` (also unstripped) to decide
+        // whether "Freeze Snapshot at Cursor" can reuse an existing extraction instead of
+        // re-running one. Regression fix (user report, 2026-07-21): stripping the extension
+        // here made that comparison ("boooooya" vs "boooooya.wav") never match, so every
+        // freeze silently re-extracted formants from scratch instead of reusing the buffer
+        // already sitting there. The extension is still stripped from the *display* name --
+        // just further down, in `tick_cdp`'s completion handler, not here.
         self.cdp_pending_formant_extraction = Some((self.buffer_name(idx), source_start_seconds));
         self.cdp_runner.submit(crate::cdp::Job {
             id: job_id,
@@ -5984,8 +6021,10 @@ impl App {
         } else {
             // No formants for this document yet — extract them, and freeze onto the fresh
             // buffer once it lands (`tick_cdp`'s `freeze_at_cursor_after_extract` chain).
+            // Pitch-wise (the original, still-default mode) since this auto-chain has no
+            // menu action of its own to pick a mode from.
             self.freeze_at_cursor_after_extract = Some(cursor_seconds);
-            self.extract_formants();
+            self.extract_formants(crate::model::cdp::FormantExtractionMode::PitchWise(8));
         }
     }
 
@@ -6119,12 +6158,18 @@ impl App {
                         self.dialog = match result {
                             Ok(output) => match output.formant_buffer_bytes {
                                 Some(bytes) if !bytes.is_empty() => {
+                                    // Display name drops the extension (`self.buffer_name`'s
+                                    // own doc comment on `cdp_pending_formant_extraction`
+                                    // above); `source_document_name` keeps the raw
+                                    // `source_name` so `formant_buffer_for_document`'s later
+                                    // lookup still matches.
+                                    let display_name = Self::strip_source_extension(&source_name);
                                     self.formant_buffers.push(
                                         crate::model::formant::FormantBuffer::new(
                                             crate::model::formant::FormantBufferKind::Formant,
-                                            format!("{source_name} formants"),
+                                            format!("{display_name} formants"),
                                             bytes,
-                                            format!("Extracted from {source_name}"),
+                                            format!("Extracted from {display_name}"),
                                         )
                                         .with_source_start(source_start_seconds)
                                         .with_source_document(source_name.clone()),
@@ -8135,7 +8180,12 @@ impl App {
         }
 
         if action == Action::ExtractFormants {
-            self.extract_formants();
+            self.extract_formants(crate::model::cdp::FormantExtractionMode::PitchWise(8));
+            return;
+        }
+
+        if action == Action::ExtractFormantsFreqwise {
+            self.extract_formants(crate::model::cdp::FormantExtractionMode::FreqWise(8));
             return;
         }
 
@@ -8285,6 +8335,7 @@ impl App {
             | Action::ExtractPitchCurve
             | Action::LoadPitchCurve
             | Action::ExtractFormants
+            | Action::ExtractFormantsFreqwise
             | Action::FreezeSnapshotAtCursor => unreachable!(),
             // Cursor movement is identical whether or not it extends a selection; the
             // selection side-effect is applied in the second match below.
@@ -9121,6 +9172,39 @@ impl App {
                     self.cdp_envelope_graphics_protocol = Some(protocol);
                     if let Some(protocol) = self.cdp_envelope_graphics_protocol.as_mut() {
                         frame.render_stateful_widget(ratatui_image::StatefulImage::default(), grid, protocol);
+                    }
+                }
+            }
+        }
+
+        // Graphics-mode formant/snapshot spectral envelope: same "ASCII first, bitmap
+        // occludes it" pattern as the CDP envelope curve just above, but the target `Rect`
+        // comes from `formant_info_layout` — a pure function of `area`/the buffer's own
+        // bytes — rather than anything stashed from a previous frame's render, specifically
+        // to avoid the class of bug the envelope editor's `curve_picker` gate above fixes
+        // (a stale `dialog_row_rects` entry surviving into a frame it no longer describes).
+        if self.graphics_mode {
+            if let Some(Dialog::FormantInfo { buffer_index }) = &self.dialog {
+                let buffer = self.formant_buffers.get(*buffer_index);
+                if let (Some(picker), Some(buffer)) = (&self.picker, buffer) {
+                    if let Some(FormantInfoLayout { plot: Some(plot), .. }) = formant_info_layout(area, Some(buffer)) {
+                        if let Some(env) = crate::model::formant::read_formant_envelope(&buffer.bytes) {
+                            let env = env.despiked_for_display();
+                            let (min_db, max_db) = formant_db_range(&env);
+                            let font = picker.font_size();
+                            let pixel_width = plot.width as u32 * font.width.max(1) as u32;
+                            let pixel_height = plot.height as u32 * font.height.max(1) as u32;
+                            let img = if buffer.kind == crate::model::formant::FormantBufferKind::Snapshot {
+                                formant_image::rasterize_formant_snapshot_curve(&env, min_db, max_db, pixel_width, pixel_height)
+                            } else {
+                                formant_image::rasterize_formant_heatmap(&env, min_db, max_db, pixel_width, pixel_height)
+                            };
+                            let protocol = picker.new_resize_protocol(image::DynamicImage::ImageRgba8(img));
+                            self.cdp_formant_graphics_protocol = Some(protocol);
+                            if let Some(protocol) = self.cdp_formant_graphics_protocol.as_mut() {
+                                frame.render_stateful_widget(ratatui_image::StatefulImage::default(), plot, protocol);
+                            }
+                        }
                     }
                 }
             }
@@ -12130,6 +12214,185 @@ fn render_info_dialog(frame: &mut Frame, area: Rect, message: &str) -> Vec<Rect>
 /// `model::formant`'s doc comments). `buffer` is `None` only if the index went stale between
 /// opening the dialog and this render (e.g. the buffer was closed) — shown as a plain
 /// message rather than panicking.
+/// Max plot dimensions for the spectral-envelope visualization
+/// (`formant_heatmap_lines`/`formant_snapshot_curve_lines`) below — generous enough to read
+/// clearly, capped so the popup doesn't balloon to fill an ultra-wide terminal.
+const FORMANT_PLOT_MAX_COLS: usize = 70;
+const FORMANT_PLOT_MAX_ROWS: usize = 16;
+
+/// The dB range `formant_heatmap_lines`/`formant_snapshot_curve_lines` normalize color and
+/// (for the curve) height against — the buffer's own dynamic range rather than a fixed
+/// absolute one. Regression fix (user report, 2026-07-21: "it always looks all green"): the
+/// first version colored via `theme::gradient_color` directly, whose [-30, 0] dB range is
+/// tuned for an audio *waveform* (which spends most of its on-screen height near full
+/// scale). A spectral envelope's raw magnitude values have no such fixed reference and
+/// commonly span far more than 30dB between a formant's peak bins and the near-silent ones
+/// between them — with that fixed range, nearly every cell fell below the floor and clamped
+/// to flat green.
+///
+/// Clipped to the 2nd/98th percentile rather than the true min/max (second regression fix,
+/// same day: "this is barely visible") — a handful of outlier cells (a near-zero window at
+/// a silence gap, say) stretched true min/max so wide that the real variation among the
+/// other 96% of cells got compressed into a sliver of the gradient. `values` is sorted here
+/// (an `O(n log n)` cost) purely for the percentile lookup — cheap for a buffer's realistic
+/// size (at most a few tens of thousands of cells).
+fn formant_db_range(env: &crate::model::formant::FormantEnvelope) -> (f32, f32) {
+    let mut dbs: Vec<f32> = env.values.iter().map(|&v| crate::model::dsp::linear_to_db(v)).collect();
+    dbs.sort_by(|a, b| a.total_cmp(b));
+    let n = dbs.len();
+    let lo = dbs[(n as f32 * 0.02) as usize];
+    let hi = dbs[((n as f32 * 0.98) as usize).min(n - 1)];
+    (lo, hi)
+}
+
+/// `value`'s dB level normalized against `(min_db, max_db)` (`formant_db_range`) into a
+/// plain `[0, 1]` fraction — shared by `formant_gradient_color` (color) and
+/// `formant_snapshot_curve_lines` (curve height), so both are driven by the exact same
+/// per-buffer scale. A degenerate (silent or perfectly flat) buffer where `min_db == max_db`
+/// returns 0.0 rather than dividing by zero.
+fn formant_normalized_fraction(value: f32, min_db: f32, max_db: f32) -> f32 {
+    let db = crate::model::dsp::linear_to_db(value);
+    if max_db > min_db { ((db - min_db) / (max_db - min_db)).clamp(0.0, 1.0) } else { 0.0 }
+}
+
+/// Maps `value`'s dB level to a point along `theme::formant_gradient_color`'s palette,
+/// normalized against `(min_db, max_db)` (`formant_db_range`) — see that function's doc
+/// comment for why this range is adaptive rather than fixed.
+fn formant_gradient_color(value: f32, min_db: f32, max_db: f32) -> ratatui::style::Color {
+    theme::formant_gradient_color(formant_normalized_fraction(value, min_db, max_db))
+}
+
+/// Renders a `Formant` buffer's (`windows > 1`) full time-varying spectral envelope as a
+/// color-graded heatmap: `cols` downsampled analysis windows (time, left→right) x `rows`
+/// downsampled spectral bins (frequency, low bin at the bottom — row 0 is the *highest* bin
+/// so it reads like a conventional spectrogram, not upside down). Downsampling is
+/// nearest-neighbor (a coarse read-only preview, not a precision view — unlike
+/// `WaveformCache`'s min/max pyramid, there's no editing decision riding on this). Colored
+/// via `formant_gradient_color`, normalized against the whole buffer's own dB range (not
+/// just the downsampled cells actually plotted) so the coloring doesn't shift as the popup
+/// is resized.
+fn formant_heatmap_lines(env: &crate::model::formant::FormantEnvelope, cols: usize, rows: usize) -> Vec<Line<'static>> {
+    let (min_db, max_db) = formant_db_range(env);
+    let last_bin = env.specenvcnt.saturating_sub(1);
+    let last_window = env.windows.saturating_sub(1);
+    let mut lines = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let bin = if rows <= 1 { last_bin } else { last_bin - (row * last_bin) / (rows - 1) };
+        let mut spans = Vec::with_capacity(cols + 1);
+        spans.push(Span::raw(" "));
+        for col in 0..cols {
+            let window = if cols <= 1 { 0 } else { col * last_window / (cols - 1) };
+            let color = formant_gradient_color(env.get(window, bin), min_db, max_db);
+            spans.push(Span::styled(" ", Style::default().bg(color)));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+/// Renders a `Snapshot` buffer's (`windows == 1`) single spectral envelope slice as a
+/// braille dot-matrix curve — amplitude vs. frequency bin, the same 2x-horizontal/
+/// 4x-vertical sub-cell technique and `braille_char`/`DOT_BITS` primitives
+/// `render_cdp_envelope_editor`'s own curve uses, applied to "bin index" instead of "time"
+/// as the x-axis. Both the curve's height *and* its color are driven by the same dB-range-
+/// normalized fraction (`formant_db_range`/`formant_gradient_color`) — using raw linear
+/// amplitude for height alone would suffer the exact same "everything pinned near the
+/// bottom" collapse the heatmap's flat-green bug was.
+fn formant_snapshot_curve_lines(env: &crate::model::formant::FormantEnvelope, cols: usize, rows: usize) -> Vec<Line<'static>> {
+    use crate::ui::widgets::braille::{braille_char, DOT_BITS};
+    let (min_db, max_db) = formant_db_range(env);
+    let last_bin = env.specenvcnt.saturating_sub(1);
+    let dot_cols = (cols * 2).max(1);
+    let dot_rows_total = (rows * 4).max(1);
+    let mut masks = vec![0u8; cols * rows];
+    let mut cell_color: Vec<Option<ratatui::style::Color>> = vec![None; cols * rows];
+    let mut prev_dot_row: Option<f64> = None;
+    for dot_col in 0..dot_cols {
+        let bin = if dot_cols <= 1 { last_bin } else { dot_col * last_bin / (dot_cols - 1) };
+        let raw = env.get(0, bin);
+        let t = formant_normalized_fraction(raw, min_db, max_db) as f64;
+        let curr_dot_row = ((1.0 - t) * (dot_rows_total - 1) as f64).clamp(0.0, (dot_rows_total - 1) as f64);
+        let (lo, hi) = match prev_dot_row {
+            Some(prev) => (prev.min(curr_dot_row), prev.max(curr_dot_row)),
+            None => (curr_dot_row, curr_dot_row),
+        };
+        let lo_idx = lo.floor().max(0.0) as usize;
+        let hi_idx = (hi.ceil() as usize).min(dot_rows_total.saturating_sub(1));
+        let col = dot_col / 2;
+        let sub_col = dot_col % 2;
+        let color = formant_gradient_color(raw, min_db, max_db);
+        for dot_idx in lo_idx..=hi_idx {
+            let row = dot_idx / 4;
+            let local = dot_idx % 4;
+            if row < rows && col < cols {
+                masks[row * cols + col] |= DOT_BITS[local][sub_col];
+                cell_color[row * cols + col] = Some(color);
+            }
+        }
+        prev_dot_row = Some(curr_dot_row);
+    }
+    let mut lines = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let mut spans = Vec::with_capacity(cols + 1);
+        spans.push(Span::raw(" "));
+        for col in 0..cols {
+            let idx = row * cols + col;
+            let ch = braille_char(masks[idx]);
+            let color = cell_color[idx].unwrap_or(theme::BORDER);
+            spans.push(Span::styled(ch.to_string(), Style::default().fg(color).bg(theme::SURFACE0)));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+/// Fixed line count preceding the plot in `render_formant_info_dialog`'s `lines`: blank,
+/// Name, Kind, Source, Duration, blank, the "Spectral envelope..." label — 7 lines (indices
+/// 0-6), so the plot's first row is `lines[7]`. Kept as a named constant (rather than
+/// re-deriving it) specifically so `formant_info_layout` — the pure geometry both the ASCII
+/// renderer and the graphics-mode overlay (`App::render`) key off — can compute the plot
+/// `Rect` without needing to intercept anything from the render call itself, the same "shared
+/// math instead of a stashed-from-last-frame Rect" fix the CDP envelope editor's own
+/// graphics-mode bug (`edit.curve_picker.is_none()`, 2026-07-21) needed.
+const FORMANT_INFO_PRE_PLOT_LINES: u16 = 7;
+
+/// `Dialog::FormantInfo`'s popup geometry — `popup` for the ASCII renderer
+/// (`render_formant_info_dialog`), `plot` (the exact `Rect` the spectral-envelope
+/// visualization occupies, `None` if the buffer has no parseable envelope) for the
+/// graphics-mode bitmap overlay in `App::render`. Both callers compute this from the same
+/// pure function so the two can never disagree about where the plot sits.
+struct FormantInfoLayout {
+    popup: Rect,
+    plot: Option<Rect>,
+}
+
+fn formant_info_layout(area: Rect, buffer: Option<&crate::model::formant::FormantBuffer>) -> Option<FormantInfoLayout> {
+    let buffer = buffer?;
+    let envelope = crate::model::formant::read_formant_envelope(&buffer.bytes);
+    let plot_cols = FORMANT_PLOT_MAX_COLS.min(area.width.saturating_sub(6) as usize).max(10);
+    let plot_rows = FORMANT_PLOT_MAX_ROWS.min(area.height.saturating_sub(12) as usize).max(4);
+    let has_plot = envelope.is_some();
+    // 5 header rows (blank + 4 metadata) + [blank + label + plot_rows if has_plot] + 2
+    // trailer rows (blank + hint) — matches `render_formant_info_dialog`'s own `lines`
+    // construction exactly.
+    let total_lines = 5 + if has_plot { 2 + plot_rows } else { 0 } + 2;
+    let width = if has_plot { (plot_cols as u16 + 4).max(50) } else { 50 }.min(area.width);
+    let height = (total_lines as u16 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let plot = has_plot.then(|| Rect {
+        x: popup.x + 2,
+        y: popup.y + 1 + FORMANT_INFO_PRE_PLOT_LINES,
+        width: plot_cols as u16,
+        height: plot_rows as u16,
+    });
+    Some(FormantInfoLayout { popup, plot })
+}
+
 fn render_formant_info_dialog(
     frame: &mut Frame,
     area: Rect,
@@ -12143,9 +12406,12 @@ fn render_formant_info_dialog(
     let Some(buffer) = buffer else {
         return render_info_dialog(frame, area, "This buffer is no longer open.");
     };
+    let layout = formant_info_layout(area, Some(buffer)).expect("buffer is Some, so layout is Some");
 
-    let duration = crate::model::formant::read_formant_duration_secs(&buffer.bytes)
-        .map(|s| format!("{s:.3} s"))
+    let envelope = crate::model::formant::read_formant_envelope(&buffer.bytes).map(|e| e.despiked_for_display());
+    let duration = envelope
+        .as_ref()
+        .map(|e| format!("{:.3} s", e.windows as f64 / e.arate))
         .unwrap_or_else(|| "(unknown)".to_string());
 
     let row = |label: &'static str, value: String| {
@@ -12153,28 +12419,39 @@ fn render_formant_info_dialog(
     };
     // Read-only — freezing a snapshot is the "Freeze Formant Snapshot at Cursor" CDP menu
     // action now, not a key here.
-    let lines = vec![
+    let mut lines = vec![
         Line::raw(""),
         row("Name", buffer.name.clone()),
         row("Kind", buffer.kind.tag().to_string()),
         row("Source", buffer.source_label.clone()),
         row("Duration", duration),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled(" Enter", hint_style),
-            Span::styled("/Esc:close", label_style),
-        ]),
     ];
 
-    // Height sized to fit every line + both borders, so nothing is clipped off the bottom.
-    let width = 50u16.min(area.width);
-    let height = (lines.len() as u16 + 2).min(area.height);
-    let popup = Rect {
-        x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    };
+    if let (Some(env), Some(plot)) = (&envelope, layout.plot) {
+        let (plot_cols, plot_rows) = (plot.width as usize, plot.height as usize);
+        lines.push(Line::raw(""));
+        // Dispatched on `buffer.kind`, not `env.windows` (regression fix, user report,
+        // 2026-07-21: "why do we have two steps? it's a snapshot"). A `Snapshot` is a single
+        // frozen instant by the app's own model (`FormantBufferKind`'s doc comment) --
+        // `env.windows` should already agree now that `read_formant_envelope` trims CDP's own
+        // leading header rows (see its doc comment), but keying off `buffer.kind` directly is
+        // the more robust, self-evidently-correct choice regardless of that parsing detail.
+        if buffer.kind == crate::model::formant::FormantBufferKind::Snapshot {
+            lines.push(Line::from(Span::styled(" Spectral envelope (freq \u{2192})", dim_style)));
+            lines.extend(formant_snapshot_curve_lines(env, plot_cols, plot_rows));
+        } else {
+            lines.push(Line::from(Span::styled(" Spectral envelope (time \u{2192}, freq \u{2191})", dim_style)));
+            lines.extend(formant_heatmap_lines(env, plot_cols, plot_rows));
+        }
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(" Enter", hint_style),
+        Span::styled("/Esc:close", label_style),
+    ]));
+
+    let popup = layout.popup;
     frame.render_widget(ratatui::widgets::Clear, popup);
     let block = Block::default()
         .title("Formant Info")
@@ -13136,6 +13413,49 @@ mod tests {
         }
         assert!(text.contains("Use Pitch Curve"), "the picker's own popup must be visible, not painted over: {text:?}");
         assert!(text.contains("mycurve"), "the picker's curve entry must be visible, not painted over: {text:?}");
+    }
+
+    /// The Formant Info popup's graphics-mode bitmap overlay (`formant_image::rasterize_*`,
+    /// wired into `App::render` right after the CDP envelope editor's own graphics block)
+    /// must actually fire end-to-end through the real render path — user report, 2026-07-21:
+    /// "now it does not use kitty-graphics for some reason" (a new dialog with no
+    /// graphics-mode code at all, mistaken for a regression). Uses `Picker::halfblocks()`,
+    /// whose output is plain glyph characters `TestBackend` can inspect directly (unlike
+    /// kitty/Sixel, which round-trip through out-of-band escapes this harness can't see) —
+    /// same technique as `opening_the_curve_picker_in_graphics_mode_does_not_paint_over_it`.
+    /// Checked for both buffer kinds, since the heatmap and the snapshot curve are two
+    /// separate rasterizers wired into the same block.
+    #[test]
+    fn formant_info_popup_uses_graphics_mode_when_available() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        for kind in [crate::model::formant::FormantBufferKind::Formant, crate::model::formant::FormantBufferKind::Snapshot] {
+            let bytes = fake_formant_bytes(100, 4, &[0.1, 0.9, 0.3, 0.05, 0.8, 0.2, 0.6, 0.4]);
+            let mut app = new_app(Some(doc(0.1, 10)), None);
+            app.graphics_mode = true;
+            app.set_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+            app.formant_buffers.push(crate::model::formant::FormantBuffer::new(kind, "f", bytes, "test"));
+            app.open_formant_info(0);
+
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let area = *buffer.area();
+            let halfblock_glyphs = ['\u{2580}', '\u{2584}', '\u{2588}', ' '];
+            let mut saw_halfblock = false;
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    let cell = &buffer[(x, y)];
+                    if let Some(ch) = cell.symbol().chars().next() {
+                        if halfblock_glyphs.contains(&ch) && cell.fg != theme::TEXT && cell.bg != theme::SURFACE0 {
+                            saw_halfblock = true;
+                        }
+                    }
+                }
+            }
+            assert!(saw_halfblock, "expected a graphics-mode halfblock cell for {kind:?}, got none");
+        }
     }
 
     /// Regression check: 'c' on a *non*-required_envelope automatable field must still mean
@@ -15504,6 +15824,38 @@ mod tests {
         }
     }
 
+    /// Regression (user report, 2026-07-21): the buffer name generated for an extracted
+    /// pitch curve/formant buffer must drop the source document's `.wav` extension --
+    /// `"mono_sine pitch"`, not `"mono_sine.wav pitch"`. Exercises the real
+    /// `extract_pitch_curve`/`extract_formants` entry points (not the completion-handler
+    /// shortcut `curve_extraction_apply_adds_a_new_curve_buffer` below uses) so the fix at
+    /// its actual source -- `App::strip_source_extension` applied to `self.buffer_name(idx)`
+    /// -- is what's under test. Only checks the *pending* source name each sets before
+    /// submitting the job (no real CDP install needed for that much).
+    #[test]
+    fn extraction_strips_the_wav_extension_from_the_pending_source_name() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp");
+        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+            eprintln!("skipping: no real CDP install found in this checkout");
+            return;
+        }
+        app.config.cdp_dir = cdp_dir.to_string_lossy().to_string();
+        app.documents[0].path = Some(std::path::PathBuf::from("mono_sine.wav"));
+
+        app.extract_pitch_curve();
+        assert_eq!(app.cdp_pending_curve_extraction.as_deref(), Some("mono_sine"));
+
+        app.dialog = None;
+        app.extract_formants(crate::model::cdp::FormantExtractionMode::PitchWise(8));
+        // Deliberately still the raw "mono_sine.wav" here, not stripped -- unlike the pitch
+        // curve above, this name flows into `source_document_name` for
+        // `formant_buffer_for_document`'s later reuse lookup (see
+        // `formant_source_document_name_survives_display_stripping_for_reuse_matching`); only
+        // the *display* name gets the extension stripped, in `tick_cdp`'s completion handler.
+        assert_eq!(app.cdp_pending_formant_extraction.as_ref().map(|(n, _)| n.as_str()), Some("mono_sine.wav"));
+    }
+
     /// A curve-extraction job's `Finished(Ok(..))` event (`cdp_pending_curve_extraction`,
     /// not `cdp_pending`) adds a new `App.curves` entry instead of splicing audio —
     /// exercises `App::tick_cdp`'s curve-extraction branch end-to-end through the real
@@ -15630,7 +15982,11 @@ mod tests {
         assert!(app.cdp_pending_formant_extraction.is_none());
         assert_eq!(app.formant_buffers.len(), 1);
         assert_eq!(app.formant_buffers[0].kind, crate::model::formant::FormantBufferKind::Formant);
-        assert_eq!(app.formant_buffers[0].name, "mysine.wav formants");
+        assert_eq!(app.formant_buffers[0].name, "mysine formants", "the display name drops the .wav extension");
+        assert_eq!(
+            app.formant_buffers[0].source_document_name, "mysine.wav",
+            "source_document_name keeps the raw name -- formant_buffer_for_document's reuse lookup compares it against a fresh, unstripped buffer_name()"
+        );
         assert_eq!(app.formant_buffers[0].bytes, b"fake formant bytes".to_vec());
         assert_eq!(
             app.formant_buffers[0].source_start_seconds, 1.5,
@@ -15830,6 +16186,315 @@ mod tests {
             app.freeze_at_cursor_after_extract.is_none(),
             "an existing extraction should be reused, not re-extracted"
         );
+    }
+
+    /// Regression (user report, 2026-07-21: "when i repeat taking a formant snapshot, it
+    /// extracts formants every time disregarding that formants buffer already exists"). Root
+    /// cause: `cdp_pending_formant_extraction`'s source name got extension-stripped for the
+    /// same-day ".wav should not appear in generated buffer names" fix, and that same
+    /// (stripped) string then landed in the finished buffer's `source_document_name` --
+    /// which `formant_buffer_for_document` compares against a fresh, *unstripped*
+    /// `self.buffer_name(idx)` ("mono_sine" vs "mono_sine.wav"), so the lookup could never
+    /// match and every freeze re-extracted from scratch. Drives the real
+    /// `extract_formants` -> completion -> `freeze_snapshot_at_cursor` sequence end to end
+    /// (unlike `freeze_snapshot_at_cursor_reuses_an_existing_extraction` above, which seeds
+    /// `source_document_name` by hand and so never exercised the actual extraction path this
+    /// bug lived in) via a fake `/bin/sh` step, mirroring
+    /// `formant_extraction_apply_adds_a_new_formant_buffer`'s own "no real CDP needed"
+    /// precedent.
+    #[test]
+    fn freeze_snapshot_at_cursor_reuses_a_real_extraction_on_the_second_call() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        // `extract_formants` bails out to `Dialog::CdpSetup` on an invalid `cdp_dir` --
+        // `validate_cdp_dir` only checks that the sentinel binary *filenames* exist, not that
+        // they're real executables, so the repo's own bundled `cdp/` directory (used by
+        // other tests needing a valid-but-inert dir) satisfies it without a real CDP install.
+        app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
+        app.documents[0].path = Some(PathBuf::from("mono_sine.wav"));
+
+        app.extract_formants(crate::model::cdp::FormantExtractionMode::PitchWise(8));
+        let job_id = match &app.dialog {
+            Some(Dialog::CdpRunning { job_id, .. }) => *job_id,
+            _ => panic!("expected CdpRunning"),
+        };
+        let planned = crate::model::cdp::pipeline::PlannedJob {
+            steps: vec![crate::model::cdp::pipeline::Invocation {
+                bin: "sh".into(),
+                args: vec!["-c".into(), "printf 'fake formant bytes' > out.for".into()],
+                label: "fake formants get".into(),
+                expected_output: "out.for".into(),
+            }],
+            input_files: Vec::new(),
+            output_files: Vec::new(),
+            glob_output: None,
+            output_curve: None,
+            output_curve_binary_template: None,
+            output_formant_buffer: Some("out.for".into()),
+            brk_files: Vec::new(),
+            binary_input_files: Vec::new(),
+            deferred_window_params: Vec::new(),
+            needs_simple_wav_input: false,
+        };
+        app.cdp_runner.submit(crate::cdp::Job {
+            id: job_id,
+            cdp_dir: std::path::PathBuf::from("/bin"),
+            planned,
+            inputs: Vec::new(),
+            input_sample_rate: 44100,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.dialog.is_some() && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.formant_buffers.len(), 1, "the extraction should have landed");
+
+        app.handle_action(Action::FreezeSnapshotAtCursor);
+        assert!(
+            app.freeze_at_cursor_after_extract.is_none(),
+            "a second freeze must reuse the extraction just made, not re-trigger extract_formants"
+        );
+        assert_eq!(app.formant_buffers.len(), 1, "reuse must not add a second [f] buffer");
+    }
+
+    /// `Action::ExtractFormantsFreqwise` (the new "Extract Formants (Frequency-wise)" menu
+    /// entry, user request 2026-07-21 — an alternative to pitch-wise extraction for
+    /// recordings where pitch-band sampling leaves large stretches of the lower bands
+    /// reading near-zero) must dispatch through the same `extract_formants` job-submission
+    /// path as the pitch-wise action, just with `FormantExtractionMode::FreqWise` --
+    /// `plan_extract_formants_freqwise_uses_the_f_flag` (pipeline tests) already covers that
+    /// the mode itself produces the right `-f8` CDP flag; this only needs to confirm the
+    /// action is wired up at all (reaches the real extraction path, not `unreachable!()` or a
+    /// no-op).
+    #[test]
+    fn extract_formants_freqwise_action_starts_an_extraction_job() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
+
+        app.handle_action(Action::ExtractFormantsFreqwise);
+
+        assert!(matches!(app.dialog, Some(Dialog::CdpRunning { .. })), "expected the extraction job to start");
+        assert!(app.cdp_pending_formant_extraction.is_some());
+    }
+
+    /// Minimal but structurally real RIFF/WAVE formant file, matching
+    /// `model::formant`'s own byte layout (`fmt ` sample-rate + `note`-chunk `specenvcnt` +
+    /// `data` as `windows * specenvcnt` little-endian f32 amplitudes) — mirrors
+    /// `model::formant::tests::fake_formant_file_with_values` (kept private to its own
+    /// module, so duplicated here in miniature) since these rendering tests need real
+    /// envelope bytes `read_formant_envelope` will actually parse, not the empty/arbitrary
+    /// bytes plumbing-only formant tests elsewhere in this file use.
+    fn fake_formant_bytes(arate: u32, specenvcnt: u32, values: &[f32]) -> Vec<u8> {
+        let hex_le = |v: u32| v.to_le_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let note_text = format!("sfifis a formant file\n01000000\nspecenvcnt\n{}\n", hex_le(specenvcnt));
+        let note_body = note_text.into_bytes();
+        let mut data_body = Vec::with_capacity(values.len() * 4);
+        for v in values {
+            data_body.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut fmt_body = Vec::new();
+        fmt_body.extend_from_slice(&3u16.to_le_bytes());
+        fmt_body.extend_from_slice(&1u16.to_le_bytes());
+        fmt_body.extend_from_slice(&arate.to_le_bytes());
+        fmt_body.extend_from_slice(&(arate * 4).to_le_bytes());
+        fmt_body.extend_from_slice(&4u16.to_le_bytes());
+        fmt_body.extend_from_slice(&32u16.to_le_bytes());
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&(fmt_body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&fmt_body);
+        out.extend_from_slice(b"note");
+        out.extend_from_slice(&(note_body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&note_body);
+        if note_body.len() % 2 == 1 {
+            out.push(0);
+        }
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data_body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data_body);
+        out
+    }
+
+    /// The Formant Info popup must show *something* beyond plain text for a real
+    /// multi-window `Formant` buffer -- a heatmap of colored cells (user report,
+    /// 2026-07-21: "is there any way we can visualize formant buffers?"). Checked by
+    /// scanning the rendered buffer for a cell whose background differs from the popup's own
+    /// base `SURFACE0`, since the heatmap is drawn as background-colored spaces
+    /// (`formant_heatmap_lines`), not distinct glyphs.
+    #[test]
+    fn formant_info_popup_shows_a_heatmap_for_a_multi_window_buffer() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let bytes = fake_formant_bytes(100, 4, &[0.1, 0.9, 0.3, 0.05, 0.8, 0.2, 0.6, 0.4]); // 2 windows x 4 bins
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.formant_buffers.push(crate::model::formant::FormantBuffer::new(
+            crate::model::formant::FormantBufferKind::Formant,
+            "f",
+            bytes,
+            "test",
+        ));
+        app.open_formant_info(0);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let surface0 = theme::SURFACE0;
+        let mut saw_colored_cell = false;
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = &buffer[(x, y)];
+                if cell.symbol() == " " && cell.bg != surface0 && cell.bg != ratatui::style::Color::Reset {
+                    saw_colored_cell = true;
+                }
+            }
+        }
+        assert!(saw_colored_cell, "expected at least one heatmap cell colored differently from the popup background");
+    }
+
+    /// Regression (user report, 2026-07-21: "it always looks all green"): the heatmap must
+    /// show more than one color when the underlying data actually varies. The original
+    /// version normalized against `theme::gradient_color`'s fixed [-30, 0]dB range (tuned for
+    /// an audio waveform, which spends most of its height near full scale) -- a spectral
+    /// envelope's raw magnitude values have no such reference and commonly span far more than
+    /// 30dB, so almost everything fell below the floor and clamped to flat green regardless
+    /// of the real shape underneath. `formant_db_range` normalizes against the buffer's own
+    /// observed range instead. This buffer's values span ~80dB (0.0001 to 1.0), well beyond
+    /// the old fixed floor, so it reproduces the bug precisely if the fix regresses.
+    #[test]
+    fn formant_heatmap_shows_more_than_one_color_for_wide_dynamic_range_data() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        // 4 windows x 4 bins, each window's peak in a different bin, everything else near
+        // silence -- a plausible-shaped, wide-dynamic-range spectral envelope.
+        let values = [
+            1.0, 0.0001, 0.0001, 0.0001, //
+            0.0001, 1.0, 0.0001, 0.0001, //
+            0.0001, 0.0001, 1.0, 0.0001, //
+            0.0001, 0.0001, 0.0001, 1.0, //
+        ];
+        let bytes = fake_formant_bytes(100, 4, &values);
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.formant_buffers.push(crate::model::formant::FormantBuffer::new(
+            crate::model::formant::FormantBufferKind::Formant,
+            "f",
+            bytes,
+            "test",
+        ));
+        app.open_formant_info(0);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let surface0 = theme::SURFACE0;
+        let mut distinct_colors = std::collections::HashSet::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = &buffer[(x, y)];
+                if cell.symbol() == " " && cell.bg != surface0 && cell.bg != ratatui::style::Color::Reset {
+                    distinct_colors.insert(format!("{:?}", cell.bg));
+                }
+            }
+        }
+        assert!(
+            distinct_colors.len() > 1,
+            "expected more than one heatmap color for wide-dynamic-range data, got {distinct_colors:?}"
+        );
+    }
+
+    /// The Formant Info popup for a single-window `Snapshot` buffer shows a braille curve
+    /// (amplitude vs. frequency bin), not a 1-column heatmap -- `formant_snapshot_curve_lines`
+    /// uses the same braille glyphs the CDP envelope editor's own curve does.
+    #[test]
+    fn formant_info_popup_shows_a_braille_curve_for_a_snapshot_buffer() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let bytes = fake_formant_bytes(100, 8, &[0.1, 0.9, 0.3, 0.05, 0.8, 0.2, 0.6, 0.4]); // 1 window x 8 bins
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.formant_buffers.push(crate::model::formant::FormantBuffer::new(
+            crate::model::formant::FormantBufferKind::Snapshot,
+            "s",
+            bytes,
+            "test",
+        ));
+        app.open_formant_info(0);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let mut saw_braille = false;
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let Some(ch) = buffer[(x, y)].symbol().chars().next() else { continue };
+                if ('\u{2800}'..='\u{28ff}').contains(&ch) && ch != '\u{2800}' {
+                    saw_braille = true;
+                }
+            }
+        }
+        assert!(saw_braille, "expected braille dot-matrix glyphs in the snapshot's spectral envelope curve");
+    }
+
+    /// Regression (user report, 2026-07-21: "why do we have two steps? it's a snapshot, so
+    /// should not there be one step?"): a real `oneform get` snapshot file parsed to `windows
+    /// == 2` before `read_formant_envelope` learned to trim CDP's own leading header rows
+    /// (see that function's doc comment -- turned out to be a fixed reference-table pair
+    /// CDP embeds in every formant-family file, not "the instant written twice" as first
+    /// suspected), which made the dialog pick the heatmap branch (`env.windows > 1`) and
+    /// render it as a 2-column heatmap instead of the single-curve view a `Snapshot` should
+    /// always get. Dispatch still keys off `buffer.kind` (the app's own semantic truth --
+    /// "one frozen instant") rather than `env.windows`, as a second, independent line of
+    /// defense even now that the parser fix makes them agree.
+    #[test]
+    fn snapshot_buffer_shows_the_curve_even_when_its_raw_data_parses_to_two_windows() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        // 2 windows x 8 bins -- simulates env.windows disagreeing with buffer.kind (e.g. if a
+        // future CDP quirk reintroduces an untrimmed header row), independent of whatever
+        // read_formant_envelope's own trimming currently does with real bytes.
+        let values = [0.1, 0.9, 0.3, 0.05, 0.8, 0.2, 0.6, 0.4, 0.1, 0.9, 0.3, 0.05, 0.8, 0.2, 0.6, 0.4];
+        let bytes = fake_formant_bytes(100, 8, &values);
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.formant_buffers.push(crate::model::formant::FormantBuffer::new(
+            crate::model::formant::FormantBufferKind::Snapshot,
+            "s",
+            bytes,
+            "test",
+        ));
+        app.open_formant_info(0);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let mut saw_braille = false;
+        let mut saw_time_axis_label = false;
+        for y in area.y..area.y + area.height {
+            let mut row_text = String::new();
+            for x in area.x..area.x + area.width {
+                let cell = &buffer[(x, y)];
+                if let Some(ch) = cell.symbol().chars().next() {
+                    row_text.push(ch);
+                    if ('\u{2800}'..='\u{28ff}').contains(&ch) && ch != '\u{2800}' {
+                        saw_braille = true;
+                    }
+                }
+            }
+            if row_text.contains("time") {
+                saw_time_axis_label = true;
+            }
+        }
+        assert!(saw_braille, "expected the braille curve even though the raw data parses to 2 windows");
+        assert!(!saw_time_axis_label, "a Snapshot must never show the heatmap's time-axis label");
     }
 
     /// `App::splice_formant_buffer_refs` (`cdp_run`'s `FormantBufferRef` resolution): a

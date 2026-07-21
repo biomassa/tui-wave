@@ -1284,6 +1284,33 @@ pub fn plan_extract_pitch_curve(pvoc: &PvocSettings) -> PlannedJob {
     }
 }
 
+/// `formants get`'s two mutually exclusive ways to size the extracted envelope (CDP's own
+/// `-p`/`-f` flags — see `formants get`'s usage text) — `PitchWise(N)` is N pitch-bands per
+/// octave (musically/log spaced), `FreqWise(N)` is 1 point per N equally-spaced (linear Hz)
+/// frequency channels. Exposed as two separate menu actions (`Action::ExtractFormants`/
+/// `ExtractFormantsFreqwise`) rather than one action with a mode toggle, mirroring
+/// `formants_vocode`/`formants_vocode_freq`'s own catalog precedent for the identical
+/// choice — see `plan_extract_formants`'s doc comment for why frequency-wise extraction
+/// exists as a real, useful alternative rather than a rarely-touched knob: pitch-wise
+/// sampling can leave large stretches of a voiced recording's lower pitch-bands reading
+/// near-zero, simply because a harmonic series is sparser than the pitch-band grid down
+/// there (user report, 2026-07-21 — confirmed against a real recording, not a rendering
+/// bug), and equal-Hz spacing doesn't have that particular blind spot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormantExtractionMode {
+    PitchWise(u32),
+    FreqWise(u32),
+}
+
+impl FormantExtractionMode {
+    fn cdp_flag(self) -> String {
+        match self {
+            FormantExtractionMode::PitchWise(n) => format!("-p{n}"),
+            FormantExtractionMode::FreqWise(n) => format!("-f{n}"),
+        }
+    }
+}
+
 /// Plans the "Extract Formants" action (CDP-Ext-Plan.md Phase 5, the producing end of the
 /// same asymmetric shape `plan_extract_pitch_curve` has — audio *in*, buffer *out*). `formants
 /// get` won't accept a plain WAV directly (it needs a `.ana` file, same as `repitch getpitch`),
@@ -1294,15 +1321,16 @@ pub fn plan_extract_pitch_curve(pvoc: &PvocSettings) -> PlannedJob {
 /// produced literally `out.for`, not `out.for.wav`) — a different quirk from the pitch-curve
 /// family that must be handled separately rather than assumed uniform.
 ///
-/// `-p8` (8 pitch-bands-per-octave) is a fixed default rather than a user-facing choice —
-/// mirrors `plan_extract_pitch_curve`'s own zero-config simplicity (no dialog, just one
-/// action on the current selection); `formants_vocode`'s catalog entry already exposes the
-/// `-p`/`-f` choice for anyone who wants a different band count applied *during* vocoding.
+/// `mode`'s own band/channel count is a fixed default (`8`, matching `formants_vocode`'s own
+/// default for either flag) rather than a user-facing choice — mirrors
+/// `plan_extract_pitch_curve`'s own zero-config simplicity (no dialog, just one action on
+/// the current selection); only the pitch-wise-vs-frequency-wise choice itself is exposed,
+/// as two separate menu actions (see `FormantExtractionMode`'s doc comment).
 ///
 /// Only ever takes the *first* channel of a multi-channel selection, same rationale as
 /// `plan_extract_pitch_curve`: a formant envelope is one spectral shape, not a per-channel
 /// concept in this app's UI.
-pub fn plan_extract_formants(pvoc: &PvocSettings) -> PlannedJob {
+pub fn plan_extract_formants(pvoc: &PvocSettings, mode: FormantExtractionMode) -> PlannedJob {
     let steps = vec![
         Invocation {
             bin: "pvoc".into(),
@@ -1319,7 +1347,7 @@ pub fn plan_extract_formants(pvoc: &PvocSettings) -> PlannedJob {
         },
         Invocation {
             bin: "formants".into(),
-            args: vec!["get".into(), "in.ana".into(), "out.for".into(), "-p8".into()],
+            args: vec!["get".into(), "in.ana".into(), "out.for".into(), mode.cdp_flag()],
             label: "formants get".into(),
             expected_output: "out.for".into(),
         },
@@ -2049,7 +2077,7 @@ mod tests {
 
     #[test]
     fn plan_extract_formants_wraps_in_pvoc_anal_then_formants_get() {
-        let job = plan_extract_formants(&PvocSettings::default());
+        let job = plan_extract_formants(&PvocSettings::default(), FormantExtractionMode::PitchWise(8));
 
         assert_eq!(job.steps.len(), 2);
         assert_eq!(job.steps[0].bin, "pvoc");
@@ -2069,8 +2097,14 @@ mod tests {
 
     #[test]
     fn plan_extract_formants_only_takes_the_first_channel() {
-        let job = plan_extract_formants(&PvocSettings::default());
+        let job = plan_extract_formants(&PvocSettings::default(), FormantExtractionMode::PitchWise(8));
         assert_eq!(job.input_files[0].source_channels, vec![0], "a formant envelope is one spectral shape, not per-channel");
+    }
+
+    #[test]
+    fn plan_extract_formants_freqwise_uses_the_f_flag() {
+        let job = plan_extract_formants(&PvocSettings::default(), FormantExtractionMode::FreqWise(8));
+        assert_eq!(job.steps[1].args, vec!["get", "in.ana", "out.for", "-f8"]);
     }
 
     // -- plan_oneform_get ("freeze snapshot" action, the Formant-buffer-in/Snapshot-buffer-out

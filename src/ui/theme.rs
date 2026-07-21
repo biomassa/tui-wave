@@ -104,6 +104,34 @@ pub fn gradient_color(db: f32) -> Color {
     }
 }
 
+/// Formant-heatmap gradient stops (quiet -> loud): dark surface -> mauve -> red -> peach ->
+/// yellow, styled after the magma/inferno colormap family real spectrogram/heatmap tools
+/// use — a wide hue *and* lightness sweep, not just a hue sweep between similarly-light
+/// pastels. Deliberately a different palette from `WAVEFORM_DOT_LOW/MID/HIGH`'s green→
+/// yellow→red (user report, 2026-07-21: "this is barely visible" — a formant heatmap packs
+/// far more distinct cells on screen at once than a waveform's dot trace does, and green and
+/// yellow are close enough in lightness in this pastel palette that adjacent heatmap cells
+/// were hard to tell apart; the waveform gradient's own green floor never has this problem
+/// since it's read as one continuous trace, not a grid of individually-compared cells).
+/// Starting from `SURFACE1` (close to the popup's own background) rather than a bright color
+/// also gives "quiet" a genuinely low-contrast reading — "barely there" — freeing the rest
+/// of the range for real contrast among everything louder.
+const FORMANT_GRADIENT_STOPS: [Color; 5] = [SURFACE1, MAUVE, RED, PEACH, YELLOW];
+
+/// Maps `t` (a plain `[0, 1]` fraction — the caller owns whatever domain-specific
+/// normalization produced it, e.g. `App::formant_db_range`'s per-buffer dB range) to a point
+/// along `FORMANT_GRADIENT_STOPS`. Piecewise-linear across equally-spaced stops, the same
+/// "lerp between the two neighboring stops" approach `gradient_color` uses for its own three
+/// stops, generalized to however many `FORMANT_GRADIENT_STOPS` has.
+pub fn formant_gradient_color(t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let segments = FORMANT_GRADIENT_STOPS.len() - 1;
+    let scaled = t * segments as f32;
+    let idx = (scaled as usize).min(segments - 1);
+    let local_t = scaled - idx as f32;
+    lerp_color(FORMANT_GRADIENT_STOPS[idx], FORMANT_GRADIENT_STOPS[idx + 1], local_t)
+}
+
 /// Background fill for a selected column/span in dot-matrix mode: `WAVEFORM_DOT_LOW` dimmed
 /// toward `BASE`. A full-pane fill of the gradient's own saturated green reads far brighter
 /// than the same color used sparingly on individual dots (green dominates perceived
@@ -145,5 +173,30 @@ mod tests {
         let b = Color::Rgb(20, 20, 20);
         assert_eq!(lerp_color(a, b, -1.0), a);
         assert_eq!(lerp_color(a, b, 2.0), b);
+    }
+
+    #[test]
+    fn formant_gradient_color_hits_the_first_and_last_stops_at_the_endpoints() {
+        assert_eq!(formant_gradient_color(0.0), FORMANT_GRADIENT_STOPS[0]);
+        assert_eq!(formant_gradient_color(1.0), FORMANT_GRADIENT_STOPS[FORMANT_GRADIENT_STOPS.len() - 1]);
+    }
+
+    #[test]
+    fn formant_gradient_color_clamps_out_of_range_t() {
+        assert_eq!(formant_gradient_color(-1.0), FORMANT_GRADIENT_STOPS[0]);
+        assert_eq!(formant_gradient_color(2.0), FORMANT_GRADIENT_STOPS[FORMANT_GRADIENT_STOPS.len() - 1]);
+    }
+
+    /// Every consecutive pair of stops must differ enough to actually read as distinct
+    /// colors on screen — regression guard for the original bug this palette replaced
+    /// (`WAVEFORM_DOT_LOW`/`WAVEFORM_DOT_MID` were both light pastels, "barely visible" next
+    /// to each other in a densely-packed heatmap).
+    #[test]
+    fn formant_gradient_stops_are_perceptually_distinct_from_their_neighbors() {
+        for pair in FORMANT_GRADIENT_STOPS.windows(2) {
+            let (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) = (pair[0], pair[1]) else { panic!("expected Rgb") };
+            let dist_sq = (ar as i32 - br as i32).pow(2) + (ag as i32 - bg as i32).pow(2) + (ab as i32 - bb as i32).pow(2);
+            assert!(dist_sq > 40i32.pow(2), "stops {:?} and {:?} are too close together", pair[0], pair[1]);
+        }
     }
 }
