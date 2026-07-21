@@ -25,6 +25,12 @@ pub struct Config {
     /// where it renders correctly but feels slower than the text renderer), not as a gate
     /// to opt in. Has no effect at all on a terminal where graphics mode wasn't detected.
     pub graphics_mode: bool,
+    /// Whether the waveform (rendered as braille dot-matrix glyphs — see
+    /// `waveform::WaveformWidget`, `waveform_image::rasterize_waveform`) is colored by an
+    /// amplitude gradient (green -> yellow -> red, see `theme::gradient_color`) or drawn
+    /// flat at `theme::WAVEFORM_DOT_LOW`. Defaults to `true`; toggled via the View menu
+    /// (`Action::ToggleDotMatrixGradient`, no default keybinding).
+    pub dot_matrix_gradient: bool,
     /// Path to the directory containing CDP (Composer's Desktop Project) binaries. Defaults
     /// to `~/cdp` (see `default_cdp_dir`, `~` resolved against the real `$HOME` at startup,
     /// not stored as a literal `~` — nothing downstream expands one) but still just a guess:
@@ -53,6 +59,7 @@ impl Default for Config {
             viewport_follows_playback: false,
             transient_threshold_db: 13.0,
             graphics_mode: true,
+            dot_matrix_gradient: true,
             cdp_dir: default_cdp_dir(),
             keybindings: HashMap::new(),
         }
@@ -151,6 +158,7 @@ mod tests {
             viewport_follows_playback: true,
             transient_threshold_db: 9.0,
             graphics_mode: false,
+            dot_matrix_gradient: true,
             cdp_dir: "/opt/cdp/bin".into(),
             keybindings: HashMap::new(),
         };
@@ -210,6 +218,7 @@ mod tests {
             viewport_follows_playback: false,
             transient_threshold_db: 12.0,
             graphics_mode: false,
+            dot_matrix_gradient: true,
             cdp_dir: String::new(),
             keybindings: HashMap::new(),
         };

@@ -3,36 +3,47 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Widget;
 
+use crate::model::dsp;
 use crate::ui::theme;
 use crate::ui::viewport::Viewport;
 use crate::ui::waveform_cache::{raw_min_max, WaveformCache};
 
-/// Lower-eighth block characters, U+2581..U+2588 — chosen over Nerd Font glyphs (which are
-/// icon-style symbols, e.g. file-type/git icons, not graduated fill levels) and over the
-/// less universally-supported upper-eighth blocks (Unicode's Legacy Computing Supplement,
-/// patchy font coverage). These eight are standard Unicode, present in essentially every
-/// monospace font, and are what terminal sparkline/plot tools (gnuplot's dumb terminal,
-/// ttyplot, etc.) already rely on.
-const LOWER_EIGHTHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+/// Braille Patterns block base codepoint (U+2800). Each cell is a 2 (wide) x 4 (tall)
+/// sub-grid of dots; OR-ing together the bits for whichever dots are "on" and adding that
+/// mask to this base yields the glyph. Bit layout is the standard braille dot numbering:
+/// ```text
+///   dot1 (0x01)  dot4 (0x08)
+///   dot2 (0x02)  dot5 (0x10)
+///   dot3 (0x04)  dot6 (0x20)
+///   dot7 (0x40)  dot8 (0x80)
+/// ```
+const BRAILLE_BASE: u32 = 0x2800;
 
-fn lower_eighth(n: u8) -> Option<char> {
-    (1..=8).contains(&n).then(|| LOWER_EIGHTHS[(n - 1) as usize])
+/// `DOT_BITS[sub_row][sub_col]` — the bit for the dot at vertical quarter `sub_row` (0=top
+/// .. 3=bottom) and horizontal half `sub_col` (0=left, 1=right) of one terminal cell.
+const DOT_BITS: [[u8; 2]; 4] = [
+    [0x01, 0x08],
+    [0x02, 0x10],
+    [0x04, 0x20],
+    [0x40, 0x80],
+];
+
+fn braille_char(mask: u8) -> char {
+    char::from_u32(BRAILLE_BASE + mask as u32).unwrap_or(' ')
 }
 
-/// Renders one channel's waveform into `area` using min/max downsampling: each terminal
-/// column represents `viewport.samples_per_column` samples. The per-column min/max comes
-/// from the precomputed `WaveformCache` rather than scanning raw samples, so render cost
-/// stays bounded by screen width regardless of file length or zoom level.
-///
-/// The bar's top and bottom edges land at fractional (sub-row) positions almost everywhere
-/// except by coincidence — floor/ceil-ing them to whole character rows throws away most of
-/// that precision, which matters most for quiet signals and zoomed-in views where a bar
-/// might only be 1-2 rows tall to begin with. Instead, the boundary row at each edge is
-/// drawn with a lower-eighth-block glyph sized to its fractional coverage: directly for the
-/// top edge (a lower-N/8 glyph already fills "from the bottom up", which is the right
-/// orientation there), and via an fg/bg swap on the complementary glyph for the bottom edge
-/// (filling "from the top down" using only bottom-aligned glyphs, the only kind with
-/// reliable font support).
+/// Renders one channel's waveform into `area` as braille dot-matrix glyphs, giving 2x
+/// horizontal resolution (each terminal column splits into a left/right sub-column with its
+/// own min/max, from the precomputed `WaveformCache` rather than scanning raw samples so
+/// render cost stays bounded by screen width) and 4x vertical resolution (4 dot-rows per
+/// character row) versus one glyph per cell. Each terminal cell still carries only one
+/// foreground color (a braille glyph can't color individual dots), so an unselected column's
+/// color is graded per row by `theme::gradient_color` from `WAVEFORM_DOT_LOW` (near the
+/// centerline) through `WAVEFORM_DOT_MID` to `WAVEFORM_DOT_HIGH` (near the amplitude
+/// extremes) — the same "position on screen IS the amplitude" mapping the dB gutter uses, so
+/// louder rows read as a warmer color, echoing btop's braille CPU graphs shading by height —
+/// unless `gradient` is off (flat `WAVEFORM_DOT_LOW`). Selected columns skip the gradient
+/// entirely (flat `WAVEFORM_SELECTED`).
 pub struct WaveformWidget<'a> {
     pub samples: &'a [f32],
     pub viewport: &'a Viewport,
@@ -43,6 +54,9 @@ pub struct WaveformWidget<'a> {
     pub cursor: usize,
     /// The playback position (only `Some` during playback, rendered as red │).
     pub playhead: Option<usize>,
+    /// Whether unselected dots are graded by amplitude (`theme::gradient_color`) or drawn
+    /// flat at `theme::WAVEFORM_DOT_LOW`. See `Config.dot_matrix_gradient`.
+    pub gradient: bool,
 }
 
 /// The terminal column the playhead falls on, given the current scroll/zoom, or `None`
@@ -71,118 +85,7 @@ impl<'a> Widget for WaveformWidget<'a> {
             return;
         }
 
-        let mid_row = area.height as f64 / 2.0;
-        let half_height = area.height as f64 / 2.0;
-
-        for col in 0..area.width {
-            let start = self.viewport.scroll_offset
-                + (col as f64 * self.viewport.samples_per_column) as usize;
-            let end = self.viewport.scroll_offset
-                + ((col + 1) as f64 * self.viewport.samples_per_column) as usize;
-            let end = end.min(self.samples.len());
-            if start >= self.samples.len() || start >= end {
-                continue;
-            }
-
-            let (min, max) = match self.cache {
-                Some(cache) => cache.min_max(self.samples, start, end),
-                None => raw_min_max(&self.samples[start..end]),
-            };
-
-            let scaled_min = (min * self.viewport.amplitude_scale).clamp(-1.0, 1.0) as f64;
-            let scaled_max = (max * self.viewport.amplitude_scale).clamp(-1.0, 1.0) as f64;
-
-            // Amplitude 1.0 is the top row, -1.0 is the bottom row, 0.0 is mid_row. These
-            // are continuous (sub-row) positions, not yet rounded to whole character rows.
-            let top_y = (mid_row - scaled_max * half_height).clamp(0.0, area.height as f64);
-            let bottom_y = (mid_row - scaled_min * half_height).clamp(0.0, area.height as f64);
-
-            let selected = self
-                .selection
-                .is_some_and(|(sel_start, sel_end)| start < sel_end && end > sel_start);
-            let color = if selected {
-                theme::WAVEFORM_SELECTED
-            } else {
-                theme::WAVEFORM
-            };
-            let x = area.x + col;
-            // Inverted selection: fill the whole column with the waveform color as the
-            // background, so the bar (drawn in WAVEFORM_SELECTED / YELLOW on top of it)
-            // looks like the palette has swapped relative to an unselected column.
-            let bg = if selected { theme::WAVEFORM } else { theme::BASE };
-            if selected {
-                for row in 0..area.height {
-                    buf[(x, area.y + row)].set_bg(theme::WAVEFORM);
-                }
-            }
-
-            // A column spanning very few samples — in the limit exactly one, where
-            // min == max — has zero geometric height here and would otherwise render
-            // nothing at all (the bug at high zoom: a 1:1 sample/column view going blank).
-            // Draw it as a single eighth-block sliver positioned at the value's row instead
-            // of skipping — the finest unit this renderer can represent anyway, and the
-            // closest approximation to "a single sample" a character cell allows.
-            const MIN_BAR_HEIGHT: f64 = 1.0 / 8.0;
-            if bottom_y - top_y < MIN_BAR_HEIGHT {
-                // True silence (min == max == 0) stays blank, same as a longer silent span
-                // (which also has zero geometric height and renders nothing) — only a
-                // non-zero degenerate column gets the visibility fix below.
-                if min == 0.0 && max == 0.0 {
-                    continue;
-                }
-                let center = ((top_y + bottom_y) / 2.0).min(area.height as f64 - f64::EPSILON).max(0.0);
-                let row = center.floor() as i64;
-                if row >= 0 && row < area.height as i64 {
-                    let frac_into_row = center - row as f64;
-                    let filled = (((1.0 - frac_into_row) * 8.0).round() as i64).clamp(1, 8) as u8;
-                    if let Some(ch) = lower_eighth(filled) {
-                        let y = area.y + row as u16;
-                        buf[(x, y)].set_char(ch).set_style(Style::default().fg(color));
-                    }
-                }
-                continue;
-            }
-
-            let top_row = top_y.floor() as i64;
-            let bottom_row_excl = bottom_y.ceil() as i64;
-
-            for row in top_row..bottom_row_excl {
-                if row < 0 || row >= area.height as i64 {
-                    continue;
-                }
-                let y = area.y + row as u16;
-                let row_top = row as f64;
-                let row_bottom = row as f64 + 1.0;
-
-                let is_top_edge = row_top < top_y && top_y < row_bottom;
-                let is_bottom_edge = row_top < bottom_y && bottom_y < row_bottom;
-
-                if is_top_edge {
-                    let frac_into_row = top_y - row_top; // how far down the edge falls
-                    let filled = ((1.0 - frac_into_row) * 8.0).round() as i64;
-                    if let Some(ch) = lower_eighth(filled.clamp(0, 8) as u8) {
-                        buf[(x, y)].set_char(ch).set_style(Style::default().fg(color));
-                    }
-                } else if is_bottom_edge {
-                    let frac_into_row = bottom_y - row_top; // how far down to fill from the top
-                    let filled = (frac_into_row * 8.0).round() as i64;
-                    let complement = 8 - filled.clamp(0, 8);
-                    if let Some(ch) = lower_eighth(complement as u8) {
-                        // Swap fg/bg: the glyph's "ink" (bottom complement/8) renders in the
-                        // pane background color, while the "non-ink" area (top filled/8 — what
-                        // we actually want colored) renders in the bar's background. When
-                        // selected the pane background is WAVEFORM (SKY) not BASE.
-                        buf[(x, y)]
-                            .set_char(ch)
-                            .set_style(Style::default().fg(bg).bg(color));
-                    } else {
-                        buf[(x, y)].set_char(' ').set_style(Style::default().bg(bg));
-                    }
-                } else {
-                    buf[(x, y)].set_char('█').set_style(Style::default().fg(color));
-                }
-            }
-        }
+        self.render_dots(area, buf);
 
         // Draw the cursor (insertion point) first so the playhead (drawn second) can
         // visually override it at overlapping columns during playback.
@@ -206,6 +109,102 @@ impl<'a> Widget for WaveformWidget<'a> {
                         .set_char('│')
                         .set_style(Style::default().fg(theme::PLAYHEAD).bg(theme::BASE).add_modifier(Modifier::BOLD));
                 }
+            }
+        }
+    }
+}
+
+impl<'a> WaveformWidget<'a> {
+    fn render_dots(&self, area: Rect, buf: &mut Buffer) {
+        let mid_row = area.height as f64 / 2.0;
+        let half_height = area.height as f64 / 2.0;
+        let dot_rows = area.height as i64 * 4;
+        let dot_mid = mid_row * 4.0;
+        let dot_half_height = half_height * 4.0;
+        let selection_bg = theme::dot_matrix_selection_bg();
+
+        for col in 0..area.width {
+            let start = self.viewport.scroll_offset
+                + (col as f64 * self.viewport.samples_per_column) as usize;
+            let end = self.viewport.scroll_offset
+                + ((col + 1) as f64 * self.viewport.samples_per_column) as usize;
+            let end = end.min(self.samples.len());
+            if start >= self.samples.len() || start >= end {
+                continue;
+            }
+
+            let selected = self
+                .selection
+                .is_some_and(|(sel_start, sel_end)| start < sel_end && end > sel_start);
+            // Selection uses a dimmed version of the gradient's own "quiet" green — paired
+            // with the flat black (`WAVEFORM_SELECTED`) dots below, so a selection reads as
+            // "gradient inverted to its low end," not an unrelated accent color.
+            let bg = if selected { selection_bg } else { theme::BASE };
+            let x = area.x + col;
+            if selected {
+                for row in 0..area.height {
+                    buf[(x, area.y + row)].set_bg(selection_bg);
+                }
+            }
+
+            // Split the column's sample range at its midpoint into a left and right
+            // sub-column, each queried independently — this is what gives the dot-matrix
+            // renderer its extra horizontal resolution over one flat bar per column.
+            let mid_sample = start + (end - start) / 2;
+            let sub_ranges = [(start, mid_sample), (mid_sample, end)];
+
+            let mut masks = vec![0u8; area.height as usize];
+
+            for (sub_col, &(s, e)) in sub_ranges.iter().enumerate() {
+                // A degenerate half (e.g. a 1-sample column split in two) falls back to the
+                // full column's range so it still reflects real data instead of going blank.
+                let (min, max) = match self.cache {
+                    Some(cache) if s < e => cache.min_max(self.samples, s, e),
+                    Some(cache) => cache.min_max(self.samples, start, end),
+                    None if s < e => raw_min_max(&self.samples[s..e]),
+                    None => raw_min_max(&self.samples[start..end]),
+                };
+                if min == 0.0 && max == 0.0 {
+                    continue;
+                }
+
+                let scaled_min = (min * self.viewport.amplitude_scale).clamp(-1.0, 1.0) as f64;
+                let scaled_max = (max * self.viewport.amplitude_scale).clamp(-1.0, 1.0) as f64;
+                let top_dot = (dot_mid - scaled_max * dot_half_height).clamp(0.0, dot_rows as f64);
+                let bottom_dot = (dot_mid - scaled_min * dot_half_height).clamp(0.0, dot_rows as f64);
+
+                let (top_idx, bottom_idx_excl) = if bottom_dot - top_dot < 1.0 {
+                    let center = ((top_dot + bottom_dot) / 2.0).min(dot_rows as f64 - f64::EPSILON).max(0.0);
+                    let idx = center.floor() as i64;
+                    (idx, idx + 1)
+                } else {
+                    (top_dot.floor() as i64, bottom_dot.ceil() as i64)
+                };
+
+                for dot_idx in top_idx..bottom_idx_excl {
+                    if dot_idx < 0 || dot_idx >= dot_rows {
+                        continue;
+                    }
+                    let row = (dot_idx / 4) as usize;
+                    let local = (dot_idx % 4) as usize;
+                    masks[row] |= DOT_BITS[local][sub_col];
+                }
+            }
+
+            for (row, &mask) in masks.iter().enumerate() {
+                if mask == 0 {
+                    continue;
+                }
+                let y = area.y + row as u16;
+                let color = if selected {
+                    theme::WAVEFORM_SELECTED
+                } else if self.gradient {
+                    let amp_frac = ((mid_row - (row as f64 + 0.5)) / half_height).abs().clamp(0.0, 1.0) as f32;
+                    theme::gradient_color(dsp::linear_to_db(amp_frac))
+                } else {
+                    theme::WAVEFORM_DOT_LOW
+                };
+                buf[(x, y)].set_char(braille_char(mask)).set_style(Style::default().fg(color).bg(bg));
             }
         }
     }
@@ -248,19 +247,18 @@ mod tests {
     }
 
     #[test]
-    fn lower_eighth_covers_one_through_eight() {
-        assert_eq!(lower_eighth(1), Some('▁'));
-        assert_eq!(lower_eighth(8), Some('█'));
-        assert_eq!(lower_eighth(0), None);
-        assert_eq!(lower_eighth(9), None);
+    fn braille_char_covers_empty_and_full_masks() {
+        assert_eq!(braille_char(0x00), '\u{2800}');
+        assert_eq!(braille_char(0xff), '\u{28ff}');
+        assert_eq!(braille_char(0x01), '\u{2801}');
     }
 
-    /// At 1 sample/column (max zoom in), every column spans exactly one sample, so
-    /// min == max and the bar has zero geometric height — the bug being guarded against
-    /// here is that such columns used to render nothing at all. Every column with a
-    /// non-zero sample must now show at least the eighth-block sliver.
+    /// At 1 sample/column (max zoom in), every column spans exactly one sample, so min ==
+    /// max and the span has zero geometric height — the bug being guarded against here is
+    /// that such columns used to render nothing at all. Every column with a non-zero sample
+    /// must show at least a single dot.
     #[test]
-    fn single_sample_columns_render_a_sliver_instead_of_going_blank() {
+    fn single_sample_columns_render_a_dot_instead_of_going_blank() {
         let samples: Vec<f32> = (0..20).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
         let area = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(area);
@@ -271,6 +269,7 @@ mod tests {
             selection: None,
             cursor: usize::MAX, // off-screen, so the cursor line doesn't interfere
             playhead: None,
+            gradient: true,
         };
         widget.render(area, &mut buf);
 
@@ -282,7 +281,7 @@ mod tests {
 
     /// Non-integer zoom levels (e.g. 1.5 samples/column) mix degenerate one-sample columns
     /// with non-degenerate two-sample ones — the one-sample columns used to go blank,
-    /// producing a sparse, inconsistent look. They must render a sliver too.
+    /// producing a sparse, inconsistent look. They must render a dot too.
     #[test]
     fn fractional_samples_per_column_has_no_blank_columns_for_nonzero_audio() {
         let samples: Vec<f32> = (0..40).map(|i| if i % 2 == 0 { 0.3 } else { 0.6 }).collect();
@@ -295,6 +294,7 @@ mod tests {
             selection: None,
             cursor: usize::MAX,
             playhead: None,
+            gradient: true,
         };
         widget.render(area, &mut buf);
 
@@ -305,7 +305,7 @@ mod tests {
     }
 
     /// A literally silent (all-zero) single-sample column is the one case that should
-    /// legitimately render nothing — there's no amplitude to show a sliver for.
+    /// legitimately render nothing — there's no amplitude to show a dot for.
     #[test]
     fn single_sample_silent_column_renders_nothing() {
         let samples = vec![0.0f32; 5];
@@ -318,6 +318,7 @@ mod tests {
             selection: None,
             cursor: usize::MAX,
             playhead: None,
+            gradient: true,
         };
         widget.render(area, &mut buf);
 
@@ -326,5 +327,56 @@ mod tests {
                 assert_eq!(buf[(x, y)].symbol(), " ", "a silent sample should not draw a mark");
             }
         }
+    }
+
+    #[test]
+    fn dot_matrix_uses_flat_green_when_gradient_is_off() {
+        let samples: Vec<f32> = (0..20).map(|i| if i % 2 == 0 { 0.9 } else { -0.9 }).collect();
+        let area = Rect::new(0, 0, 20, 10);
+        let mut buf = Buffer::empty(area);
+        let widget = WaveformWidget {
+            samples: &samples,
+            viewport: &viewport(0, 1.0),
+            cache: None,
+            selection: None,
+            cursor: usize::MAX,
+            playhead: None,
+            gradient: false,
+        };
+        widget.render(area, &mut buf);
+
+        for x in 0..20u16 {
+            for y in 0..10u16 {
+                let cell = &buf[(x, y)];
+                if cell.symbol() != " " {
+                    assert_eq!(cell.fg, theme::WAVEFORM_DOT_LOW, "dot at ({x},{y}) should be flat green with gradient off");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gradient_reddens_toward_the_amplitude_extremes() {
+        // Alternating near-full-scale samples, several per column, so each column's min/max
+        // span the whole pane height (top-to-bottom bar) rather than one single-sample sliver.
+        let samples: Vec<f32> = (0..80).map(|i| if i % 2 == 0 { 0.95 } else { -0.95 }).collect();
+        let area = Rect::new(0, 0, 20, 10);
+        let mut buf = Buffer::empty(area);
+        let widget = WaveformWidget {
+            samples: &samples,
+            viewport: &viewport(0, 4.0),
+            cache: None,
+            selection: None,
+            cursor: usize::MAX,
+            playhead: None,
+            gradient: true,
+        };
+        widget.render(area, &mut buf);
+
+        let edge_fg = buf[(0, 0)].fg;
+        let center_fg = buf[(0, 5)].fg;
+        assert_ne!(buf[(0, 0)].symbol(), " ", "edge row should be filled for a full-scale span");
+        assert_ne!(buf[(0, 5)].symbol(), " ", "center row should be filled for a full-scale span");
+        assert_ne!(edge_fg, center_fg, "gradient should vary color between the edge and the center");
     }
 }

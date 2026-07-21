@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-07-21
+
+- **Dot-matrix waveform renderer replaces the eighth-block bars entirely**, in both the
+  character-glyph and graphics-mode (kitty/Sixel/iTerm2) renderers. Each terminal column
+  splits into a left/right sub-column with its own min/max (2x horizontal resolution) and
+  each row into 4 braille dot-rows (4x vertical resolution), giving the waveform a textured,
+  btop-style look instead of solid bars. Colored by a green → yellow (-6dB) → red (0dB)
+  amplitude gradient (`theme::gradient_color`, graded by dB via a new `dsp::linear_to_db`,
+  not raw linear position — most of a waveform's on-screen height is quiet in linear terms,
+  so a linear-position gradient was nearly invisible). The gradient is a toggle ("Gradient"
+  in the View menu); off, the waveform draws flat green instead. A selection now shows as a
+  dimmed green background with flat black dots, no gradient.
+- **View menu toggles now show a checkmark when active** (Zero-Crossing Snap, Fine Step
+  Mode, Auto Vertical Zoom, Insertion Point/Viewport Follows Playback, Graphics Mode,
+  Gradient), consistent with the toolbar's own active-state highlighting. Checkmarks and
+  shortcuts render in fixed-width columns (measured in characters, not UTF-8 bytes — `✓` is
+  one display column but three bytes) so they line up vertically instead of drifting with
+  each label's length.
+- Fixed: pressing Space to play a selection continued playing past the selection's end once
+  loop playback was toggled off, instead of stopping there. `AudioEngine` gained
+  `play_bounded`/`seek_bounded` (play/seek once, no wraparound, but still stop at an end
+  frame — `DocumentSource` already supported this via `loop_end` with no `loop_start`, it
+  just wasn't exposed). `App::playback_bound` now distinguishes looped (loop playback on),
+  bounded (a selection with loop playback off), and unbounded playback, and falls back to
+  the selection's start when the cursor sits at its far edge (the common case after a
+  left-to-right drag) so the whole selection plays instead of nothing.
+- Bumped version to 1.3.0, covering the dot-matrix waveform renderer (text and graphics
+  mode), the amplitude gradient and its toggle, View menu checkmarks, and the
+  selection-playback bound fix above.
+
 ## 2026-07-20
 
 - **USERGUIDE and README rewritten for accuracy and brevity.** `USERGUIDE.md` shrinks from
