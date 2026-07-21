@@ -1341,7 +1341,7 @@ pub fn plan_extract_formants(pvoc: &PvocSettings) -> PlannedJob {
 
 /// Plans `oneform get` — CDP-Ext-Plan.md Phase 5's "freeze snapshot" action, the second
 /// asymmetric shape this family needs. Unlike `plan_extract_formants` (audio in, buffer out)
-/// this one's input is itself a `[Formant]` buffer's raw bytes (`oneform get`'s own usage
+/// this one's input is itself a `[f]` buffer's raw bytes (`oneform get`'s own usage
 /// text: `oneform get informantfile 1f-outfile time`) — there's no audio and no `pvoc anal`
 /// step at all, just one CDP invocation with the caller-picked buffer spliced in as a plain
 /// `binary_input_files` entry (the same "write raw bytes, argv token is the filename"

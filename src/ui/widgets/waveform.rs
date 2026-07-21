@@ -7,30 +7,7 @@ use crate::model::dsp;
 use crate::ui::theme;
 use crate::ui::viewport::Viewport;
 use crate::ui::waveform_cache::{raw_min_max, WaveformCache};
-
-/// Braille Patterns block base codepoint (U+2800). Each cell is a 2 (wide) x 4 (tall)
-/// sub-grid of dots; OR-ing together the bits for whichever dots are "on" and adding that
-/// mask to this base yields the glyph. Bit layout is the standard braille dot numbering:
-/// ```text
-///   dot1 (0x01)  dot4 (0x08)
-///   dot2 (0x02)  dot5 (0x10)
-///   dot3 (0x04)  dot6 (0x20)
-///   dot7 (0x40)  dot8 (0x80)
-/// ```
-const BRAILLE_BASE: u32 = 0x2800;
-
-/// `DOT_BITS[sub_row][sub_col]` — the bit for the dot at vertical quarter `sub_row` (0=top
-/// .. 3=bottom) and horizontal half `sub_col` (0=left, 1=right) of one terminal cell.
-const DOT_BITS: [[u8; 2]; 4] = [
-    [0x01, 0x08],
-    [0x02, 0x10],
-    [0x04, 0x20],
-    [0x40, 0x80],
-];
-
-fn braille_char(mask: u8) -> char {
-    char::from_u32(BRAILLE_BASE + mask as u32).unwrap_or(' ')
-}
+use crate::ui::widgets::braille::{braille_char, DOT_BITS};
 
 /// Renders one channel's waveform into `area` as braille dot-matrix glyphs, giving 2x
 /// horizontal resolution (each terminal column splits into a left/right sub-column with its
@@ -244,13 +221,6 @@ mod tests {
         let v = viewport(1000, 10.0);
         assert_eq!(playhead_column(&v, 500, 80), None); // before the visible window
         assert_eq!(playhead_column(&v, 1000 + 10 * 80, 80), None); // past the right edge
-    }
-
-    #[test]
-    fn braille_char_covers_empty_and_full_masks() {
-        assert_eq!(braille_char(0x00), '\u{2800}');
-        assert_eq!(braille_char(0xff), '\u{28ff}');
-        assert_eq!(braille_char(0x01), '\u{2801}');
     }
 
     /// At 1 sample/column (max zoom in), every column spans exactly one sample, so min ==
