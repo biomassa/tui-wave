@@ -185,7 +185,7 @@ pub fn rasterize_cdp_envelope(
             Some(py) => (py.min(y), py.max(y)),
             None => (y, y),
         };
-        draw_vspan_aa(&mut img, col, y_lo, y_hi, curve_color);
+        draw_vspan_aa(&mut img, col, y_lo, y_hi, |_| curve_color);
         prev_y = Some(y);
     }
 

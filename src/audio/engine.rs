@@ -142,6 +142,18 @@ impl AudioEngine {
         });
     }
 
+    /// Plays once (no wraparound) but stops at `end_frame` instead of the end of the file —
+    /// `loop_start: None` with `loop_end: Some` is exactly what `DocumentSource::next`
+    /// already treats as "stop here," it just wasn't exposed as its own entry point before.
+    /// Used to keep playback from continuing past a selection when loop playback is off.
+    pub fn play_bounded(&self, from_frame: usize, end_frame: usize) {
+        let _ = self.cmd_tx.send(AudioCmd::Play {
+            from_frame,
+            loop_start: None,
+            loop_end: Some(end_frame),
+        });
+    }
+
     pub fn pause(&self) {
         let _ = self.cmd_tx.send(AudioCmd::Pause);
     }
@@ -157,6 +169,16 @@ impl AudioEngine {
             frame,
             loop_start: Some(loop_start),
             loop_end: Some(loop_end),
+        });
+    }
+
+    /// The seek-time counterpart to `play_bounded`: re-syncs playback to `frame` without
+    /// wraparound, stopping at `end_frame`.
+    pub fn seek_bounded(&self, frame: usize, end_frame: usize) {
+        let _ = self.cmd_tx.send(AudioCmd::Seek {
+            frame,
+            loop_start: None,
+            loop_end: Some(end_frame),
         });
     }
 

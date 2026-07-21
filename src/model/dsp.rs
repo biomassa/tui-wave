@@ -9,6 +9,13 @@ pub fn db_to_linear(db: f32) -> f32 {
     10.0f32.powf(db / 20.0)
 }
 
+/// Converts a linear amplitude factor to dBFS (1.0 → 0 dB, ~0.5 → -6 dB) — the inverse of
+/// [`db_to_linear`]. `amplitude` is clamped away from zero first so literal silence maps to
+/// a large-but-finite negative number instead of `-inf`.
+pub fn linear_to_db(amplitude: f32) -> f32 {
+    20.0 * amplitude.abs().max(1e-6).log10()
+}
+
 /// Peak levels at or below this are treated as silence: normalizing them would amplify
 /// noise (or divide by zero for actual digital silence) instead of anything audible.
 pub const SILENCE_PEAK: f32 = 0.0001;
@@ -40,6 +47,18 @@ mod tests {
         assert!((db_to_linear(0.0) - 1.0).abs() < 1e-6);
         assert!((db_to_linear(-6.0) - 0.5012).abs() < 1e-3);
         assert!((db_to_linear(-20.0) - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn linear_to_db_maps_known_points() {
+        assert!((linear_to_db(1.0) - 0.0).abs() < 1e-3);
+        assert!((linear_to_db(0.5) - (-6.02)).abs() < 1e-1);
+        assert!((linear_to_db(0.1) - (-20.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn linear_to_db_of_zero_is_finite() {
+        assert!(linear_to_db(0.0).is_finite());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -27,6 +27,10 @@ pub struct MenuItem {
 /// drifting apart.
 pub struct MenuBar {
     pub items: Vec<MenuItem>,
+    /// Actions whose entry (see `keymap::Action::is_checkable`) should render with a
+    /// checkmark — e.g. dot-matrix mode when it's on. Mirrors `Toolbar::active_actions`:
+    /// `App::render` clears and repopulates it every frame from live toggle state.
+    pub active_actions: HashSet<Action>,
     open: Option<usize>,
     selected: usize,
     item_rects: Vec<Rect>,
@@ -91,6 +95,7 @@ impl MenuBar {
                     entry("Insertion Point Follows Playback", Action::ToggleCursorFollowsPlayback, "i"),
                     entry("Viewport Follows Playback",        Action::ToggleViewportFollowsPlayback, "f"),
                     entry("Graphics Mode",                    Action::ToggleGraphicsMode,          "g"),
+                    entry("Gradient",                         Action::ToggleDotMatrixGradient,     ""),
                 ],
             },
             MenuItem {
@@ -148,6 +153,7 @@ impl MenuBar {
         ];
         Self {
             items,
+            active_actions: HashSet::new(),
             open: None,
             selected: 0,
             item_rects: Vec::new(),
@@ -271,11 +277,18 @@ impl MenuBar {
     fn render_submenu(&mut self, frame: &mut Frame, index: usize) {
         let bar_rect = self.item_rects[index];
         let entries = &self.items[index].entries;
-        let inner_width = entries
-            .iter()
-            .map(|e| e.label.len() + e.shortcut.len() + 4)
-            .max()
-            .unwrap_or(12) as u16;
+
+        // Fixed-width columns (label, then checkmark, then right-aligned shortcut) so every
+        // row's checkmark and shortcut line up vertically instead of drifting with each
+        // label's own length. Measured in *chars*, not `str::len()` (UTF-8 bytes) — "✓"
+        // (U+2713) is a single display column but 3 bytes, and byte-counting it here would
+        // silently throw the alignment off by 2 on every checked row.
+        const CHECK_SLOT: &str = "  "; // width of " ✓", used as the un-checked filler too
+        let has_checkable = entries.iter().any(|e| e.action.is_checkable());
+        let label_width = entries.iter().map(|e| e.label.chars().count()).max().unwrap_or(0);
+        let shortcut_width = entries.iter().map(|e| e.shortcut.chars().count()).max().unwrap_or(0);
+        let checkmark_width = if has_checkable { CHECK_SLOT.chars().count() } else { 0 };
+        let inner_width = (label_width + checkmark_width + shortcut_width + 4) as u16;
         let popup = Rect {
             x: bar_rect.x,
             y: bar_rect.y + 1,
@@ -288,18 +301,30 @@ impl MenuBar {
             .iter()
             .enumerate()
             .map(|(i, e)| {
+                let checkmark = if !has_checkable {
+                    ""
+                } else if e.action.is_checkable() && self.active_actions.contains(&e.action) {
+                    " \u{2713}"
+                } else {
+                    CHECK_SLOT
+                };
+                let label = format!("{:<label_width$}", e.label);
                 let pad = (popup.width as usize)
                     .saturating_sub(2)
-                    .saturating_sub(e.label.len())
-                    .saturating_sub(e.shortcut.len());
+                    .saturating_sub(label.chars().count())
+                    .saturating_sub(checkmark.chars().count())
+                    .saturating_sub(e.shortcut.chars().count());
                 let line = if self.selected == i {
                     // Selected: one uniform highlight rather than juggling a third accent
                     // color against it, which would risk a low-contrast clash.
                     let style = Style::default().fg(theme::HIGHLIGHT_FG).bg(theme::HIGHLIGHT_BG);
-                    Line::styled(format!("{}{}{}", e.label, " ".repeat(pad), e.shortcut), style)
+                    Line::styled(format!("{label}{checkmark}{}{}", " ".repeat(pad), e.shortcut), style)
                 } else {
                     Line::from(vec![
-                        Span::styled(e.label, Style::default().fg(theme::CHROME_FG)),
+                        Span::styled(label, Style::default().fg(theme::CHROME_FG)),
+                        // Same accent the toolbar uses for an active toggle's label, so
+                        // "this is currently on" reads the same way in both places.
+                        Span::styled(checkmark, Style::default().fg(theme::ACTIVE)),
                         Span::raw(" ".repeat(pad)),
                         Span::styled(e.shortcut.clone(), Style::default().fg(theme::SHORTCUT)),
                     ])

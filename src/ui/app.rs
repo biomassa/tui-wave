@@ -1298,6 +1298,16 @@ enum SaveAsQueueThen {
     CloseBuffer(usize),
 }
 
+/// See `App::playback_bound`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaybackBound {
+    /// Wraps forever between the two frames (loop playback on).
+    Looped(usize, usize),
+    /// Plays once and stops at the second frame — no wraparound (a selection, loop off).
+    Bounded(usize, usize),
+    Unbounded,
+}
+
 
 pub struct App {
     pub should_quit: bool,
@@ -1313,6 +1323,11 @@ pub struct App {
     /// protocol instead of character glyphs. Persisted, defaults to `true` — see
     /// `Config.graphics_mode`. Toggled with `Action::ToggleGraphicsMode`.
     pub graphics_mode: bool,
+    /// Whether the (always braille dot-matrix) waveform is colored by an amplitude gradient
+    /// or drawn flat green — applies to both the character-glyph and graphics-mode
+    /// renderers. Persisted, defaults to `true` — see `Config.dot_matrix_gradient`. Toggled
+    /// with `Action::ToggleDotMatrixGradient` (View menu, no default keybinding).
+    pub dot_matrix_gradient: bool,
     /// Per-channel graphics-mode image state, index-parallel to the active document's
     /// channels. Rebuilt fresh every frame from the live `viewport`/`selection`/`cursor`/
     /// `playhead` (via `Picker::new_resize_protocol`, the crate's intended way to swap in
@@ -1633,6 +1648,7 @@ impl App {
             key_map,
             picker: None,
             graphics_mode: config.graphics_mode,
+            dot_matrix_gradient: config.dot_matrix_gradient,
             graphics_protocols: Vec::new(),
             cdp_envelope_graphics_protocol: None,
             documents,
@@ -2295,6 +2311,33 @@ impl App {
                 .map(|sel| sel.normalized())
                 .unwrap_or((0, doc.len_samples()))
         })
+    }
+
+    /// How playback (Space, or any cursor move that re-syncs already-playing audio) should
+    /// be bounded: looped over `loop_range()` when loop playback is on, bounded-but-not-
+    /// looping to the selection's end when there's a selection and looping is off (this is
+    /// what keeps Space from continuing past a selection once loop is toggled off), or
+    /// unbounded otherwise.
+    fn playback_bound(&self) -> PlaybackBound {
+        if let Some((ls, le)) = self.loop_range() {
+            return PlaybackBound::Looped(ls, le);
+        }
+        if let Some((s, e)) = self.active_doc().and_then(|doc| doc.selection).map(|sel| sel.normalized()) {
+            if s < e {
+                return PlaybackBound::Bounded(s, e);
+            }
+        }
+        PlaybackBound::Unbounded
+    }
+
+    /// The frame to start/resume bounded playback from: `cursor` when it already falls
+    /// inside `[ls, le)` (e.g. resuming a pause that landed mid-selection), otherwise `ls` —
+    /// selecting doesn't reliably leave the cursor at the *start* of the selection (dragging
+    /// left-to-right, the common case, leaves it at the far/end edge instead — see
+    /// `Selection::extended`), so falling back to `ls` is what guarantees the whole selection
+    /// actually plays instead of starting past its own end and stopping immediately.
+    fn bounded_playback_start(cursor: usize, ls: usize, le: usize) -> usize {
+        if (ls..le).contains(&cursor) { cursor } else { ls }
     }
 
     /// Highest peak within the current visible window. Computed from the precomputed cache
@@ -6262,6 +6305,7 @@ impl App {
             viewport_follows_playback: self.viewport_follows_playback,
             transient_threshold_db: self.transient_threshold_db,
             graphics_mode: self.graphics_mode,
+            dot_matrix_gradient: self.dot_matrix_gradient,
             cdp_dir,
             keybindings,
         };
@@ -7246,13 +7290,8 @@ impl App {
             }
             return;
         }
-        let loop_range = if self.loop_playback {
-            self.active_doc().map(|d| {
-                d.selection.map(|sel| sel.normalized()).unwrap_or((0, d.len_samples()))
-            })
-        } else {
-            None
-        };
+        // Computed before `document` below takes a mutable borrow of `self.documents[idx]`.
+        let playback_bound = self.playback_bound();
 
         let idx = self.active_document;
         let Some(viewport) = self.viewport.as_ref() else { return };
@@ -7367,10 +7406,10 @@ impl App {
 
         if let Some(audio) = &self.audio {
             if audio.is_playing() {
-                if let Some((ls, le)) = loop_range {
-                    audio.seek_looped(document.cursor, ls, le);
-                } else {
-                    audio.seek(document.cursor);
+                match playback_bound {
+                    PlaybackBound::Looped(ls, le) => audio.seek_looped(document.cursor, ls, le),
+                    PlaybackBound::Bounded(_, le) => audio.seek_bounded(document.cursor, le),
+                    PlaybackBound::Unbounded => audio.seek(document.cursor),
                 }
             }
         }
@@ -7823,6 +7862,12 @@ impl App {
             return;
         }
 
+        if action == Action::ToggleDotMatrixGradient {
+            self.dot_matrix_gradient = !self.dot_matrix_gradient;
+            self.save_config();
+            return;
+        }
+
         if matches!(
             action,
             Action::InsertMarker
@@ -8097,10 +8142,16 @@ impl App {
         let base_step = if self.fine_mode { (column_step / 8).max(1) } else { column_step };
         let step = ((base_step as f64 * nav_multiplier).round() as usize).max(1);
         let span = viewport.span(width);
-        let loop_range = if self.loop_playback {
-            Some(document.selection.map(|sel| sel.normalized()).unwrap_or((0, total_len)))
+        // Inlined rather than calling `self.playback_bound()`: `document` here already holds
+        // an exclusive borrow of `self.documents`, so a further immutable borrow via
+        // `self.active_doc()` wouldn't compile.
+        let playback_bound = if self.loop_playback {
+            let (ls, le) = document.selection.map(|sel| sel.normalized()).unwrap_or((0, total_len));
+            PlaybackBound::Looped(ls, le)
+        } else if let Some((s, e)) = document.selection.map(|sel| sel.normalized()).filter(|&(s, e)| s < e) {
+            PlaybackBound::Bounded(s, e)
         } else {
-            None
+            PlaybackBound::Unbounded
         };
         let old_cursor = document.cursor;
         match action {
@@ -8124,6 +8175,7 @@ impl App {
             | Action::ToggleCursorFollowsPlayback
             | Action::ToggleViewportFollowsPlayback
             | Action::ToggleGraphicsMode
+            | Action::ToggleDotMatrixGradient
             | Action::ClearSelection
             | Action::SelectAll
             | Action::SaveAs
@@ -8279,10 +8331,10 @@ impl App {
         if cursor_moved {
             if let Some(audio) = &self.audio {
                 if audio.is_playing() {
-                    if let Some((ls, le)) = loop_range {
-                        audio.seek_looped(document.cursor, ls, le);
-                    } else {
-                        audio.seek(document.cursor);
+                    match playback_bound {
+                        PlaybackBound::Looped(ls, le) => audio.seek_looped(document.cursor, ls, le),
+                        PlaybackBound::Bounded(_, le) => audio.seek_bounded(document.cursor, le),
+                        PlaybackBound::Unbounded => audio.seek(document.cursor),
                     }
                 }
             }
@@ -8548,10 +8600,12 @@ impl App {
             let Some(document) = self.active_doc() else {
                 return;
             };
-            if let Some((ls, le)) = self.loop_range() {
-                audio.play_looped(document.cursor, ls, le);
-            } else {
-                audio.play(document.cursor);
+            match self.playback_bound() {
+                PlaybackBound::Looped(ls, le) => audio.play_looped(document.cursor, ls, le),
+                PlaybackBound::Bounded(ls, le) => {
+                    audio.play_bounded(Self::bounded_playback_start(document.cursor, ls, le), le)
+                }
+                PlaybackBound::Unbounded => audio.play(document.cursor),
             }
         }
     }
@@ -8572,29 +8626,42 @@ impl App {
         self.toolbar.active_actions.clear();
         self.toolbar.is_playing = self.audio.as_ref().is_some_and(|a| a.is_playing());
         self.toolbar.transient_threshold_db = self.transient_threshold_db;
+        self.menu.active_actions.clear();
+        // These six are both toolbar-highlighted and shown as checkmarks in the View menu
+        // (see `keymap::Action::is_checkable`) — one `if`, both sets updated together, so
+        // the two displays can never drift apart on which toggles are currently on.
         if self.snap_to_zero {
             self.toolbar.active_actions.insert(Action::ToggleZeroSnap);
+            self.menu.active_actions.insert(Action::ToggleZeroSnap);
         }
         if self.loop_playback {
             self.toolbar.active_actions.insert(Action::ToggleLoop);
         }
         if self.fine_mode {
             self.toolbar.active_actions.insert(Action::ToggleFineMode);
+            self.menu.active_actions.insert(Action::ToggleFineMode);
         }
         if self.viewport.as_ref().is_some_and(|v| v.auto_vertical_zoom) {
             self.toolbar.active_actions.insert(Action::ToggleAutoVerticalZoom);
+            self.menu.active_actions.insert(Action::ToggleAutoVerticalZoom);
         }
         if self.audition {
             self.toolbar.active_actions.insert(Action::ToggleAudition);
         }
         if self.cursor_follows_playback {
             self.toolbar.active_actions.insert(Action::ToggleCursorFollowsPlayback);
+            self.menu.active_actions.insert(Action::ToggleCursorFollowsPlayback);
         }
         if self.viewport_follows_playback {
             self.toolbar.active_actions.insert(Action::ToggleViewportFollowsPlayback);
+            self.menu.active_actions.insert(Action::ToggleViewportFollowsPlayback);
         }
         if self.graphics_mode {
             self.toolbar.active_actions.insert(Action::ToggleGraphicsMode);
+            self.menu.active_actions.insert(Action::ToggleGraphicsMode);
+        }
+        if self.dot_matrix_gradient {
+            self.menu.active_actions.insert(Action::ToggleDotMatrixGradient);
         }
         self.toolbar.render(frame, chrome.toolbar, focus);
         // Fill the spacer row with the base background so it matches the toolbar below it
@@ -8745,6 +8812,7 @@ impl App {
                 selection,
                 cursor: self.documents[doc_idx].cursor,
                 playhead: self.playhead_position,
+                gradient: self.dot_matrix_gradient,
             };
             frame.render_widget(widget, channel_inner);
 
@@ -8787,6 +8855,7 @@ impl App {
                         channel_inner.width,
                         pixel_width,
                         pixel_height,
+                        self.dot_matrix_gradient,
                     );
                     let protocol = picker.new_resize_protocol(image::DynamicImage::ImageRgba8(img));
                     if i < self.graphics_protocols.len() {
@@ -12003,6 +12072,63 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let row: String = (1..6u16).map(|x| buffer[(x, 2)].symbol()).collect();
         assert_eq!(row, "Save ", "the dropdown's first entry must survive on top of the toolbar row beneath it");
+    }
+
+    /// A selection with loop playback off must bound (not loop) playback to the selection's
+    /// end — this is what keeps Space from continuing past a selection once loop is off.
+    #[test]
+    fn playback_bound_is_bounded_to_selection_when_loop_is_off() {
+        let mut app = new_app(Some(doc(0.5, 10_000)), None);
+        app.documents[0].selection = Some(Selection { start: 100, end: 500 });
+        assert_eq!(app.playback_bound(), PlaybackBound::Bounded(100, 500));
+    }
+
+    /// With loop playback on, a selection loops rather than just bounding playback once.
+    #[test]
+    fn playback_bound_is_looped_to_selection_when_loop_is_on() {
+        let mut app = new_app(Some(doc(0.5, 10_000)), None);
+        app.documents[0].selection = Some(Selection { start: 500, end: 100 }); // reversed drag
+        app.loop_playback = true;
+        assert_eq!(app.playback_bound(), PlaybackBound::Looped(100, 500));
+    }
+
+    /// No selection and loop off must never bound playback at all.
+    #[test]
+    fn playback_bound_is_unbounded_with_no_selection() {
+        let app = new_app(Some(doc(0.5, 10_000)), None);
+        assert_eq!(app.playback_bound(), PlaybackBound::Unbounded);
+    }
+
+    /// A zero-length "selection" (click without drag) must not bound playback — there's
+    /// nothing to bound it to.
+    #[test]
+    fn playback_bound_ignores_empty_selection() {
+        let mut app = new_app(Some(doc(0.5, 10_000)), None);
+        app.documents[0].selection = Some(Selection { start: 300, end: 300 });
+        assert_eq!(app.playback_bound(), PlaybackBound::Unbounded);
+    }
+
+    /// A left-to-right drag (the common case) leaves the cursor at the selection's *end*
+    /// (`Selection::extended` tracks the active edge) — starting bounded playback from that
+    /// cursor would immediately hit the bound and play nothing. It must fall back to the
+    /// selection's start instead.
+    #[test]
+    fn bounded_playback_start_falls_back_to_selection_start_when_cursor_is_at_the_far_edge() {
+        assert_eq!(App::bounded_playback_start(500, 100, 500), 100);
+    }
+
+    /// Resuming a paused mid-selection playback (cursor_follows_playback moved the cursor
+    /// inside the selection) must resume from there, not restart from the beginning.
+    #[test]
+    fn bounded_playback_start_uses_cursor_when_it_is_inside_the_range() {
+        assert_eq!(App::bounded_playback_start(300, 100, 500), 300);
+    }
+
+    /// A cursor left before the selection (e.g. stale from before the selection was made)
+    /// must also fall back to the selection's start rather than starting outside it.
+    #[test]
+    fn bounded_playback_start_falls_back_when_cursor_is_before_the_range() {
+        assert_eq!(App::bounded_playback_start(50, 100, 500), 100);
     }
 
     /// Builds a mono doc with a quiet section followed by a sudden loud one — a clear
