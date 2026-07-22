@@ -1,5 +1,43 @@
 # Changelog
 
+## 2026-07-22
+
+- **CDP process titles renamed to a CDP-WASM-SUITE-style, plain-English convention**
+  (`catalog_titles.toml`, a title-only override layer so the generated `catalog.toml` never
+  needs hand-editing) — every renamed title still reveals its own CDP binary. Fixed 4 real
+  catalog-key collisions found along the way (two different processes silently sharing one
+  key, merge-by-key semantics shadowing one of each pair). Added 27 new catalog entries for
+  confirmed CDP-WASM-SUITE gaps (filter fixed/variable, 8 more distort modes, clip mode 1,
+  grain align, specfold fold/invert, glisten, chirikov, packet), verified against the real
+  CDP8 binaries. Corrected stale source comments citing "CDP 7.1" — the bundled binaries'
+  own usage banner is misleading; this is actually CDP Release 8
+  (github.com/ComposersDesktop/CDP8).
+- **New "CDP Chain..." (Ctrl+H): multi-step CDP pipelines with unlimited-depth
+  side-chains.** A linear list of CDP processes runs as one pipeline; any dual-input step
+  can be fed by its own side-chain (a sub-chain run against a separately-picked buffer)
+  instead of a raw open buffer, nested to any depth. Reuses the existing Browser/Params flow
+  to add/edit each step; a stack-based execution engine walks the chain as a post-order tree
+  and splices the final result as a single undo step. Real audio preview works both for the
+  whole chain and mid-edit on one in-progress step (upstream steps run for real, plus the
+  step's current values). Chains save/load as named presets, track recent use, and
+  auto-save the last successfully-run chain to its own recall slot (`l` in the chain editor)
+  so an unsaved but carefully built chain is never lost after a bare Run. `p` previews the
+  chain up to and including just the selected step.
+- Fixed: a multi-step chain's marker-preservation tolerance was derived from only its last
+  step's category, as if the whole chain were one CDP process — but each spectral step
+  re-analyzes the previous step's already-padded output from scratch, so the drift compounds
+  down the chain. A chain of just 3 ordinary spectral steps (nothing "time-altering") could
+  drift far enough to silently collapse every cue marker in range. Tolerance is now the sum
+  of every top-level step's own tolerance, matching the real compounding drift.
+- Added `Ctrl+L` ("Reload from disk") to the Buffers panel: re-reads the active document's
+  file wholesale (samples, cue markers, bext, bit depth) and clears its undo history — the
+  old stack's commands store sample data from before the reload, so replaying them would
+  corrupt it. Confirms first on a dirty buffer, reloads immediately if already clean,
+  no-ops on a never-saved buffer. New matching toolbar button.
+- Bumped version to 1.4.0, covering the CDP-WASM-SUITE renames/gaps, the CDP Chain feature
+  (plus its recall-last-chain and per-step-preview follow-ups), the chain marker-tolerance
+  fix, and the Buffer-panel Reload-from-disk shortcut above.
+
 ## 2026-07-21
 
 - **Dot-matrix waveform renderer replaces the eighth-block bars entirely**, in both the
