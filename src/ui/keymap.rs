@@ -87,6 +87,7 @@ pub enum Action {
     FocusNext,
     CloseBuffer,
     RenameBuffer,
+    ReloadBuffer,
     SwitchBuffer,
     SearchBuffers,
 }
