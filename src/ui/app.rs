@@ -16735,7 +16735,7 @@ mod tests {
                 text.push_str(buffer[(x, y)].symbol());
             }
         }
-        assert!(text.contains("Psow Stretch"), "the search should have found the process");
+        assert!(text.contains("Pitch-Sync Stretch"), "the search should have found the process");
         assert!(text.contains("[p]"), "its pitch-curve badge should be visible on screen");
     }
 
@@ -16805,10 +16805,14 @@ mod tests {
     fn psow_pitch_processes_appear_in_the_real_pitch_group() {
         let app = new_app(Some(doc(0.1, 100)), None);
         let entries = app.cdp_filter_entries("", "pitch", &[]);
-        let titles: Vec<&str> = entries.iter().map(|&i| app.cdp_catalog.processes[i].title.as_str()).collect();
+        // Checked by `key` prefix, not title text: titles no longer necessarily start with
+        // "Psow" (see CDP-WASM-SUITE-analysis.md's rename pass — bin-name prefixes were
+        // deliberately dropped from titles), but every process's `bin` field is stable and
+        // `psow_`-keyed entries are exactly the ones this regression is guarding.
+        let keys: Vec<&str> = entries.iter().map(|&i| app.cdp_catalog.processes[i].key.as_str()).collect();
         assert!(
-            titles.iter().any(|t| t.starts_with("Psow")),
-            "expected at least one Psow process in the \"pitch\" group, got {titles:?}"
+            keys.iter().any(|k| k.starts_with("psow_")),
+            "expected at least one psow-keyed process in the \"pitch\" group, got {keys:?}"
         );
     }
 
@@ -16908,19 +16912,24 @@ mod tests {
     /// Search matches a process's *name* (`key`/`title`) only — a term that only appears in
     /// `short_description`/`description` must not match, or the search box effectively
     /// searches everything rather than narrowing by name (the user-reported confusion this
-    /// fixes: `blur_avrg`'s title is "Average" and its key is "blur_avrg", but its
-    /// description happens to say "spectral energy").
+    /// fixes: `blur_avrg`'s key is "blur_avrg", and its description happens to say "adjacent
+    /// channels" — a word neither its key nor its CDP-WASM-SUITE-style title ("Spectral
+    /// Average — blur", see `CDP-WASM-SUITE-analysis.md`'s rename pass) mentions).
     #[test]
     fn search_matches_process_name_not_description() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
         let blur_avrg = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").expect("blur_avrg in catalog");
         assert!(
-            app.cdp_catalog.processes[blur_avrg].short_description.to_lowercase().contains("spectral"),
-            "test assumes blur_avrg's short_description mentions \"spectral\" while its name doesn't"
+            app.cdp_catalog.processes[blur_avrg].short_description.to_lowercase().contains("channels"),
+            "test assumes blur_avrg's short_description mentions \"channels\" while its name doesn't"
+        );
+        assert!(
+            !app.cdp_catalog.processes[blur_avrg].title.to_lowercase().contains("channels"),
+            "test assumes blur_avrg's title doesn't also mention \"channels\""
         );
 
         app.open_cdp_browser();
-        for c in "spectral".chars() {
+        for c in "channels".chars() {
             app.handle_dialog_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
         let Some(Dialog::CdpBrowser { entries, .. }) = &app.dialog else { panic!("no dialog") };

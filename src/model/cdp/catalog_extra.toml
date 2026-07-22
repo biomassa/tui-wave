@@ -2,8 +2,10 @@
 # CDP-Ext-Plan.md for the inventory and rationale. Same [[process]] schema as catalog.toml
 # and the user-extension directory (see docs/cdp-custom-process-example.toml for a fully
 # commented field reference). Unlike catalog.toml, this file IS meant to be hand-edited —
-# each entry's argv shape and parameter ranges were verified against the real CDP 7.1
-# binary's own usage text (every CDP program prints full usage with no arguments) and, where
+# each entry's argv shape and parameter ranges were verified against the real CDP8
+# binary's own usage text (every CDP program prints full usage with no arguments; note the
+# usage banner itself misleadingly prints "CDP Release 7.1 2016" — a stale version-string
+# constant never bumped when the project moved to Release 8, see README.md) and, where
 # the usage text gave no explicit numeric range, against actual invocations of the binary.
 # Every entry here is exercised by `cdp::runner::tests::catalog_smoke_test`
 # (TUI_WAVE_CDP_SMOKE=1 cargo test catalog_smoke_test) before being added.
@@ -1145,8 +1147,14 @@ scale = "plain"
 # benefit — probed against the real binary (2026-07-13), which handles stereo input, and
 # even mismatched stereo-first/mono-second input pairs, natively with exit 0 and a real
 # stereo result.
+# `_1b` (not `_1`): `envel_replace_1` already names a distinct SoundThread-derived entry in
+# catalog.toml ("Envel Replace Envelope") for the same bin/subprog/mode -- reusing that key
+# here silently shadowed it (merge_catalog_source replaces on matching key), making the
+# catalog.toml entry unreachable. Found 2026-07-22 while cross-referencing
+# CDP-WASM-SUITE-analysis.md's rename table against the live catalog; same issue existed for
+# pitch_tune_1, repitch_transpose_3, repitch_transposef_3 below, fixed the same way.
 [[process]]
-key = "envel_replace_1"
+key = "envel_replace_1b"
 bin = "envel"
 subprog = "replace"
 mode = "1"
@@ -3926,7 +3934,7 @@ scale = "plain"
 # ---- Tier 0 batch 7 (2026-07-09) ------------------------------------------------------
 
 # modify_convolve_1 was tried here and deliberately NOT included: `modify convolve 1`
-# segfaults (SIGSEGV, core dump) in this CDP 7.1 build on every input pairing tested
+# segfaults (SIGSEGV, core dump) in this CDP8 build on every input pairing tested
 # (identical files, different mono files, different durations) — a real crash in the
 # binary itself, not a catalog-authoring mistake. Unlike a known-crashing mode inside an
 # already-large, mostly-working family (see specfnu_specfnu_19's skip-list entry), this
@@ -9567,7 +9575,7 @@ default = false
 flag = "-x"
 
 [[process]]
-key = "repitch_transpose_3"
+key = "repitch_transpose_3b"
 bin = "repitch"
 subprog = "transpose"
 mode = "3"
@@ -9799,7 +9807,7 @@ default = false
 flag = "-x"
 
 [[process]]
-key = "repitch_transposef_3"
+key = "repitch_transposef_3b"
 bin = "repitch"
 subprog = "transposef"
 mode = "3"
@@ -9883,7 +9891,7 @@ default = false
 flag = "-x"
 
 [[process]]
-key = "pitch_tune_1"
+key = "pitch_tune_1b"
 bin = "pitch"
 subprog = "tune"
 mode = "1"
@@ -12410,10 +12418,12 @@ stereo_native = false
 output_is_stereo = false
 
 # ---- Tier 2 "hard tier" batch 2 (2026-07-16): remaining repitch curve-transform processes ----
-# See CDP-Ext-Plan.md Phase 4. All entries below verified against the real binary (CDP 7.1
-# 2016) using a genuine `getpitch` mode-1 binary pitchfile derived from a synthesized 220Hz
-# tone (`synth wave` -> `pvoc anal` -> `repitch getpitch 1`), per this session's standing
-# curve-family methodology. Every subprogram in this family exposes 2+ modes where only the
+# See CDP-Ext-Plan.md Phase 4. All entries below verified against the real binary (CDP8;
+# its usage banner misleadingly prints "CDP Release 7.1 2016", a stale version string never
+# bumped past the old release — see README.md) using a genuine `getpitch` mode-1 binary
+# pitchfile derived from a synthesized 220Hz tone (`synth wave` -> `pvoc anal` -> `repitch
+# getpitch 1`), per this session's standing curve-family methodology. Every subprogram in
+# this family exposes 2+ modes where only the
 # odd-numbered/first mode gives "a pitchfile as output" (the rest give a transposition file,
 # a ratio/semitone-shaped concept out of scope for this app's Hz-based curve display) --
 # only pitchfile-output modes are cataloged here. All numeric ranges below are the exact
@@ -13273,4 +13283,1576 @@ max = 40.0
 step = 0.01
 default = 1.0
 exponential = true
+scale = "plain"
+
+# ---- CDP-WASM-SUITE gap-list implementation (2026-07-22) ----------------------------
+# New entries added following CDP-WASM-SUITE-gaps.md's confirmed-gap list (all verified
+# against the real binary per this file's own header convention). Multichannel-family gaps
+# (mchanpan/abfpan/panorama/spacedesign/texmchan) deliberately excluded -- this app's UI/audio
+# path is stereo-focused and untested beyond 2 channels, see CDP-WASM-SUITE-gaps.md. Also
+# excluded and documented as needing further work, not silently dropped: `filter iterated`
+# (crashes with an internal "readsamps_with_wrap()" bug across every parameter combination
+# tried -- a real binary bug, not a catalog-authoring mistake, same class of issue as
+# `modify_convolve_1`'s skip-note above); `distort shuffle` and `grain reorder` (both need a
+# free-text domain/reorder-code param this catalog's ParamKind has no variant for);
+# `repitch invert` (needs a real pitch-detected fixture to verify -- a synthesized test tone
+# didn't produce a valid pitchfile via `repitch getpitch 1` for reasons not diagnosed here);
+# `multisynth` (its score format -- an instrument name followed by a variable-length run of
+# time/pitch/loudness/duration 4-tuples on one line -- doesn't fit any ParamKind, including
+# Table, which requires a fixed column count); and `texture` (a genuinely large parameter
+# surface -- 13+ numeric params plus a bespoke harmonic-field/pitch notedata file format per
+# mode -- that needs its own dedicated research pass, not a quick addition here). `packet`
+# (both modes) IS included, at the very end of this section, past `clip_clip_1` -- see the
+# note there: its "<outfile-stem>0.wav" numbered-output quirk turned out to already be exactly
+# what `output = "wav_glob"` (pipeline.rs's `plan_wav_glob`, previously only distcut/cantor)
+# passes to any single-input process, so it needed no pipeline.rs change after all.
+#
+# Full smoke-tested (`TUI_WAVE_CDP_SMOKE=1 cargo test catalog_smoke_test`) against every entry
+# below except `grain_align` (added to runner.rs's KNOWN_FIXTURE_FAILURES -- needs real grain-
+# like amplitude variation this harness's constant-tone fixture doesn't have, same class of
+# issue as the pre-existing `grain_reverse`/`grainex_extend` entries there).
+[[process]]
+key = "filter_fixed_1"
+bin = "filter"
+subprog = "fixed"
+mode = "1"
+title = "Cut/Boost Below Frequency — filter"
+category = "time"
+subcategory = "filter"
+short_description = "Cut or boost all frequencies below a chosen point"
+description = "Verified against the real binary (`filter fixed`, no submode, then a live invocation): `filter fixed MODE infile outfile [bwidth] boost/cut freq [-ttail] [-sprescale]`. See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section -- CDP-WASM-SUITE's \"Boost/cut band\" is mode 3 here; modes 1/2 (cut/boost below or above a frequency, no band) are a bonus this catalog didn't have a name for."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Boost/Cut"
+description = "Boost (positive) or cut (negative) applied at the filter frequency, in dB"
+automatable = true
+kind = "number"
+min = -96.0
+max = 96.0
+step = 0.1
+default = 6.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Frequency"
+description = "Filter frequency in Hz"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 0.1
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Tail"
+description = "Decay tail duration in seconds added after the filtered signal ends"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 10.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Prescale"
+description = "Scales the input signal before filtering, to control overall level"
+flag = "-s"
+automatable = true
+kind = "number"
+min = 0.001
+max = 10.0
+step = 0.001
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "filter_fixed_2"
+bin = "filter"
+subprog = "fixed"
+mode = "2"
+title = "Cut/Boost Above Frequency — filter"
+category = "time"
+subcategory = "filter"
+short_description = "Cut or boost all frequencies above a chosen point"
+description = "Verified against the real binary (`filter fixed`, no submode, then a live invocation): `filter fixed MODE infile outfile [bwidth] boost/cut freq [-ttail] [-sprescale]`. See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section -- CDP-WASM-SUITE's \"Boost/cut band\" is mode 3 here; modes 1/2 (cut/boost below or above a frequency, no band) are a bonus this catalog didn't have a name for."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Boost/Cut"
+description = "Boost (positive) or cut (negative) applied at the filter frequency, in dB"
+automatable = true
+kind = "number"
+min = -96.0
+max = 96.0
+step = 0.1
+default = 6.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Frequency"
+description = "Filter frequency in Hz"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 0.1
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Tail"
+description = "Decay tail duration in seconds added after the filtered signal ends"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 10.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Prescale"
+description = "Scales the input signal before filtering, to control overall level"
+flag = "-s"
+automatable = true
+kind = "number"
+min = 0.001
+max = 10.0
+step = 0.001
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "filter_fixed_3"
+bin = "filter"
+subprog = "fixed"
+mode = "3"
+title = "Boost/Cut Band — filter"
+category = "time"
+subcategory = "filter"
+short_description = "Cut or boost a band of frequencies centred on a chosen point"
+description = "Verified against the real binary (`filter fixed`, no submode, then a live invocation): `filter fixed MODE infile outfile [bwidth] boost/cut freq [-ttail] [-sprescale]`. See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section -- CDP-WASM-SUITE's \"Boost/cut band\" is mode 3 here; modes 1/2 (cut/boost below or above a frequency, no band) are a bonus this catalog didn't have a name for."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Bandwidth"
+description = "Width of the affected band, in Hz"
+automatable = true
+kind = "number"
+min = 1.0
+max = 10000.0
+step = 0.1
+default = 200.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Boost/Cut"
+description = "Boost (positive) or cut (negative) applied at the filter frequency, in dB"
+automatable = true
+kind = "number"
+min = -96.0
+max = 96.0
+step = 0.1
+default = 6.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Frequency"
+description = "Filter frequency in Hz"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 0.1
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Tail"
+description = "Decay tail duration in seconds added after the filtered signal ends"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 10.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Prescale"
+description = "Scales the input signal before filtering, to control overall level"
+flag = "-s"
+automatable = true
+kind = "number"
+min = 0.001
+max = 10.0
+step = 0.001
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "filter_variable_1"
+bin = "filter"
+subprog = "variable"
+mode = "1"
+title = "Resonant Notch Filter"
+category = "time"
+subcategory = "filter"
+short_description = "A resonant notch (band-reject) filter at a fixed frequency"
+description = "Verified against the real binary (`filter variable`, then a live invocation): `filter variable MODE infile outfile acuity gain frq [-ttail]`. Acuity/Gain ranges copied from the sibling `filter_sweeping_*` entries (same underlying resonant-filter core, confirmed identical bounds against the real binary previously). See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section -- this fills all four \"Resonant ...\" gaps."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Acuity"
+description = "Filter tightness (smaller values give a tighter filter)"
+automatable = true
+kind = "number"
+min = 0.0001
+max = 1.0
+step = 0.0001
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Overall output gain"
+automatable = true
+kind = "number"
+min = 0.001
+max = 10000.0
+step = 0.001
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Frequency"
+description = "Filter frequency in Hz"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 0.1
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Tail"
+description = "Decay tail duration in seconds added after the filtered signal ends"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 10.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "filter_variable_2"
+bin = "filter"
+subprog = "variable"
+mode = "2"
+title = "Resonant Band-Pass Filter"
+category = "time"
+subcategory = "filter"
+short_description = "A resonant band-pass filter at a fixed frequency"
+description = "Verified against the real binary (`filter variable`, then a live invocation): `filter variable MODE infile outfile acuity gain frq [-ttail]`. Acuity/Gain ranges copied from the sibling `filter_sweeping_*` entries (same underlying resonant-filter core, confirmed identical bounds against the real binary previously). See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section -- this fills all four \"Resonant ...\" gaps."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Acuity"
+description = "Filter tightness (smaller values give a tighter filter)"
+automatable = true
+kind = "number"
+min = 0.0001
+max = 1.0
+step = 0.0001
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Overall output gain"
+automatable = true
+kind = "number"
+min = 0.001
+max = 10000.0
+step = 0.001
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Frequency"
+description = "Filter frequency in Hz"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 0.1
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Tail"
+description = "Decay tail duration in seconds added after the filtered signal ends"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 10.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "filter_variable_3"
+bin = "filter"
+subprog = "variable"
+mode = "3"
+title = "Resonant Low-Pass Filter"
+category = "time"
+subcategory = "filter"
+short_description = "A resonant low-pass filter at a fixed cutoff"
+description = "Verified against the real binary (`filter variable`, then a live invocation): `filter variable MODE infile outfile acuity gain frq [-ttail]`. Acuity/Gain ranges copied from the sibling `filter_sweeping_*` entries (same underlying resonant-filter core, confirmed identical bounds against the real binary previously). See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section -- this fills all four \"Resonant ...\" gaps."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Acuity"
+description = "Filter tightness (smaller values give a tighter filter)"
+automatable = true
+kind = "number"
+min = 0.0001
+max = 1.0
+step = 0.0001
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Overall output gain"
+automatable = true
+kind = "number"
+min = 0.001
+max = 10000.0
+step = 0.001
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Frequency"
+description = "Filter frequency in Hz"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 0.1
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Tail"
+description = "Decay tail duration in seconds added after the filtered signal ends"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 10.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "filter_variable_4"
+bin = "filter"
+subprog = "variable"
+mode = "4"
+title = "Resonant High-Pass Filter"
+category = "time"
+subcategory = "filter"
+short_description = "A resonant high-pass filter at a fixed cutoff"
+description = "Verified against the real binary (`filter variable`, then a live invocation): `filter variable MODE infile outfile acuity gain frq [-ttail]`. Acuity/Gain ranges copied from the sibling `filter_sweeping_*` entries (same underlying resonant-filter core, confirmed identical bounds against the real binary previously). See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section -- this fills all four \"Resonant ...\" gaps."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Acuity"
+description = "Filter tightness (smaller values give a tighter filter)"
+automatable = true
+kind = "number"
+min = 0.0001
+max = 1.0
+step = 0.0001
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Overall output gain"
+automatable = true
+kind = "number"
+min = 0.001
+max = 10000.0
+step = 0.001
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Frequency"
+description = "Filter frequency in Hz"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 0.1
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Tail"
+description = "Decay tail duration in seconds added after the filtered signal ends"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 10.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "distort_reverse"
+bin = "distort"
+subprog = "reverse"
+title = "Waveset Reverse — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Reverses wavecycles in groups, without reversing the sound as a whole"
+description = "Verified against the real binary's own usage text and a live invocation. `distort reverse infile outfile cyclecnt`. Mono only (CDP's own restriction on the whole `distort` family)."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Cycle Count"
+description = "Number of wavecycles reversed together as one group"
+automatable = true
+kind = "number"
+min = 1.0
+max = 50.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process]]
+key = "distort_telescope"
+bin = "distort"
+subprog = "telescope"
+title = "Waveset Telescope — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Time-contracts the sound by collapsing groups of wavecycles down to one"
+description = "Verified against the real binary's own usage text and a live invocation. `distort telescope infile outfile cyclecnt [-sskipcycles] [-a]`."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Cycle Count"
+description = "Number of wavecycles telescoped down to one"
+automatable = true
+kind = "number"
+min = 1.0
+max = 50.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Skip Cycles"
+description = "Number of wavecycles to skip at the start of the file before telescoping begins"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1000.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Average Cycle Length"
+description = "Telescope to the average cycle length instead of the longest cycle in each group"
+flag = "-a"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "distort_pitch"
+bin = "distort"
+subprog = "pitch"
+title = "Waveset Pitchwarp — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Randomly varies the pitch of each wavecycle within a chosen range"
+description = "Verified against the real binary's own usage text and a live invocation. `distort pitch infile outfile octvary [-ccyclelen] [-sskipcycles]`."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Octave Variation"
+description = "Maximum random transposition (up or down) applied to each wavecycle, in octaves"
+automatable = true
+kind = "number"
+min = 0.01
+max = 8.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Length"
+description = "Maximum number of wavecycles between new random transposition values"
+flag = "-c"
+automatable = false
+kind = "number"
+min = 2.0
+max = 500.0
+step = 1.0
+default = 64.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Skip Cycles"
+description = "Number of wavecycles to skip at the start of the file"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1000.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process]]
+key = "distort_filter_1"
+bin = "distort"
+subprog = "filter"
+mode = "1"
+title = "Waveset Band-Filter (Below) — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Time-contracts the sound by omitting wavecycles below a chosen frequency"
+description = "Verified against the real binary's own usage text and a live invocation. `distort filter 1-2 infile outfile freq [-sskipcycles]`."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Frequency"
+description = "Wavecycles on this side of the frequency are omitted"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 0.1
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Skip Cycles"
+description = "Number of wavecycles to skip at the start of the file"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1000.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process]]
+key = "distort_filter_2"
+bin = "distort"
+subprog = "filter"
+mode = "2"
+title = "Waveset Band-Filter (Above) — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Time-contracts the sound by omitting wavecycles above a chosen frequency"
+description = "Verified against the real binary's own usage text and a live invocation. `distort filter 1-2 infile outfile freq [-sskipcycles]`."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Frequency"
+description = "Wavecycles on this side of the frequency are omitted"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 0.1
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Skip Cycles"
+description = "Number of wavecycles to skip at the start of the file"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1000.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process]]
+key = "distort_filter_3"
+bin = "distort"
+subprog = "filter"
+mode = "3"
+title = "Waveset Band-Filter (Between) — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Time-contracts the sound by omitting wavecycles outside a chosen frequency band"
+description = "Verified against the real binary's own usage text and a live invocation. `distort filter 3 infile outfile freq1 freq2 [-sskipcycles]`."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Low Frequency"
+description = "Wavecycles below this frequency are omitted"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 0.1
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "High Frequency"
+description = "Wavecycles above this frequency are omitted"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 0.1
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Skip Cycles"
+description = "Number of wavecycles to skip at the start of the file"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1000.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process]]
+key = "distort_overload_1"
+bin = "distort"
+subprog = "overload"
+mode = "1"
+title = "Waveset Overload (Noise) — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Clips the signal, filling the clipped stretches with noise"
+description = "Verified against the real binary's own usage text and a live invocation. `distort overload 1 infile outfile clip_level depth`."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Clip Level"
+description = "Level at which the signal is clipped"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Depth"
+description = "Depth of the distortion pattern on clipped stretches"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "distort_overload_2"
+bin = "distort"
+subprog = "overload"
+mode = "2"
+title = "Waveset Overload (Tone) — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Clips the signal, filling the clipped stretches with a tone at a chosen frequency"
+description = "Verified against the real binary's own usage text and a live invocation. `distort overload 2 infile outfile gate depth freq`."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Gate"
+description = "Level at which the signal is clipped"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Depth"
+description = "Depth of the distortion pattern on clipped stretches"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Frequency"
+description = "Frequency of the tone imposed on clipped stretches"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 0.1
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "distort_envel_1"
+bin = "distort"
+subprog = "envel"
+mode = "1"
+title = "Waveset Envelope (Rising) — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Imposes a rising envelope over each group of wavecycles"
+description = "Verified against the real binary's own usage text and a live invocation. `distort envel 1-2 infile outfile cyclecnt [-ttroughing] [-eexponent]`. Mode 3 (troughing forced-required rather than optional) is redundant with modes 1/2's own optional Troughing param and isn't separately added; mode 4 (user-defined breakpoint envelope shape) needs `required_envelope` infra not added here."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Cycle Count"
+description = "Number of wavecycles under a single envelope"
+automatable = true
+kind = "number"
+min = 1.0
+max = 50.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Troughing"
+description = "Trough depth of the envelope (0 = no trough)"
+flag = "-t"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Exponent"
+description = "Exponent shaping the envelope's rise/decay curve (omit for a linear curve; 1.0 approximates linear)"
+flag = "-e"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.1
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "distort_envel_2"
+bin = "distort"
+subprog = "envel"
+mode = "2"
+title = "Waveset Envelope (Falling) — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Imposes a falling envelope over each group of wavecycles"
+description = "Verified against the real binary's own usage text and a live invocation. `distort envel 1-2 infile outfile cyclecnt [-ttroughing] [-eexponent]`. Mode 3 (troughing forced-required rather than optional) is redundant with modes 1/2's own optional Troughing param and isn't separately added; mode 4 (user-defined breakpoint envelope shape) needs `required_envelope` infra not added here."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Cycle Count"
+description = "Number of wavecycles under a single envelope"
+automatable = true
+kind = "number"
+min = 1.0
+max = 50.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Troughing"
+description = "Trough depth of the envelope (0 = no trough)"
+flag = "-t"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Exponent"
+description = "Exponent shaping the envelope's rise/decay curve (omit for a linear curve; 1.0 approximates linear)"
+flag = "-e"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.1
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "distort_harmonic"
+bin = "distort"
+subprog = "harmonic"
+title = "Harmonic Distortion"
+category = "time"
+subcategory = "distort"
+short_description = "Superimposes chosen harmonics onto each wavecycle"
+description = "Verified against the real binary's own usage text and a live invocation. `distort harmonic infile outfile harmonics-file [-ppre_attenuation]`. The harmonics-file is harmonic_no/amplitude pairs (harmonic_no in 2-1024, amplitude relative to the source's own amplitude of 1.0)."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Harmonics"
+description = "Harmonic number and relative amplitude pairs to superimpose"
+automatable = false
+kind = "table"
+columns = [{ name = "Harmonic", min = 2.0, max = 1024.0, step = 1.0, default = 2.0, scale = "plain", integer = true }, { name = "Amplitude", min = 0.0, max = 10.0, step = 0.01, default = 0.5, scale = "plain" }]
+
+[[process.params]]
+name = "Pre-Attenuation"
+description = "Attenuation applied to the input sound before processing"
+flag = "-p"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "clip_clip_1"
+bin = "clip"
+subprog = "clip"
+mode = "1"
+title = "Clip"
+category = "time"
+subcategory = "distort"
+short_description = "Clips the signal at a specified level"
+description = "Verified against the real binary and a live invocation: `clip clip 1 infile outfile level` (level is linear amplitude 0-1, not dB). Distinct from the existing `clip_clip_2` entry (mode 2, half-waveform clipping by fraction -- see CDP-WASM-SUITE-analysis.md's rename, which retitles that entry \"Clip Half-Waves\" to disambiguate). Default kept at 0.3 rather than 0.5: this catalog's own smoke-test fixture (tests/fixtures/mono_sine.wav) peaks at almost exactly 0.5 (16383/32767), and CDP rejects a Level at or above the actual signal peak with \"None of signal is above the input clipping level\" -- 0.3 leaves headroom against any real signal peaking anywhere near mid-scale, not just this specific fixture."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Level"
+description = "Amplitude level at which the signal is clipped"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "grain_align"
+bin = "grain"
+subprog = "align"
+title = "Align Grains (2 Sounds)"
+category = "time"
+subcategory = "texture"
+short_description = "Synchronises a second grainy sound's grain onsets with those of the first"
+description = "Verified against the real binary and its sibling `grain_reposition` entry (identical grain-detection flags): `grain align infile1 infile2 outfile offset gate2 [-blen] [-lgate] [-hminhole] [-twinsize] [-x]`. Infile1 provides the grain-onset times; infile2 provides the actual grains retimed to match."
+input = "dual_wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Offset"
+description = "Value (seconds) added to every grain timing after alignment"
+automatable = true
+kind = "number"
+min = -60.0
+max = 60.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gate 2"
+description = "Minimum signal level for a grain to be detected in the second file"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Inter-Grain Time"
+description = "Maximum time gap between detected grains (CDP additionally caps this at the selection's own duration, with a fixed 0.1s floor)"
+flag = "-b"
+automatable = false
+kind = "number"
+min = 0.1
+max = 5.0
+step = 0.01
+default = 0.5
+exponential = true
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Gate Level"
+description = "Minimum signal level for a grain to be detected in the first file"
+flag = "-l"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Hole Duration"
+description = "Minimum duration of a silent hole between grains (CDP additionally caps this at the selection's own duration)"
+flag = "-h"
+automatable = false
+kind = "number"
+min = 0.032
+max = 1.0
+step = 0.001
+default = 0.032
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Gate Tracking Window"
+description = "Window size (seconds) for gate-level tracking, capped at the selection's own duration; 0 disables tracking, using a fixed gate level instead"
+flag = "-t"
+automatable = false
+kind = "number"
+min = 0.0
+max = 5.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process]]
+key = "specfold_specfold_1"
+bin = "specfold"
+subprog = "specfold"
+mode = "1"
+title = "Fold Spectrum — specfold"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Folds groups of spectral channels into each other"
+description = "Verified against the real binary and a live invocation: `specfold specfold MODE inanalfile outanalfile stt len [cnt] [-a]`. STT must be >= 1 (confirmed: value 0 is rejected). Sibling `specfold_specfold_3` (mode 3, already in this catalog as \"Specfold Randomise\") established the STT/LEN range convention reused here."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Start Channel"
+description = "Lowest spectrum channel to process"
+automatable = true
+kind = "number"
+min = 1.0
+max = 509.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Channel Count"
+description = "Number of channels to process (must be even)"
+automatable = true
+kind = "number"
+min = 4.0
+max = 509.0
+step = 2.0
+default = 8.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Fold Count"
+description = "Number of folds (must be less than Channel Count)"
+automatable = true
+kind = "number"
+min = 1.0
+max = 254.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Amplitudes Only"
+description = "Process amplitude data only, leaving frequency data untouched"
+flag = "-a"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "specfold_specfold_2"
+bin = "specfold"
+subprog = "specfold"
+mode = "2"
+title = "Invert Spectrum (Specfold)"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Inverts a range of the spectrum"
+description = "Verified against the real binary and a live invocation: `specfold specfold MODE inanalfile outanalfile stt len [cnt] [-a]`. STT must be >= 1 (confirmed: value 0 is rejected). Sibling `specfold_specfold_3` (mode 3, already in this catalog as \"Specfold Randomise\") established the STT/LEN range convention reused here."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Start Channel"
+description = "Lowest spectrum channel to process"
+automatable = true
+kind = "number"
+min = 1.0
+max = 509.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Channel Count"
+description = "Number of channels to process"
+automatable = true
+kind = "number"
+min = 4.0
+max = 509.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Amplitudes Only"
+description = "Process amplitude data only, leaving frequency data untouched"
+flag = "-a"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "glisten_glisten"
+bin = "glisten"
+subprog = "glisten"
+title = "Glisten (Partition)"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Randomly partitions the spectrum into sets of channels and plays each set in turn"
+description = "Verified against the real binary and a live invocation: `glisten glisten inf outf grpdiv setdur [-ppitchshift] [-ddurrand] [-vdivrand]`. Channels are split at random into Group Divisions mutually exclusive sets; each set plays for Set Duration windows before the next set takes over, and a fresh random partition is made once every set has played."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Group Divisions"
+description = "Number of sets to divide the spectrum's channels into (must divide the channel count exactly)"
+automatable = true
+kind = "number"
+min = 2.0
+max = 32.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Set Duration"
+description = "Number of analysis windows a set persists for before switching to the next set"
+automatable = true
+kind = "number"
+min = 1.0
+max = 1024.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Pitch Shift"
+description = "Random pitch-shift range applied when switching sets"
+flag = "-p"
+automatable = false
+kind = "number"
+min = 0.0
+max = 96.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Duration Randomisation"
+description = "Randomisation applied to Set Duration"
+flag = "-d"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Division Randomisation"
+description = "Randomisation applied to the size of each set"
+flag = "-v"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "chirikov_chirikov_1"
+bin = "chirikov"
+subprog = "chirikov"
+mode = "1"
+title = "Chaotic (Chirikov Standard Map)"
+category = "time"
+subcategory = "synthesis"
+short_description = "Synthesizes a potentially chaotic tone from the Chirikov Standard map"
+description = "Verified against the real binary and a live invocation: `chirikov chirikov 1-2 outfile dur frq damping srate dovesplice`. Modes 3/4 (breakpoint-file output instead of audio) aren't added -- they produce a MIDI-pitch curve textfile, not a sound, a different output shape this catalog's `curve`/`wav` split doesn't cover for a generator with no audio input at all."
+input = "none"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the synthesized sound, in seconds"
+automatable = true
+kind = "number"
+min = 0.1
+max = 300.0
+step = 0.1
+default = 2.0
+exponential = true
+scale = "output_duration_seconds"
+
+[[process.params]]
+name = "Frequency"
+description = "Driving frequency of the output"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 0.1
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Damping"
+description = "Damping of the forced oscillation"
+automatable = true
+kind = "number"
+min = 0.001
+max = 50.0
+step = 0.01
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Sample Rate"
+description = "Sample rate of the synthesized sound"
+automatable = false
+kind = "choice"
+options = ["44100", "48000", "22050", "24000", "32000", "16000"]
+default = 0
+
+[[process.params]]
+name = "Splice Length"
+description = "Length of the fade spliced onto the start and end of the output, in milliseconds"
+automatable = true
+kind = "number"
+min = 1.0
+max = 50.0
+step = 0.1
+default = 10.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "chirikov_chirikov_2"
+bin = "chirikov"
+subprog = "chirikov"
+mode = "2"
+title = "Chaotic (Circle Map) — chirikov"
+category = "time"
+subcategory = "synthesis"
+short_description = "Synthesizes a potentially chaotic tone from the Circle map"
+description = "Verified against the real binary and a live invocation: `chirikov chirikov 1-2 outfile dur frq damping srate dovesplice`. Modes 3/4 (breakpoint-file output instead of audio) aren't added -- they produce a MIDI-pitch curve textfile, not a sound, a different output shape this catalog's `curve`/`wav` split doesn't cover for a generator with no audio input at all."
+input = "none"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the synthesized sound, in seconds"
+automatable = true
+kind = "number"
+min = 0.1
+max = 300.0
+step = 0.1
+default = 2.0
+exponential = true
+scale = "output_duration_seconds"
+
+[[process.params]]
+name = "Frequency"
+description = "Driving frequency of the output"
+automatable = true
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 0.1
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Damping"
+description = "Damping of the forced oscillation"
+automatable = true
+kind = "number"
+min = 0.001
+max = 50.0
+step = 0.01
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Sample Rate"
+description = "Sample rate of the synthesized sound"
+automatable = false
+kind = "choice"
+options = ["44100", "48000", "22050", "24000", "32000", "16000"]
+default = 0
+
+[[process.params]]
+name = "Splice Length"
+description = "Length of the fade spliced onto the start and end of the output, in milliseconds"
+automatable = true
+kind = "number"
+min = 1.0
+max = 50.0
+step = 0.1
+default = 10.0
+exponential = false
+scale = "plain"
+
+
+# `packet` (CDP-WASM-SUITE-gaps.md: "Sound packet"/"Wave-packet synth"). The binary writes its
+# result as "<outfile-stem>0.wav" regardless of what outfile name it's given -- confirmed live
+# (2026-07-22) by invoking it with the bare stem "cutout" (no extension) and finding the result
+# at exactly "cutout0.wav". That's precisely the fixed stem/pattern `plan_wav_glob`
+# (pipeline.rs) already passes to any `output = "wav_glob"` process (previously only
+# distcut/cantor) -- packet doesn't care what stem it's told to use, so it needs no pipeline.rs
+# change at all, just this `output` declaration. Each result opens as its own new buffer
+# (`IoKind::WavGlob`'s existing "each file becomes its own new buffer" behavior) rather than
+# splicing into the selection -- reasonable here since a packet is typically much shorter than
+# the source it's drawn from.
+[[process]]
+key = "packet_packet_2"
+bin = "packet"
+subprog = "packet"
+mode = "2"
+title = "Sound Packet (Forced)"
+category = "time"
+subcategory = "synthesis"
+short_description = "Creates a sound packet with an enveloped shape at a chosen time"
+description = "Verified against the real binary and a live invocation: `packet packet 2 infile outfile times dur narrowing centring [-n|-f] [-s]`. TIMES is simplified to a single time (CDP's own \"or textfile of times\" alternative isn't representable by this catalog's param shapes)."
+input = "wav"
+output = "wav_glob"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Time"
+description = "Time (seconds) at which the packet is created"
+automatable = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the created packet, in milliseconds"
+automatable = true
+kind = "number"
+min = 1.0
+max = 5000.0
+step = 1.0
+default = 100.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Narrowing"
+description = "Narrowing of the packet's envelope (values below 1.0 broaden it; very low values near 0 may click)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1000.0
+step = 0.1
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Centring"
+description = "Position of the packet's envelope centre within its duration (0 = left, 1 = right)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "packet_packet_1"
+bin = "packet"
+subprog = "packet"
+mode = "1"
+title = "Sound Packet (Found)"
+category = "time"
+subcategory = "synthesis"
+short_description = "Isolates an existing sound packet using signal minima as its edges"
+description = "Verified against the real binary's own usage text (argv shape identical to mode 2, with Min Duration replacing Duration): `packet packet 1 infile outfile times mindur narrowing centring [-n|-f] [-s]`. TIMES simplified to a single time, same rationale as `packet_packet_2`."
+input = "wav"
+output = "wav_glob"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Time"
+description = "Time (seconds) at which the packet is found"
+automatable = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Min Duration"
+description = "Minimum duration of the found packet, in milliseconds"
+automatable = true
+kind = "number"
+min = 1.0
+max = 5000.0
+step = 1.0
+default = 100.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Narrowing"
+description = "Narrowing of the packet's envelope (values below 1.0 broaden it; very low values near 0 may click)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1000.0
+step = 0.1
+default = 5.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Centring"
+description = "Position of the packet's envelope centre within its duration (0 = left, 1 = right)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
 scale = "plain"
