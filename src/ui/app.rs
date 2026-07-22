@@ -4161,7 +4161,29 @@ impl App {
             KeyCode::Enter => self.activate_chain_editor_row(),
             KeyCode::Char('d') => self.delete_chain_editor_row(),
             KeyCode::Char('s') => self.open_chain_save_prompt(),
+            KeyCode::Char('l') => self.recall_last_chain(),
+            KeyCode::Char('p') => self.preview_chain_here(),
             _ => {}
+        }
+    }
+
+    /// 'l' anywhere in the chain editor: loads the last successfully-*run* (Applied, not
+    /// Previewed) chain into the draft, same as picking it from the named-preset list would —
+    /// except it's never itself in that list (see `chain_last`'s own doc comment for why).
+    /// Shows an inline error instead of silently doing nothing if no chain has ever been run.
+    fn recall_last_chain(&mut self) {
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        match crate::model::cdp::chain_last::load_last_chain() {
+            Some(chain) => {
+                state.chain = chain;
+                state.buffer_picks = std::collections::HashMap::new();
+                state.preset_selected = None;
+                state.selected = ChainEditorRow::Preset;
+                state.error = None;
+            }
+            None => {
+                state.error = Some("No chain has been run yet".into());
+            }
         }
     }
 
@@ -6787,6 +6809,77 @@ impl App {
         });
     }
 
+    /// 'p' on a `Step` row of the chain editor itself (not while inside `CdpParams`):
+    /// previews the chain truncated right after that step — its own preceding siblings (in
+    /// full) plus the step itself, including its own side-chain run to completion if it has
+    /// one (a dual-input step can't run partially) — without touching the document. A no-op
+    /// on any other row (Preset/AddStep/Preview/Run has no single step to "preview up to");
+    /// the hints bar greys the key out in that case (see `render_cdp_chain_editor_dialog`).
+    /// Reuses `start_chain_run`'s stack engine exactly like `preview_chain_step` does, just
+    /// against a truncated slice of already-committed steps instead of an in-progress one.
+    fn preview_chain_here(&mut self) {
+        let Some(state) = self.cdp_chain_editor.as_ref() else { return };
+        let ChainEditorRow::Step(path) = state.selected.clone() else { return };
+        let Some((&index, parent_path)) = path.split_last() else { return };
+        let parent_path = parent_path.to_vec();
+        let Some(siblings) = crate::model::cdp::steps_at(&state.chain, &parent_path) else { return };
+        if index >= siblings.len() {
+            return;
+        }
+        let temp_steps: Vec<_> = siblings.iter().take(index + 1).cloned().collect();
+        let temp_chain = crate::model::cdp::CdpChain { name: state.chain.name.clone(), steps: temp_steps };
+
+        if let Some(missing) = first_missing_buffer_pick(&temp_chain.steps, &parent_path, &state.buffer_picks, &self.cdp_catalog) {
+            if let Some(state) = self.cdp_chain_editor.as_mut() {
+                state.error = Some(format!(
+                    "Step at {} needs a second-input buffer picked (Left/Right) before previewing",
+                    missing.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(".")
+                ));
+            }
+            return;
+        }
+
+        let buffer_picks = state.buffer_picks.clone();
+        let (initial_buffer, initial_rate, doc_index, splice_range) = if parent_path.is_empty() {
+            let idx = self.active_document;
+            let Some(doc) = self.documents.get(idx) else { return };
+            let Some(range) = self.operation_range(idx, self.snap_to_zero) else {
+                if let Some(state) = self.cdp_chain_editor.as_mut() {
+                    state.error = Some("No audio selected to preview against".into());
+                }
+                return;
+            };
+            (doc.slice(range.0..range.1), doc.sample_rate, idx, range)
+        } else {
+            let Some(doc_i) = state.buffer_picks.get(&parent_path).copied() else {
+                if let Some(state) = self.cdp_chain_editor.as_mut() {
+                    state.error = Some("Pick a second-input buffer first (Left/Right)".into());
+                }
+                return;
+            };
+            let Some(doc) = self.documents.get(doc_i) else { return };
+            (doc.channels.clone(), doc.sample_rate, doc_i, (0, doc.len_samples()))
+        };
+
+        let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
+        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+            if let Some(state) = self.cdp_chain_editor.as_mut() {
+                state.error = Some("CDP directory no longer valid".into());
+            }
+            return;
+        }
+
+        self.start_chain_run(
+            temp_chain,
+            buffer_picks,
+            initial_buffer,
+            initial_rate,
+            doc_index,
+            splice_range,
+            ChainRunFinish::PreviewWholeChain,
+        );
+    }
+
     /// Common entry point for both `run_cdp_chain` and `preview_chain_step`: seeds a single
     /// top-level frame and submits its first stage. `doc_index`/`splice_range` are only
     /// meaningful for `ChainRunFinish::Splice`; the other two finishes carry their own
@@ -6994,6 +7087,7 @@ impl App {
                 self.viewport = None;
                 self.after_sample_mutation(doc_index);
                 crate::model::cdp::chain_recent::record_used(&chain.name);
+                crate::model::cdp::chain_last::save_last_chain(&chain);
                 self.cdp_chain_editor = None;
                 self.dialog = None;
             }
@@ -13406,8 +13500,8 @@ fn render_cdp_chain_editor_dialog(
     catalog: &crate::model::cdp::CdpCatalog,
     documents: &[Document],
 ) -> Vec<Rect> {
-    let width = 90u16.min(area.width);
-    let height = 26u16.min(area.height);
+    let width = 102u16.min(area.width);
+    let height = 29u16.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -13421,6 +13515,7 @@ fn render_cdp_chain_editor_dialog(
     let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
     let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
     let error_style = Style::default().fg(theme::RED).bg(theme::SURFACE0);
+    let disabled_style = Style::default().fg(theme::ANNOTATION).bg(theme::SURFACE0);
 
     let block = Block::default()
         .title("CDP Chain")
@@ -13454,16 +13549,36 @@ fn render_cdp_chain_editor_dialog(
     };
 
     let rows = chain_editor_rows(state, catalog);
+
+    // The Preset row (always `rows[0]`, per `chain_editor_rows`) renders as a fixed header —
+    // a blank line before it and after it, so it doesn't visually run together with the
+    // scrollable step list below — rather than as part of that scrolled list.
+    let preset_selected = state.selected == ChainEditorRow::Preset;
+    let preset_style = if preset_selected { cursor_style } else { base };
+    let preset_name =
+        state.preset_selected.and_then(|i| state.presets.get(i)).map(|c| c.name.as_str()).unwrap_or("(none)");
+    let preset_lead = format!(" Preset: {preset_name}  ({} saved)   ", state.presets.len());
+    // A selected row uses one uniform highlight for the whole line (see `theme.rs`'s own
+    // convention) rather than layering the shortcut accent on top of it.
+    let preset_line = if preset_selected {
+        Line::from(Span::styled(format!("{preset_lead}l: Recall last chain"), preset_style))
+    } else {
+        Line::from(vec![
+            Span::styled(preset_lead, preset_style),
+            Span::styled("l", hint_style),
+            Span::styled(": Recall last chain", label_style),
+        ])
+    };
+    let header_lines = vec![Line::raw(""), preset_line, Line::raw("")];
+    let header_height = header_lines.len() as u16;
+
+    let body_rows = &rows[1..];
     let mut lines: Vec<Line> = Vec::new();
-    for row in &rows {
+    for row in body_rows {
         let selected = *row == state.selected;
         let style = if selected { cursor_style } else { base };
         let text = match row {
-            ChainEditorRow::Preset => {
-                let name =
-                    state.preset_selected.and_then(|i| state.presets.get(i)).map(|c| c.name.as_str()).unwrap_or("(none)");
-                format!(" Preset: {name}  ({} saved)", state.presets.len())
-            }
+            ChainEditorRow::Preset => unreachable!("Preset is rendered as the fixed header above"),
             ChainEditorRow::Step(path) => {
                 let indent = "  ".repeat(path.len());
                 let arrow = if path.len() > 1 { "\u{21b3} " } else { "" };
@@ -13491,20 +13606,30 @@ fn render_cdp_chain_editor_dialog(
                 let label = if parent_path.is_empty() { "Add step" } else { "Add side-chain step" };
                 format!("{indent}+ {label}")
             }
-            ChainEditorRow::Preview => " \u{25b6} Preview".to_string(),
+            ChainEditorRow::Preview => " \u{25b6} Preview the whole chain".to_string(),
             ChainEditorRow::Run => " \u{25b6} Run".to_string(),
         };
         lines.push(Line::from(Span::styled(text, style)));
     }
 
-    let list_height = inner.height.saturating_sub(3) as usize;
-    let list_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: inner.height.saturating_sub(3) };
-    let error_area = Rect { x: inner.x, y: inner.y + list_area.height, width: inner.width, height: 1 };
-    let hints_area = Rect { x: inner.x, y: inner.y + list_area.height + 2, width: inner.width, height: 1 };
+    let footer_height = 3u16; // error line + blank gap + hints line
+    let list_height = inner.height.saturating_sub(header_height + footer_height) as usize;
+    let header_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: header_height };
+    let list_area = Rect {
+        x: inner.x,
+        y: inner.y + header_height,
+        width: inner.width,
+        height: inner.height.saturating_sub(header_height + footer_height),
+    };
+    let error_area = Rect { x: inner.x, y: inner.y + header_height + list_area.height, width: inner.width, height: 1 };
+    let hints_area =
+        Rect { x: inner.x, y: inner.y + header_height + list_area.height + 2, width: inner.width, height: 1 };
+
+    frame.render_widget(Paragraph::new(header_lines), header_area);
 
     // Scroll so the selected row always stays on screen, same "clamp to keep selection
     // visible" idea as every other scrollable list dialog here.
-    let selected_pos = rows.iter().position(|r| *r == state.selected).unwrap_or(0);
+    let selected_pos = body_rows.iter().position(|r| *r == state.selected).unwrap_or(0);
     let scroll_top = selected_pos.saturating_sub(list_height.saturating_sub(1));
     let visible: Vec<Line> = lines.into_iter().skip(scroll_top).take(list_height).collect();
     frame.render_widget(Paragraph::new(visible), list_area);
@@ -13512,6 +13637,13 @@ fn render_cdp_chain_editor_dialog(
     if let Some(error) = &state.error {
         frame.render_widget(Paragraph::new(Line::from(Span::styled(format!(" {error}"), error_style))), error_area);
     }
+    // "p:preview here" only makes sense on a Step row (something to preview "up to and
+    // including") — greyed out (same muted `theme::ANNOTATION` color used for other
+    // de-emphasized hints/annotations) rather than hidden, so the key doesn't appear to
+    // vanish depending on selection.
+    let preview_here_enabled = matches!(state.selected, ChainEditorRow::Step(_));
+    let preview_here_key_style = if preview_here_enabled { hint_style } else { disabled_style };
+    let preview_here_label_style = if preview_here_enabled { label_style } else { disabled_style };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" \u{2191}\u{2193}", hint_style),
@@ -13522,6 +13654,8 @@ fn render_cdp_chain_editor_dialog(
             Span::styled(":reorder  ", label_style),
             Span::styled("Enter", hint_style),
             Span::styled(":open/run  ", label_style),
+            Span::styled("p", preview_here_key_style),
+            Span::styled(":preview here  ", preview_here_label_style),
             Span::styled("d", hint_style),
             Span::styled(":delete  ", label_style),
             Span::styled("s", hint_style),
@@ -17801,6 +17935,107 @@ mod tests {
         );
     }
 
+    /// End-to-end against the real CDP binaries: `p` ("preview here") on the *first* step of
+    /// a real 2-step committed chain must run only that one step (not the second), play real
+    /// audio, and leave everything else untouched -- no splice, no undo entry, the draft
+    /// still has both its committed steps, and the recalled-last-chain slot is still whatever
+    /// it was before (a Preview, unlike a real Run, must never auto-save it).
+    #[test]
+    fn preview_here_on_a_real_chain_runs_only_the_steps_up_to_the_selected_one() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_preview_here_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = new_app(Some(doc(0.5, 200)), None);
+        app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
+        assert!(crate::model::cdp::chain_last::load_last_chain().is_none(), "sanity: nothing auto-saved yet");
+
+        let chain = crate::model::cdp::CdpChain {
+            name: "Double Invert".into(),
+            steps: vec![
+                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), side_chain: Vec::new() },
+            ],
+        };
+        let mut state = fresh_chain_editor_state(chain);
+        state.selected = ChainEditorRow::Step(vec![0]);
+        app.cdp_chain_editor = Some(state);
+        app.dialog = Some(Dialog::CdpChainEditor);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::CdpRunning { .. })), "'p' should start a real async run");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while matches!(app.dialog, Some(Dialog::CdpRunning { .. })) && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(app.cdp_preview_audio.is_some(), "the preview should actually play audio");
+        assert!(matches!(app.dialog, Some(Dialog::CdpChainEditor)), "should return to the chain editor, not linger or close");
+        assert!(!app.histories[0].can_undo(), "a preview must never splice into the document / create an undo step");
+        assert_eq!(
+            app.cdp_chain_editor.as_ref().unwrap().chain.steps.len(),
+            2,
+            "previewing must never truncate/mutate the actual committed draft"
+        );
+        assert!(
+            crate::model::cdp::chain_last::load_last_chain().is_none(),
+            "a Preview, unlike a real Run, must not auto-save the recalled-last-chain slot"
+        );
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// The `p:preview here` hint only makes sense with a `Step` row selected (something to
+    /// preview "up to and including"); on any other row (Preset/AddStep/Preview/Run) it must
+    /// render in the muted `theme::ANNOTATION` color instead of the normal shortcut accent,
+    /// so the key doesn't look pressable when it'd be a no-op.
+    #[test]
+    fn preview_here_hint_is_greyed_out_unless_a_step_is_selected() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut state =
+            fresh_chain_editor_state(crate::model::cdp::CdpChain { name: "t".into(), steps: vec![chain_step("blur_avrg")] });
+        state.selected = ChainEditorRow::Run;
+        app.cdp_chain_editor = Some(state);
+        app.dialog = Some(Dialog::CdpChainEditor);
+
+        let find_p_cell = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let area = *buffer.area();
+            for y in area.y..area.y + area.height {
+                let row_text: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
+                if let Some(byte_col) = row_text.find("p:preview here") {
+                    // `find` returns a byte offset, not a column -- the row contains
+                    // multi-byte glyphs (the arrow hints) before this point, so convert.
+                    let col = row_text[..byte_col].chars().count();
+                    return buffer[(area.x + col as u16, y)].fg;
+                }
+            }
+            panic!("hints bar with 'p:preview here' should be visible: no row matched");
+        };
+
+        assert_eq!(
+            find_p_cell(&mut app),
+            theme::ANNOTATION,
+            "with Run selected, the 'p' hint should render in the muted/disabled color"
+        );
+
+        app.cdp_chain_editor.as_mut().unwrap().selected = ChainEditorRow::Step(vec![0]);
+        assert_eq!(
+            find_p_cell(&mut app),
+            theme::SHORTCUT,
+            "with a Step selected, the 'p' hint should render in the normal shortcut color"
+        );
+    }
+
     /// Minimal but structurally real RIFF/WAVE formant file, matching
     /// `model::formant`'s own byte layout (`fmt ` sample-rate + `note`-chunk `specenvcnt` +
     /// `data` as `windows * specenvcnt` little-endian f32 amplitudes) — mirrors
@@ -18457,6 +18692,64 @@ mod tests {
         assert_eq!(state.chain.steps.len(), 1);
         assert_eq!(state.chain.steps[0].process_key, "blur_avrg");
         assert!(state.buffer_picks.is_empty());
+    }
+
+    /// 'l' loads whatever chain `chain_last::save_last_chain` most recently persisted into the
+    /// draft — end to end through the real key-handling path, not the lower-level helper
+    /// directly — clearing any stale `buffer_picks`/`preset_selected` from before the load.
+    #[test]
+    fn l_key_recalls_the_last_run_chain_via_real_key_handling() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_chain_last_key_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let last_chain = crate::model::cdp::CdpChain {
+            name: "Auto-saved run".into(),
+            steps: vec![chain_step("blur_avrg"), chain_step("focus_freeze_1")],
+        };
+        crate::model::cdp::chain_last::save_last_chain(&last_chain);
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut stale_picks = std::collections::HashMap::new();
+        stale_picks.insert(vec![0], 3usize);
+        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain { name: "draft".into(), steps: Vec::new() });
+        state.buffer_picks = stale_picks;
+        state.preset_selected = Some(0);
+        app.cdp_chain_editor = Some(state);
+        app.dialog = Some(Dialog::CdpChainEditor);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+
+        let state = app.cdp_chain_editor.as_ref().expect("chain editor still open");
+        assert_eq!(state.chain, last_chain, "'l' should load the auto-saved chain into the draft");
+        assert!(state.buffer_picks.is_empty(), "loading a chain must clear stale buffer picks, same as loading a named preset");
+        assert_eq!(state.preset_selected, None, "the recalled chain isn't itself a named preset entry");
+        assert!(state.error.is_none());
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// 'l' with no chain ever run shows an inline error instead of silently doing nothing.
+    #[test]
+    fn l_key_with_no_last_chain_shows_an_inline_error() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_chain_last_key_empty_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(crate::model::cdp::CdpChain { name: "draft".into(), steps: Vec::new() }));
+        app.dialog = Some(Dialog::CdpChainEditor);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+
+        let state = app.cdp_chain_editor.as_ref().expect("chain editor still open");
+        assert!(state.error.is_some(), "no chain has ever been run — 'l' should surface an error, not silently no-op");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     /// Reordering/deleting a step that has nested side-chain buffer picks must remap those
