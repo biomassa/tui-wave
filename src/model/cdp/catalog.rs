@@ -24,10 +24,61 @@ const BUILTIN_CATALOG_TOML: &str = include_str!("catalog.toml");
 /// binary's own `--help`-style usage text (CDP programs print full usage with no arguments).
 const EXTRA_CATALOG_TOML: &str = include_str!("catalog_extra.toml");
 
+/// Friendlier display titles for existing processes, keyed by `ProcessDef::key`, layered on
+/// top of `BUILTIN_CATALOG_TOML`/`EXTRA_CATALOG_TOML` rather than edited into them directly.
+/// This exists specifically so `catalog.toml`'s titles (SoundThread-derived, machine-
+/// generated — see its own "do not hand-edit" header) can be improved without touching that
+/// file: a full `[[process]]` merge (`merge_catalog_source`) would replace the *whole*
+/// definition and get overwritten by the next converter run, whereas this only ever touches
+/// `title`. See `CDP-WASM-SUITE-analysis.md` for the naming rationale (mirrors
+/// CDP-WASM-SUITE's plain-English, sonic-effect-first convention rather than raw CDP binary
+/// names) — this file is that proposal's renames applied.
+const TITLE_OVERRIDES_TOML: &str = include_str!("catalog_titles.toml");
+
 #[derive(Deserialize)]
 struct CatalogFile {
     #[serde(default, rename = "process")]
     processes: Vec<ProcessDef>,
+}
+
+#[derive(Deserialize)]
+struct TitleOverride {
+    key: String,
+    title: String,
+}
+
+#[derive(Deserialize)]
+struct TitleOverridesFile {
+    #[serde(default, rename = "title")]
+    entries: Vec<TitleOverride>,
+}
+
+/// Applies `text` (a `catalog_titles.toml`-shaped source) as title-only overrides onto
+/// `by_key`. Returns a warning (rather than erroring) on a parse failure, or when an
+/// override's `key` doesn't match any loaded process — the latter is the signal that a
+/// catalog regen or hand-edit renamed/removed a key out from under a stale override, so it
+/// stays visible instead of silently doing nothing.
+fn apply_title_overrides(by_key: &mut [ProcessDef], text: &str) -> Option<String> {
+    match toml::from_str::<TitleOverridesFile>(text) {
+        Ok(parsed) => {
+            let mut missing = Vec::new();
+            for over in parsed.entries {
+                match by_key.iter_mut().find(|p| p.key == over.key) {
+                    Some(existing) => existing.title = over.title,
+                    None => missing.push(over.key),
+                }
+            }
+            if missing.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "catalog_titles.toml: no matching process for key(s): {}",
+                    missing.join(", ")
+                ))
+            }
+        }
+        Err(err) => Some(format!("catalog_titles.toml: {err}")),
+    }
 }
 
 /// The full set of available CDP process definitions.
@@ -70,6 +121,9 @@ impl CdpCatalog {
             warnings.push(w);
         }
         if let Some(w) = merge_catalog_source(&mut by_key, EXTRA_CATALOG_TOML, "built-in CDP extra catalog") {
+            warnings.push(w);
+        }
+        if let Some(w) = apply_title_overrides(&mut by_key, TITLE_OVERRIDES_TOML) {
             warnings.push(w);
         }
 

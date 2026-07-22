@@ -1940,9 +1940,12 @@ mod tests {
         //     either gates nothing ("No signal is gateable") or everything ("Entire signal
         //     would be gated") — the catalog default (-40dB) is a sensible choice for real
         //     audio with an actual noise floor.
-        //   grainex_extend, grain_reverse: "NO PEAKS IN THE FILE" / "No grains found" —
-        //     grain-finding needs amplitude variation (peaks and troughs) to find grains
-        //     between; a constant-level tone has none by definition.
+        //   grainex_extend, grain_reverse, grain_align: "NO PEAKS IN THE FILE" / "No grains
+        //     found" — grain-finding needs amplitude variation (peaks and troughs) to find
+        //     grains between; a constant-level tone has none by definition. grain_align
+        //     (added 2026-07-22, CDP-WASM-SUITE-gaps.md's "Align grains") hits this from both
+        //     of its two inputs at once (fed the same constant-tone fixture on each side, per
+        //     this harness's single-input-duplicated convention for dual-input processes).
         //   housekeep_extract_4: "NO CHANGE to original sound file" against this specific
         //     mono fixture — content-dependent, not an argv-shape problem.
         //   modify_space_2, modify_space_4, tostereo_tostereo: explicitly stereo-only
@@ -1967,6 +1970,7 @@ mod tests {
             "extend_scramble_1",
             "gate_gate_1",
             "gate_gate_2",
+            "grain_align",
             "grain_reverse",
             "grainex_extend",
             "housekeep_extract_4",

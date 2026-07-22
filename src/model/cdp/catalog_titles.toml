@@ -1,0 +1,1291 @@
+# Title-only overrides applied on top of catalog.toml/catalog_extra.toml -- see
+# CdpCatalog::load / apply_title_overrides in catalog.rs for how this is merged, and
+# CDP-WASM-SUITE-analysis.md for the naming rationale (this file is that proposal's
+# renames, applied). Safe to hand-edit; each entry only ever touches `title`, never the
+# rest of the process definition, so it survives catalog.toml being regenerated.
+#
+# Titles that wouldn't otherwise reveal their own CDP binary get an "-- <bin>" suffix
+# (e.g. "Waveset Average -- distort") to satisfy
+# catalog::tests::builtin_titles_reveal_their_own_cdp_binary, which exists so a
+# process's CDP family is never invisible in the UI (user report, 2026-07-14) even
+# though the browser's Groups column filters by semantic subcategory, not by binary.
+
+[[title]]
+key = "analjoin_join"
+title = "Join Sounds (Frequency Domain) — analjoin"
+
+[[title]]
+key = "blur_avrg"
+title = "Spectral Average — blur"
+
+[[title]]
+key = "blur_blur"
+title = "Spectral Blur"
+
+[[title]]
+key = "blur_chorus_5"
+title = "Spectral Chorus — blur"
+
+[[title]]
+key = "blur_drunk"
+title = "Spectral Drunk Walk — blur"
+
+[[title]]
+key = "blur_noise"
+title = "Spectral Noise — blur"
+
+[[title]]
+key = "blur_scatter"
+title = "Spectral Scatter — blur"
+
+[[title]]
+key = "blur_spread"
+title = "Spread Peaks (Enveloped Noise) — blur"
+
+[[title]]
+key = "blur_suppress"
+title = "Suppress Partials — blur"
+
+[[title]]
+key = "blur_weave"
+title = "Weave Windows — blur"
+
+[[title]]
+key = "bounce_bounce"
+title = "Bouncing Ball Repeat — bounce"
+
+[[title]]
+key = "brownian_motion_1"
+title = "Brownian Motion (Sampled Events)"
+
+[[title]]
+key = "brownian_motion_2"
+title = "Brownian Motion (Transposed Copies)"
+
+[[title]]
+key = "caltrain_caltrain"
+title = "Spectral Blur (Protect Bass) — caltrain"
+
+[[title]]
+key = "cantor_set_1"
+title = "Gradual Hole (By Percentage) — cantor"
+
+[[title]]
+key = "cantor_set_3"
+title = "Gradual Hole (Vibrato Layers) — cantor"
+
+[[title]]
+key = "cascade_cascade_1"
+title = "Cascading Echoes — cascade"
+
+[[title]]
+key = "chanphase_chanphase"
+title = "Invert Channel Phase — chanphase"
+
+[[title]]
+key = "clicknew_clicks"
+title = "Click Track — clicknew"
+
+[[title]]
+key = "clip_clip_2"
+title = "Clip Half-Waves"
+
+[[title]]
+key = "combine_cross"
+title = "Spectral Cross — combine"
+
+[[title]]
+key = "combine_diff"
+title = "Spectral Difference — combine"
+
+[[title]]
+key = "combine_interleave"
+title = "Spectral Interleave — combine"
+
+[[title]]
+key = "combine_max"
+title = "Spectral Maximum — combine"
+
+[[title]]
+key = "combine_mean_1"
+title = "Spectral Mean — combine"
+
+[[title]]
+key = "combine_mean_3"
+title = "Spectral Mean (Pitch Only) — combine"
+
+[[title]]
+key = "combine_sum"
+title = "Spectral Sum — combine"
+
+[[title]]
+key = "constrict_constrict"
+title = "Shorten Silent Gaps — constrict"
+
+[[title]]
+key = "distcut_distcut_1"
+title = "Cut Into Waveset Groups — distcut"
+
+[[title]]
+key = "distmark_distmark_1"
+title = "Distort At Marks — distmark"
+
+[[title]]
+key = "distmark_distmark_2"
+title = "Distort At Marks (Alternate Blocks) — distmark"
+
+[[title]]
+key = "distmore_double"
+title = "Waveset Double — distmore"
+
+[[title]]
+key = "distort_average"
+title = "Waveset Average — distort"
+
+[[title]]
+key = "distort_delete_2"
+title = "Waveset Delete — distort"
+
+[[title]]
+key = "distort_divide"
+title = "Waveset Divide — distort"
+
+[[title]]
+key = "distort_fractal"
+title = "Waveset Fractal — distort"
+
+[[title]]
+key = "distort_interact_1"
+title = "Waveset Interleave (2 Sounds) — distort"
+
+[[title]]
+key = "distort_interact_2"
+title = "Waveset Impose (2 Sounds) — distort"
+
+[[title]]
+key = "distort_interpolate"
+title = "Waveset Interpolate — distort"
+
+[[title]]
+key = "distort_multiply"
+title = "Waveset Multiply — distort"
+
+[[title]]
+key = "distort_omit"
+title = "Waveset Omit — distort"
+
+[[title]]
+key = "distort_reform_2"
+title = "Waveset Reform (Square) — distort"
+
+[[title]]
+key = "distort_reform_4"
+title = "Waveset Reform (Triangle) — distort"
+
+[[title]]
+key = "distort_reform_6"
+title = "Waveset Reform (Click) — distort"
+
+[[title]]
+key = "distort_reform_7"
+title = "Waveset Reform (Sine) — distort"
+
+[[title]]
+key = "distort_repeat"
+title = "Waveset Repeat — distort"
+
+[[title]]
+key = "distort_replace"
+title = "Waveset Replace — distort"
+
+[[title]]
+key = "distortt_repeat"
+title = "Waveset Group Repeat — distortt"
+
+[[title]]
+key = "distrep_distrep_1"
+title = "Waveset Repeat (With Stretch) — distrep"
+
+[[title]]
+key = "distrep_distrep_2"
+title = "Waveset Repeat (No Stretch) — distrep"
+
+[[title]]
+key = "distshift_distshift_1"
+title = "Half-Cycle Shift — distshift"
+
+[[title]]
+key = "distshift_distshift_2"
+title = "Half-Cycle Swap — distshift"
+
+[[title]]
+key = "dvdwind_dvdwind"
+title = "Fast-Wind Skim (Read-Skip-Read) — dvdwind"
+
+[[title]]
+key = "envel_attack_1"
+title = "Emphasise Attack (At Gate) — envel"
+
+[[title]]
+key = "envel_attack_2"
+title = "Emphasise Attack (Near Time) — envel"
+
+[[title]]
+key = "envel_attack_4"
+title = "Emphasise Attack (At Peak) — envel"
+
+[[title]]
+key = "envel_curtail_1"
+title = "Fade To Silence (Between Times) — envel"
+
+[[title]]
+key = "envel_curtail_2"
+title = "Fade To Silence (From Start Time) — envel"
+
+[[title]]
+key = "envel_curtail_3"
+title = "Fade To Silence — envel"
+
+[[title]]
+key = "envel_dovetail_1"
+title = "Fade In/Out (Dovetail) — envel"
+
+[[title]]
+key = "envel_dovetail_2"
+title = "Fade In/Out (Dovetail, Steep) — envel"
+
+[[title]]
+key = "envel_impose_1"
+title = "Impose Envelope From Sound"
+
+[[title]]
+key = "envel_pluck"
+title = "Pluck Attack — envel"
+
+[[title]]
+key = "envel_replace_1"
+title = "Replace Envelope"
+
+[[title]]
+key = "envel_replace_1b"
+title = "Replace Envelope From Sound"
+
+[[title]]
+key = "envel_swell"
+title = "Swell — envel"
+
+[[title]]
+key = "envel_tremolo_1"
+title = "Tremolo (Linear, Simple) — envel"
+
+[[title]]
+key = "envel_warp_1"
+title = "Normalise Envelope"
+
+[[title]]
+key = "envel_warp_10"
+title = "Limit Envelope"
+
+[[title]]
+key = "envel_warp_12"
+title = "Expand Envelope (Toward Threshold)"
+
+[[title]]
+key = "envel_warp_2"
+title = "Reverse Envelope"
+
+[[title]]
+key = "envel_warp_3"
+title = "Exaggerate Envelope"
+
+[[title]]
+key = "envel_warp_4"
+title = "Attenuate Envelope"
+
+[[title]]
+key = "envel_warp_5"
+title = "Lift Envelope"
+
+[[title]]
+key = "envel_warp_7"
+title = "Flatten Envelope"
+
+[[title]]
+key = "envel_warp_9"
+title = "Invert Envelope"
+
+[[title]]
+key = "envspeak_envspeak_1"
+title = "Repeat Syllables — envspeak"
+
+[[title]]
+key = "envspeak_envspeak_2"
+title = "Repeat Syllables (Reversed) — envspeak"
+
+[[title]]
+key = "envspeak_envspeak_5"
+title = "Repeat Syllables (Bounce Inwards) — envspeak"
+
+[[title]]
+key = "envspeak_envspeak_6"
+title = "Repeat Syllables (Bounce Outwards) — envspeak"
+
+[[title]]
+key = "extend_baktobak"
+title = "Back-To-Back — extend"
+
+[[title]]
+key = "extend_doublets"
+title = "Doublets — extend"
+
+[[title]]
+key = "extend_drunk_1"
+title = "Drunk Walk (No Sober Moments) — extend"
+
+[[title]]
+key = "extend_drunk_2"
+title = "Drunk Walk — extend"
+
+[[title]]
+key = "extend_iterate_1"
+title = "Iterate (Fluid) — extend"
+
+[[title]]
+key = "extend_loop_1"
+title = "Loop Segment — extend"
+
+[[title]]
+key = "extend_scramble_1"
+title = "Scramble Segments — extend"
+
+[[title]]
+key = "extend_zigzag_1"
+title = "Zigzag — extend"
+
+[[title]]
+key = "fastconv_fastconv"
+title = "Convolution Reverb — fastconv"
+
+[[title]]
+key = "filter_bank_1"
+title = "Harmonic Filter Bank"
+
+[[title]]
+key = "filter_bank_2"
+title = "Filter Bank (Odd Harmonics)"
+
+[[title]]
+key = "filter_bank_5"
+title = "Filter Bank (Linear Spacing)"
+
+[[title]]
+key = "filter_bank_6"
+title = "Filter Bank (Pitched Intervals)"
+
+[[title]]
+key = "filter_lohi_1"
+title = "Low/High-Pass Filter"
+
+[[title]]
+key = "filter_phasing_1"
+title = "Phaser (Allpass) — filter"
+
+[[title]]
+key = "filter_phasing_2"
+title = "Phaser — filter"
+
+[[title]]
+key = "filter_sweeping_1"
+title = "Sweeping Notch Filter"
+
+[[title]]
+key = "filter_sweeping_2"
+title = "Sweeping Band-Pass Filter"
+
+[[title]]
+key = "filter_sweeping_3"
+title = "Sweeping Low-Pass Filter"
+
+[[title]]
+key = "filter_sweeping_4"
+title = "Sweeping High-Pass Filter"
+
+[[title]]
+key = "flatten_flatten"
+title = "Flatten Levels (Syllables)"
+
+[[title]]
+key = "focus_accu"
+title = "Accumulate — focus"
+
+[[title]]
+key = "focus_exag"
+title = "Exaggerate Contour — focus"
+
+[[title]]
+key = "focus_focus"
+title = "Focus On Peaks"
+
+[[title]]
+key = "focus_fold"
+title = "Fold Into Range — focus"
+
+[[title]]
+key = "focus_freeze_1"
+title = "Freeze Spectrum (Amplitude Only) — focus"
+
+[[title]]
+key = "focus_freeze_2"
+title = "Freeze Spectrum (Frequency Only) — focus"
+
+[[title]]
+key = "focus_freeze_3"
+title = "Freeze Spectrum (Amp & Freq) — focus"
+
+[[title]]
+key = "focus_hold"
+title = "Hold Spectrum — focus"
+
+[[title]]
+key = "focus_step"
+title = "Step-Freeze Spectrum (Regular Intervals) — focus"
+
+[[title]]
+key = "formants_put_1"
+title = "Replace Formants"
+
+[[title]]
+key = "formants_put_2"
+title = "Layer Formants"
+
+[[title]]
+key = "formants_vocode"
+title = "Vocoder (Cross-Synth, Pitch Bands) — formants"
+
+[[title]]
+key = "formants_vocode_freq"
+title = "Vocoder (Cross-Synth, Hz Bands) — formants"
+
+[[title]]
+key = "fractal_wave_1"
+title = "Fractal Distort (Time-Varying Pitch)"
+
+[[title]]
+key = "fractal_wave_2"
+title = "Fractal Synth"
+
+[[title]]
+key = "frfractal_fractal"
+title = "Fractalise (Self-Layered) — frfractal"
+
+[[title]]
+key = "gate_gate_1"
+title = "Noise Gate"
+
+[[title]]
+key = "gate_gate_2"
+title = "Gate (Remove Gaps)"
+
+[[title]]
+key = "grain_duplicate"
+title = "Duplicate Grains"
+
+[[title]]
+key = "grain_omit"
+title = "Omit Grains"
+
+[[title]]
+key = "grain_repitch_1"
+title = "Granular Pitch-Shift (Cycle) — grain"
+
+[[title]]
+key = "grain_repitch_2"
+title = "Granular Pitch-Shift (Repeat) — grain"
+
+[[title]]
+key = "grain_reposition"
+title = "Reposition Grains"
+
+[[title]]
+key = "grain_rerhythm_1"
+title = "Grain Time-Warp (Cycle)"
+
+[[title]]
+key = "grain_rerhythm_2"
+title = "Grain Time-Warp (Repeat)"
+
+[[title]]
+key = "grain_reverse"
+title = "Reverse Grain Order"
+
+[[title]]
+key = "grain_timewarp"
+title = "Grain Time-Warp (Spacing Only)"
+
+[[title]]
+key = "grainex_extend"
+title = "Extend Grain Area — grainex"
+
+[[title]]
+key = "hilite_arpeg_1"
+title = "Arpeggiate Spectrum (Band Only) — hilite"
+
+[[title]]
+key = "hilite_arpeg_2"
+title = "Arpeggiate Spectrum (Boost Band) — hilite"
+
+[[title]]
+key = "hilite_arpeg_5"
+title = "Arpeggiate Spectrum (Below Band) — hilite"
+
+[[title]]
+key = "hilite_band"
+title = "Split-Band Gain — hilite"
+
+[[title]]
+key = "hilite_pluck"
+title = "Emphasise Changes — hilite"
+
+[[title]]
+key = "hilite_trace_1"
+title = "Trace Partials — hilite"
+
+[[title]]
+key = "housekeep_extract_4"
+title = "Remove DC Offset — housekeep"
+
+[[title]]
+key = "hover2_hover2"
+title = "Hover (Mirrored) — hover2"
+
+[[title]]
+key = "hover_hover"
+title = "Hover (Zigzag Read)"
+
+[[title]]
+key = "impulse_impulse"
+title = "Impulse Train"
+
+[[title]]
+key = "modify_brassage_1"
+title = "Granular Pitch Shift (Brassage) — modify"
+
+[[title]]
+key = "modify_brassage_2"
+title = "Granular Time Stretch — modify"
+
+[[title]]
+key = "modify_brassage_4"
+title = "Reorder Grains (Brassage) — modify"
+
+[[title]]
+key = "modify_brassage_5"
+title = "Granulate (Surface) — modify"
+
+[[title]]
+key = "modify_brassage_6"
+title = "Granulate (Brassage) — modify"
+
+[[title]]
+key = "modify_loudness_1"
+title = "Gain — modify"
+
+[[title]]
+key = "modify_radical_1"
+title = "Reverse (Radical) — modify"
+
+[[title]]
+key = "modify_radical_4"
+title = "Bit Crush — modify"
+
+[[title]]
+key = "modify_radical_5"
+title = "Ring Modulation — modify"
+
+[[title]]
+key = "modify_radical_6"
+title = "Cross Modulation — modify"
+
+[[title]]
+key = "modify_revecho_2"
+title = "Delay / Resonance — modify"
+
+[[title]]
+key = "modify_sausage"
+title = "Granulate (Multi-Source) — modify"
+
+[[title]]
+key = "modify_shudder"
+title = "Shudder — modify"
+
+[[title]]
+key = "modify_space_1"
+title = "Pan (Mono → Stereo) — modify"
+
+[[title]]
+key = "modify_space_2"
+title = "Mirror Stereo Position — modify"
+
+[[title]]
+key = "modify_space_4"
+title = "Narrow/Widen Stereo Image — modify"
+
+[[title]]
+key = "modify_speed_2"
+title = "Transpose (Speed) — modify"
+
+[[title]]
+key = "modify_speed_5"
+title = "Speed Ramp — modify"
+
+[[title]]
+key = "modify_stack"
+title = "Stack (Harmoniser) — modify"
+
+[[title]]
+key = "morph_bridge_1"
+title = "Spectral Bridge (Simple) — morph"
+
+[[title]]
+key = "morph_bridge_2"
+title = "Spectral Bridge (Lowest Gain) — morph"
+
+[[title]]
+key = "morph_bridge_3"
+title = "Spectral Bridge (Follow Gain) — morph"
+
+[[title]]
+key = "morph_glide"
+title = "Spectral Bridge (Frozen Points) — morph"
+
+[[title]]
+key = "morph_morph_1"
+title = "Spectral Morph"
+
+[[title]]
+key = "motor_motor_2"
+title = "Respeed Events — motor"
+
+[[title]]
+key = "motor_motor_5"
+title = "Respeed Events (Advance Only) — motor"
+
+[[title]]
+key = "motor_motor_8"
+title = "Respeed Events (Advance Or Regress) — motor"
+
+[[title]]
+key = "multiosc_multiosc_3"
+title = "Nested Oscillator (4-Op FM) — multiosc"
+
+[[title]]
+key = "newdelay_newdelay"
+title = "Tuned Delay — newdelay"
+
+[[title]]
+key = "oneform_put_1"
+title = "Impose Formant Snapshot — oneform"
+
+[[title]]
+key = "oneform_put_2"
+title = "Replace With Formant Snapshot — oneform"
+
+[[title]]
+key = "phase_phase_1"
+title = "Invert Polarity — phase"
+
+[[title]]
+key = "phasor_phasor"
+title = "Phase Interaction Streams — phasor"
+
+[[title]]
+key = "pitch_altharms_1"
+title = "Delete Alternate Harmonics (Odd) — pitch"
+
+[[title]]
+key = "pitch_altharms_2"
+title = "Delete Alternate Harmonics (Even) — pitch"
+
+[[title]]
+key = "pitch_chord_chord"
+title = "Spectral Chord (From Sound) — pitch"
+
+[[title]]
+key = "pitch_chordf_chordf"
+title = "Spectral Chord (From Spectrum) — pitch"
+
+[[title]]
+key = "pitch_octmove_1"
+title = "Octave Up (Keep Formants) — pitch"
+
+[[title]]
+key = "pitch_octmove_2"
+title = "Octave Down (Keep Formants) — pitch"
+
+[[title]]
+key = "pitch_octmove_3"
+title = "Octave Down (Keep Formants, Bass-Reinforced) — pitch"
+
+[[title]]
+key = "pitch_pick_1"
+title = "Pick Harmonics — pitch"
+
+[[title]]
+key = "pitch_pick_2"
+title = "Pick Harmonics (Octaves Only) — pitch"
+
+[[title]]
+key = "pitch_pick_3"
+title = "Pick Harmonics (Odd Only) — pitch"
+
+[[title]]
+key = "pitch_pick_4"
+title = "Filter Bank (Linear Steps) — pitch"
+
+[[title]]
+key = "pitch_pick_5"
+title = "Filter Bank (Harmonic + Offset) — pitch"
+
+[[title]]
+key = "pitch_transp_1"
+title = "Octave Transpose (Above Split) — pitch"
+
+[[title]]
+key = "pitch_transp_2"
+title = "Octave Transpose (Below Split) — pitch"
+
+[[title]]
+key = "pitch_transp_3"
+title = "Octave Transpose (Above & Below Split) — pitch"
+
+[[title]]
+key = "pitch_transp_4"
+title = "Transpose Spectrum (Above Split) — pitch"
+
+[[title]]
+key = "pitch_transp_5"
+title = "Transpose Spectrum (Below Split) — pitch"
+
+[[title]]
+key = "pitch_transp_6"
+title = "Transpose Spectrum (Above & Below Split) — pitch"
+
+[[title]]
+key = "pitch_tune_1"
+title = "Tune To Pitch"
+
+[[title]]
+key = "pitch_tune_1b"
+title = "Tune To Pitch Template (Hz)"
+
+[[title]]
+key = "pitch_tune_2"
+title = "Tune To Pitch Template (MIDI)"
+
+[[title]]
+key = "prefix_silence"
+title = "Add Silence (Start) — prefix"
+
+[[title]]
+key = "psow_cutatgrain_1"
+title = "Cut At Grain (Keep Before) — psow"
+
+[[title]]
+key = "psow_cutatgrain_2"
+title = "Cut At Grain (Keep After) — psow"
+
+[[title]]
+key = "psow_delete"
+title = "Delete Pitch-Sync Grains — psow"
+
+[[title]]
+key = "psow_dupl"
+title = "Pitch-Sync Duplicate — psow"
+
+[[title]]
+key = "psow_features_1"
+title = "Impose Vocal Features (Transpose + Timewarp) — psow"
+
+[[title]]
+key = "psow_features_2"
+title = "Impose Vocal Features (Transpose + Lower Pitch) — psow"
+
+[[title]]
+key = "psow_grab"
+title = "Grab Pitch-Sync Grain — psow"
+
+[[title]]
+key = "psow_impose"
+title = "Impose Grains On Sound — psow"
+
+[[title]]
+key = "psow_interleave"
+title = "Interleave Grains — psow"
+
+[[title]]
+key = "psow_interp"
+title = "Interpolate Pitch-Sync Grains — psow"
+
+[[title]]
+key = "psow_reinforce_1"
+title = "Reinforce Harmonics (Grains) — psow"
+
+[[title]]
+key = "psow_reinforce_2"
+title = "Reinforce Inharmonic Partials (Grains) — psow"
+
+[[title]]
+key = "psow_replace"
+title = "Replace Grains — psow"
+
+[[title]]
+key = "psow_space"
+title = "Spread Grains In Stereo — psow"
+
+[[title]]
+key = "psow_split"
+title = "Split Grains (Subharmonic + Transposed) — psow"
+
+[[title]]
+key = "psow_stretch"
+title = "Pitch-Sync Stretch — psow"
+
+[[title]]
+key = "psow_strtrans"
+title = "Pitch-Sync Stretch + Transpose — psow"
+
+[[title]]
+key = "psow_sustain"
+title = "Freeze Grain (Sustain) — psow"
+
+[[title]]
+key = "psow_sustain2"
+title = "Freeze Grain (Sustain, By Time Range) — psow"
+
+[[title]]
+key = "quirk_quirk_1"
+title = "Power Distortion — quirk"
+
+[[title]]
+key = "repeater_repeater_1"
+title = "Repeat At Times (Delay Spacing) — repeater"
+
+[[title]]
+key = "repeater_repeater_2"
+title = "Repeat At Times (Gap Spacing) — repeater"
+
+[[title]]
+key = "repeater_repeater_3"
+title = "Bouncing Repeat — repeater"
+
+[[title]]
+key = "repitch_approx_1"
+title = "Randomise Pitch Curve — repitch"
+
+[[title]]
+key = "repitch_exag_1"
+title = "Exaggerate Pitch Curve (Range) — repitch"
+
+[[title]]
+key = "repitch_exag_3"
+title = "Exaggerate Pitch Curve (Contour) — repitch"
+
+[[title]]
+key = "repitch_exag_5"
+title = "Exaggerate Pitch Curve (Range + Contour) — repitch"
+
+[[title]]
+key = "repitch_insertsil_1"
+title = "Insert Silence In Pitch Curve (By Time) — repitch"
+
+[[title]]
+key = "repitch_insertsil_2"
+title = "Insert Silence In Pitch Curve (By Samples) — repitch"
+
+[[title]]
+key = "repitch_insertzeros_1"
+title = "Mark Pitch Curve Unpitched (By Time) — repitch"
+
+[[title]]
+key = "repitch_insertzeros_2"
+title = "Mark Pitch Curve Unpitched (By Samples) — repitch"
+
+[[title]]
+key = "repitch_interp_1"
+title = "Smooth Pitch Curve Gaps (Glide) — repitch"
+
+[[title]]
+key = "repitch_interp_2"
+title = "Smooth Pitch Curve Gaps (Sustain) — repitch"
+
+[[title]]
+key = "repitch_noisetosil"
+title = "Noise To Silence (Pitch Curve) — repitch"
+
+[[title]]
+key = "repitch_pchshift"
+title = "Shift Pitch Curve (Semitones) — repitch"
+
+[[title]]
+key = "repitch_pitchtosil"
+title = "Pitch To Silence (Pitch Curve) — repitch"
+
+[[title]]
+key = "repitch_quantise_1"
+title = "Quantise Pitch (Autotune) — repitch"
+
+[[title]]
+key = "repitch_randomise_1"
+title = "Randomise Pitch Curve (Around Contour) — repitch"
+
+[[title]]
+key = "repitch_smooth_1"
+title = "Smooth Pitch (De-Vibrato) — repitch"
+
+[[title]]
+key = "repitch_transpose_1"
+title = "Transpose Spectrum (Ratio) — repitch"
+
+[[title]]
+key = "repitch_transpose_2"
+title = "Transpose Spectrum (Octaves) — repitch"
+
+[[title]]
+key = "repitch_transpose_3"
+title = "Pitch Shift — repitch"
+
+[[title]]
+key = "repitch_transpose_3b"
+title = "Transpose Spectrum (Semitones) — repitch"
+
+[[title]]
+key = "repitch_transposef_1"
+title = "Transpose Spectrum, Keep Formants (Ratio) — repitch"
+
+[[title]]
+key = "repitch_transposef_2"
+title = "Transpose Spectrum, Keep Formants (Octaves) — repitch"
+
+[[title]]
+key = "repitch_transposef_3"
+title = "Pitch Shift (Keep Formants) — repitch"
+
+[[title]]
+key = "repitch_transposef_3b"
+title = "Transpose Spectrum, Keep Formants (Semitones) — repitch"
+
+[[title]]
+key = "repitch_vibrato_1"
+title = "Add Vibrato (Pitch Curve) — repitch"
+
+[[title]]
+key = "retime_retime_13"
+title = "Move Peak To Time — retime"
+
+[[title]]
+key = "reverb"
+title = "Reverb"
+
+[[title]]
+key = "rmverb"
+title = "Room Reverb — rmverb"
+
+[[title]]
+key = "rotor_rotor_1"
+title = "Evolving Note-Sets (Grouped) — rotor"
+
+[[title]]
+key = "rotor_rotor_2"
+title = "Evolving Note-Sets (Sequential) — rotor"
+
+[[title]]
+key = "rotor_rotor_3"
+title = "Evolving Note-Sets (Overlaid) — rotor"
+
+[[title]]
+key = "scramble_scramble_10"
+title = "Reorder By Level (Loud First) — scramble"
+
+[[title]]
+key = "scramble_scramble_9"
+title = "Reorder By Level (Quiet First) — scramble"
+
+[[title]]
+key = "selfsim_selfsim"
+title = "Spectral Self-Similarity — selfsim"
+
+[[title]]
+key = "sfecho_echo"
+title = "Simple Echo — sfecho"
+
+[[title]]
+key = "sfedit_cut_1"
+title = "Trim To Length — sfedit"
+
+[[title]]
+key = "sfedit_excise_1"
+title = "Remove Section — sfedit"
+
+[[title]]
+key = "sfedit_join"
+title = "Join Sounds End-To-End — sfedit"
+
+[[title]]
+key = "shifter_shifter_1"
+title = "Shifting Repetition Cycles — shifter"
+
+[[title]]
+key = "silend_silend_1"
+title = "Add Silence (End) — silend"
+
+[[title]]
+key = "sorter_sorter_1"
+title = "Sort Elements (Crescendo) — sorter"
+
+[[title]]
+key = "sorter_sorter_2"
+title = "Sort Elements (Decrescendo) — sorter"
+
+[[title]]
+key = "sorter_sorter_3"
+title = "Sort Elements (Accelerando) — sorter"
+
+[[title]]
+key = "sorter_sorter_4"
+title = "Sort Elements (Ritardando) — sorter"
+
+[[title]]
+key = "spec_cut"
+title = "Trim (Frequency Domain) — spec"
+
+[[title]]
+key = "spec_gain"
+title = "Spectral Gain"
+
+[[title]]
+key = "spec_gate"
+title = "Spectral Gate"
+
+[[title]]
+key = "spec_grab"
+title = "Grab Static Spectrum Window"
+
+[[title]]
+key = "spec_magnify"
+title = "Freeze Spectrum (Magnify Window)"
+
+[[title]]
+key = "specfnu_specfnu_1"
+title = "Narrow Formants — specfnu"
+
+[[title]]
+key = "specfnu_specfnu_19"
+title = "Randomise Partials (Keep Formants) — specfnu"
+
+[[title]]
+key = "specfnu_specfnu_2"
+title = "Squeeze Formants — specfnu"
+
+[[title]]
+key = "specfnu_specfnu_3"
+title = "Invert Formants — specfnu"
+
+[[title]]
+key = "specfnu_specfnu_4"
+title = "Rotate Formants — specfnu"
+
+[[title]]
+key = "specfnu_specfnu_5"
+title = "Spectral Negative — specfnu"
+
+[[title]]
+key = "specfnu_specfnu_8"
+title = "Shift Formants — specfnu"
+
+[[title]]
+key = "specfnu_specfnu_9"
+title = "Move Formants — specfnu"
+
+[[title]]
+key = "specfold_specfold_3"
+title = "Randomise Spectrum — specfold"
+
+[[title]]
+key = "specsphinx_specsphinx_1"
+title = "Impose Channel Amplitudes (2 Sounds) — specsphinx"
+
+[[title]]
+key = "specsphinx_specsphinx_2"
+title = "Spectral Cross-Multiply (2 Sounds) — specsphinx"
+
+[[title]]
+key = "spectstr_stretch"
+title = "Time Stretch (Alt. Method) — spectstr"
+
+[[title]]
+key = "spectwin_spectwin_1"
+title = "Spectral Blend (Formant ↔ Formant) — spectwin"
+
+[[title]]
+key = "spectwin_spectwin_2"
+title = "Spectral Blend (Formant ↔ Total) — spectwin"
+
+[[title]]
+key = "spectwin_spectwin_3"
+title = "Spectral Blend (Total ↔ Formant) — spectwin"
+
+[[title]]
+key = "spectwin_spectwin_4"
+title = "Spectral Blend (Total ↔ Total) — spectwin"
+
+[[title]]
+key = "spike_spike"
+title = "Envelope Spike At Peak"
+
+[[title]]
+key = "splinter_splinter_1"
+title = "Pitched Splinter Lead-In"
+
+[[title]]
+key = "strange_glis_1"
+title = "Shepard Tone (Keep Formants) — strange"
+
+[[title]]
+key = "strange_glis_2"
+title = "Inharmonic Glissando (Keep Formants) — strange"
+
+[[title]]
+key = "strange_glis_3"
+title = "Glissando (Keep Formants) — strange"
+
+[[title]]
+key = "strange_invert_1"
+title = "Invert Spectral Envelope — strange"
+
+[[title]]
+key = "strange_shift_4"
+title = "Frequency Shift (Linear) — strange"
+
+[[title]]
+key = "strange_waver_1"
+title = "Waver (Harmonic/Inharmonic) — strange"
+
+[[title]]
+key = "strans_multi_1"
+title = "Speed Change — strans"
+
+[[title]]
+key = "strans_multi_2"
+title = "Transpose (No Time Change) — strans"
+
+[[title]]
+key = "strans_multi_3"
+title = "Speed Ramp (Smooth) — strans"
+
+[[title]]
+key = "strans_multi_4"
+title = "Vibrato — strans"
+
+[[title]]
+key = "stretch_spectrum_1"
+title = "Spectral Stretch (Above Point)"
+
+[[title]]
+key = "stretch_spectrum_2"
+title = "Spectral Stretch (Below Point)"
+
+[[title]]
+key = "stretch_time_1"
+title = "Time Stretch"
+
+[[title]]
+key = "stutter_stutter"
+title = "Stutter (Random Order)"
+
+[[title]]
+key = "subtract_subtract"
+title = "Subtract"
+
+[[title]]
+key = "superaccu_superaccu_1"
+title = "Step-Freeze Spectrum (Sustain Until Louder) — superaccu"
+
+[[title]]
+key = "superaccu_superaccu_2"
+title = "Step-Freeze Spectrum (Tempered Scale) — superaccu"
+
+[[title]]
+key = "synfilt_synfilt_1"
+title = "Synth Filtered Noise (Pitched) — synfilt"
+
+[[title]]
+key = "synspline_synspline"
+title = "Spline Synth (Random Overtones) — synspline"
+
+[[title]]
+key = "synth_chord_1"
+title = "Chord (By MIDI) — synth"
+
+[[title]]
+key = "synth_chord_2"
+title = "Chord (By Frequency) — synth"
+
+[[title]]
+key = "synth_noise"
+title = "White Noise — synth"
+
+[[title]]
+key = "synth_spectra"
+title = "Spectral Band — synth"
+
+[[title]]
+key = "synth_wave_1"
+title = "Waveform (Sine) — synth"
+
+[[title]]
+key = "synth_wave_2"
+title = "Waveform (Square) — synth"
+
+[[title]]
+key = "synth_wave_3"
+title = "Waveform (Triangle) — synth"
+
+[[title]]
+key = "synth_wave_4"
+title = "Waveform (Ramp) — synth"
+
+[[title]]
+key = "tapdelay_tapdelay"
+title = "Tap Delay"
+
+[[title]]
+key = "topantail2_topantail"
+title = "Trim Silent Ends — topantail2"
+
+[[title]]
+key = "tostereo_tostereo"
+title = "Converge/Diverge Mono ↔ Stereo — tostereo"
+
+[[title]]
+key = "tremenv_tremenv"
+title = "Tremolo (Envelope) — tremenv"
+
+[[title]]
+key = "tremolo_tremolo_1"
+title = "Tremolo"
+
+[[title]]
+key = "tremolo_tremolo_2"
+title = "Tremolo (Narrowing)"
+
+[[title]]
+key = "verges_verges"
+title = "Brief Gliss Flickers — verges"
+
+[[title]]
+key = "waveform_make_1"
+title = "Make Wavetable (By Cycle Count) — waveform"
+
+[[title]]
+key = "waveform_make_2"
+title = "Make Wavetable (By Duration) — waveform"
