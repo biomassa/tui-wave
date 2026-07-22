@@ -151,7 +151,7 @@ impl Toolbar {
         }];
         // Buffers-focus set. Up/Dn both selects and loads the buffer immediately — no
         // separate "Switch" command, since there's nothing left for Enter to commit.
-        // ^s/^w/^r/^a are contextual (differ from their waveform meanings) — kept literal.
+        // ^s/^w/^r/^a/^l are contextual (differ from their waveform meanings) — kept literal.
         let buffers = vec![ToolGroup {
             label: "",
             buttons: vec![
@@ -161,6 +161,7 @@ impl Toolbar {
                 ("Close",   "^w".to_string(),    Action::CloseBuffer),
                 ("Rename",  "^r".to_string(),    Action::RenameBuffer),
                 ("SaveAll", "^a".to_string(),    Action::SaveAll),
+                ("Reload",  "^l".to_string(),    Action::ReloadBuffer),
             ],
         }];
         Self {

@@ -1305,6 +1305,10 @@ enum Confirm {
     ResetConfig,
     /// Delete this file from disk (Files panel `Del`). Irreversible, hence the confirm.
     DeleteFile(PathBuf),
+    /// Reload the document at this `App.documents` index from its on-disk path (Buffers
+    /// panel `Ctrl+L`), discarding in-memory edits — confirmed because it's a dirty
+    /// document (an unmodified one just reloads immediately, nothing to lose).
+    ReloadBuffer(usize),
 }
 
 /// What to do once `App::save_as_queue` (buffers waiting for a filename before some other
@@ -2897,7 +2901,7 @@ impl App {
                     true
                 }
                 KeyCode::Char('/') => { self.handle_action(Action::SearchBuffers); true }
-                // Contextual buffer commands (^r/^a differ from the global Reverse/SaveAll).
+                // Contextual buffer commands (^r/^a/^l differ from the global Reverse/SelectAll/SaveAll).
                 KeyCode::Char('s') | KeyCode::Char('S') if ctrl => {
                     match self.buffer_panel.selected.checked_sub(self.documents.len()) {
                         Some(curve_index) => self.save_or_prompt_curve(curve_index),
@@ -2908,6 +2912,8 @@ impl App {
                 KeyCode::Char('w') | KeyCode::Char('W') if ctrl => { self.handle_action(Action::CloseBuffer); true }
                 KeyCode::Char('r') | KeyCode::Char('R') if ctrl => { self.handle_action(Action::RenameBuffer); true }
                 KeyCode::Char('a') | KeyCode::Char('A') if ctrl => { self.handle_action(Action::SaveAll); true }
+                // ^l reloads from disk here (in waveform/files focus ^l is the global SaveAll).
+                KeyCode::Char('l') | KeyCode::Char('L') if ctrl => { self.handle_action(Action::ReloadBuffer); true }
                 // Shift+Tab cycles backward (Buffers → Files); Tab forward (Buffers → Waveform).
                 KeyCode::BackTab => { self.buffer_panel.focused = false; self.file_panel.focused = true; true }
                 KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -3021,6 +3027,9 @@ impl App {
             }
             Confirm::DeleteFile(path) => {
                 self.delete_file(&path);
+            }
+            Confirm::ReloadBuffer(idx) => {
+                self.reload_buffer_from_disk(idx);
             }
         }
     }
@@ -7860,6 +7869,41 @@ impl App {
         }
     }
 
+    /// Reloads document `idx` from its on-disk path (Buffers panel `Ctrl+L`), confirming
+    /// first if it has unsaved changes to discard. A no-op if it was never saved (no `path`
+    /// to reload from) — mirrors `save_buffer`'s "no-op if it has none" convention.
+    fn request_reload_buffer(&mut self, idx: usize) {
+        let Some(doc) = self.documents.get(idx) else { return };
+        if doc.path.is_none() {
+            return;
+        }
+        if doc.dirty {
+            self.confirm = Some(Confirm::ReloadBuffer(idx));
+        } else {
+            self.reload_buffer_from_disk(idx);
+        }
+    }
+
+    /// Actually re-reads document `idx`'s on-disk file, replacing its in-memory content
+    /// (samples, markers, bext, bit depth) wholesale and clearing undo history — the old
+    /// undo stack's commands store sample data from the buffer *before* the reload, replaying
+    /// them against the freshly-loaded one would corrupt it, same reasoning as why history is
+    /// per-document in the first place. No-ops silently on a missing `path` or a read/parse
+    /// failure (e.g. the file was deleted or is no longer valid WAV) rather than losing the
+    /// in-memory buffer over it.
+    fn reload_buffer_from_disk(&mut self, idx: usize) {
+        let Some(path) = self.documents.get(idx).and_then(|d| d.path.clone()) else { return };
+        let Ok(document) = crate::model::io::load_wav(&path) else { return };
+        self.documents[idx] = document;
+        self.histories[idx] = crate::model::history::History::new();
+        self.file_panel.mark_dirty(&path, false);
+        if idx == self.active_document {
+            self.viewport = None;
+            self.rebuild_audio();
+        }
+        self.rebuild_waveform_caches();
+    }
+
     /// Closes buffer `idx`, confirming first if it has unsaved changes.
     fn request_close_buffer(&mut self, idx: usize) {
         if self.documents.get(idx).is_some_and(|d| d.dirty) {
@@ -9200,6 +9244,10 @@ impl App {
                 }
                 return;
             }
+            Action::ReloadBuffer => {
+                self.request_reload_buffer(self.active_document);
+                return;
+            }
             Action::RenameFile => {
                 self.begin_rename_selected_file();
                 return;
@@ -9690,6 +9738,7 @@ impl App {
             | Action::FocusNext
             | Action::CloseBuffer
             | Action::RenameBuffer
+            | Action::ReloadBuffer
             | Action::SwitchBuffer
             | Action::SearchBuffers
             | Action::RenameFile
@@ -10467,6 +10516,9 @@ impl App {
                 Confirm::DeleteFile(path) => {
                     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                     format!(" Delete \"{name}\" from disk? — (y) delete · (Esc) cancel ")
+                }
+                Confirm::ReloadBuffer(_) => {
+                    " Unsaved changes will be lost — (y) reload from disk · (Esc) cancel ".to_string()
                 }
             };
             render_confirm(frame, area, &text);
@@ -19788,6 +19840,112 @@ mod tests {
             "a buffer open on the file should follow the rename"
         );
         std::fs::remove_file(&new).ok();
+    }
+
+    /// `reload_buffer_from_disk` re-reads the on-disk file wholesale: an in-memory edit made
+    /// after the file was saved must be discarded, and the (now-stale) undo history must be
+    /// cleared along with it -- replaying an old command against freshly-loaded sample data
+    /// would corrupt it, same reasoning `History` being per-document exists for in the first
+    /// place.
+    #[test]
+    fn reload_buffer_from_disk_restores_the_saved_file_and_clears_history() {
+        let path = std::env::temp_dir().join(format!("tuiwave_reload_{}.wav", std::process::id()));
+        let original = doc(0.25, 10);
+        save_wav(&original, &path).unwrap();
+
+        let mut app = new_app(Some(crate::model::io::load_wav(&path).unwrap()), None);
+        app.documents[0].channels[0][0] = 0.9; // an in-memory edit never saved to disk
+        app.documents[0].dirty = true;
+        app.histories[0].apply(crate::commands::gain::gain_command(0, 10, vec![2.0], false), &mut app.documents[0]);
+        assert!(app.histories[0].can_undo(), "sanity: an edit was actually recorded");
+
+        app.reload_buffer_from_disk(0);
+
+        assert_eq!(app.documents[0].channels[0], vec![0.25f32; 10], "must match the on-disk file, not the in-memory edit");
+        assert!(!app.documents[0].dirty, "a freshly-reloaded buffer matches disk, so it isn't dirty");
+        assert!(!app.histories[0].can_undo(), "undo history must be cleared -- it referenced the discarded in-memory state");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// `Ctrl+L` in the Buffers panel on a *clean* (non-dirty) document reloads immediately,
+    /// no confirmation needed since there's nothing to lose.
+    #[test]
+    fn ctrl_l_reloads_a_clean_buffer_immediately_without_confirming() {
+        let path = std::env::temp_dir().join(format!("tuiwave_reload_clean_{}.wav", std::process::id()));
+        save_wav(&doc(0.4, 10), &path).unwrap();
+
+        let mut app = new_app(Some(crate::model::io::load_wav(&path).unwrap()), None);
+        app.buffer_panel.focused = true;
+        app.buffer_panel.selected = 0;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+
+        assert!(app.confirm.is_none(), "a clean buffer needs no confirmation");
+        assert_eq!(app.documents[0].channels[0], vec![0.4f32; 10]);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// `Ctrl+L` on a *dirty* document prompts the reload confirmation first; only pressing
+    /// (y) actually discards the in-memory edit and reloads, any other key cancels and keeps
+    /// the edit.
+    #[test]
+    fn ctrl_l_on_a_dirty_buffer_confirms_then_reloads_on_y() {
+        let path = std::env::temp_dir().join(format!("tuiwave_reload_dirty_{}.wav", std::process::id()));
+        save_wav(&doc(0.6, 10), &path).unwrap();
+
+        let mut app = new_app(Some(crate::model::io::load_wav(&path).unwrap()), None);
+        app.buffer_panel.focused = true;
+        app.buffer_panel.selected = 0;
+        app.documents[0].channels[0][0] = 0.1;
+        app.documents[0].dirty = true;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        assert!(matches!(app.confirm, Some(Confirm::ReloadBuffer(0))), "a dirty buffer must confirm before reloading");
+        assert_eq!(app.documents[0].channels[0][0], 0.1, "must not reload until confirmed");
+
+        app.handle_confirm_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(app.documents[0].channels[0], vec![0.6f32; 10], "(y) should reload from disk");
+        assert!(app.confirm.is_none());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Cancelling the reload confirmation (any key other than y/s) must leave the in-memory
+    /// edit untouched -- the confirm exists precisely so an accidental `Ctrl+L` can't discard
+    /// unsaved work.
+    #[test]
+    fn cancelling_the_reload_confirm_keeps_the_unsaved_edit() {
+        let path = std::env::temp_dir().join(format!("tuiwave_reload_cancel_{}.wav", std::process::id()));
+        save_wav(&doc(0.6, 10), &path).unwrap();
+
+        let mut app = new_app(Some(crate::model::io::load_wav(&path).unwrap()), None);
+        app.documents[0].channels[0][0] = 0.1;
+        app.documents[0].dirty = true;
+        app.confirm = Some(Confirm::ReloadBuffer(0));
+
+        app.handle_confirm_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(app.confirm.is_none());
+        assert_eq!(app.documents[0].channels[0][0], 0.1, "cancelling must not discard the unsaved edit");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A never-saved buffer (no path) has nothing on disk to reload from -- `Ctrl+L` is a
+    /// silent no-op, mirroring `save_buffer`'s own "no-op if it has none" convention.
+    #[test]
+    fn ctrl_l_on_a_never_saved_buffer_is_a_no_op() {
+        let mut app = new_app(Some(doc(0.3, 10)), None);
+        assert!(app.documents[0].path.is_none());
+        app.buffer_panel.focused = true;
+        app.buffer_panel.selected = 0;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+
+        assert!(app.confirm.is_none());
+        assert_eq!(app.documents[0].channels[0], vec![0.3f32; 10]);
     }
 
     /// Quitting with no never-saved buffers (just dirty ones that already have a path)
