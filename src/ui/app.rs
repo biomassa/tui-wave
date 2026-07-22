@@ -17831,6 +17831,14 @@ mod tests {
     /// (near-)identity round-trip through two real subprocess invocations.
     #[test]
     fn a_two_step_chain_of_a_real_process_runs_end_to_end_and_splices_once() {
+        // A real Splice also calls `chain_recent::record_used`/`chain_last::save_last_chain`,
+        // which touch `XDG_CONFIG_HOME` -- guard against other tests that temporarily
+        // redirect it concurrently (env vars are process-global, not per-thread).
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_chain_splice_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
         let mut app = new_app(Some(doc(0.5, 200)), None);
         app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
         let original_channels = app.documents[0].channels.clone();
@@ -17878,6 +17886,72 @@ mod tests {
         // Exactly ONE undo step for the whole 2-step chain, not two.
         assert!(app.histories[0].undo(&mut app.documents[0]), "one undo should be available");
         assert!(!app.histories[0].can_undo(), "a single undo should fully revert the whole chain -- a second undo step would mean each chain step got its own history entry instead of one for the whole run");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// End-to-end against the real CDP binaries: a chain's *whole* run splices in through
+    /// `cdp_process_command` exactly like a single process does (see `finish_chain_run`'s
+    /// `Splice` arm), so it inherits that command's timing-tolerance marker preservation for
+    /// free -- a marker inside the processed selection must land back at its original
+    /// position when the chain's overall result length matches (within tolerance), and a
+    /// marker outside the selection must be completely untouched. Run on a sub-selection
+    /// (not the whole file, unlike the sibling `a_two_step_chain_of_a_real_process_...` test)
+    /// so "outside the range" is a real, exercised case rather than vacuously true.
+    #[test]
+    fn markers_survive_a_real_multi_step_chain_splice() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_chain_marker_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = new_app(Some(doc(0.5, 200)), None);
+        app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
+        app.documents[0].selection = Some(Selection { start: 20, end: 180 });
+        app.documents[0].markers = vec![
+            Marker { position: 10, label: "before".into() },
+            Marker { position: 100, label: "inside".into() },
+            Marker { position: 190, label: "after".into() },
+        ];
+
+        let chain = crate::model::cdp::CdpChain {
+            name: "Double Invert".into(),
+            steps: vec![
+                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), side_chain: Vec::new() },
+            ],
+        };
+        app.cdp_chain_editor = Some(ChainEditorState {
+            chain,
+            buffer_picks: std::collections::HashMap::new(),
+            selected: ChainEditorRow::Run,
+            error: None,
+            presets: Vec::new(),
+            preset_selected: None,
+            save_prompt: None,
+        });
+
+        app.run_cdp_chain(ChainRunFinish::Splice);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while app.dialog.is_some() && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.dialog.is_none(), "the chain should have finished and spliced");
+
+        assert_eq!(
+            app.documents[0].markers,
+            vec![
+                Marker { position: 10, label: "before".into() },
+                Marker { position: 100, label: "inside".into() },
+                Marker { position: 190, label: "after".into() },
+            ],
+            "a length-preserving multi-step chain must leave every marker exactly where it was"
+        );
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     /// End-to-end against the real CDP binaries: per-step Preview mid-edit
