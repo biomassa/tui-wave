@@ -3,6 +3,7 @@
 
 pub mod catalog;
 pub mod chain;
+pub mod chain_last;
 pub mod chain_preset;
 pub mod chain_recent;
 pub mod def;
