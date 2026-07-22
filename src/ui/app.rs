@@ -784,6 +784,12 @@ enum Dialog {
     /// sub-editors, this is a top-level dialog with no browser/params dialog underneath it
     /// — Esc/Enter both close it outright (see `CurveEditorState`'s doc comment).
     CurveEditor(CurveEditorState),
+    /// The "CDP Chain" editor — a linear list of steps, any of which may have a side-chain
+    /// (see `CDP-CHAIN-PLAN.md`). A thin marker: all the actual state lives in
+    /// `App.cdp_chain_editor` (`ChainEditorState`) since adding/editing one step temporarily
+    /// switches the visible dialog to `CdpBrowser`/`CdpParams` (reused verbatim) and back,
+    /// and `Dialog` can only hold one variant at a time.
+    CdpChainEditor,
     /// Read-only summary for `App.formant_buffers[buffer_index]` (CDP-Ext-Plan.md Phase 5),
     /// opened via `App::open_formant_info` from the Buffers panel. Unlike `CurveEditor`,
     /// there is deliberately no editing here at all — the UX decision this shipped under,
@@ -1579,6 +1585,24 @@ pub struct App {
     /// `App.formant_buffers` entry (`FormantBufferKind::Snapshot`) rather than replacing
     /// anything in place.
     cdp_pending_snapshot_freeze: Option<usize>,
+    /// The in-progress "CDP Chain" draft, whenever `Dialog::CdpChainEditor` is showing *or*
+    /// a `CdpBrowser`/`CdpParams` detour opened from it is (see `ChainEditTarget`'s doc
+    /// comment for why this lives here rather than on either dialog). `None` otherwise.
+    cdp_chain_editor: Option<ChainEditorState>,
+    /// `Some` exactly when a `CdpBrowser`/`CdpParams` dialog currently showing was opened
+    /// from the chain editor to fill one of its slots — checked wherever that detour needs
+    /// different behavior than the normal top-level flow (process-list filtering, what Enter
+    /// on the Apply row actually does).
+    cdp_chain_edit_target: Option<ChainEditTarget>,
+    /// Paused parent chain-step-editing sessions, innermost last — pushed by "Configure
+    /// Side-Chain..." (opened from within a dual-input step's own `CdpParams` session) and
+    /// popped once that nested edit commits or is cancelled, restoring the parent session
+    /// exactly as it was. Empty except while editing a side-chain step reached this way.
+    cdp_chain_edit_suspended: Vec<SuspendedStepEdit>,
+    /// Context for a whole chain currently executing (`App::run_cdp_chain`) — the
+    /// multi-job counterpart to `cdp_pending`, checked by `tick_cdp` before falling through
+    /// to the single-process pendings.
+    cdp_pending_chain_run: Option<CdpChainRun>,
     /// `Some(cursor_seconds)` when "Freeze Snapshot at Cursor" had to auto-extract formants
     /// first (the current document had no `[f]` buffer yet) — the absolute document
     /// cursor time captured at invocation, so `tick_cdp` can chain the freeze onto the fresh
@@ -1603,6 +1627,257 @@ struct CdpPending {
     focus: usize,
     presets: Vec<crate::model::cdp::preset::CdpPreset>,
     preset_selected: Option<usize>,
+}
+
+/// Which slot in an in-progress `ChainEditorState` draft a `Dialog::CdpBrowser`/`CdpParams`
+/// detour (opened from the chain editor to add/edit one step) is filling. Tracked as its own
+/// `App` field rather than a new field on either dialog variant — `Dialog::CdpBrowser`/
+/// `CdpParams` are destructured by full field list at 270+ call sites in this file, so a new
+/// mandatory field on either would mean touching most of them for no behavioral gain; a
+/// side-channel flag the relevant call sites already have `self` access to costs nothing.
+///
+/// Path-based (`Vec<usize>`), not the fixed 2-level "main step index" / "(main, side)"
+/// tuples an earlier version of this feature used — side-chain nesting is unlimited, so a
+/// step's address needs to support any depth (see `model::cdp::chain::{steps_at, step_at}`).
+#[derive(Debug, Clone, PartialEq)]
+enum ChainEditTarget {
+    /// Edit the step already at this exact path.
+    Replace(Vec<usize>),
+    /// Append a new step to the list at this *parent* path (`[]` = the main chain itself).
+    Append(Vec<usize>),
+}
+
+/// One selectable row in the chain editor's flattened step list (`chain_editor_rows`) —
+/// built fresh from `ChainEditorState.chain` every time it's needed rather than stored, so it
+/// never goes stale as steps are added/removed/reordered.
+#[derive(Debug, Clone, PartialEq)]
+enum ChainEditorRow {
+    /// The preset row — Left/Right cycles `ChainEditorState.preset_selected` and loads that
+    /// chain's steps, mirroring `Dialog::CdpParams`'s own `CDP_PRESET_FOCUS` row exactly.
+    Preset,
+    /// The step at this exact path.
+    Step(Vec<usize>),
+    /// Trailing "+ Add step" affordance for the list at this *parent* path (`[]` = the main
+    /// chain's own trailing row; a dual-input step's own path = its side-chain's).
+    AddStep(Vec<usize>),
+    Preview,
+    Run,
+}
+
+/// Everything needed to reconstruct one suspended `Dialog::CdpParams` chain-step-editing
+/// session. Pushed onto `App.cdp_chain_edit_suspended` when "Configure Side-Chain..." opens a
+/// *nested* step's own editor from within this one (see the second-input row's key handling),
+/// and popped — restoring this exact session — once that nested edit commits or is cancelled.
+/// Also reused as-is by `ChainRunFinish::PreviewStepInProgress` to restore the session a
+/// per-step Preview run was started from: "resume the session I suspended" and "resume the
+/// session I ran a preview job from" are the same operation.
+struct SuspendedStepEdit {
+    target: ChainEditTarget,
+    catalog_index: usize,
+    fields: Vec<CdpField>,
+    second_input: Option<CdpSecondInput>,
+    presets: Vec<crate::model::cdp::preset::CdpPreset>,
+}
+
+/// Persistent state for an in-progress "CDP Chain" being built or edited — survives the
+/// temporary detour through `Dialog::CdpBrowser`/`CdpParams` while adding/editing one step,
+/// the same way `cdp_pending` survives a job's async round trip, just for a synchronous
+/// sub-dialog detour instead. `Dialog::CdpChainEditor` is a thin marker; this is where the
+/// actual data lives (`App.cdp_chain_editor`).
+struct ChainEditorState {
+    chain: crate::model::cdp::CdpChain,
+    /// Which open document feeds a dual-input step's second input (or, when that step has a
+    /// configured side-chain, the buffer the side-chain's own first step draws from) — keyed
+    /// by the step's full path, meaningless for a single-input step. Cycled directly from the
+    /// chain editor's own list (Left/Right on a `Step` row) *and* seeded into/read back from
+    /// `CdpParams`'s own `CdpSecondInput` while editing that step
+    /// (`open_cdp_chain_step_params`/`cdp_chain_commit_step`) — both mechanisms read and write
+    /// this same map, so whichever was used most recently is exactly what the other one shows
+    /// next. Never persisted (`CDP-CHAIN-PLAN.md` design decision 4) — reset to empty whenever
+    /// a chain (including a freshly loaded preset) is loaded into the editor.
+    buffer_picks: std::collections::HashMap<Vec<usize>, usize>,
+    selected: ChainEditorRow,
+    error: Option<String>,
+    presets: Vec<crate::model::cdp::CdpChain>,
+    preset_selected: Option<usize>,
+    save_prompt: Option<TextInput>,
+}
+
+impl ChainEditorState {
+    fn fresh() -> Self {
+        Self {
+            chain: crate::model::cdp::CdpChain { name: String::new(), steps: Vec::new() },
+            buffer_picks: std::collections::HashMap::new(),
+            selected: ChainEditorRow::AddStep(Vec::new()),
+            error: None,
+            presets: Self::presets_by_recency(),
+            preset_selected: None,
+            save_prompt: None,
+        }
+    }
+
+    /// Saved chains ordered most-recently-*run* first (falling back to alphabetical for any
+    /// chain never run, or run before it was last renamed) — mirrors `Dialog::CdpBrowser`'s
+    /// own "Recent" ordering, just folded into the one preset list rather than a separate
+    /// group (a chain preset list is expected to be much shorter than the full process
+    /// catalog, so a dedicated group would be overkill here).
+    fn presets_by_recency() -> Vec<crate::model::cdp::CdpChain> {
+        let mut chains = crate::model::cdp::chain_preset::list_chains();
+        let recent = crate::model::cdp::chain_recent::load_recent();
+        chains.sort_by_key(|c| recent.iter().position(|n| n == &c.name).unwrap_or(usize::MAX));
+        chains
+    }
+}
+
+/// Builds the chain editor's flattened, navigable row list from its current draft — see
+/// `ChainEditorRow`'s doc comment for the ordering. Rebuilt fresh whenever needed rather than
+/// cached anywhere, so it never goes stale as steps are added/removed/reordered. Recurses
+/// into a dual-input step's own `side_chain` right after that step's own row, before moving
+/// on to its next sibling — depth is unlimited, so this can't be a fixed-level loop.
+fn chain_editor_rows(state: &ChainEditorState, catalog: &crate::model::cdp::CdpCatalog) -> Vec<ChainEditorRow> {
+    let mut rows = vec![ChainEditorRow::Preset];
+    push_chain_step_rows(&mut rows, &state.chain.steps, &[], catalog);
+    rows.push(ChainEditorRow::AddStep(Vec::new()));
+    rows.push(ChainEditorRow::Preview);
+    rows.push(ChainEditorRow::Run);
+    rows
+}
+
+fn push_chain_step_rows(
+    rows: &mut Vec<ChainEditorRow>,
+    steps: &[crate::model::cdp::ChainStep],
+    parent_path: &[usize],
+    catalog: &crate::model::cdp::CdpCatalog,
+) {
+    for (i, step) in steps.iter().enumerate() {
+        let mut path = parent_path.to_vec();
+        path.push(i);
+        rows.push(ChainEditorRow::Step(path.clone()));
+        if step.is_dual_input(catalog) == Some(true) {
+            push_chain_step_rows(rows, &step.side_chain, &path, catalog);
+            rows.push(ChainEditorRow::AddStep(path));
+        }
+    }
+}
+
+/// After swapping siblings `a`/`b` at depth `depth` (i.e. `parent.len()`, where `parent` is
+/// their shared parent path), remaps every `buffer_picks` key whose path element at that
+/// depth is `a` or `b` to the other — covers the swapped steps themselves *and* everything
+/// nested under either of them (their paths all share that same prefix element).
+fn remap_buffer_picks_after_swap(picks: &mut std::collections::HashMap<Vec<usize>, usize>, depth: usize, a: usize, b: usize) {
+    let old = std::mem::take(picks);
+    for (mut k, v) in old {
+        if k.len() > depth {
+            if k[depth] == a {
+                k[depth] = b;
+            } else if k[depth] == b {
+                k[depth] = a;
+            }
+        }
+        picks.insert(k, v);
+    }
+}
+
+/// After removing sibling index `removed_index` at depth `depth`, drops every `buffer_picks`
+/// entry for that step (and anything nested under it — same "shared prefix element" logic as
+/// `remap_buffer_picks_after_swap`), and shifts every later sibling's index (and its own
+/// nested entries) down by one to match `Vec::remove`'s own shift.
+fn remove_buffer_picks_under(picks: &mut std::collections::HashMap<Vec<usize>, usize>, depth: usize, removed_index: usize) {
+    let old = std::mem::take(picks);
+    for (mut k, v) in old {
+        if k.len() > depth {
+            if k[depth] == removed_index {
+                continue;
+            }
+            if k[depth] > removed_index {
+                k[depth] -= 1;
+            }
+        }
+        picks.insert(k, v);
+    }
+}
+
+/// The path of the first dual-input step (at any depth) that doesn't yet have a
+/// `buffer_picks` entry, if any — `run_cdp_chain`'s pre-flight check before submitting
+/// anything, since a missing pick can't be discovered mid-run (there'd be no buffer to feed
+/// that step at all).
+fn first_missing_buffer_pick(
+    steps: &[crate::model::cdp::ChainStep],
+    parent_path: &[usize],
+    picks: &std::collections::HashMap<Vec<usize>, usize>,
+    catalog: &crate::model::cdp::CdpCatalog,
+) -> Option<Vec<usize>> {
+    for (i, step) in steps.iter().enumerate() {
+        let mut path = parent_path.to_vec();
+        path.push(i);
+        if step.is_dual_input(catalog) == Some(true) && !picks.contains_key(&path) {
+            return Some(path);
+        }
+        if let Some(p) = first_missing_buffer_pick(&step.side_chain, &path, picks, catalog) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// A plain-English message for a `ChainError`, shown inline on the chain editor — mirrors
+/// `cdp_plan_error_message`'s role for a single process's `PlanError`.
+fn chain_error_message(err: &crate::model::cdp::ChainError) -> String {
+    use crate::model::cdp::ChainError;
+    match err {
+        ChainError::EmptyChain => "Add at least one step before running the chain".to_string(),
+        ChainError::UnknownProcess { key } => format!("Process \"{key}\" no longer exists in the catalog"),
+        ChainError::ProcessNotChainable { key } => {
+            format!("\"{key}\" can't be used in a chain (not a plain audio-in/audio-out process)")
+        }
+        ChainError::SideChainOnSingleInputStep { key } => {
+            format!("\"{key}\" only takes one input — it can't have a side-chain")
+        }
+    }
+}
+
+/// One frame of an in-flight chain run's frame stack (`CdpChainRun.frames`) — the step-list
+/// being walked (`parent_path`) and how far through it (`index`), plus the buffer produced so
+/// far by walking it. To run a dual-input step, its own side-chain (if any) must finish
+/// first — modeled as pushing a new frame for that step's `side_chain` and pausing this one;
+/// see `App::submit_current_chain_stage`'s doc comment for the full walk.
+struct ChainRunFrame {
+    parent_path: Vec<usize>,
+    index: usize,
+    running_buffer: Vec<Vec<f32>>,
+    running_rate: u32,
+}
+
+/// What happens once a chain run's frame stack fully empties (its top-level list is
+/// exhausted) — the three different reasons `App::run_cdp_chain`/`App::preview_chain_step`
+/// can start a run, and what "done" means for each.
+enum ChainRunFinish {
+    /// "Run": splice the final result as one `CdpProcessCommand`, one undo step.
+    Splice,
+    /// "Preview" from the chain editor's own Preview row: play the whole chain's result,
+    /// return to `Dialog::CdpChainEditor`.
+    PreviewWholeChain,
+    /// "Preview" pressed while still editing one step's params mid-chain: play the result and
+    /// restore that `CdpParams` session (with a `CdpPreview` attached so the dialog shows the
+    /// audition happened) instead of touching the draft or the chain editor at all.
+    PreviewStepInProgress(SuspendedStepEdit),
+}
+
+/// Context for a whole chain run currently executing, stashed when its first job is submitted
+/// so `App::tick_cdp` knows how to advance the frame stack (or finish) once each
+/// `CdpEvent::Finished` arrives — the multi-job counterpart to `CdpPending`, which only ever
+/// tracks one job.
+struct CdpChainRun {
+    chain: crate::model::cdp::CdpChain,
+    buffer_picks: std::collections::HashMap<Vec<usize>, usize>,
+    frames: Vec<ChainRunFrame>,
+    /// Set right after a child frame (a side-chain) finishes, holding its final result until
+    /// the parent frame's step — the one that side-chain feeds — actually runs.
+    pending_secondary: Option<Vec<Vec<f32>>>,
+    /// Only used by `ChainRunFinish::Splice`: where to splice the final result.
+    doc_index: usize,
+    splice_range: (usize, usize),
+    finish: ChainRunFinish,
 }
 
 impl App {
@@ -1741,6 +2016,10 @@ impl App {
             cdp_pending_formant_extraction: None,
             cdp_pending_snapshot_freeze: None,
             freeze_at_cursor_after_extract: None,
+            cdp_chain_editor: None,
+            cdp_chain_edit_target: None,
+            cdp_chain_edit_suspended: Vec::new(),
+            cdp_pending_chain_run: None,
         }
     }
 
@@ -2876,6 +3155,9 @@ impl App {
             // `CurveEditorState.editing` instead.
             Dialog::CurveEditor(_) => None,
             Dialog::FormantInfo { .. } => None,
+            // The chain editor's own save-prompt lives on `App.cdp_chain_editor`, not on
+            // this marker variant — see `Dialog::CdpChainEditor`'s doc comment.
+            Dialog::CdpChainEditor => self.cdp_chain_editor.as_mut().and_then(|s| s.save_prompt.as_mut()),
         }
     }
 
@@ -2944,6 +3226,10 @@ impl App {
         }
         if let Some(Dialog::CurveEditor(_)) = &self.dialog {
             self.handle_curve_editor_key(key);
+            return;
+        }
+        if let Some(Dialog::CdpChainEditor) = &self.dialog {
+            self.handle_cdp_chain_editor_key(key);
             return;
         }
         if let Some(Dialog::CdpParams { envelope: Some(CdpEnvelopeEdit { curve_picker: Some(_), .. }), .. }) = &self.dialog {
@@ -3145,7 +3431,17 @@ impl App {
                         None => false,
                     };
                     if !opened {
-                        self.cdp_run(purpose);
+                        // Reused for chain-step editing (`ChainEditTarget`): Apply commits
+                        // this step's values into the chain draft and returns to the chain
+                        // editor; Preview actually runs the upstream (already-committed)
+                        // steps plus this step's in-progress values and auditions the real
+                        // result, restoring this same `CdpParams` session afterward — see
+                        // `preview_chain_step`.
+                        match (self.cdp_chain_edit_target.is_some(), purpose) {
+                            (true, crate::cdp::JobPurpose::Apply) => self.cdp_chain_commit_step(),
+                            (true, crate::cdp::JobPurpose::Preview) => self.preview_chain_step(),
+                            (false, purpose) => self.cdp_run(purpose),
+                        }
                     }
                 }
                 Some(d @ Dialog::CdpRunning { .. }) => {
@@ -3160,6 +3456,8 @@ impl App {
                 // whenever `self.dialog` is `Some(Dialog::CurveEditor(_))`, via
                 // `handle_curve_editor_key` — required only for match exhaustiveness.
                 Some(Dialog::CurveEditor(_)) => {}
+                // Same reasoning, for `handle_cdp_chain_editor_key`'s own early interception.
+                Some(Dialog::CdpChainEditor) => {}
                 None => {}
             },
             KeyCode::Esc => {
@@ -3447,6 +3745,20 @@ impl App {
                 if !self.delete_selected_cdp_preset() && self.dialog_accepts('d') {
                     if let Some(input) = self.dialog_input() {
                         input.insert('d');
+                    }
+                    self.refresh_cdp_browser_filter();
+                }
+            }
+            // 'x' on the second-input row, while chain-editing a dual-input step: suspends
+            // this `CdpParams` session and opens the browser to append a step to this step's
+            // own side-chain — see `configure_chain_side_chain`. A no-op (falls through to
+            // typing 'x') everywhere else, same "reject and fall through" shape as 's'/'d'.
+            KeyCode::Char('x')
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if !self.configure_chain_side_chain() && self.dialog_accepts('x') {
+                    if let Some(input) = self.dialog_input() {
+                        input.insert('x');
                     }
                     self.refresh_cdp_browser_filter();
                 }
@@ -3797,6 +4109,476 @@ impl App {
         }
     }
 
+    /// Entry point for `Action::CdpChain` (Ctrl+H / CDP menu) — same validate-first shortcut
+    /// as `open_cdp_entry`, opening the chain editor on a fresh draft instead of the plain
+    /// process browser once `cdp_dir` checks out.
+    fn open_cdp_chain_entry(&mut self) {
+        let dir = std::path::PathBuf::from(&self.config.cdp_dir);
+        if self.config.cdp_dir.is_empty() || crate::cdp::validate_cdp_dir(&dir).is_err() {
+            self.dialog = Some(Dialog::CdpSetup {
+                input: TextInput::new(self.config.cdp_dir.clone()),
+                error: None,
+            });
+        } else {
+            self.cdp_chain_editor = Some(ChainEditorState::fresh());
+            self.dialog = Some(Dialog::CdpChainEditor);
+        }
+    }
+
+    /// Every key while `Dialog::CdpChainEditor` is showing — intercepted early in
+    /// `handle_dialog_key` (mirroring `handle_curve_editor_key`'s own early interception),
+    /// so this has full control rather than falling through the generic Enter/Esc dispatch.
+    fn handle_cdp_chain_editor_key(&mut self, key: KeyEvent) {
+        if self.cdp_chain_editor.as_ref().is_some_and(|s| s.save_prompt.is_some()) {
+            self.handle_cdp_chain_save_prompt_key(key);
+            return;
+        }
+        let Some(rows) = self.cdp_chain_editor.as_ref().map(|s| chain_editor_rows(s, &self.cdp_catalog)) else {
+            return;
+        };
+        let Some(selected) = self.cdp_chain_editor.as_ref().map(|s| s.selected.clone()) else { return };
+        let pos = rows.iter().position(|r| *r == selected).unwrap_or(0);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        match key.code {
+            KeyCode::Esc => {
+                self.cdp_chain_editor = None;
+                self.dialog = None;
+            }
+            KeyCode::Up if shift => self.reorder_chain_step(-1),
+            KeyCode::Down if shift => self.reorder_chain_step(1),
+            KeyCode::Up => {
+                if let Some(state) = self.cdp_chain_editor.as_mut() {
+                    state.selected = rows[pos.saturating_sub(1)].clone();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(state) = self.cdp_chain_editor.as_mut() {
+                    state.selected = rows[(pos + 1).min(rows.len().saturating_sub(1))].clone();
+                }
+            }
+            KeyCode::Left => self.cycle_chain_row(&selected, -1),
+            KeyCode::Right => self.cycle_chain_row(&selected, 1),
+            KeyCode::Enter => self.activate_chain_editor_row(),
+            KeyCode::Char('d') => self.delete_chain_editor_row(),
+            KeyCode::Char('s') => self.open_chain_save_prompt(),
+            _ => {}
+        }
+    }
+
+    fn cycle_chain_row(&mut self, row: &ChainEditorRow, dir: i32) {
+        match row {
+            ChainEditorRow::Preset => self.cycle_chain_preset(dir),
+            ChainEditorRow::Step(path) => self.cycle_chain_buffer_pick(path, dir),
+            _ => {}
+        }
+    }
+
+    /// Left/Right on the preset row: cycles `preset_selected` and loads that chain's steps
+    /// wholesale into the draft (name included, so a subsequent Save overwrites the same
+    /// preset by default) — mirrors `Dialog::CdpParams`'s own preset-row convention exactly.
+    /// `buffer_picks` always resets to empty on load (never persisted, see
+    /// `ChainEditorState.buffer_picks`'s doc comment).
+    fn cycle_chain_preset(&mut self, dir: i32) {
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        if state.presets.is_empty() {
+            return;
+        }
+        let len = state.presets.len() as i32;
+        let current = state.preset_selected.map(|i| i as i32).unwrap_or(-1);
+        let next = (current + dir).rem_euclid(len) as usize;
+        state.preset_selected = Some(next);
+        state.chain = state.presets[next].clone();
+        state.buffer_picks = std::collections::HashMap::new();
+        state.selected = ChainEditorRow::Preset;
+    }
+
+    /// Left/Right on a `Step` row: cycles which open document feeds that step's second input
+    /// (or its side-chain's first step, if one is configured) — a no-op for a single-input
+    /// step. Writes to the same `buffer_picks` map `CdpSecondInput` reads from/writes to, so
+    /// this and the picker inside `CdpParams` always agree (see
+    /// `ChainEditorState.buffer_picks`'s doc comment).
+    fn cycle_chain_buffer_pick(&mut self, path: &[usize], dir: i32) {
+        let doc_count = self.documents.len();
+        if doc_count == 0 {
+            return;
+        }
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let Some(step) = crate::model::cdp::step_at(&state.chain, path) else { return };
+        if step.is_dual_input(&self.cdp_catalog) != Some(true) {
+            return;
+        }
+        let current = state.buffer_picks.get(path).map(|&i| i as i32).unwrap_or(-1);
+        let next = (current + dir).rem_euclid(doc_count as i32) as usize;
+        state.buffer_picks.insert(path.to_vec(), next);
+    }
+
+    /// Reorders the currently-selected step by `delta` (±1), swapping it with its sibling
+    /// (same parent path) — a no-op past either end, or when a trailing/Preset/Preview/Run
+    /// row is selected. Remaps `buffer_picks` for the swapped step *and* everything nested
+    /// under it (`remap_buffer_picks_after_swap`), since their paths' index at this depth
+    /// changes along with the swap.
+    fn reorder_chain_step(&mut self, delta: i32) {
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let ChainEditorRow::Step(path) = &state.selected else { return };
+        let path = path.clone();
+        let Some((&i, parent)) = path.split_last() else { return };
+        let new_i = i as i32 + delta;
+        let Some(siblings) = crate::model::cdp::steps_at_mut(&mut state.chain, parent) else { return };
+        if new_i < 0 || new_i as usize >= siblings.len() {
+            return;
+        }
+        let new_i = new_i as usize;
+        siblings.swap(i, new_i);
+        remap_buffer_picks_after_swap(&mut state.buffer_picks, parent.len(), i, new_i);
+        let mut new_path = parent.to_vec();
+        new_path.push(new_i);
+        state.selected = ChainEditorRow::Step(new_path);
+    }
+
+    /// Enter on whichever row is currently selected — dispatches to the right "open a
+    /// picker/editor" or "run the chain" action per `ChainEditorRow` variant.
+    fn activate_chain_editor_row(&mut self) {
+        let Some(state) = self.cdp_chain_editor.as_ref() else { return };
+        match state.selected.clone() {
+            ChainEditorRow::Preset => {}
+            ChainEditorRow::Step(path) => self.open_cdp_chain_step_target(ChainEditTarget::Replace(path)),
+            ChainEditorRow::AddStep(parent_path) => {
+                self.open_cdp_chain_step_target(ChainEditTarget::Append(parent_path))
+            }
+            ChainEditorRow::Preview => self.run_cdp_chain(ChainRunFinish::PreviewWholeChain),
+            ChainEditorRow::Run => self.run_cdp_chain(ChainRunFinish::Splice),
+        }
+    }
+
+    /// 'd' on whichever row is currently selected: removes a step (and everything nested
+    /// under it, if it had a side-chain) or the highlighted preset from disk — a no-op on the
+    /// trailing add/Preview/Run rows. Remaps `buffer_picks` for the remaining siblings
+    /// (`remove_buffer_picks_under`), since removing index `i` shifts every later sibling's
+    /// index (and everything nested under *them*) down by one.
+    fn delete_chain_editor_row(&mut self) {
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        match state.selected.clone() {
+            ChainEditorRow::Preset => {
+                if let Some(i) = state.preset_selected {
+                    if let Some(preset) = state.presets.get(i).cloned() {
+                        crate::model::cdp::chain_preset::delete_chain(&preset.name);
+                        state.presets = ChainEditorState::presets_by_recency();
+                        state.preset_selected = None;
+                    }
+                }
+            }
+            ChainEditorRow::Step(path) => {
+                let Some((&i, parent)) = path.split_last() else { return };
+                if let Some(siblings) = crate::model::cdp::steps_at_mut(&mut state.chain, parent) {
+                    if i < siblings.len() {
+                        siblings.remove(i);
+                        remove_buffer_picks_under(&mut state.buffer_picks, parent.len(), i);
+                        state.selected = if i > 0 {
+                            let mut prev = parent.to_vec();
+                            prev.push(i - 1);
+                            ChainEditorRow::Step(prev)
+                        } else {
+                            ChainEditorRow::AddStep(parent.to_vec())
+                        };
+                    }
+                }
+            }
+            ChainEditorRow::AddStep(_) | ChainEditorRow::Preview | ChainEditorRow::Run => {}
+        }
+    }
+
+    /// Routes to the right process picker/editor for `target`: replacing an existing step
+    /// jumps straight to `CdpParams`, prefilled with that step's saved values; appending
+    /// (at any depth) opens the browser (filtered to chainable processes — see
+    /// `cdp_filter_entries`'s chain-mode check) to pick a process first.
+    fn open_cdp_chain_step_target(&mut self, target: ChainEditTarget) {
+        let existing = match &target {
+            ChainEditTarget::Replace(path) => {
+                self.cdp_chain_editor.as_ref().and_then(|s| crate::model::cdp::step_at(&s.chain, path)).cloned()
+            }
+            ChainEditTarget::Append(_) => None,
+        };
+        match existing {
+            Some(step) => self.open_cdp_chain_step_params(&step, target),
+            None => {
+                self.cdp_chain_edit_target = Some(target);
+                self.open_cdp_browser();
+            }
+        }
+    }
+
+    /// Opens `Dialog::CdpParams` prefilled from `step`'s saved values (rather than fresh
+    /// defaults, unlike the normal `open_cdp_params`) — used when replacing an existing
+    /// chain step. Also seeds `second_input.selected` from `buffer_picks[path]` when
+    /// replacing a dual-input step that already has a pick — without this, reopening a step
+    /// to tweak an unrelated param would silently show (and, on commit, overwrite) the wrong
+    /// buffer, which is what made the picker feel "inert" before this fix. Falls back to
+    /// showing an inline error on the chain editor if `step`'s process no longer exists in
+    /// the catalog (a saved chain surviving a catalog change).
+    fn open_cdp_chain_step_params(&mut self, step: &crate::model::cdp::ChainStep, target: ChainEditTarget) {
+        let Some(catalog_index) = self.cdp_catalog.processes.iter().position(|p| p.key == step.process_key) else {
+            if let Some(state) = self.cdp_chain_editor.as_mut() {
+                state.error = Some(format!("Process \"{}\" no longer exists in the catalog", step.process_key));
+            }
+            return;
+        };
+        let (mut fields, mut second_input) = self.cdp_fields_for(catalog_index);
+        let def = &self.cdp_catalog.processes[catalog_index];
+        if step.values.len() == fields.len() {
+            fields = def.params.iter().zip(&step.values).map(|(p, v)| CdpField::from_value(p, v)).collect();
+        }
+        if let ChainEditTarget::Replace(path) = &target {
+            if let Some(picked_doc) = self.cdp_chain_editor.as_ref().and_then(|s| s.buffer_picks.get(path)).copied() {
+                if let Some(second) = second_input.as_mut() {
+                    if let Some(pos) = second.doc_indices.iter().position(|&i| i == picked_doc) {
+                        second.selected = pos;
+                    }
+                }
+            }
+        }
+        self.cdp_chain_edit_target = Some(target);
+        let presets = crate::model::cdp::preset::load_presets(&def.key, def.params.len());
+        self.dialog = Some(Dialog::CdpParams {
+            catalog_index,
+            fields,
+            second_input,
+            focus: CDP_PRESET_FOCUS,
+            error: None,
+            preview: None,
+            envelope: None,
+            list_edit: None,
+            table_edit: None,
+            marker_time_list_edit: None,
+            hilite_band_edit: None,
+            formant_picker: None,
+            presets,
+            preset_selected: None,
+            save_prompt: None,
+            scroll: 0,
+        });
+    }
+
+    /// Commits the currently-open `CdpParams` dialog's field values into the chain draft
+    /// slot named by `cdp_chain_edit_target` — what Apply does while a step is being
+    /// configured for a chain (see the redirect at the Enter handler's `cdp_run` call site).
+    /// Also captures `second_input`'s buffer pick into `buffer_picks` at this step's path, so
+    /// the chain editor's own Left/Right cycling sees it next time (and vice versa — see
+    /// `open_cdp_chain_step_params`'s seeding). Once committed, resumes whatever this session
+    /// was nested under: a suspended parent step's own `CdpParams` (`cdp_chain_edit_suspended`,
+    /// popped one level — "Configure Side-Chain..." was used to reach this session) if one
+    /// exists, otherwise the top-level `Dialog::CdpChainEditor`.
+    fn cdp_chain_commit_step(&mut self) {
+        let Some(target) = self.cdp_chain_edit_target.take() else { return };
+        let Some(Dialog::CdpParams { catalog_index, fields, second_input, .. }) = self.dialog.take() else {
+            return;
+        };
+        let Some(def) = self.cdp_catalog.processes.get(catalog_index).cloned() else {
+            self.resume_after_chain_step_edit();
+            return;
+        };
+        if let Some(bad) = Self::cdp_validate_fields(&def, &fields) {
+            self.cdp_chain_edit_target = Some(target);
+            self.dialog = Some(Dialog::CdpParams {
+                catalog_index,
+                fields,
+                second_input,
+                focus: bad + 1,
+                error: Some("value out of range".into()),
+                preview: None,
+                envelope: None,
+                list_edit: None,
+                table_edit: None,
+                marker_time_list_edit: None,
+                hilite_band_edit: None,
+                formant_picker: None,
+                presets: Vec::new(),
+                preset_selected: None,
+                save_prompt: None,
+                scroll: 0,
+            });
+            return;
+        }
+
+        let values: Vec<_> = fields.iter().map(CdpField::to_value).collect();
+        let existing_side_chain = match &target {
+            ChainEditTarget::Replace(path) => self
+                .cdp_chain_editor
+                .as_ref()
+                .and_then(|s| crate::model::cdp::step_at(&s.chain, path))
+                .map(|s| s.side_chain.clone())
+                .unwrap_or_default(),
+            ChainEditTarget::Append(_) => Vec::new(),
+        };
+        let new_step =
+            crate::model::cdp::ChainStep { process_key: def.key.clone(), values, side_chain: existing_side_chain };
+        let doc_pick = second_input.as_ref().and_then(CdpSecondInput::selected_doc_index);
+
+        let Some(state) = self.cdp_chain_editor.as_mut() else {
+            self.dialog = None;
+            return;
+        };
+        let committed_path = match &target {
+            ChainEditTarget::Append(parent_path) => {
+                let Some(siblings) = crate::model::cdp::steps_at_mut(&mut state.chain, parent_path) else {
+                    self.dialog = None;
+                    return;
+                };
+                siblings.push(new_step);
+                let mut path = parent_path.clone();
+                path.push(siblings.len() - 1);
+                path
+            }
+            ChainEditTarget::Replace(path) => {
+                if let Some((&i, parent)) = path.split_last() {
+                    if let Some(siblings) = crate::model::cdp::steps_at_mut(&mut state.chain, parent) {
+                        if let Some(slot) = siblings.get_mut(i) {
+                            *slot = new_step;
+                        }
+                    }
+                }
+                path.clone()
+            }
+        };
+        if let Some(pick) = doc_pick {
+            state.buffer_picks.insert(committed_path.clone(), pick);
+        }
+        state.selected = ChainEditorRow::Step(committed_path);
+        state.error = None;
+        self.resume_after_chain_step_edit();
+    }
+
+    /// After a chain step's `CdpParams` session ends (committed or cancelled): resumes the
+    /// parent session it was nested under, if any (`cdp_chain_edit_suspended`, popped one
+    /// level), otherwise returns to the top-level `Dialog::CdpChainEditor`.
+    fn resume_after_chain_step_edit(&mut self) {
+        let Some(parent) = self.cdp_chain_edit_suspended.pop() else {
+            self.dialog = Some(Dialog::CdpChainEditor);
+            return;
+        };
+        self.cdp_chain_edit_target = Some(parent.target);
+        self.dialog = Some(Dialog::CdpParams {
+            catalog_index: parent.catalog_index,
+            fields: parent.fields,
+            second_input: parent.second_input,
+            focus: CDP_PRESET_FOCUS,
+            error: None,
+            preview: None,
+            envelope: None,
+            list_edit: None,
+            table_edit: None,
+            marker_time_list_edit: None,
+            hilite_band_edit: None,
+            formant_picker: None,
+            presets: parent.presets,
+            preset_selected: None,
+            save_prompt: None,
+            scroll: 0,
+        });
+    }
+
+    /// 'x' on the second-input row of a dual-input step being chain-edited: suspends this
+    /// `CdpParams` session (`cdp_chain_edit_suspended`) and opens the browser to append a
+    /// step to this step's own `side_chain` — resumed by `resume_after_chain_step_edit` once
+    /// that nested edit commits or is cancelled. Returns `false` (falls through to typing
+    /// 'x') when there's no dual-input step being chain-edited at all, matching
+    /// `open_cdp_preset_save_prompt`'s "reject, let the key fall through" convention.
+    fn configure_chain_side_chain(&mut self) -> bool {
+        let Some(ChainEditTarget::Replace(path)) = self.cdp_chain_edit_target.clone() else { return false };
+        let Some(Dialog::CdpParams { catalog_index, fields, second_input, focus, presets, .. }) = self.dialog.as_ref()
+        else {
+            return false;
+        };
+        if *focus != cdp_params_focus_second_input(fields.len()) {
+            return false;
+        }
+        let Some(def) = self.cdp_catalog.processes.get(*catalog_index) else { return false };
+        if !matches!(def.input, crate::model::cdp::IoKind::DualWav | crate::model::cdp::IoKind::DualAna) {
+            return false;
+        }
+        self.cdp_chain_edit_suspended.push(SuspendedStepEdit {
+            target: ChainEditTarget::Replace(path.clone()),
+            catalog_index: *catalog_index,
+            fields: fields.clone(),
+            second_input: second_input.clone(),
+            presets: presets.clone(),
+        });
+        self.cdp_chain_edit_target = Some(ChainEditTarget::Append(path));
+        self.open_cdp_browser();
+        true
+    }
+
+    /// 's': opens the chain-name save prompt, prefilled with the draft's current name (empty
+    /// for a never-yet-named chain) — mirrors `open_cdp_preset_save_prompt`'s convention.
+    fn open_chain_save_prompt(&mut self) {
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        if state.chain.steps.is_empty() {
+            state.error = Some("Add at least one step before saving.".into());
+            return;
+        }
+        state.save_prompt = Some(TextInput::new(state.chain.name.clone()));
+    }
+
+    /// Key handling while the chain editor's save prompt is open — Enter saves (empty name
+    /// cancels without saving), Esc cancels outright. Mirrors
+    /// `handle_cdp_preset_save_prompt_key`'s shape.
+    fn handle_cdp_chain_save_prompt_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(state) = self.cdp_chain_editor.as_mut() {
+                    state.save_prompt = None;
+                }
+            }
+            KeyCode::Enter => {
+                let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+                let Some(prompt) = state.save_prompt.take() else { return };
+                let name = prompt.value().trim().to_string();
+                if name.is_empty() {
+                    return;
+                }
+                state.chain.name = name;
+                crate::model::cdp::chain_preset::save_chain(&state.chain);
+                state.presets = ChainEditorState::presets_by_recency();
+                state.preset_selected = state.presets.iter().position(|c| c.name == state.chain.name);
+            }
+            KeyCode::Backspace => {
+                if let Some(input) = self.cdp_chain_editor.as_mut().and_then(|s| s.save_prompt.as_mut()) {
+                    input.backspace();
+                }
+            }
+            KeyCode::Delete => {
+                if let Some(input) = self.cdp_chain_editor.as_mut().and_then(|s| s.save_prompt.as_mut()) {
+                    input.delete();
+                }
+            }
+            KeyCode::Left => {
+                if let Some(input) = self.cdp_chain_editor.as_mut().and_then(|s| s.save_prompt.as_mut()) {
+                    input.left();
+                }
+            }
+            KeyCode::Right => {
+                if let Some(input) = self.cdp_chain_editor.as_mut().and_then(|s| s.save_prompt.as_mut()) {
+                    input.right();
+                }
+            }
+            KeyCode::Home => {
+                if let Some(input) = self.cdp_chain_editor.as_mut().and_then(|s| s.save_prompt.as_mut()) {
+                    input.home();
+                }
+            }
+            KeyCode::End => {
+                if let Some(input) = self.cdp_chain_editor.as_mut().and_then(|s| s.save_prompt.as_mut()) {
+                    input.end();
+                }
+            }
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                if let Some(input) = self.cdp_chain_editor.as_mut().and_then(|s| s.save_prompt.as_mut()) {
+                    input.insert(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Re-validates the path typed into `Dialog::CdpSetup`. On success, persists it and
     /// proceeds straight to the browser; on failure, reopens the setup prompt with the
     /// reason shown inline.
@@ -3841,7 +4623,18 @@ impl App {
                 || p.key.to_lowercase().contains(&query)
                 || p.title.to_lowercase().contains(&query)
         };
-        let is_eligible = |p: &crate::model::cdp::ProcessDef| !is_curve_only_process(p) && matches_query(p);
+        // While picking a step for the chain editor (`cdp_chain_edit_target.is_some()`),
+        // only Wav/Ana in/out processes are offered — synthesis/curve/glob-output processes
+        // don't compose into "feeds the next step's audio input" (CDP-CHAIN-PLAN.md design
+        // decision 3). `is_curve_only_process` below already excludes curve processes from
+        // the plain browser too, so this only adds the None/WavGlob exclusion on top.
+        let chain_mode = self.cdp_chain_edit_target.is_some();
+        let is_chainable = |p: &crate::model::cdp::ProcessDef| {
+            use crate::model::cdp::IoKind;
+            !chain_mode || (matches!(p.output, IoKind::Wav | IoKind::Ana) && p.input != IoKind::None)
+        };
+        let is_eligible =
+            |p: &crate::model::cdp::ProcessDef| !is_curve_only_process(p) && matches_query(p) && is_chainable(p);
         if group == CDP_GROUP_RECENT {
             return recent
                 .iter()
@@ -5819,6 +6612,441 @@ impl App {
         }
     }
 
+    /// Starts running (or previewing) the *whole* chain currently in `App.cdp_chain_editor`
+    /// end to end: validates it, resolves the starting buffer from the active document's
+    /// selection, and hands off to `start_chain_run`. `finish` decides what happens once
+    /// every step (main and any side-chains, at any depth) has run —
+    /// `ChainRunFinish::Splice` for "Run", `PreviewWholeChain` for "Preview" on the chain
+    /// editor's own row.
+    fn run_cdp_chain(&mut self, finish: ChainRunFinish) {
+        let Some(state) = self.cdp_chain_editor.as_ref() else { return };
+        if let Err(err) = state.chain.validate(&self.cdp_catalog) {
+            let message = chain_error_message(&err);
+            if let Some(state) = self.cdp_chain_editor.as_mut() {
+                state.error = Some(message);
+            }
+            return;
+        }
+        if let Some(path) =
+            first_missing_buffer_pick(&state.chain.steps, &[], &state.buffer_picks, &self.cdp_catalog)
+        {
+            if let Some(state) = self.cdp_chain_editor.as_mut() {
+                state.error = Some(format!(
+                    "Step at {} needs a second-input buffer picked (Left/Right) before running",
+                    path.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(".")
+                ));
+            }
+            return;
+        }
+
+        let idx = self.active_document;
+        let Some(doc) = self.documents.get(idx) else { return };
+        let Some(range) = self.operation_range(idx, self.snap_to_zero) else {
+            if let Some(state) = self.cdp_chain_editor.as_mut() {
+                state.error = Some("No audio selected to run the chain on".into());
+            }
+            return;
+        };
+        let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
+        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+            self.dialog = Some(Dialog::CdpSetup {
+                input: TextInput::new(self.config.cdp_dir.clone()),
+                error: Some("CDP directory no longer valid".into()),
+            });
+            return;
+        }
+
+        let chain = state.chain.clone();
+        let buffer_picks = state.buffer_picks.clone();
+        let main_buffer = doc.slice(range.0..range.1);
+        let main_sample_rate = doc.sample_rate;
+        self.start_chain_run(chain, buffer_picks, main_buffer, main_sample_rate, idx, range, finish);
+    }
+
+    /// Preview while still editing one step's params mid-chain (Preview row of a
+    /// `CdpParams` session opened for chain-building): audits the real, already-committed
+    /// steps *before* this one in its own list (main chain, or a side-chain at any depth),
+    /// followed by this step's *in-progress* (not-yet-committed) values, then plays the
+    /// result and restores this exact `CdpParams` session — see `ChainRunFinish::
+    /// PreviewStepInProgress`. No caching (`CDP-CHAIN-PLAN.md` design decision 5, confirmed
+    /// again when adding this): every Preview press reruns the upstream steps fresh.
+    fn preview_chain_step(&mut self) {
+        let Some(target) = self.cdp_chain_edit_target.clone() else { return };
+        let Some(Dialog::CdpParams { catalog_index, fields, second_input, presets, .. }) = self.dialog.take() else {
+            return;
+        };
+        let Some(def) = self.cdp_catalog.processes.get(catalog_index).cloned() else {
+            self.dialog = Some(Dialog::CdpChainEditor);
+            return;
+        };
+        if let Some(bad) = Self::cdp_validate_fields(&def, &fields) {
+            self.cdp_chain_edit_target = Some(target);
+            self.dialog = Some(Dialog::CdpParams {
+                catalog_index,
+                fields,
+                second_input,
+                focus: bad + 1,
+                error: Some("value out of range".into()),
+                preview: None,
+                envelope: None,
+                list_edit: None,
+                table_edit: None,
+                marker_time_list_edit: None,
+                hilite_band_edit: None,
+                formant_picker: None,
+                presets,
+                preset_selected: None,
+                save_prompt: None,
+                scroll: 0,
+            });
+            return;
+        }
+
+        let (parent_path, upstream_count) = {
+            let Some(state) = self.cdp_chain_editor.as_ref() else { return };
+            match &target {
+                ChainEditTarget::Replace(path) => {
+                    let (&last, parent) = path.split_last().expect("Replace target path is never empty");
+                    (parent.to_vec(), last)
+                }
+                ChainEditTarget::Append(parent) => {
+                    let count = crate::model::cdp::steps_at(&state.chain, parent).map(|s| s.len()).unwrap_or(0);
+                    (parent.clone(), count)
+                }
+            }
+        };
+
+        let resume = SuspendedStepEdit { target, catalog_index, fields, second_input, presets };
+
+        let Some(state) = self.cdp_chain_editor.as_ref() else { return };
+        let Some(upstream) = crate::model::cdp::steps_at(&state.chain, &parent_path) else { return };
+        let Some(process_key) = self.cdp_catalog.processes.get(resume.catalog_index).map(|d| d.key.clone()) else {
+            return;
+        };
+        let mut temp_steps: Vec<_> = upstream.iter().take(upstream_count).cloned().collect();
+        let values: Vec<_> = resume.fields.iter().map(CdpField::to_value).collect();
+        temp_steps.push(crate::model::cdp::ChainStep { process_key, values, side_chain: Vec::new() });
+        let temp_chain = crate::model::cdp::CdpChain { name: state.chain.name.clone(), steps: temp_steps };
+
+        let (initial_buffer, initial_rate, doc_index, splice_range) = if parent_path.is_empty() {
+            let idx = self.active_document;
+            let Some(doc) = self.documents.get(idx) else { return };
+            let Some(range) = self.operation_range(idx, self.snap_to_zero) else {
+                self.resume_step_edit_with_error(resume, "No audio selected to preview against".into());
+                return;
+            };
+            (doc.slice(range.0..range.1), doc.sample_rate, idx, range)
+        } else {
+            let Some(doc_i) = state.buffer_picks.get(&parent_path).copied() else {
+                self.resume_step_edit_with_error(resume, "Pick a second-input buffer first (Left/Right)".into());
+                return;
+            };
+            let Some(doc) = self.documents.get(doc_i) else { return };
+            (doc.channels.clone(), doc.sample_rate, doc_i, (0, doc.len_samples()))
+        };
+
+        let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
+        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+            self.resume_step_edit_with_error(resume, "CDP directory no longer valid".into());
+            return;
+        }
+
+        let buffer_picks = state.buffer_picks.clone();
+        self.start_chain_run(
+            temp_chain,
+            buffer_picks,
+            initial_buffer,
+            initial_rate,
+            doc_index,
+            splice_range,
+            ChainRunFinish::PreviewStepInProgress(resume),
+        );
+    }
+
+    /// Restores a suspended chain-step `CdpParams` session with an inline error — used when
+    /// `preview_chain_step` can't actually start a run (no selection, no buffer picked yet).
+    fn resume_step_edit_with_error(&mut self, resume: SuspendedStepEdit, error: String) {
+        self.cdp_chain_edit_target = Some(resume.target);
+        self.dialog = Some(Dialog::CdpParams {
+            catalog_index: resume.catalog_index,
+            fields: resume.fields,
+            second_input: resume.second_input,
+            focus: CDP_PRESET_FOCUS,
+            error: Some(error),
+            preview: None,
+            envelope: None,
+            list_edit: None,
+            table_edit: None,
+            marker_time_list_edit: None,
+            hilite_band_edit: None,
+            formant_picker: None,
+            presets: resume.presets,
+            preset_selected: None,
+            save_prompt: None,
+            scroll: 0,
+        });
+    }
+
+    /// Common entry point for both `run_cdp_chain` and `preview_chain_step`: seeds a single
+    /// top-level frame and submits its first stage. `doc_index`/`splice_range` are only
+    /// meaningful for `ChainRunFinish::Splice`; the other two finishes carry their own
+    /// restore/no-splice data and ignore them.
+    fn start_chain_run(
+        &mut self,
+        chain: crate::model::cdp::CdpChain,
+        buffer_picks: std::collections::HashMap<Vec<usize>, usize>,
+        initial_buffer: Vec<Vec<f32>>,
+        initial_rate: u32,
+        doc_index: usize,
+        splice_range: (usize, usize),
+        finish: ChainRunFinish,
+    ) {
+        if let Some(audio) = self.audio.as_ref() {
+            if audio.is_playing() {
+                audio.pause();
+            }
+        }
+        let first_frame =
+            ChainRunFrame { parent_path: Vec::new(), index: 0, running_buffer: initial_buffer, running_rate: initial_rate };
+        self.cdp_pending_chain_run = Some(CdpChainRun {
+            chain,
+            buffer_picks,
+            frames: vec![first_frame],
+            pending_secondary: None,
+            doc_index,
+            splice_range,
+            finish,
+        });
+        self.submit_current_chain_stage();
+    }
+
+    /// Builds and submits the `cdp::Job` for the top frame's current step. If that step is
+    /// dual-input with its own non-empty `side_chain` that hasn't been computed yet, pushes
+    /// a new frame for that side-chain instead (a post-order walk: a step's side-chain must
+    /// fully finish before the step itself can run) and recurses. Once the top frame's list
+    /// is exhausted, hands off to `finish_current_chain_frame`.
+    fn submit_current_chain_stage(&mut self) {
+        let Some(run) = self.cdp_pending_chain_run.as_ref() else { return };
+        let Some(frame) = run.frames.last() else { return };
+        let parent_path = frame.parent_path.clone();
+        let index = frame.index;
+        let Some(siblings) = crate::model::cdp::steps_at(&run.chain, &parent_path) else { return };
+        let Some(step) = siblings.get(index).cloned() else {
+            self.finish_current_chain_frame();
+            return;
+        };
+        let Some(def) = self.cdp_catalog.processes.iter().find(|p| p.key == step.process_key).cloned() else {
+            self.cdp_pending_chain_run = None;
+            self.dialog = Some(Dialog::CdpOutput {
+                title: "CDP Chain Error".into(),
+                lines: vec![format!("Process \"{}\" no longer exists in the catalog", step.process_key)],
+                scroll: 0,
+            });
+            return;
+        };
+        let is_dual = matches!(def.input, crate::model::cdp::IoKind::DualWav | crate::model::cdp::IoKind::DualAna);
+        let mut this_path = parent_path.clone();
+        this_path.push(index);
+
+        if is_dual && !step.side_chain.is_empty() && run.pending_secondary.is_none() {
+            let Some((buf, rate)) = self.chain_picked_buffer(&this_path) else {
+                self.cdp_pending_chain_run = None;
+                self.dialog = Some(Dialog::CdpOutput {
+                    title: "CDP Chain Error".into(),
+                    lines: vec!["A side-chain's source buffer is no longer available".into()],
+                    scroll: 0,
+                });
+                return;
+            };
+            if let Some(run) = self.cdp_pending_chain_run.as_mut() {
+                run.frames.push(ChainRunFrame { parent_path: this_path, index: 0, running_buffer: buf, running_rate: rate });
+            }
+            self.submit_current_chain_stage();
+            return;
+        }
+
+        let values = step.values.clone();
+        let primary = frame.running_buffer.clone();
+        let primary_rate = frame.running_rate;
+        let secondary: Option<Vec<Vec<f32>>> = if is_dual {
+            if step.side_chain.is_empty() {
+                self.chain_picked_buffer(&this_path).map(|(b, _)| b)
+            } else {
+                run.pending_secondary.clone()
+            }
+        } else {
+            None
+        };
+
+        let mut input_specs = vec![crate::model::cdp::InputSpec {
+            channels: primary.len().max(1),
+            sample_rate: primary_rate,
+            len_samples: primary.first().map(|c| c.len()).unwrap_or(0),
+        }];
+        let mut inputs = vec![primary];
+        if let Some(secondary) = &secondary {
+            input_specs.push(crate::model::cdp::InputSpec {
+                channels: secondary.len().max(1),
+                sample_rate: primary_rate,
+                len_samples: secondary.first().map(|c| c.len()).unwrap_or(0),
+            });
+            inputs.push(secondary.clone());
+        }
+
+        let planned = crate::model::cdp::plan_job(&def, &values, &input_specs, &crate::model::cdp::PvocSettings::default());
+        let planned = match planned {
+            Ok(p) => p,
+            Err(err) => {
+                self.cdp_pending_chain_run = None;
+                self.dialog = Some(Dialog::CdpOutput {
+                    title: "CDP Chain Error".into(),
+                    lines: vec![cdp_plan_error_message(&err)],
+                    scroll: 0,
+                });
+                return;
+            }
+        };
+        if let Some(run) = self.cdp_pending_chain_run.as_mut() {
+            run.pending_secondary = None;
+        }
+
+        let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
+        let job_id = self.cdp_next_job_id;
+        self.cdp_next_job_id += 1;
+        let step_total = planned.steps.len();
+        self.cdp_runner.submit(crate::cdp::Job {
+            id: job_id,
+            cdp_dir,
+            planned,
+            inputs,
+            input_sample_rate: primary_rate,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+        self.dialog = Some(Dialog::CdpRunning {
+            job_id,
+            title: format!("CDP Chain: {}", def.title),
+            step_label: "Starting…".into(),
+            step_index: 0,
+            step_total,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+    }
+
+    /// Called once the top frame's step-list is exhausted (`index` ran past its last
+    /// step): pops that frame. If the stack is now empty, the whole run is done — hands off
+    /// to `finish_chain_run`. Otherwise the popped frame was a side-chain; its final buffer
+    /// becomes `pending_secondary` for the step (in the now-current parent frame) it feeds,
+    /// and `submit_current_chain_stage` runs again to actually invoke that step.
+    fn finish_current_chain_frame(&mut self) {
+        let Some(mut run) = self.cdp_pending_chain_run.take() else { return };
+        let Some(finished_frame) = run.frames.pop() else { return };
+        if run.frames.is_empty() {
+            let CdpChainRun { chain, finish, doc_index, splice_range, .. } = run;
+            self.finish_chain_run(finished_frame, finish, doc_index, splice_range, chain);
+            return;
+        }
+        run.pending_secondary = Some(finished_frame.running_buffer);
+        self.cdp_pending_chain_run = Some(run);
+        self.submit_current_chain_stage();
+    }
+
+    /// The whole chain run has finished: dispatches on `finish` to splice the result (one
+    /// undo step), play it back on the chain editor, or play it back and restore the
+    /// `CdpParams` session a per-step preview was started from.
+    fn finish_chain_run(
+        &mut self,
+        final_frame: ChainRunFrame,
+        finish: ChainRunFinish,
+        doc_index: usize,
+        splice_range: (usize, usize),
+        chain: crate::model::cdp::CdpChain,
+    ) {
+        self.stop_cdp_preview_audio();
+        match finish {
+            ChainRunFinish::Splice => {
+                let doc_rate = self.documents.get(doc_index).map(|d| d.sample_rate);
+                if doc_rate != Some(final_frame.running_rate) {
+                    self.dialog = Some(Dialog::Info {
+                        message: format!(
+                            "Chain output is {} Hz but the document is {} Hz.",
+                            final_frame.running_rate,
+                            doc_rate.unwrap_or(0)
+                        ),
+                    });
+                    return;
+                }
+                let last_category = chain
+                    .steps
+                    .last()
+                    .and_then(|s| self.cdp_catalog.processes.iter().find(|p| p.key == s.process_key))
+                    .map(|d| d.category)
+                    .unwrap_or(crate::model::cdp::Category::Time);
+                let tolerance = crate::commands::cdp::timing_tolerance(
+                    last_category,
+                    crate::model::cdp::PvocSettings::default().points,
+                );
+                let label = format!("CDP Chain: {}", chain.name);
+                self.histories[doc_index].apply(
+                    crate::commands::cdp::cdp_process_command(label, splice_range, final_frame.running_buffer, tolerance),
+                    &mut self.documents[doc_index],
+                );
+                self.viewport = None;
+                self.after_sample_mutation(doc_index);
+                crate::model::cdp::chain_recent::record_used(&chain.name);
+                self.cdp_chain_editor = None;
+                self.dialog = None;
+            }
+            ChainRunFinish::PreviewWholeChain => {
+                self.cdp_preview_audio = AudioEngine::try_new(final_frame.running_buffer, final_frame.running_rate);
+                if let Some(audio) = &self.cdp_preview_audio {
+                    audio.play(0);
+                }
+                self.dialog = Some(Dialog::CdpChainEditor);
+            }
+            ChainRunFinish::PreviewStepInProgress(resume) => {
+                let channels = final_frame.running_buffer;
+                let sample_rate = final_frame.running_rate;
+                self.cdp_preview_audio = AudioEngine::try_new(channels.clone(), sample_rate);
+                if let Some(audio) = &self.cdp_preview_audio {
+                    audio.play(0);
+                }
+                let values = resume.fields.iter().map(CdpField::to_value).collect();
+                let second_input_doc = resume.second_input.as_ref().and_then(CdpSecondInput::selected_doc_index);
+                let formant_selections = formant_field_selections(&resume.fields);
+                self.cdp_chain_edit_target = Some(resume.target);
+                self.dialog = Some(Dialog::CdpParams {
+                    catalog_index: resume.catalog_index,
+                    fields: resume.fields,
+                    second_input: resume.second_input,
+                    focus: CDP_PRESET_FOCUS,
+                    error: None,
+                    preview: Some(CdpPreview { values, range: splice_range, channels, sample_rate, second_input_doc, formant_selections }),
+                    envelope: None,
+                    list_edit: None,
+                    table_edit: None,
+                    marker_time_list_edit: None,
+                    hilite_band_edit: None,
+                    formant_picker: None,
+                    presets: resume.presets,
+                    preset_selected: None,
+                    save_prompt: None,
+                    scroll: 0,
+                });
+            }
+        }
+    }
+
+    /// The document channels/sample-rate `buffer_picks[path]` points at, if any — shared by
+    /// the "use directly as second input" and "side-chain's own first step's input" paths in
+    /// `submit_current_chain_stage`.
+    fn chain_picked_buffer(&self, path: &[usize]) -> Option<(Vec<Vec<f32>>, u32)> {
+        let run = self.cdp_pending_chain_run.as_ref()?;
+        let doc_index = run.buffer_picks.get(path).copied()?;
+        let doc = self.documents.get(doc_index)?;
+        Some((doc.channels.clone(), doc.sample_rate))
+    }
+
     /// "Extract Pitch Curve" (CDP-Ext-Plan.md Phase 4 "hard tier") — runs `pvoc anal` +
     /// `repitch getpitch` on the current selection (`pipeline::plan_extract_pitch_curve`)
     /// and, once the job completes, adds the result as a new `App.curves` entry. Unlike
@@ -6231,6 +7459,30 @@ impl App {
                                 scroll: 0,
                             }),
                         };
+                        continue;
+                    }
+                    if let Some(mut run) = self.cdp_pending_chain_run.take() {
+                        let Ok(output) = result else {
+                            let Err(err) = result else { unreachable!() };
+                            self.dialog = Some(Dialog::CdpOutput {
+                                title: "CDP Chain Error".into(),
+                                lines: cdp_error_lines(&err),
+                                scroll: 0,
+                            });
+                            continue;
+                        };
+                        let result_channels = output.results.into_iter().next().unwrap_or_default();
+                        // The job that just finished was always the *top* frame's current
+                        // step (a dual-input step's side-chain, if it needed one, already
+                        // finished and got folded into `pending_secondary` in an earlier
+                        // trip through this branch — see `submit_current_chain_stage`).
+                        if let Some(frame) = run.frames.last_mut() {
+                            frame.running_buffer = result_channels;
+                            frame.running_rate = output.sample_rate;
+                            frame.index += 1;
+                        }
+                        self.cdp_pending_chain_run = Some(run);
+                        self.submit_current_chain_stage();
                         continue;
                     }
                     // The job-id match was already checked at the top of this `Finished` arm,
@@ -8158,6 +9410,11 @@ impl App {
             return;
         }
 
+        if action == Action::CdpChain {
+            self.open_cdp_chain_entry();
+            return;
+        }
+
         if action == Action::ConfigureCdpDirectory {
             // Unlike `open_cdp_entry` (validate-first, only prompts when broken), this is an
             // explicit "let me view/change this setting" entry point from the Options menu —
@@ -8331,6 +9588,7 @@ impl App {
             | Action::ResetConfig
             | Action::ExportRegions
             | Action::CdpProcess
+            | Action::CdpChain
             | Action::ConfigureCdpDirectory
             | Action::ExtractPitchCurve
             | Action::LoadPitchCurve
@@ -9117,7 +10375,12 @@ impl App {
         let dialog_rects = self
             .dialog
             .as_ref()
-            .map(|d| render_dialog(frame, area, d, &self.cdp_catalog, &self.curve_histories, &self.curves, &self.formant_buffers))
+            .map(|d| {
+                render_dialog(
+                    frame, area, d, &self.cdp_catalog, &self.curve_histories, &self.curves,
+                    &self.formant_buffers, self.cdp_chain_editor.as_ref(), &self.documents,
+                )
+            })
             .unwrap_or_default();
         if !dialog_rects.is_empty() {
             self.dialog_n_interactive = dialog_rects.len().saturating_sub(1);
@@ -9718,6 +10981,8 @@ fn render_dialog(
     curve_histories: &[crate::model::curve_history::CurveHistory],
     curves: &[crate::model::curve::PitchCurve],
     formant_buffers: &[crate::model::formant::FormantBuffer],
+    chain_editor: Option<&ChainEditorState>,
+    documents: &[Document],
 ) -> Vec<Rect> {
     match dialog {
         Dialog::MixToMono { inputs, focused, tanh_clip } => {
@@ -9796,6 +11061,9 @@ fn render_dialog(
         Dialog::FormantInfo { buffer_index } => {
             return render_formant_info_dialog(frame, area, formant_buffers.get(*buffer_index));
         }
+        Dialog::CdpChainEditor => {
+            return render_cdp_chain_editor_dialog(frame, area, chain_editor, catalog, documents);
+        }
         _ => {}
     }
 
@@ -9825,7 +11093,8 @@ fn render_dialog(
         | Dialog::CdpRunning { .. }
         | Dialog::CdpOutput { .. }
         | Dialog::CurveEditor(_)
-        | Dialog::FormantInfo { .. } => {
+        | Dialog::FormantInfo { .. }
+        | Dialog::CdpChainEditor => {
             unreachable!("handled by match arms above")
         }
     };
@@ -12125,6 +13394,146 @@ fn render_cdp_running_dialog(
 }
 
 /// Scrollable viewer for a failed CDP run's captured stdout+stderr.
+/// The "CDP Chain" editor's dialog: a scrollable list of steps (`ChainEditorRow`'s ordering),
+/// each row showing the process title and, for a dual-input main step, which buffer is
+/// currently picked for its second input. Mirrors `render_cdp_output_dialog`'s popup-sizing
+/// convention; a save-prompt in progress replaces the list with a simple name-entry line,
+/// the same way `render_cdp_params_dialog`'s own save prompt takes over that dialog.
+fn render_cdp_chain_editor_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    state: Option<&ChainEditorState>,
+    catalog: &crate::model::cdp::CdpCatalog,
+    documents: &[Document],
+) -> Vec<Rect> {
+    let width = 90u16.min(area.width);
+    let height = 26u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let error_style = Style::default().fg(theme::RED).bg(theme::SURFACE0);
+
+    let block = Block::default()
+        .title("CDP Chain")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let Some(state) = state else {
+        frame.render_widget(Paragraph::new(" No chain loaded."), inner);
+        return Vec::new();
+    };
+
+    if let Some(prompt) = &state.save_prompt {
+        let lines = vec![
+            Line::raw(""),
+            Line::from(vec![Span::styled(" Save chain as: ", label_style), Span::styled(prompt.value(), cursor_style)]),
+            Line::raw(""),
+            Line::from(Span::styled(" Enter:save  Esc:cancel", hint_style)),
+        ];
+        frame.render_widget(Paragraph::new(lines), inner);
+        return Vec::new();
+    }
+
+    let buffer_name = |idx: usize| -> String {
+        match documents.get(idx).and_then(|d| d.path.as_ref()) {
+            Some(p) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "untitled".to_string()),
+            None => format!("_NEW_{:03}", idx + 1),
+        }
+    };
+
+    let rows = chain_editor_rows(state, catalog);
+    let mut lines: Vec<Line> = Vec::new();
+    for row in &rows {
+        let selected = *row == state.selected;
+        let style = if selected { cursor_style } else { base };
+        let text = match row {
+            ChainEditorRow::Preset => {
+                let name =
+                    state.preset_selected.and_then(|i| state.presets.get(i)).map(|c| c.name.as_str()).unwrap_or("(none)");
+                format!(" Preset: {name}  ({} saved)", state.presets.len())
+            }
+            ChainEditorRow::Step(path) => {
+                let indent = "  ".repeat(path.len());
+                let arrow = if path.len() > 1 { "\u{21b3} " } else { "" };
+                let Some(step) = crate::model::cdp::step_at(&state.chain, path) else {
+                    continue;
+                };
+                let title = catalog
+                    .processes
+                    .iter()
+                    .find(|p| p.key == step.process_key)
+                    .map(|d| d.title.as_str())
+                    .unwrap_or(&step.process_key);
+                let index = *path.last().unwrap();
+                if step.is_dual_input(catalog) == Some(true) {
+                    let picked =
+                        state.buffer_picks.get(path).copied().map(buffer_name).unwrap_or_else(|| "(pick a buffer)".to_string());
+                    let via = if step.side_chain.is_empty() { "2nd input" } else { "side-chain from" };
+                    format!("{indent}{arrow}{}. {title}   [{via}: {picked}]", index + 1)
+                } else {
+                    format!("{indent}{arrow}{}. {title}", index + 1)
+                }
+            }
+            ChainEditorRow::AddStep(parent_path) => {
+                let indent = "  ".repeat(parent_path.len() + 1);
+                let label = if parent_path.is_empty() { "Add step" } else { "Add side-chain step" };
+                format!("{indent}+ {label}")
+            }
+            ChainEditorRow::Preview => " \u{25b6} Preview".to_string(),
+            ChainEditorRow::Run => " \u{25b6} Run".to_string(),
+        };
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+
+    let list_height = inner.height.saturating_sub(3) as usize;
+    let list_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: inner.height.saturating_sub(3) };
+    let error_area = Rect { x: inner.x, y: inner.y + list_area.height, width: inner.width, height: 1 };
+    let hints_area = Rect { x: inner.x, y: inner.y + list_area.height + 2, width: inner.width, height: 1 };
+
+    // Scroll so the selected row always stays on screen, same "clamp to keep selection
+    // visible" idea as every other scrollable list dialog here.
+    let selected_pos = rows.iter().position(|r| *r == state.selected).unwrap_or(0);
+    let scroll_top = selected_pos.saturating_sub(list_height.saturating_sub(1));
+    let visible: Vec<Line> = lines.into_iter().skip(scroll_top).take(list_height).collect();
+    frame.render_widget(Paragraph::new(visible), list_area);
+
+    if let Some(error) = &state.error {
+        frame.render_widget(Paragraph::new(Line::from(Span::styled(format!(" {error}"), error_style))), error_area);
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" \u{2191}\u{2193}", hint_style),
+            Span::styled(":move  ", label_style),
+            Span::styled("\u{2190}\u{2192}", hint_style),
+            Span::styled(":pick  ", label_style),
+            Span::styled("Shift+\u{2191}\u{2193}", hint_style),
+            Span::styled(":reorder  ", label_style),
+            Span::styled("Enter", hint_style),
+            Span::styled(":open/run  ", label_style),
+            Span::styled("d", hint_style),
+            Span::styled(":delete  ", label_style),
+            Span::styled("s", hint_style),
+            Span::styled(":save  ", label_style),
+            Span::styled("Esc", hint_style),
+            Span::styled(":close", label_style),
+        ])),
+        hints_area,
+    );
+    Vec::new()
+}
+
 fn render_cdp_output_dialog(frame: &mut Frame, area: Rect, title: &str, lines_text: &[String], scroll: usize) -> Vec<Rect> {
     let width = 70u16.min(area.width);
     let height = 20u16.min(area.height);
@@ -16278,6 +17687,120 @@ mod tests {
         assert!(app.cdp_pending_formant_extraction.is_some());
     }
 
+    /// End-to-end against the real CDP binaries (same "bundled `cdp/` dir satisfies
+    /// `validate_cdp_dir`" precedent as the formant tests above): a real 2-step chain
+    /// ("Invert Polarity" run twice, `phase_phase_1` — chosen because it takes no params at
+    /// all, keeping this test's only real variable the chain *orchestration* itself, not any
+    /// particular process's argv shape) drives `run_cdp_chain` -> the real `CdpRunner` -> a
+    /// polled `tick_cdp` loop to completion, confirming the whole chain collapses into
+    /// exactly one undo step (not two) and that double-inverting polarity really is a
+    /// (near-)identity round-trip through two real subprocess invocations.
+    #[test]
+    fn a_two_step_chain_of_a_real_process_runs_end_to_end_and_splices_once() {
+        let mut app = new_app(Some(doc(0.5, 200)), None);
+        app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
+        let original_channels = app.documents[0].channels.clone();
+
+        let chain = crate::model::cdp::CdpChain {
+            name: "Double Invert".into(),
+            steps: vec![
+                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), side_chain: Vec::new() },
+            ],
+        };
+        app.cdp_chain_editor = Some(ChainEditorState {
+            chain,
+            buffer_picks: std::collections::HashMap::new(),
+            selected: ChainEditorRow::Run,
+            error: None,
+            presets: Vec::new(),
+            preset_selected: None,
+            save_prompt: None,
+        });
+        assert!(!app.histories[0].can_undo(), "sanity: nothing to undo before the chain runs");
+
+        app.run_cdp_chain(ChainRunFinish::Splice);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while app.dialog.is_some() && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(app.dialog.is_none(), "a successful chain run should close back to no dialog, not linger on CdpRunning/CdpChainEditor");
+        assert!(app.cdp_chain_editor.is_none(), "the draft should be cleared once the chain has actually run");
+        assert!(app.histories[0].can_undo(), "the chain's result should have spliced in as an undoable edit");
+
+        let close_enough = |a: &[Vec<f32>], b: &[Vec<f32>]| {
+            a.len() == b.len()
+                && a.iter().zip(b).all(|(ca, cb)| {
+                    ca.len() == cb.len() && ca.iter().zip(cb).all(|(&x, &y)| (x - y).abs() < 1e-3)
+                })
+        };
+        assert!(
+            close_enough(&app.documents[0].channels, &original_channels),
+            "inverting polarity twice through two real CDP invocations should round-trip back to (approximately) the original signal"
+        );
+
+        // Exactly ONE undo step for the whole 2-step chain, not two.
+        assert!(app.histories[0].undo(&mut app.documents[0]), "one undo should be available");
+        assert!(!app.histories[0].can_undo(), "a single undo should fully revert the whole chain -- a second undo step would mean each chain step got its own history entry instead of one for the whole run");
+    }
+
+    /// End-to-end against the real CDP binaries: per-step Preview mid-edit
+    /// (`preview_chain_step`) while adding a *second*, not-yet-committed step to a 1-step
+    /// draft — runs the real, already-committed step 0 plus this in-progress step's values,
+    /// confirms audio actually plays, and confirms the `CdpParams` session is restored with
+    /// its own fields intact and a `CdpPreview` attached, *without* touching the draft (still
+    /// exactly 1 committed step, not 2 — Preview must never commit).
+    #[test]
+    fn previewing_a_step_mid_edit_runs_real_upstream_steps_and_restores_the_session() {
+        let mut app = new_app(Some(doc(0.5, 200)), None);
+        app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
+
+        app.cdp_chain_editor = Some(ChainEditorState {
+            chain: crate::model::cdp::CdpChain {
+                name: "Preview Test".into(),
+                steps: vec![crate::model::cdp::ChainStep {
+                    process_key: "phase_phase_1".into(),
+                    values: Vec::new(),
+                    side_chain: Vec::new(),
+                }],
+            },
+            buffer_picks: std::collections::HashMap::new(),
+            selected: ChainEditorRow::AddStep(Vec::new()),
+            error: None,
+            presets: Vec::new(),
+            preset_selected: None,
+            save_prompt: None,
+        });
+
+        app.open_cdp_chain_step_target(ChainEditTarget::Append(Vec::new()));
+        let phase_index = app.cdp_catalog.processes.iter().position(|p| p.key == "phase_phase_1").expect("phase_phase_1 in catalog");
+        app.open_cdp_params(phase_index);
+        assert!(matches!(app.dialog, Some(Dialog::CdpParams { .. })));
+
+        app.preview_chain_step();
+        assert!(matches!(app.dialog, Some(Dialog::CdpRunning { .. })), "preview should start a real async run");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while matches!(app.dialog, Some(Dialog::CdpRunning { .. })) && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(app.cdp_preview_audio.is_some(), "the preview should actually play audio");
+        let Some(Dialog::CdpParams { catalog_index, preview, .. }) = &app.dialog else {
+            panic!("expected preview_chain_step to restore the CdpParams session it was called from");
+        };
+        assert_eq!(*catalog_index, phase_index, "must restore the same step's session, not the chain editor");
+        assert!(preview.is_some(), "a CdpPreview cache should be attached so the dialog reflects the audition");
+        assert_eq!(
+            app.cdp_chain_editor.as_ref().unwrap().chain.steps.len(),
+            1,
+            "Preview must never commit -- the draft should still have only its original 1 step"
+        );
+    }
+
     /// Minimal but structurally real RIFF/WAVE formant file, matching
     /// `model::formant`'s own byte layout (`fmt ` sample-rate + `note`-chunk `specenvcnt` +
     /// `data` as `windows * specenvcnt` little-endian f32 amplitudes) — mirrors
@@ -16795,6 +18318,245 @@ mod tests {
             let entries = app.cdp_filter_entries("", group, &[]);
             assert!(!entries.is_empty(), "group {group:?} is listed but has no eligible entries");
         }
+    }
+
+    /// Chain-mode filtering (`cdp_chain_edit_target.is_some()`): synthesis (`IoKind::None`)
+    /// and glob-output processes must be excluded from the picker, since neither composes
+    /// into "feeds the next step's audio input" (`CDP-CHAIN-PLAN.md` design decision 3) —
+    /// but an ordinary Wav/Ana single-input process must still show up.
+    #[test]
+    fn chain_edit_mode_excludes_synthesis_and_glob_output_processes_from_the_browser() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.cdp_chain_edit_target = Some(ChainEditTarget::Append(Vec::new()));
+        let entries = app.cdp_filter_entries("", CDP_GROUP_ALL, &[]);
+        let keys: Vec<&str> = entries.iter().map(|&i| app.cdp_catalog.processes[i].key.as_str()).collect();
+
+        assert!(!keys.contains(&"synth_wave_1"), "a synthesis process (no real input) must not appear while building a chain");
+        assert!(!keys.contains(&"distcut_distcut_1"), "a glob-output process (many results, not one) must not appear while building a chain");
+        assert!(keys.contains(&"blur_avrg"), "an ordinary chainable process must still appear");
+
+        app.cdp_chain_edit_target = None;
+        let entries = app.cdp_filter_entries("", CDP_GROUP_ALL, &[]);
+        let keys: Vec<&str> = entries.iter().map(|&i| app.cdp_catalog.processes[i].key.as_str()).collect();
+        assert!(keys.contains(&"synth_wave_1"), "outside chain mode, synthesis processes are normal browser entries");
+    }
+
+    fn chain_step(key: &str) -> crate::model::cdp::ChainStep {
+        crate::model::cdp::ChainStep { process_key: key.into(), values: Vec::new(), side_chain: Vec::new() }
+    }
+
+    fn fresh_chain_editor_state(chain: crate::model::cdp::CdpChain) -> ChainEditorState {
+        ChainEditorState {
+            chain,
+            buffer_picks: std::collections::HashMap::new(),
+            selected: ChainEditorRow::Preset,
+            error: None,
+            presets: Vec::new(),
+            preset_selected: None,
+            save_prompt: None,
+        }
+    }
+
+    /// `chain_editor_rows` must place a dual-input step's side-chain steps directly beneath
+    /// it, followed by its own "add side-chain step" row, before moving on to the next main
+    /// step — the ordering the chain editor's Up/Down navigation and rendering both rely on.
+    /// Nested 3 levels deep (a side-chain step that's itself dual-input with its own
+    /// side-chain) to prove the unlimited-depth rewrite actually recurses, not just handles
+    /// one extra level.
+    #[test]
+    fn chain_editor_rows_nests_side_chain_steps_to_any_depth() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let mut middle_dual = crate::model::cdp::ChainStep {
+            process_key: "combine_mean_1".into(),
+            values: Vec::new(),
+            side_chain: vec![chain_step("blur_avrg")],
+        };
+        let outer_dual = crate::model::cdp::ChainStep {
+            process_key: "combine_mean_1".into(),
+            values: Vec::new(),
+            side_chain: vec![{
+                middle_dual.side_chain.push(chain_step("focus_freeze_1"));
+                middle_dual
+            }],
+        };
+        let state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+            name: "test".into(),
+            steps: vec![outer_dual, chain_step("blur_avrg")],
+        });
+        let rows = chain_editor_rows(&state, &app.cdp_catalog);
+        assert_eq!(
+            rows,
+            vec![
+                ChainEditorRow::Preset,
+                ChainEditorRow::Step(vec![0]),                      // outer_dual
+                ChainEditorRow::Step(vec![0, 0]),                   // middle_dual, nested under step 0's side-chain
+                ChainEditorRow::Step(vec![0, 0, 0]),                // blur_avrg, nested under [0,0]'s side-chain
+                ChainEditorRow::Step(vec![0, 0, 1]),                // focus_freeze_1, blur_avrg's sibling (neither is dual-input, so no AddStep between them)
+                ChainEditorRow::AddStep(vec![0, 0]),                // "+ Add step" for middle_dual's own side-chain (it IS dual-input)
+                ChainEditorRow::AddStep(vec![0]),                   // "+ Add step" for outer_dual's own side-chain
+                ChainEditorRow::Step(vec![1]),                      // blur_avrg, sibling of outer_dual at the top level
+                ChainEditorRow::AddStep(Vec::new()),                // "+ Add step" for the main chain itself
+                ChainEditorRow::Preview,
+                ChainEditorRow::Run,
+            ]
+        );
+    }
+
+    /// End-to-end through the real key-handling path (not calling internal helpers directly):
+    /// opening the chain editor, adding a step via the reused Browser/Params flow, and
+    /// committing it via the Apply-row Enter redirect (`cdp_chain_commit_step`) must leave
+    /// exactly one step in the draft with that process's default values.
+    #[test]
+    fn adding_a_step_through_the_real_browser_and_params_flow_lands_in_the_draft() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
+
+        app.handle_action(Action::CdpChain);
+        assert!(matches!(app.dialog, Some(Dialog::CdpChainEditor)), "Ctrl+H should open the chain editor directly (valid cdp_dir)");
+
+        app.open_cdp_chain_step_target(ChainEditTarget::Append(Vec::new()));
+        assert!(matches!(app.dialog, Some(Dialog::CdpBrowser { .. })), "adding a step opens the (filtered) browser");
+        assert_eq!(app.cdp_chain_edit_target, Some(ChainEditTarget::Append(Vec::new())));
+
+        let blur_avrg_index =
+            app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").expect("blur_avrg in catalog");
+        app.open_cdp_params(blur_avrg_index);
+        assert!(matches!(app.dialog, Some(Dialog::CdpParams { .. })));
+
+        // Enter on the Apply row: since `cdp_chain_edit_target` is set, this must commit to
+        // the draft instead of actually running a job.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(app.dialog, Some(Dialog::CdpChainEditor)), "committing a step returns to the chain editor");
+        assert!(app.cdp_chain_edit_target.is_none(), "the target should be consumed once committed");
+        let state = app.cdp_chain_editor.as_ref().expect("draft still exists");
+        assert_eq!(state.chain.steps.len(), 1);
+        assert_eq!(state.chain.steps[0].process_key, "blur_avrg");
+    }
+
+    /// 'd' on a selected step removes it (and shifts `buffer_picks` in lockstep);
+    /// Shift+Up/Down swaps adjacent siblings — the two mutations
+    /// `handle_cdp_chain_editor_key` maps onto `delete_chain_editor_row`/`reorder_chain_step`.
+    #[test]
+    fn deleting_and_reordering_steps_keeps_buffer_picks_in_lockstep() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut state =
+            fresh_chain_editor_state(crate::model::cdp::CdpChain { name: "t".into(), steps: vec![chain_step("blur_avrg"), chain_step("focus_freeze_1")] });
+        state.selected = ChainEditorRow::Step(vec![0]);
+        app.cdp_chain_editor = Some(state);
+
+        app.reorder_chain_step(1);
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert_eq!(state.chain.steps[0].process_key, "focus_freeze_1");
+        assert_eq!(state.chain.steps[1].process_key, "blur_avrg");
+        assert_eq!(state.selected, ChainEditorRow::Step(vec![1]));
+
+        app.cdp_chain_editor.as_mut().unwrap().selected = ChainEditorRow::Step(vec![0]);
+        app.delete_chain_editor_row();
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert_eq!(state.chain.steps.len(), 1);
+        assert_eq!(state.chain.steps[0].process_key, "blur_avrg");
+        assert!(state.buffer_picks.is_empty());
+    }
+
+    /// Reordering/deleting a step that has nested side-chain buffer picks must remap those
+    /// picks' paths along with it — the real bug `remap_buffer_picks_after_swap`/
+    /// `remove_buffer_picks_under` exist to prevent (a pick silently pointing at the wrong,
+    /// now-shifted step after a reorder or delete).
+    #[test]
+    fn reordering_a_step_with_nested_buffer_picks_remaps_them() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let dual_with_side_chain = crate::model::cdp::ChainStep {
+            process_key: "combine_mean_1".into(),
+            values: Vec::new(),
+            side_chain: vec![chain_step("blur_avrg")],
+        };
+        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+            name: "t".into(),
+            steps: vec![chain_step("focus_freeze_1"), dual_with_side_chain],
+        });
+        state.buffer_picks.insert(vec![1], 2); // step 1's own second input
+        state.selected = ChainEditorRow::Step(vec![1]);
+        app.cdp_chain_editor = Some(state);
+
+        app.reorder_chain_step(-1); // swap step 1 into position 0
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert_eq!(state.chain.steps[0].process_key, "combine_mean_1");
+        assert_eq!(state.buffer_picks.get(&vec![0]), Some(&2), "the pick must follow the step to its new path");
+        assert!(state.buffer_picks.get(&vec![1]).is_none());
+    }
+
+    /// The core "fully working picker" fix: reopening a dual-input step for editing must
+    /// seed `CdpSecondInput.selected` from whatever was already picked for it
+    /// (`buffer_picks`), not silently fall back to the default "first non-active document" —
+    /// otherwise tweaking an unrelated param and committing would overwrite a correct earlier
+    /// pick with the wrong one.
+    #[test]
+    fn reopening_a_chain_step_seeds_the_second_input_from_its_existing_pick() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.push_document(doc(0.2, 100)); // a second open document to pick as the buffer
+        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+            name: "t".into(),
+            steps: vec![chain_step("combine_mean_1")],
+        });
+        state.buffer_picks.insert(vec![0], 1); // pick document index 1, not the default
+        app.cdp_chain_editor = Some(state);
+
+        app.open_cdp_chain_step_target(ChainEditTarget::Replace(vec![0]));
+        let Some(Dialog::CdpParams { second_input: Some(second), .. }) = &app.dialog else {
+            panic!("expected CdpParams with a second_input row for a dual-input step");
+        };
+        assert_eq!(second.selected_doc_index(), Some(1), "must seed from buffer_picks, not the default");
+    }
+
+    /// "Configure Side-Chain..." ('x' on the second-input row) suspends the current step's
+    /// `CdpParams` session and opens the browser to append to its side-chain; committing that
+    /// nested step must resume the *parent* session with its own fields intact (not jump back
+    /// to the top-level chain editor) — the suspend/resume stack this feature needed. Only
+    /// offered for a step already committed to the draft (a `Replace` target) — matching the
+    /// chain editor's own "+ Add side-chain step" row, which likewise only appears for a step
+    /// already in the tree — so this test first adds the combine step normally, then reopens
+    /// it to configure its side-chain.
+    #[test]
+    fn configuring_a_side_chain_suspends_and_resumes_the_parent_step_session() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
+        let combine_index =
+            app.cdp_catalog.processes.iter().position(|p| p.key == "combine_mean_1").expect("combine_mean_1 in catalog");
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(crate::model::cdp::CdpChain {
+            name: "t".into(),
+            steps: vec![crate::model::cdp::ChainStep { process_key: "combine_mean_1".into(), values: Vec::new(), side_chain: Vec::new() }],
+        }));
+
+        app.open_cdp_chain_step_target(ChainEditTarget::Replace(vec![0]));
+        assert!(matches!(app.dialog, Some(Dialog::CdpParams { .. })), "an existing step's Replace target jumps straight to CdpParams");
+        // Focus the second-input row so `configure_chain_side_chain` recognizes it.
+        if let Some(Dialog::CdpParams { focus, fields, second_input, .. }) = app.dialog.as_mut() {
+            *focus = cdp_params_focus_second_input(fields.len());
+            assert!(second_input.is_some(), "combine_mean_1 is dual-input");
+        }
+
+        assert!(app.configure_chain_side_chain(), "should suspend and open the browser for the side-chain");
+        assert_eq!(app.cdp_chain_edit_suspended.len(), 1, "the parent (combine) session must be suspended");
+        assert!(matches!(app.dialog, Some(Dialog::CdpBrowser { .. })));
+
+        let blur_index = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").expect("blur_avrg in catalog");
+        app.open_cdp_params(blur_index);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // commit the side-chain step
+
+        assert!(app.cdp_chain_edit_suspended.is_empty(), "resuming should pop the suspend stack");
+        let Some(Dialog::CdpParams { catalog_index, .. }) = &app.dialog else {
+            panic!("expected to resume the parent (combine) CdpParams session, not the chain editor");
+        };
+        assert_eq!(*catalog_index, combine_index, "resumed session must be the outer combine step, not left on the inner one");
+
+        // Now commit the outer (combine) step and confirm its side-chain really landed.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::CdpChainEditor)));
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert_eq!(state.chain.steps.len(), 1);
+        assert_eq!(state.chain.steps[0].side_chain.len(), 1);
+        assert_eq!(state.chain.steps[0].side_chain[0].process_key, "blur_avrg");
     }
 
     /// Regression (user report, 2026-07-21): `psow`'s pitch-subcategory processes (e.g.
