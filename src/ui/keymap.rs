@@ -70,6 +70,7 @@ pub enum Action {
     ResetConfig,
     ExportRegions,
     CdpProcess,
+    CdpChain,
     ConfigureCdpDirectory,
     ExtractPitchCurve,
     LoadPitchCurve,
@@ -132,6 +133,7 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('o') if ctrl => Some(Action::FadeOut),
         KeyCode::Char('t') if ctrl => Some(Action::Trim),
         KeyCode::Char('p') if ctrl => Some(Action::CdpProcess),
+        KeyCode::Char('h') if ctrl => Some(Action::CdpChain),
         // A single modifier, not Ctrl+Shift — double-modifier combos aren't reliably
         // reported by every terminal without the kitty keyboard protocol's disambiguation,
         // the same reasoning that keeps fine-step mode off Ctrl/Alt+arrow (see ToggleFineMode).
@@ -320,6 +322,7 @@ pub fn default_keybindings() -> HashMap<String, Vec<String>> {
     bind!("Reverse", "ctrl+r");
     bind!("ExportRegions", "E");
     bind!("CdpProcess", "ctrl+p");
+    bind!("CdpChain", "ctrl+h");
     bind!("Normalize", "ctrl+n");
     bind!("Resample", "ctrl+e");
     bind!("Gain", "ctrl+g");
@@ -419,6 +422,7 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "ResetConfig" => Some(Action::ResetConfig),
         "ExportRegions" => Some(Action::ExportRegions),
         "CdpProcess" => Some(Action::CdpProcess),
+        "CdpChain" => Some(Action::CdpChain),
         "ConfigureCdpDirectory" => Some(Action::ConfigureCdpDirectory),
         "ExtractPitchCurve" => Some(Action::ExtractPitchCurve),
         "LoadPitchCurve" => Some(Action::LoadPitchCurve),
