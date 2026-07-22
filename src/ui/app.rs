@@ -7069,16 +7069,32 @@ impl App {
                     });
                     return;
                 }
-                let last_category = chain
+                // Each top-level step's own pvoc anal/synth wrap (or wavecycle rounding, for
+                // a time-domain process) pads/trims its output independently of every other
+                // step -- `chain.steps[1]` re-analyzes `chain.steps[0]`'s already-padded
+                // output from scratch, so the padding compounds down the chain rather than
+                // being bounded by any single step's own tolerance. Using only the *last*
+                // step's tolerance (as if the chain were one process) systematically
+                // under-counts real multi-step drift and wrongly collapses markers on chains
+                // of 3+ spectral steps -- summing every top-level step's own tolerance (not
+                // recursing into side-chains, which finish *before* their owning step runs
+                // and so don't add their own drift to the top-level spine beyond what that
+                // owning step's own category already allows for) matches the actual
+                // cumulative padding instead.
+                let tolerance: usize = chain
                     .steps
-                    .last()
-                    .and_then(|s| self.cdp_catalog.processes.iter().find(|p| p.key == s.process_key))
-                    .map(|d| d.category)
-                    .unwrap_or(crate::model::cdp::Category::Time);
-                let tolerance = crate::commands::cdp::timing_tolerance(
-                    last_category,
-                    crate::model::cdp::PvocSettings::default().points,
-                );
+                    .iter()
+                    .map(|s| {
+                        let category = self
+                            .cdp_catalog
+                            .processes
+                            .iter()
+                            .find(|p| p.key == s.process_key)
+                            .map(|d| d.category)
+                            .unwrap_or(crate::model::cdp::Category::Time);
+                        crate::commands::cdp::timing_tolerance(category, crate::model::cdp::PvocSettings::default().points)
+                    })
+                    .sum();
                 let label = format!("CDP Chain: {}", chain.name);
                 self.histories[doc_index].apply(
                     crate::commands::cdp::cdp_process_command(label, splice_range, final_frame.running_buffer, tolerance),
@@ -17948,6 +17964,73 @@ mod tests {
                 Marker { position: 190, label: "after".into() },
             ],
             "a length-preserving multi-step chain must leave every marker exactly where it was"
+        );
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Real-bug regression, reported after manual testing (2026-07-22): a chain's timing
+    /// tolerance used to come from only its *last* step's category, as if the whole chain
+    /// were one CDP process. But each spectral (pvoc) step re-analyzes the previous step's
+    /// already-padded output from scratch, independently padding its own synth stage again --
+    /// the drift compounds down the chain rather than being bounded by any single step's
+    /// tolerance. 3 chained `blur_avrg` steps (real binaries) pad by ~2784 samples total,
+    /// comfortably exceeding one step's own ~2048-sample tolerance -- which used to blow the
+    /// single-step-derived tolerance and silently collapse every marker in range. Confirms the
+    /// summed-per-step tolerance fix in `finish_chain_run`'s `Splice` arm keeps the marker at
+    /// its exact original position despite that real, nontrivial length drift.
+    #[test]
+    fn markers_survive_a_real_multi_step_spectral_chain_despite_compounding_pvoc_padding() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_spectral_marker_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = new_app(Some(doc(0.5, 20000)), None);
+        app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
+        app.documents[0].markers = vec![Marker { position: 10000, label: "mid".into() }];
+        let original_len = app.documents[0].channels[0].len();
+
+        let blur_index = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").expect("blur_avrg");
+        let (fields, _) = app.cdp_fields_for(blur_index);
+        let values: Vec<_> = fields.iter().map(CdpField::to_value).collect();
+
+        let chain = crate::model::cdp::CdpChain {
+            name: "Triple Blur".into(),
+            steps: vec![
+                crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values: values.clone(), side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values: values.clone(), side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values, side_chain: Vec::new() },
+            ],
+        };
+        app.cdp_chain_editor = Some(ChainEditorState {
+            chain,
+            buffer_picks: std::collections::HashMap::new(),
+            selected: ChainEditorRow::Run,
+            error: None,
+            presets: Vec::new(),
+            preset_selected: None,
+            save_prompt: None,
+        });
+
+        app.run_cdp_chain(ChainRunFinish::Splice);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while app.dialog.is_some() && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.dialog.is_none(), "the chain should have finished and spliced");
+
+        let new_len = app.documents[0].channels[0].len();
+        assert!(
+            new_len != original_len,
+            "sanity: 3 real spectral steps must actually pad the length, or this test isn't exercising the compounding-drift case at all"
+        );
+        assert_eq!(
+            app.documents[0].markers,
+            vec![Marker { position: 10000, label: "mid".into() }],
+            "a marker inside the processed range must survive real, multi-step-compounded pvoc padding, not just a single step's worth"
         );
 
         unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
