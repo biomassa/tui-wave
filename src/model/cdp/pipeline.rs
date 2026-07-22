@@ -193,7 +193,7 @@ pub enum PlanError {
 }
 
 /// Parses the `decfactor` field out of a `.ana` file's RIFF `note` chunk (hex-encoded
-/// little-endian ints, one `key\nhex\n` pair per line — verified against real CDP 7.1
+/// little-endian ints, one `key\nhex\n` pair per line — verified against real CDP8
 /// output during the Phase 0 spike). Pure byte-parsing so it's unit-testable without
 /// touching the filesystem; the runner is what actually reads the file.
 pub fn parse_ana_decfactor(data: &[u8]) -> Option<u32> {
@@ -2130,7 +2130,7 @@ mod tests {
     // -- .ana decfactor header parsing (Phase 0 spike S5) --------------------------------
 
     /// Builds a minimal fake `.ana` byte buffer with a RIFF `note` LIST chunk containing the
-    /// given key/value (hex) pairs, matching the format captured from real CDP 7.1 output.
+    /// given key/value (hex) pairs, matching the format captured from real CDP8 output.
     fn fake_ana_note_chunk(pairs: &[(&str, u32)]) -> Vec<u8> {
         let mut body = String::new();
         for (key, value) in pairs {
