@@ -448,6 +448,16 @@ fn format_cdp_float_for_display(v: f64) -> String {
     if s.contains('.') { s } else { format!("{s}.0") }
 }
 
+/// Rounds `v` to 6 decimal places — kills the binary-fraction noise (e.g.
+/// `73.35999999999999` instead of `73.36`) that repeatedly adding/subtracting a step like
+/// 0.01 in `f64` visibly accumulates, the same fix `cdp_nudge_number`'s own doc comment
+/// explains (CDP's own params are never meaningfully precise to more than a handful of
+/// decimals, so this is lossless in practice). Used at every point a breakpoint envelope's
+/// own `points` get nudged, not just the main params dialog's flat number fields.
+fn round6(v: f64) -> f64 {
+    (v * 1e6).round() / 1e6
+}
+
 /// Whether `c` can start or continue typing a replacement number into a selected cell of
 /// the list editor (`CdpListEdit`) or table editor (`CdpTableEdit`) — the same character
 /// set already used everywhere else in this app for a signed-decimal numeric `TextInput`
@@ -490,6 +500,12 @@ fn is_pitch_curve_param(param: &crate::model::cdp::ParamDef) -> bool {
 /// tags (user report, 2026-07-21: the old full-word badges — "pitch curve", "formants",
 /// "snapshot" — routinely ran the process list's already-narrow column out of width, cutting
 /// off both the badge and the tail of the process title next to it):
+/// - "[pvoc]": `category == Category::Pvoc` — a spectral (PVOC-domain) process, the same
+///   classification `commands::cdp::timing_tolerance` and the CDP Chain execution engine's
+///   `ana_run_length` (which merges a run of these into one shared anal/synth pair instead
+///   of one pair per step) already key off. Verified against the whole catalog: `category
+///   == Pvoc` and `input`/`output == IoKind::Ana` agree on every single entry, so this badge
+///   is an exact, not approximate, indicator of "this process reads/writes `.ana` files."
 /// - "[p]": has a `FormantBufferRef`-free Hz-pitch `required_envelope` field
 ///   (`is_pitch_curve_param`) — fillable from an open `PitchCurve` via the envelope
 ///   editor's 'c' picker, or hand-drawn.
@@ -507,6 +523,9 @@ fn cdp_process_badges(p: &crate::model::cdp::ProcessDef) -> Vec<&'static str> {
     let mut badges = Vec::new();
     if matches!(p.input, crate::model::cdp::IoKind::DualWav | crate::model::cdp::IoKind::DualAna) {
         badges.push(">1 inputs");
+    }
+    if p.category == crate::model::cdp::Category::Pvoc {
+        badges.push("[pvoc]");
     }
     if p.params.iter().any(is_pitch_curve_param) {
         badges.push("[p]");
@@ -850,12 +869,29 @@ struct CdpEnvelopeEdit {
     /// tweaking rather than committing immediately, so the graphical editor still gets the
     /// final say (Enter still commits the whole session as normal).
     curve_picker: Option<EnvelopeCurvePicker>,
+    /// `Some` while the 's' ("save as preset") name prompt is open — saves the *current*
+    /// `points` (as drawn, not yet committed to the field) as a named `EnvelopePreset`,
+    /// available system-wide from any envelope editor session regardless of process/param.
+    save_prompt: Option<TextInput>,
+    /// `Some` while the 'l' ("load preset") picker overlay is open — lists every saved
+    /// `EnvelopePreset`. Same rescale-on-load treatment as the curve picker
+    /// (`App::rescale_preset_to_envelope`), since a preset drawn on one field's time/value
+    /// axis is very unlikely to match another's exactly.
+    preset_picker: Option<EnvelopePresetPicker>,
 }
 
 /// The picker `CdpEnvelopeEdit.curve_picker` holds — `entries` are indices into
 /// `App.curves`, computed once when 'c' opens it.
 struct EnvelopeCurvePicker {
     entries: Vec<usize>,
+    selected: usize,
+}
+
+/// The picker `CdpEnvelopeEdit.preset_picker` holds — the full saved-preset list, loaded
+/// fresh from disk once when 'l' opens it (and again after a 'd' delete, so the list never
+/// shows a preset that no longer exists).
+struct EnvelopePresetPicker {
+    presets: Vec<crate::model::cdp::envelope_preset::EnvelopePreset>,
     selected: usize,
 }
 
@@ -1764,6 +1800,109 @@ fn push_chain_step_rows(
     }
 }
 
+/// One row in the chain editor's *rendered* list (`chain_display_rows`) — either a real
+/// selectable row (wrapping `ChainEditorRow` verbatim) or a synthetic, non-selectable
+/// heads-up marking exactly where the underlying pipeline enters/exits the PVOC (spectral)
+/// domain around a step or run of steps (see `pvoc_segment_at`). Purely a rendering
+/// concern: navigation (`handle_cdp_chain_editor_key`), `state.selected`, and everything
+/// else still work off the plain `ChainEditorRow` list from `chain_editor_rows`, which never
+/// sees these rows at all — they can never become the selection and Up/Down skips over them
+/// entirely, simply because they're never in that list to land on.
+#[derive(Debug, Clone, PartialEq)]
+enum DisplayRow {
+    Row(ChainEditorRow),
+    /// `depth` matches the bracketed step's own `path.len()`, for indentation only.
+    PvocAnalyze { depth: usize },
+    PvocResynthesize { depth: usize },
+    /// A purely visual empty line — currently just the gap set off before "Preview the whole
+    /// chain" (`chain_display_rows`), separating the step list from the two trailing
+    /// run/preview actions.
+    Blank,
+}
+
+/// Whether `siblings[index]` sits inside a "PVOC segment" — a step or maximal run of
+/// adjacent steps the real pipeline wraps in `pvoc anal`/`pvoc synth` — and if so, whether
+/// `index` is that segment's first/last member (where the synthetic `PvocAnalyze`/
+/// `PvocResynthesize` rows belong). Mirrors two real planning behaviors exactly:
+/// - A single-input spectral step (`IoKind::Ana` on both sides) extends a run through
+///   adjacent single-input spectral siblings only — the same adjacency `ana_run_length`
+///   computes for the execution engine's own merge decision (`plan_ana_chain`), so a
+///   segment shown here is *exactly* the span that gets merged into one shared anal/synth
+///   pair at run time, never an approximation of it.
+/// - A dual-input spectral step (`IoKind::DualAna`) never merges with neighbors regardless
+///   of what they are (`plan_dual_ana` always wraps itself, independent of any adjacent
+///   step) — always its own isolated one-step segment.
+/// `None` for anything that isn't spectral at all (plain time-domain, synthesis, curve).
+struct PvocSegment {
+    is_first: bool,
+    is_last: bool,
+}
+
+fn pvoc_segment_at(siblings: &[crate::model::cdp::ChainStep], index: usize, catalog: &crate::model::cdp::CdpCatalog) -> Option<PvocSegment> {
+    let step = siblings.get(index)?;
+    let def = catalog.processes.iter().find(|p| p.key == step.process_key)?;
+    let is_single_ana = def.input == crate::model::cdp::IoKind::Ana && def.output == crate::model::cdp::IoKind::Ana;
+    let is_dual_ana = def.input == crate::model::cdp::IoKind::DualAna;
+    if is_dual_ana {
+        return Some(PvocSegment { is_first: true, is_last: true });
+    }
+    if !is_single_ana {
+        return None;
+    }
+    let continues_run = |i: usize| -> bool {
+        siblings.get(i).is_some_and(|s| {
+            catalog
+                .processes
+                .iter()
+                .find(|p| p.key == s.process_key)
+                .is_some_and(|d| d.input == crate::model::cdp::IoKind::Ana && d.output == crate::model::cdp::IoKind::Ana)
+        })
+    };
+    Some(PvocSegment {
+        is_first: index == 0 || !continues_run(index - 1),
+        is_last: !continues_run(index + 1),
+    })
+}
+
+/// Builds the chain editor's full *rendered* row list: `chain_editor_rows`' own selectable
+/// rows, with synthetic "PVOC Analyze"/"PVOC Resynthesize" rows interleaved exactly where
+/// the real pipeline would insert them. Recomputed fresh from the current draft every
+/// render — never cached — so it can't go stale as steps are added/removed/reordered/
+/// edited, the same discipline `chain_editor_rows` itself already follows.
+fn chain_display_rows(state: &ChainEditorState, catalog: &crate::model::cdp::CdpCatalog) -> Vec<DisplayRow> {
+    let mut rows = vec![DisplayRow::Row(ChainEditorRow::Preset)];
+    push_chain_display_rows(&mut rows, &state.chain.steps, &[], catalog);
+    rows.push(DisplayRow::Row(ChainEditorRow::AddStep(Vec::new())));
+    rows.push(DisplayRow::Blank);
+    rows.push(DisplayRow::Row(ChainEditorRow::Preview));
+    rows.push(DisplayRow::Row(ChainEditorRow::Run));
+    rows
+}
+
+fn push_chain_display_rows(
+    rows: &mut Vec<DisplayRow>,
+    steps: &[crate::model::cdp::ChainStep],
+    parent_path: &[usize],
+    catalog: &crate::model::cdp::CdpCatalog,
+) {
+    for (i, step) in steps.iter().enumerate() {
+        let mut path = parent_path.to_vec();
+        path.push(i);
+        let segment = pvoc_segment_at(steps, i, catalog);
+        if segment.as_ref().is_some_and(|s| s.is_first) {
+            rows.push(DisplayRow::PvocAnalyze { depth: path.len() });
+        }
+        rows.push(DisplayRow::Row(ChainEditorRow::Step(path.clone())));
+        if segment.as_ref().is_some_and(|s| s.is_last) {
+            rows.push(DisplayRow::PvocResynthesize { depth: path.len() });
+        }
+        if step.is_dual_input(catalog) == Some(true) {
+            push_chain_display_rows(rows, &step.side_chain, &path, catalog);
+            rows.push(DisplayRow::Row(ChainEditorRow::AddStep(path)));
+        }
+    }
+}
+
 /// After swapping siblings `a`/`b` at depth `depth` (i.e. `parent.len()`, where `parent` is
 /// their shared parent path), remaps every `buffer_picks` key whose path element at that
 /// depth is `a` or `b` to the other — covers the swapped steps themselves *and* everything
@@ -1799,6 +1938,53 @@ fn remove_buffer_picks_under(picks: &mut std::collections::HashMap<Vec<usize>, u
         }
         picks.insert(k, v);
     }
+}
+
+/// Rescales `points` (as authored — its own first/last point defining the input's own time
+/// span) to fit `time_max`, clamping every value to `[min, max]` — the shared "proportionally
+/// fit to the current time axis" math both "use curve" (`App::rescale_curve_to_envelope`) and
+/// "load preset" (`App::rescale_preset_to_envelope`) need: both load an externally-authored
+/// shape (a `PitchCurve`'s absolute-time points, or a saved `EnvelopePreset`'s own points)
+/// into a *different* field's envelope, whose own time axis may not match it at all. A
+/// single-point (or empty) input can't be normalized this way (no span to divide by) —
+/// placed at time 0 instead, clamped the same way.
+fn rescale_points_to_envelope(points: &[(f64, f64)], time_max: f64, min: f64, max: f64) -> Vec<(f64, f64)> {
+    let Some(&(first_t, _)) = points.first() else { return Vec::new() };
+    let Some(&(last_t, _)) = points.last() else { return Vec::new() };
+    let span = last_t - first_t;
+    points
+        .iter()
+        .map(|&(t, v)| {
+            let rescaled_t = if span > 0.0 { (t - first_t) / span * time_max } else { 0.0 };
+            (rescaled_t, v.clamp(min, max))
+        })
+        .collect()
+}
+
+/// Length of the run of consecutive single-input, single-output spectral (`IoKind::Ana` on
+/// both sides) steps starting at `siblings[index]` — 1 if that step doesn't itself qualify
+/// (the ordinary, non-mergeable single-step case), otherwise how many steps in a row from
+/// `index` onward all qualify. Used by `App::submit_current_chain_stage` to decide whether
+/// to submit one merged `plan_ana_chain` job for the whole run instead of one job per step
+/// (see that function's own doc comment, and `plan_ana_chain`'s, for why). A dual-input
+/// step's own `input` is `IoKind::DualAna`/`DualWav`, never plain `Ana`, so it can never join
+/// or extend a run — its secondary input would need its own anal regardless of any merge.
+fn ana_run_length(siblings: &[crate::model::cdp::ChainStep], index: usize, catalog: &crate::model::cdp::CdpCatalog) -> usize {
+    let is_mergeable = |step: &crate::model::cdp::ChainStep| -> bool {
+        catalog
+            .processes
+            .iter()
+            .find(|p| p.key == step.process_key)
+            .is_some_and(|def| def.input == crate::model::cdp::IoKind::Ana && def.output == crate::model::cdp::IoKind::Ana)
+    };
+    if !siblings.get(index).is_some_and(is_mergeable) {
+        return 1;
+    }
+    let mut len = 1;
+    while siblings.get(index + len).is_some_and(is_mergeable) {
+        len += 1;
+    }
+    len
 }
 
 /// The path of the first dual-input step (at any depth) that doesn't yet have a
@@ -1878,6 +2064,12 @@ struct CdpChainRun {
     /// Set right after a child frame (a side-chain) finishes, holding its final result until
     /// the parent frame's step — the one that side-chain feeds — actually runs.
     pending_secondary: Option<Vec<Vec<f32>>>,
+    /// How many chain steps the currently in-flight job represents — 1 for a normal
+    /// single-step job, more than 1 when `submit_current_chain_stage` merged a run of
+    /// consecutive spectral (`Ana`-Ana) steps into one combined job (see
+    /// `plan_ana_chain`). The completion handler in `tick_cdp` advances the top frame's
+    /// `index` by this many, not always by 1, so the run's later steps aren't re-run.
+    pending_step_count: usize,
     /// Only used by `ChainRunFinish::Splice`: where to splice the final result.
     doc_index: usize,
     splice_range: (usize, usize),
@@ -3245,6 +3437,14 @@ impl App {
             self.handle_envelope_curve_picker_key(key);
             return;
         }
+        if let Some(Dialog::CdpParams { envelope: Some(CdpEnvelopeEdit { save_prompt: Some(_), .. }), .. }) = &self.dialog {
+            self.handle_envelope_save_prompt_key(key);
+            return;
+        }
+        if let Some(Dialog::CdpParams { envelope: Some(CdpEnvelopeEdit { preset_picker: Some(_), .. }), .. }) = &self.dialog {
+            self.handle_envelope_preset_picker_key(key);
+            return;
+        }
         if let Some(Dialog::CdpParams { envelope: Some(_), .. }) = &self.dialog {
             self.handle_cdp_envelope_key(key);
             return;
@@ -3757,6 +3957,15 @@ impl App {
                     }
                     self.refresh_cdp_browser_filter();
                 }
+            }
+            // "Recall last process" — only in the CDP Process browser, and only Ctrl-modified
+            // since a bare 'l' there is a live search character (unlike the CDP Chain
+            // editor's own 'l', which has no search box to collide with).
+            KeyCode::Char('l') | KeyCode::Char('L')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(self.dialog, Some(Dialog::CdpBrowser { .. })) =>
+            {
+                self.recall_last_process();
             }
             // 'x' on the second-input row, while chain-editing a dual-input step: suspends
             // this `CdpParams` session and opens the browser to append a step to this step's
@@ -4759,6 +4968,42 @@ impl App {
         });
     }
 
+    /// Like `open_cdp_params`, but overrides the freshly-built default `fields` with
+    /// `values` when the count matches (silently keeps the defaults otherwise — e.g. the
+    /// catalog's own param list for this process changed shape since `values` was saved).
+    /// Used by "Recall last process" (`Ctrl+L` in the browser, `App::recall_last_process`)
+    /// to reopen the params dialog exactly as it was last applied.
+    fn open_cdp_params_with_values(&mut self, catalog_index: usize, values: &[crate::model::cdp::ParamValue]) {
+        self.open_cdp_params(catalog_index);
+        let Some(def) = self.cdp_catalog.processes.get(catalog_index) else { return };
+        if values.len() != def.params.len() {
+            return;
+        }
+        let fields: Vec<CdpField> = def.params.iter().zip(values).map(|(p, v)| CdpField::from_value(p, v)).collect();
+        if let Some(Dialog::CdpParams { fields: dialog_fields, .. }) = self.dialog.as_mut() {
+            *dialog_fields = fields;
+        }
+    }
+
+    /// "Recall last process" (`Ctrl+L` in the CDP Process browser): reopens the params
+    /// dialog for the last successfully-*applied* process (not Preview), prefilled with its
+    /// exact saved values — the single-process counterpart to the chain editor's own `l`
+    /// ("Recall last chain"). Shows an inline info dialog instead of silently doing nothing
+    /// if no process has ever been applied, or it's no longer in the catalog.
+    fn recall_last_process(&mut self) {
+        let Some(last) = crate::model::cdp::process_last::load_last_process() else {
+            self.dialog = Some(Dialog::Info { message: "No process has been run yet".into() });
+            return;
+        };
+        let Some(catalog_index) = self.cdp_catalog.processes.iter().position(|p| p.key == last.process_key) else {
+            self.dialog = Some(Dialog::Info {
+                message: format!("Process \"{}\" no longer exists in the catalog", last.process_key),
+            });
+            return;
+        };
+        self.open_cdp_params_with_values(catalog_index, &last.values);
+    }
+
     /// Builds fresh default-valued `fields`/`second_input` for the catalog process at
     /// `catalog_index` — used by `open_cdp_params` to seed a freshly opened dialog.
     fn cdp_fields_for(&self, catalog_index: usize) -> (Vec<CdpField>, Option<CdpSecondInput>) {
@@ -4871,7 +5116,17 @@ impl App {
             return false;
         };
         *dialog_focus = field_index + 1; // smart-target may have jumped focus to this field
-        *dialog_envelope = Some(CdpEnvelopeEdit { field_index, points, selected: 0, original, time_max, range, curve_picker: None });
+        *dialog_envelope = Some(CdpEnvelopeEdit {
+            field_index,
+            points,
+            selected: 0,
+            original,
+            time_max,
+            range,
+            curve_picker: None,
+            save_prompt: None,
+            preset_picker: None,
+        });
         true
     }
 
@@ -5957,14 +6212,14 @@ impl App {
                 let i = edit.selected;
                 let time_step = (edit.time_max / 40.0).max(0.001);
                 let lower = if i == 0 { 0.0 } else { edit.points[i - 1].0 + 0.001 };
-                edit.points[i].0 = (edit.points[i].0 - time_step).max(lower);
+                edit.points[i].0 = round6((edit.points[i].0 - time_step).max(lower));
                 return;
             }
             KeyCode::Right if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 let i = edit.selected;
                 let time_step = (edit.time_max / 40.0).max(0.001);
                 let upper = if i + 1 == edit.points.len() { edit.time_max } else { edit.points[i + 1].0 - 0.001 };
-                edit.points[i].0 = (edit.points[i].0 + time_step).min(upper.max(edit.points[i].0));
+                edit.points[i].0 = round6((edit.points[i].0 + time_step).min(upper.max(edit.points[i].0)));
                 return;
             }
             KeyCode::Left => {
@@ -5988,7 +6243,7 @@ impl App {
                 } else {
                     ((max - min) / 40.0).max(step)
                 };
-                edit.points[i].1 = (edit.points[i].1 + value_step).clamp(min, max);
+                edit.points[i].1 = round6((edit.points[i].1 + value_step).clamp(min, max));
                 return;
             }
             KeyCode::Down => {
@@ -5998,7 +6253,7 @@ impl App {
                 } else {
                     ((max - min) / 40.0).max(step)
                 };
-                edit.points[i].1 = (edit.points[i].1 - value_step).clamp(min, max);
+                edit.points[i].1 = round6((edit.points[i].1 - value_step).clamp(min, max));
                 return;
             }
             KeyCode::Char('n') => {
@@ -6063,6 +6318,22 @@ impl App {
                     *envelope = None;
                 }
             }
+            // Save the envelope as drawn (not yet committed to the field) under a typed
+            // name, reusable system-wide from any envelope editor regardless of
+            // process/param — see `envelope_preset`'s own doc comment for why.
+            KeyCode::Char('s') => {
+                if let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() {
+                    edit.save_prompt = Some(TextInput::fresh(String::new()));
+                }
+            }
+            // Opened even with zero saved presets yet, same "show the empty state as real
+            // feedback" reasoning as the curve picker above.
+            KeyCode::Char('l') => {
+                let presets = crate::model::cdp::envelope_preset::list_presets();
+                if let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() {
+                    edit.preset_picker = Some(EnvelopePresetPicker { presets, selected: 0 });
+                }
+            }
             _ => {}
         }
     }
@@ -6122,17 +6393,133 @@ impl App {
         };
         let time_max = edit.time_max;
         let Some(curve) = self.curves.get(curve_index) else { return Vec::new() };
-        let Some(&(first_t, _)) = curve.points.first() else { return Vec::new() };
-        let Some(&(last_t, _)) = curve.points.last() else { return Vec::new() };
-        let span = last_t - first_t;
-        curve
-            .points
-            .iter()
-            .map(|&(t, v)| {
-                let rescaled_t = if span > 0.0 { (t - first_t) / span * time_max } else { 0.0 };
-                (rescaled_t, v.clamp(min, max))
-            })
-            .collect()
+        rescale_points_to_envelope(&curve.points, time_max, min, max)
+    }
+
+    /// Rescales a saved `EnvelopePreset`'s own `points` to fit the *current* envelope
+    /// editor's `time_max`/`min..max` — same treatment `rescale_curve_to_envelope` gives an
+    /// external `PitchCurve`, since a preset drawn on one field's time/value axis (very
+    /// possibly a different process, a different selection length, a different param range
+    /// entirely) is very unlikely to match another's exactly.
+    fn rescale_preset_to_envelope(&self, points: &[(f64, f64)], min: f64, max: f64) -> Vec<(f64, f64)> {
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_ref() else {
+            return Vec::new();
+        };
+        rescale_points_to_envelope(points, edit.time_max, min, max)
+    }
+
+    /// All key handling while `CdpEnvelopeEdit.save_prompt` is `Some` — Enter saves the
+    /// envelope as currently drawn (not yet committed to the field) under the typed name,
+    /// overwriting any existing preset with that name; an empty/whitespace-only name is
+    /// treated as "cancel," matching Esc. Mirrors `handle_cdp_chain_save_prompt_key`'s shape.
+    fn handle_envelope_save_prompt_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() {
+                    edit.save_prompt = None;
+                }
+            }
+            KeyCode::Enter => {
+                let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() else { return };
+                let Some(prompt) = edit.save_prompt.take() else { return };
+                let name = prompt.value().trim().to_string();
+                if name.is_empty() {
+                    return;
+                }
+                let points = edit.points.clone();
+                crate::model::cdp::envelope_preset::save_preset(&crate::model::cdp::envelope_preset::EnvelopePreset {
+                    name,
+                    points,
+                });
+            }
+            KeyCode::Backspace => {
+                if let Some(input) = self.envelope_save_prompt_input() {
+                    input.backspace();
+                }
+            }
+            KeyCode::Delete => {
+                if let Some(input) = self.envelope_save_prompt_input() {
+                    input.delete();
+                }
+            }
+            KeyCode::Left => {
+                if let Some(input) = self.envelope_save_prompt_input() {
+                    input.left();
+                }
+            }
+            KeyCode::Right => {
+                if let Some(input) = self.envelope_save_prompt_input() {
+                    input.right();
+                }
+            }
+            KeyCode::Home => {
+                if let Some(input) = self.envelope_save_prompt_input() {
+                    input.home();
+                }
+            }
+            KeyCode::End => {
+                if let Some(input) = self.envelope_save_prompt_input() {
+                    input.end();
+                }
+            }
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                if let Some(input) = self.envelope_save_prompt_input() {
+                    input.insert(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn envelope_save_prompt_input(&mut self) -> Option<&mut TextInput> {
+        match self.dialog.as_mut() {
+            Some(Dialog::CdpParams { envelope: Some(edit), .. }) => edit.save_prompt.as_mut(),
+            _ => None,
+        }
+    }
+
+    /// All key handling while `CdpEnvelopeEdit.preset_picker` is `Some` — Up/Down navigate
+    /// the saved-preset list, Esc closes it (back to the plain graphical envelope editor),
+    /// 'd' deletes the highlighted preset from disk, Enter loads it (rescaled to fit the
+    /// current field, `rescale_preset_to_envelope`) into `points` for further tweaking —
+    /// same "doesn't commit the field itself" deferral as the curve picker's own Enter.
+    fn handle_envelope_preset_picker_key(&mut self, key: KeyEvent) {
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() else { return };
+        let Some(picker) = edit.preset_picker.as_mut() else { return };
+        match key.code {
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => {
+                picker.selected = (picker.selected + 1).min(picker.presets.len().saturating_sub(1));
+            }
+            KeyCode::Esc => edit.preset_picker = None,
+            KeyCode::Char('d') => {
+                if let Some(preset) = picker.presets.get(picker.selected) {
+                    crate::model::cdp::envelope_preset::delete_preset(&preset.name);
+                }
+                picker.presets = crate::model::cdp::envelope_preset::list_presets();
+                picker.selected = picker.selected.min(picker.presets.len().saturating_sub(1));
+            }
+            KeyCode::Enter => {
+                let Some(chosen_points) = picker.presets.get(picker.selected).map(|p| p.points.clone()) else {
+                    edit.preset_picker = None;
+                    return;
+                };
+                let field_index = edit.field_index;
+                let (min, max) = match self.dialog.as_ref() {
+                    Some(Dialog::CdpParams { fields, .. }) => match fields.get(field_index) {
+                        Some(CdpField::Number { min, max, .. }) => (*min, *max),
+                        _ => return,
+                    },
+                    _ => return,
+                };
+                let rescaled = self.rescale_preset_to_envelope(&chosen_points, min, max);
+                let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() else { return };
+                edit.points = rescaled;
+                edit.selected = edit.selected.min(edit.points.len().saturating_sub(1));
+                edit.preset_picker = None;
+            }
+            _ => {}
+        }
     }
 
     /// Left (`forward = false`)/Right (`forward = true`) within `Dialog::CdpParams`: on the
@@ -6915,6 +7302,7 @@ impl App {
             buffer_picks,
             frames: vec![first_frame],
             pending_secondary: None,
+            pending_step_count: 1,
             doc_index,
             splice_range,
             finish,
@@ -6949,6 +7337,24 @@ impl App {
         let is_dual = matches!(def.input, crate::model::cdp::IoKind::DualWav | crate::model::cdp::IoKind::DualAna);
         let mut this_path = parent_path.clone();
         this_path.push(index);
+
+        // A run of 2+ consecutive spectral (Ana-Ana) steps gets merged into one job — one
+        // shared `pvoc anal`/`pvoc synth` pair around every process in the run instead of one
+        // pair per step (see `plan_ana_chain`'s doc comment for why: each step would otherwise
+        // independently re-analyze the previous one's already-resynthesized output, which is
+        // both slower and the root cause class of the marker-drift-compounding bug fixed
+        // earlier this session). A lone Ana step (`ana_run_length` returns 1) falls through
+        // to the ordinary single-step build below, unchanged.
+        if !is_dual && def.input == crate::model::cdp::IoKind::Ana && def.output == crate::model::cdp::IoKind::Ana {
+            let run_len = ana_run_length(siblings, index, &self.cdp_catalog);
+            if run_len >= 2 {
+                let merged_steps: Vec<_> = siblings[index..index + run_len].to_vec();
+                let primary = frame.running_buffer.clone();
+                let primary_rate = frame.running_rate;
+                self.submit_merged_ana_run(merged_steps, primary, primary_rate);
+                return;
+            }
+        }
 
         if is_dual && !step.side_chain.is_empty() && run.pending_secondary.is_none() {
             let Some((buf, rate)) = self.chain_picked_buffer(&this_path) else {
@@ -7027,6 +7433,82 @@ impl App {
         self.dialog = Some(Dialog::CdpRunning {
             job_id,
             title: format!("CDP Chain: {}", def.title),
+            step_label: "Starting…".into(),
+            step_index: 0,
+            step_total,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+    }
+
+    /// The merged-run counterpart to the rest of `submit_current_chain_stage`'s single-step
+    /// build: submits ONE job for `steps` (a run of 2+ consecutive spectral steps
+    /// `ana_run_length` found, already cloned out of the chain by the caller) via
+    /// `plan_ana_chain` instead of one job per step, and records `pending_step_count` so the
+    /// completion handler in `tick_cdp` advances the frame's `index` past the whole run at
+    /// once. Error handling mirrors the single-step path exactly (an unknown process, or a
+    /// plan error, closes the run with `Dialog::CdpOutput`).
+    fn submit_merged_ana_run(
+        &mut self,
+        steps: Vec<crate::model::cdp::ChainStep>,
+        primary: Vec<Vec<f32>>,
+        primary_rate: u32,
+    ) {
+        let Some(defs): Option<Vec<crate::model::cdp::ProcessDef>> = steps
+            .iter()
+            .map(|s| self.cdp_catalog.processes.iter().find(|p| p.key == s.process_key).cloned())
+            .collect()
+        else {
+            self.cdp_pending_chain_run = None;
+            self.dialog = Some(Dialog::CdpOutput {
+                title: "CDP Chain Error".into(),
+                lines: vec!["A process in this chain no longer exists in the catalog".into()],
+                scroll: 0,
+            });
+            return;
+        };
+        let pairs: Vec<(&crate::model::cdp::ProcessDef, &[crate::model::cdp::ParamValue])> =
+            defs.iter().zip(steps.iter()).map(|(def, step)| (def, step.values.as_slice())).collect();
+
+        let input_spec = crate::model::cdp::InputSpec {
+            channels: primary.len().max(1),
+            sample_rate: primary_rate,
+            len_samples: primary.first().map(|c| c.len()).unwrap_or(0),
+        };
+        let planned = crate::model::cdp::plan_ana_chain(&pairs, &input_spec, &crate::model::cdp::PvocSettings::default());
+        let planned = match planned {
+            Ok(p) => p,
+            Err(err) => {
+                self.cdp_pending_chain_run = None;
+                self.dialog = Some(Dialog::CdpOutput {
+                    title: "CDP Chain Error".into(),
+                    lines: vec![cdp_plan_error_message(&err)],
+                    scroll: 0,
+                });
+                return;
+            }
+        };
+        if let Some(run) = self.cdp_pending_chain_run.as_mut() {
+            run.pending_secondary = None;
+            run.pending_step_count = steps.len();
+        }
+
+        let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
+        let job_id = self.cdp_next_job_id;
+        self.cdp_next_job_id += 1;
+        let step_total = planned.steps.len();
+        self.cdp_runner.submit(crate::cdp::Job {
+            id: job_id,
+            cdp_dir,
+            planned,
+            inputs: vec![primary],
+            input_sample_rate: primary_rate,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+        let title = defs.iter().map(|d| d.title.as_str()).collect::<Vec<_>>().join(" \u{2192} ");
+        self.dialog = Some(Dialog::CdpRunning {
+            job_id,
+            title: format!("CDP Chain: {title}"),
             step_label: "Starting…".into(),
             step_index: 0,
             step_total,
@@ -7594,11 +8076,17 @@ impl App {
                         // The job that just finished was always the *top* frame's current
                         // step (a dual-input step's side-chain, if it needed one, already
                         // finished and got folded into `pending_secondary` in an earlier
-                        // trip through this branch — see `submit_current_chain_stage`).
+                        // trip through this branch — see `submit_current_chain_stage`). Advances
+                        // by `pending_step_count`, not always 1: a merged run of consecutive
+                        // spectral steps (see `submit_current_chain_stage`'s `ana_run_length`
+                        // check) was submitted as ONE job covering several chain steps at
+                        // once, so completing it must skip `index` past all of them, not just
+                        // the first.
+                        let step_count = run.pending_step_count;
                         if let Some(frame) = run.frames.last_mut() {
                             frame.running_buffer = result_channels;
                             frame.running_rate = output.sample_rate;
-                            frame.index += 1;
+                            frame.index += step_count;
                         }
                         self.cdp_pending_chain_run = Some(run);
                         self.submit_current_chain_stage();
@@ -7625,6 +8113,11 @@ impl App {
                         process_def.map(|d| d.category).unwrap_or(crate::model::cdp::Category::Time),
                         crate::model::cdp::PvocSettings::default().points,
                     );
+                    // Same "auto-save on a real Apply, not Preview" treatment
+                    // `chain_last::save_last_chain` gives a whole chain — recalled via
+                    // `Ctrl+L` in the browser (`App::recall_last_process`).
+                    let last_process_values: Vec<crate::model::cdp::ParamValue> =
+                        pending.fields.iter().map(CdpField::to_value).collect();
 
                     match result {
                         Ok(mut output) => match purpose {
@@ -7658,6 +8151,10 @@ impl App {
                                 self.dialog = None;
                                 if let Some(key) = &recent_key {
                                     crate::model::cdp::recent::record_used(key);
+                                    crate::model::cdp::process_last::save_last_process(&crate::model::cdp::process_last::LastProcess {
+                                        process_key: key.clone(),
+                                        values: last_process_values.clone(),
+                                    });
                                 }
                             }
                             crate::cdp::JobPurpose::Apply => {
@@ -7687,6 +8184,10 @@ impl App {
                                 self.dialog = None;
                                 if let Some(key) = &recent_key {
                                     crate::model::cdp::recent::record_used(key);
+                                    crate::model::cdp::process_last::save_last_process(&crate::model::cdp::process_last::LastProcess {
+                                        process_key: key.clone(),
+                                        values: last_process_values.clone(),
+                                    });
                                 }
                             }
                             crate::cdp::JobPurpose::Preview => {
@@ -9036,8 +9537,8 @@ impl App {
                 } else {
                     edit.points[point_idx + 1].0 - 0.001
                 };
-                let new_t = (anchor_t + dt).clamp(lower.min(upper), upper.max(lower));
-                let new_v = (anchor_v + dv).clamp(min, max);
+                let new_t = round6((anchor_t + dt).clamp(lower.min(upper), upper.max(lower)));
+                let new_v = round6((anchor_v + dv).clamp(min, max));
 
                 if let Some(p) = edit.points.get_mut(point_idx) {
                     *p = (new_t, new_v);
@@ -10571,9 +11072,14 @@ impl App {
         // painting a brand new envelope bitmap into it every frame, completely obscuring the
         // picker it was drawn on top of. Not a stale-image cleanup problem (the picker's own
         // `Clear` widget handles that fine for plain text) — the bitmap was actively being
-        // redrawn onto the wrong, no-longer-current `Rect`.
+        // redrawn onto the wrong, no-longer-current `Rect`. `save_prompt`/`preset_picker`
+        // (the envelope-preset save/load overlays) early-return the exact same empty-rect
+        // shape from `render_cdp_envelope_editor`, so they need the same gate or they'd hit
+        // the identical bug.
         let envelope_curve = match &self.dialog {
-            Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) if edit.curve_picker.is_none() => {
+            Some(Dialog::CdpParams { envelope: Some(edit), fields, .. })
+                if edit.curve_picker.is_none() && edit.save_prompt.is_none() && edit.preset_picker.is_none() =>
+            {
                 fields.get(edit.field_index).and_then(|f| match f {
                     CdpField::Number { min, max, .. } => {
                         Some((edit.points.clone(), edit.selected, edit.time_max, *min, *max, edit.range))
@@ -11667,8 +12173,12 @@ const CDP_ENVELOPE_Y_LABEL_WIDTH: u16 = 7;
 
 fn cdp_envelope_layout(area: Rect) -> CdpEnvelopeLayout {
     let width = 130u16.min(area.width);
-    // spacer+grid+x-axis-line+x-axis-labels+blank+point-status+hints+mouse-hints+2 border
-    let height = (CDP_ENVELOPE_GRID_HEIGHT as u16 + 9).min(area.height);
+    // blank+preset-line+blank+spacer+grid+x-axis-line+x-axis-labels+blank+point-status+blank
+    // +hints+mouse-hints+2 border. Both hint lines are wrapped (`Wrap { trim: false }`, not
+    // hard-split into a permanent second line) — on any reasonably wide terminal each fits
+    // on its own single row exactly like before the save/load-preset header block existed;
+    // only a genuinely narrow terminal reflows one onto a second row, at a word boundary.
+    let height = (CDP_ENVELOPE_GRID_HEIGHT as u16 + 10 + 3).min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -11686,7 +12196,7 @@ fn cdp_envelope_layout(area: Rect) -> CdpEnvelopeLayout {
     let grid_width = (inner.width as usize).saturating_sub(CDP_ENVELOPE_Y_LABEL_WIDTH as usize).max(10);
     let grid = Rect {
         x: inner.x + CDP_ENVELOPE_Y_LABEL_WIDTH,
-        y: inner.y + 1, // +1 for the header spacer row
+        y: inner.y + 4, // +3 for the blank/preset-line/blank header block, +1 for the spacer row
         width: grid_width as u16,
         height: CDP_ENVELOPE_GRID_HEIGHT as u16,
     };
@@ -11703,6 +12213,12 @@ fn render_cdp_envelope_editor(
 ) -> Vec<Rect> {
     if let Some(picker) = &edit.curve_picker {
         return render_envelope_curve_picker(frame, area, picker, curves);
+    }
+    if let Some(prompt) = &edit.save_prompt {
+        return render_envelope_save_prompt(frame, area, prompt);
+    }
+    if let Some(picker) = &edit.preset_picker {
+        return render_envelope_preset_picker(frame, area, picker);
     }
     let Some(CdpField::Number { min, max, .. }) = fields.get(edit.field_index) else {
         return Vec::new();
@@ -11767,7 +12283,21 @@ fn render_cdp_envelope_editor(
         prev_dot_row = Some(curr_dot_row);
     }
 
-    let mut lines = vec![Line::raw("")];
+    // Save/load a named breakpoint-shape preset (`envelope_preset`, system-wide across every
+    // process/param) sits on its own line at the very top, set off by a blank line before and
+    // after — kept away from the dense per-point key hints at the bottom so it doesn't blend
+    // in with them or push that already-long line past the popup's width.
+    let mut lines = vec![
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(" s", hint_style),
+            Span::styled(":save preset  ", label_style),
+            Span::styled("l", hint_style),
+            Span::styled(":load preset", label_style),
+        ]),
+        Line::raw(""),
+        Line::raw(""), // the original header spacer row, preserved as its own line
+    ];
     for row in 0..GRID_HEIGHT {
         let mut spans: Vec<Span> = Vec::with_capacity(grid_width + Y_LABEL_WIDTH);
         let y_label = if row == 0 {
@@ -11794,7 +12324,11 @@ fn render_cdp_envelope_editor(
         let (screen_col, screen_row) = cdp_envelope_point_cell(layout.grid, edit.time_max, min, max, point);
         let col = (screen_col - layout.grid.x) as usize;
         let row = (screen_row - layout.grid.y) as usize;
-        let line_idx = 1 + row; // +1 for the header spacer line
+        // 4 header lines now precede the grid rows (blank, save/load-preset hint, blank,
+        // the original spacer) -- was `1 + row` before that block existed above; a stale `1`
+        // here (a real regression when the header block was added) drew a point marker glyph
+        // 3 rows too high, landing on the save/load-preset hint line instead of the grid.
+        let line_idx = 4 + row;
         let span_idx = 1 + col; // +1 for the y-axis label span
         if let Some(line) = overlay_lines.get_mut(line_idx) {
             if let Some(span) = line.spans.get_mut(span_idx) {
@@ -11827,6 +12361,7 @@ fn render_cdp_envelope_editor(
             label_style,
         ),
     ]));
+    lines.push(Line::raw(""));
     let mut hint_spans = vec![
         Span::styled(" \u{2190}\u{2192}", hint_style),
         Span::styled(":point  ", label_style),
@@ -11851,6 +12386,8 @@ fn render_cdp_envelope_editor(
     } else {
         hint_spans.push(Span::styled(":use curve  ", label_style));
     }
+    // 's'/'l' (save/load a named preset) are hinted on their own line at the very top of
+    // the popup instead — see `lines`' header block above.
     hint_spans.push(Span::styled("Enter", hint_style));
     hint_spans.push(Span::styled(":save  ", label_style));
     hint_spans.push(Span::styled("Esc", hint_style));
@@ -11869,7 +12406,12 @@ fn render_cdp_envelope_editor(
         Span::styled(":delete", label_style),
     ]));
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    // Wrapped (not truncated) so a genuinely narrow terminal reflows either hint line onto a
+    // second row at a word boundary instead of silently clipping it — on any reasonably
+    // sized terminal both lines fit on their own single row, same as before "s"/"p" briefly
+    // lived on the bottom line and forced a permanent (and, on wide terminals, wasteful)
+    // 4-line split.
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     vec![layout.grid]
 }
 
@@ -11925,6 +12467,104 @@ fn render_envelope_curve_picker(
         Span::styled(":select  ", label_style),
         Span::styled("Enter", hint_style),
         Span::styled(":use  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+    Vec::new()
+}
+
+/// The "save as preset" prompt `CdpEnvelopeEdit.save_prompt` opens ('s') — a single name-entry
+/// line, same shape as the chain editor's own `render_cdp_chain_editor_dialog` save prompt.
+fn render_envelope_save_prompt(frame: &mut Frame, area: Rect, prompt: &TextInput) -> Vec<Rect> {
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+
+    let width = 50u16.min(area.width);
+    let height = 6u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let block = Block::default()
+        .title("Save Envelope Preset")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let lines = vec![
+        Line::raw(""),
+        Line::from(vec![Span::styled(" Name: ", label_style), Span::styled(prompt.value(), cursor_style)]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(" Enter", hint_style),
+            Span::styled(":save  ", label_style),
+            Span::styled("Esc", hint_style),
+            Span::styled(":cancel", label_style),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+    Vec::new()
+}
+
+/// The "load preset" picker `CdpEnvelopeEdit.preset_picker` opens ('l') — a flat list of
+/// every saved `EnvelopePreset`, same visual/interaction conventions as
+/// `render_envelope_curve_picker`, plus 'd' to delete the highlighted one from disk.
+fn render_envelope_preset_picker(frame: &mut Frame, area: Rect, picker: &EnvelopePresetPicker) -> Vec<Rect> {
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
+
+    let names: Vec<&str> = picker.presets.iter().map(|p| p.name.as_str()).collect();
+
+    let hint_line = " \u{2191}\u{2193}:select  Enter:use  d:delete  Esc:cancel";
+    let content_width = names.iter().map(|n| n.chars().count()).max().unwrap_or(0).max(hint_line.chars().count());
+    let width = (content_width as u16 + 4).max(30).min(area.width);
+    let rows = names.len().max(1);
+    let height = (rows as u16 + 1 + 2 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let block = Block::default()
+        .title(" Load Envelope Preset ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = Vec::new();
+    if names.is_empty() {
+        lines.push(Line::from(Span::styled(" (no saved presets)", label_style)));
+    } else {
+        for (i, name) in names.iter().enumerate() {
+            let style = if i == picker.selected { selected_style } else { base };
+            lines.push(Line::from(Span::styled(format!(" {name}"), style)));
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(" \u{2191}\u{2193}", hint_style),
+        Span::styled(":select  ", label_style),
+        Span::styled("Enter", hint_style),
+        Span::styled(":use  ", label_style),
+        Span::styled("d", hint_style),
+        Span::styled(":delete  ", label_style),
         Span::styled("Esc", hint_style),
         Span::styled(":cancel", label_style),
     ]));
@@ -13016,12 +13656,22 @@ fn render_cdp_browser_dialog(
 
     let inner = layout.inner;
     let groups_col = layout.groups_col;
-    let processes_block = Block::default().borders(Borders::LEFT).border_style(Style::default().fg(theme::BORDER));
-    let processes_col = processes_block.inner(layout.processes_col);
-    frame.render_widget(processes_block, layout.processes_col);
-    let desc_block = Block::default().borders(Borders::LEFT).border_style(Style::default().fg(theme::BORDER));
-    let desc_col = desc_block.inner(layout.desc_col);
-    frame.render_widget(desc_block, layout.desc_col);
+    // The Processes/Description vertical dividers only run down through the actual list
+    // content, not the trailing blank spacer row that's meant to fully separate the list
+    // from the hints bar below -- otherwise the divider lines poke through as two stray
+    // vertical bar fragments in what should read as a clean, undivided blank row (user report).
+    let divider_height = inner.height.saturating_sub(2);
+    let border_style = Style::default().fg(theme::BORDER);
+    let processes_col = Block::default().borders(Borders::LEFT).inner(layout.processes_col);
+    frame.render_widget(
+        Block::default().borders(Borders::LEFT).border_style(border_style),
+        Rect { height: divider_height, ..layout.processes_col },
+    );
+    let desc_col = Block::default().borders(Borders::LEFT).inner(layout.desc_col);
+    frame.render_widget(
+        Block::default().borders(Borders::LEFT).border_style(border_style),
+        Rect { height: divider_height, ..layout.desc_col },
+    );
 
     // Blank + label/search + blank precede the list in both columns, so a given row index
     // lands on the same screen line in either one.
@@ -13124,6 +13774,8 @@ fn render_cdp_browser_dialog(
             Span::styled(":page  ", label_style),
             Span::styled("Enter", hint_style),
             Span::styled(":open  ", label_style),
+            Span::styled("Ctrl+l", hint_style),
+            Span::styled(":recall last  ", label_style),
             Span::styled("Esc", hint_style),
             Span::styled(":cancel", label_style),
         ])),
@@ -13569,7 +14221,7 @@ fn render_cdp_chain_editor_dialog(
     documents: &[Document],
 ) -> Vec<Rect> {
     let width = 102u16.min(area.width);
-    let height = 29u16.min(area.height);
+    let height = 30u16.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -13603,7 +14255,12 @@ fn render_cdp_chain_editor_dialog(
             Line::raw(""),
             Line::from(vec![Span::styled(" Save chain as: ", label_style), Span::styled(prompt.value(), cursor_style)]),
             Line::raw(""),
-            Line::from(Span::styled(" Enter:save  Esc:cancel", hint_style)),
+            Line::from(vec![
+                Span::styled(" Enter", hint_style),
+                Span::styled(":save  ", label_style),
+                Span::styled("Esc", hint_style),
+                Span::styled(":cancel", label_style),
+            ]),
         ];
         frame.render_widget(Paragraph::new(lines), inner);
         return Vec::new();
@@ -13616,9 +14273,9 @@ fn render_cdp_chain_editor_dialog(
         }
     };
 
-    let rows = chain_editor_rows(state, catalog);
+    let rows = chain_display_rows(state, catalog);
 
-    // The Preset row (always `rows[0]`, per `chain_editor_rows`) renders as a fixed header —
+    // The Preset row (always `rows[0]`, per `chain_display_rows`) renders as a fixed header —
     // a blank line before it and after it, so it doesn't visually run together with the
     // scrollable step list below — rather than as part of that scrolled list.
     let preset_selected = state.selected == ChainEditorRow::Preset;
@@ -13643,9 +14300,28 @@ fn render_cdp_chain_editor_dialog(
     let body_rows = &rows[1..];
     let mut lines: Vec<Line> = Vec::new();
     for row in body_rows {
+        let row = match row {
+            DisplayRow::Row(row) => row,
+            // Synthetic, non-selectable heads-up — always the same pale style regardless of
+            // selection (nothing here can ever be `state.selected`, so there's no highlight
+            // case to fold into). Same indentation convention as a real `Step` row at that
+            // depth, so it visually brackets the step(s) it describes.
+            DisplayRow::PvocAnalyze { depth } => {
+                lines.push(Line::from(Span::styled(format!("{}PVOC Analyze", "  ".repeat(*depth)), disabled_style)));
+                continue;
+            }
+            DisplayRow::PvocResynthesize { depth } => {
+                lines.push(Line::from(Span::styled(format!("{}PVOC Resynthesize", "  ".repeat(*depth)), disabled_style)));
+                continue;
+            }
+            DisplayRow::Blank => {
+                lines.push(Line::raw(""));
+                continue;
+            }
+        };
         let selected = *row == state.selected;
         let style = if selected { cursor_style } else { base };
-        let text = match row {
+        let spans: Vec<Span> = match row {
             ChainEditorRow::Preset => unreachable!("Preset is rendered as the fixed header above"),
             ChainEditorRow::Step(path) => {
                 let indent = "  ".repeat(path.len());
@@ -13653,31 +14329,38 @@ fn render_cdp_chain_editor_dialog(
                 let Some(step) = crate::model::cdp::step_at(&state.chain, path) else {
                     continue;
                 };
-                let title = catalog
-                    .processes
-                    .iter()
-                    .find(|p| p.key == step.process_key)
-                    .map(|d| d.title.as_str())
-                    .unwrap_or(&step.process_key);
+                let def = catalog.processes.iter().find(|p| p.key == step.process_key);
+                let title = def.map(|d| d.title.as_str()).unwrap_or(&step.process_key);
                 let index = *path.last().unwrap();
-                if step.is_dual_input(catalog) == Some(true) {
+                let main_text = if step.is_dual_input(catalog) == Some(true) {
                     let picked =
                         state.buffer_picks.get(path).copied().map(buffer_name).unwrap_or_else(|| "(pick a buffer)".to_string());
                     let via = if step.side_chain.is_empty() { "2nd input" } else { "side-chain from" };
                     format!("{indent}{arrow}{}. {title}   [{via}: {picked}]", index + 1)
                 } else {
                     format!("{indent}{arrow}{}. {title}", index + 1)
+                };
+                let mut spans = vec![Span::styled(main_text, style)];
+                // Pale, same muted color/rationale as the CDP Process browser's own "[pvoc]"
+                // badge (`cdp_process_badges`) — a heads-up that this step is spectral (and so
+                // eligible to merge with an adjacent spectral step into one shared anal/synth
+                // pair, see `ana_run_length`), not a warning. Suppressed on the selected row,
+                // same "fold into one uniform highlight, don't layer a second accent" rule
+                // the Preset row's own hint text already follows.
+                if !selected && def.is_some_and(|d| d.category == crate::model::cdp::Category::Pvoc) {
+                    spans.push(Span::styled(" [pvoc]", disabled_style));
                 }
+                spans
             }
             ChainEditorRow::AddStep(parent_path) => {
                 let indent = "  ".repeat(parent_path.len() + 1);
                 let label = if parent_path.is_empty() { "Add step" } else { "Add side-chain step" };
-                format!("{indent}+ {label}")
+                vec![Span::styled(format!("{indent}+ {label}"), style)]
             }
-            ChainEditorRow::Preview => " \u{25b6} Preview the whole chain".to_string(),
-            ChainEditorRow::Run => " \u{25b6} Run".to_string(),
+            ChainEditorRow::Preview => vec![Span::styled(" \u{25b6} Preview the whole chain", style)],
+            ChainEditorRow::Run => vec![Span::styled(" \u{25b6} Run", style)],
         };
-        lines.push(Line::from(Span::styled(text, style)));
+        lines.push(Line::from(spans));
     }
 
     let footer_height = 3u16; // error line + blank gap + hints line
@@ -13697,7 +14380,8 @@ fn render_cdp_chain_editor_dialog(
 
     // Scroll so the selected row always stays on screen, same "clamp to keep selection
     // visible" idea as every other scrollable list dialog here.
-    let selected_pos = body_rows.iter().position(|r| *r == state.selected).unwrap_or(0);
+    let selected_pos =
+        body_rows.iter().position(|r| matches!(r, DisplayRow::Row(row) if *row == state.selected)).unwrap_or(0);
     let scroll_top = selected_pos.saturating_sub(list_height.saturating_sub(1));
     let visible: Vec<Line> = lines.into_iter().skip(scroll_top).take(list_height).collect();
     frame.render_widget(Paragraph::new(visible), list_area);
@@ -14631,6 +15315,32 @@ mod tests {
         assert_eq!(*desc_scroll, 0, "scrolling back up should return to the top");
     }
 
+    /// The Processes/Description column dividers must stop before the blank spacer row that
+    /// separates the list from the hints bar -- otherwise two stray vertical bar fragments
+    /// poke through what should read as a clean, undivided blank line (user report,
+    /// screenshot).
+    #[test]
+    fn no_column_divider_fragments_on_the_blank_row_above_the_hints_bar() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_browser();
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let layout = cdp_browser_layout(app.last_frame_area);
+        let blank_row = layout.inner.y + layout.inner.height.saturating_sub(2);
+        let buf = terminal.backend().buffer();
+        for x in layout.inner.x..(layout.inner.x + layout.inner.width) {
+            assert_ne!(
+                buf[(x, blank_row)].symbol(),
+                "│",
+                "the row directly above the hints bar should be a clean blank line, not a divider fragment"
+            );
+        }
+    }
+
     /// Enter on the browser opens `Dialog::CdpParams` for the currently-selected process —
     /// the two-dialog flow's whole point: browsing never grows/shrinks a params form live,
     /// it commits to a completely separate dialog sized for that one process.
@@ -14836,6 +15546,33 @@ mod tests {
         assert_eq!(*focus, 1, "should be back on the Channels field");
         let Some(CdpField::Number { envelope, .. }) = fields.first() else { panic!("expected a Number field") };
         assert!(envelope.is_none(), "field must stay a plain constant after Esc");
+    }
+
+    /// Real bug (user report, screenshot): repeatedly nudging a point's value with plain
+    /// Up/Down showed "v=73.35999999999999" instead of "73.36" — the coarse step for
+    /// `blur_avrg`'s real "Channels" field is `(200.0 - 1.0) / 40.0 = 4.975`, and repeated
+    /// f64 addition of a step like that visibly accumulates binary-fraction noise (the same
+    /// class of bug `cdp_nudge_number`'s own doc comment already documents for the main
+    /// params dialog's flat number fields — this is the envelope editor's point-value
+    /// counterpart, fixed the same way: round to 6 decimal places after every nudge).
+    #[test]
+    fn envelope_point_value_nudge_never_accumulates_binary_fraction_noise() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_blur_avrg_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        for _ in 0..7 {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        }
+
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
+        let value = edit.points[edit.selected].1;
+        let displayed = format_cdp_float_for_display(value);
+        assert!(
+            !displayed.contains("999999") && !displayed.contains("000000"),
+            "value must not carry binary-fraction noise: {displayed}"
+        );
+        assert_eq!(value, round6(value), "the stored value itself must already be rounded, not just the display");
     }
 
     /// Enter commits the edited points into the field, switching it to envelope mode; a
@@ -15150,6 +15887,371 @@ mod tests {
         assert_eq!(edit.points[0].1, 10.0);
         assert_eq!(edit.points[1].1, 30.0);
         assert_eq!(edit.points[2].1, 20.0);
+    }
+
+    /// 's' opens the save-name prompt; typing a name and pressing Enter persists the
+    /// envelope *as currently drawn* (not yet committed to the field) to disk as a
+    /// system-wide `EnvelopePreset`, and returns to the plain graphical editor with the
+    /// field itself still untouched (saving a preset is not the same as committing the field).
+    #[test]
+    fn s_opens_save_prompt_and_enter_persists_the_current_envelope_as_a_preset() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_envelope_preset_save_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_blur_avrg_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)); // insert a 3rd point
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)); // nudge it off-default
+        let drawn_points = {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
+            edit.points.clone()
+        };
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+            assert!(edit.save_prompt.is_some(), "'s' should open the save-name prompt");
+        }
+        for c in "My Swell".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) = &app.dialog else {
+            panic!("expected the plain envelope editor to still be open")
+        };
+        assert!(edit.save_prompt.is_none(), "Enter should close the prompt");
+        assert_eq!(edit.points, drawn_points, "saving a preset must not alter the in-progress envelope");
+        let Some(CdpField::Number { envelope: field_env, .. }) = fields.get(edit.field_index) else { panic!() };
+        assert!(field_env.is_none(), "saving a preset must not itself commit the field");
+
+        let on_disk = crate::model::cdp::envelope_preset::list_presets();
+        assert_eq!(on_disk.len(), 1);
+        assert_eq!(on_disk[0].name, "My Swell");
+        assert_eq!(on_disk[0].points, drawn_points);
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// 'l' opens the load-preset picker listing every saved `EnvelopePreset`, sorted by name
+    /// (the same order `envelope_preset::list_presets` returns) — system-wide, so a preset
+    /// saved from one process's envelope shows up when editing a *different* process's field.
+    #[test]
+    fn l_opens_the_preset_picker_listing_saved_presets() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_envelope_preset_list_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        crate::model::cdp::envelope_preset::save_preset(&crate::model::cdp::envelope_preset::EnvelopePreset {
+            name: "Zebra".into(),
+            points: vec![(0.0, 1.0), (1.0, 2.0)],
+        });
+        crate::model::cdp::envelope_preset::save_preset(&crate::model::cdp::envelope_preset::EnvelopePreset {
+            name: "Alpha".into(),
+            points: vec![(0.0, 3.0), (1.0, 4.0)],
+        });
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_blur_avrg_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        let picker = edit.preset_picker.as_ref().expect("'l' should open the preset picker");
+        assert_eq!(picker.presets.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["Alpha", "Zebra"]);
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn esc_from_the_preset_picker_returns_to_the_envelope_editor_unchanged() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_envelope_preset_esc_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        crate::model::cdp::envelope_preset::save_preset(&crate::model::cdp::envelope_preset::EnvelopePreset {
+            name: "Shape".into(),
+            points: vec![(0.0, 1.0), (1.0, 2.0)],
+        });
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_blur_avrg_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let original_points = {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
+            edit.points.clone()
+        };
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else {
+            panic!("expected the plain envelope editor to still be open, not the whole dialog closed")
+        };
+        assert!(edit.preset_picker.is_none());
+        assert_eq!(edit.points, original_points, "Esc from the picker must not touch the envelope's own points");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn enter_on_the_preset_picker_rescales_the_preset_to_fit_time_max_and_clamps_to_range() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_envelope_preset_enter_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        // focus_hold's field range is 0.0-30.0 -- pick values that exceed it on one end, to
+        // also exercise the clamp, same as the curve-picker's own equivalent test.
+        crate::model::cdp::envelope_preset::save_preset(&crate::model::cdp::envelope_preset::EnvelopePreset {
+            name: "Big Swell".into(),
+            points: vec![(0.0, 10.0), (2.0, 50.0), (4.0, 20.0)],
+        });
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_focus_hold_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let time_max = {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
+            edit.time_max
+        };
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else {
+            panic!("Enter on the picker should load the preset and stay in the plain envelope editor")
+        };
+        assert!(edit.preset_picker.is_none());
+        assert_eq!(edit.points.len(), 3);
+        assert!((edit.points[0].0 - 0.0).abs() < 1e-9);
+        assert!((edit.points[1].0 - time_max / 2.0).abs() < 1e-9);
+        assert!((edit.points[2].0 - time_max).abs() < 1e-9);
+        assert_eq!(edit.points[0].1, 10.0);
+        assert_eq!(edit.points[1].1, 30.0, "50.0 must clamp to the field's own max of 30.0");
+        assert_eq!(edit.points[2].1, 20.0);
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn d_on_the_preset_picker_deletes_the_highlighted_preset_from_disk() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_envelope_preset_delete_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        crate::model::cdp::envelope_preset::save_preset(&crate::model::cdp::envelope_preset::EnvelopePreset {
+            name: "Keep".into(),
+            points: vec![(0.0, 1.0), (1.0, 2.0)],
+        });
+        crate::model::cdp::envelope_preset::save_preset(&crate::model::cdp::envelope_preset::EnvelopePreset {
+            name: "Remove".into(),
+            points: vec![(0.0, 3.0), (1.0, 4.0)],
+        });
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_blur_avrg_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        // "Remove" sorts after "Keep" alphabetically -- move down to select it.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+
+        let remaining = crate::model::cdp::envelope_preset::list_presets();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].name, "Keep");
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
+        let picker = edit.preset_picker.as_ref().expect("picker should still be open after deleting");
+        assert_eq!(picker.presets.len(), 1);
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// NASTY BUG regression, same class as `opening_the_curve_picker_in_graphics_mode_does_not_paint_over_it`:
+    /// the graphics-mode envelope bitmap must not be redrawn over the save-prompt or
+    /// load-preset overlays either — both early-return the same empty-row-rect shape from
+    /// `render_cdp_envelope_editor` that caused the original bug for the curve picker, so
+    /// the occlusion gate has to check them too.
+    #[test]
+    fn opening_the_preset_overlays_in_graphics_mode_does_not_paint_over_them() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_envelope_preset_graphics_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+        crate::model::cdp::envelope_preset::save_preset(&crate::model::cdp::envelope_preset::EnvelopePreset {
+            name: "mypreset".into(),
+            points: vec![(0.0, 1.0), (1.0, 2.0)],
+        });
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        app.graphics_mode = true;
+        app.set_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+        open_blur_avrg_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let mut text = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        assert!(text.contains("Load Envelope Preset"), "the picker's own popup must be visible, not painted over: {text:?}");
+        assert!(text.contains("mypreset"), "the picker's preset entry must be visible, not painted over: {text:?}");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Real bug (user report, screenshot): the overlay that draws a breakpoint marker glyph
+    /// (`\u{25cf}`) computed its target `lines` index as `1 + row` — correct back when a
+    /// single spacer line preceded the grid rows, but stale once the save/load-preset header
+    /// block (blank, hint line, blank, spacer = 4 lines) was added above it. For a point near
+    /// the top of its value range (row 0), the marker landed 3 rows too high, drawing squarely
+    /// on top of the "s:save preset  l:load preset" hint text instead of the grid — visually
+    /// replacing "save preset" with a stray filled-circle glyph. Locks in that a point at the
+    /// very top of the grid draws its marker inside the grid rows, never above them.
+    #[test]
+    fn envelope_point_marker_never_overlaps_the_save_load_preset_header_line() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        let catalog_index = app.cdp_catalog.processes.iter().position(|p| p.key == "combine_cross").expect("combine_cross");
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = 1;
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        // Push the point to the very top of its value range (row 0 of the grid) -- exactly
+        // where the stale offset used to draw onto the header instead.
+        for _ in 0..50 {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let grid = *app.dialog_row_rects.first().expect("envelope editor should return its grid rect");
+
+        let mut preset_line_row: Option<u16> = None;
+        let mut marker_row: Option<u16> = None;
+        for y in area.y..area.y + area.height {
+            let row_text: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
+            if row_text.contains("save preset") {
+                preset_line_row = Some(y);
+                assert!(!row_text.contains('\u{25cf}'), "the marker glyph must never land on the save/load-preset header line");
+            }
+            if row_text.contains('\u{25cf}') {
+                marker_row = Some(y);
+            }
+        }
+        let preset_line_row = preset_line_row.expect("the save/load preset line should be visible");
+        let marker_row = marker_row.expect("the point marker should be visible somewhere");
+
+        assert_ne!(marker_row, preset_line_row, "the marker must not land on the preset header line");
+        assert!(marker_row >= grid.y, "the marker must be inside the grid, not above it");
+    }
+
+    /// Real bug (user report, screenshot): the "s:save preset  l:load preset" hint used to
+    /// live on the same dense bottom hint line as every per-point key, and that extra text
+    /// pushed the line past the popup's width with no wrapping, cutting off "Esc:cancel"
+    /// entirely. It now sits on its own line near the top of the popup (above the grid),
+    /// bracketed by a blank line before and after — this locks in that layout, not just that
+    /// the text exists somewhere on screen.
+    #[test]
+    fn save_load_preset_hint_sits_above_the_grid_bracketed_by_blank_lines() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_blur_avrg_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let grid = *app.dialog_row_rects.first().expect("envelope editor should return its grid rect");
+
+        // Scanned only within the popup's own column span (derived from `grid`, which sits
+        // inside it) -- the whole-terminal width has other widgets (menu bar, waveform) drawn
+        // outside the popup on the same rows, which a naive whole-row emptiness check would
+        // wrongly see as "not blank."
+        let popup_left = grid.x.saturating_sub(CDP_ENVELOPE_Y_LABEL_WIDTH + 1);
+        let popup_right = grid.x + grid.width + 1;
+        let row_text = |y: u16| -> String { (popup_left..popup_right).map(|x| buffer[(x, y)].symbol()).collect() };
+
+        let mut preset_line_row: Option<u16> = None;
+        for y in area.y..area.y + area.height {
+            if row_text(y).contains("save preset") {
+                preset_line_row = Some(y);
+            }
+        }
+        let preset_line_row = preset_line_row.expect("the save/load preset line should be visible");
+        // Strip the popup's own left/right border columns (included in the scanned range)
+        // along with plain whitespace -- a row with nothing but the vertical border chars
+        // and spaces is "blank" for this check's purposes.
+        let is_blank = |y: u16| row_text(y).trim_matches(|c: char| c.is_whitespace() || c == '\u{2502}').is_empty();
+
+        assert!(preset_line_row < grid.y, "the preset line must sit above the grid, not mixed into the bottom hints");
+        assert!(is_blank(preset_line_row - 1), "a blank line must precede the preset line: {:?}", row_text(preset_line_row - 1));
+        assert!(is_blank(preset_line_row + 1), "a blank line must follow the preset line: {:?}", row_text(preset_line_row + 1));
+    }
+
+    /// Real bug (user report, screenshot): the keyboard-hint line ran to ~118 columns even
+    /// *before* "s"/"p" were added to it (they've since moved to their own line near the
+    /// top — see `save_load_preset_hint_sits_above_the_grid_bracketed_by_blank_lines`), so it
+    /// silently truncated with no wrapping on anything narrower than ~120 columns —
+    /// `ratatui::Paragraph` doesn't wrap by default, it just clips. Splitting both the
+    /// keyboard-hint and mouse-hint lines in two (each half comfortably under 65 columns)
+    /// fixes this at any realistic terminal width, not just by freeing up the ~30 columns
+    /// "s"/"p" used to occupy. Checked at 80 columns — narrower than either half needs, with
+    /// real margin to spare.
+    #[test]
+    fn bottom_hint_line_no_longer_cuts_off_esc_cancel_on_a_narrow_terminal() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_blur_avrg_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let mut text = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        assert!(text.contains("Esc"), "the hint bar's Esc key hint must not be cut off: {text:?}");
+        assert!(text.contains("cancel"), "the hint bar's Esc:cancel label must not be cut off: {text:?}");
     }
 
     /// `cdp_validate_fields` must still block a `required_envelope` field that's still
@@ -18024,14 +19126,19 @@ mod tests {
 
     /// Real-bug regression, reported after manual testing (2026-07-22): a chain's timing
     /// tolerance used to come from only its *last* step's category, as if the whole chain
-    /// were one CDP process. But each spectral (pvoc) step re-analyzes the previous step's
-    /// already-padded output from scratch, independently padding its own synth stage again --
-    /// the drift compounds down the chain rather than being bounded by any single step's
-    /// tolerance. 3 chained `blur_avrg` steps (real binaries) pad by ~2784 samples total,
-    /// comfortably exceeding one step's own ~2048-sample tolerance -- which used to blow the
-    /// single-step-derived tolerance and silently collapse every marker in range. Confirms the
-    /// summed-per-step tolerance fix in `finish_chain_run`'s `Splice` arm keeps the marker at
-    /// its exact original position despite that real, nontrivial length drift.
+    /// were one CDP process. Before `submit_current_chain_stage` learned to merge a run of
+    /// consecutive spectral steps into one job (`plan_ana_chain`, added right after this
+    /// test), each step independently re-analyzed the previous one's already-padded output
+    /// from scratch, and 3 chained `blur_avrg` steps padded by ~2784 samples total --
+    /// comfortably exceeding one step's own ~2048-sample tolerance, silently collapsing every
+    /// marker in range. The summed-per-step tolerance fix in `finish_chain_run`'s `Splice` arm
+    /// still guards that case (e.g. a chain mixing categories, where a run can't merge), but
+    /// for this *specific* all-spectral chain the merge now eliminates the compounding drift
+    /// at the source -- one shared anal/synth pair means only one pad, not three. This test
+    /// still exercises the real end-to-end marker-preservation path against real binaries,
+    /// just no longer for the "compounding" reason its name describes; see
+    /// `a_three_step_spectral_chain_merges_into_a_single_anal_synth_job` right below for a
+    /// direct check that the merge itself is what's happening now.
     #[test]
     fn markers_survive_a_real_multi_step_spectral_chain_despite_compounding_pvoc_padding() {
         let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -18084,6 +19191,67 @@ mod tests {
             vec![Marker { position: 10000, label: "mid".into() }],
             "a marker inside the processed range must survive real, multi-step-compounded pvoc padding, not just a single step's worth"
         );
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Direct confirmation that `submit_current_chain_stage` actually merges a run of
+    /// consecutive spectral (Ana-Ana) chain steps into ONE job instead of one job per step: a
+    /// mono 2-step `blur_avrg` chain must show exactly one `Dialog::CdpRunning` with
+    /// `step_total == 4` (anal, step 1, step 2, synth) right after starting -- an unmerged
+    /// submission would instead have started the *first* step's own 3-step job (anal, step,
+    /// synth) and only shown the second step's job later. Also confirms the merged run still
+    /// splices as exactly one undo step, same as before merging existed.
+    #[test]
+    fn a_two_step_spectral_chain_merges_into_a_single_anal_synth_job() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_spectral_merge_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = new_app(Some(doc(0.5, 20000)), None);
+        app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
+
+        let blur_index = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").expect("blur_avrg");
+        let (fields, _) = app.cdp_fields_for(blur_index);
+        let values: Vec<_> = fields.iter().map(CdpField::to_value).collect();
+
+        let chain = crate::model::cdp::CdpChain {
+            name: "Merged Blur".into(),
+            steps: vec![
+                crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values: values.clone(), side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values, side_chain: Vec::new() },
+            ],
+        };
+        app.cdp_chain_editor = Some(ChainEditorState {
+            chain,
+            buffer_picks: std::collections::HashMap::new(),
+            selected: ChainEditorRow::Run,
+            error: None,
+            presets: Vec::new(),
+            preset_selected: None,
+            save_prompt: None,
+        });
+
+        app.run_cdp_chain(ChainRunFinish::Splice);
+        let Some(Dialog::CdpRunning { step_total, .. }) = &app.dialog else {
+            panic!("expected a running merged job");
+        };
+        assert_eq!(
+            *step_total, 4,
+            "a merged 2-step mono run should be exactly anal + step1 + step2 + synth = 4 invocations, not two separate 3-step jobs"
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while app.dialog.is_some() && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.dialog.is_none(), "the merged run should still finish and splice");
+        assert!(app.histories[0].can_undo());
+        assert!(app.histories[0].undo(&mut app.documents[0]), "one undo should be available");
+        assert!(!app.histories[0].can_undo(), "the whole merged 2-step run must still collapse into exactly one undo step");
 
         unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
         std::fs::remove_dir_all(&temp_dir).ok();
@@ -18677,8 +19845,177 @@ mod tests {
     #[test]
     fn cdp_process_badges_is_empty_for_a_plain_process() {
         let app = new_app(Some(doc(0.1, 100)), None);
-        let p = app.cdp_catalog.processes.iter().find(|p| p.key == "blur_avrg").expect("blur_avrg is a plain single-input process");
+        // Time-domain, single-input, no formant/pitch-curve params -- unlike blur_avrg (which
+        // now earns the "[pvoc]" badge below), this one has nothing to flag at all.
+        let p = app.cdp_catalog.processes.iter().find(|p| p.key == "phase_phase_1").expect("phase_phase_1 is a plain time-domain process");
         assert!(cdp_process_badges(p).is_empty());
+    }
+
+    #[test]
+    fn cdp_process_badges_marks_spectral_processes_but_not_time_domain_ones() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let spectral = app.cdp_catalog.processes.iter().find(|p| p.key == "blur_avrg").expect("blur_avrg is a spectral (pvoc) process");
+        assert!(cdp_process_badges(spectral).contains(&"[pvoc]"));
+
+        let time_domain = app.cdp_catalog.processes.iter().find(|p| p.key == "phase_phase_1").expect("phase_phase_1 is time-domain, not spectral");
+        assert!(!cdp_process_badges(time_domain).contains(&"[pvoc]"));
+    }
+
+    /// End-to-end: the CDP Chain editor's own step rows show the same "[pvoc]" heads-up next
+    /// to a spectral step (in the pale `theme::ANNOTATION` color, not just present as text) —
+    /// and not next to a time-domain one — so a user building a chain can see at a glance
+    /// which adjacent steps are eligible for `ana_run_length`'s automatic merge.
+    #[test]
+    fn chain_editor_renders_the_pvoc_badge_pale_next_to_spectral_steps_only() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+            name: "t".into(),
+            steps: vec![chain_step("blur_avrg"), chain_step("phase_phase_1")],
+        });
+        state.selected = ChainEditorRow::Run; // neither step row selected -- badge suppression only applies to ITS OWN row
+        app.cdp_chain_editor = Some(state);
+        app.dialog = Some(Dialog::CdpChainEditor);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+
+        let mut blur_row: Option<u16> = None;
+        let mut phase_row: Option<u16> = None;
+        let mut pvoc_cell: Option<(u16, u16)> = None;
+        for y in area.y..area.y + area.height {
+            let row_text: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
+            if row_text.contains("Spectral Average") {
+                blur_row = Some(y);
+            }
+            if row_text.contains("Invert Polarity") || row_text.contains("Phase") {
+                phase_row = Some(y);
+            }
+            if let Some(byte_col) = row_text.find("[pvoc]") {
+                let col = row_text[..byte_col].chars().count();
+                pvoc_cell = Some((area.x + col as u16, y));
+            }
+        }
+        let blur_row = blur_row.expect("blur_avrg's row should be visible");
+        let phase_row = phase_row.expect("phase_phase_1's row should be visible");
+        let (pvoc_x, pvoc_y) = pvoc_cell.expect("a [pvoc] badge should be visible somewhere");
+
+        assert_eq!(pvoc_y, blur_row, "the [pvoc] badge must appear on the spectral step's own row");
+        assert_ne!(pvoc_y, phase_row, "the [pvoc] badge must not appear on the time-domain step's row");
+        assert_eq!(buffer[(pvoc_x, pvoc_y)].fg, theme::ANNOTATION, "the badge must render in the pale/muted color, not the normal row text color");
+    }
+
+    /// Real bug (user report, screenshot): the CDP Chain editor's "Save chain as" prompt
+    /// rendered its whole "Enter:save  Esc:cancel" hint as one `hint_style`-colored span, so
+    /// "save"/"cancel" showed in the same shortcut-orange as the "Enter"/"Esc" keys
+    /// themselves instead of the normal label color every other hint in the app uses for the
+    /// non-key part (`":save  "`/`":cancel"` in `label_style`) — the one place in the whole
+    /// codebase this convention had drifted.
+    #[test]
+    fn chain_save_prompt_hint_colors_only_the_keys_orange_not_the_labels() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let state = fresh_chain_editor_state(crate::model::cdp::CdpChain { name: "t".into(), steps: vec![chain_step("blur_avrg")] });
+        app.cdp_chain_editor = Some(state);
+        app.dialog = Some(Dialog::CdpChainEditor);
+        app.open_chain_save_prompt();
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+
+        let mut enter_cell: Option<(u16, u16)> = None;
+        let mut save_cell: Option<(u16, u16)> = None;
+        let mut esc_cell: Option<(u16, u16)> = None;
+        let mut cancel_cell: Option<(u16, u16)> = None;
+        for y in area.y..area.y + area.height {
+            let row_text: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
+            if let Some(byte_col) = row_text.find("Enter:save") {
+                let enter_col = row_text[..byte_col].chars().count();
+                enter_cell = Some((area.x + enter_col as u16, y));
+                let save_byte_col = byte_col + "Enter:".len();
+                let save_col = row_text[..save_byte_col].chars().count();
+                save_cell = Some((area.x + save_col as u16, y));
+            }
+            if let Some(byte_col) = row_text.find("Esc:cancel") {
+                let esc_col = row_text[..byte_col].chars().count();
+                esc_cell = Some((area.x + esc_col as u16, y));
+                let cancel_byte_col = byte_col + "Esc:".len();
+                let cancel_col = row_text[..cancel_byte_col].chars().count();
+                cancel_cell = Some((area.x + cancel_col as u16, y));
+            }
+        }
+        let (enter_x, enter_y) = enter_cell.expect("Enter hint should be visible");
+        let (save_x, save_y) = save_cell.expect("save label should be visible");
+        let (esc_x, esc_y) = esc_cell.expect("Esc hint should be visible");
+        let (cancel_x, cancel_y) = cancel_cell.expect("cancel label should be visible");
+
+        assert_eq!(buffer[(enter_x, enter_y)].fg, theme::SHORTCUT, "the Enter key itself should be orange");
+        assert_eq!(buffer[(save_x, save_y)].fg, theme::CHROME_FG, "the \"save\" label must not be orange");
+        assert_eq!(buffer[(esc_x, esc_y)].fg, theme::SHORTCUT, "the Esc key itself should be orange");
+        assert_eq!(buffer[(cancel_x, cancel_y)].fg, theme::CHROME_FG, "the \"cancel\" label must not be orange");
+    }
+
+    /// End-to-end: "PVOC Analyze"/"PVOC Resynthesize" must actually reach the rendered
+    /// screen, in the pale/muted color, bracketing exactly the spectral step and not the
+    /// time-domain one -- not just come out of `chain_display_rows` in isolation.
+    #[test]
+    fn chain_editor_renders_pvoc_analyze_and_resynthesize_pale_around_the_spectral_step() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+            name: "t".into(),
+            steps: vec![chain_step("phase_phase_1"), chain_step("blur_avrg")],
+        });
+        state.selected = ChainEditorRow::Run;
+        app.cdp_chain_editor = Some(state);
+        app.dialog = Some(Dialog::CdpChainEditor);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+
+        let mut phase_row: Option<u16> = None;
+        let mut blur_row: Option<u16> = None;
+        let mut analyze_row: Option<u16> = None;
+        let mut synth_row: Option<u16> = None;
+        let mut analyze_cell: Option<(u16, u16)> = None;
+        for y in area.y..area.y + area.height {
+            let row_text: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
+            if row_text.contains("Invert Polarity") {
+                phase_row = Some(y);
+            }
+            if row_text.contains("Spectral Average") {
+                blur_row = Some(y);
+            }
+            if let Some(byte_col) = row_text.find("PVOC Analyze") {
+                analyze_row = Some(y);
+                let col = row_text[..byte_col].chars().count();
+                analyze_cell = Some((area.x + col as u16, y));
+            }
+            if row_text.contains("PVOC Resynthesize") {
+                synth_row = Some(y);
+            }
+        }
+        let phase_row = phase_row.expect("phase_phase_1's row should be visible");
+        let blur_row = blur_row.expect("blur_avrg's row should be visible");
+        let analyze_row = analyze_row.expect("a PVOC Analyze row should be visible");
+        let synth_row = synth_row.expect("a PVOC Resynthesize row should be visible");
+        let (analyze_x, analyze_y) = analyze_cell.unwrap();
+
+        assert!(analyze_row > phase_row && analyze_row < blur_row, "PVOC Analyze must sit between the time-domain step and the spectral one it precedes");
+        assert!(synth_row > blur_row, "PVOC Resynthesize must sit after the spectral step it follows");
+        assert_eq!(buffer[(analyze_x, analyze_y)].fg, theme::ANNOTATION, "PVOC Analyze must render in the pale/muted color");
     }
 
     /// End-to-end: the "pitch curve" badge must actually reach the rendered screen next to
@@ -18844,6 +20181,127 @@ mod tests {
                 ChainEditorRow::Run,
             ]
         );
+    }
+
+    /// `chain_display_rows` must interleave "PVOC Analyze"/"PVOC Resynthesize" exactly
+    /// bracketing a run of adjacent single-input spectral steps — merged into ONE shared
+    /// pair for the whole run, not one pair per step — while leaving a plain time-domain
+    /// step (and the rows around it) completely untouched.
+    #[test]
+    fn chain_display_rows_brackets_a_run_of_adjacent_spectral_steps() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+            name: "test".into(),
+            steps: vec![chain_step("phase_phase_1"), chain_step("blur_avrg"), chain_step("blur_avrg")],
+        });
+        let rows = chain_display_rows(&state, &app.cdp_catalog);
+        assert_eq!(
+            rows,
+            vec![
+                DisplayRow::Row(ChainEditorRow::Preset),
+                DisplayRow::Row(ChainEditorRow::Step(vec![0])), // phase_phase_1 -- time-domain, no bracket
+                DisplayRow::PvocAnalyze { depth: 1 },
+                DisplayRow::Row(ChainEditorRow::Step(vec![1])), // blur_avrg
+                DisplayRow::Row(ChainEditorRow::Step(vec![2])), // blur_avrg -- merged into the same run, no anal/synth between them
+                DisplayRow::PvocResynthesize { depth: 1 },
+                DisplayRow::Row(ChainEditorRow::AddStep(Vec::new())),
+                DisplayRow::Blank,
+                DisplayRow::Row(ChainEditorRow::Preview),
+                DisplayRow::Row(ChainEditorRow::Run),
+            ]
+        );
+    }
+
+    /// A dual-input spectral step (`combine_mean_1`, `IoKind::DualAna`) never merges into a
+    /// run with an adjacent single-input spectral sibling, even though both are "[pvoc]" —
+    /// it always gets its own isolated anal/synth bracket, matching `plan_dual_ana`'s real
+    /// behavior (which always wraps itself independent of its neighbors) and
+    /// `ana_run_length`'s own exclusion of dual-input steps from a mergeable run.
+    #[test]
+    fn chain_display_rows_never_merges_a_dual_input_spectral_step_with_a_neighbor() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+            name: "test".into(),
+            steps: vec![chain_step("blur_avrg"), chain_step("combine_mean_1")],
+        });
+        let rows = chain_display_rows(&state, &app.cdp_catalog);
+        assert_eq!(
+            rows,
+            vec![
+                DisplayRow::Row(ChainEditorRow::Preset),
+                DisplayRow::PvocAnalyze { depth: 1 },
+                DisplayRow::Row(ChainEditorRow::Step(vec![0])), // blur_avrg -- its own isolated bracket
+                DisplayRow::PvocResynthesize { depth: 1 },
+                DisplayRow::PvocAnalyze { depth: 1 },
+                DisplayRow::Row(ChainEditorRow::Step(vec![1])), // combine_mean_1 -- its own isolated bracket, not merged with blur_avrg
+                DisplayRow::PvocResynthesize { depth: 1 },
+                DisplayRow::Row(ChainEditorRow::AddStep(vec![1])), // combine_mean_1 is dual-input -- has its own side-chain "+ Add step"
+                DisplayRow::Row(ChainEditorRow::AddStep(Vec::new())),
+                DisplayRow::Blank,
+                DisplayRow::Row(ChainEditorRow::Preview),
+                DisplayRow::Row(ChainEditorRow::Run),
+            ]
+        );
+    }
+
+    /// Reordering steps must recompute where the bracket lands, exactly as the feature asks:
+    /// "every time the order and amount of processes in the chain is changed... the chain
+    /// display should be recalculated." `chain_display_rows` is never cached (rebuilt fresh
+    /// from `state.chain` every call), so reordering the underlying steps alone -- without
+    /// touching `chain_display_rows` at all -- must already move the bracket to the step's
+    /// new position.
+    #[test]
+    fn reordering_steps_moves_the_pvoc_bracket_to_follow_the_step() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+            name: "test".into(),
+            steps: vec![chain_step("blur_avrg"), chain_step("phase_phase_1")],
+        });
+        let before = chain_display_rows(&state, &app.cdp_catalog);
+        assert_eq!(before[1], DisplayRow::PvocAnalyze { depth: 1 }, "sanity: bracket starts around step 0 (blur_avrg)");
+
+        state.chain.steps.swap(0, 1); // now [phase_phase_1, blur_avrg]
+        let after = chain_display_rows(&state, &app.cdp_catalog);
+        assert_eq!(
+            after,
+            vec![
+                DisplayRow::Row(ChainEditorRow::Preset),
+                DisplayRow::Row(ChainEditorRow::Step(vec![0])), // phase_phase_1, now first -- no bracket
+                DisplayRow::PvocAnalyze { depth: 1 },
+                DisplayRow::Row(ChainEditorRow::Step(vec![1])), // blur_avrg, now second -- bracket followed it here
+                DisplayRow::PvocResynthesize { depth: 1 },
+                DisplayRow::Row(ChainEditorRow::AddStep(Vec::new())),
+                DisplayRow::Blank,
+                DisplayRow::Row(ChainEditorRow::Preview),
+                DisplayRow::Row(ChainEditorRow::Run),
+            ]
+        );
+    }
+
+    /// The synthetic PVOC rows are purely a rendering concern: they never appear in
+    /// `chain_editor_rows` (the list navigation/selection actually uses), so Up/Down and
+    /// `state.selected` can never land on one no matter how many are interleaved into the
+    /// rendered display.
+    #[test]
+    fn pvoc_display_rows_are_absent_from_the_selectable_row_list() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+            name: "test".into(),
+            steps: vec![chain_step("blur_avrg"), chain_step("blur_avrg"), chain_step("combine_mean_1")],
+        });
+        let display_rows = chain_display_rows(&state, &app.cdp_catalog);
+        assert!(
+            display_rows.iter().any(|r| matches!(r, DisplayRow::PvocAnalyze { .. } | DisplayRow::PvocResynthesize { .. })),
+            "sanity: this chain should actually produce some PVOC display rows"
+        );
+        let selectable = chain_editor_rows(&state, &app.cdp_catalog);
+        // Every real step/control row still appears, one-to-one, with none of the synthetic
+        // PVOC rows mixed in.
+        let display_steps: Vec<_> = display_rows
+            .into_iter()
+            .filter_map(|r| match r { DisplayRow::Row(row) => Some(row), _ => None })
+            .collect();
+        assert_eq!(display_steps, selectable, "the selectable list must be exactly the display list with PVOC rows stripped out");
     }
 
     /// End-to-end through the real key-handling path (not calling internal helpers directly):
@@ -19353,6 +20811,160 @@ mod tests {
 
         unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
         std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// A successful single-process Apply auto-saves it (process key + exact field values)
+    /// as the recallable "last process" -- the single-process counterpart to
+    /// `chain_last::save_last_chain`, recalled via `Ctrl+L` in the browser
+    /// (`App::recall_last_process`). Reuses the same "fake copy job" trick
+    /// `applying_a_process_records_it_as_recently_used` does, since this only needs a real
+    /// `Apply` completion to fire, not a real CDP binary.
+    #[test]
+    fn applying_a_process_auto_saves_it_as_the_recallable_last_process() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_last_process_apply_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = new_app(Some(doc(0.1, 4)), None);
+        let catalog_index = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").expect("blur_avrg");
+        let (fields, _) = app.cdp_fields_for(catalog_index);
+        assert!(crate::model::cdp::process_last::load_last_process().is_none(), "nothing saved yet");
+
+        app.cdp_pending = Some(CdpPending {
+            doc_index: 0,
+            range: (0, 4),
+            label: "CDP: Fake".into(),
+            catalog_index,
+            fields: fields.clone(),
+            second_input: None,
+            focus: 0,
+            presets: Vec::new(),
+            preset_selected: None,
+        });
+        app.dialog = Some(Dialog::CdpRunning {
+            job_id: 99,
+            title: "Fake".into(),
+            step_label: String::new(),
+            step_index: 0,
+            step_total: 1,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let planned = crate::model::cdp::pipeline::PlannedJob {
+            steps: vec![crate::model::cdp::pipeline::Invocation {
+                bin: "cp".into(),
+                args: vec!["in.wav".into(), "out.wav".into()],
+                label: "fake copy".into(),
+                expected_output: "out.wav".into(),
+            }],
+            input_files: vec![crate::model::cdp::pipeline::TempWavSpec {
+                relative_name: "in.wav".into(),
+                input_index: 0,
+                source_channels: vec![0],
+            }],
+            output_files: vec![crate::model::cdp::pipeline::OutputWavSpec {
+                relative_name: "out.wav".into(),
+                dest_channels: vec![0],
+            }],
+            glob_output: None,
+            output_curve: None,
+            output_curve_binary_template: None, output_formant_buffer: None,
+            brk_files: Vec::new(),
+            binary_input_files: Vec::new(),
+            deferred_window_params: Vec::new(),
+            needs_simple_wav_input: false,
+        };
+        app.cdp_runner.submit(crate::cdp::Job {
+            id: 99,
+            cdp_dir: std::path::PathBuf::from("/bin"),
+            planned,
+            inputs: vec![vec![vec![0.1, 0.2, 0.3, 0.4]]],
+            input_sample_rate: app.documents[0].sample_rate,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.dialog.is_some() && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.dialog.is_none(), "the CdpRunning dialog should close once the job finishes");
+
+        let saved = crate::model::cdp::process_last::load_last_process().expect("should be auto-saved after a real Apply");
+        assert_eq!(saved.process_key, "blur_avrg");
+        let expected_values: Vec<_> = fields.iter().map(CdpField::to_value).collect();
+        assert_eq!(saved.values, expected_values);
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// `Ctrl+L` in the CDP Process browser reopens the params dialog for the saved "last
+    /// process," prefilled with its exact saved values — not just its defaults.
+    #[test]
+    fn ctrl_l_in_browser_recalls_the_last_process_prefilled_with_its_values() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_last_process_recall_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        let catalog_index = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").expect("blur_avrg");
+        crate::model::cdp::process_last::save_last_process(&crate::model::cdp::process_last::LastProcess {
+            process_key: "blur_avrg".into(),
+            values: vec![crate::model::cdp::ParamValue::Number(42.0)],
+        });
+
+        app.open_cdp_browser();
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+
+        let Some(Dialog::CdpParams { catalog_index: opened_index, fields, .. }) = &app.dialog else {
+            panic!("Ctrl+L should open the params dialog prefilled from the last process")
+        };
+        assert_eq!(*opened_index, catalog_index);
+        assert_eq!(fields.len(), 1);
+        let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected a Number field") };
+        assert_eq!(input.value().trim().parse::<f64>(), Ok(42.0));
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// `Ctrl+L` with no process ever applied shows an inline info message instead of
+    /// silently doing nothing.
+    #[test]
+    fn ctrl_l_in_browser_with_no_last_process_shows_an_info_message() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_last_process_empty_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        app.open_cdp_browser();
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+
+        assert!(matches!(app.dialog, Some(Dialog::Info { .. })), "no process has ever run -- Ctrl+L should surface a message, not silently no-op");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// A bare (non-Ctrl) 'l' in the browser must still type into the live search box, exactly
+    /// as before this feature existed — only `Ctrl+L` is the "recall last process" command,
+    /// since a bare letter here has no free key the way it does in the CDP Chain editor
+    /// (which has no search box to collide with).
+    #[test]
+    fn plain_l_in_browser_still_types_into_search_not_recall() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        app.open_cdp_browser();
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpBrowser { search, .. }) = &app.dialog else { panic!("expected the browser to stay open") };
+        assert_eq!(search.value(), "l", "a bare 'l' must still type into the search box");
     }
 
     /// Shift+Tab cycles panel focus the opposite way to Tab:

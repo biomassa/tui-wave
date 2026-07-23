@@ -513,6 +513,14 @@ fn plan_param(
 /// `DeferredWindowTarget` per deferred (`PercentOfAnaWindowCount`) param this invocation's
 /// args (or `.brk` files) reference — almost always 0 or 1 in practice (only one catalog
 /// param uses that scale today), but a process could in principle carry more than one.
+///
+/// `brk_index_base` offsets the per-param index used to name generated `.brk`/list/table
+/// files (`brk_{i}.txt`, etc.) — every existing single-process caller passes `0` (no change
+/// from before this parameter existed). `plan_ana_chain` is the one caller that passes a
+/// distinct nonzero base per process in a merged run: those all share one job/temp directory
+/// (unlike every other planning function, which gives each process its own job), so two
+/// different processes' own param 0 would otherwise both generate `brk_0.txt` and silently
+/// clobber each other's file.
 fn build_process_args(
     def: &ProcessDef,
     values: &[ParamValue],
@@ -522,6 +530,7 @@ fn build_process_args(
     pvoc: &PvocSettings,
     sample_rate: u32,
     brk_files: &mut Vec<(String, String)>,
+    brk_index_base: usize,
 ) -> Result<(Vec<String>, Vec<DeferredWindowTarget>), PlanError> {
     if values.len() != def.params.len() {
         return Err(PlanError::ParamCountMismatch { expected: def.params.len(), actual: values.len() });
@@ -549,7 +558,7 @@ fn build_process_args(
         if !param.before_outfile {
             continue;
         }
-        let plan = plan_param(param, value, duration_secs, pvoc, sample_rate, brk_files, i);
+        let plan = plan_param(param, value, duration_secs, pvoc, sample_rate, brk_files, brk_index_base + i);
         if let Some(token) = plan.arg {
             match plan.deferred {
                 Some(DeferredParamKind::Arg { flag, percent }) => {
@@ -570,7 +579,7 @@ fn build_process_args(
         if param.before_outfile {
             continue;
         }
-        let plan = plan_param(param, value, duration_secs, pvoc, sample_rate, brk_files, i);
+        let plan = plan_param(param, value, duration_secs, pvoc, sample_rate, brk_files, brk_index_base + i);
         if let Some(token) = plan.arg {
             match plan.deferred {
                 Some(DeferredParamKind::Arg { flag, percent }) => {
@@ -712,6 +721,7 @@ fn plan_wav_glob(
         pvoc,
         input.sample_rate,
         &mut brk_files,
+        0,
     )?;
     debug_assert!(deferred.is_empty(), "glob-output processes never carry ana-window-count params");
 
@@ -745,7 +755,7 @@ fn plan_synthesis(
     // process (no input at all) never does. Placeholder value is inert for every other
     // scale, and no catalog entry pairs this scale with an `IoKind::None` process.
     let (args, deferred) =
-        build_process_args(def, values, &[], "out.wav", 0.0, pvoc, 44100, &mut brk_files)?;
+        build_process_args(def, values, &[], "out.wav", 0.0, pvoc, 44100, &mut brk_files, 0)?;
     debug_assert!(deferred.is_empty(), "synthesis processes have no ana-window-count params");
 
     let dest_channels = if def.output_is_stereo { vec![0, 1] } else { vec![0] };
@@ -788,6 +798,7 @@ fn plan_wav(
             pvoc,
             input.sample_rate,
             &mut brk_files,
+            0,
         )?;
         debug_assert!(deferred.is_empty(), "wav processes never carry ana-window-count params");
         // A `stereo_native` process's real output channel count is `def.output_is_stereo`,
@@ -841,6 +852,7 @@ fn plan_wav(
             pvoc,
             input.sample_rate,
             &mut brk_files,
+            0,
         )?;
         debug_assert!(deferred.is_empty());
         let label = format!("{}{}", process_label(def), channel_label(ch, input.channels));
@@ -878,6 +890,7 @@ fn plan_dual_wav(
             pvoc,
             a.sample_rate,
             &mut brk_files,
+            0,
         )?;
         debug_assert!(deferred.is_empty());
         return Ok(PlannedJob {
@@ -929,6 +942,7 @@ fn plan_dual_wav(
             pvoc,
             a.sample_rate,
             &mut brk_files,
+            0,
         )?;
         debug_assert!(deferred.is_empty());
         let label = format!("{}{}", process_label(def), channel_label(ch, lanes));
@@ -1012,6 +1026,7 @@ fn plan_dual_ana(
             pvoc,
             a.sample_rate,
             &mut brk_files,
+            0,
         )?;
         debug_assert!(deferred.is_empty(), "no dual-input process uses the ana-window-count scale");
         steps.push(Invocation {
@@ -1081,6 +1096,7 @@ fn plan_ana(
             pvoc,
             input.sample_rate,
             &mut brk_files,
+            0,
         )?;
         // Every lane analyzes its own .ana file, so each accumulates its own entry rather
         // than overwriting a job-wide slot (see DeferredWindowParam's doc comment).
@@ -1106,6 +1122,121 @@ fn plan_ana(
     }
 
     Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, brk_files, binary_input_files: Vec::new(), deferred_window_params, needs_simple_wav_input: def.requires_simple_wav_input })
+}
+
+/// Plans a run of 2+ consecutive single-input spectral (`IoKind::Ana`-in/`IoKind::Ana`-out)
+/// CDP Chain steps as ONE analysis/resynthesis round trip instead of one per step: `pvoc
+/// anal` runs once per channel, each process in `steps` reads the *previous* one's `.ana`
+/// output directly — CDP's own normal PVOC-domain workflow (chaining spectral processes on
+/// `.ana` files without resynthesizing audio in between, exactly how a CDP CLI script would
+/// do it by hand: `anal` once, several `.ana`-to-`.ana` transforms, `synth` once) — and
+/// `pvoc synth` runs once at the very end.
+///
+/// Used only by the CDP Chain execution engine (`ui/app.rs`'s `submit_current_chain_stage`,
+/// which detects such a run); a lone `Ana` step still goes through the ordinary
+/// single-process `plan_ana` above, completely unchanged — this function exists
+/// side-by-side with it rather than replacing it so the single-process path (and its
+/// existing tests/exact `.ana` filenames) carries zero risk from this change. Every `def` in
+/// `steps` must have `input == IoKind::Ana` and `output == IoKind::Ana` (checked by the
+/// caller, not re-validated here) — a dual-input (`DualAna`) step can't join a run this way,
+/// since its secondary input never enters the run's single-buffer `.ana` chain and would
+/// need its own anal regardless.
+///
+/// Every process in the run shares one job (one temp working directory), unlike every other
+/// planning function here (one process = one job) — so each gets its own `brk_index_base`
+/// (`step_idx * 1000`, comfortably more headroom than any real process's param count) when
+/// building its args, or two different processes' own param 0 would both generate
+/// `brk_0.txt` and silently clobber each other's file.
+pub fn plan_ana_chain(
+    steps: &[(&ProcessDef, &[ParamValue])],
+    input: &InputSpec,
+    pvoc: &PvocSettings,
+) -> Result<PlannedJob, PlanError> {
+    debug_assert!(steps.len() >= 2, "a single step should go through plan_ana instead");
+    let mut brk_files = Vec::new();
+    let duration = input.duration_secs();
+    let channels = input.channels.max(1);
+
+    let mut invocations = Vec::new();
+    let mut input_files = Vec::new();
+    let mut output_files = Vec::new();
+    let mut deferred_window_params = Vec::new();
+
+    for ch in 0..channels {
+        let label_suffix = channel_label(ch, channels);
+        let wav_in = format!("in_c{}.wav", ch + 1);
+        let mut ana_cur = format!("chain_c{}_s0.ana", ch + 1);
+        let wav_out = format!("out_c{}.wav", ch + 1);
+
+        input_files.push(TempWavSpec { relative_name: wav_in.clone(), input_index: 0, source_channels: vec![ch] });
+
+        invocations.push(Invocation {
+            bin: "pvoc".into(),
+            args: vec![
+                "anal".into(),
+                "1".into(),
+                wav_in,
+                ana_cur.clone(),
+                format!("-c{}", pvoc.points),
+                format!("-o{}", pvoc.overlap),
+            ],
+            label: format!("pvoc anal{label_suffix}"),
+            expected_output: ana_cur.clone(),
+        });
+
+        for (step_idx, (def, values)) in steps.iter().enumerate() {
+            let ana_next = format!("chain_c{}_s{}.ana", ch + 1, step_idx + 1);
+            let process_step_index = invocations.len();
+            let (args, deferred) = build_process_args(
+                def,
+                values,
+                &[ana_cur.as_str()],
+                &ana_next,
+                duration,
+                pvoc,
+                input.sample_rate,
+                &mut brk_files,
+                step_idx * 1000,
+            )?;
+            // Each step in the run reads the *previous* step's own `.ana` output as its
+            // input — same "every lane accumulates its own deferred-param entry" reasoning
+            // as `plan_ana` above, just generalized across steps too, not only channels.
+            deferred_window_params.extend(deferred.into_iter().map(|target| DeferredWindowParam {
+                ana_relative_name: ana_cur.clone(),
+                step_index: process_step_index,
+                target,
+            }));
+            invocations.push(Invocation {
+                bin: def.bin.clone(),
+                args,
+                label: format!("{}{label_suffix}", process_label(def)),
+                expected_output: ana_next.clone(),
+            });
+            ana_cur = ana_next;
+        }
+
+        invocations.push(Invocation {
+            bin: "pvoc".into(),
+            args: vec!["synth".into(), ana_cur, wav_out.clone()],
+            label: format!("pvoc synth{label_suffix}"),
+            expected_output: wav_out.clone(),
+        });
+        output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
+    }
+
+    Ok(PlannedJob {
+        steps: invocations,
+        input_files,
+        output_files,
+        glob_output: None,
+        output_curve: None,
+        output_curve_binary_template: None,
+        output_formant_buffer: None,
+        brk_files,
+        binary_input_files: Vec::new(),
+        deferred_window_params,
+        needs_simple_wav_input: steps.iter().any(|(def, _)| def.requires_simple_wav_input),
+    })
 }
 
 /// Plans a curve-in/curve-out process (`IoKind::Curve` on both sides) — the `repitch`
@@ -1172,6 +1303,7 @@ pub fn plan_curve_transform_job(
         &PvocSettings::default(),
         44100,
         &mut brk_files,
+        0,
     )?;
     debug_assert!(deferred.is_empty(), "curve processes never carry ana-window-count params");
 
@@ -1555,6 +1687,136 @@ mod tests {
         assert_eq!(job.output_files.len(), 2);
         assert_eq!(job.output_files[0].dest_channels, vec![0]);
         assert_eq!(job.output_files[1].dest_channels, vec![1]);
+    }
+
+    /// A mono 2-step spectral run must produce exactly ONE `pvoc anal` and ONE `pvoc synth`
+    /// (not one pair per step) — 4 invocations total (anal, step1, step2, synth) — with each
+    /// process reading the *previous* one's `.ana` output directly, never resynthesizing to
+    /// audio in between. This is the whole point of `plan_ana_chain` over calling `plan_ana`
+    /// twice.
+    #[test]
+    fn two_step_mono_run_shares_one_anal_and_one_synth() {
+        let mut avrg = base_def(IoKind::Ana, IoKind::Ana);
+        avrg.bin = "blur".into();
+        avrg.subprog = Some("avrg".into());
+        avrg.mode = None;
+        avrg.params = vec![number_param("Channels", 1.0, 200.0, 6.0, NumberScale::Plain)];
+
+        let mut freeze = base_def(IoKind::Ana, IoKind::Ana);
+        freeze.bin = "focus".into();
+        freeze.subprog = Some("freeze".into());
+        freeze.mode = Some("1".into());
+        freeze.params = vec![];
+
+        let avrg_values = vec![ParamValue::Number(6.0)];
+        let freeze_values: Vec<ParamValue> = vec![];
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 88200 };
+        let job = plan_ana_chain(&[(&avrg, &avrg_values), (&freeze, &freeze_values)], &input, &PvocSettings::default())
+            .unwrap();
+
+        let anal_count = job.steps.iter().filter(|s| s.bin == "pvoc" && s.args.first().map(String::as_str) == Some("anal")).count();
+        let synth_count = job.steps.iter().filter(|s| s.bin == "pvoc" && s.args.first().map(String::as_str) == Some("synth")).count();
+        assert_eq!(anal_count, 1, "one process's own anal must not fire for a merged run");
+        assert_eq!(synth_count, 1, "one process's own synth must not fire for a merged run");
+        assert_eq!(job.steps.len(), 4, "anal, blur avrg, focus freeze, synth -- no intermediate resynthesis");
+
+        assert_eq!(job.steps[0].args, vec!["anal", "1", "in_c1.wav", "chain_c1_s0.ana", "-c1024", "-o3"]);
+        assert_eq!(job.steps[1].bin, "blur");
+        assert_eq!(job.steps[1].args, vec!["avrg", "chain_c1_s0.ana", "chain_c1_s1.ana", "6"]);
+        assert_eq!(job.steps[2].bin, "focus");
+        assert_eq!(job.steps[2].args, vec!["freeze", "1", "chain_c1_s1.ana", "chain_c1_s2.ana"]);
+        assert_eq!(job.steps[3].args, vec!["synth", "chain_c1_s2.ana", "out_c1.wav"]);
+        assert_eq!(job.input_files.len(), 1);
+        assert_eq!(job.output_files.len(), 1);
+    }
+
+    /// A stereo run must still only anal/synth once *per channel* (not per step): 2 channels
+    /// x 2 steps = one anal + 2 processes + one synth per channel = 8 invocations total, not
+    /// 2 channels x 2 steps x 3 (anal/process/synth each) = 12.
+    #[test]
+    fn stereo_run_anals_and_synths_once_per_channel_not_per_step() {
+        let mut avrg = base_def(IoKind::Ana, IoKind::Ana);
+        avrg.bin = "blur".into();
+        avrg.subprog = Some("avrg".into());
+        avrg.mode = None;
+        avrg.params = vec![number_param("Channels", 1.0, 200.0, 6.0, NumberScale::Plain)];
+        let values = vec![ParamValue::Number(6.0)];
+
+        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 88200 };
+        let job = plan_ana_chain(&[(&avrg, &values), (&avrg, &values)], &input, &PvocSettings::default()).unwrap();
+
+        assert_eq!(job.steps.len(), 8, "2 channels x (1 anal + 2 process steps + 1 synth)");
+        let anal_count = job.steps.iter().filter(|s| s.bin == "pvoc" && s.args.first().map(String::as_str) == Some("anal")).count();
+        let synth_count = job.steps.iter().filter(|s| s.bin == "pvoc" && s.args.first().map(String::as_str) == Some("synth")).count();
+        assert_eq!(anal_count, 2, "one anal per channel, not per step");
+        assert_eq!(synth_count, 2, "one synth per channel, not per step");
+        assert_eq!(job.input_files.len(), 2);
+        assert_eq!(job.output_files.len(), 2);
+    }
+
+    /// Two different processes in the same run each having their own `Breakpoints` param at
+    /// local index 0 must not collide on the same `brk_0.txt` filename -- they share one job
+    /// (one temp directory), unlike every other planning function's one-process-per-job
+    /// convention, so without `brk_index_base` the second process's file would silently
+    /// clobber the first's before either ever runs.
+    #[test]
+    fn distinct_processes_own_breakpoint_files_do_not_collide() {
+        let mut first = base_def(IoKind::Ana, IoKind::Ana);
+        first.bin = "blur".into();
+        first.subprog = Some("avrg".into());
+        first.mode = None;
+        first.params = vec![number_param("Channels", 1.0, 200.0, 6.0, NumberScale::Plain)];
+        let first_values = vec![ParamValue::Breakpoints(vec![(0.0, 4.0), (1.0, 8.0)])];
+
+        let mut second = base_def(IoKind::Ana, IoKind::Ana);
+        second.bin = "focus".into();
+        second.subprog = Some("freeze".into());
+        second.mode = Some("1".into());
+        second.params = vec![number_param("Depth", 0.0, 1.0, 0.5, NumberScale::Plain)];
+        let second_values = vec![ParamValue::Breakpoints(vec![(0.0, 0.2), (1.0, 0.9)])];
+
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let job = plan_ana_chain(&[(&first, &first_values), (&second, &second_values)], &input, &PvocSettings::default())
+            .unwrap();
+
+        let brk_names: Vec<&str> = job.brk_files.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(brk_names.len(), 2, "each process's own .brk file must survive, not overwrite the other's");
+        assert_ne!(brk_names[0], brk_names[1], "the two processes' own param-0 .brk files must not share a name");
+        // Each invocation's own arg must reference its own distinct file, not the other's.
+        assert!(job.steps[1].args.contains(&brk_names[0].to_string()));
+        assert!(job.steps[2].args.contains(&brk_names[1].to_string()));
+    }
+
+    /// A `PercentOfAnaWindowCount` param on a *non-first* step in the run must be tracked
+    /// against the `.ana` file *that step itself reads* (the previous step's output), not
+    /// the run's very first anal -- the runner patches window-count placeholders by parsing
+    /// `decfactor` out of whichever file `ana_relative_name` names, so getting this wrong
+    /// would have it read the wrong (differently-windowed) file.
+    #[test]
+    fn deferred_window_param_on_a_later_step_points_at_its_own_input_ana_file() {
+        let mut first = base_def(IoKind::Ana, IoKind::Ana);
+        first.bin = "blur".into();
+        first.subprog = Some("avrg".into());
+        first.mode = None;
+        first.params = vec![number_param("Channels", 1.0, 200.0, 6.0, NumberScale::Plain)];
+        let first_values = vec![ParamValue::Number(6.0)];
+
+        let mut second = base_def(IoKind::Ana, IoKind::Ana);
+        second.bin = "some_bin".into();
+        second.subprog = None;
+        second.mode = None;
+        second.params = vec![number_param("Window", 0.0, 100.0, 50.0, NumberScale::PercentOfAnaWindowCount)];
+        let second_values = vec![ParamValue::Number(50.0)];
+
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let job = plan_ana_chain(&[(&first, &first_values), (&second, &second_values)], &input, &PvocSettings::default())
+            .unwrap();
+
+        assert_eq!(job.deferred_window_params.len(), 1);
+        assert_eq!(
+            job.deferred_window_params[0].ana_relative_name, "chain_c1_s1.ana",
+            "must reference the second step's own input (the first step's output), not the initial anal's output"
+        );
     }
 
     #[test]
