@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-07-23
+
+- **CDP chains automatically merge adjacent spectral (PVOC) steps into one shared
+  anal/synth pass** instead of wrapping each one individually — same result, far less work
+  for a chain of 2+ consecutive spectral processes. The chain editor's own step list (and
+  the Process browser) now show a pale `[pvoc]` badge on every spectral process, and the
+  chain editor brackets a merged run with "PVOC Analyze"/"PVOC Resynthesize" marker rows
+  (never selectable — the cursor structurally can't land on them).
+- **New: system-wide breakpoint-envelope presets.** Any automatable field's envelope editor
+  (`e`) can save (`s`) and load (`l`) a named shape, reusable across any process/param, not
+  scoped to the one it was drawn on — loading rescales the shape's own timing to fit the
+  current field's time span while leaving its shape unchanged. `d` in the picker deletes a
+  saved preset.
+- **New: "Recall last process" (`Ctrl+L`) in the CDP Process browser**, mirroring the CDP
+  Chain editor's existing "recall last chain" (`l`) — every successfully *applied* (not
+  previewed) process auto-saves its parameters, so reopening the browser and pressing
+  `Ctrl+L` reopens the params dialog on that same process with your last values intact.
+- Fixed a rounding-noise display bug (envelope values showing e.g. `73.35999999999999`
+  after a nudge) and a marker-overlay regression where a point near the top of its range
+  drew on top of the envelope editor's own header text. Hint lines in the envelope editor
+  and CDP Process browser now wrap properly on narrow terminals instead of clipping or
+  permanently reserving extra vertical space. Fixed the CDP Chain "Save chain as" prompt
+  coloring its whole hint line orange instead of just the key. Fixed stray vertical divider
+  fragments poking into the blank row above the CDP Process browser's hints bar.
+- Bumped version to 1.5.0, covering the CDP chain PVOC auto-merge/badges, envelope
+  presets, recall-last-process, and the fixes above.
+
 ## 2026-07-22
 
 - **CDP process titles renamed to a CDP-WASM-SUITE-style, plain-English convention**
