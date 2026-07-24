@@ -6504,6 +6504,13 @@ impl App {
                     points,
                 });
                 edit.presets = crate::model::cdp::envelope_preset::list_presets();
+                // Saving is also a transition away from "(none)" -- if the user never cycled
+                // with Tab first, `custom_points` would otherwise never get snapshotted, so
+                // cycling back around to "(none)" later would silently show a stale shape
+                // instead of restoring what was actually drawn (user report).
+                if edit.preset_selected.is_none() && edit.custom_points.is_none() {
+                    edit.custom_points = Some(edit.points.clone());
+                }
                 edit.preset_selected = edit.presets.iter().position(|p| p.name == name);
             }
             KeyCode::Backspace => {
@@ -15386,6 +15393,64 @@ mod tests {
             Some(Dialog::CdpParams { catalog_index: ci, .. }) => assert_eq!(*ci, catalog_index),
             _ => panic!("expected a click to open Dialog::CdpParams"),
         }
+    }
+
+    /// Real gap found via manual testing: if the user saves their drawn shape as a *new*
+    /// preset before ever pressing Tab, `preset_selected` jumps straight to that new preset
+    /// without `custom_points` ever getting snapshotted (that used to only happen inside
+    /// `envelope_cycle_preset`). Cycling through other presets afterward and wrapping back to
+    /// "(none)" would then silently show whatever was last cycled to, not the shape drawn
+    /// before the save. `handle_envelope_save_prompt_key`'s Enter arm now snapshots
+    /// `custom_points` itself when this is the first transition away from "(none)".
+    #[test]
+    fn saving_before_the_first_tab_still_lets_cycling_back_to_none_restore_the_drawn_shape() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_envelope_save_first_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        // A pre-existing preset that sorts *after* "Mine" (the one about to be saved), so the
+        // newly saved preset isn't the only (and therefore trivially "current") entry, and two
+        // Tabs are needed to wrap all the way back around to "(none)".
+        crate::model::cdp::envelope_preset::save_preset(&crate::model::cdp::envelope_preset::EnvelopePreset {
+            name: "Zebra".into(),
+            points: vec![(0.0, 50.0), (1.0, 100.0)],
+        });
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_blur_avrg_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)); // draw a 3rd point
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        let drawn_points = {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
+            edit.points.clone()
+        };
+
+        // Save immediately -- no Tab press yet, so the picker/cycle code path never runs.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        for c in "Mine".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
+            assert_eq!(
+                edit.preset_selected.and_then(|i| edit.presets.get(i)).map(|p| p.name.as_str()),
+                Some("Mine")
+            );
+        }
+
+        // Tab to the other preset, then Tab again to wrap back to "(none)".
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
+        assert!(edit.preset_selected.is_none(), "two Tabs from the just-saved preset should wrap back to (none)");
+        assert_eq!(edit.points, drawn_points, "(none) must restore the shape drawn before the save, not a stale preset's shape");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     /// `cdp_params_column_widths` sizes both columns to the *longest* label/range in the
