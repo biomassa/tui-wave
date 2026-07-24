@@ -8,6 +8,7 @@
   were set by hand before cycling started, instead of that state being lost the moment
   preset browsing begins. Saving a new preset before ever cycling also snapshots it, so the
   hand-set state survives either way.
+- Bumped version to 1.5.1.
 
 ## 2026-07-24
 
@@ -20,6 +21,9 @@
   open first. Cycling all the way around includes an extra "(none)" slot holding whatever
   shape was hand-drawn before the first `Tab` press, so that shape is never lost just from
   browsing presets.
+- Fixed a rounding-noise bug where inserting a breakpoint (mouse double-click, or the `n`
+  midpoint-insert key) could land on a raw binary-fraction value like `20.079999999999984`
+  instead of a clean one.
 
 ## 2026-07-23
 
