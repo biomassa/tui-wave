@@ -1751,6 +1751,13 @@ struct ChainEditorState {
     error: Option<String>,
     presets: Vec<crate::model::cdp::CdpChain>,
     preset_selected: Option<usize>,
+    /// A snapshot of `chain` taken the first time cycling or saving ever transitions
+    /// `preset_selected` away from `None` this session — lets Left/Right cycling wrap all the
+    /// way back around to a "(none)" slot holding exactly the draft built by hand, instead of
+    /// that draft being lost the moment preset browsing starts. Mirrors
+    /// `Dialog::CdpParams.custom_values`/`CdpEnvelopeEdit.custom_points` exactly; see
+    /// `App::cycle_chain_preset`.
+    custom_chain: Option<crate::model::cdp::CdpChain>,
     save_prompt: Option<TextInput>,
 }
 
@@ -1763,6 +1770,7 @@ impl ChainEditorState {
             error: None,
             presets: Self::presets_by_recency(),
             preset_selected: None,
+            custom_chain: None,
             save_prompt: None,
         }
     }
@@ -4403,6 +4411,10 @@ impl App {
                 state.chain = chain;
                 state.buffer_picks = std::collections::HashMap::new();
                 state.preset_selected = None;
+                // The recalled chain replaces whatever draft "(none)" was tracking -- clear it
+                // so a subsequent cycle-back-to-"(none)" restores *this* draft, not a stale
+                // one from before the recall.
+                state.custom_chain = None;
                 state.selected = ChainEditorRow::Preset;
                 state.error = None;
             }
@@ -4422,19 +4434,38 @@ impl App {
 
     /// Left/Right on the preset row: cycles `preset_selected` and loads that chain's steps
     /// wholesale into the draft (name included, so a subsequent Save overwrites the same
-    /// preset by default) — mirrors `Dialog::CdpParams`'s own preset-row convention exactly.
-    /// `buffer_picks` always resets to empty on load (never persisted, see
-    /// `ChainEditorState.buffer_picks`'s doc comment).
+    /// preset by default) — mirrors `Dialog::CdpParams`'s own preset-row convention exactly,
+    /// including its "(none)" slot: an extra stop in the cycle (index `-1`, i.e. `dir`'s
+    /// `rem_euclid` never lands there on its own) holding whatever draft was built by hand
+    /// before Left/Right was first pressed this session (`custom_chain`, snapshotted the
+    /// first time the cycle leaves it — also by `handle_cdp_chain_save_prompt_key` if a save
+    /// happens first) — see `App::cdp_params_cycle_preset`/`envelope_cycle_preset` for the
+    /// same fix applied there. `buffer_picks` always resets to empty on any load (never
+    /// persisted, see `ChainEditorState.buffer_picks`'s doc comment).
     fn cycle_chain_preset(&mut self, dir: i32) {
         let Some(state) = self.cdp_chain_editor.as_mut() else { return };
         if state.presets.is_empty() {
             return;
         }
-        let len = state.presets.len() as i32;
-        let current = state.preset_selected.map(|i| i as i32).unwrap_or(-1);
-        let next = (current + dir).rem_euclid(len) as usize;
-        state.preset_selected = Some(next);
-        state.chain = state.presets[next].clone();
+        let total = state.presets.len() as i32 + 1; // +1 for the "(none)" slot at index 0
+        let current_slot = state.preset_selected.map(|i| i as i32 + 1).unwrap_or(0);
+        let new_slot = (current_slot + dir).rem_euclid(total);
+        let custom_chain = state.custom_chain.clone().or_else(|| {
+            if state.preset_selected.is_none() { Some(state.chain.clone()) } else { None }
+        });
+
+        if new_slot == 0 {
+            if let Some(chain) = custom_chain.clone() {
+                state.chain = chain;
+            }
+            state.custom_chain = custom_chain;
+            state.preset_selected = None;
+        } else {
+            let next = (new_slot - 1) as usize;
+            state.preset_selected = Some(next);
+            state.chain = state.presets[next].clone();
+            state.custom_chain = custom_chain;
+        }
         state.buffer_picks = std::collections::HashMap::new();
         state.selected = ChainEditorRow::Preset;
     }
@@ -4784,6 +4815,12 @@ impl App {
                 let name = prompt.value().trim().to_string();
                 if name.is_empty() {
                     return;
+                }
+                // Saving is also a transition away from "(none)" -- if the user never cycled
+                // with Left/Right first, custom_chain would otherwise never get snapshotted
+                // (mirrors the same fix applied to the envelope editor and CdpParams).
+                if state.preset_selected.is_none() && state.custom_chain.is_none() {
+                    state.custom_chain = Some(state.chain.clone());
                 }
                 state.chain.name = name;
                 crate::model::cdp::chain_preset::save_chain(&state.chain);
@@ -19343,6 +19380,7 @@ mod tests {
             error: None,
             presets: Vec::new(),
             preset_selected: None,
+            custom_chain: None,
             save_prompt: None,
         });
         assert!(!app.histories[0].can_undo(), "sanity: nothing to undo before the chain runs");
@@ -19415,6 +19453,7 @@ mod tests {
             error: None,
             presets: Vec::new(),
             preset_selected: None,
+            custom_chain: None,
             save_prompt: None,
         });
 
@@ -19486,6 +19525,7 @@ mod tests {
             error: None,
             presets: Vec::new(),
             preset_selected: None,
+            custom_chain: None,
             save_prompt: None,
         });
 
@@ -19547,6 +19587,7 @@ mod tests {
             error: None,
             presets: Vec::new(),
             preset_selected: None,
+            custom_chain: None,
             save_prompt: None,
         });
 
@@ -19598,6 +19639,7 @@ mod tests {
             error: None,
             presets: Vec::new(),
             preset_selected: None,
+            custom_chain: None,
             save_prompt: None,
         });
 
@@ -20279,6 +20321,102 @@ mod tests {
         assert_eq!(buffer[(cancel_x, cancel_y)].fg, theme::CHROME_FG, "the \"cancel\" label must not be orange");
     }
 
+    /// The chain editor's preset row cycle also includes a "(none)" slot holding whatever
+    /// draft was built by hand before Left/Right was first pressed this session — cycling all
+    /// the way around (forward through every preset, or backward past the first) restores
+    /// that draft instead of losing it the moment preset browsing starts. Mirrors the same fix
+    /// applied to the envelope editor's Tab-cycling and `Dialog::CdpParams`'s own preset row
+    /// (user report).
+    #[test]
+    fn cycling_all_the_way_around_the_chain_preset_row_returns_to_the_hand_built_draft() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_chain_preset_none_slot_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        crate::model::cdp::chain_preset::save_chain(&crate::model::cdp::CdpChain {
+            name: "Alpha".into(),
+            steps: vec![chain_step("blur_avrg")],
+        });
+        crate::model::cdp::chain_preset::save_chain(&crate::model::cdp::CdpChain {
+            name: "Zebra".into(),
+            steps: vec![chain_step("phase_phase_1")],
+        });
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let hand_built =
+            crate::model::cdp::CdpChain { name: "My Draft".into(), steps: vec![chain_step("blur_avrg"), chain_step("phase_phase_1")] };
+        let mut state = fresh_chain_editor_state(hand_built.clone());
+        state.presets = ChainEditorState::presets_by_recency();
+        app.cdp_chain_editor = Some(state);
+        app.dialog = Some(Dialog::CdpChainEditor);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        {
+            let state = app.cdp_chain_editor.as_ref().unwrap();
+            assert_eq!(state.preset_selected, Some(1), "two Rights from (none) should land on the second preset (Zebra)");
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert!(state.preset_selected.is_none(), "a third Right should wrap back around to (none)");
+        assert_eq!(state.chain, hand_built, "(none) must restore the exact chain built before the first Right");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Real gap found via manual testing on the envelope editor's/`Dialog::CdpParams`'s own
+    /// equivalent feature: saving a hand-built draft as a new preset before ever cycling with
+    /// Left/Right also transitions `preset_selected` away from `None`, so `custom_chain` must
+    /// get snapshotted at save time too — otherwise cycling through other presets afterward
+    /// and wrapping back to "(none)" would silently show a stale preset instead of the draft
+    /// that was actually built by hand.
+    #[test]
+    fn saving_a_chain_before_the_first_cycle_still_lets_wrapping_to_none_restore_the_draft() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_chain_preset_save_first_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        // A pre-existing preset that sorts after "Mine" (the one about to be saved), so two
+        // Rights are needed to wrap all the way back around to "(none)".
+        crate::model::cdp::chain_preset::save_chain(&crate::model::cdp::CdpChain {
+            name: "Zebra".into(),
+            steps: vec![chain_step("phase_phase_1")],
+        });
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let hand_built = crate::model::cdp::CdpChain { name: "Mine".into(), steps: vec![chain_step("blur_avrg")] };
+        let mut state = fresh_chain_editor_state(hand_built.clone());
+        state.presets = ChainEditorState::presets_by_recency();
+        app.cdp_chain_editor = Some(state);
+        app.dialog = Some(Dialog::CdpChainEditor);
+
+        // Save immediately -- no Right press yet, so the cycle code path never runs. The save
+        // prompt is prefilled with the chain's own current name ("Mine"), so Enter alone saves.
+        app.open_chain_save_prompt();
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        {
+            let state = app.cdp_chain_editor.as_ref().unwrap();
+            assert_eq!(
+                state.preset_selected.and_then(|i| state.presets.get(i)).map(|c| c.name.as_str()),
+                Some("Mine")
+            );
+        }
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert!(state.preset_selected.is_none(), "two Rights from the just-saved preset should wrap back to (none)");
+        assert_eq!(state.chain, hand_built, "(none) must restore the draft built before the save, not a stale preset");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
     /// End-to-end: "PVOC Analyze"/"PVOC Resynthesize" must actually reach the rendered
     /// screen, in the pale/muted color, bracketing exactly the spectral step and not the
     /// time-domain one -- not just come out of `chain_display_rows` in isolation.
@@ -20450,6 +20588,7 @@ mod tests {
             error: None,
             presets: Vec::new(),
             preset_selected: None,
+            custom_chain: None,
             save_prompt: None,
         }
     }

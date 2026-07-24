@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-07-25
+
+- CDP Process and CDP Chain preset rows gain the same "(none)" cycle slot the envelope
+  editor's preset row got: Left/Right cycling all the way past the last saved preset (or
+  back past the first) now wraps around to a "(none)" slot holding whatever values/steps
+  were set by hand before cycling started, instead of that state being lost the moment
+  preset browsing begins. Saving a new preset before ever cycling also snapshots it, so the
+  hand-set state survives either way.
+
 ## 2026-07-24
 
 - **Breakpoint envelope presets now use the same interaction as CDP Process/Chain
