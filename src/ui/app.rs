@@ -6265,7 +6265,7 @@ impl App {
                 let mid_t = (t0 + t1) / 2.0;
                 let ratio = if t1 > t0 { (mid_t - t0) / (t1 - t0) } else { 0.5 };
                 let mid_v = v0 + (v1 - v0) * ratio;
-                edit.points.insert(hi_i, (mid_t, mid_v));
+                edit.points.insert(hi_i, (round6(mid_t), round6(mid_v)));
                 edit.selected = hi_i;
                 return;
             }
@@ -9520,7 +9520,7 @@ impl App {
                 if is_double {
                     self.last_cdp_envelope_click = None;
                     let insert_at = edit.points.partition_point(|&(pt, _)| pt < t);
-                    edit.points.insert(insert_at, (t, v.clamp(min, max)));
+                    edit.points.insert(insert_at, (round6(t), round6(v.clamp(min, max))));
                     edit.selected = insert_at;
                     return true;
                 }
@@ -18313,6 +18313,54 @@ mod tests {
 
         let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
         assert_eq!(edit.points.len(), before + 1, "double-click should insert exactly one new point");
+    }
+
+    /// Real bug (user report, screenshot): a point inserted by double-clicking landed at
+    /// whatever binary-fraction position the mouse-to-domain mapping produced (e.g.
+    /// `v=20.079999999999984`), since neither the double-click insert nor the `n` (midpoint
+    /// insert) path applied `round6` -- every other point mutation (nudge, drag) already did.
+    /// Locks in that a freshly-inserted point's time/value are clean to 6 decimal places.
+    #[test]
+    fn double_click_insert_and_n_insert_round_the_new_points_value_and_time() {
+        let (mut app, grid, cell0, cell1) = open_cdp_envelope_editor_for_mouse_tests();
+        let click_col = grid.x + grid.width / 8;
+        let click_row = grid.y + grid.height / 3; // an off-grid-line row, prone to binary noise
+        assert!(click_col.abs_diff(cell0.0) > 1 && click_col.abs_diff(cell1.0) > 1, "click column must miss both existing points");
+
+        app.handle_mouse(cdp_mouse_at(click_col, click_row, MouseEventKind::Down(MouseButton::Left), KeyModifiers::NONE));
+        app.handle_mouse(cdp_mouse_at(click_col, click_row, MouseEventKind::Up(MouseButton::Left), KeyModifiers::NONE));
+        std::thread::sleep(Duration::from_millis(10));
+        app.handle_mouse(cdp_mouse_at(click_col, click_row, MouseEventKind::Down(MouseButton::Left), KeyModifiers::NONE));
+        app.handle_mouse(cdp_mouse_at(click_col, click_row, MouseEventKind::Up(MouseButton::Left), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+        let (t, v) = edit.points[edit.selected];
+        assert_eq!(t, round6(t), "double-click insert must round the new point's time");
+        assert_eq!(v, round6(v), "double-click insert must round the new point's value");
+    }
+
+    /// Same rounding bug, via `n` (midpoint insert) instead of a double-click: 0.1/0.2-style
+    /// values are the classic case where a plain average (`(v0+v1)/2`) lands on a value with
+    /// more than 6 decimal digits of binary noise even though both inputs are themselves
+    /// clean, round6'd numbers -- set directly rather than via keyboard nudging (which would
+    /// itself round the *inputs*, not exercise whether the midpoint math re-introduces noise).
+    #[test]
+    fn n_insert_rounds_the_new_points_midpoint_value() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_blur_avrg_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = app.dialog.as_mut() else { panic!("no dialog") };
+            edit.points = vec![(0.0, 0.1), (edit.time_max, 0.2)];
+            edit.selected = 0;
+        }
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+        let (t, v) = edit.points[edit.selected];
+        assert_eq!(t, round6(t), "n-insert must round the new point's time");
+        assert_eq!(v, round6(v), "n-insert must round the new point's value");
     }
 
     /// Click-and-drag on a breakpoint moves it; the value should end up close to the row the
