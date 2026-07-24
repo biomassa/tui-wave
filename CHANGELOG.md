@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-07-24
+
+- **Breakpoint envelope presets now use the same interaction as CDP Process/Chain
+  presets** instead of their own separate full-screen picker dialog: the envelope editor's
+  "Preset" row shows the current preset (or "(none)") and a saved count, `Tab`/`Shift+Tab`
+  cycle through every saved preset and load each one immediately (rescaled to fit the
+  current field), `s` opens an inline save prompt prefilled with the current preset's name,
+  and `d` deletes the currently-cycled-to preset immediately — no separate picker dialog to
+  open first. Cycling all the way around includes an extra "(none)" slot holding whatever
+  shape was hand-drawn before the first `Tab` press, so that shape is never lost just from
+  browsing presets.
+
 ## 2026-07-23
 
 - **CDP chains automatically merge adjacent spectral (PVOC) steps into one shared

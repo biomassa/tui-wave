@@ -873,25 +873,28 @@ struct CdpEnvelopeEdit {
     /// `points` (as drawn, not yet committed to the field) as a named `EnvelopePreset`,
     /// available system-wide from any envelope editor session regardless of process/param.
     save_prompt: Option<TextInput>,
-    /// `Some` while the 'l' ("load preset") picker overlay is open — lists every saved
-    /// `EnvelopePreset`. Same rescale-on-load treatment as the curve picker
-    /// (`App::rescale_preset_to_envelope`), since a preset drawn on one field's time/value
-    /// axis is very unlikely to match another's exactly.
-    preset_picker: Option<EnvelopePresetPicker>,
+    /// Every saved `EnvelopePreset`, loaded once when the envelope editor opens (and
+    /// refreshed after a save/delete) — mirrors `Dialog::CdpParams.presets`/`preset_selected`
+    /// exactly, so preset browsing here is the same Tab/Shift+Tab-cycle-and-load-immediately
+    /// interaction as the CDP Process/Chain preset rows, not a separate picker dialog.
+    presets: Vec<crate::model::cdp::envelope_preset::EnvelopePreset>,
+    /// The currently-loaded preset's index into `presets`, if `points` came from one —
+    /// `None` means "(none)" (hand-drawn, or edited since loading). Same rescale-on-load
+    /// treatment as the curve picker (`App::rescale_preset_to_envelope`), since a preset
+    /// drawn on one field's time/value axis is very unlikely to match another's exactly.
+    preset_selected: Option<usize>,
+    /// A snapshot of `points` taken the first time Tab/Shift+Tab ever cycles away from the
+    /// "(none)" slot in a given editing session — lets that cycle wrap all the way back
+    /// around to exactly the shape the user had drawn *before* touching Tab at all, instead
+    /// of the "(none)" slot being a dead end only reachable by never cycling in the first
+    /// place. `None` until that first cycle happens.
+    custom_points: Option<Vec<(f64, f64)>>,
 }
 
 /// The picker `CdpEnvelopeEdit.curve_picker` holds — `entries` are indices into
 /// `App.curves`, computed once when 'c' opens it.
 struct EnvelopeCurvePicker {
     entries: Vec<usize>,
-    selected: usize,
-}
-
-/// The picker `CdpEnvelopeEdit.preset_picker` holds — the full saved-preset list, loaded
-/// fresh from disk once when 'l' opens it (and again after a 'd' delete, so the list never
-/// shows a preset that no longer exists).
-struct EnvelopePresetPicker {
-    presets: Vec<crate::model::cdp::envelope_preset::EnvelopePreset>,
     selected: usize,
 }
 
@@ -3441,10 +3444,6 @@ impl App {
             self.handle_envelope_save_prompt_key(key);
             return;
         }
-        if let Some(Dialog::CdpParams { envelope: Some(CdpEnvelopeEdit { preset_picker: Some(_), .. }), .. }) = &self.dialog {
-            self.handle_envelope_preset_picker_key(key);
-            return;
-        }
         if let Some(Dialog::CdpParams { envelope: Some(_), .. }) = &self.dialog {
             self.handle_cdp_envelope_key(key);
             return;
@@ -5125,7 +5124,9 @@ impl App {
             range,
             curve_picker: None,
             save_prompt: None,
-            preset_picker: None,
+            presets: crate::model::cdp::envelope_preset::list_presets(),
+            preset_selected: None,
+            custom_points: None,
         });
         true
     }
@@ -6320,22 +6321,91 @@ impl App {
             }
             // Save the envelope as drawn (not yet committed to the field) under a typed
             // name, reusable system-wide from any envelope editor regardless of
-            // process/param — see `envelope_preset`'s own doc comment for why.
+            // process/param — see `envelope_preset`'s own doc comment for why. Prefilled with
+            // the currently-loaded preset's name (if any) so re-saving over it is just Enter,
+            // mirroring `App::open_cdp_preset_save_prompt`.
             KeyCode::Char('s') => {
                 if let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() {
-                    edit.save_prompt = Some(TextInput::fresh(String::new()));
+                    let prefill =
+                        edit.preset_selected.and_then(|i| edit.presets.get(i)).map(|p| p.name.clone()).unwrap_or_default();
+                    edit.save_prompt = Some(TextInput::fresh(prefill));
                 }
             }
-            // Opened even with zero saved presets yet, same "show the empty state as real
-            // feedback" reasoning as the curve picker above.
-            KeyCode::Char('l') => {
-                let presets = crate::model::cdp::envelope_preset::list_presets();
+            // Deletes the currently-cycled-to preset immediately, no confirmation — mirrors
+            // `App::delete_selected_cdp_preset`. A no-op if nothing's currently selected (a
+            // hand-drawn/edited shape with no preset loaded).
+            KeyCode::Char('d') => {
                 if let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() {
-                    edit.preset_picker = Some(EnvelopePresetPicker { presets, selected: 0 });
+                    if let Some(name) = edit.preset_selected.and_then(|i| edit.presets.get(i)).map(|p| p.name.clone()) {
+                        crate::model::cdp::envelope_preset::delete_preset(&name);
+                        edit.presets = crate::model::cdp::envelope_preset::list_presets();
+                        edit.preset_selected = None;
+                    }
                 }
             }
+            // Tab/Shift+Tab cycle through saved presets, loading immediately — the envelope
+            // editor's own arrow keys are already claimed by point selection/nudging, so this
+            // takes the same role Left/Right plays on `Dialog::CdpParams`'s and the CDP Chain
+            // editor's own preset rows (`App::cdp_params_cycle_preset`/`cycle_chain_preset`).
+            KeyCode::BackTab => self.envelope_cycle_preset(false),
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => self.envelope_cycle_preset(false),
+            KeyCode::Tab => self.envelope_cycle_preset(true),
             _ => {}
         }
+    }
+
+    /// Cycles `CdpEnvelopeEdit.preset_selected` through the saved envelope presets (wrapping),
+    /// loading the newly selected preset's points into `points` immediately, rescaled to fit
+    /// the current field's time/value range (`rescale_preset_to_envelope`) — mirrors
+    /// `cdp_params_cycle_preset`'s index math, just keyed by Tab/Shift+Tab instead of
+    /// Left/Right, and with one deliberate addition: the cycle includes an extra "(none)"
+    /// slot representing whatever was drawn *before* Tab was first pressed this session, so
+    /// cycling all the way around returns to it rather than that shape being lost the moment
+    /// you start browsing presets (user report). `custom_points` snapshots that starting shape
+    /// the first time the cycle leaves "(none)"; a later save/edit doesn't touch the snapshot.
+    /// A no-op if there are no saved presets (nothing to cycle to besides "(none)" itself).
+    fn envelope_cycle_preset(&mut self, forward: bool) {
+        let (field_index, new_slot, custom_points) = {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &self.dialog else { return };
+            if edit.presets.is_empty() {
+                return;
+            }
+            let total = edit.presets.len() + 1; // +1 for the "(none)" slot at index 0
+            let current_slot = edit.preset_selected.map(|i| i + 1).unwrap_or(0);
+            let new_slot = if forward { (current_slot + 1) % total } else { (current_slot + total - 1) % total };
+            let custom_points = edit.custom_points.clone().or_else(|| {
+                if edit.preset_selected.is_none() { Some(edit.points.clone()) } else { None }
+            });
+            (edit.field_index, new_slot, custom_points)
+        };
+
+        if new_slot == 0 {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() else { return };
+            if let Some(points) = custom_points.clone() {
+                edit.points = points;
+            }
+            edit.custom_points = custom_points;
+            edit.selected = edit.selected.min(edit.points.len().saturating_sub(1));
+            edit.preset_selected = None;
+            return;
+        }
+        let new_index = new_slot - 1;
+
+        let (min, max) = match self.dialog.as_ref() {
+            Some(Dialog::CdpParams { fields, .. }) => match fields.get(field_index) {
+                Some(CdpField::Number { min, max, .. }) => (*min, *max),
+                _ => return,
+            },
+            _ => return,
+        };
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_ref() else { return };
+        let Some(chosen_points) = edit.presets.get(new_index).map(|p| p.points.clone()) else { return };
+        let rescaled = self.rescale_preset_to_envelope(&chosen_points, min, max);
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() else { return };
+        edit.points = rescaled;
+        edit.selected = edit.selected.min(edit.points.len().saturating_sub(1));
+        edit.preset_selected = Some(new_index);
+        edit.custom_points = custom_points;
     }
 
     /// All key handling while `CdpEnvelopeEdit.curve_picker` is `Some` — Up/Down navigate
@@ -6410,8 +6480,10 @@ impl App {
 
     /// All key handling while `CdpEnvelopeEdit.save_prompt` is `Some` — Enter saves the
     /// envelope as currently drawn (not yet committed to the field) under the typed name,
-    /// overwriting any existing preset with that name; an empty/whitespace-only name is
-    /// treated as "cancel," matching Esc. Mirrors `handle_cdp_chain_save_prompt_key`'s shape.
+    /// overwriting any existing preset with that name, then reloads `presets` and selects the
+    /// newly saved one (mirroring `handle_cdp_preset_save_prompt_key`'s own post-save
+    /// refresh); an empty/whitespace-only name is treated as "cancel," matching Esc. Mirrors
+    /// `handle_cdp_chain_save_prompt_key`'s shape.
     fn handle_envelope_save_prompt_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
@@ -6428,9 +6500,11 @@ impl App {
                 }
                 let points = edit.points.clone();
                 crate::model::cdp::envelope_preset::save_preset(&crate::model::cdp::envelope_preset::EnvelopePreset {
-                    name,
+                    name: name.clone(),
                     points,
                 });
+                edit.presets = crate::model::cdp::envelope_preset::list_presets();
+                edit.preset_selected = edit.presets.iter().position(|p| p.name == name);
             }
             KeyCode::Backspace => {
                 if let Some(input) = self.envelope_save_prompt_input() {
@@ -6475,50 +6549,6 @@ impl App {
         match self.dialog.as_mut() {
             Some(Dialog::CdpParams { envelope: Some(edit), .. }) => edit.save_prompt.as_mut(),
             _ => None,
-        }
-    }
-
-    /// All key handling while `CdpEnvelopeEdit.preset_picker` is `Some` — Up/Down navigate
-    /// the saved-preset list, Esc closes it (back to the plain graphical envelope editor),
-    /// 'd' deletes the highlighted preset from disk, Enter loads it (rescaled to fit the
-    /// current field, `rescale_preset_to_envelope`) into `points` for further tweaking —
-    /// same "doesn't commit the field itself" deferral as the curve picker's own Enter.
-    fn handle_envelope_preset_picker_key(&mut self, key: KeyEvent) {
-        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() else { return };
-        let Some(picker) = edit.preset_picker.as_mut() else { return };
-        match key.code {
-            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
-            KeyCode::Down => {
-                picker.selected = (picker.selected + 1).min(picker.presets.len().saturating_sub(1));
-            }
-            KeyCode::Esc => edit.preset_picker = None,
-            KeyCode::Char('d') => {
-                if let Some(preset) = picker.presets.get(picker.selected) {
-                    crate::model::cdp::envelope_preset::delete_preset(&preset.name);
-                }
-                picker.presets = crate::model::cdp::envelope_preset::list_presets();
-                picker.selected = picker.selected.min(picker.presets.len().saturating_sub(1));
-            }
-            KeyCode::Enter => {
-                let Some(chosen_points) = picker.presets.get(picker.selected).map(|p| p.points.clone()) else {
-                    edit.preset_picker = None;
-                    return;
-                };
-                let field_index = edit.field_index;
-                let (min, max) = match self.dialog.as_ref() {
-                    Some(Dialog::CdpParams { fields, .. }) => match fields.get(field_index) {
-                        Some(CdpField::Number { min, max, .. }) => (*min, *max),
-                        _ => return,
-                    },
-                    _ => return,
-                };
-                let rescaled = self.rescale_preset_to_envelope(&chosen_points, min, max);
-                let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() else { return };
-                edit.points = rescaled;
-                edit.selected = edit.selected.min(edit.points.len().saturating_sub(1));
-                edit.preset_picker = None;
-            }
-            _ => {}
         }
     }
 
@@ -11072,13 +11102,12 @@ impl App {
         // painting a brand new envelope bitmap into it every frame, completely obscuring the
         // picker it was drawn on top of. Not a stale-image cleanup problem (the picker's own
         // `Clear` widget handles that fine for plain text) — the bitmap was actively being
-        // redrawn onto the wrong, no-longer-current `Rect`. `save_prompt`/`preset_picker`
-        // (the envelope-preset save/load overlays) early-return the exact same empty-rect
-        // shape from `render_cdp_envelope_editor`, so they need the same gate or they'd hit
-        // the identical bug.
+        // redrawn onto the wrong, no-longer-current `Rect`. `save_prompt` (the envelope-preset
+        // save overlay) early-returns the exact same empty-rect shape from
+        // `render_cdp_envelope_editor`, so it needs the same gate or it'd hit the identical bug.
         let envelope_curve = match &self.dialog {
             Some(Dialog::CdpParams { envelope: Some(edit), fields, .. })
-                if edit.curve_picker.is_none() && edit.save_prompt.is_none() && edit.preset_picker.is_none() =>
+                if edit.curve_picker.is_none() && edit.save_prompt.is_none() =>
             {
                 fields.get(edit.field_index).and_then(|f| match f {
                     CdpField::Number { min, max, .. } => {
@@ -12217,9 +12246,6 @@ fn render_cdp_envelope_editor(
     if let Some(prompt) = &edit.save_prompt {
         return render_envelope_save_prompt(frame, area, prompt);
     }
-    if let Some(picker) = &edit.preset_picker {
-        return render_envelope_preset_picker(frame, area, picker);
-    }
     let Some(CdpField::Number { min, max, .. }) = fields.get(edit.field_index) else {
         return Vec::new();
     };
@@ -12283,18 +12309,39 @@ fn render_cdp_envelope_editor(
         prev_dot_row = Some(curr_dot_row);
     }
 
-    // Save/load a named breakpoint-shape preset (`envelope_preset`, system-wide across every
-    // process/param) sits on its own line at the very top, set off by a blank line before and
-    // after — kept away from the dense per-point key hints at the bottom so it doesn't blend
-    // in with them or push that already-long line past the popup's width.
+    // A "Preset" row, mirroring `Dialog::CdpParams`'s own preset row (`CDP_PRESET_FOCUS`) and
+    // the CDP Chain editor's: the same system-wide `envelope_preset` shapes, browsed with the
+    // same cycle-and-load-immediately + prefilled-save + instant-delete interaction, instead
+    // of the separate full-screen picker popup this used to be (there's no free axis for
+    // Left/Right here — the graphical editor's own arrow keys are already point selection/
+    // nudging — so Tab/Shift+Tab plays that role instead). Sits on its own line at the very
+    // top, set off by a blank line before and after — kept away from the dense per-point key
+    // hints at the bottom so it doesn't blend in with them or push that already-long line
+    // past the popup's width.
+    let preset_line = if edit.presets.is_empty() {
+        Line::from(vec![
+            Span::styled(" Preset: ", label_style),
+            Span::styled("(none saved)", dim_style),
+            Span::styled("  s", hint_style),
+            Span::styled(":save", label_style),
+        ])
+    } else {
+        let name = edit.preset_selected.and_then(|i| edit.presets.get(i)).map(|p| p.name.as_str()).unwrap_or("(none)");
+        Line::from(vec![
+            Span::styled(" Preset: ", label_style),
+            Span::styled(name.to_string(), base),
+            Span::styled(format!("  ({} saved)  ", edit.presets.len()), dim_style),
+            Span::styled("Tab", hint_style),
+            Span::styled(":cycle  ", label_style),
+            Span::styled("s", hint_style),
+            Span::styled(":save  ", label_style),
+            Span::styled("d", hint_style),
+            Span::styled(":delete", label_style),
+        ])
+    };
     let mut lines = vec![
         Line::raw(""),
-        Line::from(vec![
-            Span::styled(" s", hint_style),
-            Span::styled(":save preset  ", label_style),
-            Span::styled("l", hint_style),
-            Span::styled(":load preset", label_style),
-        ]),
+        preset_line,
         Line::raw(""),
         Line::raw(""), // the original header spacer row, preserved as its own line
     ];
@@ -12324,10 +12371,10 @@ fn render_cdp_envelope_editor(
         let (screen_col, screen_row) = cdp_envelope_point_cell(layout.grid, edit.time_max, min, max, point);
         let col = (screen_col - layout.grid.x) as usize;
         let row = (screen_row - layout.grid.y) as usize;
-        // 4 header lines now precede the grid rows (blank, save/load-preset hint, blank,
-        // the original spacer) -- was `1 + row` before that block existed above; a stale `1`
-        // here (a real regression when the header block was added) drew a point marker glyph
-        // 3 rows too high, landing on the save/load-preset hint line instead of the grid.
+        // 4 header lines now precede the grid rows (blank, Preset row, blank, the original
+        // spacer) -- was `1 + row` before that block existed above; a stale `1` here (a real
+        // regression when the header block was added) drew a point marker glyph 3 rows too
+        // high, landing on the Preset row instead of the grid.
         let line_idx = 4 + row;
         let span_idx = 1 + col; // +1 for the y-axis label span
         if let Some(line) = overlay_lines.get_mut(line_idx) {
@@ -12386,7 +12433,7 @@ fn render_cdp_envelope_editor(
     } else {
         hint_spans.push(Span::styled(":use curve  ", label_style));
     }
-    // 's'/'l' (save/load a named preset) are hinted on their own line at the very top of
+    // The Preset row's own keys (Tab/s/d) are hinted on their own line at the very top of
     // the popup instead — see `lines`' header block above.
     hint_spans.push(Span::styled("Enter", hint_style));
     hint_spans.push(Span::styled(":save  ", label_style));
@@ -12512,63 +12559,6 @@ fn render_envelope_save_prompt(frame: &mut Frame, area: Rect, prompt: &TextInput
             Span::styled(":cancel", label_style),
         ]),
     ];
-    frame.render_widget(Paragraph::new(lines), inner);
-    Vec::new()
-}
-
-/// The "load preset" picker `CdpEnvelopeEdit.preset_picker` opens ('l') — a flat list of
-/// every saved `EnvelopePreset`, same visual/interaction conventions as
-/// `render_envelope_curve_picker`, plus 'd' to delete the highlighted one from disk.
-fn render_envelope_preset_picker(frame: &mut Frame, area: Rect, picker: &EnvelopePresetPicker) -> Vec<Rect> {
-    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
-    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
-    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
-    let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
-
-    let names: Vec<&str> = picker.presets.iter().map(|p| p.name.as_str()).collect();
-
-    let hint_line = " \u{2191}\u{2193}:select  Enter:use  d:delete  Esc:cancel";
-    let content_width = names.iter().map(|n| n.chars().count()).max().unwrap_or(0).max(hint_line.chars().count());
-    let width = (content_width as u16 + 4).max(30).min(area.width);
-    let rows = names.len().max(1);
-    let height = (rows as u16 + 1 + 2 + 2).min(area.height);
-    let popup = Rect {
-        x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    };
-    frame.render_widget(ratatui::widgets::Clear, popup);
-
-    let block = Block::default()
-        .title(" Load Envelope Preset ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::BORDER))
-        .style(base);
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    let mut lines = Vec::new();
-    if names.is_empty() {
-        lines.push(Line::from(Span::styled(" (no saved presets)", label_style)));
-    } else {
-        for (i, name) in names.iter().enumerate() {
-            let style = if i == picker.selected { selected_style } else { base };
-            lines.push(Line::from(Span::styled(format!(" {name}"), style)));
-        }
-    }
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::styled(" \u{2191}\u{2193}", hint_style),
-        Span::styled(":select  ", label_style),
-        Span::styled("Enter", hint_style),
-        Span::styled(":use  ", label_style),
-        Span::styled("d", hint_style),
-        Span::styled(":delete  ", label_style),
-        Span::styled("Esc", hint_style),
-        Span::styled(":cancel", label_style),
-    ]));
-
     frame.render_widget(Paragraph::new(lines), inner);
     Vec::new()
 }
@@ -15927,6 +15917,11 @@ mod tests {
         assert_eq!(edit.points, drawn_points, "saving a preset must not alter the in-progress envelope");
         let Some(CdpField::Number { envelope: field_env, .. }) = fields.get(edit.field_index) else { panic!() };
         assert!(field_env.is_none(), "saving a preset must not itself commit the field");
+        assert_eq!(
+            edit.preset_selected.and_then(|i| edit.presets.get(i)).map(|p| p.name.as_str()),
+            Some("My Swell"),
+            "saving should select the newly saved preset, mirroring Dialog::CdpParams's own save prompt"
+        );
 
         let on_disk = crate::model::cdp::envelope_preset::list_presets();
         assert_eq!(on_disk.len(), 1);
@@ -15937,13 +15932,16 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
-    /// 'l' opens the load-preset picker listing every saved `EnvelopePreset`, sorted by name
-    /// (the same order `envelope_preset::list_presets` returns) — system-wide, so a preset
-    /// saved from one process's envelope shows up when editing a *different* process's field.
+    /// Tab/Shift+Tab cycle through saved `EnvelopePreset`s (sorted by name, the same order
+    /// `envelope_preset::list_presets` returns), loading each one's points immediately —
+    /// system-wide, so a preset saved from one process's envelope shows up when editing a
+    /// *different* process's field. Mirrors `cdp_params_cycle_preset`'s own Left/Right
+    /// cycling, just keyed differently since the envelope editor's arrow keys are already
+    /// claimed by point selection/nudging.
     #[test]
-    fn l_opens_the_preset_picker_listing_saved_presets() {
+    fn tab_cycles_through_saved_presets_loading_each_one_immediately() {
         let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let temp_dir = std::env::temp_dir().join(format!("tui_wave_envelope_preset_list_test_{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_envelope_preset_cycle_test_{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
 
@@ -15960,51 +15958,102 @@ mod tests {
         open_blur_avrg_with_field_focused(&mut app);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
 
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+            assert_eq!(edit.presets.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["Alpha", "Zebra"]);
+            assert!(edit.preset_selected.is_none());
+        }
 
-        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
-        let picker = edit.preset_picker.as_ref().expect("'l' should open the preset picker");
-        assert_eq!(picker.presets.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["Alpha", "Zebra"]);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+            assert_eq!(edit.preset_selected, Some(0), "Tab should land on the first preset (Alpha)");
+            assert_eq!(edit.points[0].1, 3.0);
+        }
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+            assert_eq!(edit.preset_selected, Some(1), "a second Tab should advance to Zebra");
+            assert_eq!(edit.points[0].1, 1.0);
+        }
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+            assert_eq!(edit.preset_selected, Some(0), "Shift+Tab (BackTab) should step back to Alpha");
+        }
 
         unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
+    /// User report: cycling into saved presets used to lose whatever shape was hand-drawn
+    /// before the very first Tab press, with no way back to it. The cycle now includes an
+    /// extra "(none)" slot for exactly that pre-Tab shape, so cycling all the way around
+    /// (forward through every preset, or backward past the first) returns to it intact.
     #[test]
-    fn esc_from_the_preset_picker_returns_to_the_envelope_editor_unchanged() {
+    fn cycling_all_the_way_around_returns_to_the_shape_drawn_before_the_first_tab() {
         let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let temp_dir = std::env::temp_dir().join(format!("tui_wave_envelope_preset_esc_test_{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_envelope_preset_none_slot_test_{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
 
         crate::model::cdp::envelope_preset::save_preset(&crate::model::cdp::envelope_preset::EnvelopePreset {
-            name: "Shape".into(),
+            name: "Alpha".into(),
+            points: vec![(0.0, 3.0), (1.0, 4.0)],
+        });
+        crate::model::cdp::envelope_preset::save_preset(&crate::model::cdp::envelope_preset::EnvelopePreset {
+            name: "Zebra".into(),
             points: vec![(0.0, 1.0), (1.0, 2.0)],
         });
 
         let mut app = new_app(Some(doc(0.1, 44100)), None);
         open_blur_avrg_with_field_focused(&mut app);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
-        let original_points = {
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)); // draw a 3rd point
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)); // nudge it off-default
+        let drawn_points = {
             let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
             edit.points.clone()
         };
 
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        // Forward through both presets and one more Tab should wrap back to "(none)" with the
+        // original hand-drawn shape restored.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
+            assert_eq!(edit.preset_selected, Some(1), "two Tabs from (none) should land on the second preset");
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
+            assert!(edit.preset_selected.is_none(), "a third Tab should wrap back around to (none)");
+            assert_eq!(edit.points, drawn_points, "(none) must restore the exact shape drawn before the first Tab");
+        }
 
-        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else {
-            panic!("expected the plain envelope editor to still be open, not the whole dialog closed")
-        };
-        assert!(edit.preset_picker.is_none());
-        assert_eq!(edit.points, original_points, "Esc from the picker must not touch the envelope's own points");
+        // Backward from (none) should land directly on the last preset, not skip past it.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
+            assert_eq!(edit.preset_selected, Some(1), "Shift+Tab from (none) should land on the last preset");
+        }
+        // ...and one more BackTab, then wrapping past the first preset, returns to (none) again.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
+            assert!(edit.preset_selected.is_none());
+            assert_eq!(edit.points, drawn_points, "(none) must still hold the original shape after cycling both directions");
+        }
 
         unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
-    fn enter_on_the_preset_picker_rescales_the_preset_to_fit_time_max_and_clamps_to_range() {
+    fn tab_cycling_a_preset_rescales_it_to_fit_time_max_and_clamps_to_range() {
         let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp_dir = std::env::temp_dir().join(format!("tui_wave_envelope_preset_enter_test_{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
@@ -16025,13 +16074,12 @@ mod tests {
             edit.time_max
         };
 
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
         let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else {
-            panic!("Enter on the picker should load the preset and stay in the plain envelope editor")
+            panic!("Tab should load the preset and stay in the plain envelope editor")
         };
-        assert!(edit.preset_picker.is_none());
+        assert_eq!(edit.preset_selected, Some(0));
         assert_eq!(edit.points.len(), 3);
         assert!((edit.points[0].0 - 0.0).abs() < 1e-9);
         assert!((edit.points[1].0 - time_max / 2.0).abs() < 1e-9);
@@ -16044,8 +16092,10 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
+    /// 'd' deletes the currently-cycled-to preset immediately, no confirmation and no
+    /// separate picker to navigate first — mirrors `App::delete_selected_cdp_preset`.
     #[test]
-    fn d_on_the_preset_picker_deletes_the_highlighted_preset_from_disk() {
+    fn d_deletes_the_currently_selected_preset_from_disk() {
         let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp_dir = std::env::temp_dir().join(format!("tui_wave_envelope_preset_delete_test_{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
@@ -16063,9 +16113,13 @@ mod tests {
         let mut app = new_app(Some(doc(0.1, 44100)), None);
         open_blur_avrg_with_field_focused(&mut app);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
-        // "Remove" sorts after "Keep" alphabetically -- move down to select it.
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        // "Remove" sorts after "Keep" alphabetically -- Tab twice to land on it.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
+            assert_eq!(edit.preset_selected.and_then(|i| edit.presets.get(i)).map(|p| p.name.as_str()), Some("Remove"));
+        }
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
 
@@ -16073,31 +16127,22 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].name, "Keep");
         let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
-        let picker = edit.preset_picker.as_ref().expect("picker should still be open after deleting");
-        assert_eq!(picker.presets.len(), 1);
+        assert_eq!(edit.presets.len(), 1, "the in-memory list should refresh immediately, without reopening anything");
+        assert!(edit.preset_selected.is_none(), "deleting the loaded preset clears the selection");
 
         unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     /// NASTY BUG regression, same class as `opening_the_curve_picker_in_graphics_mode_does_not_paint_over_it`:
-    /// the graphics-mode envelope bitmap must not be redrawn over the save-prompt or
-    /// load-preset overlays either — both early-return the same empty-row-rect shape from
-    /// `render_cdp_envelope_editor` that caused the original bug for the curve picker, so
-    /// the occlusion gate has to check them too.
+    /// the graphics-mode envelope bitmap must not be redrawn over the save-preset prompt
+    /// either — it early-returns the same empty-row-rect shape from `render_cdp_envelope_editor`
+    /// that caused the original bug for the curve picker, so the occlusion gate has to check
+    /// it too.
     #[test]
-    fn opening_the_preset_overlays_in_graphics_mode_does_not_paint_over_them() {
+    fn opening_the_save_prompt_in_graphics_mode_does_not_paint_over_it() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
-
-        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let temp_dir = std::env::temp_dir().join(format!("tui_wave_envelope_preset_graphics_test_{}", std::process::id()));
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
-        crate::model::cdp::envelope_preset::save_preset(&crate::model::cdp::envelope_preset::EnvelopePreset {
-            name: "mypreset".into(),
-            points: vec![(0.0, 1.0), (1.0, 2.0)],
-        });
 
         let mut app = new_app(Some(doc(0.1, 44100)), None);
         app.graphics_mode = true;
@@ -16108,7 +16153,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
 
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         terminal.draw(|frame| app.render(frame)).unwrap();
         let buffer = terminal.backend().buffer();
         let area = *buffer.area();
@@ -16118,21 +16163,17 @@ mod tests {
                 text.push_str(buffer[(x, y)].symbol());
             }
         }
-        assert!(text.contains("Load Envelope Preset"), "the picker's own popup must be visible, not painted over: {text:?}");
-        assert!(text.contains("mypreset"), "the picker's preset entry must be visible, not painted over: {text:?}");
-
-        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
-        std::fs::remove_dir_all(&temp_dir).ok();
+        assert!(text.contains("Save Envelope Preset"), "the prompt's own popup must be visible, not painted over: {text:?}");
     }
 
     /// Real bug (user report, screenshot): the overlay that draws a breakpoint marker glyph
     /// (`\u{25cf}`) computed its target `lines` index as `1 + row` — correct back when a
-    /// single spacer line preceded the grid rows, but stale once the save/load-preset header
-    /// block (blank, hint line, blank, spacer = 4 lines) was added above it. For a point near
-    /// the top of its value range (row 0), the marker landed 3 rows too high, drawing squarely
-    /// on top of the "s:save preset  l:load preset" hint text instead of the grid — visually
-    /// replacing "save preset" with a stray filled-circle glyph. Locks in that a point at the
-    /// very top of the grid draws its marker inside the grid rows, never above them.
+    /// single spacer line preceded the grid rows, but stale once the Preset-row header block
+    /// (blank, preset row, blank, spacer = 4 lines) was added above it. For a point near the
+    /// top of its value range (row 0), the marker landed 3 rows too high, drawing squarely on
+    /// top of the "Preset: ..." row instead of the grid — visually replacing it with a stray
+    /// filled-circle glyph. Locks in that a point at the very top of the grid draws its marker
+    /// inside the grid rows, never above them.
     #[test]
     fn envelope_point_marker_never_overlaps_the_save_load_preset_header_line() {
         use ratatui::backend::TestBackend;
@@ -16161,15 +16202,15 @@ mod tests {
         let mut marker_row: Option<u16> = None;
         for y in area.y..area.y + area.height {
             let row_text: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
-            if row_text.contains("save preset") {
+            if row_text.contains("Preset:") {
                 preset_line_row = Some(y);
-                assert!(!row_text.contains('\u{25cf}'), "the marker glyph must never land on the save/load-preset header line");
+                assert!(!row_text.contains('\u{25cf}'), "the marker glyph must never land on the Preset row");
             }
             if row_text.contains('\u{25cf}') {
                 marker_row = Some(y);
             }
         }
-        let preset_line_row = preset_line_row.expect("the save/load preset line should be visible");
+        let preset_line_row = preset_line_row.expect("the Preset row should be visible");
         let marker_row = marker_row.expect("the point marker should be visible somewhere");
 
         assert_ne!(marker_row, preset_line_row, "the marker must not land on the preset header line");
@@ -16179,9 +16220,9 @@ mod tests {
     /// Real bug (user report, screenshot): the "s:save preset  l:load preset" hint used to
     /// live on the same dense bottom hint line as every per-point key, and that extra text
     /// pushed the line past the popup's width with no wrapping, cutting off "Esc:cancel"
-    /// entirely. It now sits on its own line near the top of the popup (above the grid),
-    /// bracketed by a blank line before and after — this locks in that layout, not just that
-    /// the text exists somewhere on screen.
+    /// entirely. It now sits on its own "Preset:" row near the top of the popup (above the
+    /// grid), bracketed by a blank line before and after — this locks in that layout, not just
+    /// that the row exists somewhere on screen.
     #[test]
     fn save_load_preset_hint_sits_above_the_grid_bracketed_by_blank_lines() {
         use ratatui::backend::TestBackend;
@@ -16207,11 +16248,11 @@ mod tests {
 
         let mut preset_line_row: Option<u16> = None;
         for y in area.y..area.y + area.height {
-            if row_text(y).contains("save preset") {
+            if row_text(y).contains("Preset:") {
                 preset_line_row = Some(y);
             }
         }
-        let preset_line_row = preset_line_row.expect("the save/load preset line should be visible");
+        let preset_line_row = preset_line_row.expect("the Preset row should be visible");
         // Strip the popup's own left/right border columns (included in the scanned range)
         // along with plain whitespace -- a row with nothing but the vertical border chars
         // and spaces is "blank" for this check's purposes.
