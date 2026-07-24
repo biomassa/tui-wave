@@ -775,6 +775,13 @@ enum Dialog {
         formant_picker: Option<FormantBufferPicker>,
         presets: Vec<crate::model::cdp::preset::CdpPreset>,
         preset_selected: Option<usize>,
+        /// A snapshot of `fields` (as `ParamValue`s) taken the first time cycling or saving
+        /// ever transitions `preset_selected` away from `None` this session — lets Left/Right
+        /// cycling wrap all the way back around to a "(none)" slot holding exactly the values
+        /// last set by hand, instead of that state being lost the moment preset browsing
+        /// starts. Mirrors `CdpEnvelopeEdit.custom_points` exactly; see
+        /// `App::cdp_params_cycle_preset`.
+        custom_values: Option<Vec<crate::model::cdp::ParamValue>>,
         save_prompt: Option<TextInput>,
         scroll: usize,
     },
@@ -1670,6 +1677,7 @@ struct CdpPending {
     focus: usize,
     presets: Vec<crate::model::cdp::preset::CdpPreset>,
     preset_selected: Option<usize>,
+    custom_values: Option<Vec<crate::model::cdp::ParamValue>>,
 }
 
 /// Which slot in an in-progress `ChainEditorState` draft a `Dialog::CdpBrowser`/`CdpParams`
@@ -3590,7 +3598,7 @@ impl App {
                 }
                 Some(Dialog::CdpParams {
                     catalog_index, fields, second_input, focus, error, preview, envelope, list_edit, table_edit,
-                    marker_time_list_edit, hilite_band_edit, formant_picker, presets, preset_selected, save_prompt, scroll,
+                    marker_time_list_edit, hilite_band_edit, formant_picker, presets, preset_selected, custom_values, save_prompt, scroll,
                 }) => {
                     // Enter's default action is Apply (from anywhere, including the preset
                     // row — a highlighted preset's values, or the process's defaults, are
@@ -3630,7 +3638,7 @@ impl App {
                     // passed directly.
                     self.dialog = Some(Dialog::CdpParams {
                         catalog_index, fields, second_input, focus, error, preview, envelope, list_edit, table_edit,
-                        marker_time_list_edit, hilite_band_edit, formant_picker, presets, preset_selected, save_prompt, scroll,
+                        marker_time_list_edit, hilite_band_edit, formant_picker, presets, preset_selected, custom_values, save_prompt, scroll,
                     });
                     let opened = match setup_kind {
                         Some(CdpFieldSetupKind::Envelope) => self.open_cdp_envelope_editor(),
@@ -4592,6 +4600,7 @@ impl App {
             formant_picker: None,
             presets,
             preset_selected: None,
+            custom_values: None,
             save_prompt: None,
             scroll: 0,
         });
@@ -4632,6 +4641,7 @@ impl App {
                 formant_picker: None,
                 presets: Vec::new(),
                 preset_selected: None,
+                custom_values: None,
                 save_prompt: None,
                 scroll: 0,
             });
@@ -4710,6 +4720,7 @@ impl App {
             formant_picker: None,
             presets: parent.presets,
             preset_selected: None,
+            custom_values: None,
             save_prompt: None,
             scroll: 0,
         });
@@ -4962,6 +4973,7 @@ impl App {
             formant_picker: None,
             presets,
             preset_selected: None,
+            custom_values: None,
             save_prompt: None,
             scroll: 0,
         });
@@ -6597,36 +6609,58 @@ impl App {
     }
 
     /// Cycles `preset_selected` through the saved presets for the process currently open in
-    /// `Dialog::CdpParams` (wrapping; starting from `None`, Right lands on the first preset
-    /// and Left on the last), loading the newly selected preset's values into `fields`
-    /// immediately — see `Dialog::CdpParams`'s doc comment. A no-op if there are no saved
-    /// presets.
+    /// `Dialog::CdpParams` (wrapping), loading the newly selected preset's values into
+    /// `fields` immediately — see `Dialog::CdpParams`'s doc comment. The cycle also includes
+    /// an extra "(none)" slot representing whatever values were set by hand before Left/Right
+    /// was first pressed this session (`custom_values`, snapshotted the first time the cycle
+    /// leaves it — also by `handle_cdp_preset_save_prompt_key` if a save happens first), so
+    /// cycling all the way around returns to those values rather than losing them the moment
+    /// preset browsing starts (mirrors `App::envelope_cycle_preset`). A no-op if there are no
+    /// saved presets (nothing to cycle to besides "(none)" itself).
     fn cdp_params_cycle_preset(&mut self, forward: bool) {
-        let (catalog_index, new_index) = {
-            let Some(Dialog::CdpParams { catalog_index, presets, preset_selected, .. }) = &self.dialog else {
+        let (catalog_index, new_slot, custom_values) = {
+            let Some(Dialog::CdpParams { catalog_index, presets, preset_selected, fields, custom_values, .. }) =
+                &self.dialog
+            else {
                 return;
             };
             if presets.is_empty() {
                 return;
             }
-            let len = presets.len();
-            let new_index = match (*preset_selected, forward) {
-                (None, true) => 0,
-                (None, false) => len - 1,
-                (Some(i), true) => (i + 1) % len,
-                (Some(i), false) => (i + len - 1) % len,
-            };
-            (*catalog_index, new_index)
+            let total = presets.len() + 1; // +1 for the "(none)" slot at index 0
+            let current_slot = preset_selected.map(|i| i + 1).unwrap_or(0);
+            let new_slot = if forward { (current_slot + 1) % total } else { (current_slot + total - 1) % total };
+            let custom_values = custom_values.clone().or_else(|| {
+                if preset_selected.is_none() { Some(fields.iter().map(CdpField::to_value).collect()) } else { None }
+            });
+            (*catalog_index, new_slot, custom_values)
         };
         let Some(def) = self.cdp_catalog.processes.get(catalog_index) else { return };
         let params = def.params.clone();
 
-        let Some(Dialog::CdpParams { presets, preset_selected, fields, .. }) = self.dialog.as_mut() else {
+        if new_slot == 0 {
+            let Some(Dialog::CdpParams { fields, preset_selected, custom_values: cv, .. }) = self.dialog.as_mut()
+            else {
+                return;
+            };
+            if let Some(values) = custom_values.clone() {
+                *fields = params.iter().zip(values.iter()).map(|(p, v)| CdpField::from_value(p, v)).collect();
+            }
+            *cv = custom_values;
+            *preset_selected = None;
+            return;
+        }
+        let new_index = new_slot - 1;
+
+        let Some(Dialog::CdpParams { presets, preset_selected, fields, custom_values: cv, .. }) =
+            self.dialog.as_mut()
+        else {
             return;
         };
         let Some(preset) = presets.get(new_index) else { return };
         *fields = params.iter().zip(preset.values.iter()).map(|(p, v)| CdpField::from_value(p, v)).collect();
         *preset_selected = Some(new_index);
+        *cv = custom_values;
     }
 
     /// Opens the preset-name prompt ('s' key), prefilled with the currently-loaded preset's
@@ -6678,14 +6712,22 @@ impl App {
                 let param_count = def.params.len();
                 crate::model::cdp::preset::save_preset(
                     &key_str,
-                    crate::model::cdp::preset::CdpPreset { name: name.clone(), values },
+                    crate::model::cdp::preset::CdpPreset { name: name.clone(), values: values.clone() },
                 );
                 let new_presets = crate::model::cdp::preset::load_presets(&key_str, param_count);
                 let new_selected = new_presets.iter().position(|p| p.name == name);
-                if let Some(Dialog::CdpParams { presets, preset_selected, save_prompt, .. }) =
+                if let Some(Dialog::CdpParams { presets, preset_selected, custom_values, save_prompt, .. }) =
                     self.dialog.as_mut()
                 {
                     *presets = new_presets;
+                    // Saving is also a transition away from "(none)" -- if the user never
+                    // cycled with Left/Right first, custom_values would otherwise never get
+                    // snapshotted, so cycling back around to "(none)" later would silently
+                    // show a stale preset's values instead of restoring what was actually set
+                    // by hand (mirrors the same fix applied to the envelope editor).
+                    if preset_selected.is_none() && custom_values.is_none() {
+                        *custom_values = Some(values);
+                    }
                     *preset_selected = new_selected;
                     *save_prompt = None;
                 }
@@ -6880,7 +6922,7 @@ impl App {
     fn cdp_run(&mut self, purpose: crate::cdp::JobPurpose) {
         use crate::model::cdp::IoKind;
         let Some(Dialog::CdpParams {
-            catalog_index, fields, second_input, focus, preview, presets, preset_selected, ..
+            catalog_index, fields, second_input, focus, preview, presets, preset_selected, custom_values, ..
         }) = self.dialog.take()
         else {
             return;
@@ -6892,11 +6934,14 @@ impl App {
         // would silently drop e.g. the second-input selection on a validation error).
         // `envelope`/`save_prompt` are always `None` here — `handle_dialog_key` intercepts
         // every key while either sub-mode is open, so `cdp_run` can never be reached mid-edit.
+        // `custom_values` is captured directly (not threaded as a parameter like the others)
+        // since nothing between here and any `reopen(...)` call below inspects or consumes it.
         let reopen = |focus: usize, error: String, fields: Vec<CdpField>, second_input: Option<CdpSecondInput>, preview: Option<CdpPreview>, presets: Vec<crate::model::cdp::preset::CdpPreset>, preset_selected: Option<usize>| {
             Dialog::CdpParams {
                 catalog_index, fields, second_input, focus, error: Some(error), preview,
                 envelope: None, list_edit: None, table_edit: None, marker_time_list_edit: None,
-                hilite_band_edit: None, formant_picker: None, presets, preset_selected, save_prompt: None, scroll: 0,
+                hilite_band_edit: None, formant_picker: None, presets, preset_selected,
+                custom_values: custom_values.clone(), save_prompt: None, scroll: 0,
             }
         };
 
@@ -7020,6 +7065,7 @@ impl App {
             focus,
             presets,
             preset_selected,
+            custom_values,
         });
         self.cdp_runner.submit(crate::cdp::Job {
             id: job_id,
@@ -7151,6 +7197,7 @@ impl App {
                 formant_picker: None,
                 presets,
                 preset_selected: None,
+                custom_values: None,
                 save_prompt: None,
                 scroll: 0,
             });
@@ -7237,6 +7284,7 @@ impl App {
             formant_picker: None,
             presets: resume.presets,
             preset_selected: None,
+            custom_values: None,
             save_prompt: None,
             scroll: 0,
         });
@@ -7668,6 +7716,7 @@ impl App {
                     formant_picker: None,
                     presets: resume.presets,
                     preset_selected: None,
+                    custom_values: None,
                     save_prompt: None,
                     scroll: 0,
                 });
@@ -8265,6 +8314,7 @@ impl App {
                                     formant_picker: None,
                                     presets: pending.presets,
                                     preset_selected: pending.preset_selected,
+                                    custom_values: pending.custom_values,
                                     save_prompt: None,
                                     scroll: 0,
                                 });
@@ -11722,7 +11772,7 @@ fn render_dialog(
         }
         Dialog::CdpParams {
             catalog_index, fields, second_input, focus, error, preview, envelope, list_edit, table_edit,
-            marker_time_list_edit, hilite_band_edit, formant_picker, presets, preset_selected, save_prompt, scroll,
+            marker_time_list_edit, hilite_band_edit, formant_picker, presets, preset_selected, custom_values: _, save_prompt, scroll,
         } => {
             let def = catalog.processes.get(*catalog_index);
             if let Some(edit) = envelope {
@@ -13940,7 +13990,7 @@ fn render_cdp_params_dialog(
             Span::styled("  s:save", hint_style),
         ])
     } else {
-        let name = preset_selected.and_then(|i| presets.get(i)).map(|p| p.name.as_str()).unwrap_or("(custom)");
+        let name = preset_selected.and_then(|i| presets.get(i)).map(|p| p.name.as_str()).unwrap_or("(none)");
         let value = if preset_focused { format!("\u{25c4} {name} \u{25ba}") } else { name.to_string() };
         Line::from(vec![
             Span::styled(preset_label, if preset_focused { cursor_style } else { label_style }),
@@ -18531,6 +18581,60 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
+    /// The preset row's cycle also includes a "(none)" slot holding whatever values were set
+    /// by hand before Left/Right was first pressed this session — cycling all the way around
+    /// (forward through every preset, or backward past the first) restores those values
+    /// instead of losing them the moment preset browsing starts. Mirrors the same fix applied
+    /// to the envelope editor's own Tab-cycling (user report).
+    #[test]
+    fn cycling_all_the_way_around_the_preset_row_returns_to_hand_set_values() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_preset_none_slot_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        crate::model::cdp::preset::save_preset(
+            "blur_avrg",
+            crate::model::cdp::preset::CdpPreset { name: "Wide".into(), values: vec![crate::model::cdp::ParamValue::Number(42.0)] },
+        );
+        crate::model::cdp::preset::save_preset(
+            "blur_avrg",
+            crate::model::cdp::preset::CdpPreset { name: "Narrow".into(), values: vec![crate::model::cdp::ParamValue::Number(3.0)] },
+        );
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let catalog_index = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").unwrap();
+        app.open_cdp_params(catalog_index);
+        // Set a hand-typed value distinct from both presets before ever cycling.
+        if let Some(Dialog::CdpParams { fields, .. }) = app.dialog.as_mut() {
+            if let Some(CdpField::Number { input, .. }) = fields.first_mut() {
+                *input = TextInput::fresh("17".to_string());
+            }
+        }
+        let hand_set_value: f64 = {
+            let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+            let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected Number field") };
+            input.value().parse().unwrap()
+        };
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        {
+            let Some(Dialog::CdpParams { preset_selected, .. }) = &app.dialog else { panic!("no dialog") };
+            assert_eq!(*preset_selected, Some(1), "two Rights from (none) should land on the second preset");
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { preset_selected, fields, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(preset_selected.is_none(), "a third Right should wrap back around to (none)");
+        let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected Number field") };
+        let restored: f64 = input.value().parse().unwrap();
+        assert_eq!(restored, hand_set_value, "(none) must restore the exact value set before the first Right");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
     /// 's' opens the save-name prompt (prefilled empty for a fresh dialog); typing a name
     /// and pressing Enter persists it to disk and selects it as the active preset —
     /// end-to-end through the actual `App` key-handling path, not just the lower-level
@@ -18569,6 +18673,63 @@ mod tests {
         let on_disk = crate::model::cdp::preset::load_presets("blur_avrg", 1);
         assert_eq!(on_disk.len(), 1);
         assert_eq!(on_disk[0].name, "My Preset");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Real gap found via manual testing on the envelope editor's equivalent feature: saving
+    /// hand-set values as a new preset before ever cycling with Left/Right also transitions
+    /// `preset_selected` away from `None`, so `custom_values` must get snapshotted at save
+    /// time too -- otherwise cycling through other presets afterward and wrapping back to
+    /// "(none)" would silently show a stale preset's values instead of what was set by hand.
+    #[test]
+    fn saving_before_the_first_cycle_still_lets_wrapping_to_none_restore_the_values() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_preset_save_first_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        // A pre-existing preset that sorts after "Mine" (the one about to be saved), so two
+        // Rights are needed to wrap all the way back around to "(none)".
+        crate::model::cdp::preset::save_preset(
+            "blur_avrg",
+            crate::model::cdp::preset::CdpPreset { name: "Zebra".into(), values: vec![crate::model::cdp::ParamValue::Number(99.0)] },
+        );
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let catalog_index = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").unwrap();
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { fields, .. }) = app.dialog.as_mut() {
+            if let Some(CdpField::Number { input, .. }) = fields.first_mut() {
+                *input = TextInput::fresh("17".to_string());
+            }
+        }
+        let hand_set_value: f64 = {
+            let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+            let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected Number field") };
+            input.value().parse().unwrap()
+        };
+
+        // Save immediately -- no Right press yet, so the cycle code path never runs.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        for c in "Mine".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        {
+            let Some(Dialog::CdpParams { presets, preset_selected, .. }) = &app.dialog else { panic!("no dialog") };
+            assert_eq!(preset_selected.and_then(|i| presets.get(i)).map(|p| p.name.as_str()), Some("Mine"));
+        }
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { preset_selected, fields, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(preset_selected.is_none(), "two Rights from the just-saved preset should wrap back to (none)");
+        let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected Number field") };
+        let restored: f64 = input.value().parse().unwrap();
+        assert_eq!(restored, hand_set_value, "(none) must restore the value set before the save, not a stale preset's value");
 
         unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
         std::fs::remove_dir_all(&temp_dir).ok();
@@ -18629,6 +18790,7 @@ mod tests {
             focus: 0,
             presets: Vec::new(),
             preset_selected: None,
+            custom_values: None,
         });
         app.dialog = Some(Dialog::CdpRunning {
             job_id: 42,
@@ -20906,6 +21068,7 @@ mod tests {
             focus: 0,
             presets: Vec::new(),
             preset_selected: None,
+            custom_values: None,
         });
         app.dialog = Some(Dialog::CdpRunning {
             job_id: 99,
@@ -20995,6 +21158,7 @@ mod tests {
             focus: 0,
             presets: Vec::new(),
             preset_selected: None,
+            custom_values: None,
         });
         app.dialog = Some(Dialog::CdpRunning {
             job_id: 99,
@@ -23008,6 +23172,7 @@ mod tests {
             formant_picker: None,
             presets: Vec::new(),
             preset_selected: None,
+            custom_values: None,
             save_prompt: None,
             scroll: 0,
         });
@@ -23168,6 +23333,7 @@ mod tests {
             formant_picker: None,
             presets: Vec::new(),
             preset_selected: None,
+            custom_values: None,
             save_prompt: None,
             scroll: 0,
         });
