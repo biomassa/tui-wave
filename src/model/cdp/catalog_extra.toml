@@ -16521,6 +16521,18 @@ a random matrix, and applies it to the source's spectrum in one step — a raw s
 transform with no directly predictable audible result. Also generates the matrix data itself \
 as a reusable file — after this runs, use "Save Matrix As" to keep it, then apply it to a \
 different sound later with Matrix Apply Saved Matrix.
+
+Each output bin is a weighted sum of every input bin at that window, so the output level \
+scales with Analysis Channels — and with the source's own content, richer material \
+accumulating more than a pure tone at the same channel count — confirmed against the real \
+binary clipping harder at higher Analysis Channels on both a sine tone and white noise, the \
+latter needing far more headroom at the same setting. "Auto Gain Reduction" below runs this \
+process twice: once on a deeply pre-attenuated preview to measure exactly how much this \
+run's randomly-generated matrix amplifies your actual source, then again on the real source \
+gained by the exact factor that avoids clipping, reusing that same matrix — not an estimate, \
+an exact measurement, so raising Analysis Channels for a denser, more chaotic effect doesn't \
+need a manual gain fix regardless of content. Turn it off for the raw, harsher, \
+un-attenuated result (and a single run instead of two).
 """
 input = "wav"
 output = "wav"
@@ -16530,11 +16542,11 @@ sidecar_extension = "txt"
 
 [[process.params]]
 name = "Analysis Channels"
-description = "FFT size for the internal analysis — must be a power of two"
+description = "FFT size for the internal analysis — must be a power of two. Larger values make the effect denser but clip much harder (see the process description)"
 automatable = false
 kind = "choice"
 options = ["4", "8", "16", "32", "64", "128", "256", "512", "1024", "2048", "4096", "8192", "16384"]
-default = 8
+default = 1
 
 [[process.params]]
 name = "Window Overlap"
@@ -16548,6 +16560,13 @@ default = 2.0
 exponential = false
 scale = "plain"
 integer = true
+
+[[process.params]]
+name = "Auto Gain Reduction"
+description = "Run this process twice — once on a safely pre-attenuated preview to measure exactly how much this run's matrix amplifies your source, then once more on the real source at the exact gain that avoids clipping, reusing that same matrix. An exact measurement, not an estimate. Turn off for a single un-attenuated run. Has no effect on the CDP command line itself — this app runs the extra pass before handing the real source to CDP"
+automatable = false
+kind = "toggle"
+default = true
 
 [[process.params]]
 name = "Cyclic"
@@ -16570,6 +16589,15 @@ description = """
 Runs its own internal spectral analysis and applies a previously-generated matrix-data file \
 (saved via Matrix Generate And Transform's "Save Matrix As" prompt) to the source's spectrum \
 — a raw spectral-domain transform with no directly predictable audible result.
+
+A saved matrix's energy characteristics have no relationship to whatever new source it's \
+applied to here, so this can clip just as harshly as Matrix Generate And Transform — \
+confirmed against the real binary applying a matrix generated from one sound to an unrelated \
+one. "Auto Gain Reduction" below runs this twice: once on a deeply pre-attenuated preview to \
+measure exactly how much this specific matrix amplifies your specific source, then again on \
+the real source gained by the exact factor that avoids clipping. Not an estimate, an exact \
+measurement (the matrix multiply is linear for a fixed matrix), so it holds regardless of \
+what the matrix was originally generated from.
 """
 input = "wav"
 output = "wav"
@@ -16584,9 +16612,1612 @@ kind = "file_path"
 extension = "matrix"
 
 [[process.params]]
+name = "Auto Gain Reduction"
+description = "Run this process twice — once on a safely pre-attenuated preview to measure exactly how much this matrix amplifies your source, then once more on the real source at the exact gain that avoids clipping. An exact measurement, not an estimate. Turn off for a single un-attenuated run. Has no effect on the CDP command line itself — this app runs the extra pass before handing the real source to CDP"
+automatable = false
+kind = "toggle"
+default = true
+
+[[process.params]]
 name = "Cyclic"
 description = "Apply the matrix transform cyclically (window N is transformed by the matrix raised to the Nth power, instead of once)"
 flag = "-c"
 automatable = false
 kind = "toggle"
 default = false
+
+# ---- CDP Release 8 gap-list, batch 5 (2026-07-26) --------------------------------------
+# SPECFNU: of the 15 uncataloged modes (6,7,10-18,20-23), only 6, 10, and 23 turned out to
+# actually work. Modes 11-16 and 18 (the whole "under formants" pitch-contour family) ALL
+# reproducibly crash the real binary with "double free or corruption (out)" (SIGABRT, exit
+# 134) -- confirmed value-independent (mode 11 crashes even with octshift=0, a no-op value)
+# and unconditional across every param/flag combination tried. This is the SAME bug class
+# already documented for specfnu_specfnu_19 in cdp::runner's KNOWN_FIXTURE_FAILURES, just
+# never previously confirmed to extend across the rest of this family -- a real CDP bug in
+# this release, not a catalog/argv problem, so none of the 7 crashing modes are added.
+# Modes 7/17 (pitch-grid #HS/#HF/#SCALE/#ELACS datafile format) and 20 (separately broken --
+# "Writing output will overrun buffer" with -s, silently truncated output without) are
+# likewise not added; 21/22 output text/data with no audio at all, out of scope like
+# strands/refocus. Mode 6's own `-x` flag independently errors ("Unknown mode in pass 0",
+# confirmed regardless of what else is on the command line) -- omitted from its entry rather
+# than exposing a broken toggle.
+
+[[process]]
+key = "specfnu_specfnu_6"
+bin = "specfnu"
+subprog = "specfnu"
+mode = "6"
+title = "Specfnu Suppress Formants"
+category = "pvoc"
+subcategory = "formants"
+short_description = "Suppresses the selected formants"
+description = "Suppresses the energy at one or more of the source's (up to 4) formants."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Formants"
+description = "Which formants to suppress, as concatenated digits 1-4 — e.g. 1 suppresses the 1st formant, 134 suppresses the 1st, 3rd, and 4th"
+automatable = false
+kind = "number"
+min = 1.0
+max = 1234.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Gain"
+description = "Amplitude gain/attenuation"
+flag = "-g"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Short Window"
+description = "Use a short window for extracting the spectral envelope"
+flag = "-s"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "specfnu_specfnu_10"
+bin = "specfnu"
+subprog = "specfnu"
+mode = "10"
+title = "Specfnu Arpeggiate Under Formants"
+category = "pvoc"
+subcategory = "formants"
+short_description = "Arpeggiates the spectrum of the source, keeping its formants"
+description = "Arpeggiates the source's spectrum while preserving its formant structure."
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Arpeggiation Rate"
+description = "Rate of spectral arpeggiation, in Hz"
+automatable = false
+kind = "number"
+min = -50.0
+max = 50.0
+step = 0.1
+default = 5.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Output gain/attenuation"
+flag = "-g"
+automatable = false
+kind = "number"
+min = 0.01
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Short Window"
+description = "Use a short window for extracting the spectral envelope"
+flag = "-s"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Exclude Non-Harmonic Partials"
+description = "Exclude non-harmonic partials from the arpeggiation"
+flag = "-x"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Silence Unpitched Windows"
+description = "Replace unpitched (or extremely quiet) windows with silence"
+flag = "-r"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Arpeggiate Downwards"
+description = "Arpeggiate downwards instead of the default upwards"
+flag = "-d"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Arpeggiate Up And Down"
+description = "Arpeggiate both up and down instead of the default upwards only"
+flag = "-c"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "specfnu_specfnu_23"
+bin = "specfnu"
+subprog = "specfnu"
+mode = "23"
+title = "Specfnu Sine Speech"
+category = "pvoc"
+subcategory = "formants"
+short_description = "Converts formant frequencies to sine tones"
+description = """
+Converts each of the source's formant frequencies into a pure sine tone, producing a \
+"sine speech" effect. Its HFFILE pitch-quantisation datafile is fixed to disabled (0) — \
+this app doesn't yet support authoring that pitch-grid file format.
+"""
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Pitch Quantisation"
+description = "Reserved (always 0 — this app doesn't yet support supplying a real pitch-grid file, so no pitch quantisation is applied)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Sinusoidisation"
+description = "Degree of sinusoidisation"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gain"
+description = "Output gain/attenuation"
+flag = "-a"
+automatable = false
+kind = "number"
+min = 0.01
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Formant 1 Gain"
+description = "Relative gain/attenuation of formant 1"
+flag = "-b"
+automatable = false
+kind = "number"
+min = 0.01
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Formant 2 Gain"
+description = "Relative gain/attenuation of formant 2"
+flag = "-c"
+automatable = false
+kind = "number"
+min = 0.01
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Formant 3 Gain"
+description = "Relative gain/attenuation of formant 3"
+flag = "-d"
+automatable = false
+kind = "number"
+min = 0.01
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Formant 4 Gain"
+description = "Relative gain/attenuation of formant 4"
+flag = "-e"
+automatable = false
+kind = "number"
+min = 0.01
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Formant 1 Pitch-Force Depth"
+description = "How strongly to force formant 1's pitch to the pitch-grid, if applied (moot while Pitch Quantisation is fixed at 0)"
+flag = "-n"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Formant 2 Pitch-Force Depth"
+description = "How strongly to force formant 2's pitch to the pitch-grid, if applied (moot while Pitch Quantisation is fixed at 0)"
+flag = "-o"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Formant 3 Pitch-Force Depth"
+description = "How strongly to force formant 3's pitch to the pitch-grid, if applied (moot while Pitch Quantisation is fixed at 0)"
+flag = "-p"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Formant 4 Pitch-Force Depth"
+description = "How strongly to force formant 4's pitch to the pitch-grid, if applied (moot while Pitch Quantisation is fixed at 0)"
+flag = "-q"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Short Window"
+description = "Use a short window for extracting the spectral envelope"
+flag = "-s"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Force Fundamental"
+description = "Force the lowest formant to use the fundamental frequency as its peak"
+flag = "-f"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Silence Unpitched Windows"
+description = "Replace unpitched (or extremely quiet) windows with silence"
+flag = "-r"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Smooth Pitch Transitions"
+description = "Smooth transitions between pitches in the formant traces"
+flag = "-S"
+automatable = false
+kind = "toggle"
+default = false
+
+# ---- CDP Release 8 gap-list, batch 6 (2026-07-26): variadic input ----------------------
+# The last structural gap in the Release 8 catalog: four processes take an open-ended LIST of
+# input files (`infile1 [infile2 ...] outfile ...`), which no `IoKind` could express before
+# `variadic_wav`/`grouped_wav` (see `def.rs` for the model, `pipeline::plan_variadic_wav` for
+# the planning, and `ui::app`'s `CdpVariadicInput` for the ordered multi-select picker). In
+# every case input 1 is the active selection and the picker supplies inputs 2..N, mirroring
+# how a dual-input process's second input already works. All four reject non-mono inputs
+# outright, so only each input's first channel is ever sent.
+#
+# Findings from the real binaries + CDP8 sources that the usage text does NOT give you, all
+# of which changed what shipped here:
+#
+#  * `pulser multi`'s usage line `2-3 infile1 [infile2 ......] infile outfile dur` reads as
+#    though modes 2-3 take an extra singular input file between the list and the outfile.
+#    They do not. That line is simply wrong. `pulser.c` declares mode 3 (internal mode index
+#    2) with `set_param_data(ap, SPACEDATA, 10, 9, ...)`, and the extra argument it consumes
+#    sits AFTER the outfile, not before it, and is a spatialisation argument -- either an
+#    output-channel string or a datafile -- not an infile. Mode 2 has no extra argument at
+#    all. Confirmed by running every count around the boundary; mode 2 with N files and 9
+#    params runs clean, and mode 3's extra token errors as "INVALID FILETYPE FOR SPACEDATA"
+#    when handed a `.wav`.
+#  * `get_channel_string` treats a literal "0" as "MONO OUTPUT"; any other channel string
+#    yields 8-channel output (verified: "12" and "1234" both produced 8-channel files). So
+#    mode 3 ships with that argument fixed at "0", the only in-scope value -- the same
+#    stereo-only exclusion mchanpan/abfpan/panorama/CRUMBLE/SPIN already got.
+#  * `pulser multi` is `MANY_SNDFILES` internally, which hard-rejects fewer than 2 input
+#    files ("Insufficient input files for this process") in ALL THREE modes -- including
+#    mode 1, whose `infile1 [infile2 ......]` usage line implies one is enough. Hence
+#    `min_inputs = 2`. `tesselate`/`crystal rotate` are `ONE_OR_MANY_SNDFILES` and really do
+#    accept a single file.
+#  * `pulser multi`'s OCTAV and BEND are documented as "Range 0 - 1" but `ap->hi` for both is
+#    24; the wider range is what the binary actually enforces, so that is what is declared.
+#  * `tesselate`'s `[-ffrom]` flag is in the usage text but is NOT implemented -- `set_vflgs`
+#    declares no flags at all and the code that would have used it is commented out.
+#    Confirmed: "Unknown flag -f on command line." Omitted, same precedent as repeater's
+#    documented-but-rejected `-s`.
+#  * `tesselate` at chans=2 genuinely does use multiple inputs (`layercnt = infilecnt *
+#    outchancnt`): 1/2/3 mono sources at chans=2 produced 4.0s/4.4s/4.8s of output from
+#    identical parameters. So it ships variadic rather than restricted to one file.
+#  * `tesselate`'s TYPE must be strictly less than CHANS ("Tesselation type (2) must be less
+#    than the number of output channels (2)"), so at the stereo-only chans=2 it is 0 or 1.
+#  * `tesselate`'s datafile is the first `transposed` table: exactly two lines, line 1 every
+#    source's resync count and line 2 every source's onset delay, with as many entries per
+#    line as there are input files. Its row count must therefore equal the input-file count.
+#  * `repair repair` writes MULTIPLE output files, not one: `insams/chans` of them, named by
+#    inserting `_<n>` before the extension (`out.wav` -> `out_0.wav`, `out_1.wav`, ...), which
+#    is why it declares `output = "wav_glob"`. Its channel count is restricted to {2,4,5,7,8,16}
+#    by the binary and fixed at 2 here. It additionally requires that positionally-paired
+#    sources be the same length ("FILES 0 AND 1 ARE NOT THE SAME SIZE") -- a data condition
+#    only the user can satisfy, surfaced as CDP's own error rather than pre-blocked.
+#
+# CHANS/CHANNELS are `choice` params with a single "2" option rather than free numbers: the
+# value is genuinely fixed by this app's stereo-only audio path, and a locked single-option
+# field says so, where a number field with min == max would just let the user type something
+# Apply then rejects.
+
+[[process]]
+key = "pulser_multi_1"
+bin = "pulser"
+subprog = "multi"
+mode = "1"
+title = "Pulser Multi (Brightness Only)"
+category = "time"
+subcategory = "texture"
+short_description = "Streams pitched packets that take only their brightness from the sources"
+description = "Iterates several mono sources into a stream of enveloped, pitched packets. In this mode the packets take their spectral brightness (only) from the sources and their pitch from the Pitch parameter. Sources are used in randomly permuted sequences. Needs at least two input files: the current selection plus one or more picked buffers."
+input = "variadic_wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+min_inputs = 2
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the output stream, in seconds"
+automatable = false
+kind = "number"
+min = 0.02
+max = 3600.0
+step = 0.1
+default = 4.0
+exponential = true
+scale = "output_duration_seconds"
+
+[[process.params]]
+name = "Pitch"
+description = "MIDI pitch of the packets"
+automatable = true
+kind = "number"
+min = 24.0
+max = 96.0
+step = 1.0
+default = 60.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Rise"
+description = "Shortest packet-envelope risetime, in seconds (each packet picks a random risetime between this and Max Rise)"
+automatable = false
+kind = "number"
+min = 0.002
+max = 0.2
+step = 0.001
+default = 0.02
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Rise"
+description = "Longest packet-envelope risetime, in seconds"
+automatable = false
+kind = "number"
+min = 0.002
+max = 0.2
+step = 0.001
+default = 0.02
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Sustain"
+description = "Shortest packet-envelope sustain, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 0.2
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Sustain"
+description = "Longest packet-envelope sustain, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 0.2
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Decay"
+description = "Shortest packet-envelope decaytime, in seconds"
+automatable = false
+kind = "number"
+min = 0.02
+max = 2.0
+step = 0.01
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Decay"
+description = "Longest packet-envelope decaytime, in seconds"
+automatable = false
+kind = "number"
+min = 0.02
+max = 2.0
+step = 0.01
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Speed"
+description = "Average time between packets in the output, in seconds"
+automatable = true
+kind = "number"
+min = 0.05
+max = 1.0
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Scatter"
+description = "Randomisation of Speed (0 = perfectly regular)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Rise Slope"
+description = "Shape of the packet's rise (1 = linear, >1 steeper, <1 shallower)"
+flag = "-e"
+automatable = true
+kind = "number"
+min = 0.25
+max = 4.0
+step = 0.05
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Decay Slope"
+description = "Shape of the packet's decay (1 = linear, >1 steeper, <1 shallower)"
+flag = "-E"
+automatable = true
+kind = "number"
+min = 0.25
+max = 4.0
+step = 0.05
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Jitter"
+description = "Random pitch jitter applied to each packet, in semitones"
+flag = "-p"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Amplitude Jitter"
+description = "Random amplitude jitter applied to each packet (0 = none)"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Lower Octave"
+description = "Amount of lower-octave reinforcement (documented as 0-1, but the binary accepts up to 24)"
+flag = "-o"
+automatable = true
+kind = "number"
+min = 0.0
+max = 24.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitchbend"
+description = "Amount of upward pitchbend applied to each packet, in semitones (documented as 0-1, but the binary accepts up to 24)"
+flag = "-b"
+automatable = true
+kind = "number"
+min = 0.0
+max = 24.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Seed"
+description = "Random seed — the same seed reproduces identical output on a rerun (0 = fresh randomness each run)"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 0.0
+max = 32767.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Fully Random Source Order"
+description = "Pick each packet's source file entirely at random. Off (the default) uses every file once in a random order, then reshuffles"
+flag = "-r"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "pulser_multi_2"
+bin = "pulser"
+subprog = "multi"
+mode = "2"
+title = "Pulser Multi (From Source Starts)"
+category = "time"
+subcategory = "texture"
+short_description = "Streams packets derived from the starts of the sources"
+description = "Iterates several mono sources into a stream of enveloped packets, each derived from the START of one source (so the packets keep the sources' own pitch rather than taking one from a parameter). Sources are used in randomly permuted sequences. Needs at least two input files: the current selection plus one or more picked buffers."
+input = "variadic_wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+min_inputs = 2
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the output stream, in seconds"
+automatable = false
+kind = "number"
+min = 0.02
+max = 3600.0
+step = 0.1
+default = 4.0
+exponential = true
+scale = "output_duration_seconds"
+
+[[process.params]]
+name = "Min Rise"
+description = "Shortest packet-envelope risetime, in seconds (each packet picks a random risetime between this and Max Rise)"
+automatable = false
+kind = "number"
+min = 0.002
+max = 0.2
+step = 0.001
+default = 0.02
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Rise"
+description = "Longest packet-envelope risetime, in seconds"
+automatable = false
+kind = "number"
+min = 0.002
+max = 0.2
+step = 0.001
+default = 0.02
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Sustain"
+description = "Shortest packet-envelope sustain, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 0.2
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Sustain"
+description = "Longest packet-envelope sustain, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 0.2
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Decay"
+description = "Shortest packet-envelope decaytime, in seconds"
+automatable = false
+kind = "number"
+min = 0.02
+max = 2.0
+step = 0.01
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Decay"
+description = "Longest packet-envelope decaytime, in seconds"
+automatable = false
+kind = "number"
+min = 0.02
+max = 2.0
+step = 0.01
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Speed"
+description = "Average time between packets in the output, in seconds"
+automatable = true
+kind = "number"
+min = 0.05
+max = 1.0
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Scatter"
+description = "Randomisation of Speed (0 = perfectly regular)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Rise Slope"
+description = "Shape of the packet's rise (1 = linear, >1 steeper, <1 shallower)"
+flag = "-e"
+automatable = true
+kind = "number"
+min = 0.25
+max = 4.0
+step = 0.05
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Decay Slope"
+description = "Shape of the packet's decay (1 = linear, >1 steeper, <1 shallower)"
+flag = "-E"
+automatable = true
+kind = "number"
+min = 0.25
+max = 4.0
+step = 0.05
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Jitter"
+description = "Random pitch jitter applied to each packet, in semitones"
+flag = "-p"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Amplitude Jitter"
+description = "Random amplitude jitter applied to each packet (0 = none)"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Lower Octave"
+description = "Amount of lower-octave reinforcement (documented as 0-1, but the binary accepts up to 24)"
+flag = "-o"
+automatable = true
+kind = "number"
+min = 0.0
+max = 24.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitchbend"
+description = "Amount of upward pitchbend applied to each packet, in semitones (documented as 0-1, but the binary accepts up to 24)"
+flag = "-b"
+automatable = true
+kind = "number"
+min = 0.0
+max = 24.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Seed"
+description = "Random seed — the same seed reproduces identical output on a rerun (0 = fresh randomness each run)"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 0.0
+max = 32767.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Fully Random Source Order"
+description = "Pick each packet's source file entirely at random. Off (the default) uses every file once in a random order, then reshuffles"
+flag = "-r"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "pulser_multi_3"
+bin = "pulser"
+subprog = "multi"
+mode = "3"
+title = "Pulser Multi (From Random Startpoints)"
+category = "time"
+subcategory = "texture"
+short_description = "Streams packets derived from random startpoints inside the sources"
+description = "Iterates several mono sources into a stream of enveloped packets, each derived from a RANDOM startpoint within one source. Sources are used in randomly permuted sequences. Needs at least two input files: the current selection plus one or more picked buffers. CDP's spatialisation argument for this mode is fixed at mono output, since this app's audio path is stereo-only and every other value produces an 8-channel file."
+input = "variadic_wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+min_inputs = 2
+
+[[process.params]]
+name = "Output Channels"
+description = "Fixed at mono. CDP's own values here name output channels 1-8 and always produce an 8-channel file, which this app's stereo-only audio path cannot use"
+automatable = false
+kind = "choice"
+options = ["0"]
+default = 0
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the output stream, in seconds"
+automatable = false
+kind = "number"
+min = 0.02
+max = 3600.0
+step = 0.1
+default = 4.0
+exponential = true
+scale = "output_duration_seconds"
+
+[[process.params]]
+name = "Min Rise"
+description = "Shortest packet-envelope risetime, in seconds (each packet picks a random risetime between this and Max Rise)"
+automatable = false
+kind = "number"
+min = 0.002
+max = 0.2
+step = 0.001
+default = 0.02
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Rise"
+description = "Longest packet-envelope risetime, in seconds"
+automatable = false
+kind = "number"
+min = 0.002
+max = 0.2
+step = 0.001
+default = 0.02
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Sustain"
+description = "Shortest packet-envelope sustain, in seconds"
+automatable = true
+kind = "number"
+min = 0.0
+max = 0.2
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Sustain"
+description = "Longest packet-envelope sustain, in seconds"
+automatable = true
+kind = "number"
+min = 0.0
+max = 0.2
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Decay"
+description = "Shortest packet-envelope decaytime, in seconds"
+automatable = false
+kind = "number"
+min = 0.02
+max = 2.0
+step = 0.01
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Decay"
+description = "Longest packet-envelope decaytime, in seconds"
+automatable = false
+kind = "number"
+min = 0.02
+max = 2.0
+step = 0.01
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Speed"
+description = "Average time between packets in the output, in seconds"
+automatable = true
+kind = "number"
+min = 0.05
+max = 1.0
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Scatter"
+description = "Randomisation of Speed (0 = perfectly regular)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Rise Slope"
+description = "Shape of the packet's rise (1 = linear, >1 steeper, <1 shallower)"
+flag = "-e"
+automatable = true
+kind = "number"
+min = 0.25
+max = 4.0
+step = 0.05
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Decay Slope"
+description = "Shape of the packet's decay (1 = linear, >1 steeper, <1 shallower)"
+flag = "-E"
+automatable = true
+kind = "number"
+min = 0.25
+max = 4.0
+step = 0.05
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Jitter"
+description = "Random pitch jitter applied to each packet, in semitones"
+flag = "-p"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Amplitude Jitter"
+description = "Random amplitude jitter applied to each packet (0 = none)"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Lower Octave"
+description = "Amount of lower-octave reinforcement (documented as 0-1, but the binary accepts up to 24)"
+flag = "-o"
+automatable = true
+kind = "number"
+min = 0.0
+max = 24.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitchbend"
+description = "Amount of upward pitchbend applied to each packet, in semitones (documented as 0-1, but the binary accepts up to 24)"
+flag = "-b"
+automatable = true
+kind = "number"
+min = 0.0
+max = 24.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Seed"
+description = "Random seed — the same seed reproduces identical output on a rerun (0 = fresh randomness each run)"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 0.0
+max = 32767.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Fully Random Source Order"
+description = "Pick each packet's source file entirely at random. Off (the default) uses every file once in a random order, then reshuffles"
+flag = "-r"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "tesselate_tesselate"
+bin = "tesselate"
+subprog = "tesselate"
+title = "Tesselate"
+category = "time"
+subcategory = "texture"
+short_description = "Repeats each mono source on a channel pair with a slowly drifting delay"
+description = "Creates a repeating pattern that shifts in space and time: each mono source is repeated on a pair of output channels, but with a slightly different delay in each of the pair, so the pattern gradually drifts apart and resynchronises. The Sources table needs one row per input file (the current selection plus any picked buffers): that row's Resync Count sets how many repeats pass before the drifting copy realigns, and its Entry Delay staggers when that source first enters."
+input = "variadic_wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = true
+
+[[process.params]]
+name = "Sources"
+description = "One row per input file, in input order: how many repeats before the drifting copy resynchronises, and how long after time zero that source first enters. Entry delays must all differ and must each be less than Cycle Duration"
+automatable = false
+kind = "table"
+transposed = true
+
+[[process.params.columns]]
+name = "Resync Count"
+min = 2.0
+max = 1024.0
+step = 1.0
+default = 4.0
+scale = "plain"
+integer = true
+
+[[process.params.columns]]
+name = "Entry Delay"
+min = 0.0
+max = 60.0
+step = 0.01
+default = 0.0
+scale = "plain"
+
+[[process.params]]
+name = "Output Channels"
+description = "Fixed at stereo. CDP supports any even count from 2 to 16 here, but this app's audio path is stereo-only"
+automatable = false
+kind = "choice"
+options = ["2"]
+default = 0
+
+[[process.params]]
+name = "Cycle Duration"
+description = "Shortest repeat time, in seconds — the delay between repetitions before the extra drift is added"
+automatable = false
+kind = "number"
+min = 0.01
+max = 60.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Output Duration"
+description = "Duration of the output sound, in seconds (rounded down to a whole number of cycles)"
+automatable = false
+kind = "number"
+min = 1.0
+max = 3600.0
+step = 0.1
+default = 8.0
+exponential = true
+scale = "output_duration_seconds"
+
+[[process.params]]
+name = "Drift Pattern"
+description = "Which channels drift against each other: 0 = odd against even, 1 = adjacent channels. Must be less than Output Channels, so at stereo only 0 and 1 are valid"
+automatable = false
+kind = "choice"
+options = ["0", "1"]
+default = 0
+
+[[process]]
+key = "repair_repair"
+bin = "repair"
+subprog = "repair"
+title = "Repair (Join Mono Files to Stereo)"
+category = "time"
+subcategory = "utility"
+short_description = "Interleaves pairs of mono sources into stereo files"
+description = "Joins a list of mono sounds into stereo files by interleaving them. The current selection is always the first channel-1 source; the picker's two lists supply any further channel-1 sources and every channel-2 source. Each channel-1 source is paired positionally with the channel-2 source in the same position, and each pair becomes one new stereo buffer — so the two lists must end up the same length, and paired sources must be exactly the same length in samples (CDP rejects a mismatch outright)."
+input = "grouped_wav"
+output = "wav_glob"
+stereo_native = false
+output_is_stereo = true
+min_inputs = 2
+
+[[process.params]]
+name = "Output Channels"
+description = "Fixed at stereo. CDP also accepts 4, 5, 7, 8, and 16 here, but this app's audio path is stereo-only"
+automatable = false
+kind = "choice"
+options = ["2"]
+default = 0
+
+# ---- CDP Release 8 gap-list, batch 7 (2026-07-26): CRYSTAL ------------------------------
+# The last entry on the variadic-input list (batch 6 above shipped the other three) and the
+# first process needing a COMPOUND datafile param: `crystal rotate`'s VDAT file holds two
+# structurally unrelated sections in one file behind one argv token — XYZ vertex triples
+# followed by a time/value amplitude envelope — which is why `ParamKind::CrystalVdat` exists
+# rather than a `table` plus a `required_envelope` number (see that variant's doc comment).
+#
+# Verified against the real binary and `CDP8/dev/science/crystal.c` + `dev/include/science.h`:
+#
+#  * `crystal rotate 1-10 fi [fi2 fi3..] fo vdat rota rotb twidth tstep dur plo phi
+#    [-ppass -sstop] [-afatt] [-Pfpresc] [-Ffslope] [-Ssslope]`. Note the datafile sits AFTER
+#    the outfile, so no `before_outfile` is needed.
+#  * Only modes 1 (mono) and 2 (stereo) are in scope, confirmed by inspecting real output.
+#    Modes 3-9 write 8-channel files and mode 10 writes one file per rotated vertex set —
+#    the same stereo-only exclusion CRUMBLE/SPIN/mchanpan already got.
+#  * Every range/default here is from `setup_crystal_param_ranges_and_defaults`, not from the
+#    usage text, which gives ranges for only four of the thirteen values.
+#  * `set_param_data(ap, CRYSTALDAT, 7, 7, "DDDDdDD")`: the 5th positional (DUR) is lowercase
+#    'd', i.e. constant-only — every other positional accepts a breakpoint file, and all six
+#    flags are 'd' too. That is exactly what `automatable` declares below.
+#  * Cross-param rules the binary enforces, all satisfied by these defaults: DUR must exceed
+#    both TSTEP and TWIDTH; STOP - PASS must be >= 50 Hz (PASS/STOP are silently swapped if
+#    given reversed); PLO and PHI must differ (an inverted pair is only a warning).
+#  * VDAT parse rules (`handle_the_special_data`), all enforced by `CrystalVdat::validate`
+#    before a job is launched: a line of exactly 3 numbers is a vertex and all vertices must
+#    come first; the first line with any other count starts the envelope, so the envelope is
+#    written 2 numbers per line (3 would be re-read as another vertex — reproduced: "No
+#    envelope data found in file"). Envelope times start at exactly 0 and strictly increase;
+#    values are 0-1 with the first and last exactly 0; `;` starts a comment line.
+#  * **The unit-sphere constraint IS enforced**, contradicting the earlier note in
+#    CDP-Release8-TODO.md that called it documented-but-unenforced: `handle_the_special_data`
+#    calls `get_vectorlen` per vertex and errors "vertex N lies outside the unit sphere" when
+#    sqrt(x²+y²+z²) > 1. Reproduced directly with a (0.9, 0.9, 0.9) vertex, whose coordinates
+#    are each individually in range. Hence the cross-axis check in `CrystalVdat::validate`
+#    that no per-column clamp could express.
+#  * Vertex count must equal the input-file count whenever more than one file is supplied
+#    (`if(dz->infilecnt > 1 && vertexcnt != dz->infilecnt)`); with exactly one input file any
+#    vertex count is accepted (the single file is re-read, delayed and transposed once per
+#    vertex). Pre-blocked in `pipeline::check_compound_param_data` rather than passed through
+#    — see that function's doc comment for why.
+#  * `ONE_OR_MANY_SNDFILES`, so unlike `pulser multi`/`repair` it genuinely runs with just the
+#    selection and needs no `min_inputs`.
+
+[[process]]
+key = "crystal_rotate_1"
+bin = "crystal"
+subprog = "rotate"
+mode = "1"
+title = "Crystal Rotate (Mono)"
+category = "time"
+subcategory = "texture"
+short_description = "Sounds events placed by the vertices of a rotating 3-D crystal"
+description = "Treats the input sounds as the vertices of a crystal spinning in 3-D space. At every time-step the crystal is sampled and one sound event is generated per vertex: the vertex's X coordinate sets the event's time offset, Y its pitch, and Z its depth — distant (negative Z) events are low-pass filtered and mixed back with the original, close (positive Z) ones are stacked an octave up. With more than one input file the Nth file drives the Nth vertex, so the vertex count must then match the file count exactly. Mono output."
+input = "variadic_wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Crystal Data"
+description = "The crystal's vertices (X/Y/Z, each -1 to 1 and inside the unit sphere) and the amplitude envelope imposed on every generated event. Press e to edit: section 1 is the vertex table, e again switches to the envelope, v switches back"
+automatable = false
+kind = "crystal_vdat"
+
+[[process.params]]
+name = "Rotation XY"
+description = "Rotation speed in the XY plane, in revolutions per second (negative reverses)"
+automatable = true
+kind = "number"
+min = -10.0
+max = 10.0
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Rotation XZ"
+description = "Rotation speed in the XZ plane, in revolutions per second (negative reverses)"
+automatable = true
+kind = "number"
+min = -10.0
+max = 10.0
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Time Width"
+description = "Largest time gap between the first and last event of one group, in seconds — how far the vertices' X coordinates spread the group in time. Must be less than Output Duration"
+automatable = true
+kind = "number"
+min = 0.01
+max = 3600.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Time Step"
+description = "Time between successive samplings of the rotating crystal, in seconds — the gap from one group of events to the next. Must be less than Output Duration"
+automatable = true
+kind = "number"
+min = 0.01
+max = 3600.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Output Duration"
+description = "Total duration of the output, in seconds. Must be greater than both Time Step and Time Width"
+automatable = false
+kind = "number"
+min = 0.1
+max = 7200.0
+step = 0.1
+default = 20.0
+exponential = true
+scale = "output_duration_seconds"
+
+[[process.params]]
+name = "Min Pitch"
+description = "MIDI pitch generated by a vertex at the bottom of the crystal (Y = -1)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 127.0
+step = 1.0
+default = 36.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Pitch"
+description = "MIDI pitch generated by a vertex at the top of the crystal (Y = 1). Must differ from Min Pitch"
+automatable = true
+kind = "number"
+min = 0.0
+max = 127.0
+step = 1.0
+default = 72.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Filter Passband"
+description = "Upper edge of the depth filter's passband, in Hz — the filter applied to distant (negative Z) events. Must be at least 50 Hz below Filter Stopband"
+flag = "-p"
+automatable = false
+kind = "number"
+min = 16.0
+max = 4000.0
+step = 10.0
+default = 400.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Filter Stopband"
+description = "Lower edge of the depth filter's stopband, in Hz. Must be at least 50 Hz above Filter Passband"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 50.0
+max = 8000.0
+step = 10.0
+default = 800.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Filter Attenuation"
+description = "Maximum attenuation the depth filter applies at full distance, in dB"
+flag = "-a"
+automatable = false
+kind = "number"
+min = -96.0
+max = 0.0
+step = 1.0
+default = -60.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Filter Prescale"
+description = "Gain applied to the source before it is filtered, to leave headroom for the filter's own output"
+flag = "-P"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.9
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Depth Curve"
+description = "Warps the mix between filtered and unfiltered sound as depth increases (1 = linear, less = filtering comes in sooner)"
+flag = "-F"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.05
+default = 0.7
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Proximity Curve"
+description = "Warps the mix between the octave-stacked and original sound as closeness increases (1 = linear, less = stacking comes in sooner)"
+flag = "-S"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.05
+default = 0.7
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "crystal_rotate_2"
+bin = "crystal"
+subprog = "rotate"
+mode = "2"
+title = "Crystal Rotate (Stereo)"
+category = "time"
+subcategory = "texture"
+short_description = "Sound events placed in stereo by the vertices of a rotating 3-D crystal"
+description = "As Crystal Rotate (Mono), but the vertex's X coordinate additionally sets each event's stereo position as well as its time offset, so the crystal's rotation is audible as movement across the stereo image. With more than one input file the Nth file drives the Nth vertex, so the vertex count must then match the file count exactly."
+input = "variadic_wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = true
+
+[[process.params]]
+name = "Crystal Data"
+description = "The crystal's vertices (X/Y/Z, each -1 to 1 and inside the unit sphere) and the amplitude envelope imposed on every generated event. Press e to edit: section 1 is the vertex table, e again switches to the envelope, v switches back"
+automatable = false
+kind = "crystal_vdat"
+
+[[process.params]]
+name = "Rotation XY"
+description = "Rotation speed in the XY plane, in revolutions per second (negative reverses)"
+automatable = true
+kind = "number"
+min = -10.0
+max = 10.0
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Rotation XZ"
+description = "Rotation speed in the XZ plane, in revolutions per second (negative reverses)"
+automatable = true
+kind = "number"
+min = -10.0
+max = 10.0
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Time Width"
+description = "Largest time gap between the first and last event of one group, in seconds — how far the vertices' X coordinates spread the group in time. Must be less than Output Duration"
+automatable = true
+kind = "number"
+min = 0.01
+max = 3600.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Time Step"
+description = "Time between successive samplings of the rotating crystal, in seconds — the gap from one group of events to the next. Must be less than Output Duration"
+automatable = true
+kind = "number"
+min = 0.01
+max = 3600.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Output Duration"
+description = "Total duration of the output, in seconds. Must be greater than both Time Step and Time Width"
+automatable = false
+kind = "number"
+min = 0.1
+max = 7200.0
+step = 0.1
+default = 20.0
+exponential = true
+scale = "output_duration_seconds"
+
+[[process.params]]
+name = "Min Pitch"
+description = "MIDI pitch generated by a vertex at the bottom of the crystal (Y = -1)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 127.0
+step = 1.0
+default = 36.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Pitch"
+description = "MIDI pitch generated by a vertex at the top of the crystal (Y = 1). Must differ from Min Pitch"
+automatable = true
+kind = "number"
+min = 0.0
+max = 127.0
+step = 1.0
+default = 72.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Filter Passband"
+description = "Upper edge of the depth filter's passband, in Hz — the filter applied to distant (negative Z) events. Must be at least 50 Hz below Filter Stopband"
+flag = "-p"
+automatable = false
+kind = "number"
+min = 16.0
+max = 4000.0
+step = 10.0
+default = 400.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Filter Stopband"
+description = "Lower edge of the depth filter's stopband, in Hz. Must be at least 50 Hz above Filter Passband"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 50.0
+max = 8000.0
+step = 10.0
+default = 800.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Filter Attenuation"
+description = "Maximum attenuation the depth filter applies at full distance, in dB"
+flag = "-a"
+automatable = false
+kind = "number"
+min = -96.0
+max = 0.0
+step = 1.0
+default = -60.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Filter Prescale"
+description = "Gain applied to the source before it is filtered, to leave headroom for the filter's own output"
+flag = "-P"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.9
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Depth Curve"
+description = "Warps the mix between filtered and unfiltered sound as depth increases (1 = linear, less = filtering comes in sooner)"
+flag = "-F"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.05
+default = 0.7
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Proximity Curve"
+description = "Warps the mix between the octave-stacked and original sound as closeness increases (1 = linear, less = stacking comes in sooner)"
+flag = "-S"
+automatable = false
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.05
+default = 0.7
+exponential = true
+scale = "plain"

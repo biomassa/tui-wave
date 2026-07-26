@@ -84,6 +84,23 @@ impl CdpChain {
     }
 }
 
+/// Whether `def` can be a chain step at all: it must both consume the previous step's audio
+/// and produce audio for the next one. That rules out synthesis (`IoKind::None` — nothing
+/// upstream to consume), pitch-curve transforms (`IoKind::Curve` — carries no audio on either
+/// side), glob output (`IoKind::WavGlob` — many results, not one to feed onward), and the
+/// variadic input kinds (`VariadicWav`/`GroupedWav` — their extra files come from a per-run
+/// picker a saved chain has no way to carry). See `CDP-CHAIN-PLAN.md` design decision 3.
+///
+/// Public and shared with `ui::app`'s browser filter (`cdp_filter_entries`) rather than
+/// duplicated there. It *was* duplicated, as `matches!(output, Wav | Ana) && input != None` —
+/// an approximation that agreed with this rule for every input kind that existed at the time
+/// and then silently diverged the moment `VariadicWav`/`GroupedWav` were added, offering those
+/// processes as chain steps that `validate` would immediately reject. Hence one function.
+pub fn process_is_chainable(def: &super::ProcessDef) -> bool {
+    matches!(def.input, IoKind::Wav | IoKind::Ana | IoKind::DualWav | IoKind::DualAna)
+        && matches!(def.output, IoKind::Wav | IoKind::Ana)
+}
+
 impl ChainStep {
     fn validate(&self, catalog: &CdpCatalog) -> Result<(), ChainError> {
         let def = catalog
@@ -92,9 +109,7 @@ impl ChainStep {
             .find(|p| p.key == self.process_key)
             .ok_or_else(|| ChainError::UnknownProcess { key: self.process_key.clone() })?;
 
-        let input_ok = matches!(def.input, IoKind::Wav | IoKind::Ana | IoKind::DualWav | IoKind::DualAna);
-        let output_ok = matches!(def.output, IoKind::Wav | IoKind::Ana);
-        if !input_ok || !output_ok {
+        if !process_is_chainable(def) {
             return Err(ChainError::ProcessNotChainable { key: self.process_key.clone() });
         }
 

@@ -274,10 +274,15 @@ mod tests {
                             assert_column_sane(&proc.key, &param.name, col);
                         }
                     }
+                    // `CrystalVdat` declares no bounds at all (they're `CrystalVdat`
+                    // associated constants — see `ParamKind::CrystalVdat`'s doc comment), so
+                    // there is nothing per-entry for this test to check. Its own equivalent
+                    // guard is `CrystalVdat::validate`, exercised in `def.rs`'s tests.
                     ParamKind::Toggle { .. }
                     | ParamKind::Choice { .. }
                     | ParamKind::FormantBufferRef { .. }
-                    | ParamKind::FilePath { .. } => {}
+                    | ParamKind::FilePath { .. }
+                    | ParamKind::CrystalVdat => {}
                 }
             }
         }
@@ -345,10 +350,22 @@ mod tests {
     #[test]
     fn builtin_toggle_params_always_carry_a_flag() {
         use super::super::def::ParamKind;
+        // `matrix_matrix_1`/`matrix_matrix_2`'s "Auto Gain Reduction" (added 2026-07-26,
+        // extended to mode 2 same day) are the deliberate exceptions: neither ever reaches
+        // CDP's argv at all (`matrix matrix 1`/`2` have no gain flag of their own) —
+        // `pipeline::plan_matrix_with_gain_calibration`/`plan_matrix_apply_with_gain_calibration`
+        // read the value directly to decide whether to plan the two-pass gain-calibration
+        // job instead of the ordinary single-invocation one. Every other toggle in the
+        // catalog reaching this point with no flag is exactly the "forgotten flag" bug this
+        // test exists to catch.
+        const DELIBERATELY_FLAGLESS: &[(&str, &str)] =
+            &[("matrix_matrix_1", "Auto Gain Reduction"), ("matrix_matrix_2", "Auto Gain Reduction")];
         let (catalog, _) = CdpCatalog::load(None);
         for proc in &catalog.processes {
             for param in &proc.params {
-                if matches!(param.kind, ParamKind::Toggle { .. }) {
+                if matches!(param.kind, ParamKind::Toggle { .. })
+                    && !DELIBERATELY_FLAGLESS.contains(&(proc.key.as_str(), param.name.as_str()))
+                {
                     assert!(
                         param.flag.as_deref().is_some_and(|f| !f.is_empty()),
                         "{}: toggle param {:?} has no flag -- enabling it would emit nothing",

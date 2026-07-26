@@ -244,4 +244,28 @@ mod tests {
         let loaded = load_presets_in(&dir.0, "probe_proc", 3);
         assert_eq!(loaded, vec![preset], "FormantBufferRef unit variant must round-trip through a preset file");
     }
+
+    /// `ParamValue::CrystalVdat` is the only *struct*-carrying variant here, and the only
+    /// one holding a nested array-of-arrays (`Vec<[f64; 3]>`) plus a `Vec` of tuples in the
+    /// same value — the shape most likely to trip TOML's own restrictions on nesting inside
+    /// an inline table. Same rationale as the `FormantBufferRef` test above: pin it against
+    /// a future toml-crate/serde change rather than discovering it when a user's saved
+    /// crystal preset silently stops loading.
+    #[test]
+    fn crystal_vdat_value_round_trips_through_a_preset_file() {
+        let dir = TempDir::new("crystal_vdat");
+        let preset = CdpPreset {
+            name: "probe".into(),
+            values: vec![
+                ParamValue::CrystalVdat(super::super::def::CrystalVdat {
+                    vertices: vec![[0.5, -0.25, 0.1], [-0.3, 0.2, 0.0]],
+                    envelope: vec![(0.0, 0.0), (0.4, 1.0), (1.2, 0.0)],
+                }),
+                ParamValue::Number(2.0),
+            ],
+        };
+        save_preset_in(&dir.0, "crystal_proc", preset.clone());
+        let loaded = load_presets_in(&dir.0, "crystal_proc", 2);
+        assert_eq!(loaded, vec![preset], "the compound VDAT value must round-trip through a preset file");
+    }
 }
