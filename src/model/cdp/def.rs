@@ -125,6 +125,13 @@ pub enum ParamValue {
     /// are injected into `PlannedJob.binary_input_files` by the app layer after `plan_job`
     /// returns, the same bypass `ParamKind::FormantBufferRef`'s own doc comment describes.
     FormantBufferRef,
+    /// An absolute path to a real file on disk the user picked via a file browser (e.g.
+    /// `matrix matrix 2`'s `inmatrixfile`, `ParamKind::FilePath`) — unlike
+    /// `FormantBufferRef`, the file already exists wherever the user saved it and CDP can
+    /// open it directly by that path (`cdp::runner` spawns every job with the temp job dir
+    /// as CWD, but an absolute path works regardless of CWD), so there's no bytes-injection
+    /// bypass needed: `plan_param` just emits this string as the argv token verbatim.
+    FilePath(String),
 }
 
 /// One row of `hilite band`'s per-band data: a frequency band (`lofrq`/`hifrq`) plus up to
@@ -264,6 +271,15 @@ pub enum ParamKind {
         buffer_kind: crate::model::formant::FormantBufferKind,
         relative_name: String,
     },
+    /// A required reference to a real file on disk, picked via a file browser rather than
+    /// typed or hand-drawn — `matrix matrix 2`'s `inmatrixfile` (a machine-generated
+    /// matrix-data file, `matrix matrix 1`'s own `sidecar_extension` output, saved by the
+    /// user under `.matrix` via a Save-As prompt). Unlike `FormantBufferRef` this carries no
+    /// in-app storage of its own: the picked file already exists wherever the user saved it,
+    /// so the UI's file browser (`ui/app.rs`, mirrors `Dialog::LoadCurve`'s picker) just
+    /// resolves to a real absolute path, which `ParamValue::FilePath` carries directly.
+    /// `extension` (no leading dot) is what the picker filters to.
+    FilePath { extension: String },
 }
 
 impl ParamKind {
@@ -310,6 +326,10 @@ impl ParamKind {
             // `FormantBufferRef` params instead of driving them through this helper (see
             // `cdp::runner`'s `KNOWN_FIXTURE_FAILURES`-adjacent handling).
             ParamKind::FormantBufferRef { .. } => ParamValue::FormantBufferRef,
+            // Same rationale as `FormantBufferRef` above: a real path needs a real file on
+            // disk to point at, which this helper can't manufacture — the catalog smoke
+            // test special-cases `FilePath` params the same way.
+            ParamKind::FilePath { .. } => ParamValue::FilePath(String::new()),
         }
     }
 }
@@ -447,6 +467,17 @@ pub struct ProcessDef {
     /// it, without touching the float32 precision every other process still gets.
     #[serde(default)]
     pub requires_simple_wav_input: bool,
+    /// `Some(ext)` for a process whose real binary writes a second, secondary output file
+    /// alongside its normal `Wav` result — same base name, a different extension (e.g.
+    /// `matrix matrix 1` writes both `out.wav` and `out.txt`, confirmed against the real
+    /// binary: the `.txt` file holds the generated matrix data). `pipeline::plan_wav`'s
+    /// mono/`stereo_native` branch turns this into `PlannedJob.output_sidecar` (`"out.{ext}"`,
+    /// same fixed `"out.wav"` stem every process in that branch already uses); `cdp::runner`
+    /// reads its bytes back before the job's temp directory is cleaned up, for the app layer
+    /// to offer a Save-As prompt on. `None` (the default — every process before
+    /// `matrix_matrix_1`) means no secondary file exists to capture.
+    #[serde(default)]
+    pub sidecar_extension: Option<String>,
     /// Ordered — this order is exactly the order these values appear as positional
     /// arguments on the CDP command line (flagged params are still emitted in this order,
     /// just as `-x<value>` tokens instead of bare ones). A process with no parameters emits
@@ -498,7 +529,7 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false,
+            requires_simple_wav_input: false, sidecar_extension: None,
             params: vec![sample_number()],
         };
 
@@ -548,7 +579,7 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false,
+            requires_simple_wav_input: false, sidecar_extension: None,
             params: vec![toggle, choice],
         };
 
@@ -620,7 +651,7 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: true,
-            requires_simple_wav_input: false,
+            requires_simple_wav_input: false, sidecar_extension: None,
             params: vec![table],
         };
 
@@ -667,7 +698,7 @@ mod tests {
             output: IoKind::Ana,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false,
+            requires_simple_wav_input: false, sidecar_extension: None,
             params: vec![param],
         };
 
@@ -721,7 +752,7 @@ mod tests {
             output: IoKind::Ana,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false,
+            requires_simple_wav_input: false, sidecar_extension: None,
             params: vec![param],
         };
 

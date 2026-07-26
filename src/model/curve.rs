@@ -1,6 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// File extension a saved pitch curve is written with (no leading dot) — distinguishes a
+/// curve save file from any other plain-text file in a directory, so `Dialog::LoadCurve`'s
+/// file picker (`ui/app.rs`) can filter to just these instead of showing every file.
+pub const CURVE_EXTENSION: &str = "pc";
+
 /// An open pitch curve: named time/Hz breakpoint pairs, held separately from any audio
 /// `Document`. Produced by extracting pitch from a selection (`repitch getpitch` mode 2)
 /// or generated/transformed by the `repitch` family's curve-in/curve-out subprograms

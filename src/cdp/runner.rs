@@ -69,6 +69,12 @@ pub struct JobOutput {
     /// text/binary split to make here the way `curve_points`/`curve_binary_template` have,
     /// since formant data has no plain-text representation at all.
     pub formant_buffer_bytes: Option<Vec<u8>>,
+    /// `Some` only when `PlannedJob.output_sidecar` was set (e.g. `matrix matrix 1`'s
+    /// generated-matrix-data file) — unlike `curve_points`/`formant_buffer_bytes`, this
+    /// coexists with real `results`: it's a *secondary* file alongside the job's normal wav
+    /// output, not the whole result. Raw bytes, verbatim; the app layer decides what to do
+    /// with them (`App::tick_cdp`'s Save-As prompt).
+    pub sidecar_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -405,6 +411,7 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
             curve_points: Some(points),
             curve_binary_template,
             formant_buffer_bytes: None,
+            sidecar_bytes: None,
         });
     }
     if let Some(relative_name) = &job.planned.output_formant_buffer {
@@ -419,6 +426,7 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
             curve_points: None,
             curve_binary_template: None,
             formant_buffer_bytes: Some(bytes),
+            sidecar_bytes: None,
         });
     }
 
@@ -451,7 +459,18 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
         c.resize(max_len, 0.0);
     }
 
-    Ok(JobOutput { results: vec![channels], sample_rate, curve_points: None, curve_binary_template: None, formant_buffer_bytes: None })
+    let sidecar_bytes = match &job.planned.output_sidecar {
+        Some(relative_name) => {
+            let path = temp_dir.join(relative_name);
+            Some(std::fs::read(&path).map_err(|e| CdpError::OutputRead {
+                path: path.display().to_string(),
+                message: e.to_string(),
+            })?)
+        }
+        None => None,
+    };
+
+    Ok(JobOutput { results: vec![channels], sample_rate, curve_points: None, curve_binary_template: None, formant_buffer_bytes: None, sidecar_bytes })
 }
 
 /// Loads every `<prefix>N.wav` (N = 0, 1, 2, …) found in `temp_dir`, in numeric order, as
@@ -481,7 +500,7 @@ fn load_glob_outputs(
     if results.is_empty() {
         return Err(CdpError::NoOutput { step: format!("{}0.wav", glob.prefix) });
     }
-    Ok(JobOutput { results, sample_rate, curve_points: None, curve_binary_template: None, formant_buffer_bytes: None })
+    Ok(JobOutput { results, sample_rate, curve_points: None, curve_binary_template: None, formant_buffer_bytes: None, sidecar_bytes: None })
 }
 
 #[cfg(test)]
@@ -543,7 +562,7 @@ mod tests {
             }],
             glob_output: None,
             output_curve: None,
-            output_curve_binary_template: None, output_formant_buffer: None,
+            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -610,7 +629,7 @@ mod tests {
             output_files: Vec::new(),
             glob_output: Some(crate::model::cdp::pipeline::GlobOutputSpec { prefix: "cutout".into() }),
             output_curve: None,
-            output_curve_binary_template: None, output_formant_buffer: None,
+            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -659,7 +678,7 @@ mod tests {
             output_files: Vec::new(),
             glob_output: None,
             output_curve: Some("curve_out.txt".into()),
-            output_curve_binary_template: None, output_formant_buffer: None,
+            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
             brk_files: vec![("curve_in.txt".into(), "0 220\n1 440".into())],
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -1948,21 +1967,48 @@ mod tests {
         //     this harness's single-input-duplicated convention for dual-input processes).
         //   housekeep_extract_4: "NO CHANGE to original sound file" against this specific
         //     mono fixture — content-dependent, not an argv-shape problem.
-        //   modify_space_2, modify_space_4, tostereo_tostereo: explicitly stereo-only
-        //     ("MIRROR/NARROW only works with STEREO input files"; tostereo: "must be
-        //     stereo") — this harness only ever exercises mono input (see
+        //   modify_space_2, modify_space_4, tostereo_tostereo, spin_stereo_1: explicitly
+        //     stereo-only ("MIRROR/NARROW only works with STEREO input files"; tostereo:
+        //     "must be stereo"; spin stereo: "File in.wav is not of correct type (must be
+        //     stereo)") — this harness only ever exercises mono input (see
         //     `input_count`/`inputs` above), so any process that hard-requires stereo will
         //     always fail here regardless of catalog correctness. Each verified correct by
         //     hand against `tests/fixtures/stereo_sine.wav` (real exit-0 runs), not a bug to
         //     chase.
         //   specfnu_specfnu_19: the CDP binary itself crashes ("double free or corruption")
         //     on this input — a CDP bug, nothing tui-wave's plan/argv can work around.
+        //   distmore_bright_{1,2,3}, distmore_segsbkwd_{1..9}, distmore_segszig_1: same
+        //     "needs at least 2 Head/Tail mark *pairs* (4 marks)" limitation, on the same
+        //     binary's other marklist-shaped subprograms/modes — the smoke test's generic
+        //     `required_list` seeding (one entry, at the param's own default value — mirrors
+        //     the UI's own never-opened-list-editor seeding) can never satisfy that,
+        //     regardless of catalog correctness. Verified correct by hand with a real
+        //     4-entry marklist (2026-07-26).
+        //   matrix_matrix_2: its `FilePath` param (`ParamKind::FilePath`) has no catalog
+        //     default at all — `ParamKind::default_value` can only supply an empty string
+        //     ("Cannot open datafile"), same "no real value to seed with" situation as
+        //     `FormantBufferRef` params below. Verified correct by hand: generated a real
+        //     `.txt` matrix file via `matrix matrix 1` and fed it straight back through
+        //     `matrix matrix 2 ... -c`, exit 0 (2026-07-26).
         // And two pre-existing (not catalog_extra.toml's) bugs found the same way: the
         // machine-generated catalog.toml (regenerate via
         // scripts/convert_soundthread_catalog.py, don't hand-edit) has a default outside
         // CDP's actually-enforced range for extend_scramble_1 (0.02 vs 0.031-0.985) and
         // modify_brassage_4 (2500 vs 0-2000).
         const KNOWN_FIXTURE_FAILURES: &[&str] = &[
+            "distmore_bright_1",
+            "distmore_bright_2",
+            "distmore_bright_3",
+            "distmore_segsbkwd_1",
+            "distmore_segsbkwd_2",
+            "distmore_segsbkwd_3",
+            "distmore_segsbkwd_4",
+            "distmore_segsbkwd_5",
+            "distmore_segsbkwd_6",
+            "distmore_segsbkwd_7",
+            "distmore_segsbkwd_8",
+            "distmore_segsbkwd_9",
+            "distmore_segszig_1",
             "envspeak_envspeak_1",
             "envspeak_envspeak_2",
             "envspeak_envspeak_5",
@@ -1974,10 +2020,12 @@ mod tests {
             "grain_reverse",
             "grainex_extend",
             "housekeep_extract_4",
+            "matrix_matrix_2",
             "modify_brassage_4",
             "modify_space_2",
             "modify_space_4",
             "specfnu_specfnu_19",
+            "spin_stereo_1",
             "tostereo_tostereo",
             // psow_interp requires each input be a pre-grabbed single grain (e.g. via
             // psow_grab with duration 0) -- fed an ordinary recording, the real binary

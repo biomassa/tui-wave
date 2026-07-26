@@ -168,6 +168,7 @@ enum CdpFieldSetupKind {
     Envelope,
     List,
     FormantBuffer,
+    FilePath,
 }
 
 /// One editable field in the `Dialog::CdpParams` form, mirroring a `ParamKind` from the
@@ -252,6 +253,16 @@ enum CdpField {
         selected: Option<usize>,
         buffer_kind: crate::model::formant::FormantBufferKind,
     },
+    /// A `ParamKind::FilePath` field — `path` starts `None` ("never picked"), same rationale
+    /// as `FormantBufferRef` above: there's no catalog default to seed from, since the value
+    /// is a real file the user must browse to and select (`Dialog::CdpParams.file_picker`,
+    /// mirrors `Dialog::LoadCurve`'s picker). `extension` is cloned from `ParamKind::FilePath`
+    /// at construction time, same rationale as every other field's own bounds — it's what
+    /// the picker filters to.
+    FilePath {
+        path: Option<String>,
+        extension: String,
+    },
 }
 
 impl CdpField {
@@ -318,6 +329,10 @@ impl CdpField {
             ParamKind::FormantBufferRef { buffer_kind, .. } => {
                 CdpField::FormantBufferRef { selected: None, buffer_kind: *buffer_kind }
             }
+            // `path` starts `None` ("never picked") — same "no catalog default to seed from"
+            // rationale as `FormantBufferRef` above, just a real filesystem path instead of
+            // an in-app buffer index.
+            ParamKind::FilePath { extension } => CdpField::FilePath { path: None, extension: extension.clone() },
         }
     }
 
@@ -432,6 +447,7 @@ impl CdpField {
             // `PlannedJob.binary_input_files` (see `ParamValue::FormantBufferRef`'s doc
             // comment) rather than routing "which buffer" through `ParamValue` at all.
             CdpField::FormantBufferRef { .. } => ParamValue::FormantBufferRef,
+            CdpField::FilePath { path, .. } => ParamValue::FilePath(path.clone().unwrap_or_default()),
         }
     }
 }
@@ -621,11 +637,22 @@ enum Dialog {
     /// `Ctrl+S` on a curve row already having a `path` saves straight to it with no dialog,
     /// mirroring how a document with a known path behaves.
     SaveCurveAs { curve_index: usize, input: TextInput },
-    /// "Load Pitch Curve..." (CDP menu) — prompts for a path, reads it via
-    /// `model::curve::load_curve` on Enter, and adds it as a new `App.curves` entry. A
+    /// Prompts for a filename after a successful Apply of a process declaring
+    /// `sidecar_extension` (e.g. `matrix matrix 1`) — `bytes` are the secondary output file's
+    /// raw contents, already read out of the job's temp directory (about to be cleaned up),
+    /// held here until the user names where to write them. Enter saves into the Files
+    /// panel's current directory (mirrors `SaveCurveAs`) and updates `App.last_matrix_path`.
+    SaveMatrixAs { bytes: Vec<u8>, input: TextInput },
+    /// "Load Pitch Curve..." (CDP menu) — a directory-browsing file picker (`FilePanel`,
+    /// same widget the Files panel uses, in `show_all_files` mode since a saved curve is
+    /// plain text with no fixed extension) rather than a typed path: the user has no way to
+    /// know a saved curve's exact path otherwise. Enter on a file reads it via
+    /// `model::curve::load_curve` and adds it as a new `App.curves` entry (see
+    /// `load_curve_from_path`); Enter on a directory navigates into it; Esc cancels. Has its
+    /// own early-intercepted key handling (`handle_load_curve_key`), like `CdpBrowser`. A
     /// loaded curve has no `binary_template` (see that field's doc comment), so it can be
     /// viewed/hand-edited/re-saved but not run through a CDP transform until re-extracted.
-    LoadCurve { input: TextInput },
+    LoadCurve { picker: FilePanel },
     /// Mix-to-mono: one TextInput per source channel (dB gain, or the literal "-inf" for
     /// silence). `focused` is the index of the currently-active field; Tab cycles through.
     /// `tanh_clip` enables a tanh soft-limiter on the mixed output (same as Gain's option).
@@ -773,6 +800,11 @@ enum Dialog {
         /// (see `CdpField::FormantBufferRef`'s doc comment) — this just lists
         /// `App.formant_buffers` (filtered by `buffer_kind`) and commits the chosen index.
         formant_picker: Option<FormantBufferPicker>,
+        /// `Some` while the file browser (reuses `FilePanel`, same widget/rendering as
+        /// `Dialog::LoadCurve`'s picker) is open for one of `fields`' `FilePath`-kind params
+        /// — mutually exclusive with every other sub-editor above, same take-over-all-key-
+        /// handling shape. Filtered to the field's own `ParamKind::FilePath.extension`.
+        file_picker: Option<CdpFilePicker>,
         presets: Vec<crate::model::cdp::preset::CdpPreset>,
         preset_selected: Option<usize>,
         /// A snapshot of `fields` (as `ParamValue`s) taken the first time cycling or saving
@@ -915,6 +947,15 @@ struct FormantBufferPicker {
     field_index: usize,
     entries: Vec<usize>,
     selected: usize,
+}
+
+/// State for `Dialog::CdpParams.file_picker` — reuses `FilePanel` (same widget as
+/// `Dialog::LoadCurve`) rather than a bespoke list like `FormantBufferPicker`, since a real
+/// filesystem browse (navigate directories, filter by extension) is a fundamentally
+/// different shape from "pick one of N in-memory buffers."
+struct CdpFilePicker {
+    field_index: usize,
+    panel: FilePanel,
 }
 
 /// State for the plain-list editor, active while `Dialog::CdpParams.list_edit` is `Some` —
@@ -1563,6 +1604,15 @@ pub struct App {
     /// double-click (which opens the file) versus a single click (which only selects it,
     /// auditioning it if Audition is on).
     last_file_click: Option<(Instant, u16, u16)>,
+    /// Same double-click detection as `last_file_click`, for `Dialog::LoadCurve`'s picker —
+    /// a separate field since the two panels can't both be showing at once, but the modal
+    /// isn't `self.file_panel` itself.
+    last_load_curve_click: Option<(Instant, u16, u16)>,
+    /// Path of the most recent matrix-data file saved via "Save Matrix As" this session
+    /// (`matrix matrix 1`'s sidecar output, `MATRIX_EXTENSION`) — lets
+    /// `open_cdp_file_picker` preselect it for the "extract, then immediately apply"
+    /// workflow instead of always opening empty. `None` until the first save.
+    last_matrix_path: Option<PathBuf>,
     /// Persisted toggles, loaded at startup and rewritten whenever one changes. The
     /// snapshot here is what gets written to disk — see `save_config`.
     config: Config,
@@ -2214,6 +2264,8 @@ impl App {
             audition_playing_path: None,
             audition_pending: None,
             last_file_click: None,
+            last_load_curve_click: None,
+            last_matrix_path: None,
             config,
             nav_hold_action: None,
             nav_repeat_count: 0,
@@ -2719,7 +2771,8 @@ impl App {
             }
             return;
         }
-        let default_name = format!("{}.txt", curve.name.replace(' ', "_"));
+        let default_name =
+            format!("{}.{}", curve.name.replace(' ', "_"), crate::model::curve::CURVE_EXTENSION);
         self.dialog = Some(Dialog::SaveCurveAs { curve_index, input: TextInput::fresh(default_name) });
     }
 
@@ -2741,12 +2794,27 @@ impl App {
         }
     }
 
-    /// Enter from `Dialog::LoadCurve` — reads `path` (expanding a leading `~`, same
-    /// convention `App::open_directory` already uses) via `model::curve::load_curve` and
-    /// adds it as a new curve. Silently does nothing on a bad path/unparseable file, same
-    /// as `open_directory`'s own failure handling — the dialog has already closed by the
-    /// time this runs (this is an Enter-key arm on an already-`take()`n `self.dialog`), so
-    /// there's nothing to leave open for a retry; re-opening "Load Pitch Curve..." starts fresh.
+    /// Enter from `Dialog::SaveMatrixAs` — writes `bytes` (a completed matrix-generating
+    /// job's sidecar output, already read into memory since its temp directory is about to
+    /// be cleaned up) into the Files panel's current directory under `file_name`, and
+    /// remembers the path so `open_cdp_file_picker` can preselect it next time.
+    fn save_matrix_as(&mut self, bytes: &[u8], file_name: &str) {
+        if file_name.is_empty() {
+            return;
+        }
+        let path = self.file_panel.directory.join(file_name);
+        if std::fs::write(&path, bytes).is_err() {
+            return;
+        }
+        self.last_matrix_path = Some(path);
+    }
+
+    /// Enter on a file row in `Dialog::LoadCurve` (`handle_load_curve_key`) — reads `path`
+    /// (expanding a leading `~`, same convention `App::open_directory` already uses) via
+    /// `model::curve::load_curve` and adds it as a new curve. Silently does nothing on an
+    /// unparseable file, same as `open_directory`'s own failure handling — the dialog has
+    /// already closed by the time this runs, so there's nothing to leave open for a retry;
+    /// re-opening "Load Pitch Curve..." starts fresh.
     fn load_curve_from_path(&mut self, path: &str) {
         if path.is_empty() {
             return;
@@ -2759,6 +2827,86 @@ impl App {
         let Ok(curve) = crate::model::curve::load_curve(&expanded) else { return };
         self.curves.push(curve);
         self.curve_histories.push(crate::model::curve_history::CurveHistory::new());
+    }
+
+    /// Early-intercepted key handler for `Dialog::LoadCurve` (see its doc comment). Mirrors
+    /// `App::handle_key`'s `file_panel.focused`/`file_panel.filtering` blocks almost
+    /// verbatim, since this picker is the very same `FilePanel` widget in a modal instead of
+    /// the sidebar — just Enter-on-a-file loads a curve and closes the dialog instead of
+    /// opening a document, and Esc cancels outright rather than merely defocusing. Takes
+    /// `self.dialog` up front so `picker` can be freely mutated (including handing it to
+    /// `set_directory`) without fighting the borrow checker over whether to put it back.
+    fn handle_load_curve_key(&mut self, key: KeyEvent) {
+        let Some(Dialog::LoadCurve { mut picker }) = self.dialog.take() else { return };
+        let mut activate = false;
+        let mut close = false;
+        if picker.filtering {
+            match key.code {
+                KeyCode::Esc => {
+                    picker.filtering = false;
+                    picker.filter.clear();
+                }
+                KeyCode::Enter => activate = true,
+                KeyCode::Up => picker.move_up(),
+                KeyCode::Down => picker.move_down(),
+                KeyCode::Home => picker.move_top(),
+                KeyCode::End => picker.move_bottom(),
+                KeyCode::PageUp => picker.move_page_up(),
+                KeyCode::PageDown => picker.move_page_down(),
+                KeyCode::Backspace => {
+                    picker.filter.pop();
+                    picker.selected = 0;
+                }
+                KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                    picker.filter.push(c);
+                    picker.selected = 0;
+                }
+                _ => {}
+            }
+        } else {
+            match key.code {
+                KeyCode::Up => picker.move_up(),
+                KeyCode::Down => picker.move_down(),
+                KeyCode::Home => picker.move_top(),
+                KeyCode::End => picker.move_bottom(),
+                KeyCode::PageUp => picker.move_page_up(),
+                KeyCode::PageDown => picker.move_page_down(),
+                KeyCode::Enter => activate = true,
+                KeyCode::Char('/') => {
+                    picker.filtering = true;
+                    picker.filter.clear();
+                }
+                KeyCode::Esc => close = true,
+                _ => {}
+            }
+        }
+        if close {
+            return; // already taken — leaving self.dialog as None cancels it
+        }
+        if activate {
+            self.activate_load_curve_picker(picker);
+            return;
+        }
+        self.dialog = Some(Dialog::LoadCurve { picker });
+    }
+
+    /// Enter (or a double-click, `try_handle_load_curve_mouse`) on `Dialog::LoadCurve`'s
+    /// highlighted row: a directory navigates into it and keeps the dialog open; a file
+    /// loads it via `load_curve_from_path` and leaves the dialog closed (mirrors
+    /// `App::open_selected_file`'s own navigate-vs-open split for the real Files panel).
+    fn activate_load_curve_picker(&mut self, mut picker: FilePanel) {
+        match picker.selected_entry() {
+            Some((path, FileEntryKind::Parent | FileEntryKind::Dir)) => {
+                picker.set_directory(path);
+                self.dialog = Some(Dialog::LoadCurve { picker });
+            }
+            Some((path, FileEntryKind::File)) => {
+                self.load_curve_from_path(&path.to_string_lossy());
+            }
+            None => {
+                self.dialog = Some(Dialog::LoadCurve { picker });
+            }
+        }
     }
 
     /// Commits a `CurveEditorState`'s in-progress typed cell (`edit.editing`, if any) into
@@ -3324,7 +3472,7 @@ impl App {
             | Dialog::RenameBuffer { input, .. }
             | Dialog::RenameFile { input, .. }
             | Dialog::SaveCurveAs { input, .. }
-            | Dialog::LoadCurve { input } => Some(input),
+            | Dialog::SaveMatrixAs { input, .. } => Some(input),
             Dialog::Gain { input, right_input, focused, per_channel, is_stereo, .. } => {
                 let rows = GainRows::new(*is_stereo, *per_channel);
                 let f = *focused;
@@ -3374,6 +3522,9 @@ impl App {
             // no plain `TextInput` field of its own — the in-progress typed cell lives in
             // `CurveEditorState.editing` instead.
             Dialog::CurveEditor(_) => None,
+            // Has its own early-intercepted key handling (`handle_load_curve_key`) — the
+            // picker navigates like the Files panel, no free-text field to route keys to.
+            Dialog::LoadCurve { .. } => None,
             Dialog::FormantInfo { .. } => None,
             // The chain editor's own save-prompt lives on `App.cdp_chain_editor`, not on
             // this marker variant — see `Dialog::CdpChainEditor`'s doc comment.
@@ -3452,6 +3603,10 @@ impl App {
             self.handle_cdp_chain_editor_key(key);
             return;
         }
+        if let Some(Dialog::LoadCurve { .. }) = &self.dialog {
+            self.handle_load_curve_key(key);
+            return;
+        }
         if let Some(Dialog::CdpParams { envelope: Some(CdpEnvelopeEdit { curve_picker: Some(_), .. }), .. }) = &self.dialog {
             self.handle_envelope_curve_picker_key(key);
             return;
@@ -3482,6 +3637,10 @@ impl App {
         }
         if let Some(Dialog::CdpParams { formant_picker: Some(_), .. }) = &self.dialog {
             self.handle_cdp_formant_picker_key(key);
+            return;
+        }
+        if let Some(Dialog::CdpParams { file_picker: Some(_), .. }) = &self.dialog {
+            self.handle_cdp_file_picker_key(key);
             return;
         }
         if let Some(Dialog::CdpParams { save_prompt: Some(_), .. }) = &self.dialog {
@@ -3530,10 +3689,10 @@ impl App {
                     self.rename_file(&path, &ensure_wav_extension(input.value().trim()));
                 }
                 Some(Dialog::SaveCurveAs { curve_index, input }) => {
-                    self.save_curve_as(curve_index, input.value().trim());
+                    self.save_curve_as(curve_index, &ensure_curve_extension(input.value().trim()));
                 }
-                Some(Dialog::LoadCurve { input }) => {
-                    self.load_curve_from_path(input.value().trim());
+                Some(Dialog::SaveMatrixAs { bytes, input }) => {
+                    self.save_matrix_as(&bytes, &ensure_matrix_extension(input.value().trim()));
                 }
                 Some(Dialog::MixToMono { inputs, tanh_clip, .. }) => {
                     let inputs_snapshot = inputs.clone();
@@ -3606,7 +3765,7 @@ impl App {
                 }
                 Some(Dialog::CdpParams {
                     catalog_index, fields, second_input, focus, error, preview, envelope, list_edit, table_edit,
-                    marker_time_list_edit, hilite_band_edit, formant_picker, presets, preset_selected, custom_values, save_prompt, scroll,
+                    marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, presets, preset_selected, custom_values, save_prompt, scroll,
                 }) => {
                     // Enter's default action is Apply (from anywhere, including the preset
                     // row — a highlighted preset's values, or the process's defaults, are
@@ -3633,6 +3792,7 @@ impl App {
                                 CdpField::FormantBufferRef { selected: None, .. } => {
                                     Some(CdpFieldSetupKind::FormantBuffer)
                                 }
+                                CdpField::FilePath { path: None, .. } => Some(CdpFieldSetupKind::FilePath),
                                 _ => None,
                             }
                         });
@@ -3646,12 +3806,13 @@ impl App {
                     // passed directly.
                     self.dialog = Some(Dialog::CdpParams {
                         catalog_index, fields, second_input, focus, error, preview, envelope, list_edit, table_edit,
-                        marker_time_list_edit, hilite_band_edit, formant_picker, presets, preset_selected, custom_values, save_prompt, scroll,
+                        marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, presets, preset_selected, custom_values, save_prompt, scroll,
                     });
                     let opened = match setup_kind {
                         Some(CdpFieldSetupKind::Envelope) => self.open_cdp_envelope_editor(),
                         Some(CdpFieldSetupKind::List) => self.open_cdp_list_editor(),
                         Some(CdpFieldSetupKind::FormantBuffer) => self.open_cdp_formant_picker(),
+                        Some(CdpFieldSetupKind::FilePath) => self.open_cdp_file_picker(),
                         None => false,
                     };
                     if !opened {
@@ -3682,6 +3843,8 @@ impl App {
                 Some(Dialog::CurveEditor(_)) => {}
                 // Same reasoning, for `handle_cdp_chain_editor_key`'s own early interception.
                 Some(Dialog::CdpChainEditor) => {}
+                // Same reasoning, for `handle_load_curve_key`'s own early interception.
+                Some(Dialog::LoadCurve { .. }) => {}
                 None => {}
             },
             KeyCode::Esc => {
@@ -3937,12 +4100,15 @@ impl App {
                 }
             }
             // 'b' opens the "pick a buffer" picker for a focused `FormantBufferRef` field
-            // (CDP-Ext-Plan.md Phase 5) — free to repurpose for the same reason 'e'/'s'/'d'
-            // are above (a focused Number field's `dialog_accepts` rejects letters anyway).
+            // (CDP-Ext-Plan.md Phase 5), or the file browser for a focused `FilePath` field
+            // (only one ever applies to a given field, same "one returns false, falls
+            // through to the next" chaining as 'e' above) — free to repurpose for the same
+            // reason 'e'/'s'/'d' are above (a focused Number field's `dialog_accepts`
+            // rejects letters anyway).
             KeyCode::Char('b')
                 if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
-                if !self.open_cdp_formant_picker() && self.dialog_accepts('b') {
+                if !self.open_cdp_formant_picker() && !self.open_cdp_file_picker() && self.dialog_accepts('b') {
                     if let Some(input) = self.dialog_input() {
                         input.insert('b');
                     }
@@ -4628,7 +4794,7 @@ impl App {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None,
+            formant_picker: None, file_picker: None,
             presets,
             preset_selected: None,
             custom_values: None,
@@ -4669,7 +4835,7 @@ impl App {
                 table_edit: None,
                 marker_time_list_edit: None,
                 hilite_band_edit: None,
-                formant_picker: None,
+                formant_picker: None, file_picker: None,
                 presets: Vec::new(),
                 preset_selected: None,
                 custom_values: None,
@@ -4748,7 +4914,7 @@ impl App {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None,
+            formant_picker: None, file_picker: None,
             presets: parent.presets,
             preset_selected: None,
             custom_values: None,
@@ -5007,7 +5173,7 @@ impl App {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None,
+            formant_picker: None, file_picker: None,
             presets,
             preset_selected: None,
             custom_values: None,
@@ -6233,6 +6399,144 @@ impl App {
         }
     }
 
+    /// Opens the file browser (`Dialog::CdpParams.file_picker`) for a focused (or the first
+    /// eligible) `CdpField::FilePath` field — mirrors `open_cdp_formant_picker`'s smart-target
+    /// resolution, just with no "already has a match" precondition (a file browser is always
+    /// openable, unlike the formant picker's "at least one open buffer of this kind" gate).
+    /// Starts browsing at `App.file_panel.directory` by default; for a `.matrix`-extension
+    /// field specifically, starts at `App.last_matrix_path`'s own directory with that file
+    /// preselected instead, if one exists — the "extract, then immediately apply" workflow's
+    /// convenience this session's design settled on (CDP-Release8-TODO.md, 2026-07-26).
+    fn open_cdp_file_picker(&mut self) -> bool {
+        let Some(Dialog::CdpParams { fields, focus, .. }) = &self.dialog else { return false };
+        let eligible = |_: usize, f: &CdpField| matches!(f, CdpField::FilePath { .. });
+        let unset = |_: usize, f: &CdpField| matches!(f, CdpField::FilePath { path: None, .. });
+        let Some(field_index) = resolve_smart_field_target(fields, *focus, eligible, unset) else {
+            return false;
+        };
+        let Some(CdpField::FilePath { path, extension }) = fields.get(field_index) else {
+            return false;
+        };
+        let extension: &'static str = match extension.as_str() {
+            "matrix" => "matrix",
+            // Every `FilePath` param this catalog declares today uses "matrix" (see
+            // `ParamKind::FilePath`'s doc comment) — this arm exists so a future
+            // differently-extensioned param fails loudly (falls back to "wav", clearly
+            // wrong) instead of silently misbehaving, rather than to handle a real case.
+            _ => "wav",
+        };
+        let start_dir = self
+            .last_matrix_path
+            .as_ref()
+            .filter(|_| extension == "matrix")
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.file_panel.directory.clone());
+        let mut panel = FilePanel::new_with_extension(start_dir, extension, "Pick File");
+        // Preselect the field's current pick (if any), else the last matrix generated —
+        // same "don't silently switch the pick on reopen" care as the formant picker.
+        let preselect = path.clone().or_else(|| {
+            self.last_matrix_path.as_ref().filter(|_| extension == "matrix").map(|p| p.to_string_lossy().into_owned())
+        });
+        if let Some(preselect) = preselect {
+            if let Some(name) = std::path::Path::new(&preselect).file_name() {
+                if let Some(idx) = (0..panel.filtered_count()).find(|&i| {
+                    panel.selected = i;
+                    panel.selected_entry().is_some_and(|(p, _)| p.file_name() == Some(name))
+                }) {
+                    panel.selected = idx;
+                }
+            }
+        }
+        panel.focused = true;
+        let Some(Dialog::CdpParams { focus: dialog_focus, file_picker, .. }) = self.dialog.as_mut() else {
+            return false;
+        };
+        *dialog_focus = field_index + 1; // smart-target may have jumped focus to this field
+        *file_picker = Some(CdpFilePicker { field_index, panel });
+        true
+    }
+
+    /// All key handling while `Dialog::CdpParams.file_picker` is `Some` — mirrors
+    /// `App::handle_key`'s `file_panel.focused`/`filtering` blocks (same widget,
+    /// `Dialog::LoadCurve`'s own navigation) almost verbatim: Enter on a directory navigates
+    /// into it, Enter on a file commits its absolute path into the field's `path` and closes
+    /// the picker, Esc closes without changing anything.
+    fn handle_cdp_file_picker_key(&mut self, key: KeyEvent) {
+        let Some(Dialog::CdpParams { file_picker: Some(CdpFilePicker { panel, .. }), .. }) = self.dialog.as_mut()
+        else {
+            return;
+        };
+        if panel.filtering {
+            match key.code {
+                KeyCode::Esc => {
+                    panel.filtering = false;
+                    panel.filter.clear();
+                }
+                KeyCode::Enter => self.activate_cdp_file_picker(),
+                KeyCode::Up => panel.move_up(),
+                KeyCode::Down => panel.move_down(),
+                KeyCode::Home => panel.move_top(),
+                KeyCode::End => panel.move_bottom(),
+                KeyCode::PageUp => panel.move_page_up(),
+                KeyCode::PageDown => panel.move_page_down(),
+                KeyCode::Backspace => {
+                    panel.filter.pop();
+                    panel.selected = 0;
+                }
+                KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                    panel.filter.push(c);
+                    panel.selected = 0;
+                }
+                _ => {}
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Up => panel.move_up(),
+            KeyCode::Down => panel.move_down(),
+            KeyCode::Home => panel.move_top(),
+            KeyCode::End => panel.move_bottom(),
+            KeyCode::PageUp => panel.move_page_up(),
+            KeyCode::PageDown => panel.move_page_down(),
+            KeyCode::Enter => self.activate_cdp_file_picker(),
+            KeyCode::Char('/') => {
+                panel.filtering = true;
+                panel.filter.clear();
+            }
+            KeyCode::Esc => {
+                if let Some(Dialog::CdpParams { file_picker, .. }) = self.dialog.as_mut() {
+                    *file_picker = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Enter on `Dialog::CdpParams.file_picker`'s highlighted row: a directory navigates into
+    /// it (picker stays open); a file commits its absolute path into the field's `path` and
+    /// closes the picker. Mirrors `App::open_selected_file`'s navigate-vs-open split.
+    fn activate_cdp_file_picker(&mut self) {
+        let Some(Dialog::CdpParams { file_picker: Some(CdpFilePicker { field_index, panel }), .. }) =
+            self.dialog.as_mut()
+        else {
+            return;
+        };
+        let field_index = *field_index;
+        match panel.selected_entry() {
+            Some((path, FileEntryKind::Parent | FileEntryKind::Dir)) => panel.set_directory(path),
+            Some((path, FileEntryKind::File)) => {
+                if let Some(Dialog::CdpParams { fields, file_picker, .. }) = self.dialog.as_mut() {
+                    if let Some(CdpField::FilePath { path: field_path, .. }) = fields.get_mut(field_index) {
+                        *field_path = Some(path.to_string_lossy().into_owned());
+                    }
+                    *file_picker = None;
+                }
+            }
+            None => {}
+        }
+    }
+
     /// All key handling while `Dialog::CdpParams.envelope` is `Some` — a completely
     /// separate routing path from the rest of `handle_dialog_key` (dispatched at its very
     /// top), so the two never interleave. See `CdpEnvelopeEdit`'s doc comment for what each
@@ -6949,6 +7253,12 @@ impl App {
             if let CdpField::FormantBufferRef { selected: None, .. } = field {
                 return Some(i);
             }
+            // A `FilePath` field has no catalog default either (see its doc comment) —
+            // `None` always means "never browsed to a file," same block as an unpicked
+            // `FormantBufferRef` above.
+            if let CdpField::FilePath { path: None, .. } = field {
+                return Some(i);
+            }
         }
         None
     }
@@ -6977,7 +7287,7 @@ impl App {
             Dialog::CdpParams {
                 catalog_index, fields, second_input, focus, error: Some(error), preview,
                 envelope: None, list_edit: None, table_edit: None, marker_time_list_edit: None,
-                hilite_band_edit: None, formant_picker: None, presets, preset_selected,
+                hilite_band_edit: None, formant_picker: None, file_picker: None, presets, preset_selected,
                 custom_values: custom_values.clone(), save_prompt: None, scroll: 0,
             }
         };
@@ -7231,7 +7541,7 @@ impl App {
                 table_edit: None,
                 marker_time_list_edit: None,
                 hilite_band_edit: None,
-                formant_picker: None,
+                formant_picker: None, file_picker: None,
                 presets,
                 preset_selected: None,
                 custom_values: None,
@@ -7318,7 +7628,7 @@ impl App {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None,
+            formant_picker: None, file_picker: None,
             presets: resume.presets,
             preset_selected: None,
             custom_values: None,
@@ -7750,7 +8060,7 @@ impl App {
                     table_edit: None,
                     marker_time_list_edit: None,
                     hilite_band_edit: None,
-                    formant_picker: None,
+                    formant_picker: None, file_picker: None,
                     presets: resume.presets,
                     preset_selected: None,
                     custom_values: None,
@@ -8304,7 +8614,21 @@ impl App {
                                 );
                                 self.viewport = None;
                                 self.after_sample_mutation(pending.doc_index);
-                                self.dialog = None;
+                                // A process declaring `sidecar_extension` (e.g. `matrix
+                                // matrix 1`'s generated matrix data) produced a second file
+                                // alongside the one just spliced above — prompt to save it
+                                // instead of just closing, since its temp directory (and this
+                                // is the only copy) is about to be cleaned up.
+                                self.dialog = match output.sidecar_bytes.filter(|b| !b.is_empty()) {
+                                    Some(bytes) => Some(Dialog::SaveMatrixAs {
+                                        bytes,
+                                        input: TextInput::fresh(format!(
+                                            "{}.{MATRIX_EXTENSION}",
+                                            recent_key.as_deref().unwrap_or("matrix")
+                                        )),
+                                    }),
+                                    None => None,
+                                };
                                 if let Some(key) = &recent_key {
                                     crate::model::cdp::recent::record_used(key);
                                     crate::model::cdp::process_last::save_last_process(&crate::model::cdp::process_last::LastProcess {
@@ -8348,7 +8672,7 @@ impl App {
                                     table_edit: None,
                                     marker_time_list_edit: None,
                                     hilite_band_edit: None,
-                                    formant_picker: None,
+                                    formant_picker: None, file_picker: None,
                                     presets: pending.presets,
                                     preset_selected: pending.preset_selected,
                                     custom_values: pending.custom_values,
@@ -9312,6 +9636,12 @@ impl App {
         if self.try_handle_cdp_envelope_mouse(mouse) {
             return;
         }
+        if self.try_handle_load_curve_mouse(mouse) {
+            return;
+        }
+        if self.try_handle_cdp_file_picker_mouse(mouse) {
+            return;
+        }
         // When a dialog or Save-As prompt is open, absorb all mouse events so clicks on the
         // waveform/panels behind it don't fire. Route left-clicks that land on an interactive
         // row to the appropriate handler; everything else is just swallowed.
@@ -9569,6 +9899,67 @@ impl App {
     /// *what to do* with it, never whether to let it through to whatever's behind the popup.
     /// Returns `false` immediately when the editor isn't open, so `handle_mouse` falls
     /// through to its normal dialog-click handling for every other dialog unaffected by this.
+    /// `Dialog::LoadCurve`'s picker uses `FilePanel`'s own `hit_test`/`handle_click` against
+    /// its last-rendered absolute rects, exactly like the persistent Files panel's mouse
+    /// handling (`App::handle_mouse`'s `file_panel.handle_click` block) — a single click
+    /// selects, a double-click (same 400ms/1-column/same-row window) activates the row, via
+    /// `activate_load_curve_picker`. Checked before the generic `dialog_row_rects` handling
+    /// in `handle_mouse` since this picker never populates that (see
+    /// `render_load_curve_dialog`'s doc comment).
+    fn try_handle_load_curve_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if !matches!(self.dialog, Some(Dialog::LoadCurve { .. })) {
+            return false;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            let Some(Dialog::LoadCurve { picker }) = self.dialog.as_mut() else { return true };
+            if picker.handle_click(mouse.column, mouse.row) {
+                let now = Instant::now();
+                let is_double_click = self.last_load_curve_click.is_some_and(|(t, x, y)| {
+                    now.duration_since(t) < Duration::from_millis(400)
+                        && x.abs_diff(mouse.column) <= 1
+                        && y == mouse.row
+                });
+                self.last_load_curve_click = Some((now, mouse.column, mouse.row));
+                if is_double_click {
+                    self.last_load_curve_click = None;
+                    let Some(Dialog::LoadCurve { picker }) = self.dialog.take() else { return true };
+                    self.activate_load_curve_picker(picker);
+                }
+            }
+        }
+        true
+    }
+
+    /// `Dialog::CdpParams.file_picker`'s mouse handling — same click/double-click convention
+    /// as `try_handle_load_curve_mouse`, just committing into the field's `path` via
+    /// `activate_cdp_file_picker` instead of loading a curve. Reuses `last_load_curve_click`
+    /// for double-click timing (the two pickers can't both be open at once).
+    fn try_handle_cdp_file_picker_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if !matches!(self.dialog, Some(Dialog::CdpParams { file_picker: Some(_), .. })) {
+            return false;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            let Some(Dialog::CdpParams { file_picker: Some(CdpFilePicker { panel, .. }), .. }) = self.dialog.as_mut()
+            else {
+                return true;
+            };
+            if panel.handle_click(mouse.column, mouse.row) {
+                let now = Instant::now();
+                let is_double_click = self.last_load_curve_click.is_some_and(|(t, x, y)| {
+                    now.duration_since(t) < Duration::from_millis(400)
+                        && x.abs_diff(mouse.column) <= 1
+                        && y == mouse.row
+                });
+                self.last_load_curve_click = Some((now, mouse.column, mouse.row));
+                if is_double_click {
+                    self.last_load_curve_click = None;
+                    self.activate_cdp_file_picker();
+                }
+            }
+        }
+        true
+    }
+
     fn try_handle_cdp_envelope_mouse(&mut self, mouse: MouseEvent) -> bool {
         if !matches!(self.dialog, Some(Dialog::CdpParams { envelope: Some(_), .. })) {
             return false;
@@ -10215,7 +10606,13 @@ impl App {
         }
 
         if action == Action::LoadPitchCurve {
-            self.dialog = Some(Dialog::LoadCurve { input: TextInput::fresh(String::new()) });
+            let mut picker = FilePanel::new_with_extension(
+                self.file_panel.directory.clone(),
+                crate::model::curve::CURVE_EXTENSION,
+                "Load Pitch Curve",
+            );
+            picker.focused = true;
+            self.dialog = Some(Dialog::LoadCurve { picker });
             return;
         }
 
@@ -11174,6 +11571,19 @@ impl App {
             self.dialog_row_rects = dialog_rects;
         }
 
+        // `Dialog::LoadCurve` renders separately from the generic `render_dialog` above
+        // (which only ever gets `&Dialog`) because `FilePanel::render` needs `&mut self` for
+        // its own row-rect/visible-rows bookkeeping — same reason `try_handle_load_curve_mouse`
+        // reads `picker`'s rects directly instead of going through `dialog_row_rects`.
+        if let Some(Dialog::LoadCurve { picker }) = self.dialog.as_mut() {
+            render_load_curve_dialog(frame, area, picker);
+        }
+        // `Dialog::CdpParams.file_picker` reuses the exact same widget/render function as
+        // `Dialog::LoadCurve` above, for the exact same `&mut FilePanel` reason.
+        if let Some(Dialog::CdpParams { file_picker: Some(CdpFilePicker { panel, .. }), .. }) = self.dialog.as_mut() {
+            render_load_curve_dialog(frame, area, panel);
+        }
+
         // Graphics-mode envelope curve: `render_cdp_envelope_editor` (inside `render_dialog`
         // above) always draws the ASCII staircase into the grid's `Rect` first — cheap, and
         // the correct fallback when there's no picker. When a real terminal graphics
@@ -11327,6 +11737,39 @@ fn ensure_wav_extension(name: &str) -> String {
         name.to_string()
     } else {
         format!("{name}.wav")
+    }
+}
+
+/// Ensures a curve save target ends in `.pc` (case-insensitive, `model::curve::CURVE_EXTENSION`),
+/// appending it otherwise — same convention as `ensure_wav_extension`, so a curve saved
+/// under a name with no extension (or a stale `.txt` typed by habit) still lands as `.pc`
+/// and shows up in `Dialog::LoadCurve`'s extension-filtered picker.
+fn ensure_curve_extension(name: &str) -> String {
+    if name.is_empty()
+        || std::path::Path::new(name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case(crate::model::curve::CURVE_EXTENSION))
+    {
+        name.to_string()
+    } else {
+        format!("{name}.{}", crate::model::curve::CURVE_EXTENSION)
+    }
+}
+
+/// File extension a saved matrix-data file (`matrix matrix 1`'s sidecar output) is written
+/// with — distinguishes it from any other plain-text file, so `open_cdp_file_picker`'s
+/// browser (filtered to this extension) only ever shows real matrix files.
+const MATRIX_EXTENSION: &str = "matrix";
+
+/// Ensures a matrix-data save target ends in `.matrix` (case-insensitive), appending it
+/// otherwise — same convention as `ensure_curve_extension`.
+fn ensure_matrix_extension(name: &str) -> String {
+    if name.is_empty()
+        || std::path::Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case(MATRIX_EXTENSION))
+    {
+        name.to_string()
+    } else {
+        format!("{name}.{MATRIX_EXTENSION}")
     }
 }
 
@@ -11809,7 +12252,7 @@ fn render_dialog(
         }
         Dialog::CdpParams {
             catalog_index, fields, second_input, focus, error, preview, envelope, list_edit, table_edit,
-            marker_time_list_edit, hilite_band_edit, formant_picker, presets, preset_selected, custom_values: _, save_prompt, scroll,
+            marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, presets, preset_selected, custom_values: _, save_prompt, scroll,
         } => {
             let def = catalog.processes.get(*catalog_index);
             if let Some(edit) = envelope {
@@ -11829,6 +12272,11 @@ fn render_dialog(
             }
             if let Some(picker) = formant_picker {
                 return render_cdp_formant_picker(frame, area, picker, formant_buffers);
+            }
+            // Rendered separately by `App::render` (needs `&mut FilePanel`, same reason
+            // `Dialog::LoadCurve`'s own picker is) — see that dialog's doc comment.
+            if file_picker.is_some() {
+                return Vec::new();
             }
             return render_cdp_params_dialog(
                 frame, area, def, fields, second_input.as_ref(), *focus, error, preview,
@@ -11855,6 +12303,12 @@ fn render_dialog(
         Dialog::CdpChainEditor => {
             return render_cdp_chain_editor_dialog(frame, area, chain_editor, catalog, documents);
         }
+        Dialog::LoadCurve { .. } => {
+            // Rendered separately by `App::render` (needs `&mut FilePanel` for the picker's
+            // own row-rect/visible-rows bookkeeping) — `render_dialog` only ever gets
+            // `&Dialog`, so it can't call `FilePanel::render` itself.
+            return Vec::new();
+        }
         _ => {}
     }
 
@@ -11871,7 +12325,7 @@ fn render_dialog(
         Dialog::RenameBuffer { input, .. } => ("Rename Buffer", " New name: ".into(), Some(input), " ".into()),
         Dialog::RenameFile { input, .. } => ("Rename File", " New name: ".into(), Some(input), " ".into()),
         Dialog::SaveCurveAs { input, .. } => ("Save Curve", " File name: ".into(), Some(input), " ".into()),
-        Dialog::LoadCurve { input } => ("Load Pitch Curve", " Path: ".into(), Some(input), " ".into()),
+        Dialog::SaveMatrixAs { input, .. } => ("Save Matrix", " File name: ".into(), Some(input), " ".into()),
         Dialog::Gain { .. }
         | Dialog::FadeIn { .. }
         | Dialog::FadeOut { .. }
@@ -11885,7 +12339,8 @@ fn render_dialog(
         | Dialog::CdpOutput { .. }
         | Dialog::CurveEditor(_)
         | Dialog::FormantInfo { .. }
-        | Dialog::CdpChainEditor => {
+        | Dialog::CdpChainEditor
+        | Dialog::LoadCurve { .. } => {
             unreachable!("handled by match arms above")
         }
     };
@@ -14167,6 +14622,25 @@ fn render_cdp_params_dialog(
                     Span::styled(format!(" {name}"), base),
                 ])
             }
+            // Same "no catalog default, opened with a picker instead of a typed value"
+            // treatment as `FormantBufferRef` above, just 'b' opens a real file browser
+            // (`Dialog::CdpParams.file_picker`) instead of a buffer list.
+            CdpField::FilePath { path: None, .. } => Line::from(vec![
+                Span::styled(label, label_style_here),
+                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(" (not set — b to pick)", dim_style),
+            ]),
+            CdpField::FilePath { path: Some(path), .. } => {
+                let name = std::path::Path::new(path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone());
+                Line::from(vec![
+                    Span::styled(label, label_style_here),
+                    Span::styled(format!("{:<range_width$}", ""), range_style),
+                    Span::styled(format!(" {name}"), base),
+                ])
+            }
         };
         lines.push(line);
     }
@@ -14549,6 +15023,46 @@ fn render_cdp_output_dialog(frame: &mut Frame, area: Rect, title: &str, lines_te
         hints_area,
     );
     Vec::new()
+}
+
+/// `Dialog::LoadCurve`'s picker — `picker.render` draws its own bordered box/title/entry
+/// list (the same `FilePanel` widget the Files panel uses), so this only needs to size a
+/// centered popup for it and add a hints line below. Called from `App::render` directly
+/// (not `render_dialog`) since `FilePanel::render` needs `&mut self`; returns nothing to
+/// `dialog_row_rects` because mouse clicks go straight through `picker`'s own
+/// `hit_test`/`handle_click` instead (`App::try_handle_load_curve_mouse`).
+fn render_load_curve_dialog(frame: &mut Frame, area: Rect, picker: &mut FilePanel) {
+    let width = 60u16.min(area.width);
+    let height = 22u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let list_area = Rect { x: popup.x, y: popup.y, width: popup.width, height: popup.height.saturating_sub(1) };
+    let hints_area = Rect { x: popup.x, y: popup.y + list_area.height, width: popup.width, height: 1 };
+
+    picker.render(frame, list_area);
+
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" \u{2191}\u{2193}", hint_style),
+            Span::styled(":move  ", label_style),
+            Span::styled("Enter", hint_style),
+            Span::styled(":open/load  ", label_style),
+            Span::styled("/", hint_style),
+            Span::styled(":filter  ", label_style),
+            Span::styled("Esc", hint_style),
+            Span::styled(":cancel", label_style),
+        ]))
+        .style(Style::default().bg(theme::SURFACE0)),
+        hints_area,
+    );
 }
 
 fn render_info_dialog(frame: &mut Frame, area: Rect, message: &str) -> Vec<Rect> {
@@ -16983,6 +17497,82 @@ mod tests {
     }
 
     #[test]
+    fn load_pitch_curve_opens_a_picker_at_the_files_panel_directory() {
+        let dir = std::env::temp_dir().join(format!("tui-wave-load-curve-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut app = new_app(None, Some(dir.clone()));
+        app.handle_action(Action::LoadPitchCurve);
+        let Some(Dialog::LoadCurve { picker }) = &app.dialog else {
+            panic!("expected Dialog::LoadCurve to be open");
+        };
+        assert_eq!(picker.directory, dir);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The picker must only list `.pc` files — a `.wav` document or a stray `.txt` sitting
+    /// in the same directory should not appear as a loadable "curve", even though `.txt`
+    /// was this app's own save format before `CURVE_EXTENSION` was introduced.
+    #[test]
+    fn load_pitch_curve_picker_only_lists_pc_files() {
+        let dir = std::env::temp_dir().join(format!("tui-wave-load-curve-filter-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("song.wav"), b"not a real wav, just a filter probe").unwrap();
+        std::fs::write(dir.join("old_curve.txt"), "0 100\n1 200").unwrap();
+        crate::model::curve::save_curve(
+            &crate::model::curve::PitchCurve::new("real_curve", vec![(0.0, 100.0)]),
+            &dir.join("real_curve.pc"),
+        )
+        .unwrap();
+
+        let mut app = new_app(None, Some(dir.clone()));
+        app.handle_action(Action::LoadPitchCurve);
+        let Some(Dialog::LoadCurve { picker }) = &app.dialog else {
+            panic!("expected Dialog::LoadCurve to be open");
+        };
+        assert_eq!(picker.filtered_count(), 2, "expected just \"..\" and real_curve.pc");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn entering_on_a_curve_file_loads_it_and_closes_the_dialog() {
+        let dir = std::env::temp_dir().join(format!("tui-wave-load-curve-test-{}", std::process::id() + 1));
+        std::fs::create_dir_all(&dir).unwrap();
+        let curve_path = dir.join("mycurve.pc");
+        crate::model::curve::save_curve(
+            &crate::model::curve::PitchCurve::new("mycurve", vec![(0.0, 220.0), (1.0, 440.0)]),
+            &curve_path,
+        )
+        .unwrap();
+
+        let mut app = new_app(None, Some(dir.clone()));
+        app.handle_action(Action::LoadPitchCurve);
+        // Entries are "..", then "mycurve.pc" (dirs before files, but there are none here).
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.dialog.is_none(), "loading a file should close the picker");
+        assert_eq!(app.curves.len(), 1);
+        assert_eq!(app.curves[0].points, vec![(0.0, 220.0), (1.0, 440.0)]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn esc_cancels_load_pitch_curve_without_adding_a_curve() {
+        let mut app = new_app(None, None);
+        app.handle_action(Action::LoadPitchCurve);
+        assert!(app.dialog.is_some());
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(app.dialog.is_none());
+        assert!(app.curves.is_empty());
+    }
+
+    #[test]
     fn buffer_names_lists_curves_after_documents_tagged_distinctly() {
         let mut app = new_app(Some(doc(1.0, 100)), None);
         app.curves.push(crate::model::curve::PitchCurve::new("mycurve", vec![(0.0, 100.0)]));
@@ -17540,7 +18130,7 @@ mod tests {
             glob_output: None,
             output_curve: Some("curve_out.txt".into()),
             output_curve_binary_template: Some("curve_raw_out.pch.wav".into()),
-            output_formant_buffer: None,
+            output_formant_buffer: None, output_sidecar: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -17631,7 +18221,7 @@ mod tests {
             panic!("expected the Save Curve dialog to open for a never-saved curve")
         };
         assert_eq!(*curve_index, 0);
-        assert_eq!(input.value(), "test_curve.txt");
+        assert_eq!(input.value(), "test_curve.pc");
     }
 
     #[test]
@@ -17642,17 +18232,17 @@ mod tests {
         app.curves.push(crate::model::curve::PitchCurve::new("roundtrip", vec![(0.0, 220.0), (1.0, 440.0)]));
         app.curve_histories.push(crate::model::curve_history::CurveHistory::new());
 
-        app.save_curve_as(0, "roundtrip.txt");
+        app.save_curve_as(0, "roundtrip.pc");
         assert!(!app.curves[0].dirty, "should be marked clean once saved");
-        assert_eq!(app.curves[0].path, Some(dir.join("roundtrip.txt")));
+        assert_eq!(app.curves[0].path, Some(dir.join("roundtrip.pc")));
 
-        app.load_curve_from_path(dir.join("roundtrip.txt").to_str().unwrap());
+        app.load_curve_from_path(dir.join("roundtrip.pc").to_str().unwrap());
         assert_eq!(app.curves.len(), 2, "loading should add a second curve, not replace the first");
         assert_eq!(app.curves[1].points, app.curves[0].points);
         assert_eq!(app.curves[1].name, "roundtrip");
         assert!(app.curves[1].binary_template.is_none(), "a loaded curve has no CDP lineage to transform with");
 
-        std::fs::remove_file(dir.join("roundtrip.txt")).ok();
+        std::fs::remove_file(dir.join("roundtrip.pc")).ok();
         std::fs::remove_dir(&dir).ok();
     }
 
@@ -17787,7 +18377,7 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false,
+            requires_simple_wav_input: false, sidecar_extension: None,
             params: vec![ParamDef {
                 name: "Count".into(),
                 description: String::new(),
@@ -18857,7 +19447,7 @@ mod tests {
             output_files: Vec::new(),
             glob_output: Some(crate::model::cdp::pipeline::GlobOutputSpec { prefix: "g".into() }),
             output_curve: None,
-            output_curve_binary_template: None, output_formant_buffer: None,
+            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -18888,6 +19478,89 @@ mod tests {
             assert_eq!(doc.channels[0].len(), 4, "each new buffer should hold the copied 4 samples");
             assert!(doc.dirty, "a never-saved new buffer should start dirty");
         }
+    }
+
+    /// A normal (non-glob) Apply whose process declares `sidecar_extension` (e.g. `matrix
+    /// matrix 1`) splices its real result as usual, but also opens `Dialog::SaveMatrixAs`
+    /// with the sidecar file's bytes instead of just closing — its temp directory (the only
+    /// copy) is about to be cleaned up, so this is the one chance to keep it. Exercises
+    /// `App::tick_cdp`'s normal `JobPurpose::Apply` branch end-to-end through the real
+    /// `cdp_runner`, same "fake /bin/sh step, no real CDP install needed" precedent as
+    /// `glob_output_apply_opens_one_new_buffer_per_result` above.
+    #[test]
+    fn apply_with_a_sidecar_output_opens_save_matrix_as_after_splicing() {
+        let mut app = new_app(Some(doc(0.1, 4)), None);
+        app.cdp_pending = Some(CdpPending {
+            doc_index: 0,
+            range: (0, 4),
+            label: "CDP: Fake Matrix".into(),
+            catalog_index: 0,
+            fields: Vec::new(),
+            second_input: None,
+            focus: 0,
+            presets: Vec::new(),
+            preset_selected: None,
+            custom_values: None,
+        });
+        app.dialog = Some(Dialog::CdpRunning {
+            job_id: 99,
+            title: "Fake Matrix".into(),
+            step_label: String::new(),
+            step_index: 0,
+            step_total: 1,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let planned = crate::model::cdp::pipeline::PlannedJob {
+            steps: vec![crate::model::cdp::pipeline::Invocation {
+                bin: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "cp in.wav out.wav && printf 'fake matrix data' > out.txt".into(),
+                ],
+                label: "fake matrix".into(),
+                expected_output: "out.wav".into(),
+            }],
+            input_files: vec![crate::model::cdp::pipeline::TempWavSpec {
+                relative_name: "in.wav".into(),
+                input_index: 0,
+                source_channels: vec![0],
+            }],
+            output_files: vec![crate::model::cdp::pipeline::OutputWavSpec {
+                relative_name: "out.wav".into(),
+                dest_channels: vec![0],
+            }],
+            glob_output: None,
+            output_curve: None,
+            output_curve_binary_template: None,
+            output_formant_buffer: None,
+            output_sidecar: Some("out.txt".into()),
+            brk_files: Vec::new(),
+            binary_input_files: Vec::new(),
+            deferred_window_params: Vec::new(),
+            needs_simple_wav_input: false,
+        };
+        app.cdp_runner.submit(crate::cdp::Job {
+            id: 99,
+            cdp_dir: std::path::PathBuf::from("/bin"),
+            planned,
+            inputs: vec![vec![vec![0.1, 0.2, 0.3, 0.4]]],
+            input_sample_rate: 44100,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !matches!(app.dialog, Some(Dialog::SaveMatrixAs { .. })) && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert_eq!(app.documents[0].channels[0], vec![0.1, 0.2, 0.3, 0.4], "the normal result should still splice in");
+        let Some(Dialog::SaveMatrixAs { bytes, .. }) = &app.dialog else {
+            panic!("expected Dialog::SaveMatrixAs to open, got {:?}", app.dialog.is_some());
+        };
+        assert_eq!(bytes, b"fake matrix data");
     }
 
     /// Regression (user report, 2026-07-21): the buffer name generated for an extracted
@@ -18957,7 +19630,7 @@ mod tests {
             glob_output: None,
             output_curve: Some("pitch.txt".into()),
             output_curve_binary_template: Some("pitch.pch".into()),
-            output_formant_buffer: None,
+            output_formant_buffer: None, output_sidecar: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -19023,7 +19696,7 @@ mod tests {
             glob_output: None,
             output_curve: None,
             output_curve_binary_template: None,
-            output_formant_buffer: Some("out.for".into()),
+            output_formant_buffer: Some("out.for".into()), output_sidecar: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -19096,7 +19769,7 @@ mod tests {
             glob_output: None,
             output_curve: None,
             output_curve_binary_template: None,
-            output_formant_buffer: Some("moment.1f.wav".into()),
+            output_formant_buffer: Some("moment.1f.wav".into()), output_sidecar: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -19155,7 +19828,7 @@ mod tests {
             glob_output: None,
             output_curve: None,
             output_curve_binary_template: None,
-            output_formant_buffer: Some("out.for".into()),
+            output_formant_buffer: Some("out.for".into()), output_sidecar: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -19295,7 +19968,7 @@ mod tests {
             glob_output: None,
             output_curve: None,
             output_curve_binary_template: None,
-            output_formant_buffer: Some("out.for".into()),
+            output_formant_buffer: Some("out.for".into()), output_sidecar: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -20026,7 +20699,7 @@ mod tests {
             output: IoKind::Ana,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false,
+            requires_simple_wav_input: false, sidecar_extension: None,
             params: vec![ParamDef {
                 name: "Formants".into(),
                 description: String::new(),
@@ -20053,7 +20726,7 @@ mod tests {
             glob_output: None,
             output_curve: None,
             output_curve_binary_template: None,
-            output_formant_buffer: None,
+            output_formant_buffer: None, output_sidecar: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -20095,7 +20768,7 @@ mod tests {
             output: IoKind::Ana,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false,
+            requires_simple_wav_input: false, sidecar_extension: None,
             params: vec![ParamDef {
                 name: "Formants".into(),
                 description: String::new(),
@@ -20122,7 +20795,7 @@ mod tests {
             glob_output: None,
             output_curve: None,
             output_curve_binary_template: None,
-            output_formant_buffer: None,
+            output_formant_buffer: None, output_sidecar: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -21237,7 +21910,7 @@ mod tests {
             }],
             glob_output: None,
             output_curve: None,
-            output_curve_binary_template: None, output_formant_buffer: None,
+            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -21327,7 +22000,7 @@ mod tests {
             }],
             glob_output: None,
             output_curve: None,
-            output_curve_binary_template: None, output_formant_buffer: None,
+            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -23308,7 +23981,7 @@ mod tests {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None,
+            formant_picker: None, file_picker: None,
             presets: Vec::new(),
             preset_selected: None,
             custom_values: None,
@@ -23339,7 +24012,7 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false,
+            requires_simple_wav_input: false, sidecar_extension: None,
             params: vec![ParamDef {
                 name: "Formants".into(),
                 description: String::new(),
@@ -23420,6 +24093,91 @@ mod tests {
         assert_eq!(*focus, snapshot_field + 1, "focus should jump to the Snapshot field");
     }
 
+    /// 'b' opens the file browser for a `FilePath` field too — mirrors
+    /// `b_opens_the_picker_from_the_preset_row_on_a_real_process`'s exact structure, on the
+    /// real shipped `matrix_matrix_2` catalog entry instead of a synthetic one.
+    #[test]
+    fn b_opens_the_file_picker_for_a_real_filepath_process() {
+        let mut app = new_app(Some(doc(1.0, 44100)), None);
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "matrix_matrix_2")
+            .expect("matrix_matrix_2 should be in the catalog");
+        app.open_cdp_params(catalog_index);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { file_picker, focus, fields, .. }) = &app.dialog else {
+            panic!("no dialog")
+        };
+        assert!(file_picker.is_some(), "'b' should open the file picker without the user pre-focusing the field");
+        let path_field = fields.iter().position(|f| matches!(f, CdpField::FilePath { .. })).unwrap();
+        assert_eq!(*focus, path_field + 1, "focus should jump to the Matrix File field");
+    }
+
+    /// Enter on the picker's highlighted `.matrix` file commits its absolute path into the
+    /// field and closes the picker — the core of the "lighter, file-path-based" design this
+    /// session settled on instead of a full FormantBuffer-style in-memory mechanism
+    /// (CDP-Release8-TODO.md, 2026-07-26).
+    #[test]
+    fn entering_on_a_matrix_file_in_the_picker_commits_its_absolute_path() {
+        let dir = std::env::temp_dir().join(format!("tui-wave-matrix-picker-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mymatrix.matrix"), "2\n0.1\n0.2\n").unwrap();
+
+        let mut app = new_app(Some(doc(1.0, 44100)), Some(dir.clone()));
+        let catalog_index = app.cdp_catalog.processes.iter().position(|p| p.key == "matrix_matrix_2").unwrap();
+        app.open_cdp_params(catalog_index);
+        assert!(app.open_cdp_file_picker());
+
+        // Entries are "..", then "mymatrix.matrix" (no subdirs here).
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { file_picker, fields, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(file_picker.is_none(), "picking a file should close the picker");
+        let Some(CdpField::FilePath { path: Some(path), .. }) =
+            fields.iter().find(|f| matches!(f, CdpField::FilePath { .. }))
+        else {
+            panic!("expected the FilePath field to be set");
+        };
+        assert_eq!(path, &dir.join("mymatrix.matrix").to_string_lossy().into_owned());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A never-picked `FilePath` field must block Apply/Preview exactly like an unpicked
+    /// `FormantBufferRef` — same "no catalog default at all" rationale.
+    #[test]
+    fn cdp_validate_fields_blocks_an_unset_file_path_field() {
+        let app = new_app(Some(doc(1.0, 44100)), None);
+        let catalog_index = app.cdp_catalog.processes.iter().position(|p| p.key == "matrix_matrix_2").unwrap();
+        let def = &app.cdp_catalog.processes[catalog_index];
+        let fields: Vec<CdpField> = def.params.iter().map(CdpField::from_default).collect();
+        let path_field = fields.iter().position(|f| matches!(f, CdpField::FilePath { .. })).unwrap();
+        assert_eq!(App::cdp_validate_fields(def, &fields), Some(path_field));
+    }
+
+    /// "Save Matrix As" writes the sidecar bytes under the given filename in the Files
+    /// panel's current directory and remembers the path for `open_cdp_file_picker` to
+    /// preselect next time — mirrors `save_curve_as`'s own directory convention.
+    #[test]
+    fn save_matrix_as_writes_the_file_and_remembers_the_path() {
+        let dir = std::env::temp_dir().join(format!("tui-wave-save-matrix-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = new_app(None, Some(dir.clone()));
+
+        app.save_matrix_as(b"fake matrix bytes", "mysine.matrix");
+
+        let path = dir.join("mysine.matrix");
+        assert_eq!(std::fs::read(&path).unwrap(), b"fake matrix bytes");
+        assert_eq!(app.last_matrix_path, Some(path));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Enter on a focused, still-unset `FormantBufferRef` field opens the buffer picker
     /// instead of running Apply — mirrors `enter_on_an_unset_required_envelope_field_opens_its_editor`/
     /// `enter_on_an_unset_required_list_field_opens_its_editor` for the third "unset"-capable
@@ -23469,7 +24227,7 @@ mod tests {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None,
+            formant_picker: None, file_picker: None,
             presets: Vec::new(),
             preset_selected: None,
             custom_values: None,

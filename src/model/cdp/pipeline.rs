@@ -160,6 +160,18 @@ pub struct PlannedJob {
     /// names the relative temp file whose raw bytes become the new buffer's content
     /// verbatim.
     pub output_formant_buffer: Option<String>,
+    /// `Some` only for a normal single-`Wav`-output process whose `ProcessDef` declares
+    /// `sidecar_extension` (e.g. `matrix matrix 1`'s generated-matrix-data `.txt` file,
+    /// written alongside its real `out.wav` under the same base name) — names the relative
+    /// temp file whose raw bytes `cdp::runner` reads back (before the temp dir is cleaned
+    /// up) into `CompletedJob.sidecar_bytes`, for the app layer to offer a Save-As prompt on
+    /// (`App::tick_cdp`). Unlike `output_curve`/`output_formant_buffer`, this is a genuine
+    /// *secondary* result alongside a normal primary one, not the job's only output — only
+    /// ever populated by `plan_wav`'s mono/`stereo_native` branch today (the dual-mono lane
+    /// split branch doesn't compute it, so a sidecar-producing process run against a stereo
+    /// file through that path silently produces no sidecar capture — a known, documented
+    /// scope limit rather than an oversight, added 2026-07-26 for `matrix_matrix_1`).
+    pub output_sidecar: Option<String>,
     pub brk_files: Vec<(String, String)>,
     /// Raw-byte input files to write before running (parallel to `brk_files`, which is
     /// text-only) — used for a curve-transform job's binary pitchfile input, spliced from a
@@ -504,6 +516,10 @@ fn plan_param(
             };
             ParamPlan { arg: format_arg(&param.flag, relative_name), deferred: None }
         }
+        // The picked file already exists on disk at this absolute path — no temp file to
+        // write, no bytes to inject, unlike `FormantBufferRef` (see `ParamKind::FilePath`'s
+        // doc comment). Just emit the path itself as the argv token.
+        ParamValue::FilePath(path) => ParamPlan { arg: format_arg(&param.flag, path), deferred: None },
     }
 }
 
@@ -702,6 +718,14 @@ pub fn plan_job(
 /// only the source's first channel is written to the temp input file (see
 /// `GlobOutputSpec`'s doc comment for why stereo isn't supported here). `expected_output`
 /// checks for `<prefix>0.wav` specifically — CDP numbers this family of outputs from 0.
+///
+/// `def.input == IoKind::Ana` (e.g. `speculate`, whose numbered outputs are spectral
+/// permutation steps) gets the same single-lane `pvoc anal` pre-pass `plan_ana` gives every
+/// other Ana-domain process — but no resynthesis step after, unlike `plan_ana`: the
+/// process's own numbered `.wav` outputs already ARE the final result, not a `.ana` file
+/// still waiting on `pvoc synth`. Found missing (`plan_wav_glob` unconditionally treated its
+/// input as a plain WAV) while cataloging `speculate` against the real binary (2026-07-26,
+/// CDP-Release8-TODO.md) — every glob-output process cataloged before it took `Wav` input.
 fn plan_wav_glob(
     def: &ProcessDef,
     values: &[ParamValue],
@@ -712,10 +736,32 @@ fn plan_wav_glob(
     let duration = input.duration_secs();
     let prefix = "cutout".to_string();
 
+    let mut steps = Vec::new();
+    let process_input: String = if def.input == IoKind::Ana {
+        let ana_in = "in.ana".to_string();
+        steps.push(Invocation {
+            bin: "pvoc".into(),
+            args: vec![
+                "anal".into(),
+                "1".into(),
+                "in.wav".into(),
+                ana_in.clone(),
+                format!("-c{}", pvoc.points),
+                format!("-o{}", pvoc.overlap),
+            ],
+            label: "pvoc anal".into(),
+            expected_output: ana_in.clone(),
+        });
+        ana_in
+    } else {
+        "in.wav".into()
+    };
+
+    let process_step_index = steps.len();
     let (args, deferred) = build_process_args(
         def,
         values,
-        &["in.wav"],
+        &[process_input.as_str()],
         &prefix,
         duration,
         pvoc,
@@ -723,23 +769,42 @@ fn plan_wav_glob(
         &mut brk_files,
         0,
     )?;
-    debug_assert!(deferred.is_empty(), "glob-output processes never carry ana-window-count params");
+    // A `Wav`-input glob process does its own internal analysis (if any) with no separate
+    // `.ana` file this pipeline ever produces, so a `PercentOfAnaWindowCount`-scaled param
+    // there would have no real window count to resolve against — preserved from this
+    // function's original (pre-Ana-input) form. An `Ana`-input one genuinely has a `.ana`
+    // file now (`process_input` above), so its own deferred params, if any, resolve
+    // normally as `plan_ana`'s already do.
+    debug_assert!(
+        def.input != IoKind::Wav || deferred.is_empty(),
+        "wav-input glob-output processes never carry ana-window-count params"
+    );
+    let deferred_window_params = deferred
+        .into_iter()
+        .map(|target| DeferredWindowParam {
+            ana_relative_name: process_input.clone(),
+            step_index: process_step_index,
+            target,
+        })
+        .collect();
+
+    steps.push(Invocation {
+        bin: def.bin.clone(),
+        args,
+        label: process_label(def),
+        expected_output: format!("{prefix}0.wav"),
+    });
 
     Ok(PlannedJob {
-        steps: vec![Invocation {
-            bin: def.bin.clone(),
-            args,
-            label: process_label(def),
-            expected_output: format!("{prefix}0.wav"),
-        }],
+        steps,
         input_files: vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0] }],
         output_files: Vec::new(),
         glob_output: Some(GlobOutputSpec { prefix }),
         output_curve: None,
-        output_curve_binary_template: None, output_formant_buffer: None,
+        output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
         brk_files,
         binary_input_files: Vec::new(),
-        deferred_window_params: Vec::new(),
+        deferred_window_params,
         needs_simple_wav_input: def.requires_simple_wav_input,
     })
 }
@@ -772,7 +837,7 @@ fn plan_synthesis(
         binary_input_files: Vec::new(),
         glob_output: None,
         output_curve: None,
-        output_curve_binary_template: None, output_formant_buffer: None,
+        output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
     })
@@ -831,6 +896,7 @@ fn plan_wav(
             glob_output: None,
             output_curve: None,
             output_curve_binary_template: None, output_formant_buffer: None,
+            output_sidecar: def.sidecar_extension.as_ref().map(|ext| format!("out.{ext}")),
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
         });
@@ -861,7 +927,7 @@ fn plan_wav(
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 /// Dual-input time-domain process: `bin subprog [mode] inA inB out params...`. Lanes work
@@ -920,7 +986,7 @@ fn plan_dual_wav(
             binary_input_files: Vec::new(),
             glob_output: None,
             output_curve: None,
-            output_curve_binary_template: None, output_formant_buffer: None,
+            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
         });
@@ -960,7 +1026,7 @@ fn plan_dual_wav(
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 /// Dual-input spectral process: per channel lane, `pvoc anal` both inputs, run the process
@@ -1045,7 +1111,7 @@ fn plan_dual_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 fn plan_ana(
@@ -1121,7 +1187,7 @@ fn plan_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, brk_files, binary_input_files: Vec::new(), deferred_window_params, needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, brk_files, binary_input_files: Vec::new(), deferred_window_params, needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 /// Plans a run of 2+ consecutive single-input spectral (`IoKind::Ana`-in/`IoKind::Ana`-out)
@@ -1231,7 +1297,7 @@ pub fn plan_ana_chain(
         glob_output: None,
         output_curve: None,
         output_curve_binary_template: None,
-        output_formant_buffer: None,
+        output_formant_buffer: None, output_sidecar: None,
         brk_files,
         binary_input_files: Vec::new(),
         deferred_window_params,
@@ -1333,7 +1399,7 @@ pub fn plan_curve_transform_job(
         glob_output: None,
         output_curve: Some("curve_out.txt".to_string()),
         output_curve_binary_template: Some(raw_outfile_actual),
-        output_formant_buffer: None,
+        output_formant_buffer: None, output_sidecar: None,
         brk_files,
         binary_input_files: vec![("curve_in.wav".to_string(), spliced)],
         deferred_window_params: Vec::new(),
@@ -1408,7 +1474,7 @@ pub fn plan_extract_pitch_curve(pvoc: &PvocSettings) -> PlannedJob {
         glob_output: None,
         output_curve: Some("pitch.txt".into()),
         output_curve_binary_template: Some("pitch.pch.wav".into()),
-        output_formant_buffer: None,
+        output_formant_buffer: None, output_sidecar: None,
         brk_files: Vec::new(),
         binary_input_files: Vec::new(),
         deferred_window_params: Vec::new(),
@@ -1491,7 +1557,7 @@ pub fn plan_extract_formants(pvoc: &PvocSettings, mode: FormantExtractionMode) -
         glob_output: None,
         output_curve: None,
         output_curve_binary_template: None,
-        output_formant_buffer: Some("out.for".into()),
+        output_formant_buffer: Some("out.for".into()), output_sidecar: None,
         brk_files: Vec::new(),
         binary_input_files: Vec::new(),
         deferred_window_params: Vec::new(),
@@ -1525,7 +1591,7 @@ pub fn plan_oneform_get(formant_buffer_bytes: &[u8], time_secs: f64) -> PlannedJ
         glob_output: None,
         output_curve: None,
         output_curve_binary_template: None,
-        output_formant_buffer: Some("moment.1f.wav".into()),
+        output_formant_buffer: Some("moment.1f.wav".into()), output_sidecar: None,
         brk_files: Vec::new(),
         binary_input_files: vec![("in.for".to_string(), formant_buffer_bytes.to_vec())],
         deferred_window_params: Vec::new(),
@@ -1567,7 +1633,7 @@ mod tests {
             output,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false,
+            requires_simple_wav_input: false, sidecar_extension: None,
             params: vec![number_param("Speed", -96.0, 96.0, 0.0, NumberScale::Plain)],
         }
     }
@@ -1587,6 +1653,29 @@ mod tests {
             job.output_files,
             vec![OutputWavSpec { relative_name: "out.wav".into(), dest_channels: vec![0] }]
         );
+    }
+
+    /// `ProcessDef.sidecar_extension` (`matrix matrix 1`'s generated-matrix-data file,
+    /// 2026-07-26) turns into `PlannedJob.output_sidecar` naming `"out.<ext>"` — the same
+    /// fixed `"out.wav"` stem `plan_wav`'s mono/`stereo_native` branch already uses, just a
+    /// different extension for the secondary file.
+    #[test]
+    fn sidecar_extension_becomes_a_named_output_sidecar_file() {
+        let mut def = base_def(IoKind::Wav, IoKind::Wav);
+        def.sidecar_extension = Some("txt".into());
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let job = plan_job(&def, &[ParamValue::Number(3.0)], std::slice::from_ref(&input), &PvocSettings::default())
+            .unwrap();
+        assert_eq!(job.output_sidecar, Some("out.txt".to_string()));
+    }
+
+    #[test]
+    fn no_sidecar_extension_means_no_output_sidecar() {
+        let def = base_def(IoKind::Wav, IoKind::Wav);
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let job = plan_job(&def, &[ParamValue::Number(3.0)], std::slice::from_ref(&input), &PvocSettings::default())
+            .unwrap();
+        assert_eq!(job.output_sidecar, None);
     }
 
     /// `ParamDef.before_outfile` (the `pitch altharms`/`formants put` datafile-before-outfile
@@ -2079,6 +2168,45 @@ mod tests {
         // InputSpec above says the document is stereo (see GlobOutputSpec's doc comment for
         // why merging independently-numbered file sets across stereo lanes isn't supported).
         assert_eq!(job.input_files.len(), 1);
+        assert_eq!(job.input_files[0].source_channels, vec![0]);
+    }
+
+    /// An `Ana`-input glob-output process (`speculate`'s shape — a spectral permutation
+    /// that writes each intermediate step to its own numbered file) gets a `pvoc anal`
+    /// pre-pass first, reads that `.ana` file (not a plain `.wav`), and has no resynthesis
+    /// step after — its own numbered outputs already are the final result. Found missing
+    /// (this function's original form only ever wrote `in.wav` unconditionally) while
+    /// cataloging `speculate` against the real binary (2026-07-26).
+    #[test]
+    fn glob_output_with_ana_input_gets_an_anal_prepass_and_no_synth_step() {
+        let mut def = base_def(IoKind::Ana, IoKind::WavGlob);
+        def.bin = "speculate".into();
+        def.subprog = Some("speculate".into());
+        def.mode = None;
+        def.params = vec![
+            number_param("Min Frequency", 0.0, 20000.0, 200.0, NumberScale::Plain),
+            number_param("Max Frequency", 0.0, 20000.0, 2000.0, NumberScale::Plain),
+        ];
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+
+        let job = plan_job(
+            &def,
+            &[ParamValue::Number(200.0), ParamValue::Number(2000.0)],
+            std::slice::from_ref(&input),
+            &PvocSettings::default(),
+        )
+        .unwrap();
+
+        assert_eq!(job.steps.len(), 2, "expected a pvoc anal pre-pass, then the process itself");
+        assert_eq!(job.steps[0].bin, "pvoc");
+        assert_eq!(job.steps[0].args[0], "anal");
+        assert_eq!(job.steps[0].expected_output, "in.ana");
+        assert_eq!(job.steps[1].bin, "speculate");
+        assert_eq!(job.steps[1].args, vec!["speculate", "in.ana", "cutout", "200", "2000"]);
+        assert_eq!(job.steps[1].expected_output, "cutout0.wav");
+        assert!(job.output_files.is_empty());
+        assert_eq!(job.glob_output.expect("expected a GlobOutputSpec").prefix, "cutout");
+        assert_eq!(job.input_files.len(), 1, "the pvoc anal pre-pass still needs a real in.wav on disk");
         assert_eq!(job.input_files[0].source_channels, vec![0]);
     }
 

@@ -16,7 +16,8 @@ pub enum EntryKind {
     Parent,
     /// A subdirectory — navigates into it.
     Dir,
-    /// A `.wav` file — opens it.
+    /// A file matching the panel's own extension filter (see `FilePanel::extension`) —
+    /// opens/selects it.
     File,
 }
 
@@ -41,10 +42,28 @@ pub struct FilePanel {
     /// and as the page size for `move_page_up`/`move_page_down`. Updated every render, so
     /// PgUp/PgDn always moves by exactly one screenful regardless of terminal size.
     visible_rows: usize,
+    /// The file extension this panel lists (case-insensitive, no leading dot) — `"wav"` for
+    /// the main Files panel, `"pc"` for the "Load Pitch Curve..." picker
+    /// (`Dialog::LoadCurve`), CDP's own pitch-curve save format.
+    extension: &'static str,
+    /// Title shown in the panel's own border (`" {label} (N) "`) — "Files" for the main
+    /// panel, something more specific (e.g. "Load Pitch Curve") for a picker reusing this
+    /// widget inside a modal dialog.
+    pub label: &'static str,
 }
 
 impl FilePanel {
     pub fn new(directory: PathBuf) -> Self {
+        Self::new_with(directory, "wav", "Files")
+    }
+
+    /// A picker variant filtered to a different extension than the main panel's `.wav` —
+    /// see `extension`'s doc comment.
+    pub fn new_with_extension(directory: PathBuf, extension: &'static str, label: &'static str) -> Self {
+        Self::new_with(directory, extension, label)
+    }
+
+    fn new_with(directory: PathBuf, extension: &'static str, label: &'static str) -> Self {
         let mut panel = Self {
             directory,
             entries: Vec::new(),
@@ -56,21 +75,24 @@ impl FilePanel {
             dirty_paths: HashSet::new(),
             rects: Vec::new(),
             visible_rows: 10,
+            extension,
+            label,
         };
         panel.scan();
         panel
     }
 
     pub fn scan(&mut self) {
-        self.entries = Self::scan_dir(&self.directory);
+        self.entries = Self::scan_dir(&self.directory, self.extension);
         let count = self.entries.len();
         self.selected = self.selected.min(count.saturating_sub(1));
         self.clamp_scroll();
     }
 
-    /// Lists `..` (unless at the filesystem root), then subdirectories, then `.wav` files —
-    /// dirs and files each sorted case-insensitively.
-    pub fn scan_dir(dir: &Path) -> Vec<FileEntry> {
+    /// Lists `..` (unless at the filesystem root), then subdirectories, then files whose
+    /// extension matches `extension` (case-insensitive) — dirs and files each sorted
+    /// case-insensitively.
+    pub fn scan_dir(dir: &Path, extension: &str) -> Vec<FileEntry> {
         let mut dirs = Vec::new();
         let mut files = Vec::new();
         if let Ok(readdir) = std::fs::read_dir(dir) {
@@ -81,7 +103,7 @@ impl FilePanel {
                 };
                 if path.is_dir() {
                     dirs.push(FileEntry { name, path, kind: EntryKind::Dir });
-                } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav")) {
+                } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case(extension)) {
                     files.push(FileEntry { name, path, kind: EntryKind::File });
                 }
             }
@@ -216,7 +238,7 @@ impl FilePanel {
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         self.rects.clear();
 
-        let title = format!(" Files ({}) ", self.entries.len());
+        let title = format!(" {} ({}) ", self.label, self.entries.len());
 
         let border_style = if self.focused {
             Style::default().fg(theme::FOCUS)
@@ -349,7 +371,7 @@ mod tests {
     #[test]
     fn scan_finds_wav_files() {
         let dir = Path::new("tests/fixtures");
-        let entries = FilePanel::scan_dir(dir);
+        let entries = FilePanel::scan_dir(dir, "wav");
         assert!(entries.len() >= 2, "expected at least 2 .wav files in tests/fixtures, found {}", entries.len());
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"mono_sine.wav"));
@@ -363,7 +385,7 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("subdir")).unwrap();
         fs::write(base.join("a.wav"), b"x").unwrap(); // scan only checks the extension
-        let entries = FilePanel::scan_dir(&base);
+        let entries = FilePanel::scan_dir(&base, "wav");
 
         assert_eq!(entries[0].name, "..");
         assert!(matches!(entries[0].kind, EntryKind::Parent));
