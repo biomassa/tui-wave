@@ -128,9 +128,19 @@ fn cdp_plan_error_message(err: &crate::model::cdp::PlanError) -> String {
         PlanError::InputCountMismatch { expected, actual } => {
             format!("internal error: expected {expected} inputs, got {actual}")
         }
-        PlanError::SampleRateMismatch { first, second } => {
-            format!("second input is {second} Hz, selection is {first} Hz — resample one first")
+        // Reachable for real: a variadic process's file count is picked by hand
+        // (`CdpVariadicInput`), so an unusable count is a normal user state, not a bug.
+        // `reason` already reads as a sentence fragment describing the rule.
+        PlanError::VariadicInputCount { reason, actual } => {
+            format!("{actual} input file(s): {reason}")
         }
+        PlanError::SampleRateMismatch { first, second } => {
+            format!("an extra input is {second} Hz, selection is {first} Hz — resample one first")
+        }
+        // `reason` is already a user-facing sentence fragment naming the specific offending
+        // row/point (see `CrystalVdat::validate`), so this only has to attach the field it
+        // came from.
+        PlanError::InvalidParamData { param, reason } => format!("{param}: {reason}"),
     }
 }
 
@@ -169,6 +179,10 @@ enum CdpFieldSetupKind {
     List,
     FormantBuffer,
     FilePath,
+    /// A `CdpField::CrystalVdat` whose *envelope* half has never been configured. The vertex
+    /// half is always seeded, so it's never what's missing — Enter goes straight to the half
+    /// that is (`App::open_cdp_crystal_envelope_editor`), where 'v' then reaches the other.
+    CrystalEnvelope,
 }
 
 /// One editable field in the `Dialog::CdpParams` form, mirroring a `ParamKind` from the
@@ -263,6 +277,26 @@ enum CdpField {
         path: Option<String>,
         extension: String,
     },
+    /// A `ParamKind::CrystalVdat` field (`crystal rotate`'s compound VDAT datafile) — the
+    /// only field holding *two* independently-edited sections, mirroring
+    /// `model::cdp::CrystalVdat`'s own two halves exactly (see that type for why CDP forces
+    /// them into one param). Each half gets the editor its shape already deserves rather
+    /// than a bespoke compound widget: `vertices` opens the existing multi-column table
+    /// editor as an X/Y/Z table (`CdpTableTarget::CrystalVertices`), `envelope` the existing
+    /// graphical breakpoint editor (`CdpEnvelopeTarget::CrystalEnvelope`), and 'e'/'v'
+    /// switch between them without leaving the field.
+    ///
+    /// `vertices` is always seeded with one row (the origin) — the same "a table has no
+    /// meaningful unset state" rationale as `Table`. `envelope` deliberately starts **empty**
+    /// instead: unlike a vertex coordinate, an envelope's times are real seconds, and the
+    /// only sensible starting span is the selection's own duration, which isn't known until a
+    /// dialog is actually open (`App::open_cdp_crystal_envelope_editor` seeds it there).
+    /// Empty therefore means "not configured yet" and blocks Apply exactly like an unset
+    /// `required_envelope` field.
+    CrystalVdat {
+        vertices: Vec<[f64; 3]>,
+        envelope: Vec<(f64, f64)>,
+    },
 }
 
 impl CdpField {
@@ -291,7 +325,7 @@ impl CdpField {
             }
             // One seeded row (each column at its own default) rather than empty — see
             // `CdpField::Table`'s doc comment for why a table field has no "unset" state.
-            ParamKind::Table { columns, time_column } => CdpField::Table {
+            ParamKind::Table { columns, time_column, transposed: _ } => CdpField::Table {
                 rows: vec![columns.iter().map(|c| c.default).collect()],
                 columns: columns.clone(),
                 time_column: *time_column,
@@ -333,6 +367,11 @@ impl CdpField {
             // rationale as `FormantBufferRef` above, just a real filesystem path instead of
             // an in-app buffer index.
             ParamKind::FilePath { extension } => CdpField::FilePath { path: None, extension: extension.clone() },
+            // One vertex at the origin, no envelope yet — see `CdpField::CrystalVdat`'s doc
+            // comment for why the two halves start differently.
+            ParamKind::CrystalVdat => {
+                CdpField::CrystalVdat { vertices: vec![[0.0, 0.0, 0.0]], envelope: Vec::new() }
+            }
         }
     }
 
@@ -371,7 +410,7 @@ impl CdpField {
                 options: options.clone(),
                 selected: (*i).min(options.len().saturating_sub(1)),
             },
-            (ParamKind::Table { columns, time_column }, ParamValue::Table(rows)) => CdpField::Table {
+            (ParamKind::Table { columns, time_column, transposed: _ }, ParamValue::Table(rows)) => CdpField::Table {
                 // A saved preset's row count is trusted as-is (unlike a *type* mismatch,
                 // which falls through to `from_default` below) — an empty `rows` would
                 // leave the table editor with no cell to select, so fall back to one
@@ -425,6 +464,14 @@ impl CdpField {
                     transpose: transpose.clone(),
                 }
             }
+            (ParamKind::CrystalVdat, ParamValue::CrystalVdat(vdat)) => CdpField::CrystalVdat {
+                // Same empty-preset-value fallback as `Table`/`MarkerTimeList` above: a
+                // vertex-less preset would leave the vertex table editor with no cell to
+                // select. The envelope has no such fallback — empty is its own legitimate
+                // "not configured yet" state (see `CdpField::CrystalVdat`'s doc comment).
+                vertices: if vdat.vertices.is_empty() { vec![[0.0, 0.0, 0.0]] } else { vdat.vertices.clone() },
+                envelope: vdat.envelope.clone(),
+            },
             _ => CdpField::from_default(param),
         }
     }
@@ -448,6 +495,12 @@ impl CdpField {
             // comment) rather than routing "which buffer" through `ParamValue` at all.
             CdpField::FormantBufferRef { .. } => ParamValue::FormantBufferRef,
             CdpField::FilePath { path, .. } => ParamValue::FilePath(path.clone().unwrap_or_default()),
+            CdpField::CrystalVdat { vertices, envelope } => {
+                ParamValue::CrystalVdat(crate::model::cdp::CrystalVdat {
+                    vertices: vertices.clone(),
+                    envelope: envelope.clone(),
+                })
+            }
         }
     }
 }
@@ -539,6 +592,13 @@ fn cdp_process_badges(p: &crate::model::cdp::ProcessDef) -> Vec<&'static str> {
     let mut badges = Vec::new();
     if matches!(p.input, crate::model::cdp::IoKind::DualWav | crate::model::cdp::IoKind::DualAna) {
         badges.push(">1 inputs");
+    }
+    // Same "needs more than the selection" warning, but open-ended — `input_arity`'s minimum
+    // is what actually gates Apply, so the badge distinguishes the two variadic floors rather
+    // than lumping them under one string a user would have to go read the description to
+    // interpret.
+    if matches!(p.input, crate::model::cdp::IoKind::VariadicWav | crate::model::cdp::IoKind::GroupedWav) {
+        badges.push(if p.input_arity().0 > 1 { "N inputs (2+)" } else { "N inputs" });
     }
     if p.category == crate::model::cdp::Category::Pvoc {
         badges.push("[pvoc]");
@@ -742,7 +802,7 @@ enum Dialog {
     /// `focus` is `CDP_PRESET_FOCUS` (0) for the preset row, or `field_index + 1` for the
     /// field at that index in `fields`, continuing past them with a second-input picker row
     /// (dual-input processes only), then Preview, then Apply — see
-    /// `cdp_params_focus_second_input`/`cdp_params_focus_preview`/`cdp_params_focus_apply`
+    /// `cdp_params_focus_extra_input`/`cdp_params_focus_preview`/`cdp_params_focus_apply`
     /// (thin `+1`-shifted wrappers around the plain field-index-space helpers below, so both
     /// spaces share one source of truth for the trailing rows' positions). `second_input` is
     /// `Some` exactly when the process is dual-input (`IoKind::DualWav`/`DualAna`). `error`
@@ -767,6 +827,11 @@ enum Dialog {
         catalog_index: usize,
         fields: Vec<CdpField>,
         second_input: Option<CdpSecondInput>,
+        /// `Some` exactly when the process is variadic-input (`IoKind::VariadicWav`/
+        /// `GroupedWav`) — the generalization of `second_input` past two files. The two are
+        /// mutually exclusive by construction (an `IoKind` is one or the other), which is why
+        /// they share a single focus row: see `cdp_params_focus_extra_input`.
+        variadic_input: Option<CdpVariadicInput>,
         focus: usize,
         error: Option<String>,
         preview: Option<CdpPreview>,
@@ -805,6 +870,13 @@ enum Dialog {
         /// — mutually exclusive with every other sub-editor above, same take-over-all-key-
         /// handling shape. Filtered to the field's own `ParamKind::FilePath.extension`.
         file_picker: Option<CdpFilePicker>,
+        /// `Some` while the ordered multi-select over open buffers
+        /// (`render_cdp_variadic_picker`) is open for `variadic_input` — mutually exclusive
+        /// with every other sub-editor above, same take-over-all-key-handling shape. Unlike
+        /// every other one it edits the dialog's own extra-input row rather than one of
+        /// `fields` (so there's no `field_index`): "which buffers" is an input-arity concern,
+        /// not a process parameter.
+        variadic_picker: Option<CdpVariadicPicker>,
         presets: Vec<crate::model::cdp::preset::CdpPreset>,
         preset_selected: Option<usize>,
         /// A snapshot of `fields` (as `ParamValue`s) taken the first time cycling or saving
@@ -877,6 +949,124 @@ impl CdpSecondInput {
     }
 }
 
+/// The additional-input state for a variadic-input CDP process (`IoKind::VariadicWav`/
+/// `GroupedWav` — `pulser multi`, `tesselate`, `crystal rotate`, `repair repair`). The
+/// generalization of `CdpSecondInput` past two inputs: `doc_indices`/`names` are captured at
+/// dialog-open time for exactly the same reason (the dialog is modal, so buffers can't
+/// change under it) and likewise include every open buffer, since using the processed
+/// document again as an extra source is legitimate.
+///
+/// The active selection is always input 1 and is *not* represented here at all — `groups`
+/// only ever supplies inputs 2..N, precisely the role `CdpSecondInput` plays for a dual
+/// process. So no variadic process is ever picker-only, and the flat list `pipeline` sees is
+/// always `[selection] ++ groups.concat()` (`App::variadic_input_docs`).
+///
+/// `groups` is a `Vec` of ordered pick lists rather than one flat list because two of these
+/// processes read the order as structure, not just sequence:
+/// - `VariadicWav` uses exactly one group. Order is still meaningful (`crystal rotate`'s Nth
+///   file drives the Nth crystal vertex) but ungrouped.
+/// - `GroupedWav` (`repair repair`) uses two: additional channel-1 sources, then channel-2
+///   sources. CDP wants all channel-1 sources first and all channel-2 sources second, and
+///   pairs them positionally, so a single flat list would leave the user hand-computing
+///   where the split falls.
+///
+/// Each inner `Vec<usize>` holds indices into `doc_indices`/`names` **in pick order** — the
+/// order the user toggled them on. That's the whole ordering mechanism: selecting appends,
+/// deselecting removes, so there's no separate reorder mode to build or explain. A buffer
+/// may legitimately appear in more than one group (`repair` fed the same mono source as both
+/// channels is a valid, if dull, request), so membership is per-group, never global.
+#[derive(Clone)]
+struct CdpVariadicInput {
+    doc_indices: Vec<usize>,
+    names: Vec<String>,
+    /// One label per entry in `groups`, shown as that list's heading in the picker overlay
+    /// and its prefix in the summary row. Built once at open time from `def.input` (see
+    /// `App::cdp_fields_for`) rather than re-derived per frame.
+    group_labels: Vec<String>,
+    groups: Vec<Vec<usize>>,
+}
+
+impl CdpVariadicInput {
+    /// Every picked buffer's real document index, flattened in group order then pick order —
+    /// exactly the order CDP wants them on the command line, minus the selection itself
+    /// (which `App::cdp_run` prepends). Skips an index that no longer resolves rather than
+    /// panicking; `doc_indices` is a snapshot, so this can only happen if that invariant is
+    /// ever broken.
+    fn picked_doc_indices(&self) -> Vec<usize> {
+        self.groups
+            .iter()
+            .flatten()
+            .filter_map(|&i| self.doc_indices.get(i).copied())
+            .collect()
+    }
+
+    /// Total input-file count this pick represents, counting the selection — what
+    /// `ProcessDef::input_arity`'s bounds are checked against.
+    fn total_input_count(&self) -> usize {
+        1 + self.groups.iter().map(Vec::len).sum::<usize>()
+    }
+
+    /// One-line summary for the collapsed row in `render_cdp_params_dialog`, e.g.
+    /// `"3 files: selection + 2"` or `"4 files: ch1 selection +1, ch2 2"`. Leads with the
+    /// total because that is the number `ProcessDef::input_arity`'s minimum is checked
+    /// against, so a too-small pick is visible without opening the overlay; and it always
+    /// names the selection explicitly, since the single most confusable thing about this
+    /// picker is whether the buffer being edited is already counted (it always is).
+    fn summary(&self) -> String {
+        let total = self.total_input_count();
+        let detail = self.summary_detail();
+        format!("{total} file{}: {detail}", if total == 1 { "" } else { "s" })
+    }
+
+    /// The per-group part of `summary`, split out only to keep that function readable.
+    fn summary_detail(&self) -> String {
+        if self.groups.len() == 1 {
+            let n = self.groups[0].len();
+            return if n == 0 { "selection only".into() } else { format!("selection + {n} more") };
+        }
+        self.groups
+            .iter()
+            .enumerate()
+            .map(|(g, picks)| {
+                let label = self.group_labels.get(g).map(String::as_str).unwrap_or("group");
+                // Group 0 is where the selection sits (it is always input 1), so it reads
+                // "selection +N" while later groups are a plain count.
+                if g == 0 {
+                    format!("{label} selection +{}", picks.len())
+                } else {
+                    format!("{label} {}", picks.len())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// The transient overlay state for `Dialog::CdpParams.variadic_picker` — open while the user
+/// is actually choosing files. Split from `CdpVariadicInput` (which persists for the whole
+/// dialog session) along the same line every other `CdpParams` sub-editor already draws:
+/// the committed value lives on the dialog, the cursor/undo state lives on the sub-editor
+/// and vanishes when it closes.
+///
+/// This is a take-over-all-keys overlay rather than extra inline focus rows because the
+/// dialog's linear Up/Down focus walk is already spoken for — a list needing its own
+/// Up/Down cursor can't share it. That also keeps the focus arithmetic identical to
+/// `CdpSecondInput`'s: exactly one extra row either way (`cdp_params_focus_extra_input`).
+struct CdpVariadicPicker {
+    /// `CdpVariadicInput.groups` as it was when the overlay opened — restored verbatim on
+    /// Esc, so a cancelled browse can't leave a half-built pick behind. Mirrors
+    /// `CdpEnvelopeEdit.original`.
+    original: Vec<Vec<usize>>,
+    /// Which of `CdpVariadicInput.groups` Space currently toggles into. Always 0 for a
+    /// single-group (`VariadicWav`) picker, where Tab is inert.
+    group: usize,
+    /// Cursor row within the buffer list (indexes `CdpVariadicInput.names`, not the pick
+    /// order) — the list shown is always every open buffer, with pick position annotated,
+    /// rather than two separate picked/unpicked lists, so toggling never makes a row jump
+    /// out from under the cursor.
+    cursor: usize,
+}
+
 /// State for the ASCII breakpoint-curve editor, active while `Dialog::CdpParams.envelope`
 /// is `Some`. `points` are `(time_secs, value)` pairs, always kept sorted by time and with
 /// at least 2 entries (a single point isn't a meaningful automation curve) — this is the
@@ -888,8 +1078,110 @@ impl CdpSecondInput {
 /// automation off". `time_max` is the selection's duration in seconds — the field's own
 /// `min`/`max`/`step` (looked up from `fields[field_index]` at render/key time rather than
 /// duplicated here) bound the value axis.
+/// Which *part* of `fields[field_index]` a `CdpEnvelopeEdit` session is editing, and hence
+/// where its value-axis bounds come from and where a commit lands.
+///
+/// The editor was originally hard-wired to `CdpField::Number` in roughly ten places (bounds
+/// lookup, commit, cancel-restore, the 'c' key's two meanings, preset rescaling, the curve
+/// picker, mouse click and drag, the graphics-mode rasteriser, and the renderer). CRYSTAL's
+/// VDAT envelope section is the same `(time, value)` data drawn on the same grid but has no
+/// backing `Number` param at all — its 0-1 range is a fixed CDP contract
+/// (`CrystalVdat::ENVELOPE_MIN`/`MAX`/`STEP`), and the committed points belong to one half of
+/// a compound value.
+///
+/// So rather than scattering `if let CdpField::CrystalVdat` beside each of those ten
+/// `CdpField::Number` matches, all of them now route through exactly three target-aware
+/// helpers — `cdp_envelope_bounds` (where do min/max/step come from), `cdp_envelope_write_back`
+/// (where does a commit/cancel land), and `CdpEnvelopeTarget::constant_key` (what does 'c'
+/// mean here) — and every other line of the editor, including all of the drawing, the
+/// keyboard nudging, the mouse dragging and the preset machinery, is untouched and shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CdpEnvelopeTarget {
+    /// The original and overwhelmingly common case: `fields[field_index]` is a
+    /// `CdpField::Number`, bounds come from that field, and the committed points land in its
+    /// own `envelope` (`None` there meaning "back to a plain constant").
+    NumberField,
+    /// `fields[field_index]` is a `CdpField::CrystalVdat` and this session edits its
+    /// `envelope` half only; its vertex half is edited by a `CdpTableEdit` with the matching
+    /// `CdpTableTarget::CrystalVertices`, and 'v' switches between the two.
+    CrystalEnvelope,
+}
+
+/// What the envelope editor's 'c' key does in a given session — three genuinely different
+/// meanings that used to be inferred from `ParamDef.required_envelope` alone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CdpEnvelopeConstantKey {
+    /// An ordinary automatable `Number` param: 'c' abandons automation and returns the field
+    /// to the plain constant it still holds in `input`.
+    RevertToConstant,
+    /// A `required_envelope` `Number` param: there is no constant to revert to, so 'c' is
+    /// free to mean "fill this curve from one of the open pitch curves" instead.
+    UseCurve,
+    /// CRYSTAL's VDAT envelope: neither applies. There is no constant form (the datafile
+    /// always carries a curve), and an open pitch curve is a Hz contour, not the 0-1
+    /// amplitude shape this section wants — rescaling one into 0-1 would produce a shape with
+    /// no relationship to what the user picked. 'c' is inert and unadvertised.
+    Unavailable,
+}
+
+impl CdpEnvelopeTarget {
+    /// `Some((min, max, step))` for a target whose value axis is fixed by CDP rather than by
+    /// a catalog param; `None` means "read them off the backing field".
+    fn fixed_bounds(self) -> Option<(f64, f64, f64)> {
+        match self {
+            CdpEnvelopeTarget::NumberField => None,
+            CdpEnvelopeTarget::CrystalEnvelope => Some((
+                crate::model::cdp::CrystalVdat::ENVELOPE_MIN,
+                crate::model::cdp::CrystalVdat::ENVELOPE_MAX,
+                crate::model::cdp::CrystalVdat::ENVELOPE_STEP,
+            )),
+        }
+    }
+
+    fn constant_key(self, required_envelope: bool) -> CdpEnvelopeConstantKey {
+        match self {
+            CdpEnvelopeTarget::CrystalEnvelope => CdpEnvelopeConstantKey::Unavailable,
+            CdpEnvelopeTarget::NumberField if required_envelope => CdpEnvelopeConstantKey::UseCurve,
+            CdpEnvelopeTarget::NumberField => CdpEnvelopeConstantKey::RevertToConstant,
+        }
+    }
+}
+
+/// The value-axis `(min, max, step)` for an open envelope editor session — from the target's
+/// own fixed contract when it has one, else from the backing `CdpField::Number`. Every place
+/// that used to destructure `CdpField::Number { min, max, step, .. }` for this editor now
+/// calls here, so a new target kind needs no edits outside `CdpEnvelopeTarget`.
+fn cdp_envelope_bounds(fields: &[CdpField], edit: &CdpEnvelopeEdit) -> Option<(f64, f64, f64)> {
+    if let Some(bounds) = edit.target.fixed_bounds() {
+        return Some(bounds);
+    }
+    match fields.get(edit.field_index) {
+        Some(CdpField::Number { min, max, step, .. }) => Some((*min, *max, *step)),
+        _ => None,
+    }
+}
+
+/// Writes an envelope editor session's result back into whatever it targets: `Some(points)`
+/// commits (Enter), `None` clears (Esc restoring a field that had no envelope, or 'c'
+/// reverting a `Number` field to a constant). The `Option` means the same thing on both sides
+/// — "this field currently has no envelope" — so one signature covers commit, cancel-restore,
+/// and revert-to-constant for every target.
+fn cdp_envelope_write_back(fields: &mut [CdpField], edit: &CdpEnvelopeEdit, points: Option<Vec<(f64, f64)>>) {
+    match fields.get_mut(edit.field_index) {
+        Some(CdpField::Number { envelope, .. }) if edit.target == CdpEnvelopeTarget::NumberField => {
+            *envelope = points;
+        }
+        Some(CdpField::CrystalVdat { envelope, .. }) if edit.target == CdpEnvelopeTarget::CrystalEnvelope => {
+            *envelope = points.unwrap_or_default();
+        }
+        _ => {}
+    }
+}
+
 struct CdpEnvelopeEdit {
     field_index: usize,
+    /// Which part of `fields[field_index]` this session edits — see `CdpEnvelopeTarget`.
+    target: CdpEnvelopeTarget,
     points: Vec<(f64, f64)>,
     selected: usize,
     original: Option<Vec<(f64, f64)>>,
@@ -1018,8 +1310,81 @@ struct CdpListEdit {
 /// applied to whichever single column index (if any) must stay strictly ascending across
 /// rows — `None` when row order is unconstrained (e.g. repeater's segments, which may
 /// overlap or run backward in the source).
+/// Which field shape a `CdpTableEdit` session is editing — the `CdpEnvelopeTarget` of the
+/// table editor, added for the same reason and in the same shape, so CRYSTAL's two sections
+/// are handled symmetrically rather than one reusing an existing editor and the other getting
+/// a bespoke widget.
+///
+/// The vertex section is a fixed 3-column numeric grid with per-column bounds and no ordering
+/// constraint — which is precisely `CdpTableEdit` already, right down to the `n`-insert and
+/// `Del`-remove semantics. Building a separate XYZ widget would have duplicated the cell
+/// cursor, the type-to-overwrite `TextInput` handling, the per-column clamping and the
+/// scrolling row list for no behavioural difference at all. The only thing genuinely absent
+/// is where the *columns* come from: a `Table` field carries its own catalog-declared ones,
+/// while a vertex table's are fixed by CDP (`crystal_vertex_columns`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CdpTableTarget {
+    /// The original case: `fields[field_index]` is a `CdpField::Table` and owns its columns.
+    TableField,
+    /// `fields[field_index]` is a `CdpField::CrystalVdat` and this session edits its
+    /// `vertices` half as an X/Y/Z table; 'e' switches to its envelope half.
+    CrystalVertices,
+}
+
+/// The three fixed columns of a CRYSTAL vertex table. Bounds come from `CrystalVdat`'s own
+/// constants, so the editor's per-cell clamp and `CrystalVdat::validate` can't disagree about
+/// the per-axis range (the unit-sphere rule is cross-axis and stays validation-only — no
+/// single-column clamp can express it). The step is deliberately coarser than the params
+/// dialog's usual 0.01: the whole legal span is only 2.0 wide.
+fn crystal_vertex_columns() -> Vec<crate::model::cdp::TableColumn> {
+    ["X (time / position)", "Y (pitch)", "Z (brightness)"]
+        .iter()
+        .map(|name| crate::model::cdp::TableColumn {
+            name: (*name).into(),
+            min: crate::model::cdp::CrystalVdat::COORD_MIN,
+            max: crate::model::cdp::CrystalVdat::COORD_MAX,
+            step: 0.05,
+            default: 0.0,
+            scale: crate::model::cdp::def::NumberScale::Plain,
+            integer: false,
+        })
+        .collect()
+}
+
+/// The column definitions for an open table editor session — the field's own for a `Table`,
+/// CDP's fixed X/Y/Z triple for a crystal vertex table. The table editor's counterpart to
+/// `cdp_envelope_bounds`.
+fn cdp_table_columns(fields: &[CdpField], edit: &CdpTableEdit) -> Option<Vec<crate::model::cdp::TableColumn>> {
+    match (edit.target, fields.get(edit.field_index)) {
+        (CdpTableTarget::TableField, Some(CdpField::Table { columns, .. })) => Some(columns.clone()),
+        (CdpTableTarget::CrystalVertices, Some(CdpField::CrystalVdat { .. })) => Some(crystal_vertex_columns()),
+        _ => None,
+    }
+}
+
+/// Writes a table editor session's rows back into whatever it targets — the table editor's
+/// counterpart to `cdp_envelope_write_back`, used by both Enter (commit) and Esc (restore the
+/// snapshot). Rows shorter than 3 are padded when landing in a crystal field, so a malformed
+/// row can never panic the `[f64; 3]` conversion.
+fn cdp_table_write_back(fields: &mut [CdpField], edit: &CdpTableEdit, rows: Vec<Vec<f64>>) {
+    match fields.get_mut(edit.field_index) {
+        Some(CdpField::Table { rows: field_rows, .. }) if edit.target == CdpTableTarget::TableField => {
+            *field_rows = rows;
+        }
+        Some(CdpField::CrystalVdat { vertices, .. }) if edit.target == CdpTableTarget::CrystalVertices => {
+            *vertices = rows
+                .into_iter()
+                .map(|row| [row.first().copied().unwrap_or(0.0), row.get(1).copied().unwrap_or(0.0), row.get(2).copied().unwrap_or(0.0)])
+                .collect();
+        }
+        _ => {}
+    }
+}
+
 struct CdpTableEdit {
     field_index: usize,
+    /// Which field shape this session edits — see `CdpTableTarget`.
+    target: CdpTableTarget,
     rows: Vec<Vec<f64>>,
     selected_row: usize,
     selected_col: usize,
@@ -1259,6 +1624,13 @@ struct CdpPreview {
     /// A-derived audio while claiming to have processed against B — the picker is the one
     /// dialog control `values`/`range` can't see change.
     second_input_doc: Option<usize>,
+    /// Every extra input a variadic-input process was given when this preview ran, flattened
+    /// in the exact order it went on the command line (`CdpVariadicInput::picked_doc_indices`);
+    /// empty for every other process. The same blind spot `second_input_doc` closes, but for
+    /// a list whose *order* matters as much as its membership: re-picking the same buffers in
+    /// a different order genuinely changes the result (`crystal rotate` maps file N to vertex
+    /// N), and `values` can't see either change.
+    variadic_docs: Vec<usize>,
     /// The picked buffer index of each `FormantBufferRef` field, in field order, when this
     /// preview ran — the exact same blind spot `second_input_doc` closes, but for the
     /// formant-buffer picker (CDP-Ext-Plan.md Phase 5). A picked buffer is a runtime
@@ -1281,36 +1653,50 @@ fn formant_field_selections(fields: &[CdpField]) -> Vec<Option<usize>> {
         .collect()
 }
 
-/// `Dialog::CdpBrowser`'s control focus range is dynamic (one index per param field, then a
-/// second-input picker row for dual-input processes, then two trailing action buttons)
-/// rather than a fixed `er_focus`-style constant set, since the field count varies per
-/// process. These helpers compute the trailing indices from `fields.len()` +
-/// `second_input.is_some()` at every call site so they can't drift out of sync with each
-/// other. They operate in plain 0-based field-index space; `CDP_PRESET_FOCUS` and the
+/// `Dialog::CdpBrowser`'s control focus range is dynamic (one index per param field, then an
+/// extra-input row for processes that take more than the selection, then two trailing action
+/// buttons) rather than a fixed `er_focus`-style constant set, since the field count varies
+/// per process. These helpers compute the trailing indices from `fields.len()` +
+/// `has_extra_input` at every call site so they can't drift out of sync with each other.
+/// They operate in plain 0-based field-index space; `CDP_PRESET_FOCUS` and the
 /// `cdp_browser_*_focus` wrappers below shift into the dialog's actual `focus` space, which
 /// reserves index 0 for the process list itself.
-fn cdp_params_second_input_focus(field_count: usize) -> usize {
+///
+/// There is exactly **one** extra-input row whether the process is dual-input
+/// (`Dialog::CdpParams.second_input`, a single Left/Right cycle) or variadic-input
+/// (`variadic_input`, an Enter-to-open ordered multi-select overlay) — an `IoKind` is never
+/// both, so `has_extra_input` (`cdp_has_extra_input`) covers the two without either needing
+/// its own slot, and no existing focus index shifts.
+fn cdp_params_extra_input_focus(field_count: usize) -> usize {
     field_count
 }
-fn cdp_params_preview_focus(field_count: usize, has_second_input: bool) -> usize {
-    field_count + has_second_input as usize
+fn cdp_params_preview_focus(field_count: usize, has_extra_input: bool) -> usize {
+    field_count + has_extra_input as usize
 }
-fn cdp_params_apply_focus(field_count: usize, has_second_input: bool) -> usize {
-    cdp_params_preview_focus(field_count, has_second_input) + 1
+fn cdp_params_apply_focus(field_count: usize, has_extra_input: bool) -> usize {
+    cdp_params_preview_focus(field_count, has_extra_input) + 1
+}
+
+/// Whether `Dialog::CdpParams` shows its one extra-input row at all — true for a dual-input
+/// *or* a variadic-input process. One helper so the ~10 focus-arithmetic call sites can't
+/// each forget one of the two cases (which is exactly what would happen if they kept writing
+/// `second_input.is_some()` by hand).
+fn cdp_has_extra_input(second: Option<&CdpSecondInput>, variadic: Option<&CdpVariadicInput>) -> bool {
+    second.is_some() || variadic.is_some()
 }
 
 /// `Dialog::CdpParams.focus` reserves 0 for the preset row; a field's own focus value is
 /// `field_index + 1`. These three wrap the plain field-index-space helpers above with that
 /// `+1` shift so both spaces share one source of truth for the trailing rows' positions.
 const CDP_PRESET_FOCUS: usize = 0;
-fn cdp_params_focus_second_input(field_count: usize) -> usize {
-    cdp_params_second_input_focus(field_count) + 1
+fn cdp_params_focus_extra_input(field_count: usize) -> usize {
+    cdp_params_extra_input_focus(field_count) + 1
 }
-fn cdp_params_focus_preview(field_count: usize, has_second_input: bool) -> usize {
-    cdp_params_preview_focus(field_count, has_second_input) + 1
+fn cdp_params_focus_preview(field_count: usize, has_extra_input: bool) -> usize {
+    cdp_params_preview_focus(field_count, has_extra_input) + 1
 }
-fn cdp_params_focus_apply(field_count: usize, has_second_input: bool) -> usize {
-    cdp_params_apply_focus(field_count, has_second_input) + 1
+fn cdp_params_focus_apply(field_count: usize, has_extra_input: bool) -> usize {
+    cdp_params_apply_focus(field_count, has_extra_input) + 1
 }
 
 /// PageUp/PageDown step size for `Dialog::CdpBrowser`'s process list.
@@ -1713,7 +2099,7 @@ pub struct App {
 
 /// Context for the CDP job currently running in `cdp_runner`, stashed when it's submitted
 /// so `App::tick_cdp` knows what to do once the matching `CdpEvent::Finished` arrives.
-/// `catalog_index`/`fields`/`second_input`/`focus`/`presets`/`preset_selected` are only
+/// `catalog_index`/`fields`/`second_input`/`variadic_input`/`focus`/`presets`/`preset_selected` are only
 /// needed for a `Preview` job: the dialog is `Dialog::CdpRunning` (not `CdpParams`) while
 /// the job is in flight, so this is the only place that state survives long enough to
 /// rebuild `CdpParams` (with the new preview attached) once the job completes.
@@ -1724,6 +2110,7 @@ struct CdpPending {
     catalog_index: usize,
     fields: Vec<CdpField>,
     second_input: Option<CdpSecondInput>,
+    variadic_input: Option<CdpVariadicInput>,
     focus: usize,
     presets: Vec<crate::model::cdp::preset::CdpPreset>,
     preset_selected: Option<usize>,
@@ -1777,6 +2164,12 @@ struct SuspendedStepEdit {
     catalog_index: usize,
     fields: Vec<CdpField>,
     second_input: Option<CdpSecondInput>,
+    /// Always `None` in practice — a variadic-input process can't be a chain step at all
+    /// (`model::cdp::chain::step_is_supported` only accepts `Wav`/`Ana`/`Dual*` input), so
+    /// there is never a real pick to carry here. Kept as a field anyway so restoring a
+    /// suspended session rebuilds `Dialog::CdpParams` from exactly one place rather than
+    /// hardcoding a `None` that would silently start lying the day chains do support them.
+    variadic_input: Option<CdpVariadicInput>,
     presets: Vec<crate::model::cdp::preset::CdpPreset>,
 }
 
@@ -3643,6 +4036,10 @@ impl App {
             self.handle_cdp_file_picker_key(key);
             return;
         }
+        if let Some(Dialog::CdpParams { variadic_picker: Some(_), .. }) = &self.dialog {
+            self.handle_cdp_variadic_picker_key(key);
+            return;
+        }
         if let Some(Dialog::CdpParams { save_prompt: Some(_), .. }) = &self.dialog {
             self.handle_cdp_preset_save_prompt_key(key);
             return;
@@ -3764,8 +4161,8 @@ impl App {
                     }
                 }
                 Some(Dialog::CdpParams {
-                    catalog_index, fields, second_input, focus, error, preview, envelope, list_edit, table_edit,
-                    marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, presets, preset_selected, custom_values, save_prompt, scroll,
+                    catalog_index, fields, second_input, variadic_input, focus, error, preview, envelope, list_edit, table_edit,
+                    marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, variadic_picker, presets, preset_selected, custom_values, save_prompt, scroll,
                 }) => {
                     // Enter's default action is Apply (from anywhere, including the preset
                     // row — a highlighted preset's values, or the process's defaults, are
@@ -3793,10 +4190,13 @@ impl App {
                                     Some(CdpFieldSetupKind::FormantBuffer)
                                 }
                                 CdpField::FilePath { path: None, .. } => Some(CdpFieldSetupKind::FilePath),
+                                CdpField::CrystalVdat { envelope, .. } if envelope.is_empty() => {
+                                    Some(CdpFieldSetupKind::CrystalEnvelope)
+                                }
                                 _ => None,
                             }
                         });
-                    let purpose = if focus == cdp_params_focus_preview(fields.len(), second_input.is_some()) {
+                    let purpose = if focus == cdp_params_focus_preview(fields.len(), cdp_has_extra_input(second_input.as_ref(), variadic_input.as_ref())) {
                         crate::cdp::JobPurpose::Preview
                     } else {
                         crate::cdp::JobPurpose::Apply
@@ -3805,15 +4205,21 @@ impl App {
                     // need `&mut self.dialog` too, so it's restored here first rather than
                     // passed directly.
                     self.dialog = Some(Dialog::CdpParams {
-                        catalog_index, fields, second_input, focus, error, preview, envelope, list_edit, table_edit,
-                        marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, presets, preset_selected, custom_values, save_prompt, scroll,
+                        catalog_index, fields, second_input, variadic_input, focus, error, preview, envelope, list_edit, table_edit,
+                        marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, variadic_picker, presets, preset_selected, custom_values, save_prompt, scroll,
                     });
+                    // `open_cdp_variadic_picker` self-checks that focus is actually on the
+                    // extra-input row of a variadic process, so it is safe to try
+                    // unconditionally and costs nothing everywhere else — Enter on that row
+                    // has no other meaning (there's no value to cycle, unlike the dual-input
+                    // row), so this can't shadow an existing action.
                     let opened = match setup_kind {
                         Some(CdpFieldSetupKind::Envelope) => self.open_cdp_envelope_editor(),
                         Some(CdpFieldSetupKind::List) => self.open_cdp_list_editor(),
                         Some(CdpFieldSetupKind::FormantBuffer) => self.open_cdp_formant_picker(),
                         Some(CdpFieldSetupKind::FilePath) => self.open_cdp_file_picker(),
-                        None => false,
+                        Some(CdpFieldSetupKind::CrystalEnvelope) => self.open_cdp_crystal_envelope_editor(),
+                        None => self.open_cdp_variadic_picker(),
                     };
                     if !opened {
                         // Reused for chain-step editing (`ChainEditTarget`): Apply commits
@@ -4086,11 +4492,17 @@ impl App {
             KeyCode::Char('e')
                 if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
-                if !self.open_cdp_envelope_editor()
+                // A crystal field opens on its *vertex* section (section 1 of the datafile);
+                // 'e' again from inside that editor reaches the envelope section, and 'v'
+                // comes back. Chained last for the same reason as every opener above: each
+                // returns `false` for a field it doesn't handle.
+                if !self.open_cdp_focused_field_editor()
+                    && !self.open_cdp_envelope_editor()
                     && !self.open_cdp_list_editor()
                     && !self.open_cdp_table_editor()
                     && !self.open_cdp_marker_time_list_editor()
                     && !self.open_cdp_hilite_band_editor()
+                    && !self.open_cdp_crystal_vertex_editor()
                     && self.dialog_accepts('e')
                 {
                     if let Some(input) = self.dialog_input() {
@@ -4242,8 +4654,8 @@ impl App {
             // computes the visible scroll window fresh from `focus` every frame (mirroring
             // `Dialog::CdpBrowser`'s own on-the-fly `scroll_top` from `selected`), so there's
             // nothing to update here beyond `focus` itself.
-            Some(Dialog::CdpParams { fields, second_input, focus, .. }) => {
-                *focus = step(*focus, cdp_params_focus_apply(fields.len(), second_input.is_some()) + 1);
+            Some(Dialog::CdpParams { fields, second_input, variadic_input, focus, .. }) => {
+                *focus = step(*focus, cdp_params_focus_apply(fields.len(), cdp_has_extra_input(second_input.as_ref(), variadic_input.as_ref())) + 1);
             }
             _ => {}
         }
@@ -4766,7 +5178,7 @@ impl App {
             }
             return;
         };
-        let (mut fields, mut second_input) = self.cdp_fields_for(catalog_index);
+        let (mut fields, mut second_input, variadic_input) = self.cdp_fields_for(catalog_index);
         let def = &self.cdp_catalog.processes[catalog_index];
         if step.values.len() == fields.len() {
             fields = def.params.iter().zip(&step.values).map(|(p, v)| CdpField::from_value(p, v)).collect();
@@ -4786,6 +5198,7 @@ impl App {
             catalog_index,
             fields,
             second_input,
+            variadic_input,
             focus: CDP_PRESET_FOCUS,
             error: None,
             preview: None,
@@ -4794,7 +5207,7 @@ impl App {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None, file_picker: None,
+            formant_picker: None, file_picker: None, variadic_picker: None,
             presets,
             preset_selected: None,
             custom_values: None,
@@ -4814,7 +5227,7 @@ impl App {
     /// exists, otherwise the top-level `Dialog::CdpChainEditor`.
     fn cdp_chain_commit_step(&mut self) {
         let Some(target) = self.cdp_chain_edit_target.take() else { return };
-        let Some(Dialog::CdpParams { catalog_index, fields, second_input, .. }) = self.dialog.take() else {
+        let Some(Dialog::CdpParams { catalog_index, fields, second_input, variadic_input, .. }) = self.dialog.take() else {
             return;
         };
         let Some(def) = self.cdp_catalog.processes.get(catalog_index).cloned() else {
@@ -4827,6 +5240,7 @@ impl App {
                 catalog_index,
                 fields,
                 second_input,
+                variadic_input,
                 focus: bad + 1,
                 error: Some("value out of range".into()),
                 preview: None,
@@ -4835,7 +5249,7 @@ impl App {
                 table_edit: None,
                 marker_time_list_edit: None,
                 hilite_band_edit: None,
-                formant_picker: None, file_picker: None,
+                formant_picker: None, file_picker: None, variadic_picker: None,
                 presets: Vec::new(),
                 preset_selected: None,
                 custom_values: None,
@@ -4906,6 +5320,7 @@ impl App {
             catalog_index: parent.catalog_index,
             fields: parent.fields,
             second_input: parent.second_input,
+            variadic_input: parent.variadic_input,
             focus: CDP_PRESET_FOCUS,
             error: None,
             preview: None,
@@ -4914,7 +5329,7 @@ impl App {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None, file_picker: None,
+            formant_picker: None, file_picker: None, variadic_picker: None,
             presets: parent.presets,
             preset_selected: None,
             custom_values: None,
@@ -4931,11 +5346,11 @@ impl App {
     /// `open_cdp_preset_save_prompt`'s "reject, let the key fall through" convention.
     fn configure_chain_side_chain(&mut self) -> bool {
         let Some(ChainEditTarget::Replace(path)) = self.cdp_chain_edit_target.clone() else { return false };
-        let Some(Dialog::CdpParams { catalog_index, fields, second_input, focus, presets, .. }) = self.dialog.as_ref()
+        let Some(Dialog::CdpParams { catalog_index, fields, second_input, variadic_input, focus, presets, .. }) = self.dialog.as_ref()
         else {
             return false;
         };
-        if *focus != cdp_params_focus_second_input(fields.len()) {
+        if *focus != cdp_params_focus_extra_input(fields.len()) {
             return false;
         }
         let Some(def) = self.cdp_catalog.processes.get(*catalog_index) else { return false };
@@ -4947,6 +5362,7 @@ impl App {
             catalog_index: *catalog_index,
             fields: fields.clone(),
             second_input: second_input.clone(),
+            variadic_input: variadic_input.clone(),
             presets: presets.clone(),
         });
         self.cdp_chain_edit_target = Some(ChainEditTarget::Append(path));
@@ -5076,15 +5492,14 @@ impl App {
                 || p.key.to_lowercase().contains(&query)
                 || p.title.to_lowercase().contains(&query)
         };
-        // While picking a step for the chain editor (`cdp_chain_edit_target.is_some()`),
-        // only Wav/Ana in/out processes are offered — synthesis/curve/glob-output processes
-        // don't compose into "feeds the next step's audio input" (CDP-CHAIN-PLAN.md design
-        // decision 3). `is_curve_only_process` below already excludes curve processes from
-        // the plain browser too, so this only adds the None/WavGlob exclusion on top.
+        // While picking a step for the chain editor (`cdp_chain_edit_target.is_some()`), only
+        // processes that both consume and produce audio are offered — the rule lives in
+        // `chain::process_is_chainable` so this filter and `ChainStep::validate` can't
+        // disagree about what's offerable (they did, before that function existed: see its
+        // doc comment).
         let chain_mode = self.cdp_chain_edit_target.is_some();
         let is_chainable = |p: &crate::model::cdp::ProcessDef| {
-            use crate::model::cdp::IoKind;
-            !chain_mode || (matches!(p.output, IoKind::Wav | IoKind::Ana) && p.input != IoKind::None)
+            !chain_mode || crate::model::cdp::chain::process_is_chainable(p)
         };
         let is_eligible =
             |p: &crate::model::cdp::ProcessDef| !is_curve_only_process(p) && matches_query(p) && is_chainable(p);
@@ -5159,12 +5574,13 @@ impl App {
     /// default-valued fields and loading any presets saved for it from disk.
     fn open_cdp_params(&mut self, catalog_index: usize) {
         let Some(def) = self.cdp_catalog.processes.get(catalog_index) else { return };
-        let (fields, second_input) = self.cdp_fields_for(catalog_index);
+        let (fields, second_input, variadic_input) = self.cdp_fields_for(catalog_index);
         let presets = crate::model::cdp::preset::load_presets(&def.key, def.params.len());
         self.dialog = Some(Dialog::CdpParams {
             catalog_index,
             fields,
             second_input,
+            variadic_input,
             focus: CDP_PRESET_FOCUS,
             error: None,
             preview: None,
@@ -5173,7 +5589,7 @@ impl App {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None, file_picker: None,
+            formant_picker: None, file_picker: None, variadic_picker: None,
             presets,
             preset_selected: None,
             custom_values: None,
@@ -5218,12 +5634,17 @@ impl App {
         self.open_cdp_params_with_values(catalog_index, &last.values);
     }
 
-    /// Builds fresh default-valued `fields`/`second_input` for the catalog process at
-    /// `catalog_index` — used by `open_cdp_params` to seed a freshly opened dialog.
-    fn cdp_fields_for(&self, catalog_index: usize) -> (Vec<CdpField>, Option<CdpSecondInput>) {
+    /// Builds fresh default-valued `fields` plus whichever extra-input state the process
+    /// needs — `second_input` for a dual-input one, `variadic_input` for a variadic one, never
+    /// both (see `cdp_params_focus_extra_input`). Used by `open_cdp_params` to seed a freshly
+    /// opened dialog.
+    fn cdp_fields_for(
+        &self,
+        catalog_index: usize,
+    ) -> (Vec<CdpField>, Option<CdpSecondInput>, Option<CdpVariadicInput>) {
         use crate::model::cdp::IoKind;
         let Some(def) = self.cdp_catalog.processes.get(catalog_index) else {
-            return (Vec::new(), None);
+            return (Vec::new(), None, None);
         };
         let mut fields: Vec<CdpField> = def.params.iter().map(CdpField::from_default).collect();
         // Synthesis processes carry a Sample Rate choice — preselect the option matching
@@ -5253,7 +5674,28 @@ impl App {
                 .unwrap_or(0);
             CdpSecondInput { doc_indices, names, selected }
         });
-        (fields, second_input)
+        // Starts with nothing picked — i.e. the selection alone. That's already runnable for
+        // `tesselate`/`crystal rotate` (`min_inputs` 1), and for the two `min_inputs = 2`
+        // processes the dialog's own plan error names the shortfall, which is a clearer first
+        // impression than a pre-picked buffer the user never chose. Group labels come from the
+        // input kind: one unnamed list for a flat `VariadicWav`, two channel-role lists for
+        // `GroupedWav` (`repair repair` — see `IoKind::GroupedWav`'s doc comment for why the
+        // split is presented rather than left to the user to compute).
+        let variadic_input = match def.input {
+            IoKind::VariadicWav | IoKind::GroupedWav => {
+                let doc_indices: Vec<usize> = (0..self.documents.len()).collect();
+                let names = doc_indices.iter().map(|&i| self.buffer_name(i)).collect();
+                let group_labels: Vec<String> = if def.input == IoKind::GroupedWav {
+                    vec!["ch1".into(), "ch2".into()]
+                } else {
+                    vec!["extra".into()]
+                };
+                let groups = vec![Vec::new(); group_labels.len()];
+                Some(CdpVariadicInput { doc_indices, names, group_labels, groups })
+            }
+            _ => None,
+        };
+        (fields, second_input, variadic_input)
     }
 
     /// Rebuilds `Dialog::CdpBrowser`'s `fields`/`second_input` for whatever process
@@ -5332,6 +5774,7 @@ impl App {
         *dialog_focus = field_index + 1; // smart-target may have jumped focus to this field
         *dialog_envelope = Some(CdpEnvelopeEdit {
             field_index,
+            target: CdpEnvelopeTarget::NumberField,
             points,
             selected: 0,
             original,
@@ -5344,6 +5787,163 @@ impl App {
             custom_points: None,
         });
         true
+    }
+
+    /// The selection's duration in seconds (and the sample range it came from) — what every
+    /// `CdpParams` sub-editor uses as its time axis. Factored out of the four openers that
+    /// each recomputed it identically, so the crystal openers below can't drift from them.
+    fn cdp_editor_time_axis(&self) -> ((usize, usize), f64) {
+        let idx = self.active_document;
+        let range = self.operation_range(idx, self.snap_to_zero).unwrap_or((0, 0));
+        let time_max = self
+            .documents
+            .get(idx)
+            .map(|doc| (range.1 - range.0) as f64 / doc.sample_rate as f64)
+            .filter(|&d| d > 0.0)
+            .unwrap_or(1.0);
+        (range, time_max)
+    }
+
+    /// Opens the graphical breakpoint editor on a `CdpField::CrystalVdat`'s **envelope**
+    /// section — the same editor `open_cdp_envelope_editor` opens for a `Number` field, just
+    /// pointed at the other target (`CdpEnvelopeTarget::CrystalEnvelope`), which is the whole
+    /// point of making it polymorphic.
+    ///
+    /// Reached three ways: 'e' from the params dialog when the envelope is the unconfigured
+    /// half, Enter on an unconfigured crystal field (`CdpFieldSetupKind::CrystalEnvelope`),
+    /// and 'e' from inside the vertex table editor. Returns `false` when there's no crystal
+    /// field to act on, so callers can chain it like every other opener.
+    ///
+    /// A never-configured envelope is seeded with a symmetric rise/fall across the real
+    /// selection duration — already valid per `CrystalVdat::validate` (starts at time 0, ends
+    /// at 0, strictly increasing, first and last value 0), so the user starts from something
+    /// CDP will accept and has to deliberately break it rather than deliberately fix it.
+    fn open_cdp_crystal_envelope_editor(&mut self) -> bool {
+        let Some(Dialog::CdpParams { fields, focus, .. }) = &self.dialog else { return false };
+        let eligible = |_: usize, f: &CdpField| matches!(f, CdpField::CrystalVdat { .. });
+        let unset = |_: usize, f: &CdpField| matches!(f, CdpField::CrystalVdat { envelope, .. } if envelope.is_empty());
+        let Some(field_index) = resolve_smart_field_target(fields, *focus, eligible, unset) else {
+            return false;
+        };
+        let Some(CdpField::CrystalVdat { envelope, .. }) = fields.get(field_index) else { return false };
+
+        let (range, time_max) = self.cdp_editor_time_axis();
+        let original = (!envelope.is_empty()).then(|| envelope.clone());
+        let points = original.clone().unwrap_or_else(|| {
+            vec![(0.0, 0.0), (round6(time_max / 2.0), 1.0), (round6(time_max), 0.0)]
+        });
+
+        let Some(Dialog::CdpParams { focus: dialog_focus, envelope: dialog_envelope, table_edit, .. }) =
+            self.dialog.as_mut()
+        else {
+            return false;
+        };
+        *dialog_focus = field_index + 1;
+        // Switching sections from the vertex table: that editor already wrote its rows back
+        // into the field before dispatching here, so closing it is all that's left. The two
+        // sub-editor slots are mutually exclusive by construction everywhere else, and this
+        // is the one path that could otherwise leave both open at once.
+        *table_edit = None;
+        *dialog_envelope = Some(CdpEnvelopeEdit {
+            field_index,
+            target: CdpEnvelopeTarget::CrystalEnvelope,
+            points,
+            selected: 0,
+            original,
+            time_max,
+            range,
+            curve_picker: None,
+            save_prompt: None,
+            presets: crate::model::cdp::envelope_preset::list_presets(),
+            preset_selected: None,
+            custom_points: None,
+        });
+        true
+    }
+
+    /// Opens the multi-column table editor on a `CdpField::CrystalVdat`'s **vertex** section
+    /// (`CdpTableTarget::CrystalVertices`) — the table-editor counterpart to
+    /// `open_cdp_crystal_envelope_editor`, and the section 'e' lands on first from the params
+    /// dialog (vertices come first in the datafile, and unlike the envelope they always
+    /// already hold at least one row).
+    fn open_cdp_crystal_vertex_editor(&mut self) -> bool {
+        let Some(Dialog::CdpParams { fields, focus, .. }) = &self.dialog else { return false };
+        let eligible = |_: usize, f: &CdpField| matches!(f, CdpField::CrystalVdat { .. });
+        let Some(field_index) = resolve_smart_field_target(fields, *focus, eligible, |_, _| false) else {
+            return false;
+        };
+        let Some(CdpField::CrystalVdat { vertices, .. }) = fields.get(field_index) else { return false };
+
+        let rows: Vec<Vec<f64>> = vertices.iter().map(|v| v.to_vec()).collect();
+        let (_, time_max) = self.cdp_editor_time_axis();
+
+        let Some(Dialog::CdpParams { focus: dialog_focus, table_edit: dialog_table_edit, envelope, .. }) =
+            self.dialog.as_mut()
+        else {
+            return false;
+        };
+        *dialog_focus = field_index + 1;
+        // Mirror of the `table_edit = None` in the envelope opener above — this is the
+        // 'v'-from-the-envelope-editor path's other half.
+        *envelope = None;
+        *dialog_table_edit = Some(CdpTableEdit {
+            field_index,
+            target: CdpTableTarget::CrystalVertices,
+            original: rows.clone(),
+            rows,
+            selected_row: 0,
+            selected_col: 0,
+            // Vertex coordinates have no time axis at all, so `time_column` is `None` and
+            // `time_max` is never consulted — passed through only because the struct is
+            // shared with real time-column tables.
+            time_column: None,
+            time_max,
+            editing: None,
+        });
+        true
+    }
+
+    /// Opens whichever sub-editor belongs to the field that currently has focus, whatever
+    /// kind it is. Tried *before* the `open_cdp_*` chain the 'e' key otherwise walks, and
+    /// this is why:
+    ///
+    /// each opener in that chain applies "smart" target resolution
+    /// (`resolve_smart_field_target`) — if the focused field isn't of its kind it happily
+    /// scans on and claims some *other* eligible field. That's the intended behaviour when
+    /// only one field on the process is editable at all (it saves navigating to it first),
+    /// but it silently makes the chain's *order* decide the winner whenever a process has two
+    /// editable fields of different kinds. `crystal rotate` is the first such process: its
+    /// VDAT field sits alongside six automatable Number params, so pressing 'e' with the VDAT
+    /// field focused used to open a breakpoint envelope on "Rotation XY" instead — the chain's
+    /// first link winning purely because it is first.
+    ///
+    /// Returns `false` when focus isn't on a field, or the focused field has no editor (a
+    /// Toggle/Choice, or a non-automatable Number), leaving the existing chain to run
+    /// unchanged — so nothing about the single-editable-field case moves.
+    fn open_cdp_focused_field_editor(&mut self) -> bool {
+        let Some(Dialog::CdpParams { fields, focus, .. }) = &self.dialog else { return false };
+        if *focus == CDP_PRESET_FOCUS {
+            return false;
+        }
+        // Resolved to a plain discriminant before dispatching so the `&self.dialog` borrow
+        // has ended by the time an `&mut self` opener is called.
+        let kind = match fields.get(*focus - 1) {
+            Some(CdpField::Number { .. }) => 0,
+            Some(CdpField::List { .. }) => 1,
+            Some(CdpField::Table { .. }) => 2,
+            Some(CdpField::MarkerTimeList { .. }) => 3,
+            Some(CdpField::HiliteBand { .. }) => 4,
+            Some(CdpField::CrystalVdat { .. }) => 5,
+            _ => return false,
+        };
+        match kind {
+            0 => self.open_cdp_envelope_editor(),
+            1 => self.open_cdp_list_editor(),
+            2 => self.open_cdp_table_editor(),
+            3 => self.open_cdp_marker_time_list_editor(),
+            4 => self.open_cdp_hilite_band_editor(),
+            _ => self.open_cdp_crystal_vertex_editor(),
+        }
     }
 
     /// Opens the plain-list editor for an automatable `CdpField::List` — same "smart" target
@@ -5610,6 +6210,7 @@ impl App {
         *dialog_focus = field_index + 1; // smart-target may have jumped focus to this field
         *dialog_table_edit = Some(CdpTableEdit {
             field_index,
+            target: CdpTableTarget::TableField,
             rows,
             selected_row: 0,
             selected_col: 0,
@@ -5668,11 +6269,10 @@ impl App {
         let Some(Dialog::CdpParams { table_edit: Some(edit), fields, .. }) = self.dialog.as_mut() else {
             return;
         };
-        let field_index = edit.field_index;
-        let Some(CdpField::Table { columns, .. }) = fields.get(field_index) else { return };
-        // Cloned so `edit` (borrowed from `self.dialog`) can be mutated freely below without
-        // fighting the borrow checker over `fields`' own borrow of `self.dialog`.
-        let columns = columns.clone();
+        // Owned (not borrowed from `fields`) so `edit` — also borrowed from `self.dialog` —
+        // can be mutated freely below without fighting the borrow checker.
+        let Some(columns) = cdp_table_columns(fields, edit) else { return };
+        let is_crystal = edit.target == CdpTableTarget::CrystalVertices;
 
         let continues_typing = matches!(key.code, KeyCode::Char(c) if is_cdp_table_edit_char(c))
             || (edit.editing.is_some() && key.code == KeyCode::Backspace);
@@ -5757,16 +6357,30 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 if let Some(Dialog::CdpParams { fields, table_edit, .. }) = self.dialog.as_mut() {
-                    if let Some(CdpField::Table { rows: field_rows, .. }) = fields.get_mut(field_index) {
-                        *field_rows = original;
+                    if let Some(edit) = table_edit.as_ref() {
+                        cdp_table_write_back(fields, edit, original);
                     }
                     *table_edit = None;
                 }
             }
+            // Switch to the *other* half of a compound crystal field, committing this half on
+            // the way — the section-switch counterpart to the envelope editor's 'v'. 'e' is
+            // free here for the same reason it is in the params dialog: this editor's typing
+            // alphabet is digits/`-`/`.` only (`is_cdp_table_edit_char`), so a letter can
+            // never be a value keystroke. Only bound for `CrystalVertices`; on an ordinary
+            // `Table` field 'e' stays inert exactly as before.
+            KeyCode::Char('e') if is_crystal => {
+                if let Some(Dialog::CdpParams { fields, table_edit, .. }) = self.dialog.as_mut() {
+                    if let Some(edit) = table_edit.as_ref() {
+                        cdp_table_write_back(fields, edit, committed_rows);
+                    }
+                }
+                self.open_cdp_crystal_envelope_editor();
+            }
             KeyCode::Enter => {
                 if let Some(Dialog::CdpParams { fields, table_edit, .. }) = self.dialog.as_mut() {
-                    if let Some(CdpField::Table { rows: field_rows, .. }) = fields.get_mut(field_index) {
-                        *field_rows = committed_rows;
+                    if let Some(edit) = table_edit.as_ref() {
+                        cdp_table_write_back(fields, edit, committed_rows);
                     }
                     *table_edit = None;
                 }
@@ -6364,6 +6978,81 @@ impl App {
         true
     }
 
+    /// Opens the ordered multi-select over open buffers (`Dialog::CdpParams.variadic_picker`)
+    /// for a variadic-input process. Returns `false` — leaving the key to fall through — when
+    /// the dialog isn't a variadic one or focus isn't on the extra-input row, matching
+    /// `configure_chain_side_chain`'s "reject, let the key fall through" convention.
+    ///
+    /// Unlike `open_cdp_formant_picker` there's no smart-target search: this row is a fixed,
+    /// single place in the dialog, not one of N candidate fields.
+    fn open_cdp_variadic_picker(&mut self) -> bool {
+        let Some(Dialog::CdpParams { fields, focus, variadic_input, variadic_picker, .. }) = self.dialog.as_mut()
+        else {
+            return false;
+        };
+        if *focus != cdp_params_focus_extra_input(fields.len()) {
+            return false;
+        }
+        let Some(variadic) = variadic_input.as_ref() else { return false };
+        *variadic_picker = Some(CdpVariadicPicker {
+            original: variadic.groups.clone(),
+            group: 0,
+            cursor: 0,
+        });
+        true
+    }
+
+    /// All key handling while `Dialog::CdpParams.variadic_picker` is `Some`: Up/Down move the
+    /// cursor over every open buffer, Space toggles the cursor's buffer in/out of the current
+    /// group, Tab switches groups (`GroupedWav` only — inert with one group), Esc restores the
+    /// pick as it was when the overlay opened, Enter keeps it and closes.
+    ///
+    /// Toggling *appends* on select and removes on deselect, which is the entire ordering
+    /// mechanism — pick order is the command-line order, so there's deliberately no separate
+    /// reorder mode: to move a file later, deselect it and reselect it.
+    fn handle_cdp_variadic_picker_key(&mut self, key: KeyEvent) {
+        let Some(Dialog::CdpParams { variadic_input: Some(variadic), variadic_picker: Some(picker), .. }) =
+            self.dialog.as_mut()
+        else {
+            return;
+        };
+        let buffer_count = variadic.names.len();
+        let group_count = variadic.groups.len();
+        match key.code {
+            KeyCode::Up => picker.cursor = picker.cursor.saturating_sub(1),
+            KeyCode::Down => picker.cursor = (picker.cursor + 1).min(buffer_count.saturating_sub(1)),
+            // Wraps, so a two-group picker needs one key rather than Tab/Shift+Tab both.
+            KeyCode::Tab | KeyCode::BackTab => {
+                if group_count > 1 {
+                    picker.group = (picker.group + 1) % group_count;
+                }
+            }
+            KeyCode::Char(' ') => {
+                if let Some(group) = variadic.groups.get_mut(picker.group) {
+                    match group.iter().position(|&i| i == picker.cursor) {
+                        Some(at) => {
+                            group.remove(at);
+                        }
+                        None => group.push(picker.cursor),
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                let original = picker.original.clone();
+                variadic.groups = original;
+                if let Some(Dialog::CdpParams { variadic_picker, .. }) = self.dialog.as_mut() {
+                    *variadic_picker = None;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(Dialog::CdpParams { variadic_picker, .. }) = self.dialog.as_mut() {
+                    *variadic_picker = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// All key handling while `Dialog::CdpParams.formant_picker` is `Some` — Up/Down navigate
     /// the filtered list of open buffers, Esc closes it without changing the field's
     /// selection, Enter commits the highlighted buffer's index into the field's `selected`.
@@ -6550,8 +7239,7 @@ impl App {
             return;
         };
         let field_index = edit.field_index;
-        let Some(CdpField::Number { min, max, step, .. }) = fields.get(field_index) else { return };
-        let (min, max, step) = (*min, *max, *step);
+        let Some((min, max, step)) = cdp_envelope_bounds(fields, edit) else { return };
         let committed_points = edit.points.clone();
         let original = edit.original.clone();
         let required_envelope = self
@@ -6560,6 +7248,8 @@ impl App {
             .get(*catalog_index)
             .and_then(|d| d.params.get(field_index))
             .is_some_and(|p| p.required_envelope);
+        let constant_key = edit.target.constant_key(required_envelope);
+        let is_crystal = edit.target == CdpEnvelopeTarget::CrystalEnvelope;
 
         match key.code {
             KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -6637,8 +7327,8 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 if let Some(Dialog::CdpParams { fields, envelope, .. }) = self.dialog.as_mut() {
-                    if let Some(CdpField::Number { envelope: field_env, .. }) = fields.get_mut(field_index) {
-                        *field_env = original;
+                    if let Some(edit) = envelope.as_ref() {
+                        cdp_envelope_write_back(fields, edit, original);
                     }
                     *envelope = None;
                 }
@@ -6649,25 +7339,39 @@ impl App {
             // `EnvelopeCurvePicker`. Opened even with zero open curves: the picker then shows
             // "(no open curves)" (`render_envelope_curve_picker`), which is real feedback,
             // where the previous silent no-op left the user stuck in the editor wondering why
-            // nothing happened.
-            KeyCode::Char('c') if required_envelope => {
+            // nothing happened. Which of 'c's meanings applies is `CdpEnvelopeTarget::
+            // constant_key`'s call, not a bare `required_envelope` check, so the crystal
+            // envelope (where neither applies) can opt out of both.
+            KeyCode::Char('c') if constant_key == CdpEnvelopeConstantKey::UseCurve => {
                 let entries: Vec<usize> = (0..self.curves.len()).collect();
                 if let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() {
                     edit.curve_picker = Some(EnvelopeCurvePicker { entries, selected: 0 });
                 }
             }
-            KeyCode::Char('c') => {
+            KeyCode::Char('c') if constant_key == CdpEnvelopeConstantKey::RevertToConstant => {
                 if let Some(Dialog::CdpParams { fields, envelope, .. }) = self.dialog.as_mut() {
-                    if let Some(CdpField::Number { envelope: field_env, .. }) = fields.get_mut(field_index) {
-                        *field_env = None;
+                    if let Some(edit) = envelope.as_ref() {
+                        cdp_envelope_write_back(fields, edit, None);
                     }
                     *envelope = None;
                 }
             }
+            // Switch to the *other* half of a compound crystal field, committing this half on
+            // the way — the section-switch counterpart to the vertex table editor's own 'e'.
+            // Only bound for `CrystalEnvelope`; on a `Number` field 'v' has no meaning and
+            // falls through to the catch-all below, exactly as before.
+            KeyCode::Char('v') if is_crystal => {
+                if let Some(Dialog::CdpParams { fields, envelope, .. }) = self.dialog.as_mut() {
+                    if let Some(edit) = envelope.as_ref() {
+                        cdp_envelope_write_back(fields, edit, Some(committed_points));
+                    }
+                }
+                self.open_cdp_crystal_vertex_editor();
+            }
             KeyCode::Enter => {
                 if let Some(Dialog::CdpParams { fields, envelope, .. }) = self.dialog.as_mut() {
-                    if let Some(CdpField::Number { envelope: field_env, .. }) = fields.get_mut(field_index) {
-                        *field_env = Some(committed_points);
+                    if let Some(edit) = envelope.as_ref() {
+                        cdp_envelope_write_back(fields, edit, Some(committed_points));
                     }
                     *envelope = None;
                 }
@@ -6718,7 +7422,7 @@ impl App {
     /// the first time the cycle leaves "(none)"; a later save/edit doesn't touch the snapshot.
     /// A no-op if there are no saved presets (nothing to cycle to besides "(none)" itself).
     fn envelope_cycle_preset(&mut self, forward: bool) {
-        let (field_index, new_slot, custom_points) = {
+        let (new_slot, custom_points) = {
             let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &self.dialog else { return };
             if edit.presets.is_empty() {
                 return;
@@ -6729,7 +7433,7 @@ impl App {
             let custom_points = edit.custom_points.clone().or_else(|| {
                 if edit.preset_selected.is_none() { Some(edit.points.clone()) } else { None }
             });
-            (edit.field_index, new_slot, custom_points)
+            (new_slot, custom_points)
         };
 
         if new_slot == 0 {
@@ -6745,9 +7449,9 @@ impl App {
         let new_index = new_slot - 1;
 
         let (min, max) = match self.dialog.as_ref() {
-            Some(Dialog::CdpParams { fields, .. }) => match fields.get(field_index) {
-                Some(CdpField::Number { min, max, .. }) => (*min, *max),
-                _ => return,
+            Some(Dialog::CdpParams { fields, envelope: Some(edit), .. }) => match cdp_envelope_bounds(fields, edit) {
+                Some((min, max, _)) => (min, max),
+                None => return,
             },
             _ => return,
         };
@@ -6784,12 +7488,13 @@ impl App {
                 if curve_index >= self.curves.len() {
                     return;
                 }
-                let field_index = edit.field_index;
                 let (min, max) = match self.dialog.as_ref() {
-                    Some(Dialog::CdpParams { fields, .. }) => match fields.get(field_index) {
-                        Some(CdpField::Number { min, max, .. }) => (*min, *max),
-                        _ => return,
-                    },
+                    Some(Dialog::CdpParams { fields, envelope: Some(edit), .. }) => {
+                        match cdp_envelope_bounds(fields, edit) {
+                            Some((min, max, _)) => (min, max),
+                            None => return,
+                        }
+                    }
                     _ => return,
                 };
                 let rescaled = self.rescale_curve_to_envelope(curve_index, min, max);
@@ -6926,7 +7631,7 @@ impl App {
             self.cdp_params_cycle_preset(forward);
             return;
         }
-        if focus_val == cdp_params_focus_second_input(fields.len()) {
+        if focus_val == cdp_params_focus_extra_input(fields.len()) {
             if let Some(second) = second_input {
                 second.selected = if forward {
                     (second.selected + 1).min(second.doc_indices.len().saturating_sub(1))
@@ -7155,12 +7860,14 @@ impl App {
         range: (usize, usize),
         sample_rate: u32,
         second_input_doc: Option<usize>,
+        variadic_docs: &[usize],
         formant_selections: &[Option<usize>],
     ) -> bool {
         preview.range == range
             && preview.values == values
             && preview.sample_rate == sample_rate
             && preview.second_input_doc == second_input_doc
+            && preview.variadic_docs == variadic_docs
             && preview.formant_selections == formant_selections
     }
 
@@ -7259,6 +7966,19 @@ impl App {
             if let CdpField::FilePath { path: None, .. } = field {
                 return Some(i);
             }
+            // A crystal field's vertex half always has a seeded row, but its envelope half
+            // starts empty ("never configured" — see `CdpField::CrystalVdat`'s doc comment),
+            // which must block Apply exactly like an unset `required_envelope` field. Every
+            // *other* crystal rule (unit sphere, envelope contract, vertex-vs-input-count)
+            // spans more than one field of the value or couples it to the run's input count,
+            // so it lives in `pipeline::check_compound_param_data` instead — where it can be
+            // reported with a specific message rather than this function's single generic
+            // "value out of range."
+            if let CdpField::CrystalVdat { envelope, .. } = field {
+                if envelope.is_empty() {
+                    return Some(i);
+                }
+            }
         }
         None
     }
@@ -7269,7 +7989,7 @@ impl App {
     fn cdp_run(&mut self, purpose: crate::cdp::JobPurpose) {
         use crate::model::cdp::IoKind;
         let Some(Dialog::CdpParams {
-            catalog_index, fields, second_input, focus, preview, presets, preset_selected, custom_values, ..
+            catalog_index, fields, second_input, variadic_input, focus, preview, presets, preset_selected, custom_values, ..
         }) = self.dialog.take()
         else {
             return;
@@ -7283,17 +8003,17 @@ impl App {
         // every key while either sub-mode is open, so `cdp_run` can never be reached mid-edit.
         // `custom_values` is captured directly (not threaded as a parameter like the others)
         // since nothing between here and any `reopen(...)` call below inspects or consumes it.
-        let reopen = |focus: usize, error: String, fields: Vec<CdpField>, second_input: Option<CdpSecondInput>, preview: Option<CdpPreview>, presets: Vec<crate::model::cdp::preset::CdpPreset>, preset_selected: Option<usize>| {
+        let reopen = |focus: usize, error: String, fields: Vec<CdpField>, second_input: Option<CdpSecondInput>, variadic_input: Option<CdpVariadicInput>, preview: Option<CdpPreview>, presets: Vec<crate::model::cdp::preset::CdpPreset>, preset_selected: Option<usize>| {
             Dialog::CdpParams {
-                catalog_index, fields, second_input, focus, error: Some(error), preview,
+                catalog_index, fields, second_input, variadic_input, focus, error: Some(error), preview,
                 envelope: None, list_edit: None, table_edit: None, marker_time_list_edit: None,
-                hilite_band_edit: None, formant_picker: None, file_picker: None, presets, preset_selected,
+                hilite_band_edit: None, formant_picker: None, file_picker: None, variadic_picker: None, presets, preset_selected,
                 custom_values: custom_values.clone(), save_prompt: None, scroll: 0,
             }
         };
 
         if let Some(bad) = Self::cdp_validate_fields(&def, &fields) {
-            self.dialog = Some(reopen(bad + 1, "value out of range".into(), fields, second_input, preview, presets, preset_selected));
+            self.dialog = Some(reopen(bad + 1, "value out of range".into(), fields, second_input, variadic_input, preview, presets, preset_selected));
             return;
         }
 
@@ -7307,7 +8027,7 @@ impl App {
             match self.operation_range(idx, self.snap_to_zero) {
                 Some(r) => r,
                 None => {
-                    self.dialog = Some(reopen(focus, "no audio to process".into(), fields, second_input, preview, presets, preset_selected));
+                    self.dialog = Some(reopen(focus, "no audio to process".into(), fields, second_input, variadic_input, preview, presets, preset_selected));
                     return;
                 }
             }
@@ -7318,12 +8038,19 @@ impl App {
         // Resolved ahead of the cached-preview fast path below, which must know it to judge
         // whether the cache is still valid.
         let second_doc_index = second_input.as_ref().and_then(CdpSecondInput::selected_doc_index);
+        // A variadic process's extra inputs (`IoKind::VariadicWav`/`GroupedWav`), flattened
+        // into command-line order — same "whole buffer, its own selection ignored" treatment
+        // as the dual second input above, and resolved here for the same reason: the cached-
+        // preview check has to see them to know whether the cache still applies. Empty for
+        // every non-variadic process, so nothing below needs to branch on the input kind.
+        let variadic_docs: Vec<usize> =
+            variadic_input.as_ref().map(CdpVariadicInput::picked_doc_indices).unwrap_or_default();
 
         // An unchanged-parameter Apply after a successful Preview splices the cached
         // result instead of re-running CDP.
         if matches!(purpose, crate::cdp::JobPurpose::Apply) {
             if let Some(cached) = &preview {
-                if Self::cdp_preview_matches(cached, &values, range, doc.sample_rate, second_doc_index, &formant_field_selections(&fields)) {
+                if Self::cdp_preview_matches(cached, &values, range, doc.sample_rate, second_doc_index, &variadic_docs, &formant_field_selections(&fields)) {
                     let label = format!("CDP: {}", def.title);
                     let channels = cached.channels.clone();
                     let tolerance = crate::commands::cdp::timing_tolerance(
@@ -7355,7 +8082,7 @@ impl App {
         }
         if matches!(def.input, IoKind::DualWav | IoKind::DualAna) {
             let Some(doc_b) = second_doc_index.and_then(|i| self.documents.get(i)) else {
-                self.dialog = Some(reopen(focus, "no second input buffer".into(), fields, second_input, preview, presets, preset_selected));
+                self.dialog = Some(reopen(focus, "no second input buffer".into(), fields, second_input, variadic_input, preview, presets, preset_selected));
                 return;
             };
             input_specs.push(crate::model::cdp::InputSpec {
@@ -7364,12 +8091,26 @@ impl App {
                 len_samples: doc_b.len_samples(),
             });
         }
+        // One spec per picked buffer, appended after the selection's own — `plan_job` reads
+        // `inputs` positionally, so this order is literally the argv order. A pick that no
+        // longer resolves to a live document is dropped rather than aborting: `doc_indices`
+        // is a modal-dialog snapshot, so this can't happen today, and silently planning with
+        // one fewer file surfaces as `PlanError::VariadicInputCount` (which the user can act
+        // on) rather than a bare internal error.
+        for doc_index in &variadic_docs {
+            let Some(extra) = self.documents.get(*doc_index) else { continue };
+            input_specs.push(crate::model::cdp::InputSpec {
+                channels: extra.channel_count(),
+                sample_rate: extra.sample_rate,
+                len_samples: extra.len_samples(),
+            });
+        }
 
         let planned = crate::model::cdp::plan_job(&def, &values, &input_specs, &crate::model::cdp::PvocSettings::default());
         let mut planned = match planned {
             Ok(p) => p,
             Err(err) => {
-                self.dialog = Some(reopen(focus, cdp_plan_error_message(&err), fields, second_input, preview, presets, preset_selected));
+                self.dialog = Some(reopen(focus, cdp_plan_error_message(&err), fields, second_input, variadic_input, preview, presets, preset_selected));
                 return;
             }
         };
@@ -7391,6 +8132,12 @@ impl App {
                 inputs.push(doc_b.channels.clone());
             }
         }
+        // Must stay index-parallel to the `input_specs` loop above (`TempWavSpec.input_index`
+        // addresses this `Vec`), so it skips exactly the same unresolvable picks.
+        for doc_index in &variadic_docs {
+            let Some(extra) = self.documents.get(*doc_index) else { continue };
+            inputs.push(extra.channels.clone());
+        }
         let input_sample_rate = doc.sample_rate;
         let job_id = self.cdp_next_job_id;
         self.cdp_next_job_id += 1;
@@ -7409,6 +8156,7 @@ impl App {
             catalog_index,
             fields: fields.clone(),
             second_input,
+            variadic_input,
             focus,
             presets,
             preset_selected,
@@ -7520,7 +8268,7 @@ impl App {
     /// again when adding this): every Preview press reruns the upstream steps fresh.
     fn preview_chain_step(&mut self) {
         let Some(target) = self.cdp_chain_edit_target.clone() else { return };
-        let Some(Dialog::CdpParams { catalog_index, fields, second_input, presets, .. }) = self.dialog.take() else {
+        let Some(Dialog::CdpParams { catalog_index, fields, second_input, variadic_input, presets, .. }) = self.dialog.take() else {
             return;
         };
         let Some(def) = self.cdp_catalog.processes.get(catalog_index).cloned() else {
@@ -7533,6 +8281,7 @@ impl App {
                 catalog_index,
                 fields,
                 second_input,
+                variadic_input,
                 focus: bad + 1,
                 error: Some("value out of range".into()),
                 preview: None,
@@ -7541,7 +8290,7 @@ impl App {
                 table_edit: None,
                 marker_time_list_edit: None,
                 hilite_band_edit: None,
-                formant_picker: None, file_picker: None,
+                formant_picker: None, file_picker: None, variadic_picker: None,
                 presets,
                 preset_selected: None,
                 custom_values: None,
@@ -7565,7 +8314,7 @@ impl App {
             }
         };
 
-        let resume = SuspendedStepEdit { target, catalog_index, fields, second_input, presets };
+        let resume = SuspendedStepEdit { target, catalog_index, fields, second_input, variadic_input, presets };
 
         let Some(state) = self.cdp_chain_editor.as_ref() else { return };
         let Some(upstream) = crate::model::cdp::steps_at(&state.chain, &parent_path) else { return };
@@ -7620,6 +8369,7 @@ impl App {
             catalog_index: resume.catalog_index,
             fields: resume.fields,
             second_input: resume.second_input,
+            variadic_input: resume.variadic_input,
             focus: CDP_PRESET_FOCUS,
             error: Some(error),
             preview: None,
@@ -7628,7 +8378,7 @@ impl App {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None, file_picker: None,
+            formant_picker: None, file_picker: None, variadic_picker: None,
             presets: resume.presets,
             preset_selected: None,
             custom_values: None,
@@ -8052,15 +8802,16 @@ impl App {
                     catalog_index: resume.catalog_index,
                     fields: resume.fields,
                     second_input: resume.second_input,
+                    variadic_input: resume.variadic_input,
                     focus: CDP_PRESET_FOCUS,
                     error: None,
-                    preview: Some(CdpPreview { values, range: splice_range, channels, sample_rate, second_input_doc, formant_selections }),
+                    preview: Some(CdpPreview { values, range: splice_range, channels, sample_rate, second_input_doc, variadic_docs: Vec::new(), formant_selections }),
                     envelope: None,
                     list_edit: None,
                     table_edit: None,
                     marker_time_list_edit: None,
                     hilite_band_edit: None,
-                    formant_picker: None, file_picker: None,
+                    formant_picker: None, file_picker: None, variadic_picker: None,
                     presets: resume.presets,
                     preset_selected: None,
                     custom_values: None,
@@ -8653,10 +9404,16 @@ impl App {
                                     .as_ref()
                                     .and_then(CdpSecondInput::selected_doc_index);
                                 let formant_selections = formant_field_selections(&pending.fields);
+                                let variadic_docs = pending
+                                    .variadic_input
+                                    .as_ref()
+                                    .map(CdpVariadicInput::picked_doc_indices)
+                                    .unwrap_or_default();
                                 self.dialog = Some(Dialog::CdpParams {
                                     catalog_index: pending.catalog_index,
                                     fields: pending.fields,
                                     second_input: pending.second_input,
+                                    variadic_input: pending.variadic_input,
                                     focus: pending.focus,
                                     error: None,
                                     preview: Some(CdpPreview {
@@ -8665,6 +9422,7 @@ impl App {
                                         channels,
                                         sample_rate: output.sample_rate,
                                         second_input_doc,
+                                        variadic_docs,
                                         formant_selections,
                                     }),
                                     envelope: None,
@@ -8672,7 +9430,7 @@ impl App {
                                     table_edit: None,
                                     marker_time_list_edit: None,
                                     hilite_band_edit: None,
-                                    formant_picker: None, file_picker: None,
+                                    formant_picker: None, file_picker: None, variadic_picker: None,
                                     presets: pending.presets,
                                     preset_selected: pending.preset_selected,
                                     custom_values: pending.custom_values,
@@ -9981,8 +10739,8 @@ impl App {
                 let Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) = self.dialog.as_mut() else {
                     return true;
                 };
-                let Some(CdpField::Number { min, max, .. }) = fields.get(edit.field_index) else { return true };
-                let (min, max, time_max) = (*min, *max, edit.time_max);
+                let Some((min, max, _)) = cdp_envelope_bounds(fields, edit) else { return true };
+                let time_max = edit.time_max;
                 let (t, v) = cdp_envelope_mouse_to_domain(grid, time_max, min, max, mouse.column, mouse.row);
 
                 let now = Instant::now();
@@ -10032,8 +10790,7 @@ impl App {
                 let Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) = self.dialog.as_mut() else {
                     return true;
                 };
-                let Some(CdpField::Number { min, max, .. }) = fields.get(edit.field_index) else { return true };
-                let (min, max) = (*min, *max);
+                let Some((min, max, _)) = cdp_envelope_bounds(fields, edit) else { return true };
 
                 // Shift scales the mouse delta down before it's converted to a domain delta,
                 // so the same physical movement produces a smaller change — precision
@@ -11613,12 +12370,8 @@ impl App {
             Some(Dialog::CdpParams { envelope: Some(edit), fields, .. })
                 if edit.curve_picker.is_none() && edit.save_prompt.is_none() =>
             {
-                fields.get(edit.field_index).and_then(|f| match f {
-                    CdpField::Number { min, max, .. } => {
-                        Some((edit.points.clone(), edit.selected, edit.time_max, *min, *max, edit.range))
-                    }
-                    _ => None,
-                })
+                cdp_envelope_bounds(fields, edit)
+                    .map(|(min, max, _)| (edit.points.clone(), edit.selected, edit.time_max, min, max, edit.range))
             }
             _ => None,
         };
@@ -12251,8 +13004,8 @@ fn render_dialog(
             );
         }
         Dialog::CdpParams {
-            catalog_index, fields, second_input, focus, error, preview, envelope, list_edit, table_edit,
-            marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, presets, preset_selected, custom_values: _, save_prompt, scroll,
+            catalog_index, fields, second_input, variadic_input, focus, error, preview, envelope, list_edit, table_edit,
+            marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, variadic_picker, presets, preset_selected, custom_values: _, save_prompt, scroll,
         } => {
             let def = catalog.processes.get(*catalog_index);
             if let Some(edit) = envelope {
@@ -12273,13 +13026,16 @@ fn render_dialog(
             if let Some(picker) = formant_picker {
                 return render_cdp_formant_picker(frame, area, picker, formant_buffers);
             }
+            if let (Some(picker), Some(variadic)) = (variadic_picker.as_ref(), variadic_input.as_ref()) {
+                return render_cdp_variadic_picker(frame, area, picker, variadic);
+            }
             // Rendered separately by `App::render` (needs `&mut FilePanel`, same reason
             // `Dialog::LoadCurve`'s own picker is) — see that dialog's doc comment.
             if file_picker.is_some() {
                 return Vec::new();
             }
             return render_cdp_params_dialog(
-                frame, area, def, fields, second_input.as_ref(), *focus, error, preview,
+                frame, area, def, fields, second_input.as_ref(), variadic_input.as_ref(), *focus, error, preview,
                 presets, *preset_selected, save_prompt.as_ref(), *scroll, formant_buffers,
             );
         }
@@ -12346,6 +13102,7 @@ fn render_dialog(
     };
 
     let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
     let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
     let mut spans = vec![Span::styled(prefix.clone(), base)];
     let mut content_len = prefix.chars().count();
@@ -12359,9 +13116,17 @@ fn render_dialog(
     spans.push(Span::styled(suffix.clone(), base));
     content_len += suffix.chars().count();
 
+    // Only `SaveMatrixAs` gets a hint line: it's the one dialog in this shared group where
+    // Esc discarding has a real, distinct cost worth calling out explicitly -- mode 1's
+    // matrix is randomly regenerated every run, so a discarded-then-reopened prompt can
+    // never get the exact same data back (unlike e.g. Rename Marker, where Esc losing a
+    // typed-in label is trivially redone).
+    let hint = matches!(dialog, Dialog::SaveMatrixAs { .. }).then_some(" Enter:save  Esc:discard");
+    let content_len = content_len.max(hint.map(str::len).unwrap_or(0));
+
     let width = (content_len as u16 + 2).min(area.width);
-    // Border + blank spacer row + content row + border.
-    let height = 4.min(area.height);
+    // Border + blank spacer row + content row + (optional hint row) + border.
+    let height = (if hint.is_some() { 5 } else { 4 }).min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -12374,10 +13139,11 @@ fn render_dialog(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
-    frame.render_widget(
-        Paragraph::new(vec![Line::raw(""), Line::from(spans)]).block(block),
-        popup,
-    );
+    let mut lines = vec![Line::raw(""), Line::from(spans)];
+    if let Some(hint) = hint {
+        lines.push(Line::styled(hint, hint_style));
+    }
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
     Vec::new()
 }
 
@@ -12795,13 +13561,19 @@ fn render_cdp_envelope_editor(
     if let Some(prompt) = &edit.save_prompt {
         return render_envelope_save_prompt(frame, area, prompt);
     }
-    let Some(CdpField::Number { min, max, .. }) = fields.get(edit.field_index) else {
+    let Some((min, max, _)) = cdp_envelope_bounds(fields, edit) else {
         return Vec::new();
     };
-    let (min, max) = (*min, *max);
     let param = def.and_then(|d| d.params.get(edit.field_index));
     let param_name = param.map(|p| p.name.as_str()).unwrap_or("Envelope");
-    let required_envelope = param.is_some_and(|p| p.required_envelope);
+    let constant_key = edit.target.constant_key(param.is_some_and(|p| p.required_envelope));
+    // The crystal envelope is one half of a compound field, so its title says which half —
+    // "Envelope: Crystal Data" alone would read as though the whole field were an envelope.
+    let title = if edit.target == CdpEnvelopeTarget::CrystalEnvelope {
+        format!("Event Envelope: {param_name}  (section 2 of 2)")
+    } else {
+        format!("Envelope: {param_name}")
+    };
 
     let layout = cdp_envelope_layout(area);
     let popup = layout.popup;
@@ -12815,7 +13587,7 @@ fn render_cdp_envelope_editor(
     let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
 
     let block = Block::default()
-        .title(format!("Envelope: {param_name}"))
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
@@ -12975,12 +13747,22 @@ fn render_cdp_envelope_editor(
     // A required datafile field has no valid constant to revert to (`ParamDef.required_envelope`'s
     // doc comment) — 'c' is repurposed there as "use curve" instead. Advertised even with no
     // open curves, since 'c' now opens the picker regardless (it reports "(no open curves)"),
-    // so the hint matches the key's actual availability.
-    hint_spans.push(Span::styled("c", hint_style));
-    if !required_envelope {
-        hint_spans.push(Span::styled(":constant  ", label_style));
-    } else {
-        hint_spans.push(Span::styled(":use curve  ", label_style));
+    // so the hint matches the key's actual availability. On the crystal envelope neither
+    // meaning applies (`CdpEnvelopeConstantKey::Unavailable`) and the key is left unhinted;
+    // the section-switch key takes its place there instead.
+    match constant_key {
+        CdpEnvelopeConstantKey::RevertToConstant => {
+            hint_spans.push(Span::styled("c", hint_style));
+            hint_spans.push(Span::styled(":constant  ", label_style));
+        }
+        CdpEnvelopeConstantKey::UseCurve => {
+            hint_spans.push(Span::styled("c", hint_style));
+            hint_spans.push(Span::styled(":use curve  ", label_style));
+        }
+        CdpEnvelopeConstantKey::Unavailable => {
+            hint_spans.push(Span::styled("v", hint_style));
+            hint_spans.push(Span::styled(":vertices  ", label_style));
+        }
     }
     // The Preset row's own keys (Tab/s/d) are hinted on their own line at the very top of
     // the popup instead — see `lines`' header block above.
@@ -13173,6 +13955,140 @@ fn render_cdp_formant_picker(
         Span::styled("Esc", hint_style),
         Span::styled(":cancel", label_style),
     ]));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+    Vec::new()
+}
+
+/// Fixed visible-row count for `render_cdp_variadic_picker`'s buffer list — the same
+/// "plain scrolling list, no reason to size it off the terminal" reasoning
+/// `CDP_LIST_EDITOR_ROWS` already applies, just a smaller cap since the number of open
+/// buffers is realistically small.
+const CDP_VARIADIC_PICKER_ROWS: usize = 12;
+
+/// The ordered multi-select overlay for `Dialog::CdpParams.variadic_picker`.
+///
+/// Renders **every** open buffer as one row, annotated with its 1-based position in each
+/// group it was picked into (`[1]`, or `[ch1 1]`/`[ch2 2]` when there's more than one
+/// group), rather than showing picked and unpicked buffers as two separate lists. Keeping
+/// one stable row order means toggling a buffer never makes rows jump out from under the
+/// cursor — and since pick order *is* command-line order, showing that order as a number on
+/// a fixed row is what makes it legible without a separate reorder step.
+///
+/// The heading names where input 1 comes from, because that's the one thing this overlay
+/// can't show as a row: the active selection is always input 1 and is never in this list
+/// (see `CdpVariadicInput`'s doc comment).
+fn render_cdp_variadic_picker(
+    frame: &mut Frame,
+    area: Rect,
+    picker: &CdpVariadicPicker,
+    variadic: &CdpVariadicInput,
+) -> Vec<Rect> {
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
+    let multi_group = variadic.groups.len() > 1;
+
+    // One row per open buffer, with its pick position(s) prefixed.
+    let rows: Vec<String> = variadic
+        .names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let marks: Vec<String> = variadic
+                .groups
+                .iter()
+                .enumerate()
+                .filter_map(|(g, picks)| {
+                    let at = picks.iter().position(|&p| p == i)?;
+                    Some(if multi_group {
+                        format!("{} {}", variadic.group_labels.get(g).map(String::as_str).unwrap_or("?"), at + 1)
+                    } else {
+                        format!("{}", at + 1)
+                    })
+                })
+                .collect();
+            if marks.is_empty() {
+                format!("  {name}")
+            } else {
+                format!("[{}] {name}", marks.join(", "))
+            }
+        })
+        .collect();
+
+    let group_label = variadic.group_labels.get(picker.group).map(String::as_str).unwrap_or("extra");
+    let heading = if multi_group {
+        format!("input 1 = selection (ch1)   adding to: {group_label}")
+    } else {
+        "input 1 = the current selection".to_string()
+    };
+    let hint_text = if multi_group {
+        " Space:toggle  Tab:group  Enter:done  Esc:cancel"
+    } else {
+        " Space:toggle  Enter:done  Esc:cancel"
+    };
+
+    let content_width = rows
+        .iter()
+        .map(|r| r.chars().count())
+        .chain([heading.chars().count(), hint_text.chars().count()])
+        .max()
+        .unwrap_or(0);
+    let width = (content_width as u16 + 4).max(34).min(area.width);
+    let visible = rows.len().clamp(1, CDP_VARIADIC_PICKER_ROWS);
+    // heading + blank + rows + blank + hints (4 fixed content lines), + 2 border rows. Sized
+    // exactly: one row short and the hint line is silently clipped off the bottom, which is
+    // how a user would lose the only on-screen mention of Space/Tab.
+    let height = (visible as u16 + 6).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let block = Block::default()
+        .title(" Input Files ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    // Scroll the cursor into view the same way `Dialog::CdpBrowser` does — derived from the
+    // cursor every frame rather than stored, so there's no scroll state to keep in sync.
+    let scroll_top = picker.cursor.saturating_sub(visible.saturating_sub(1)).min(rows.len().saturating_sub(visible));
+
+    let mut lines = vec![
+        Line::from(Span::styled(format!(" {heading}"), label_style)),
+        Line::raw(""),
+    ];
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(" (no open buffers)", label_style)));
+    } else {
+        for (i, row) in rows.iter().enumerate().skip(scroll_top).take(visible) {
+            let style = if i == picker.cursor { selected_style } else { base };
+            lines.push(Line::from(Span::styled(format!(" {row}"), style)));
+        }
+    }
+    lines.push(Line::raw(""));
+    let mut hint_spans = vec![
+        Span::styled(" Space", hint_style),
+        Span::styled(":toggle  ", label_style),
+    ];
+    if multi_group {
+        hint_spans.push(Span::styled("Tab", hint_style));
+        hint_spans.push(Span::styled(":group  ", label_style));
+    }
+    hint_spans.extend([
+        Span::styled("Enter", hint_style),
+        Span::styled(":done  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
+    ]);
+    lines.push(Line::from(hint_spans));
 
     frame.render_widget(Paragraph::new(lines), inner);
     Vec::new()
@@ -13722,11 +14638,20 @@ fn render_cdp_table_editor(
     edit: &CdpTableEdit,
     def: Option<&crate::model::cdp::ProcessDef>,
 ) -> Vec<Rect> {
-    let Some(CdpField::Table { columns, .. }) = fields.get(edit.field_index) else {
+    let Some(columns) = cdp_table_columns(fields, edit) else {
         return Vec::new();
     };
+    let columns = &columns;
     let param = def.and_then(|d| d.params.get(edit.field_index));
     let param_name = param.map(|p| p.name.as_str()).unwrap_or("Table");
+    let is_crystal = edit.target == CdpTableTarget::CrystalVertices;
+    // Same "say which half of the compound field this is" reasoning as the crystal
+    // envelope editor's own title.
+    let title = if is_crystal {
+        format!("Vertices: {param_name}  (section 1 of 2)")
+    } else {
+        format!("Table: {param_name}")
+    };
 
     let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
     let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
@@ -13764,7 +14689,7 @@ fn render_cdp_table_editor(
     frame.render_widget(ratatui::widgets::Clear, popup);
 
     let block = Block::default()
-        .title(format!("Table: {param_name}"))
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
@@ -13824,16 +14749,20 @@ fn render_cdp_table_editor(
         Span::styled("Del", hint_style),
         Span::styled(":remove", label_style),
     ]));
-    lines.push(Line::from(vec![
-        Span::styled(" Enter", hint_style),
-        Span::styled(":save  ", label_style),
-        Span::styled("Esc", hint_style),
-        Span::styled(":cancel", label_style),
-        Span::styled(
-            format!("  {}", columns.get(edit.selected_col).map(|c| format_cdp_range(c.min, c.max)).unwrap_or_default()),
-            dim_style,
-        ),
-    ]));
+    let mut closing_hints = vec![Span::styled(" Enter", hint_style), Span::styled(":save  ", label_style)];
+    // Only a compound crystal field has a second section to switch to — the same key the
+    // params dialog uses to open an editor at all, reused here for "the other half."
+    if is_crystal {
+        closing_hints.push(Span::styled("e", hint_style));
+        closing_hints.push(Span::styled(":envelope  ", label_style));
+    }
+    closing_hints.push(Span::styled("Esc", hint_style));
+    closing_hints.push(Span::styled(":cancel", label_style));
+    closing_hints.push(Span::styled(
+        format!("  {}", columns.get(edit.selected_col).map(|c| format_cdp_range(c.min, c.max)).unwrap_or_default()),
+        dim_style,
+    ));
+    lines.push(Line::from(closing_hints));
 
     frame.render_widget(Paragraph::new(lines), inner);
     Vec::new()
@@ -14410,6 +15339,7 @@ fn render_cdp_params_dialog(
     def: Option<&crate::model::cdp::ProcessDef>,
     fields: &[CdpField],
     second_input: Option<&CdpSecondInput>,
+    variadic_input: Option<&CdpVariadicInput>,
     focus: usize,
     error: &Option<String>,
     preview: &Option<CdpPreview>,
@@ -14424,10 +15354,10 @@ fn render_cdp_params_dialog(
 
     let width = (14 + label_width + range_width + 24).clamp(50, 110) as u16;
     let width = width.min(area.width);
-    let has_second_input = second_input.is_some() as usize;
-    // header spacer + preset row + blank + [fields] + second-input? + blank + buttons +
+    let has_extra_input = cdp_has_extra_input(second_input, variadic_input) as usize;
+    // header spacer + preset row + blank + [fields] + extra-input? + blank + buttons +
     // error/blank + hints, + 2 border.
-    let overhead = 1 + 1 + 1 + has_second_input + 1 + 1 + 1 + 1;
+    let overhead = 1 + 1 + 1 + has_extra_input + 1 + 1 + 1 + 1;
     let content_field_rows = fields.len().max(1);
     let ideal_height = overhead + content_field_rows + 2;
     let height = (ideal_height as u16).min(area.height);
@@ -14630,6 +15560,31 @@ fn render_cdp_params_dialog(
                 Span::styled(format!("{:<range_width$}", ""), range_style),
                 Span::styled(" (not set — b to pick)", dim_style),
             ]),
+            // Both halves in one row, since they're one field — the vertex count is always
+            // real, the envelope may still be the "not set" half that blocks Apply. Kept
+            // deliberately terse (abbreviated "vert"/"env pts" rather than the fuller wording
+            // the single-section fields use): this row has to fit the same value column every
+            // other field gets, and it's the only one reporting two counts at once.
+            CdpField::CrystalVdat { vertices, envelope } => {
+                let vertex_text = format!(" {} vert", vertices.len());
+                if envelope.is_empty() {
+                    Line::from(vec![
+                        Span::styled(label, label_style_here),
+                        Span::styled(format!("{:<range_width$}", ""), range_style),
+                        Span::styled(vertex_text, point_style),
+                        Span::styled(", no envelope, e to edit", dim_style),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::styled(label, label_style_here),
+                        Span::styled(format!("{:<range_width$}", ""), range_style),
+                        Span::styled(
+                            format!("{vertex_text}, {} env pts, e to edit", envelope.len()),
+                            point_style,
+                        ),
+                    ])
+                }
+            }
             CdpField::FilePath { path: Some(path), .. } => {
                 let name = std::path::Path::new(path)
                     .file_name()
@@ -14655,7 +15610,7 @@ fn render_cdp_params_dialog(
     }
 
     if let Some(second) = second_input {
-        let is_focused = focus == cdp_params_focus_second_input(fields.len());
+        let is_focused = focus == cdp_params_focus_extra_input(fields.len());
         let label = format!(" {:<label_width$}  ", "2nd input");
         let name = second.selected_name();
         let value = if is_focused { format!(" \u{25c4} {name} \u{25ba}") } else { format!(" {name}") };
@@ -14665,10 +15620,30 @@ fn render_cdp_params_dialog(
             Span::styled(value, base),
         ]));
     }
+    // Shares the dual-input row's slot (an `IoKind` is never both -- see
+    // `cdp_params_focus_extra_input`). Collapsed to a summary plus an explicit "Enter" hint
+    // rather than the left/right cycle affordance the dual row uses, because unlike a
+    // single-choice cycle this row's real editor is the overlay
+    // (`render_cdp_variadic_picker`) and Enter is the only way in.
+    if let Some(variadic) = variadic_input {
+        let is_focused = focus == cdp_params_focus_extra_input(fields.len());
+        let label = format!(" {:<label_width$}  ", "input files");
+        let value = if is_focused {
+            format!(" {}  (Enter: pick)", variadic.summary())
+        } else {
+            format!(" {}", variadic.summary())
+        };
+        lines.push(Line::from(vec![
+            Span::styled(label, if is_focused { cursor_style } else { label_style }),
+            Span::styled(format!("{:<range_width$}", ""), range_style),
+            Span::styled(value, base),
+        ]));
+    }
     lines.push(Line::raw(""));
 
-    let preview_focus = cdp_params_focus_preview(fields.len(), second_input.is_some());
-    let apply_focus = cdp_params_focus_apply(fields.len(), second_input.is_some());
+    let has_extra = cdp_has_extra_input(second_input, variadic_input);
+    let preview_focus = cdp_params_focus_preview(fields.len(), has_extra);
+    let apply_focus = cdp_params_focus_apply(fields.len(), has_extra);
     // The checkmark means "Apply will splice exactly what you last heard" — so it must
     // track the same structural staleness check the Apply fast path uses (values +
     // second-input; range/rate can't change while the dialog is modal), not bare
@@ -14677,6 +15652,7 @@ fn render_cdp_params_dialog(
         p.values.len() == fields.len()
             && p.values.iter().zip(fields).all(|(v, f)| *v == f.to_value())
             && p.second_input_doc == second_input.as_ref().and_then(|s| s.selected_doc_index())
+            && p.variadic_docs == variadic_input.map(CdpVariadicInput::picked_doc_indices).unwrap_or_default()
             && p.formant_selections == formant_field_selections(fields)
     });
     let preview_label = if preview_fresh { " [Preview \u{2713}]" } else { " [Preview]" };
@@ -18130,7 +19106,7 @@ mod tests {
             glob_output: None,
             output_curve: Some("curve_out.txt".into()),
             output_curve_binary_template: Some("curve_raw_out.pch.wav".into()),
-            output_formant_buffer: None, output_sidecar: None,
+            output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -18377,7 +19353,7 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false, sidecar_extension: None,
+            requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 name: "Count".into(),
                 description: String::new(),
@@ -19414,6 +20390,7 @@ mod tests {
             catalog_index: 0,
             fields: Vec::new(),
             second_input: None,
+            variadic_input: None,
             focus: 0,
             presets: Vec::new(),
             preset_selected: None,
@@ -19442,12 +20419,11 @@ mod tests {
             input_files: vec![crate::model::cdp::pipeline::TempWavSpec {
                 relative_name: "in.wav".into(),
                 input_index: 0,
-                source_channels: vec![0],
-            }],
+                source_channels: vec![0], gain: None }],
             output_files: Vec::new(),
             glob_output: Some(crate::model::cdp::pipeline::GlobOutputSpec { prefix: "g".into() }),
             output_curve: None,
-            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
+            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -19497,6 +20473,7 @@ mod tests {
             catalog_index: 0,
             fields: Vec::new(),
             second_input: None,
+            variadic_input: None,
             focus: 0,
             presets: Vec::new(),
             preset_selected: None,
@@ -19525,8 +20502,7 @@ mod tests {
             input_files: vec![crate::model::cdp::pipeline::TempWavSpec {
                 relative_name: "in.wav".into(),
                 input_index: 0,
-                source_channels: vec![0],
-            }],
+                source_channels: vec![0], gain: None }],
             output_files: vec![crate::model::cdp::pipeline::OutputWavSpec {
                 relative_name: "out.wav".into(),
                 dest_channels: vec![0],
@@ -19536,6 +20512,7 @@ mod tests {
             output_curve_binary_template: None,
             output_formant_buffer: None,
             output_sidecar: Some("out.txt".into()),
+            matrix_gain_calibration: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -19561,6 +20538,81 @@ mod tests {
             panic!("expected Dialog::SaveMatrixAs to open, got {:?}", app.dialog.is_some());
         };
         assert_eq!(bytes, b"fake matrix data");
+    }
+
+    /// Real end-to-end Apply of "Matrix Generate And Transform" through the actual
+    /// `CdpParams` -> `cdp_run` -> real `matrix` binary path (not the earlier
+    /// fake-`/bin/sh`-job test, which bypasses `plan_job`/the real catalog entry entirely).
+    /// Regression coverage for a real bug (user report, 2026-07-26): a stereo document took
+    /// `plan_wav`'s dual-mono-lane branch, which didn't populate `output_sidecar` at all, so
+    /// "Save Matrix As" silently never appeared for a stereo file. Fixed by capturing the
+    /// first lane's sidecar only (`plan_wav`'s own doc comment — the same "one mono lane"
+    /// convention `GlobOutputSpec` already established for this exact tension). Covers both
+    /// channel counts since they go through genuinely different `plan_wav` branches. A real
+    /// Apply also calls `recent::record_used`/`process_last::save_last_process`, which touch
+    /// `XDG_CONFIG_HOME` — guarded the same way every other real-Apply/chain test is (env
+    /// vars are process-global, not per-thread, so an unguarded override here would race
+    /// against any other test doing the same concurrently).
+    #[test]
+    fn real_matrix_apply_opens_save_matrix_as_mono() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_matrix_apply_mono_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        let cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp");
+        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+            eprintln!("skipping: no real CDP install found in this checkout");
+            unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+            std::fs::remove_dir_all(&temp_dir).ok();
+            return;
+        }
+        app.config.cdp_dir = cdp_dir.to_string_lossy().to_string();
+        let catalog_index = app.cdp_catalog.processes.iter().position(|p| p.key == "matrix_matrix_1").unwrap();
+        app.open_cdp_params(catalog_index);
+        app.cdp_run(crate::cdp::JobPurpose::Apply);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while matches!(app.dialog, Some(Dialog::CdpRunning { .. })) && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(app.dialog, Some(Dialog::SaveMatrixAs { .. })), "expected Save Matrix As to open");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn real_matrix_apply_opens_save_matrix_as_stereo() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_matrix_apply_stereo_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = new_app(Some(stereo_doc(0.1, 0.2, 44100)), None);
+        let cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp");
+        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+            eprintln!("skipping: no real CDP install found in this checkout");
+            unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+            std::fs::remove_dir_all(&temp_dir).ok();
+            return;
+        }
+        app.config.cdp_dir = cdp_dir.to_string_lossy().to_string();
+        let catalog_index = app.cdp_catalog.processes.iter().position(|p| p.key == "matrix_matrix_1").unwrap();
+        app.open_cdp_params(catalog_index);
+        app.cdp_run(crate::cdp::JobPurpose::Apply);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while matches!(app.dialog, Some(Dialog::CdpRunning { .. })) && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(app.dialog, Some(Dialog::SaveMatrixAs { .. })), "expected Save Matrix As to open");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     /// Regression (user report, 2026-07-21): the buffer name generated for an extracted
@@ -19630,7 +20682,7 @@ mod tests {
             glob_output: None,
             output_curve: Some("pitch.txt".into()),
             output_curve_binary_template: Some("pitch.pch".into()),
-            output_formant_buffer: None, output_sidecar: None,
+            output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -19696,7 +20748,7 @@ mod tests {
             glob_output: None,
             output_curve: None,
             output_curve_binary_template: None,
-            output_formant_buffer: Some("out.for".into()), output_sidecar: None,
+            output_formant_buffer: Some("out.for".into()), output_sidecar: None, matrix_gain_calibration: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -19769,7 +20821,7 @@ mod tests {
             glob_output: None,
             output_curve: None,
             output_curve_binary_template: None,
-            output_formant_buffer: Some("moment.1f.wav".into()), output_sidecar: None,
+            output_formant_buffer: Some("moment.1f.wav".into()), output_sidecar: None, matrix_gain_calibration: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -19828,7 +20880,7 @@ mod tests {
             glob_output: None,
             output_curve: None,
             output_curve_binary_template: None,
-            output_formant_buffer: Some("out.for".into()), output_sidecar: None,
+            output_formant_buffer: Some("out.for".into()), output_sidecar: None, matrix_gain_calibration: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -19968,7 +21020,7 @@ mod tests {
             glob_output: None,
             output_curve: None,
             output_curve_binary_template: None,
-            output_formant_buffer: Some("out.for".into()), output_sidecar: None,
+            output_formant_buffer: Some("out.for".into()), output_sidecar: None, matrix_gain_calibration: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -20180,7 +21232,7 @@ mod tests {
         let original_len = app.documents[0].channels[0].len();
 
         let blur_index = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").expect("blur_avrg");
-        let (fields, _) = app.cdp_fields_for(blur_index);
+        let (fields, ..) = app.cdp_fields_for(blur_index);
         let values: Vec<_> = fields.iter().map(CdpField::to_value).collect();
 
         let chain = crate::model::cdp::CdpChain {
@@ -20243,7 +21295,7 @@ mod tests {
         app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
 
         let blur_index = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").expect("blur_avrg");
-        let (fields, _) = app.cdp_fields_for(blur_index);
+        let (fields, ..) = app.cdp_fields_for(blur_index);
         let values: Vec<_> = fields.iter().map(CdpField::to_value).collect();
 
         let chain = crate::model::cdp::CdpChain {
@@ -20699,7 +21751,7 @@ mod tests {
             output: IoKind::Ana,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false, sidecar_extension: None,
+            requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 name: "Formants".into(),
                 description: String::new(),
@@ -20726,7 +21778,7 @@ mod tests {
             glob_output: None,
             output_curve: None,
             output_curve_binary_template: None,
-            output_formant_buffer: None, output_sidecar: None,
+            output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -20768,7 +21820,7 @@ mod tests {
             output: IoKind::Ana,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false, sidecar_extension: None,
+            requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 name: "Formants".into(),
                 description: String::new(),
@@ -20795,7 +21847,7 @@ mod tests {
             glob_output: None,
             output_curve: None,
             output_curve_binary_template: None,
-            output_formant_buffer: None, output_sidecar: None,
+            output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -20822,17 +21874,18 @@ mod tests {
             channels: Vec::new(),
             sample_rate: 44100,
             second_input_doc: None,
+            variadic_docs: Vec::new(),
             formant_selections: vec![Some(0)],
         };
         let values = vec![ParamValue::FormantBufferRef]; // identical for either pick
 
         // Same pick → still fresh (fast-path Apply allowed).
         let same = vec![CdpField::FormantBufferRef { selected: Some(0), buffer_kind: kind }];
-        assert!(App::cdp_preview_matches(&preview, &values, (0, 100), 44100, None, &formant_field_selections(&same)));
+        assert!(App::cdp_preview_matches(&preview, &values, (0, 100), 44100, None, &[], &formant_field_selections(&same)));
 
         // Different pick → stale (must re-run CDP).
         let different = vec![CdpField::FormantBufferRef { selected: Some(1), buffer_kind: kind }];
-        assert!(!App::cdp_preview_matches(&preview, &values, (0, 100), 44100, None, &formant_field_selections(&different)));
+        assert!(!App::cdp_preview_matches(&preview, &values, (0, 100), 44100, None, &[], &formant_field_selections(&different)));
     }
 
     /// `cdp_process_badges` — one test per badge, each against a real shipped catalog entry
@@ -21249,6 +22302,272 @@ mod tests {
         assert!(keys.contains(&"synth_wave_1"), "outside chain mode, synthesis processes are normal browser entries");
     }
 
+    /// The variadic extra-input row must occupy exactly the same single focus slot the
+    /// dual-input row does — that's the whole reason `cdp_has_extra_input` exists rather than
+    /// each of the two picker kinds getting its own row. If either ever grew a second row the
+    /// Preview/Apply indices would silently shift for one input kind but not the other.
+    #[test]
+    fn a_variadic_process_gets_the_same_single_extra_input_row_a_dual_process_does() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let variadic = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "pulser_multi_1")
+            .expect("pulser_multi_1 in catalog");
+        app.open_cdp_params(variadic);
+        let Some(Dialog::CdpParams { fields, second_input, variadic_input, .. }) = &app.dialog else {
+            panic!("expected CdpParams");
+        };
+        assert!(second_input.is_none(), "a variadic process has no dual second-input row");
+        let variadic_input = variadic_input.as_ref().expect("a variadic process gets a picker");
+        assert!(cdp_has_extra_input(second_input.as_ref(), Some(variadic_input)));
+        let field_count = fields.len();
+        assert_eq!(cdp_params_focus_extra_input(field_count), field_count + 1);
+        assert_eq!(cdp_params_focus_preview(field_count, true), field_count + 2);
+        assert_eq!(cdp_params_focus_apply(field_count, true), field_count + 3);
+        // Nothing picked yet means the selection alone — never a buffer the user didn't choose.
+        assert_eq!(variadic_input.groups, vec![Vec::<usize>::new()]);
+        assert_eq!(variadic_input.total_input_count(), 1);
+    }
+
+    /// `IoKind::GroupedWav` gets two ordered lists (`repair`'s channel-1/channel-2 source
+    /// roles), a flat `VariadicWav` exactly one — the shape difference the two kinds exist to
+    /// express (see `IoKind::GroupedWav`'s doc comment).
+    #[test]
+    fn grouped_input_gets_two_pick_lists_and_flat_input_gets_one() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let find = |key: &str| app.cdp_catalog.processes.iter().position(|p| p.key == key).expect(key);
+
+        let (_, _, flat) = app.cdp_fields_for(find("tesselate_tesselate"));
+        let flat = flat.expect("tesselate is variadic");
+        assert_eq!(flat.groups.len(), 1);
+        assert_eq!(flat.group_labels, vec!["extra".to_string()]);
+
+        let (_, _, grouped) = app.cdp_fields_for(find("repair_repair"));
+        let grouped = grouped.expect("repair is grouped-variadic");
+        assert_eq!(grouped.groups.len(), 2);
+        assert_eq!(grouped.group_labels, vec!["ch1".to_string(), "ch2".to_string()]);
+    }
+
+    /// The picker's core contract: Space appends on select and removes on deselect, and that
+    /// pick order — not buffer order — is what reaches the command line. Order is load-bearing
+    /// for two of the four processes (`crystal rotate` maps file N to vertex N, `repair` pairs
+    /// positionally), and there's deliberately no separate reorder step, so this is the only
+    /// mechanism that sets it.
+    #[test]
+    fn space_toggles_buffers_in_pick_order_and_removing_one_closes_the_gap() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.push_document(doc(0.2, 100));
+        app.push_document(doc(0.3, 100));
+        let variadic = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "pulser_multi_1")
+            .expect("pulser_multi_1 in catalog");
+        app.open_cdp_params(variadic);
+
+        // Focus the extra-input row, then Enter to open the overlay.
+        let field_count = match &app.dialog {
+            Some(Dialog::CdpParams { fields, .. }) => fields.len(),
+            _ => panic!("expected CdpParams"),
+        };
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = cdp_params_focus_extra_input(field_count);
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(&app.dialog, Some(Dialog::CdpParams { variadic_picker: Some(_), .. })),
+            "Enter on the extra-input row opens the picker"
+        );
+
+        // Pick buffer 2, then buffer 1 — deliberately out of buffer order.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { variadic_input: Some(v), .. }) = &app.dialog else { panic!() };
+        assert_eq!(v.picked_doc_indices(), vec![2, 1], "pick order, not buffer order");
+        assert_eq!(v.total_input_count(), 3, "the selection counts as input 1");
+
+        // Toggling 2 off leaves 1 alone and renumbers nothing else.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { variadic_input: Some(v), .. }) = &app.dialog else { panic!() };
+        assert_eq!(v.picked_doc_indices(), vec![1]);
+
+        // Enter keeps the pick and closes; Esc would have restored the open-time snapshot.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { variadic_input: Some(v), variadic_picker, .. }) = &app.dialog else {
+            panic!()
+        };
+        assert!(variadic_picker.is_none(), "Enter closes the overlay");
+        assert_eq!(v.picked_doc_indices(), vec![1]);
+    }
+
+    /// Esc must restore the pick exactly as it was when the overlay opened — a cancelled
+    /// browse can't leave a half-built pick behind, since the pick silently changes which
+    /// files CDP is handed.
+    #[test]
+    fn esc_in_the_variadic_picker_restores_the_pick_it_opened_with() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.push_document(doc(0.2, 100));
+        let variadic = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "pulser_multi_1")
+            .expect("pulser_multi_1 in catalog");
+        app.open_cdp_params(variadic);
+        let field_count = match &app.dialog {
+            Some(Dialog::CdpParams { fields, .. }) => fields.len(),
+            _ => panic!(),
+        };
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = cdp_params_focus_extra_input(field_count);
+        }
+        // First session: pick buffer 1 and keep it.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Second session: pick buffer 0 too, then cancel.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { variadic_input: Some(v), .. }) = &app.dialog else { panic!() };
+        assert_eq!(v.picked_doc_indices().len(), 2, "both picked mid-session");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { variadic_input: Some(v), variadic_picker, .. }) = &app.dialog else {
+            panic!("Esc must close the overlay, not the whole dialog")
+        };
+        assert!(variadic_picker.is_none());
+        assert_eq!(v.picked_doc_indices(), vec![1], "restored to the open-time pick");
+    }
+
+    /// Tab cycles which channel-role list Space adds to, for a `GroupedWav` process only —
+    /// with one group there is nothing to switch to and Tab must be inert (it must not, for
+    /// instance, fall through to the dialog's own focus walk while the overlay is up).
+    #[test]
+    fn tab_switches_group_for_grouped_input_and_is_inert_for_flat_input() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.push_document(doc(0.2, 100));
+
+        let open_picker = |app: &mut App, key: &str| {
+            let index = app.cdp_catalog.processes.iter().position(|p| p.key == key).expect(key);
+            app.open_cdp_params(index);
+            let field_count = match &app.dialog {
+                Some(Dialog::CdpParams { fields, .. }) => fields.len(),
+                _ => panic!(),
+            };
+            if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+                *focus = cdp_params_focus_extra_input(field_count);
+            }
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        };
+
+        open_picker(&mut app, "repair_repair");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { variadic_input: Some(v), variadic_picker: Some(p), .. }) = &app.dialog
+        else {
+            panic!("expected the grouped picker to still be open")
+        };
+        assert_eq!(p.group, 1, "Tab moved to the ch2 list");
+        assert_eq!(v.groups[0], Vec::<usize>::new(), "ch1 untouched");
+        assert_eq!(v.groups[1], vec![1], "the pick landed in ch2");
+        // Two files total (selection as the ch1 source + one ch2 source) is a valid pick.
+        assert_eq!(v.total_input_count(), 2);
+
+        open_picker(&mut app, "pulser_multi_1");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { variadic_picker: Some(p), .. }) = &app.dialog else {
+            panic!("Tab must not close a single-group picker")
+        };
+        assert_eq!(p.group, 0, "with one group there is nothing to switch to");
+    }
+
+    /// The picker actually draws: its pick-order annotations are the only thing that makes
+    /// the ordering legible (there's no separate reorder step), so a rendering regression
+    /// there would silently make the whole feature unusable while every key-handling test
+    /// still passed. Also covers the collapsed summary row, whose leading total is what tells
+    /// a user their pick is still short of `min_inputs` without opening the overlay.
+    #[test]
+    fn variadic_picker_renders_pick_order_and_the_row_shows_the_total() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 10_000)), None);
+        app.push_document(doc(0.2, 10_000));
+        let variadic = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "repair_repair")
+            .expect("repair_repair in catalog");
+        app.open_cdp_params(variadic);
+        let field_count = match &app.dialog {
+            Some(Dialog::CdpParams { fields, .. }) => fields.len(),
+            _ => panic!(),
+        };
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = cdp_params_focus_extra_input(field_count);
+        }
+
+        // Collapsed row first: 1 file so far (the selection), split across the two ch groups.
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(screen.contains("input files"), "the extra-input row is labeled: {screen}");
+        assert!(screen.contains("1 file: ch1 selection +0"), "the row leads with the total: {screen}");
+
+        // Open the overlay and pick buffer 1 into ch2.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(screen.contains("Input Files"), "the overlay's title: {screen}");
+        assert!(screen.contains("adding to: ch2"), "the overlay names the group Space adds to: {screen}");
+        assert!(screen.contains("[ch2 1]"), "the picked buffer shows its group and pick position: {screen}");
+        assert!(screen.contains("Tab:group"), "a grouped picker offers the Tab hint: {screen}");
+
+        // Committing updates the collapsed row's total to 2 files.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(screen.contains("2 files:"), "the row's total tracks the pick: {screen}");
+    }
+
+    /// Every rendered cell joined row-by-row — enough to assert a label appears somewhere on
+    /// screen without hardcoding coordinates that shift whenever a dialog's height changes.
+    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+        let area = *buffer.area();
+        (0..area.height)
+            .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A variadic process must not be offered as a chain step: `chain::step_is_supported`
+    /// only accepts `Wav`/`Ana`/`Dual*` input, and every variadic process's extra files come
+    /// from a picker a chain has no way to carry (`SuspendedStepEdit.variadic_input` is
+    /// therefore always `None`). Guards the assumption the whole chain-side plumbing rests on.
+    #[test]
+    fn chain_edit_mode_excludes_variadic_input_processes_from_the_browser() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.cdp_chain_edit_target = Some(ChainEditTarget::Append(Vec::new()));
+        let entries = app.cdp_filter_entries("", CDP_GROUP_ALL, &[]);
+        let keys: Vec<&str> = entries.iter().map(|&i| app.cdp_catalog.processes[i].key.as_str()).collect();
+        for key in ["pulser_multi_1", "pulser_multi_2", "pulser_multi_3", "tesselate_tesselate", "repair_repair"] {
+            assert!(!keys.contains(&key), "{key} takes a variadic input list and cannot be a chain step");
+        }
+    }
+
     fn chain_step(key: &str) -> crate::model::cdp::ChainStep {
         crate::model::cdp::ChainStep { process_key: key.into(), values: Vec::new(), side_chain: Vec::new() }
     }
@@ -21620,7 +22939,7 @@ mod tests {
         assert!(matches!(app.dialog, Some(Dialog::CdpParams { .. })), "an existing step's Replace target jumps straight to CdpParams");
         // Focus the second-input row so `configure_chain_side_chain` recognizes it.
         if let Some(Dialog::CdpParams { focus, fields, second_input, .. }) = app.dialog.as_mut() {
-            *focus = cdp_params_focus_second_input(fields.len());
+            *focus = cdp_params_focus_extra_input(fields.len());
             assert!(second_input.is_some(), "combine_mean_1 is dual-input");
         }
 
@@ -21877,6 +23196,7 @@ mod tests {
             catalog_index,
             fields: Vec::new(),
             second_input: None,
+            variadic_input: None,
             focus: 0,
             presets: Vec::new(),
             preset_selected: None,
@@ -21902,15 +23222,14 @@ mod tests {
             input_files: vec![crate::model::cdp::pipeline::TempWavSpec {
                 relative_name: "in.wav".into(),
                 input_index: 0,
-                source_channels: vec![0],
-            }],
+                source_channels: vec![0], gain: None }],
             output_files: vec![crate::model::cdp::pipeline::OutputWavSpec {
                 relative_name: "out.wav".into(),
                 dest_channels: vec![0],
             }],
             glob_output: None,
             output_curve: None,
-            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
+            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -21957,7 +23276,7 @@ mod tests {
 
         let mut app = new_app(Some(doc(0.1, 4)), None);
         let catalog_index = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").expect("blur_avrg");
-        let (fields, _) = app.cdp_fields_for(catalog_index);
+        let (fields, ..) = app.cdp_fields_for(catalog_index);
         assert!(crate::model::cdp::process_last::load_last_process().is_none(), "nothing saved yet");
 
         app.cdp_pending = Some(CdpPending {
@@ -21967,6 +23286,7 @@ mod tests {
             catalog_index,
             fields: fields.clone(),
             second_input: None,
+            variadic_input: None,
             focus: 0,
             presets: Vec::new(),
             preset_selected: None,
@@ -21992,15 +23312,14 @@ mod tests {
             input_files: vec![crate::model::cdp::pipeline::TempWavSpec {
                 relative_name: "in.wav".into(),
                 input_index: 0,
-                source_channels: vec![0],
-            }],
+                source_channels: vec![0], gain: None }],
             output_files: vec![crate::model::cdp::pipeline::OutputWavSpec {
                 relative_name: "out.wav".into(),
                 dest_channels: vec![0],
             }],
             glob_output: None,
             output_curve: None,
-            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
+            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -23973,6 +25292,7 @@ mod tests {
             catalog_index: 0,
             fields: vec![field],
             second_input: None,
+            variadic_input: None,
             focus: 1,
             error: None,
             preview: None,
@@ -23981,7 +25301,7 @@ mod tests {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None, file_picker: None,
+            formant_picker: None, file_picker: None, variadic_picker: None,
             presets: Vec::new(),
             preset_selected: None,
             custom_values: None,
@@ -24012,7 +25332,7 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false, sidecar_extension: None,
+            requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 name: "Formants".into(),
                 description: String::new(),
@@ -24178,6 +25498,29 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// User request, 2026-07-26: Esc on `Dialog::SaveMatrixAs` must discard, not save — no
+    /// file written, `last_matrix_path` untouched. `handle_dialog_key`'s generic `KeyCode::Esc`
+    /// arm (`self.dialog = None`, no `save_matrix_as` call) already did this correctly before
+    /// this test was written; what was actually missing was the "Esc:discard" hint in the
+    /// dialog itself (`render_dialog`'s simple-text-dialog block) so the user could tell this
+    /// was safe/intentional rather than an accidental loss. This test locks in the discard
+    /// behavior itself, not just the hint text.
+    #[test]
+    fn esc_on_save_matrix_as_discards_without_writing_a_file() {
+        let dir = std::env::temp_dir().join(format!("tui-wave-save-matrix-esc-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = new_app(None, Some(dir.clone()));
+
+        app.dialog = Some(Dialog::SaveMatrixAs { bytes: b"fake matrix bytes".to_vec(), input: TextInput::new("mysine") });
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(app.dialog.is_none(), "Esc should close the dialog");
+        assert_eq!(app.last_matrix_path, None, "Esc must not remember a save path");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "Esc must not write a matrix file");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Enter on a focused, still-unset `FormantBufferRef` field opens the buffer picker
     /// instead of running Apply — mirrors `enter_on_an_unset_required_envelope_field_opens_its_editor`/
     /// `enter_on_an_unset_required_list_field_opens_its_editor` for the third "unset"-capable
@@ -24219,6 +25562,7 @@ mod tests {
                 CdpField::FormantBufferRef { selected: None, buffer_kind: FormantBufferKind::Formant },
             ],
             second_input: None,
+            variadic_input: None,
             focus: CDP_PRESET_FOCUS,
             error: None,
             preview: None,
@@ -24227,7 +25571,7 @@ mod tests {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None, file_picker: None,
+            formant_picker: None, file_picker: None, variadic_picker: None,
             presets: Vec::new(),
             preset_selected: None,
             custom_values: None,
@@ -24331,5 +25675,297 @@ mod tests {
         assert!(!app.curves[0].dirty, "a no-change Enter must not dirty the curve");
         assert_eq!(app.curve_histories[0].last_label(), None, "a no-change Enter must not push an undo step");
     }
-}
+    // ---- crystal rotate's compound VDAT field ----------------------------------------
 
+    /// Opens `crystal_rotate_1`'s params dialog with its (only) VDAT field focused.
+    fn open_crystal_with_field_focused(app: &mut App) {
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "crystal_rotate_1")
+            .expect("crystal_rotate_1 should be in the catalog");
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = 1;
+        }
+    }
+
+    /// The two halves of a compound field start differently on purpose: vertices always have
+    /// a seeded row (there is no meaningful unset coordinate), the envelope starts empty
+    /// because its times are real seconds and nothing at catalog-load time knows the
+    /// selection's duration.
+    #[test]
+    fn crystal_field_starts_with_one_vertex_and_no_envelope() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_crystal_with_field_focused(&mut app);
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::CrystalVdat { vertices, envelope }) = fields.first() else {
+            panic!("expected a CrystalVdat field")
+        };
+        assert_eq!(vertices, &vec![[0.0, 0.0, 0.0]]);
+        assert!(envelope.is_empty(), "the envelope half is the unconfigured one");
+    }
+
+    /// The unconfigured half blocks Apply exactly like an unset `required_envelope` field,
+    /// and stops doing so once the envelope editor has committed something.
+    #[test]
+    fn cdp_validate_fields_blocks_a_crystal_field_until_its_envelope_is_set() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_crystal_with_field_focused(&mut app);
+        let def = app.cdp_catalog.processes.iter().find(|p| p.key == "crystal_rotate_1").unwrap().clone();
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(App::cdp_validate_fields(&def, fields), Some(0), "the empty envelope must block");
+
+        // Enter on the unset field opens the envelope editor rather than running and failing.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { envelope: Some(edit), error, .. }) = &app.dialog else {
+            panic!("expected the envelope editor to be open")
+        };
+        assert_eq!(edit.target, CdpEnvelopeTarget::CrystalEnvelope);
+        assert!(error.is_none(), "we redirected to the editor instead of running");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // commit
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(App::cdp_validate_fields(&def, fields).is_none(), "a committed envelope unblocks Apply");
+    }
+
+    /// The seeded envelope must already satisfy every rule CDP enforces on the datafile, so
+    /// a user who just opens the editor and presses Enter gets a runnable job — the shape is
+    /// scaled to the real selection's duration, starts at time 0, ends at the duration, and
+    /// has 0 as its first and last value.
+    #[test]
+    fn opening_the_crystal_envelope_seeds_a_shape_that_already_validates() {
+        // 2 seconds at 44100.
+        let mut app = new_app(Some(doc(0.1, 88200)), None);
+        open_crystal_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)); // vertices
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)); // -> envelope
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // commit
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::CrystalVdat { vertices, envelope }) = fields.first() else { panic!() };
+        assert_eq!(envelope.len(), 3, "a symmetric rise/fall, not a flat line");
+        assert_eq!(envelope[0], (0.0, 0.0));
+        assert_eq!(envelope[2], (2.0, 0.0), "the envelope spans the real selection duration");
+        let vdat = crate::model::cdp::CrystalVdat { vertices: vertices.clone(), envelope: envelope.clone() };
+        assert_eq!(vdat.validate(), Ok(()), "the seeded shape must be runnable as-is");
+    }
+
+    /// 'e' from the params dialog lands on section 1 (vertices, the order they appear in the
+    /// datafile); 'e' again switches to section 2, and 'v' comes back — with each switch
+    /// committing the section being left, so a round trip loses nothing.
+    #[test]
+    fn e_and_v_switch_between_the_crystal_field_two_sections_committing_as_they_go() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_crystal_with_field_focused(&mut app);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { table_edit: Some(edit), envelope, .. }) = &app.dialog else {
+            panic!("'e' should open the vertex table first")
+        };
+        assert_eq!(edit.target, CdpTableTarget::CrystalVertices);
+        assert!(envelope.is_none(), "only one sub-editor may be open at a time");
+
+        // Edit a coordinate, then switch sections without pressing Enter.
+        type_str(&mut app, "0.5");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { envelope: Some(edit), table_edit, fields, .. }) = &app.dialog else {
+            panic!("'e' inside the vertex table should switch to the envelope")
+        };
+        assert_eq!(edit.target, CdpEnvelopeTarget::CrystalEnvelope);
+        assert!(table_edit.is_none(), "switching must close the section being left");
+        let Some(CdpField::CrystalVdat { vertices, .. }) = fields.first() else { panic!() };
+        assert_eq!(vertices[0][0], 0.5, "the vertex edit must be committed on the way out");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { table_edit: Some(edit), envelope, fields, .. }) = &app.dialog else {
+            panic!("'v' inside the envelope should switch back to the vertices")
+        };
+        assert_eq!(edit.target, CdpTableTarget::CrystalVertices);
+        assert!(envelope.is_none());
+        assert_eq!(edit.rows[0][0], 0.5, "the round trip must not lose the edited coordinate");
+        let Some(CdpField::CrystalVdat { envelope, .. }) = fields.first() else { panic!() };
+        assert!(!envelope.is_empty(), "leaving the envelope section commits it too");
+    }
+
+    /// The vertex table's three columns come from CDP's own contract, not from the catalog
+    /// entry, and a typed coordinate clamps to the per-axis -1..1 range. (The unit-sphere
+    /// rule is cross-axis and deliberately lives in `CrystalVdat::validate` instead — no
+    /// per-column clamp can express it.)
+    #[test]
+    fn crystal_vertex_table_uses_the_fixed_xyz_columns_and_clamps_each_axis() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_crystal_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { table_edit: Some(edit), fields, .. }) = &app.dialog else { panic!() };
+        let columns = cdp_table_columns(fields, edit).expect("a crystal vertex table has fixed columns");
+        assert_eq!(columns.len(), 3);
+        assert!(columns[0].name.starts_with('X') && columns[1].name.starts_with('Y') && columns[2].name.starts_with('Z'));
+        assert_eq!((columns[0].min, columns[0].max), (-1.0, 1.0));
+
+        type_str(&mut app, "9");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)); // commits
+        let Some(Dialog::CdpParams { table_edit: Some(edit), .. }) = &app.dialog else { panic!() };
+        assert_eq!(edit.rows[0][0], 1.0, "a coordinate must clamp to the fixed +/-1 range");
+    }
+
+    /// The graphical envelope editor's value axis must come from CDP's fixed 0-1 contract
+    /// when it's editing a crystal envelope, not from any `CdpField::Number` (there isn't
+    /// one) — and nudging must clamp to it. This is the polymorphism the whole
+    /// `CdpEnvelopeTarget` split exists for.
+    #[test]
+    fn crystal_envelope_editor_uses_the_fixed_zero_to_one_value_axis() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_crystal_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // unset -> envelope
+
+        let Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) = &app.dialog else { panic!() };
+        assert_eq!(cdp_envelope_bounds(fields, edit), Some((0.0, 1.0, 0.01)));
+
+        // Point 0 sits at value 0; a coarse Down must not take it below the floor, and a
+        // long run of coarse Ups must not take the middle point above the ceiling.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        for _ in 0..80 {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        }
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!() };
+        assert_eq!(edit.points[0].1, 0.0);
+        assert_eq!(edit.points[1].1, 1.0);
+    }
+
+    /// 'c' has two meanings in the envelope editor already (revert-to-constant, use-curve)
+    /// and neither applies to a crystal envelope: there is no constant form, and an open
+    /// pitch curve is a Hz contour rather than a 0-1 amplitude shape. It must be inert here
+    /// — in particular it must not close the editor the way revert-to-constant does.
+    #[test]
+    fn c_is_inert_in_the_crystal_envelope_editor() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_crystal_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else {
+            panic!("'c' must not close the crystal envelope editor")
+        };
+        assert!(edit.curve_picker.is_none(), "'c' must not open the pitch-curve picker either");
+    }
+
+    /// Esc must restore the section it was editing and nothing else — the compound field's
+    /// *other* half has to survive untouched.
+    #[test]
+    fn esc_in_one_crystal_section_restores_only_that_section() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_crystal_with_field_focused(&mut app);
+        // Configure both halves first.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // envelope
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // commit
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!() };
+        let Some(CdpField::CrystalVdat { envelope, .. }) = fields.first() else { panic!() };
+        let committed_envelope = envelope.clone();
+
+        // Open the vertex table, add a row, then cancel.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { fields, table_edit, .. }) = &app.dialog else { panic!() };
+        assert!(table_edit.is_none(), "Esc closes the sub-editor");
+        let Some(CdpField::CrystalVdat { vertices, envelope }) = fields.first() else { panic!() };
+        assert_eq!(vertices.len(), 1, "Esc must discard the added vertex");
+        assert_eq!(envelope, &committed_envelope, "Esc in the vertex section must not touch the envelope");
+    }
+
+    /// An ordinary `Number` field's envelope editor must be entirely unaffected by the
+    /// target split: its bounds still come from the field, and 'v' (the crystal
+    /// section-switch key) must remain an ordinary no-op there rather than doing anything.
+    #[test]
+    fn number_field_envelope_editor_is_unchanged_by_the_target_split() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        let catalog_index = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").unwrap();
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = 1;
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) = &app.dialog else { panic!() };
+        assert_eq!(edit.target, CdpEnvelopeTarget::NumberField);
+        let Some(CdpField::Number { min, max, step, .. }) = fields.get(edit.field_index) else { panic!() };
+        assert_eq!(cdp_envelope_bounds(fields, edit), Some((*min, *max, *step)));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert!(
+            matches!(&app.dialog, Some(Dialog::CdpParams { envelope: Some(_), .. })),
+            "'v' must stay inert on a Number field's envelope editor"
+        );
+    }
+
+    /// Regression test for a real ordering bug the compound field exposed: every `open_cdp_*`
+    /// opener applies "smart" target resolution, so when the focused field isn't of its kind
+    /// it scans on and claims a different one. `crystal rotate` is the first process with two
+    /// *differently*-shaped editable fields (the VDAT datafile plus six automatable Numbers),
+    /// and 'e' on the focused VDAT field used to open a breakpoint envelope on "Rotation XY"
+    /// instead, purely because `open_cdp_envelope_editor` is first in the chain. The focused
+    /// field must always win — in both directions.
+    #[test]
+    fn e_opens_the_focused_field_editor_not_whichever_opener_is_first_in_the_chain() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_crystal_with_field_focused(&mut app); // focus = 1, i.e. the VDAT field
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert!(
+            matches!(&app.dialog, Some(Dialog::CdpParams { table_edit: Some(_), envelope: None, .. })),
+            "'e' on the focused VDAT field must open its vertex table, not an envelope on a Number param"
+        );
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        // Focus an automatable Number param instead: 'e' must now open that field's own
+        // breakpoint editor, targeting *that* field.
+        let rotation_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .find(|p| p.key == "crystal_rotate_1")
+            .unwrap()
+            .params
+            .iter()
+            .position(|p| p.name == "Rotation XY")
+            .unwrap();
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = rotation_index + 1;
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else {
+            panic!("'e' on a focused automatable Number field must open the envelope editor")
+        };
+        assert_eq!(edit.field_index, rotation_index);
+        assert_eq!(edit.target, CdpEnvelopeTarget::NumberField);
+    }
+
+    /// Both crystal sub-editors must render without panicking and must say which section
+    /// they are — the compound field is the only place a sub-editor title can be ambiguous.
+    #[test]
+    fn crystal_section_editors_render_with_a_section_labelled_title() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_crystal_with_field_focused(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("Vertices: Crystal Data"), "the vertex editor must name its section");
+        assert!(text.contains("section 1 of 2"));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("Event Envelope: Crystal Data"), "the envelope editor must name its section");
+        assert!(text.contains("section 2 of 2"));
+    }
+}

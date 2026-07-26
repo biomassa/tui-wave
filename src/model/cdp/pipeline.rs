@@ -67,6 +67,14 @@ pub struct TempWavSpec {
     pub relative_name: String,
     pub input_index: usize,
     pub source_channels: Vec<usize>,
+    /// A linear gain multiplier applied to the raw samples before writing this file —
+    /// `None` (every input before 2026-07-26) means no attenuation, same as an implicit
+    /// `1.0`. Added for `matrix_matrix_1`'s "Auto Gain Reduction" two-pass scheme
+    /// (`MatrixGainCalibration`'s doc comment): the preview pass's input needs a fixed safe
+    /// attenuation, and the final pass's input is initially written at that same safe value
+    /// as a placeholder (the real gain isn't known until the preview pass completes), then
+    /// overwritten in place once it is.
+    pub gain: Option<f64>,
 }
 
 /// A temp output file the runner must read after the job completes, and which destination
@@ -110,6 +118,44 @@ pub struct DeferredWindowParam {
 pub enum DeferredWindowTarget {
     Arg { arg_index: usize, flag: Option<String>, percent: f64 },
     BrkFile { relative_name: String, points: Vec<(f64, f64)> },
+}
+
+/// `matrix_matrix_1`'s "Auto Gain Reduction" two-pass gain scheme (2026-07-26) — a fixed
+/// formula based on Analysis Channels alone (tried first) turned out insufficient in
+/// practice (real user content still clipped, just less than before), since the actual
+/// output level depends on the specific random matrix generated *and* the source's own
+/// content, neither of which a formula can know in advance. This instead *measures* the
+/// real answer: `PlannedJob.steps[0]` runs `matrix matrix 1` on a copy of the input safely
+/// pre-attenuated by `preview_attenuation` (small enough that this pass can never clip,
+/// regardless of channel count or content) and produces both the transformed preview *and*
+/// the matrix data itself (`matrix matrix 1`'s own two-file output). `steps[1]` then runs
+/// `matrix matrix 2`, reusing that *same* saved matrix (never regenerated — mode 1's
+/// randomness only happens once), applied to a freshly-written copy of the input gained by
+/// the exact factor computed from the preview's measured peak. Since `matrix matrix 2`
+/// applies a fixed matrix, this is a genuinely linear operator: scaling the input by `k`
+/// scales the output by exactly `k` too, so the computed gain is exact, not an estimate —
+/// unlike the abandoned formula, this can't under- or over-correct regardless of source
+/// content or how the random matrix happened to come out.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatrixGainCalibration {
+    /// Relative name of `steps[0]`'s real transformed-preview output — its peak amplitude
+    /// drives the gain computation.
+    pub preview_output_relative_name: String,
+    /// The fixed, guaranteed-safe gain `steps[0]`'s own input file was attenuated by.
+    pub preview_attenuation: f64,
+    /// Peak amplitude to target for the final output — a little under 1.0 to leave some
+    /// headroom rather than aiming for exactly full scale.
+    pub target_peak: f64,
+    /// Every final-pass (`steps[1..]`) input file to (re)write once the real gain is known —
+    /// one entry per channel lane (always 1 for mono, 2 for stereo; `matrix` is never
+    /// `stereo_native`, so a stereo document still gets one independent final-pass
+    /// invocation per channel — see `plan_matrix_with_gain_calibration`'s doc comment for
+    /// why every lane shares this one calibration rather than getting its own). Each
+    /// entry's own `gain` is a safe placeholder at plan time (mirroring `write_inputs`'
+    /// normal behavior); `cdp::runner::resolve_matrix_gain_calibration` overwrites every
+    /// entry's file in place with the real computed gain, once, right before the first
+    /// final-pass step runs.
+    pub final_inputs: Vec<TempWavSpec>,
 }
 
 /// A process that produces an unknown number of numbered mono output files sharing a
@@ -166,12 +212,19 @@ pub struct PlannedJob {
     /// temp file whose raw bytes `cdp::runner` reads back (before the temp dir is cleaned
     /// up) into `CompletedJob.sidecar_bytes`, for the app layer to offer a Save-As prompt on
     /// (`App::tick_cdp`). Unlike `output_curve`/`output_formant_buffer`, this is a genuine
-    /// *secondary* result alongside a normal primary one, not the job's only output — only
-    /// ever populated by `plan_wav`'s mono/`stereo_native` branch today (the dual-mono lane
-    /// split branch doesn't compute it, so a sidecar-producing process run against a stereo
-    /// file through that path silently produces no sidecar capture — a known, documented
-    /// scope limit rather than an oversight, added 2026-07-26 for `matrix_matrix_1`).
+    /// *secondary* result alongside a normal primary one, not the job's only output.
+    /// `plan_wav`'s dual-mono-lane branch (a stereo document run through a mono-only
+    /// process) only captures the *first* lane's sidecar — each lane's matrix is
+    /// independently random-generated, so there's no single file representing both; see
+    /// that branch's own doc comment.
     pub output_sidecar: Option<String>,
+    /// `Some` only for `matrix_matrix_1`'s "Auto Gain Reduction" (2026-07-26) — see
+    /// `MatrixGainCalibration`'s own doc comment for the two-pass scheme this drives.
+    /// `cdp::runner` resolves it between `PlannedJob.steps[0]` (the safely pre-attenuated
+    /// preview) and `steps[1]` (the final, correctly-gained pass), the same "read an
+    /// earlier step's real output, patch a later step's input before it runs" shape
+    /// `DeferredWindowParam` already established for `PercentOfAnaWindowCount`.
+    pub matrix_gain_calibration: Option<MatrixGainCalibration>,
     pub brk_files: Vec<(String, String)>,
     /// Raw-byte input files to write before running (parallel to `brk_files`, which is
     /// text-only) — used for a curve-transform job's binary pitchfile input, spliced from a
@@ -199,9 +252,28 @@ pub enum PlanError {
     /// `plan_job` was handed the wrong number of `InputSpec`s for the process's `IoKind`
     /// arity (0 for synthesis, 1 for Wav/Ana, 2 for DualWav/DualAna).
     InputCountMismatch { expected: usize, actual: usize },
+    /// A variadic-input process (`IoKind::VariadicWav`/`GroupedWav`) got a file count its
+    /// own shape can't accept. Distinct from `InputCountMismatch`, which names one exact
+    /// expected arity: here the valid set is a *range* (and, for `GroupedWav`, a parity
+    /// constraint too — CDP itself rejects an odd count with "NUMBER OF INPUT FILES IS NOT
+    /// A MULTIPLE OF 2"), so the message has to describe the rule rather than a number.
+    VariadicInputCount { reason: String, actual: usize },
     /// Dual-input processing requires both inputs at the same sample rate — CDP itself
     /// rejects mismatched-rate inputs, so this is caught up front with a clearer message.
+    /// Variadic-input processes get the same check against input 0 (the selection), for the
+    /// same reason: every real binary in that family rejects a mismatch with "Incompatible
+    /// sample-rate in input file <name>".
     SampleRateMismatch { first: u32, second: u32 },
+    /// A compound datafile param's value breaks a structural rule the CDP binary itself
+    /// enforces while parsing that file (`ParamKind::CrystalVdat` — vertices outside the
+    /// unit sphere, an event envelope that doesn't start and end at 0, a vertex count that
+    /// doesn't match the input-file count, …). Distinct from every error above in *when* it
+    /// can happen: the value is structurally well-formed as far as the type system and the
+    /// per-cell range clamps go, and only fails a cross-field rule — so it can't be caught
+    /// by the UI's own per-field `cdp_validate_fields` and is checked here, where both the
+    /// param values and the real input count are in hand. `reason` is written to be shown
+    /// verbatim (see `CrystalVdat::validate`); `param` names the field it belongs to.
+    InvalidParamData { param: String, reason: String },
 }
 
 /// Parses the `decfactor` field out of a `.ana` file's RIFF `note` chunk (hex-encoded
@@ -423,23 +495,40 @@ fn plan_param(
         // just with more than one value per line. None of the catalog's table params use
         // `PercentOfAnaWindowCount`, so — like `List` — every column resolves outright.
         ParamValue::Table(rows) => {
-            let super::def::ParamKind::Table { columns, .. } = &param.kind else {
+            let super::def::ParamKind::Table { columns, transposed, .. } = &param.kind else {
                 unreachable!("Table value paired with non-Table ParamKind")
             };
             let relative_name = format!("table_{brk_index}.txt");
-            let contents = rows
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .zip(columns)
-                        .map(|(&v, col)| {
-                            format_number(scale_number_value(col.scale, v, duration_secs, pvoc, sample_rate))
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let cell = |col_index: usize, v: f64| {
+                let scale = columns.get(col_index).map(|c| c.scale).unwrap_or(NumberScale::Plain);
+                format_number(scale_number_value(scale, v, duration_secs, pvoc, sample_rate))
+            };
+            // Transposed (`tesselate`): one line per column, holding every row's value for
+            // that column. Scaling is still looked up per *column*, exactly as in the normal
+            // layout — only where the newlines fall changes. See `ParamKind::Table.transposed`.
+            let contents = if *transposed {
+                (0..columns.len())
+                    .map(|c| {
+                        rows.iter()
+                            .filter_map(|row| row.get(c).copied())
+                            .map(|v| cell(c, v))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                rows.iter()
+                    .map(|row| {
+                        row.iter()
+                            .enumerate()
+                            .map(|(c, &v)| cell(c, v))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
             brk_files.push((relative_name.clone(), contents));
             ParamPlan { arg: format_arg(&param.flag, &relative_name), deferred: None }
         }
@@ -520,7 +609,45 @@ fn plan_param(
         // write, no bytes to inject, unlike `FormantBufferRef` (see `ParamKind::FilePath`'s
         // doc comment). Just emit the path itself as the argv token.
         ParamValue::FilePath(path) => ParamPlan { arg: format_arg(&param.flag, path), deferred: None },
+        // `crystal rotate`'s two-section VDAT file (see `ParamKind::CrystalVdat`). Same
+        // "extra text file in the temp dir, argv token is its filename" mechanism as every
+        // other datafile kind; only the file's own layout is bespoke, and it's the one
+        // layout in this catalog where *where the newlines fall* is load-bearing rather
+        // than cosmetic — see `write_crystal_vdat`. No `NumberScale` is involved at all:
+        // coordinates are unitless and the envelope's times are the generated event's own
+        // duration, neither of which is a percentage of anything the planner knows.
+        ParamValue::CrystalVdat(vdat) => {
+            let relative_name = format!("vdat_{brk_index}.txt");
+            brk_files.push((relative_name.clone(), write_crystal_vdat(vdat)));
+            ParamPlan { arg: format_arg(&param.flag, &relative_name), deferred: None }
+        }
     }
+}
+
+/// Serializes a `CrystalVdat` into the exact text `crystal rotate` parses (verified against
+/// the real binary, not just its usage text): every vertex first, one `x y z` triple per
+/// line, then every envelope breakpoint, **two numbers per line**.
+///
+/// The two-numbers-per-line rule is not stylistic. `crystal.c` splits the sections purely by
+/// counting numbers per line — a line of exactly 3 is a vertex, and the *first* line with any
+/// other count begins the envelope. Writing the envelope 3-to-a-line therefore makes CDP read
+/// those numbers back as additional vertices and then fail with "No envelope data found",
+/// which is exactly what happens when you try it. One `(time, value)` pair per line is both
+/// the natural layout and, at 2 numbers, unambiguously not a vertex.
+///
+/// A leading comment naming the two sections: `;` starts a comment anywhere in the file and
+/// the parser skips such lines entirely, so this is free, and it makes a job's temp directory
+/// readable when debugging a rejected datafile.
+fn write_crystal_vdat(vdat: &super::def::CrystalVdat) -> String {
+    let mut out = String::from("; crystal vertices: x y z\n");
+    for v in &vdat.vertices {
+        out.push_str(&format!("{} {} {}\n", format_number(v[0]), format_number(v[1]), format_number(v[2])));
+    }
+    out.push_str("; event envelope: time value\n");
+    for &(t, v) in &vdat.envelope {
+        out.push_str(&format!("{} {}\n", format_number(t), format_number(v)));
+    }
+    out
 }
 
 /// Appends `def`'s positional args (subprog, mode) then param args, resolving scales
@@ -649,31 +776,56 @@ pub fn plan_job(
         });
     }
 
-    let expected_inputs = match def.input {
-        // `Curve` never reaches this function in practice (see `IoKind::Curve`'s doc
-        // comment — callers use `plan_curve_job` instead), but the match must stay
-        // exhaustive; 0 lets a stray call fall through to the dispatch below's own
-        // `UnsupportedInV1` rather than a spurious `InputCountMismatch` first.
-        IoKind::None | IoKind::Curve => 0,
-        // `WavGlob` is output-only (see its doc comment) and never valid as `def.input` — a
-        // catalog bug, not a real input arity, but the match must stay exhaustive.
-        IoKind::Wav | IoKind::Ana | IoKind::WavGlob => 1,
-        IoKind::DualWav | IoKind::DualAna => 2,
-    };
-    if inputs.len() != expected_inputs {
-        if expected_inputs > 0 && inputs.is_empty() {
-            return Err(PlanError::MissingInput);
-        }
-        return Err(PlanError::InputCountMismatch { expected: expected_inputs, actual: inputs.len() });
+    // Arity comes from `ProcessDef::input_arity` (min, optional max, must-be-even) rather
+    // than a table local to this function, so the UI's own pre-Apply gate can consult
+    // exactly the same rule — see that method's doc comment. `Curve` reports 0 here even
+    // though it never reaches this function in practice (callers use `plan_curve_job`), so a
+    // stray call falls through to the dispatch below's `UnsupportedInV1` rather than a
+    // confusing `InputCountMismatch` first; `WavGlob` reports 1 for the same "keep the
+    // dispatch below in charge of rejecting it" reason.
+    let (min_inputs, max_inputs, even_only) = def.input_arity();
+    if inputs.is_empty() && min_inputs > 0 {
+        return Err(PlanError::MissingInput);
     }
-    if let [first, second] = inputs {
-        if first.sample_rate != second.sample_rate {
+    if max_inputs == Some(min_inputs) && !even_only {
+        // Fixed arity (every non-variadic kind): one exact expected count, so the original
+        // precise error is still the right one.
+        if inputs.len() != min_inputs {
+            return Err(PlanError::InputCountMismatch { expected: min_inputs, actual: inputs.len() });
+        }
+    } else if inputs.len() < min_inputs {
+        return Err(PlanError::VariadicInputCount {
+            reason: format!("this process needs at least {min_inputs}"),
+            actual: inputs.len(),
+        });
+    } else if even_only && inputs.len() % 2 != 0 {
+        // Channel-grouped (`repair repair`): channel-1 sources followed by an equal number
+        // of channel-2 sources, so an odd count has no valid split. CDP rejects it too
+        // ("NUMBER OF INPUT FILES IS NOT A MULTIPLE OF 2"), but saying it in terms of the
+        // groups the UI actually shows is more use than restating the arithmetic.
+        return Err(PlanError::VariadicInputCount {
+            reason: "needs an equal number of channel-1 and channel-2 sources".into(),
+            actual: inputs.len(),
+        });
+    }
+    // Every extra input must match input 0's rate. Written as a scan over `inputs[1..]`
+    // rather than the old two-element slice pattern so it covers a variadic list's 3rd,
+    // 4th, … file too; for a `Dual*` process it is byte-for-byte the same check as before.
+    if let Some(first) = inputs.first() {
+        if let Some(other) = inputs[1..].iter().find(|i| i.sample_rate != first.sample_rate) {
             return Err(PlanError::SampleRateMismatch {
                 first: first.sample_rate,
-                second: second.sample_rate,
+                second: other.sample_rate,
             });
         }
     }
+
+    // Compound-datafile params carry cross-field rules that neither the type system nor the
+    // UI's per-field validation can express — checked here, before any temp file is written
+    // or a process spawned, so the user sees the real reason inline in the params dialog
+    // rather than CDP's own message after a full job launch. See
+    // `PlanError::InvalidParamData`.
+    check_compound_param_data(def, values, inputs.len())?;
 
     // `WavGlob` (an unknown number of numbered output files) is a distinct enough result
     // shape — one mono lane always, no channel merging, no splice target — that it gets its
@@ -685,6 +837,13 @@ pub fn plan_job(
     // here keeps a user-authored catalog entry declaring that combination from panicking
     // the plan (`inputs` is empty for `IoKind::None`, so `&inputs[0]` would).
     if def.output == IoKind::WavGlob {
+        // A variadic-input glob process (`repair repair`: N mono files in, N/chans
+        // interleaved files out) shares the glob *result* shape but none of `plan_wav_glob`'s
+        // single-input assumptions, so it routes to the variadic planner instead — which
+        // reads `def.output` itself to decide between one `out.wav` and a numbered set.
+        if matches!(def.input, IoKind::VariadicWav | IoKind::GroupedWav) {
+            return plan_variadic_wav(def, values, inputs, pvoc);
+        }
         let Some(first) = inputs.first() else {
             return Err(PlanError::UnsupportedInV1 {
                 reason: "a glob-output process without an audio input is not supported yet".into(),
@@ -695,10 +854,22 @@ pub fn plan_job(
 
     match def.input {
         IoKind::None => plan_synthesis(def, values, pvoc),
-        IoKind::Wav => plan_wav(def, values, &inputs[0], pvoc),
+        // `matrix_matrix_1`/`matrix_matrix_2` with "Auto Gain Reduction" on each get their
+        // own two-pass planning function instead of the ordinary single-invocation
+        // `plan_wav` — see `plan_matrix_with_gain_calibration`'s and
+        // `plan_matrix_apply_with_gain_calibration`'s doc comments. Both return `None`
+        // (falling through to `plan_wav` unchanged) for every other process, and for their
+        // own process with the toggle off.
+        IoKind::Wav => plan_matrix_with_gain_calibration(def, values, &inputs[0], pvoc)
+            .or_else(|| plan_matrix_apply_with_gain_calibration(def, values, &inputs[0], pvoc))
+            .unwrap_or_else(|| plan_wav(def, values, &inputs[0], pvoc)),
         IoKind::Ana => plan_ana(def, values, &inputs[0], pvoc),
         IoKind::DualWav => plan_dual_wav(def, values, &inputs[0], &inputs[1], pvoc),
         IoKind::DualAna => plan_dual_ana(def, values, &inputs[0], &inputs[1], pvoc),
+        // Both variadic arities plan identically — the flat-vs-grouped distinction is
+        // entirely about what the *order* means, which only the UI and the arity check
+        // above care about (see `IoKind::VariadicWav`'s doc comment).
+        IoKind::VariadicWav | IoKind::GroupedWav => plan_variadic_wav(def, values, inputs, pvoc),
         // Never valid as `def.input` (see `IoKind::WavGlob`'s doc comment) — a catalog bug
         // if reached, not a real plan to build.
         IoKind::WavGlob => Err(PlanError::UnsupportedInV1 {
@@ -711,6 +882,46 @@ pub fn plan_job(
             reason: "Curve processes must be planned via plan_curve_job, not plan_job".into(),
         }),
     }
+}
+
+/// Structural checks for compound datafile params — the rules that span more than one field
+/// of a single value, or that couple a value to the run's input-file count, and so have no
+/// home in the per-field UI validation (`ui::app`'s `cdp_validate_fields`) or in a
+/// `TableColumn`'s min/max.
+///
+/// **Vertex/input-count mismatch is pre-blocked here rather than passed through to CDP.**
+/// `crystal.c` does reject it with a perfectly clear message of its own, but that message
+/// only arrives after a full job launch (temp WAVs written for every picked buffer, a
+/// subprocess spawned) and lands in the run-failure output viewer, detached from the two
+/// controls that actually disagree. Both numbers are known here for free, the rule is exact
+/// (not a heuristic), and every other input-count rule this app can state — `input_arity`'s
+/// minimum, `GroupedWav`'s even-count split — is already pre-blocked the same way, so
+/// passing this one through would be the odd one out. The check deliberately mirrors CDP's
+/// own condition exactly, including its `infilecnt > 1` escape: with a single input file any
+/// vertex count is legal (the one file is re-read, delayed and transposed, once per vertex),
+/// so a solo-buffer run is never blocked on this.
+fn check_compound_param_data(
+    def: &ProcessDef,
+    values: &[ParamValue],
+    input_count: usize,
+) -> Result<(), PlanError> {
+    for (param, value) in def.params.iter().zip(values) {
+        let ParamValue::CrystalVdat(vdat) = value else { continue };
+        if let Err(reason) = vdat.validate() {
+            return Err(PlanError::InvalidParamData { param: param.name.clone(), reason });
+        }
+        if input_count > 1 && vdat.vertices.len() != input_count {
+            return Err(PlanError::InvalidParamData {
+                param: param.name.clone(),
+                reason: format!(
+                    "{} input files but {} vertices — with more than one file CDP needs exactly one vertex per file",
+                    input_count,
+                    vdat.vertices.len()
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Plans a glob-output process (`IoKind::WavGlob` — an unknown number of numbered mono
@@ -797,11 +1008,11 @@ fn plan_wav_glob(
 
     Ok(PlannedJob {
         steps,
-        input_files: vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0] }],
+        input_files: vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0], gain: None }],
         output_files: Vec::new(),
         glob_output: Some(GlobOutputSpec { prefix }),
         output_curve: None,
-        output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
+        output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
         brk_files,
         binary_input_files: Vec::new(),
         deferred_window_params,
@@ -837,10 +1048,309 @@ fn plan_synthesis(
         binary_input_files: Vec::new(),
         glob_output: None,
         output_curve: None,
-        output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
+        output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
     })
+}
+
+/// `matrix matrix 1`'s random-matrix transform has no gain parameter of its own (confirmed
+/// against the real binary's own usage text), but its output level scales with Analysis
+/// Channels AND with the input's own content — every output spectral bin is a weighted sum
+/// of every input bin, so more channels means more accumulated energy per bin, and how much
+/// depends on what's actually in those bins. A fixed formula (this function's original,
+/// now-replaced form: a calibrated `2.0 / sqrt(channels)` constant) held up against a
+/// calibration sine tone but still clipped, just less, against real white-noise content in
+/// manual testing (user report, 2026-07-26) — confirmed by re-testing the same formula
+/// against white noise myself, it doesn't generalize across content types.
+///
+/// Replaced with an exact two-pass "measure-then-apply" scheme rather than a better-fitted
+/// estimate, since the matrix multiply is linear for a FIXED matrix (confirmed empirically:
+/// scaling the input by `k` scales the output by exactly `k`) — reusing the SAME generated
+/// matrix across both passes (mode 1 generates and applies it once; mode 2 re-applies a
+/// saved one) turns "what gain avoids clipping" from a guess into an exact computation
+/// regardless of channel count or content:
+///
+///   Pass 1 (`steps[0]`, mode 1): run the source, pre-attenuated by a fixed, guaranteed-safe
+///           `MATRIX_PREVIEW_ATTENUATION` (-100dB), through the real mode-1 transform. This
+///           generates both the real matrix data (saved as this job's sidecar, same as
+///           before "Auto Gain Reduction" existed) and a preview output whose peak, scaled
+///           back up by `1 / MATRIX_PREVIEW_ATTENUATION`, is exactly what a full-scale input would
+///           have produced through this same matrix.
+///   Pass 2 (`steps[1..]`, mode 2, one invocation per channel lane): re-run the ORIGINAL
+///           input — gained by the exact factor that brings that implied full-scale peak
+///           down to `MATRIX_TARGET_PEAK` — through mode 2 with pass 1's saved matrix file,
+///           guaranteeing (up to `MATRIX_TARGET_PEAK`'s headroom) no clipping.
+///
+/// `cdp::runner::resolve_matrix_gain_calibration` does the actual peak-measurement/gain-
+/// compute/rewrite between the two passes, once pass 1's real output exists (see
+/// `MatrixGainCalibration`'s own doc comment). `matrix` is never `stereo_native` (confirmed
+/// in the catalog), so a stereo document still gets one independent mode-2 invocation per
+/// channel lane here — every lane shares the one matrix and the one gain, both computed
+/// once from lane 0's preview only: measuring each lane independently would need a separate
+/// mode-1 preview per lane, each generating a DIFFERENT random matrix, defeating the point
+/// of a single reusable "the" matrix as this result's sidecar.
+///
+/// Returns `None` (falling through to the ordinary single-invocation `plan_wav`) if the
+/// process isn't `matrix_matrix_1`, the "Auto Gain Reduction" toggle is off, or the process
+/// lacks `sidecar_extension` (needed to name the matrix file mode 2 reads back) — the last
+/// case is a catalog-authoring bug if it ever happens, not a real runtime state.
+// -40dB (0.01), tried first, still let the PREVIEW pass itself clip on dense white-noise
+// content at high Analysis Channels (confirmed by hand, 2026-07-26: -40dB-attenuated noise
+// through 1024 channels still overflowed to a real peak of ~2.27, not just close to the
+// CDP-reported "peak 148 at full scale, 1024 channels" sine case this constant was
+// originally picked against) -- a clipped preview corrupts the whole calibration, since the
+// measured peak then understates the true implied full-scale peak, so the computed final
+// gain undershoots and the FINAL pass clips too. -100dB left both a sine tone and
+// full-scale-equivalent white noise unclipped even at the highest Analysis Channels option
+// (16384) in manual testing, with enormous remaining margin (float32's exponent range makes
+// attenuating this hard essentially free — no precision loss at either end of a
+// `preview_peak / MATRIX_PREVIEW_ATTENUATION` division this small). Shared by both
+// `matrix_matrix_1` (`plan_matrix_with_gain_calibration`) and `matrix_matrix_2`
+// (`plan_matrix_apply_with_gain_calibration`) -- the same worst-case-content reasoning
+// applies identically to both, and mode 2's own clipping (applying a saved matrix to an
+// unrelated file) was confirmed worse in practice (peak ~229 vs. mode 1's own worst case).
+const MATRIX_PREVIEW_ATTENUATION: f64 = 0.00001; // -100dB
+const MATRIX_TARGET_PEAK: f64 = 0.95;
+
+fn plan_matrix_with_gain_calibration(
+    def: &ProcessDef,
+    values: &[ParamValue],
+    input: &InputSpec,
+    pvoc: &PvocSettings,
+) -> Option<Result<PlannedJob, PlanError>> {
+    if def.key != "matrix_matrix_1" {
+        return None;
+    }
+    let toggle_index = def.params.iter().position(|p| p.name == "Auto Gain Reduction")?;
+    if !matches!(values.get(toggle_index), Some(ParamValue::Toggle(true))) {
+        return None;
+    }
+    let sidecar_ext = def.sidecar_extension.as_ref()?;
+
+    Some((|| {
+        let mut brk_files = Vec::new();
+        let duration = input.duration_secs();
+        let channels = input.channels.max(1);
+
+        let preview_input = "in_preview.wav".to_string();
+        let preview_output = "preview_out.wav".to_string();
+        let (preview_args, deferred) = build_process_args(
+            def,
+            values,
+            &[preview_input.as_str()],
+            &preview_output,
+            duration,
+            pvoc,
+            input.sample_rate,
+            &mut brk_files,
+            0,
+        )?;
+        debug_assert!(deferred.is_empty(), "matrix has no ana-window-count params");
+
+        let matrix_file = format!("preview_out.{sidecar_ext}");
+
+        let cyclic_on = def
+            .params
+            .iter()
+            .position(|p| p.name == "Cyclic")
+            .and_then(|i| values.get(i))
+            .is_some_and(|v| matches!(v, ParamValue::Toggle(true)));
+
+        let mut steps = vec![Invocation {
+            bin: def.bin.clone(),
+            args: preview_args,
+            label: format!("{} (preview)", process_label(def)),
+            expected_output: preview_output.clone(),
+        }];
+        let mut input_files = vec![TempWavSpec {
+            relative_name: preview_input,
+            input_index: 0,
+            source_channels: vec![0],
+            gain: Some(MATRIX_PREVIEW_ATTENUATION),
+        }];
+        let mut output_files = Vec::new();
+        let mut final_inputs = Vec::new();
+
+        for ch in 0..channels {
+            let (infile, outfile) = if channels == 1 {
+                ("in_final.wav".to_string(), "out.wav".to_string())
+            } else {
+                (format!("in_final_c{}.wav", ch + 1), format!("out_c{}.wav", ch + 1))
+            };
+            let mut final_args = vec![
+                def.subprog.clone().unwrap_or_default(),
+                "2".to_string(),
+                infile.clone(),
+                outfile.clone(),
+                matrix_file.clone(),
+            ];
+            if cyclic_on {
+                final_args.push("-c".to_string());
+            }
+            steps.push(Invocation {
+                bin: def.bin.clone(),
+                args: final_args,
+                label: format!("{}{}", process_label(def), channel_label(ch, channels)),
+                expected_output: outfile.clone(),
+            });
+            // Written at the same safe `MATRIX_PREVIEW_ATTENUATION` initially (a placeholder — the
+            // real gain isn't known until steps[0] finishes); `resolve_matrix_gain_calibration`
+            // overwrites every `final_inputs` entry's file in place once it is.
+            let spec = TempWavSpec {
+                relative_name: infile,
+                input_index: 0,
+                source_channels: vec![ch],
+                gain: Some(MATRIX_PREVIEW_ATTENUATION),
+            };
+            input_files.push(spec.clone());
+            final_inputs.push(spec);
+            output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
+        }
+
+        Ok(PlannedJob {
+            steps,
+            input_files,
+            output_files,
+            glob_output: None,
+            output_curve: None,
+            output_curve_binary_template: None,
+            output_formant_buffer: None,
+            output_sidecar: Some(matrix_file),
+            matrix_gain_calibration: Some(MatrixGainCalibration {
+                preview_output_relative_name: preview_output,
+                preview_attenuation: MATRIX_PREVIEW_ATTENUATION,
+                target_peak: MATRIX_TARGET_PEAK,
+                final_inputs,
+            }),
+            brk_files,
+            binary_input_files: Vec::new(),
+            deferred_window_params: Vec::new(),
+            needs_simple_wav_input: def.requires_simple_wav_input,
+        })
+    })())
+}
+
+/// `matrix matrix 2` ("Apply Saved Matrix") shares mode 1's clipping problem and its fix
+/// (`plan_matrix_with_gain_calibration`'s doc comment) — user report, 2026-07-26: applying a
+/// saved matrix to a *different* file clips too, confirmed by hand against the real binary
+/// (a matrix generated from a full-scale sine at 1024 channels, applied via mode 2 to
+/// unrelated full-scale white noise: peak ~229, far worse than mode 1's own worst case,
+/// since the saved matrix's energy characteristics have no relationship at all to the new
+/// source it's being applied to).
+///
+/// Simpler than mode 1's scheme: there's no matrix to *generate* here (`Matrix File` is
+/// already a real, fixed path the user picked — a `ParamKind::FilePath` value emitted
+/// verbatim by the ordinary per-param loop in `build_process_args`), so both the preview and
+/// the final pass are just two ordinary mode-2 invocations differing only in which temp
+/// input file they read — no hand-built final args, no sidecar to capture. Same
+/// `MATRIX_PREVIEW_ATTENUATION`/`MATRIX_TARGET_PEAK` constants as mode 1 (same worst-case-content
+/// reasoning applies identically here).
+fn plan_matrix_apply_with_gain_calibration(
+    def: &ProcessDef,
+    values: &[ParamValue],
+    input: &InputSpec,
+    pvoc: &PvocSettings,
+) -> Option<Result<PlannedJob, PlanError>> {
+    if def.key != "matrix_matrix_2" {
+        return None;
+    }
+    let toggle_index = def.params.iter().position(|p| p.name == "Auto Gain Reduction")?;
+    if !matches!(values.get(toggle_index), Some(ParamValue::Toggle(true))) {
+        return None;
+    }
+
+    Some((|| {
+        let mut brk_files = Vec::new();
+        let duration = input.duration_secs();
+        let channels = input.channels.max(1);
+
+        let preview_input = "in_preview.wav".to_string();
+        let preview_output = "preview_out.wav".to_string();
+        let (preview_args, deferred) = build_process_args(
+            def,
+            values,
+            &[preview_input.as_str()],
+            &preview_output,
+            duration,
+            pvoc,
+            input.sample_rate,
+            &mut brk_files,
+            0,
+        )?;
+        debug_assert!(deferred.is_empty(), "matrix has no ana-window-count params");
+
+        let mut steps = vec![Invocation {
+            bin: def.bin.clone(),
+            args: preview_args,
+            label: format!("{} (preview)", process_label(def)),
+            expected_output: preview_output.clone(),
+        }];
+        let mut input_files = vec![TempWavSpec {
+            relative_name: preview_input,
+            input_index: 0,
+            source_channels: vec![0],
+            gain: Some(MATRIX_PREVIEW_ATTENUATION),
+        }];
+        let mut output_files = Vec::new();
+        let mut final_inputs = Vec::new();
+
+        for ch in 0..channels {
+            let (infile, outfile) = if channels == 1 {
+                ("in_final.wav".to_string(), "out.wav".to_string())
+            } else {
+                (format!("in_final_c{}.wav", ch + 1), format!("out_c{}.wav", ch + 1))
+            };
+            let (final_args, deferred) = build_process_args(
+                def,
+                values,
+                &[infile.as_str()],
+                &outfile,
+                duration,
+                pvoc,
+                input.sample_rate,
+                &mut brk_files,
+                0,
+            )?;
+            debug_assert!(deferred.is_empty());
+            steps.push(Invocation {
+                bin: def.bin.clone(),
+                args: final_args,
+                label: format!("{}{}", process_label(def), channel_label(ch, channels)),
+                expected_output: outfile.clone(),
+            });
+            let spec = TempWavSpec {
+                relative_name: infile,
+                input_index: 0,
+                source_channels: vec![ch],
+                gain: Some(MATRIX_PREVIEW_ATTENUATION),
+            };
+            input_files.push(spec.clone());
+            final_inputs.push(spec);
+            output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
+        }
+
+        Ok(PlannedJob {
+            steps,
+            input_files,
+            output_files,
+            glob_output: None,
+            output_curve: None,
+            output_curve_binary_template: None,
+            output_formant_buffer: None,
+            output_sidecar: None,
+            matrix_gain_calibration: Some(MatrixGainCalibration {
+                preview_output_relative_name: preview_output,
+                preview_attenuation: MATRIX_PREVIEW_ATTENUATION,
+                target_peak: MATRIX_TARGET_PEAK,
+                final_inputs,
+            }),
+            brk_files,
+            binary_input_files: Vec::new(),
+            deferred_window_params: Vec::new(),
+            needs_simple_wav_input: def.requires_simple_wav_input,
+        })
+    })())
 }
 
 fn plan_wav(
@@ -888,8 +1398,7 @@ fn plan_wav(
             input_files: vec![TempWavSpec {
                 relative_name: "in.wav".into(),
                 input_index: 0,
-                source_channels,
-            }],
+                source_channels, gain: None }],
             output_files: vec![OutputWavSpec { relative_name: "out.wav".into(), dest_channels }],
             brk_files,
             binary_input_files: Vec::new(),
@@ -897,6 +1406,7 @@ fn plan_wav(
             output_curve: None,
             output_curve_binary_template: None, output_formant_buffer: None,
             output_sidecar: def.sidecar_extension.as_ref().map(|ext| format!("out.{ext}")),
+        matrix_gain_calibration: None,
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
         });
@@ -906,6 +1416,14 @@ fn plan_wav(
     let mut steps = Vec::new();
     let mut input_files = Vec::new();
     let mut output_files = Vec::new();
+    // A sidecar-producing process (e.g. `matrix matrix 1`) run per-lane generates an
+    // independent one for *each* channel (mode 1's matrix is randomly generated fresh every
+    // run) — there's no single file that represents "the" result across lanes the way
+    // `output_files` (one real audio channel per lane) does. Rather than drop sidecar
+    // capture entirely for a stereo document, only the first lane's is captured and offered
+    // for save — the same "one mono lane, first channel" convention `GlobOutputSpec`'s own
+    // doc comment already established for this codebase's other lane-per-channel limitation.
+    let mut output_sidecar = None;
     for ch in 0..input.channels {
         let infile = format!("in_c{}.wav", ch + 1);
         let outfile = format!("out_c{}.wav", ch + 1);
@@ -923,11 +1441,14 @@ fn plan_wav(
         debug_assert!(deferred.is_empty());
         let label = format!("{}{}", process_label(def), channel_label(ch, input.channels));
         steps.push(Invocation { bin: def.bin.clone(), args, label, expected_output: outfile.clone() });
-        input_files.push(TempWavSpec { relative_name: infile, input_index: 0, source_channels: vec![ch] });
+        input_files.push(TempWavSpec { relative_name: infile, input_index: 0, source_channels: vec![ch], gain: None });
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
+        if ch == 0 {
+            output_sidecar = def.sidecar_extension.as_ref().map(|ext| format!("out_c1.{ext}"));
+        }
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar, matrix_gain_calibration: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 /// Dual-input time-domain process: `bin subprog [mode] inA inB out params...`. Lanes work
@@ -970,13 +1491,11 @@ fn plan_dual_wav(
                 TempWavSpec {
                     relative_name: "in_a.wav".into(),
                     input_index: 0,
-                    source_channels: (0..a.channels.max(1)).collect(),
-                },
+                    source_channels: (0..a.channels.max(1)).collect(), gain: None },
                 TempWavSpec {
                     relative_name: "in_b.wav".into(),
                     input_index: 1,
-                    source_channels: (0..b.channels.max(1)).collect(),
-                },
+                    source_channels: (0..b.channels.max(1)).collect(), gain: None },
             ],
             output_files: vec![OutputWavSpec {
                 relative_name: "out.wav".into(),
@@ -986,7 +1505,7 @@ fn plan_dual_wav(
             binary_input_files: Vec::new(),
             glob_output: None,
             output_curve: None,
-            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
+            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
         deferred_window_params: Vec::new(),
         needs_simple_wav_input: def.requires_simple_wav_input,
         });
@@ -1016,17 +1535,104 @@ fn plan_dual_wav(
         input_files.push(TempWavSpec {
             relative_name: infile_a,
             input_index: 0,
-            source_channels: vec![ch.min(a.channels.saturating_sub(1))],
-        });
+            source_channels: vec![ch.min(a.channels.saturating_sub(1))], gain: None });
         input_files.push(TempWavSpec {
             relative_name: infile_b,
             input_index: 1,
-            source_channels: vec![ch.min(b.channels.saturating_sub(1))],
-        });
+            source_channels: vec![ch.min(b.channels.saturating_sub(1))], gain: None });
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+}
+
+/// Variadic-input time-domain process: `bin subprog [mode] in_1.wav in_2.wav … out.wav
+/// params...` (`IoKind::VariadicWav`/`GroupedWav` — `pulser multi`, `tesselate`, `crystal
+/// rotate`, `repair repair`). One invocation, never per-channel lanes: every process in
+/// this family rejects a non-mono input outright (confirmed against all four real
+/// binaries), so each input contributes exactly its **first channel** to a mono temp file
+/// — the same "one mono lane, first channel" convention `plan_wav_glob`/`GlobOutputSpec`
+/// already established for this codebase's other mono-only family. Splitting a stereo
+/// document into lanes the way `plan_dual_wav` does would be wrong here anyway: with N
+/// inputs of possibly differing channel counts there is no meaningful lane pairing, and
+/// these processes' outputs are spatial/generative results whose channel count comes from
+/// their own parameters, not from the input's.
+///
+/// Duration-scaled params resolve against `inputs[0]` — the selection being processed,
+/// exactly as in `plan_dual_wav`; every later input is contextual source material.
+///
+/// The result shape follows `def.output`: `IoKind::WavGlob` (only `repair repair` today)
+/// produces a numbered set the runner scans for, everything else a single `out.wav` whose
+/// channel count is `def.output_is_stereo`. CDP derives the glob names from the outfile
+/// stem by inserting `_<n>` before the extension (`out.wav` → `out_0.wav`, `out_1.wav`, …,
+/// confirmed against the real binary), which is exactly `GlobOutputSpec`'s
+/// `<prefix><n>.wav` scan with `prefix = "out_"`.
+fn plan_variadic_wav(
+    def: &ProcessDef,
+    values: &[ParamValue],
+    inputs: &[InputSpec],
+    pvoc: &PvocSettings,
+) -> Result<PlannedJob, PlanError> {
+    let mut brk_files = Vec::new();
+    let Some(first) = inputs.first() else { return Err(PlanError::MissingInput) };
+    let duration = first.duration_secs();
+
+    let names: Vec<String> = (0..inputs.len()).map(|i| format!("in_{}.wav", i + 1)).collect();
+    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (args, deferred) = build_process_args(
+        def,
+        values,
+        &name_refs,
+        "out.wav",
+        duration,
+        pvoc,
+        first.sample_rate,
+        &mut brk_files,
+        0,
+    )?;
+    debug_assert!(deferred.is_empty(), "variadic wav processes never carry ana-window-count params");
+
+    let input_files = names
+        .into_iter()
+        .enumerate()
+        .map(|(i, relative_name)| TempWavSpec {
+            relative_name,
+            input_index: i,
+            source_channels: vec![0],
+            gain: None,
+        })
+        .collect();
+
+    let is_glob = def.output == IoKind::WavGlob;
+    Ok(PlannedJob {
+        steps: vec![Invocation {
+            bin: def.bin.clone(),
+            args,
+            label: process_label(def),
+            // A glob job's real first file is `out_0.wav`; `out.wav` itself is never
+            // written, so checking for it would fail every run.
+            expected_output: if is_glob { "out_0.wav".into() } else { "out.wav".into() },
+        }],
+        input_files,
+        output_files: if is_glob {
+            Vec::new()
+        } else {
+            vec![OutputWavSpec {
+                relative_name: "out.wav".into(),
+                dest_channels: if def.output_is_stereo { vec![0, 1] } else { vec![0] },
+            }]
+        },
+        glob_output: is_glob.then(|| GlobOutputSpec { prefix: "out_".into() }),
+        brk_files,
+        binary_input_files: Vec::new(),
+        output_curve: None,
+        output_curve_binary_template: None,
+        output_formant_buffer: None,
+        output_sidecar: None,
+        matrix_gain_calibration: None,
+        deferred_window_params: Vec::new(),
+        needs_simple_wav_input: def.requires_simple_wav_input,
+    })
 }
 
 /// Dual-input spectral process: per channel lane, `pvoc anal` both inputs, run the process
@@ -1059,13 +1665,11 @@ fn plan_dual_ana(
         input_files.push(TempWavSpec {
             relative_name: wav_a.clone(),
             input_index: 0,
-            source_channels: vec![ch.min(a.channels.saturating_sub(1))],
-        });
+            source_channels: vec![ch.min(a.channels.saturating_sub(1))], gain: None });
         input_files.push(TempWavSpec {
             relative_name: wav_b.clone(),
             input_index: 1,
-            source_channels: vec![ch.min(b.channels.saturating_sub(1))],
-        });
+            source_channels: vec![ch.min(b.channels.saturating_sub(1))], gain: None });
 
         for (wav_in, ana, which) in [(&wav_a, &ana_a, "A"), (&wav_b, &ana_b, "B")] {
             steps.push(Invocation {
@@ -1111,7 +1715,7 @@ fn plan_dual_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 fn plan_ana(
@@ -1136,7 +1740,7 @@ fn plan_ana(
         let ana_out = format!("b{}.ana", ch + 1);
         let wav_out = format!("out_c{}.wav", ch + 1);
 
-        input_files.push(TempWavSpec { relative_name: wav_in.clone(), input_index: 0, source_channels: vec![ch] });
+        input_files.push(TempWavSpec { relative_name: wav_in.clone(), input_index: 0, source_channels: vec![ch], gain: None });
 
         steps.push(Invocation {
             bin: "pvoc".into(),
@@ -1187,7 +1791,7 @@ fn plan_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, brk_files, binary_input_files: Vec::new(), deferred_window_params, needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None, brk_files, binary_input_files: Vec::new(), deferred_window_params, needs_simple_wav_input: def.requires_simple_wav_input })
 }
 
 /// Plans a run of 2+ consecutive single-input spectral (`IoKind::Ana`-in/`IoKind::Ana`-out)
@@ -1234,7 +1838,7 @@ pub fn plan_ana_chain(
         let mut ana_cur = format!("chain_c{}_s0.ana", ch + 1);
         let wav_out = format!("out_c{}.wav", ch + 1);
 
-        input_files.push(TempWavSpec { relative_name: wav_in.clone(), input_index: 0, source_channels: vec![ch] });
+        input_files.push(TempWavSpec { relative_name: wav_in.clone(), input_index: 0, source_channels: vec![ch], gain: None });
 
         invocations.push(Invocation {
             bin: "pvoc".into(),
@@ -1297,7 +1901,7 @@ pub fn plan_ana_chain(
         glob_output: None,
         output_curve: None,
         output_curve_binary_template: None,
-        output_formant_buffer: None, output_sidecar: None,
+        output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
         brk_files,
         binary_input_files: Vec::new(),
         deferred_window_params,
@@ -1399,7 +2003,7 @@ pub fn plan_curve_transform_job(
         glob_output: None,
         output_curve: Some("curve_out.txt".to_string()),
         output_curve_binary_template: Some(raw_outfile_actual),
-        output_formant_buffer: None, output_sidecar: None,
+        output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
         brk_files,
         binary_input_files: vec![("curve_in.wav".to_string(), spliced)],
         deferred_window_params: Vec::new(),
@@ -1469,12 +2073,12 @@ pub fn plan_extract_pitch_curve(pvoc: &PvocSettings) -> PlannedJob {
     ];
     PlannedJob {
         steps,
-        input_files: vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0] }],
+        input_files: vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0], gain: None }],
         output_files: Vec::new(),
         glob_output: None,
         output_curve: Some("pitch.txt".into()),
         output_curve_binary_template: Some("pitch.pch.wav".into()),
-        output_formant_buffer: None, output_sidecar: None,
+        output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
         brk_files: Vec::new(),
         binary_input_files: Vec::new(),
         deferred_window_params: Vec::new(),
@@ -1552,12 +2156,12 @@ pub fn plan_extract_formants(pvoc: &PvocSettings, mode: FormantExtractionMode) -
     ];
     PlannedJob {
         steps,
-        input_files: vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0] }],
+        input_files: vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0], gain: None }],
         output_files: Vec::new(),
         glob_output: None,
         output_curve: None,
         output_curve_binary_template: None,
-        output_formant_buffer: Some("out.for".into()), output_sidecar: None,
+        output_formant_buffer: Some("out.for".into()), output_sidecar: None, matrix_gain_calibration: None,
         brk_files: Vec::new(),
         binary_input_files: Vec::new(),
         deferred_window_params: Vec::new(),
@@ -1591,7 +2195,7 @@ pub fn plan_oneform_get(formant_buffer_bytes: &[u8], time_secs: f64) -> PlannedJ
         glob_output: None,
         output_curve: None,
         output_curve_binary_template: None,
-        output_formant_buffer: Some("moment.1f.wav".into()), output_sidecar: None,
+        output_formant_buffer: Some("moment.1f.wav".into()), output_sidecar: None, matrix_gain_calibration: None,
         brk_files: Vec::new(),
         binary_input_files: vec![("in.for".to_string(), formant_buffer_bytes.to_vec())],
         deferred_window_params: Vec::new(),
@@ -1633,7 +2237,7 @@ mod tests {
             output,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false, sidecar_extension: None,
+            requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![number_param("Speed", -96.0, 96.0, 0.0, NumberScale::Plain)],
         }
     }
@@ -1648,7 +2252,7 @@ mod tests {
         assert_eq!(job.steps.len(), 1);
         assert_eq!(job.steps[0].bin, "modify");
         assert_eq!(job.steps[0].args, vec!["speed", "2", "in.wav", "out.wav", "3"]);
-        assert_eq!(job.input_files, vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0] }]);
+        assert_eq!(job.input_files, vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0], gain: None }]);
         assert_eq!(
             job.output_files,
             vec![OutputWavSpec { relative_name: "out.wav".into(), dest_channels: vec![0] }]
@@ -1720,6 +2324,263 @@ mod tests {
         assert_eq!(job.output_files[1].dest_channels, vec![1]);
     }
 
+    /// Regression (user report, 2026-07-26): a sidecar-producing process (e.g. `matrix
+    /// matrix 1`) run against a stereo document takes the dual-mono-lane branch, which
+    /// originally didn't populate `output_sidecar` at all — "Save Matrix As" silently never
+    /// appeared. Only the first lane's sidecar (`out_c1.<ext>`, matching that lane's own
+    /// `out_c1.wav`) is captured, the same "one mono lane" scope limit `GlobOutputSpec`
+    /// already has for this exact tension (each lane's matrix is independently generated,
+    /// there's no single file representing both).
+    #[test]
+    fn stereo_wav_non_native_sidecar_captures_only_the_first_lane() {
+        let mut def = base_def(IoKind::Wav, IoKind::Wav);
+        def.stereo_native = false;
+        def.sidecar_extension = Some("txt".into());
+        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100 };
+        let job = plan_job(&def, &[ParamValue::Number(3.0)], std::slice::from_ref(&input), &PvocSettings::default())
+            .unwrap();
+        assert_eq!(job.output_sidecar, Some("out_c1.txt".to_string()));
+    }
+
+    /// `matrix_matrix_1`'s "Auto Gain Reduction" (2026-07-26) two-pass "measure-then-apply"
+    /// gain calibration (`MatrixGainCalibration`'s doc comment, `plan_matrix_with_gain_calibration`)
+    /// is planned only for this one process key, only when the toggle is on and
+    /// `sidecar_extension` is set, and never for anything else (e.g. a process that happens
+    /// to share the "Auto Gain Reduction"/"Cyclic" param names by coincidence).
+    fn matrix_like_def(auto_gain_default: bool) -> ProcessDef {
+        let mut def = base_def(IoKind::Wav, IoKind::Wav);
+        def.key = "matrix_matrix_1".into();
+        def.subprog = Some("matrix".into());
+        def.mode = Some("1".into());
+        def.sidecar_extension = Some("txt".into());
+        def.params = vec![
+            ParamDef {
+                name: "Auto Gain Reduction".into(),
+                description: String::new(),
+                flag: None,
+                automatable: false,
+                required_envelope: false,
+                required_list: false,
+                list_is_time_sequence: false,
+                before_outfile: false,
+                kind: ParamKind::Toggle { default: auto_gain_default },
+            },
+            ParamDef {
+                name: "Cyclic".into(),
+                description: String::new(),
+                flag: Some("-c".into()),
+                automatable: false,
+                required_envelope: false,
+                required_list: false,
+                list_is_time_sequence: false,
+                before_outfile: false,
+                kind: ParamKind::Toggle { default: false },
+            },
+        ];
+        def
+    }
+
+    #[test]
+    fn matrix_gain_calibration_is_none_when_the_toggle_is_off() {
+        let def = matrix_like_def(false);
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let job = plan_job(
+            &def,
+            &[ParamValue::Toggle(false), ParamValue::Toggle(false)],
+            std::slice::from_ref(&input),
+            &PvocSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(job.matrix_gain_calibration, None);
+        assert_eq!(job.steps.len(), 1, "toggle off falls through to the ordinary single-invocation plan_wav");
+    }
+
+    #[test]
+    fn matrix_gain_calibration_is_none_for_any_other_process() {
+        let mut def = matrix_like_def(true);
+        // `matrix_matrix_2` is deliberately NOT used here (it's `matrix_matrix_1`'s own
+        // real sibling with its own gain-calibration dispatch, `plan_matrix_apply_with_gain_calibration`
+        // — see the tests below) -- picking a process key that gets NEITHER calibration is
+        // what actually exercises "any other process".
+        def.key = "matrix_matrix_3".into();
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let job = plan_job(
+            &def,
+            &[ParamValue::Toggle(true), ParamValue::Toggle(false)],
+            std::slice::from_ref(&input),
+            &PvocSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(job.matrix_gain_calibration, None);
+    }
+
+    #[test]
+    fn plan_job_builds_a_two_pass_matrix_gain_calibration_job_for_mono() {
+        let def = matrix_like_def(true);
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let job = plan_job(
+            &def,
+            &[ParamValue::Toggle(true), ParamValue::Toggle(false)],
+            std::slice::from_ref(&input),
+            &PvocSettings::default(),
+        )
+        .unwrap();
+
+        assert_eq!(job.steps.len(), 2, "one preview (mode 1) pass, one final (mode 2) pass");
+        assert_eq!(job.steps[0].args, vec!["matrix", "1", "in_preview.wav", "preview_out.wav"]);
+        assert_eq!(job.steps[1].args, vec!["matrix", "2", "in_final.wav", "out.wav", "preview_out.txt"]);
+        assert_eq!(job.output_sidecar, Some("preview_out.txt".to_string()));
+        assert_eq!(job.output_files.len(), 1);
+        assert_eq!(job.output_files[0], OutputWavSpec { relative_name: "out.wav".into(), dest_channels: vec![0] });
+
+        let cal = job.matrix_gain_calibration.expect("expected a calibration");
+        assert_eq!(cal.preview_output_relative_name, "preview_out.wav");
+        assert!(cal.preview_attenuation > 0.0 && cal.preview_attenuation < 1.0);
+        assert!(cal.target_peak > 0.0 && cal.target_peak < 1.0);
+        assert_eq!(cal.final_inputs.len(), 1);
+        assert_eq!(cal.final_inputs[0].relative_name, "in_final.wav");
+        assert_eq!(cal.final_inputs[0].source_channels, vec![0]);
+        assert_eq!(cal.final_inputs[0].gain, Some(cal.preview_attenuation));
+    }
+
+    #[test]
+    fn plan_job_builds_a_two_pass_matrix_gain_calibration_job_per_lane_for_stereo() {
+        let def = matrix_like_def(true);
+        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100 };
+        let job = plan_job(
+            &def,
+            &[ParamValue::Toggle(true), ParamValue::Toggle(true)], // Cyclic on this time
+            std::slice::from_ref(&input),
+            &PvocSettings::default(),
+        )
+        .unwrap();
+
+        // One shared preview pass (one matrix, one gain for both lanes -- see
+        // `plan_matrix_with_gain_calibration`'s doc comment for why), then one final pass
+        // per channel, both reusing that same matrix file.
+        assert_eq!(job.steps.len(), 3);
+        // Cyclic (true here) is a real param on `def` itself, so the preview pass (built via
+        // the normal `build_process_args`, unlike the hand-built final passes below) picks
+        // it up automatically along with every other param.
+        assert_eq!(job.steps[0].args, vec!["matrix", "1", "in_preview.wav", "preview_out.wav", "-c"]);
+        assert_eq!(job.steps[1].args, vec!["matrix", "2", "in_final_c1.wav", "out_c1.wav", "preview_out.txt", "-c"]);
+        assert_eq!(job.steps[2].args, vec!["matrix", "2", "in_final_c2.wav", "out_c2.wav", "preview_out.txt", "-c"]);
+        assert_eq!(job.output_sidecar, Some("preview_out.txt".to_string()));
+
+        assert_eq!(job.output_files.len(), 2);
+        assert_eq!(job.output_files[0].dest_channels, vec![0]);
+        assert_eq!(job.output_files[1].dest_channels, vec![1]);
+
+        let cal = job.matrix_gain_calibration.expect("expected a calibration");
+        assert_eq!(cal.final_inputs.len(), 2);
+        assert_eq!(cal.final_inputs[0].source_channels, vec![0]);
+        assert_eq!(cal.final_inputs[1].source_channels, vec![1]);
+    }
+
+    /// `matrix_matrix_2`'s own "Auto Gain Reduction" (`plan_matrix_apply_with_gain_calibration`,
+    /// 2026-07-26 — user report: applying a saved matrix to a different file clips too).
+    fn matrix_apply_like_def(auto_gain_default: bool) -> ProcessDef {
+        let mut def = base_def(IoKind::Wav, IoKind::Wav);
+        def.key = "matrix_matrix_2".into();
+        def.subprog = Some("matrix".into());
+        def.mode = Some("2".into());
+        def.params = vec![
+            ParamDef {
+                name: "Matrix File".into(),
+                description: String::new(),
+                flag: None,
+                automatable: false,
+                required_envelope: false,
+                required_list: false,
+                list_is_time_sequence: false,
+                before_outfile: false,
+                kind: ParamKind::FilePath { extension: "matrix".into() },
+            },
+            ParamDef {
+                name: "Auto Gain Reduction".into(),
+                description: String::new(),
+                flag: None,
+                automatable: false,
+                required_envelope: false,
+                required_list: false,
+                list_is_time_sequence: false,
+                before_outfile: false,
+                kind: ParamKind::Toggle { default: auto_gain_default },
+            },
+            ParamDef {
+                name: "Cyclic".into(),
+                description: String::new(),
+                flag: Some("-c".into()),
+                automatable: false,
+                required_envelope: false,
+                required_list: false,
+                list_is_time_sequence: false,
+                before_outfile: false,
+                kind: ParamKind::Toggle { default: false },
+            },
+        ];
+        def
+    }
+
+    #[test]
+    fn matrix_apply_gain_calibration_is_none_when_the_toggle_is_off() {
+        let def = matrix_apply_like_def(false);
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let values = [
+            ParamValue::FilePath("/tmp/some.matrix".into()),
+            ParamValue::Toggle(false),
+            ParamValue::Toggle(false),
+        ];
+        let job = plan_job(&def, &values, std::slice::from_ref(&input), &PvocSettings::default()).unwrap();
+        assert_eq!(job.matrix_gain_calibration, None);
+        assert_eq!(job.steps.len(), 1, "toggle off falls through to the ordinary single-invocation plan_wav");
+    }
+
+    #[test]
+    fn plan_job_builds_a_two_pass_matrix_apply_gain_calibration_job_for_mono() {
+        let def = matrix_apply_like_def(true);
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let values = [
+            ParamValue::FilePath("/tmp/some.matrix".into()),
+            ParamValue::Toggle(true),
+            ParamValue::Toggle(false),
+        ];
+        let job = plan_job(&def, &values, std::slice::from_ref(&input), &PvocSettings::default()).unwrap();
+
+        assert_eq!(job.steps.len(), 2, "one preview pass, one final pass, both mode 2");
+        assert_eq!(job.steps[0].args, vec!["matrix", "2", "in_preview.wav", "preview_out.wav", "/tmp/some.matrix"]);
+        assert_eq!(job.steps[1].args, vec!["matrix", "2", "in_final.wav", "out.wav", "/tmp/some.matrix"]);
+        assert_eq!(job.output_sidecar, None, "mode 2 doesn't generate a new matrix file");
+
+        let cal = job.matrix_gain_calibration.expect("expected a calibration");
+        assert_eq!(cal.preview_output_relative_name, "preview_out.wav");
+        assert_eq!(cal.final_inputs.len(), 1);
+        assert_eq!(cal.final_inputs[0].relative_name, "in_final.wav");
+        assert_eq!(cal.final_inputs[0].gain, Some(cal.preview_attenuation));
+    }
+
+    #[test]
+    fn plan_job_builds_a_two_pass_matrix_apply_gain_calibration_job_per_lane_for_stereo() {
+        let def = matrix_apply_like_def(true);
+        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100 };
+        let values = [
+            ParamValue::FilePath("/tmp/some.matrix".into()),
+            ParamValue::Toggle(true),
+            ParamValue::Toggle(true), // Cyclic on
+        ];
+        let job = plan_job(&def, &values, std::slice::from_ref(&input), &PvocSettings::default()).unwrap();
+
+        assert_eq!(job.steps.len(), 3);
+        assert_eq!(job.steps[0].args, vec!["matrix", "2", "in_preview.wav", "preview_out.wav", "/tmp/some.matrix", "-c"]);
+        assert_eq!(job.steps[1].args, vec!["matrix", "2", "in_final_c1.wav", "out_c1.wav", "/tmp/some.matrix", "-c"]);
+        assert_eq!(job.steps[2].args, vec!["matrix", "2", "in_final_c2.wav", "out_c2.wav", "/tmp/some.matrix", "-c"]);
+
+        let cal = job.matrix_gain_calibration.expect("expected a calibration");
+        assert_eq!(cal.final_inputs.len(), 2);
+        assert_eq!(cal.final_inputs[0].source_channels, vec![0]);
+        assert_eq!(cal.final_inputs[1].source_channels, vec![1]);
+    }
+
     #[test]
     fn stereo_native_process_keeps_single_lane() {
         let mut def = base_def(IoKind::Wav, IoKind::Wav);
@@ -1729,7 +2590,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(job.steps.len(), 1);
-        assert_eq!(job.input_files, vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0, 1] }]);
+        assert_eq!(job.input_files, vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0, 1], gain: None }]);
         assert_eq!(
             job.output_files,
             vec![OutputWavSpec { relative_name: "out.wav".into(), dest_channels: vec![0, 1] }]
@@ -2452,7 +3313,7 @@ mod tests {
         assert_eq!(job.output_files, Vec::new());
         assert_eq!(
             job.input_files,
-            vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0] }]
+            vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0], gain: None }]
         );
     }
 
@@ -2481,7 +3342,7 @@ mod tests {
         assert_eq!(job.output_files, Vec::new());
         assert_eq!(
             job.input_files,
-            vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0] }]
+            vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0], gain: None }]
         );
     }
 
@@ -2563,5 +3424,125 @@ mod tests {
         // 2 seconds @ 44100Hz, decfactor 128 (points=1024, overlap=3 default -- verified
         // against real CDP output in the Phase 0 spike).
         assert_eq!(window_count_from_decfactor(88200, 128), 690);
+    }
+
+    // ---- crystal rotate's compound VDAT datafile -------------------------------------
+
+    fn crystal_like_def() -> ProcessDef {
+        let mut def = base_def(IoKind::VariadicWav, IoKind::Wav);
+        def.key = "crystal_rotate_1".into();
+        def.bin = "crystal".into();
+        def.subprog = Some("rotate".into());
+        def.mode = Some("1".into());
+        def.params = vec![ParamDef {
+            name: "Crystal Data".into(),
+            description: String::new(),
+            flag: None,
+            automatable: false,
+            required_envelope: false,
+            required_list: false,
+            list_is_time_sequence: false,
+            before_outfile: false,
+            kind: ParamKind::CrystalVdat,
+        }];
+        def
+    }
+
+    fn crystal_value(vertices: Vec<[f64; 3]>) -> ParamValue {
+        ParamValue::CrystalVdat(crate::model::cdp::CrystalVdat {
+            vertices,
+            envelope: vec![(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)],
+        })
+    }
+
+    /// The datafile's exact bytes, not just "a file was written". Line shape is what CDP's
+    /// own parser uses to tell the two sections apart, so this pins vertices at 3 numbers per
+    /// line and envelope points at 2 — the byte-level property `write_crystal_vdat`'s doc
+    /// comment explains and the real-binary test in `cdp::runner` then confirms end to end.
+    #[test]
+    fn crystal_vdat_datafile_writes_vertices_three_per_line_and_envelope_two_per_line() {
+        let def = crystal_like_def();
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let job = plan_job(
+            &def,
+            &[crystal_value(vec![[0.5, 0.25, -0.1]])],
+            std::slice::from_ref(&input),
+            &PvocSettings::default(),
+        )
+        .unwrap();
+
+        assert_eq!(job.steps[0].args, vec!["rotate", "1", "in_1.wav", "out.wav", "vdat_0.txt"]);
+        assert_eq!(job.brk_files.len(), 1);
+        let (name, contents) = &job.brk_files[0];
+        assert_eq!(name, "vdat_0.txt");
+
+        let data_lines: Vec<&str> = contents.lines().filter(|l| !l.trim_start().starts_with(';')).collect();
+        assert_eq!(data_lines, vec!["0.5 0.25 -0.1", "0 0", "0.5 1", "1 0"]);
+        // Every non-comment line before the envelope must have exactly 3 numbers and every
+        // envelope line exactly 2 — the rule the parser actually applies.
+        assert_eq!(data_lines[0].split_whitespace().count(), 3);
+        for line in &data_lines[1..] {
+            assert_eq!(line.split_whitespace().count(), 2, "envelope line {line:?} must not look like a vertex");
+        }
+    }
+
+    /// The vertex/input-count rule is pre-blocked rather than left to CDP — see
+    /// `check_compound_param_data`'s doc comment for why. It mirrors CDP's condition exactly,
+    /// including the single-input escape hatch.
+    #[test]
+    fn crystal_vertex_count_must_match_the_input_count_only_when_more_than_one_file() {
+        let def = crystal_like_def();
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+
+        // One input file: any vertex count is legal (the file is re-read once per vertex).
+        for vertices in [vec![[0.0, 0.0, 0.0]], vec![[0.1, 0.0, 0.0], [-0.1, 0.0, 0.0], [0.0, 0.2, 0.0]]] {
+            assert!(
+                plan_job(&def, &[crystal_value(vertices)], std::slice::from_ref(&input), &PvocSettings::default())
+                    .is_ok(),
+                "a single input accepts any vertex count"
+            );
+        }
+
+        // Two input files, three vertices: blocked before anything is spawned.
+        let err = plan_job(
+            &def,
+            &[crystal_value(vec![[0.1, 0.0, 0.0], [-0.1, 0.0, 0.0], [0.0, 0.2, 0.0]])],
+            &[input, input],
+            &PvocSettings::default(),
+        )
+        .unwrap_err();
+        let PlanError::InvalidParamData { param, reason } = err else {
+            panic!("expected InvalidParamData, got {err:?}");
+        };
+        assert_eq!(param, "Crystal Data");
+        assert!(reason.contains("2 input files but 3 vertices"), "{reason}");
+
+        // Two input files, two vertices: fine.
+        assert!(plan_job(
+            &def,
+            &[crystal_value(vec![[0.1, 0.0, 0.0], [-0.1, 0.0, 0.0]])],
+            &[input, input],
+            &PvocSettings::default(),
+        )
+        .is_ok());
+    }
+
+    /// `CrystalVdat::validate`'s structural rules must be surfaced by `plan_job` too, not
+    /// only by the UI — a value can reach here from a saved preset that predates the check.
+    #[test]
+    fn crystal_vdat_structural_errors_block_planning_with_the_real_reason() {
+        let def = crystal_like_def();
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        // Each coordinate is inside -1..1 but the vector length is >1 — the constraint CDP's
+        // `get_vectorlen` really does enforce.
+        let err = plan_job(
+            &def,
+            &[crystal_value(vec![[0.9, 0.9, 0.9]])],
+            std::slice::from_ref(&input),
+            &PvocSettings::default(),
+        )
+        .unwrap_err();
+        let PlanError::InvalidParamData { reason, .. } = err else { panic!("expected InvalidParamData") };
+        assert!(reason.contains("unit sphere"), "{reason}");
     }
 }

@@ -15,7 +15,10 @@ pub mod recent;
 
 pub use catalog::CdpCatalog;
 pub use chain::{step_at, steps_at, steps_at_mut, CdpChain, ChainError, ChainStep};
-pub use def::{Category, HiliteBandRow, IoKind, ParamDef, ParamKind, ParamValue, ProcessDef, TableColumn};
+pub use def::{
+    Category, CrystalVdat, HiliteBandRow, IoKind, ParamDef, ParamKind, ParamValue, ProcessDef,
+    TableColumn,
+};
 pub use pipeline::{
     plan_ana_chain, plan_extract_formants, plan_extract_pitch_curve, plan_job, plan_oneform_get,
     FormantExtractionMode, InputSpec, PlanError, PvocSettings,

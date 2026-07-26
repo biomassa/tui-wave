@@ -31,6 +31,30 @@ pub enum Category {
 /// spliced from a `model::curve::PitchCurve`'s `binary_template` and current points, never
 /// an open audio `Document`; the result replaces that curve's points and template rather
 /// than being spliced into any buffer (see `pipeline::plan_curve_transform_job`).
+///
+/// `VariadicWav`/`GroupedWav` are the open-ended input arities (CDP-Release8-TODO.md's
+/// "variadic input" batch): CDP's `infile1 [infile2 infile3 ...] outfile ...` shape, which
+/// `Dual*`'s fixed 2 can't express. Both always resolve to input 0 = the active selection
+/// plus N additional whole buffers the user picked (`ui::app`'s `CdpVariadicInput`), so a
+/// process is never picker-only — exactly the role `Dual*`'s second input already plays,
+/// generalized past two. They differ only in what the ordered list *means*, which is a UI
+/// and validation concern rather than a planning one (`pipeline::plan_variadic_wav` handles
+/// both identically — it just emits every input in list order):
+///
+/// - `VariadicWav`: a flat list, minimum 1 file. Order is significant to the process
+///   (`crystal rotate`'s Nth file drives the Nth crystal vertex) but carries no grouping.
+/// - `GroupedWav`: the list is two equal-length channel-role groups concatenated — every
+///   channel-1 source in order, then every channel-2 source in order (`repair repair`'s
+///   documented ordering, confirmed against the real binary: it reads
+///   `infiles[n]`/`infiles[n + count/2]` as one output file's two channels). Minimum 2
+///   files, always an even count. Only ever stereo here: CDP supports 4/5/7/8/16-channel
+///   groupings too, deliberately not exposed (this app's audio path is stereo-only — the
+///   same exclusion `mchanpan`/`abfpan`/`panorama`/… already got).
+///
+/// Every process with either input kind takes **mono** input files only (confirmed against
+/// all four real binaries: "File x.wav is not of correct type (must be mono)"), so
+/// `plan_variadic_wav` always writes one mono temp file per input rather than splitting a
+/// stereo document into per-channel lanes the way `plan_wav`/`plan_dual_wav` do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IoKind {
@@ -41,6 +65,8 @@ pub enum IoKind {
     DualAna,
     WavGlob,
     Curve,
+    VariadicWav,
+    GroupedWav,
 }
 
 /// How a `Number` parameter's raw slider value (0-100 for percentage-based scales) maps to
@@ -132,6 +158,112 @@ pub enum ParamValue {
     /// as CWD, but an absolute path works regardless of CWD), so there's no bytes-injection
     /// bypass needed: `plan_param` just emits this string as the argv token verbatim.
     FilePath(String),
+    /// `crystal rotate`'s two-section VDAT datafile — see `ParamKind::CrystalVdat` and
+    /// `CrystalVdat`'s own doc comments for the shape and why it isn't two separate params.
+    CrystalVdat(CrystalVdat),
+}
+
+/// `crystal rotate`'s VDAT companion datafile, as edited in the UI and written by
+/// `pipeline::plan_param`: a list of crystal vertices followed by one amplitude envelope
+/// imposed on every sound event the crystal generates. One value rather than two params
+/// because CDP reads it as **one** argv token naming **one** file whose two sections are
+/// delimited only by line shape (a line of exactly 3 numbers is a vertex; the first line
+/// with any other count starts the envelope), so the two halves can never be written or
+/// validated independently — see `ParamKind::CrystalVdat`.
+///
+/// Every constraint below is enforced by `crystal.c`'s own `handle_the_special_data`, i.e.
+/// it is a hard parse error from the real binary, not a preference (all reproduced against
+/// the real binary while building this):
+/// - `vertices` must be non-empty, each coordinate in `[-1, 1]` ("Crystal X-coord (%lf) out
+///   of range"), and each vertex must additionally lie **inside the unit sphere**
+///   (`sqrt(x²+y²+z²) <= 1`, "vertex N lies outside the unit sphere"). The usage text
+///   presents that second rule as advice; `get_vectorlen` really does enforce it, so a
+///   coordinate triple can be individually in range and still be rejected.
+/// - `envelope` is `(time_secs, value)` pairs: at least 2 of them, times strictly
+///   increasing and starting at exactly 0, values in `[0, 1]` with the **first and last
+///   exactly 0** ("First envelope value (%lf) is not zero", "Last envelope value ...").
+///   The final time is the duration of each generated sound event.
+///
+/// Vertex count also has to equal the input-file count whenever more than one file is
+/// supplied (`if(dz->infilecnt > 1 && vertexcnt != dz->infilecnt)`) — checked in
+/// `pipeline::plan_job` instead of `validate` here, since only the planner knows how many
+/// input files a given run actually has.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct CrystalVdat {
+    /// Initial X/Y/Z coordinates, one per crystal vertex, in the same order as the input
+    /// files (the Nth file drives the Nth vertex). X maps to event time/stereo position, Y
+    /// to pitch, Z to brightness.
+    pub vertices: Vec<[f64; 3]>,
+    /// `(time_secs, value)` breakpoints, in the exact shape `ParamValue::Breakpoints`
+    /// already uses — deliberately, so the existing graphical envelope editor
+    /// (`ui::app`'s `CdpEnvelopeEdit`) can edit this section unchanged. Empty means "never
+    /// configured": there is no catalog default that could know the real event duration, so
+    /// the UI seeds it from the selection on first open and blocks Apply until then, exactly
+    /// as a `ParamDef::required_envelope` field does.
+    pub envelope: Vec<(f64, f64)>,
+}
+
+impl CrystalVdat {
+    /// Inclusive bounds on one vertex coordinate. Also the per-axis bounds the vertex table
+    /// editor clamps typed cells to — the unit-sphere rule is a separate, cross-axis check
+    /// (`validate`) that no single-column clamp can express.
+    pub const COORD_MIN: f64 = -1.0;
+    pub const COORD_MAX: f64 = 1.0;
+    /// Inclusive bounds on one envelope value. Fixed by CDP, not derived from any catalog
+    /// param — which is exactly why the envelope editor needed a way to get its value-axis
+    /// bounds from something other than a `ParamKind::Number` (`ui::app`'s
+    /// `CdpEnvelopeTarget`).
+    pub const ENVELOPE_MIN: f64 = 0.0;
+    pub const ENVELOPE_MAX: f64 = 1.0;
+    /// Nudge step for the envelope's value axis, standing in for the `step` the editor
+    /// would otherwise read off a `ParamKind::Number` — 1/100th of the fixed 0-1 range.
+    pub const ENVELOPE_STEP: f64 = 0.01;
+
+    /// Every structural rule the real binary enforces while parsing this file, checked
+    /// before a temp file is written or a process spawned. `Err` carries a message written
+    /// to be shown verbatim to the user (`pipeline::PlanError::InvalidParamData`), so it
+    /// names the offending row/point rather than restating the rule abstractly.
+    ///
+    /// Lives here rather than in the UI's own `cdp_validate_fields` because it is a property
+    /// of the *value*, not of any dialog: the same check has to hold for a value loaded from
+    /// a saved preset, and it needs to be unit-testable without a terminal.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.vertices.is_empty() {
+            return Err("needs at least one crystal vertex".into());
+        }
+        for (i, v) in self.vertices.iter().enumerate() {
+            if v.iter().any(|c| *c < Self::COORD_MIN || *c > Self::COORD_MAX) {
+                return Err(format!("vertex {} has a coordinate outside -1 to 1", i + 1));
+            }
+            // `sqrt(x²+y²+z²) > 1`, written without the square root so the comparison is
+            // exact for the boundary case (a vertex exactly on the unit sphere is accepted
+            // by CDP: it rejects only `> 1.0`).
+            let len_sq = v.iter().map(|c| c * c).sum::<f64>();
+            if len_sq > 1.0 {
+                return Err(format!(
+                    "vertex {} lies outside the unit sphere (x²+y²+z² = {:.3}, must be ≤ 1)",
+                    i + 1,
+                    len_sq
+                ));
+            }
+        }
+        if self.envelope.len() < 2 {
+            return Err("the event envelope needs at least 2 breakpoints".into());
+        }
+        if self.envelope[0].0 != 0.0 {
+            return Err("the event envelope's first breakpoint must be at time 0".into());
+        }
+        if self.envelope.windows(2).any(|w| w[1].0 <= w[0].0) {
+            return Err("the event envelope's times must strictly increase".into());
+        }
+        if self.envelope.iter().any(|&(_, v)| v < Self::ENVELOPE_MIN || v > Self::ENVELOPE_MAX) {
+            return Err("every event-envelope value must be between 0 and 1".into());
+        }
+        if self.envelope[0].1 != 0.0 || self.envelope[self.envelope.len() - 1].1 != 0.0 {
+            return Err("the event envelope's first and last values must both be 0".into());
+        }
+        Ok(())
+    }
 }
 
 /// One row of `hilite band`'s per-band data: a frequency band (`lofrq`/`hifrq`) plus up to
@@ -225,6 +357,20 @@ pub enum ParamKind {
         /// missing key would be a hard deserialize error, not an implicit `None`.
         #[serde(default)]
         time_column: Option<usize>,
+        /// Write the table **transposed**: one line per *column*, each holding every row's
+        /// value for that column, instead of the usual one line per row. `tesselate`'s
+        /// datafile is exactly this shape (confirmed against the real binary's own parser: it
+        /// insists on exactly two lines — line 1 every source's resync count, line 2 every
+        /// source's onset delay — and rejects any other line count outright), and it is the
+        /// only process that needs it so far.
+        ///
+        /// A flag on `Table` rather than a whole new `ParamKind` because nothing else about
+        /// the shape differs: the editor, the per-column bounds, and the row semantics ("one
+        /// row per input file") are identical, and only the final `\n`/`" "` placement in
+        /// `pipeline::plan_param` changes. `#[serde(default)]` so no existing table entry
+        /// needs updating.
+        #[serde(default)]
+        transposed: bool,
     },
     /// `focus freeze`'s bespoke marker-prefixed time list (CDP-Ext-Plan.md Tier 1b) — always
     /// required, same rationale as `Table`. `markers` is the catalog-declared set of valid
@@ -280,6 +426,30 @@ pub enum ParamKind {
     /// resolves to a real absolute path, which `ParamValue::FilePath` carries directly.
     /// `extension` (no leading dot) is what the picker filters to.
     FilePath { extension: String },
+    /// `crystal rotate`'s VDAT datafile — a **compound** param, the first in this catalog:
+    /// one argv token, one file, two structurally unrelated sections inside it (XYZ vertex
+    /// triples, then a time/value amplitude envelope). See `ParamValue::CrystalVdat` and
+    /// `CrystalVdat` for the shape and the rules CDP enforces on it.
+    ///
+    /// Deliberately not two params (a `Table` for the triples plus a `required_envelope`
+    /// `Number` for the envelope), even though the halves would each fit an existing kind:
+    /// CDP takes exactly **one** filename here, and the two sections are delimited only by
+    /// line shape — the first line whose number count isn't 3 ends the vertex section and
+    /// begins the envelope. Splitting them into two params would mean two datafiles for one
+    /// argv slot, which `plan_param` (one `ParamPlan` per param, one token per plan) has no
+    /// way to express, and would let a user configure one half and not the other with no
+    /// single place to validate the pairing. The editor still presents them as two sections
+    /// — it just does that inside one field (`ui::app`'s `CdpCrystalSection`), reusing the
+    /// existing table and graphical-envelope editors polymorphically rather than by
+    /// splitting the data model.
+    ///
+    /// Carries no configuration at all, unlike every other datafile kind here: every bound
+    /// (coords -1..1, envelope values 0..1, times ascending from 0) is fixed by
+    /// `crystal.c`, identical for both in-scope modes, and not something a catalog author
+    /// could meaningfully vary — so they live as `CrystalVdat` associated constants where
+    /// the writer, the validator, and the editor all read the same copy, rather than being
+    /// restated (and able to drift) per catalog entry.
+    CrystalVdat,
 }
 
 impl ParamKind {
@@ -330,6 +500,18 @@ impl ParamKind {
             // disk to point at, which this helper can't manufacture — the catalog smoke
             // test special-cases `FilePath` params the same way.
             ParamKind::FilePath { .. } => ParamValue::FilePath(String::new()),
+            // The simplest value that satisfies every rule in `CrystalVdat::validate`: one
+            // vertex at the origin (dead centre of the crystal — no time offset, mid pitch,
+            // neutral brightness) and a symmetric 1-second rise/fall event envelope. Unlike
+            // the UI's own seeding (`App::open_cdp_crystal_envelope_editor`, which stretches
+            // the envelope across the real selection's duration), this helper has no
+            // selection to measure, so it uses a fixed 1s — fine for the smoke test, whose
+            // point is that the argv/datafile shape is accepted, not that the timing is
+            // musically apt.
+            ParamKind::CrystalVdat => ParamValue::CrystalVdat(CrystalVdat {
+                vertices: vec![[0.0, 0.0, 0.0]],
+                envelope: vec![(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)],
+            }),
         }
     }
 }
@@ -478,6 +660,21 @@ pub struct ProcessDef {
     /// `matrix_matrix_1`) means no secondary file exists to capture.
     #[serde(default)]
     pub sidecar_extension: Option<String>,
+    /// Smallest input-file count a variadic-input process (`IoKind::VariadicWav`/
+    /// `GroupedWav`) will actually run with; meaningless for every other `input` kind, whose
+    /// arity the `IoKind` itself already fixes. `None` (the default, and every process
+    /// before the variadic-input batch) means 1 — the natural floor, since input 0 is always
+    /// the active selection.
+    ///
+    /// Needed because CDP's real floors differ per process and are *not* derivable from the
+    /// usage text: `pulser multi` and `repair repair` both declare `MANY_SNDFILES`
+    /// internally, which hard-rejects anything under 2 ("Insufficient input files for this
+    /// process") in **all** modes — including `pulser multi 1`, whose usage line reads
+    /// `infile1 [infile2 ......]` as though one would do. `tesselate`/`crystal rotate`
+    /// declare `ONE_OR_MANY_SNDFILES` instead and genuinely accept a single file. Verified
+    /// by running each binary at every count around its boundary.
+    #[serde(default)]
+    pub min_inputs: Option<usize>,
     /// Ordered — this order is exactly the order these values appear as positional
     /// arguments on the CDP command line (flagged params are still emitted in this order,
     /// just as `-x<value>` tokens instead of bare ones). A process with no parameters emits
@@ -485,6 +682,25 @@ pub struct ProcessDef {
     /// hence `#[serde(default)]`.
     #[serde(default)]
     pub params: Vec<ParamDef>,
+}
+
+impl ProcessDef {
+    /// Smallest and largest input-file counts this process accepts, and whether the count
+    /// must be even. One place both `pipeline::plan_job`'s arity check and the UI's
+    /// "can Apply run yet?" gate read, so the two can never disagree about whether a given
+    /// pick is runnable. `None` for a max means unbounded (every variadic process — CDP
+    /// imposes no ceiling beyond memory).
+    pub fn input_arity(&self) -> (usize, Option<usize>, bool) {
+        match self.input {
+            IoKind::None | IoKind::Curve => (0, Some(0), false),
+            IoKind::Wav | IoKind::Ana | IoKind::WavGlob => (1, Some(1), false),
+            IoKind::DualWav | IoKind::DualAna => (2, Some(2), false),
+            IoKind::VariadicWav => (self.min_inputs.unwrap_or(1).max(1), None, false),
+            // Two equal-length channel-role groups, so at least one source per channel and
+            // always an even total — see `IoKind::GroupedWav`'s doc comment.
+            IoKind::GroupedWav => (self.min_inputs.unwrap_or(2).max(2), None, true),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -529,7 +745,7 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false, sidecar_extension: None,
+            requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![sample_number()],
         };
 
@@ -579,7 +795,7 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false, sidecar_extension: None,
+            requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![toggle, choice],
         };
 
@@ -635,6 +851,7 @@ mod tests {
                     },
                 ],
                 time_column: Some(0),
+                transposed: false,
             },
         };
         let def = ProcessDef {
@@ -651,7 +868,7 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: true,
-            requires_simple_wav_input: false, sidecar_extension: None,
+            requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![table],
         };
 
@@ -698,7 +915,7 @@ mod tests {
             output: IoKind::Ana,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false, sidecar_extension: None,
+            requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![param],
         };
 
@@ -752,12 +969,114 @@ mod tests {
             output: IoKind::Ana,
             stereo_native: false,
             output_is_stereo: false,
-            requires_simple_wav_input: false, sidecar_extension: None,
+            requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![param],
         };
 
         let text = toml::to_string(&def).expect("serialize");
         let back: ProcessDef = toml::from_str(&text).expect("deserialize");
         assert_eq!(def, back);
+    }
+
+    fn crystal_param() -> ParamDef {
+        ParamDef {
+            name: "Crystal Data".into(),
+            description: "Vertices and event envelope".into(),
+            flag: None,
+            automatable: false,
+            required_envelope: false,
+            required_list: false,
+            list_is_time_sequence: false,
+            // The real argv is `crystal rotate <mode> fi [fi2..] fo vdat ...` — the datafile
+            // sits *after* the outfile, so this is the ordinary (default) placement.
+            before_outfile: false,
+            kind: ParamKind::CrystalVdat,
+        }
+    }
+
+    fn crystal_def(params: Vec<ParamDef>) -> ProcessDef {
+        ProcessDef {
+            key: "crystal_rotate_1".into(),
+            bin: "crystal".into(),
+            subprog: Some("rotate".into()),
+            mode: Some("1".into()),
+            title: "Crystal (Mono)".into(),
+            category: Category::Time,
+            subcategory: "texture".into(),
+            short_description: "Rotate a crystal".into(),
+            description: "Full description.".into(),
+            input: IoKind::VariadicWav,
+            output: IoKind::Wav,
+            stereo_native: false,
+            output_is_stereo: false,
+            requires_simple_wav_input: false,
+            sidecar_extension: None,
+            min_inputs: None,
+            params,
+        }
+    }
+
+    /// `ParamKind::CrystalVdat` is the catalog's first **unit** variant under the
+    /// `#[serde(tag = "kind")]` + `#[serde(flatten)]` combination every other variant uses
+    /// as a struct variant — worth confirming in isolation, exactly like the `Table`/
+    /// `MarkerTimeList`/`HiliteBand` schema tests above, since a flattened internally-tagged
+    /// *unit* variant is a distinct serde code path (a bare `kind = "..."` key with no
+    /// sibling data) that could plausibly fail to round-trip through TOML.
+    #[test]
+    fn crystal_vdat_param_round_trips_through_toml() {
+        let def = crystal_def(vec![crystal_param()]);
+        let text = toml::to_string(&def).expect("serialize");
+        assert!(text.contains("kind = \"crystal_vdat\""), "the tag must survive flattening: {text}");
+        let back: ProcessDef = toml::from_str(&text).expect("deserialize");
+        assert_eq!(def, back);
+    }
+
+    /// `default_value` must produce something `validate` accepts — the catalog smoke test
+    /// drives every process through it, so a default that violates CDP's own parse rules
+    /// would fail as a confusing datafile error rather than a real argv-shape check.
+    #[test]
+    fn crystal_vdat_default_value_is_already_valid() {
+        let ParamValue::CrystalVdat(vdat) = ParamKind::CrystalVdat.default_value() else {
+            panic!("wrong value kind");
+        };
+        assert_eq!(vdat.validate(), Ok(()));
+    }
+
+    #[test]
+    fn crystal_vdat_validate_rejects_a_vertex_outside_the_unit_sphere() {
+        // Every coordinate is individually inside -1..1, but the vector length is ~1.56 —
+        // exactly the case the usage text presents as advice and the binary actually
+        // rejects ("vertex 1 lies outside the unit sphere").
+        let vdat = CrystalVdat {
+            vertices: vec![[0.9, 0.9, 0.9]],
+            envelope: vec![(0.0, 0.0), (1.0, 0.0)],
+        };
+        assert!(vdat.validate().unwrap_err().contains("unit sphere"));
+
+        // Exactly on the sphere is accepted (CDP rejects only `> 1.0`).
+        let on_sphere = CrystalVdat {
+            vertices: vec![[1.0, 0.0, 0.0]],
+            envelope: vec![(0.0, 0.0), (1.0, 0.0)],
+        };
+        assert_eq!(on_sphere.validate(), Ok(()));
+    }
+
+    #[test]
+    fn crystal_vdat_validate_enforces_the_envelope_contract() {
+        let with = |envelope: Vec<(f64, f64)>| CrystalVdat { vertices: vec![[0.0, 0.0, 0.0]], envelope };
+
+        assert!(with(vec![(0.0, 0.0)]).validate().unwrap_err().contains("at least 2"));
+        assert!(with(vec![(0.1, 0.0), (1.0, 0.0)]).validate().unwrap_err().contains("time 0"));
+        assert!(with(vec![(0.0, 0.0), (0.5, 0.5), (0.5, 0.0)]).validate().unwrap_err().contains("strictly increase"));
+        assert!(with(vec![(0.0, 0.0), (0.5, 1.5), (1.0, 0.0)]).validate().unwrap_err().contains("between 0 and 1"));
+        assert!(with(vec![(0.0, 0.2), (1.0, 0.0)]).validate().unwrap_err().contains("first and last"));
+        assert!(with(vec![(0.0, 0.0), (1.0, 0.3)]).validate().unwrap_err().contains("first and last"));
+        assert_eq!(with(vec![(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)]).validate(), Ok(()));
+    }
+
+    #[test]
+    fn crystal_vdat_validate_rejects_an_empty_vertex_list() {
+        let vdat = CrystalVdat { vertices: Vec::new(), envelope: vec![(0.0, 0.0), (1.0, 0.0)] };
+        assert!(vdat.validate().unwrap_err().contains("at least one crystal vertex"));
     }
 }

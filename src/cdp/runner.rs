@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
-use crate::model::cdp::pipeline::{parse_ana_decfactor, window_count_from_decfactor, PlannedJob};
+use crate::model::cdp::pipeline::{parse_ana_decfactor, window_count_from_decfactor, PlannedJob, TempWavSpec};
 use crate::model::document::Document;
 use crate::model::io::{load_wav, save_wav_with, BitDepth};
 
@@ -180,6 +180,9 @@ fn run_job_body(
 
         let mut args = step.args.clone();
         resolve_deferred_window_param(job, index, temp_dir, &mut args)?;
+        if index == 1 {
+            resolve_matrix_gain_calibration(job, temp_dir)?;
+        }
 
         let _ = events.send(CdpEvent::StepStarted {
             job: job.id,
@@ -212,20 +215,36 @@ fn write_inputs(job: &Job, temp_dir: &Path) -> Result<(), CdpError> {
     let bit_depth =
         if job.planned.needs_simple_wav_input { BitDepth::Int16 } else { BitDepth::Float32 };
     for spec in &job.planned.input_files {
-        let source = job.inputs.get(spec.input_index).map(Vec::as_slice).unwrap_or(&[]);
-        let channels: Vec<Vec<f32>> = spec
-            .source_channels
-            .iter()
-            .map(|&ch| source.get(ch).cloned().unwrap_or_default())
-            .collect();
-        let doc = Document { channels, sample_rate: job.input_sample_rate, ..Default::default() };
-        let path = temp_dir.join(&spec.relative_name);
-        save_wav_with(&doc, &path, bit_depth, false).map_err(|e| CdpError::Spawn {
-            step: format!("write {}", spec.relative_name),
-            message: e.to_string(),
-        })?;
+        write_temp_wav_spec(spec, job, temp_dir, bit_depth)?;
     }
     Ok(())
+}
+
+/// Writes one `TempWavSpec` (a subset/reordering of `job.inputs`' channels, optionally
+/// gain-scaled) to `temp_dir` — factored out of `write_inputs` so
+/// `resolve_matrix_gain_calibration` can reuse it to rewrite the final pass's input file in
+/// place, once the real gain is known, without duplicating the channel-selection logic.
+fn write_temp_wav_spec(
+    spec: &TempWavSpec,
+    job: &Job,
+    temp_dir: &Path,
+    bit_depth: BitDepth,
+) -> Result<(), CdpError> {
+    let source = job.inputs.get(spec.input_index).map(Vec::as_slice).unwrap_or(&[]);
+    let mut channels: Vec<Vec<f32>> =
+        spec.source_channels.iter().map(|&ch| source.get(ch).cloned().unwrap_or_default()).collect();
+    if let Some(gain) = spec.gain {
+        let gain = gain as f32;
+        for channel in &mut channels {
+            for sample in channel {
+                *sample *= gain;
+            }
+        }
+    }
+    let doc = Document { channels, sample_rate: job.input_sample_rate, ..Default::default() };
+    let path = temp_dir.join(&spec.relative_name);
+    save_wav_with(&doc, &path, bit_depth, false)
+        .map_err(|e| CdpError::Spawn { step: format!("write {}", spec.relative_name), message: e.to_string() })
 }
 
 fn write_brk_files(job: &Job, temp_dir: &Path) -> Result<(), CdpError> {
@@ -313,6 +332,48 @@ fn resolve_deferred_window_param(
                 })?;
             }
         }
+    }
+    Ok(())
+}
+
+/// `matrix_matrix_1`'s "Auto Gain Reduction" two-pass scheme (`MatrixGainCalibration`'s doc
+/// comment) — called right before `steps[1]` (the first final, correctly-gained pass) runs,
+/// once `steps[0]`'s safely-attenuated preview has already produced its real output.
+/// Measures that preview's actual peak, computes the exact linear gain that would have
+/// brought a full-scale input to `target_peak` through this same (now-fixed,
+/// mode-2-reused) matrix, and rewrites every entry in `final_inputs` in place with the
+/// original samples scaled by that gain — replacing the safe placeholder `write_inputs`
+/// wrote there initially (before the real gain was knowable). One shared gain covers every
+/// lane (mono has one entry, stereo has two independent per-channel final-pass invocations
+/// sharing the one calibration — see `plan_matrix_with_gain_calibration`). A no-op whenever
+/// `matrix_gain_calibration` is `None`, i.e. every job except this one process's two-pass jobs.
+fn resolve_matrix_gain_calibration(job: &Job, temp_dir: &Path) -> Result<(), CdpError> {
+    let Some(cal) = &job.planned.matrix_gain_calibration else { return Ok(()) };
+
+    let preview_path = temp_dir.join(&cal.preview_output_relative_name);
+    let preview = load_wav(&preview_path).map_err(|e| CdpError::OutputRead {
+        path: preview_path.display().to_string(),
+        message: e.to_string(),
+    })?;
+    let preview_peak = preview
+        .channels
+        .iter()
+        .flat_map(|c| c.iter())
+        .fold(0.0f32, |max, &s| max.max(s.abs())) as f64;
+
+    // A silent (or all-but-silent) preview has nothing to correct for -- fall back to no
+    // attenuation rather than dividing by (near) zero.
+    let final_gain = if preview_peak < 1e-9 {
+        1.0
+    } else {
+        let implied_full_scale_peak = preview_peak / cal.preview_attenuation;
+        (cal.target_peak / implied_full_scale_peak).min(1.0)
+    };
+
+    let bit_depth = if job.planned.needs_simple_wav_input { BitDepth::Int16 } else { BitDepth::Float32 };
+    for spec in &cal.final_inputs {
+        let spec = TempWavSpec { gain: Some(final_gain), ..spec.clone() };
+        write_temp_wav_spec(&spec, job, temp_dir, bit_depth)?;
     }
     Ok(())
 }
@@ -555,14 +616,14 @@ mod tests {
     fn empty_planned_job(steps: Vec<Invocation>, output_relative_name: &str) -> PlannedJob {
         PlannedJob {
             steps,
-            input_files: vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0] }],
+            input_files: vec![TempWavSpec { relative_name: "in.wav".into(), input_index: 0, source_channels: vec![0], gain: None }],
             output_files: vec![OutputWavSpec {
                 relative_name: output_relative_name.into(),
                 dest_channels: vec![0],
             }],
             glob_output: None,
             output_curve: None,
-            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
+            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -625,11 +686,12 @@ mod tests {
                 relative_name: "in.wav".into(),
                 input_index: 0,
                 source_channels: vec![0],
+                gain: None,
             }],
             output_files: Vec::new(),
             glob_output: Some(crate::model::cdp::pipeline::GlobOutputSpec { prefix: "cutout".into() }),
             output_curve: None,
-            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
+            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -678,7 +740,7 @@ mod tests {
             output_files: Vec::new(),
             glob_output: None,
             output_curve: Some("curve_out.txt".into()),
-            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None,
+            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
             brk_files: vec![("curve_in.txt".into(), "0 220\n1 440".into())],
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
@@ -873,6 +935,385 @@ mod tests {
         assert!((ratio - 0.5).abs() < 0.05, "expected ~half duration at +12 semitones, got ratio {ratio}");
     }
 
+    /// Real end-to-end coverage for the flat variadic-input kind (`IoKind::VariadicWav`):
+    /// `plan_variadic_wav` -> `CdpRunner` -> the real `pulser` binary, with **two distinct**
+    /// inputs (a sine and a detuned copy) rather than one buffer duplicated. `pulser multi`
+    /// is `MANY_SNDFILES` internally, so a single file is rejected outright ("Insufficient
+    /// input files for this process") -- which makes this the one thing a single-input fake
+    /// job could never have caught: that `plan_variadic_wav` emits every picked file, in
+    /// order, as its own `in_N.wav`.
+    #[test]
+    fn pulser_multi_1_runs_with_two_real_inputs_end_to_end() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+        // A second, genuinely different source: the same sine resampled by nearest-neighbour
+        // to shift its pitch. Cheap, and enough that CDP is reading two real files rather
+        // than the same bytes twice.
+        let detuned: Vec<Vec<f32>> = vec![(0..len_samples)
+            .map(|i| channels[0][(i * 3 / 2).min(len_samples - 1)])
+            .collect()];
+
+        let (catalog, warnings) = crate::model::cdp::CdpCatalog::load(None);
+        assert!(warnings.is_empty(), "catalog failed to parse: {warnings:?}");
+        let def = catalog.find("pulser_multi_1").expect("pulser_multi_1 in catalog");
+        assert_eq!(def.input, crate::model::cdp::IoKind::VariadicWav);
+        assert_eq!(def.input_arity().0, 2, "pulser multi rejects fewer than 2 input files");
+
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            &[input, input],
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .expect("plan_job should accept two inputs for a variadic process");
+
+        // The argv shape is the thing under test as much as the exit code: both inputs must
+        // appear, in order, before the outfile.
+        let args = &planned.steps[0].args;
+        let in1 = args.iter().position(|a| a == "in_1.wav").expect("in_1.wav in argv");
+        let in2 = args.iter().position(|a| a == "in_2.wav").expect("in_2.wav in argv");
+        let out = args.iter().position(|a| a == "out.wav").expect("out.wav in argv");
+        assert!(in1 < in2 && in2 < out, "expected in_1 in_2 out ordering, got {args:?}");
+        assert_eq!(planned.input_files.len(), 2);
+        assert_eq!(planned.input_files[1].input_index, 1, "second temp file reads input 1");
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 140,
+            cdp_dir,
+            planned,
+            inputs: vec![channels, detuned],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(60))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("pulser multi 1 should succeed with two real mono inputs");
+        assert_eq!(output.results.len(), 1);
+        assert_eq!(output.results[0].len(), 1, "pulser multi 1 emits mono");
+        assert!(!output.results[0][0].is_empty(), "output should contain audio");
+    }
+
+    /// Real end-to-end coverage for `tesselate` -- the one process needing a `transposed`
+    /// table (`ParamKind::Table.transposed`). Its datafile must have exactly two lines with
+    /// one entry per input file; getting that wrong is silent in a fake job and a hard
+    /// "doesn't correspond to no of input files" error against the real binary, so this runs
+    /// with two inputs and a two-row table to actually exercise the transpose.
+    #[test]
+    fn tesselate_transposed_datafile_matches_input_count_end_to_end() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+        let other: Vec<Vec<f32>> = vec![channels[0].iter().rev().copied().collect()];
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("tesselate_tesselate").expect("tesselate_tesselate in catalog");
+        assert_eq!(def.input, crate::model::cdp::IoKind::VariadicWav);
+
+        // Two rows (one per input file); entry delays must differ and stay under Cycle
+        // Duration, both of which CDP enforces.
+        let mut values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+        values[0] = crate::model::cdp::ParamValue::Table(vec![vec![4.0, 0.0], vec![4.0, 0.2]]);
+
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            &[input, input],
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .expect("plan_job should accept two inputs");
+
+        // Two lines, two entries each -- the transpose, not the row-per-line default.
+        let (_, table) = planned
+            .brk_files
+            .iter()
+            .find(|(name, _)| name.starts_with("table_"))
+            .expect("tesselate writes a table datafile");
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines.len(), 2, "tesselate's datafile is exactly two lines: {table:?}");
+        assert_eq!(lines[0], "4 4", "line 1 is every source's resync count");
+        assert_eq!(lines[1], "0 0.2", "line 2 is every source's entry delay");
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 141,
+            cdp_dir,
+            planned,
+            inputs: vec![channels, other],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(60))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("tesselate should succeed with a matching 2-row datafile");
+        assert_eq!(output.results.len(), 1);
+        assert_eq!(output.results[0].len(), 2, "tesselate at chans=2 emits stereo");
+    }
+
+    /// Real end-to-end coverage for the channel-grouped variadic kind
+    /// (`IoKind::GroupedWav`) plus the variadic *glob* output path: `repair repair` writes
+    /// `out_0.wav`, `out_1.wav`, … rather than one `out.wav`, so this checks both that the
+    /// numbered set is what `GlobOutputSpec`'s `"out_"` prefix scans for and that each
+    /// numbered file really is the interleaving of its two positionally-paired mono sources.
+    #[test]
+    fn repair_grouped_inputs_interleave_into_numbered_stereo_files_end_to_end() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+        // Distinguishable right-channel source: the same sine at half amplitude. Same length
+        // as the left source, which `repair` requires ("FILES 0 AND 1 ARE NOT THE SAME SIZE").
+        let quiet: Vec<Vec<f32>> = vec![channels[0].iter().map(|s| s * 0.25).collect()];
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("repair_repair").expect("repair_repair in catalog");
+        assert_eq!(def.input, crate::model::cdp::IoKind::GroupedWav);
+        assert_eq!(def.output, crate::model::cdp::IoKind::WavGlob);
+
+        let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+
+        // An odd count has no valid channel-1/channel-2 split -- rejected before CDP is even
+        // spawned, with the group wording rather than CDP's "not a multiple of 2".
+        let odd = crate::model::cdp::plan_job(def, &values, &[input], &crate::model::cdp::PvocSettings::default());
+        assert!(
+            matches!(odd, Err(crate::model::cdp::PlanError::VariadicInputCount { .. })),
+            "one input file is not a valid grouped pick: {odd:?}"
+        );
+
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            &[input, input],
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .expect("two inputs is one channel-1 source and one channel-2 source");
+        assert_eq!(
+            planned.glob_output.as_ref().map(|g| g.prefix.as_str()),
+            Some("out_"),
+            "repair's numbered outputs are out_0.wav, out_1.wav, ..."
+        );
+        assert!(planned.output_files.is_empty(), "a glob job has no single output file");
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 142,
+            cdp_dir,
+            planned,
+            inputs: vec![channels.clone(), quiet.clone()],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(60))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("repair should join two mono sources into one stereo file");
+        assert_eq!(output.results.len(), 1, "one group of two sources produces one output file");
+        let joined = &output.results[0];
+        assert_eq!(joined.len(), 2, "the joined file is stereo");
+        // The whole point of `repair` -- so assert the actual interleaving, not just the
+        // channel count. Left is the first channel-1 source, right the first channel-2 one.
+        let n = joined[0].len().min(64);
+        for i in 0..n {
+            assert!((joined[0][i] - channels[0][i]).abs() < 1e-3, "left channel at {i}");
+            assert!((joined[1][i] - quiet[0][i]).abs() < 1e-3, "right channel at {i}");
+        }
+    }
+
+    /// Builds a `crystal_rotate_*` value list from the catalog's own defaults with the
+    /// handful of params these tests pin overridden by name — the datafile, both rotation
+    /// speeds (zeroed, so the crystal is stationary and the result is exactly periodic), the
+    /// time width (minimised, so a group's events are effectively simultaneous), the time
+    /// step, the output duration, and a near-unison pitch range (CDP rejects an exactly zero
+    /// range). Overriding by name rather than by index keeps these tests from silently
+    /// testing the wrong parameter if the catalog entry ever gains or reorders one.
+    fn crystal_values(
+        def: &crate::model::cdp::ProcessDef,
+        vertices: Vec<[f64; 3]>,
+        envelope: Vec<(f64, f64)>,
+        duration: f64,
+    ) -> Vec<crate::model::cdp::ParamValue> {
+        use crate::model::cdp::ParamValue;
+        def.params
+            .iter()
+            .map(|p| match p.name.as_str() {
+                "Crystal Data" => ParamValue::CrystalVdat(crate::model::cdp::CrystalVdat {
+                    vertices: vertices.clone(),
+                    envelope: envelope.clone(),
+                }),
+                "Rotation XY" | "Rotation XZ" => ParamValue::Number(0.0),
+                "Time Width" => ParamValue::Number(0.01),
+                "Time Step" => ParamValue::Number(1.0),
+                "Output Duration" => ParamValue::Number(duration),
+                "Min Pitch" => ParamValue::Number(60.0),
+                "Max Pitch" => ParamValue::Number(61.0),
+                _ => p.kind.default_value(),
+            })
+            .collect()
+    }
+
+    /// The compound VDAT datafile (`ParamKind::CrystalVdat`) end to end against the real
+    /// `crystal` binary, asserting the *shape of the generated sound* rather than an exit
+    /// code — which is the only way to know both halves of that one datafile were parsed the
+    /// way this app intends.
+    ///
+    /// With the crystal held still (both rotation speeds 0), a single vertex at the origin,
+    /// a minimal time width and a 1-second time step, the process must emit one event per
+    /// second, each shaped by the 0.5-second envelope in section 2 of the datafile. So the
+    /// output is an exactly periodic pulse train: loud a quarter-second into every second
+    /// (the envelope's peak) and *silent* three-quarters of the way in (past the end of that
+    /// event, before the next). That pattern is impossible unless the vertex section, the
+    /// envelope section and the boundary between them were all read correctly — in
+    /// particular, writing the envelope 3 numbers to a line instead of 2 makes CDP read it
+    /// back as extra vertices and fail outright.
+    #[test]
+    fn crystal_rotate_mono_generates_an_enveloped_event_train_from_the_real_vdat_file() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+
+        let (catalog, warnings) = crate::model::cdp::CdpCatalog::load(None);
+        assert!(warnings.is_empty(), "catalog failed to parse: {warnings:?}");
+        let def = catalog.find("crystal_rotate_1").expect("crystal_rotate_1 in catalog");
+        assert_eq!(def.input, crate::model::cdp::IoKind::VariadicWav);
+        assert!(!def.output_is_stereo, "mode 1 is the mono mode");
+
+        let values = crystal_values(def, vec![[0.0, 0.0, 0.0]], vec![(0.0, 0.0), (0.25, 1.0), (0.5, 0.0)], 5.0);
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            std::slice::from_ref(&input),
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .expect("one input file is enough for crystal (ONE_OR_MANY_SNDFILES)");
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 160,
+            cdp_dir,
+            planned,
+            inputs: vec![channels.clone()],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(60)) else {
+            unreachable!()
+        };
+        let output = result.expect("crystal rotate 1 should accept the generated vdat file");
+        assert_eq!(output.results.len(), 1);
+        let mono = &output.results[0];
+        assert_eq!(mono.len(), 1, "mode 1 writes a mono file");
+
+        let sr = sample_rate as usize;
+        let peak_at = |secs: f64| {
+            let start = (secs * sr as f64) as usize;
+            mono[0][start..(start + sr / 20).min(mono[0].len())]
+                .iter()
+                .fold(0.0f32, |acc, s| acc.max(s.abs()))
+        };
+        // Four full one-second periods fit inside the 5-second output (the last event starts
+        // at t=4 and its envelope runs out at 4.5).
+        for k in 0..4 {
+            let loud = peak_at(k as f64 + 0.25);
+            let quiet = peak_at(k as f64 + 0.75);
+            assert!(loud > 0.1, "event {k} should peak a quarter-second in, got {loud}");
+            assert!(quiet < 1e-4, "the gap after event {k} should be silent, got {quiet}");
+        }
+    }
+
+    /// Mode 2 (stereo) plus the variadic input ordering in one check: two mono sources, one
+    /// loud and one a tenth of its amplitude, driving two vertices placed at opposite ends of
+    /// the X axis. X is both the time offset *and* (in this mode only) the stereo position,
+    /// so the loud source's vertex must land hard left and the quiet source's hard right —
+    /// which means the left channel has to be dramatically louder than the right. Anything
+    /// that mixed the two files up, ignored the pick order, or dropped a vertex would fail
+    /// this rather than merely produce a differently-shaped file.
+    ///
+    /// Also pins the pre-Apply vertex/input-count block (`check_compound_param_data`), since
+    /// this is the only shipped process where that rule can fire at all.
+    #[test]
+    fn crystal_rotate_stereo_pans_each_input_file_by_its_own_vertex_x() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+        let quiet: Vec<Vec<f32>> = vec![channels[0].iter().map(|s| s * 0.1).collect()];
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("crystal_rotate_2").expect("crystal_rotate_2 in catalog");
+        assert!(def.output_is_stereo, "mode 2 is the stereo mode");
+
+        let envelope = vec![(0.0, 0.0), (0.25, 1.0), (0.5, 0.0)];
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+
+        // Two files but three vertices: rejected here, before any temp file is written or
+        // any process spawned, naming both counts.
+        let mismatched = crystal_values(
+            def,
+            vec![[-0.9, 0.0, 0.0], [0.9, 0.0, 0.0], [0.0, 0.5, 0.0]],
+            envelope.clone(),
+            5.0,
+        );
+        let err = crate::model::cdp::plan_job(
+            def,
+            &mismatched,
+            &[input, input],
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, crate::model::cdp::PlanError::InvalidParamData { reason, .. }
+                if reason.contains("2 input files but 3 vertices")),
+            "a vertex/file mismatch must be pre-blocked: {err:?}"
+        );
+
+        let values = crystal_values(def, vec![[-0.9, 0.0, 0.0], [0.9, 0.0, 0.0]], envelope, 5.0);
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            &[input, input],
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .expect("two files and two vertices agree");
+        assert_eq!(
+            planned.steps[0].args[..4],
+            ["rotate".to_string(), "2".to_string(), "in_1.wav".to_string(), "in_2.wav".to_string()],
+            "both input files must be emitted, in pick order, before the outfile"
+        );
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 161,
+            cdp_dir,
+            planned,
+            inputs: vec![channels.clone(), quiet.clone()],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(60)) else {
+            unreachable!()
+        };
+        let output = result.expect("crystal rotate 2 should accept two mono sources");
+        let stereo = &output.results[0];
+        assert_eq!(stereo.len(), 2, "mode 2 writes a stereo file");
+
+        let mean = |ch: &Vec<f32>| ch.iter().map(|s| s.abs() as f64).sum::<f64>() / ch.len() as f64;
+        let (left, right) = (mean(&stereo[0]), mean(&stereo[1]));
+        assert!(
+            left > right * 4.0,
+            "the loud source's vertex sits at x = -0.9 so it must dominate the left channel (L {left}, R {right})"
+        );
+        assert!(right > 0.0, "the quiet source's vertex still contributes to the right channel");
+    }
+
     #[test]
     fn blur_avrg_pvoc_round_trip_preserves_duration() {
         let cdp_dir = require_cdp!();
@@ -909,6 +1350,181 @@ mod tests {
         assert_eq!(output.sample_rate, sample_rate);
         let ratio = output.results[0][0].len() as f64 / len_samples as f64;
         assert!((ratio - 1.0).abs() < 0.1, "expected ~same duration after pvoc round-trip, got ratio {ratio}");
+    }
+
+    /// Deterministic full-scale white noise -- no `rand` dependency, just a fixed-seed
+    /// xorshift so the test is reproducible. `matrix matrix 1`'s clipping (see
+    /// `plan_matrix_with_gain_calibration`'s doc comment) turned out to be content-dependent,
+    /// not just channel-count-dependent -- the original formula-based fix held up against a
+    /// sine tone but still clipped against noise (user report, 2026-07-26), which is exactly
+    /// why this test exercises both content types against the real binary.
+    fn white_noise_channels(len_samples: usize) -> Vec<f32> {
+        let mut state: u32 = 0x9E3779B9;
+        (0..len_samples)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state as f32 / u32::MAX as f32) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    /// Regression coverage for the two-pass "measure-then-apply" gain calibration
+    /// (`MatrixGainCalibration`'s doc comment): confirms it holds against the real binary at
+    /// a high Analysis Channels setting (1024 -- confirmed by hand to clip badly enough that
+    /// CDP's own CLI suggests cutting the source by ~93%; the max option, 16384, is a real
+    /// worst case too but takes ~90 CPU-seconds per single mode-1 run on this machine, too
+    /// slow for a test run 4x over) on both a pure sine tone and full-scale white noise --
+    /// the exact combination that broke the original formula-based attenuation (it
+    /// under-attenuated noise while over-attenuating the sine, since a fixed
+    /// channel-count-only formula can't account for how energy actually accumulates across
+    /// content types). No assertion on the *result* other than "peak output amplitude is
+    /// within TARGET_PEAK's headroom" -- what the matrix transform actually sounds like is
+    /// intentionally unpredictable (per the process description).
+    #[test]
+    fn matrix_gain_calibration_avoids_clipping_on_sine_and_white_noise() {
+        let cdp_dir = require_cdp!();
+        let (sine_channels, sample_rate) = mono_sine_channels();
+        let len_samples = sine_channels[0].len();
+        let noise_channels = vec![white_noise_channels(len_samples)];
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("matrix_matrix_1").expect("matrix_matrix_1 in catalog");
+        let channels_index = def.params.iter().position(|p| p.name == "Analysis Channels").unwrap();
+        let choice_1024 = match &def.params[channels_index].kind {
+            crate::model::cdp::def::ParamKind::Choice { options, .. } => {
+                options.iter().position(|o| o == "1024").expect("1024 is a valid Analysis Channels option")
+            }
+            _ => unreachable!("Analysis Channels is always a Choice"),
+        };
+        let values = [
+            crate::model::cdp::ParamValue::Choice(choice_1024),
+            crate::model::cdp::ParamValue::Number(2.0),
+            crate::model::cdp::ParamValue::Toggle(true),
+            crate::model::cdp::ParamValue::Toggle(false),
+        ];
+
+        for (label, source_channels) in [("sine", sine_channels), ("white noise", noise_channels)] {
+            let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+            let planned = crate::model::cdp::plan_job(
+                def,
+                &values,
+                std::slice::from_ref(&input),
+                &crate::model::cdp::PvocSettings::default(),
+            )
+            .unwrap();
+            assert!(planned.matrix_gain_calibration.is_some(), "{label}: expected the two-pass job shape");
+
+            let runner = CdpRunner::new();
+            runner.submit(Job {
+                id: 200,
+                cdp_dir: cdp_dir.clone(),
+                planned,
+                inputs: vec![source_channels],
+                input_sample_rate: sample_rate,
+                purpose: JobPurpose::Apply,
+            });
+
+            let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(30)) else {
+                unreachable!()
+            };
+            let output = result.unwrap_or_else(|e| panic!("{label}: matrix matrix 1 should succeed, got {e:?}"));
+            let peak = output.results[0][0].iter().fold(0.0f32, |max, &s| max.max(s.abs()));
+            assert!(peak <= 0.96, "{label}: expected no clipping (peak <= ~TARGET_PEAK), got peak {peak}");
+        }
+    }
+
+    /// Regression coverage for `matrix_matrix_2`'s own "Auto Gain Reduction"
+    /// (`plan_matrix_apply_with_gain_calibration`) — user report, 2026-07-26: applying a
+    /// *saved* matrix to a different file clips too, confirmed by hand against the real
+    /// binary (a matrix generated from a full-scale sine, applied via mode 2 to unrelated
+    /// full-scale white noise: peak ~229, far worse than mode 1's own worst case, since the
+    /// saved matrix's energy characteristics have no relationship to the new source). This
+    /// generates a real matrix file from one sound (mode 1, gain reduction off — just need a
+    /// real `.matrix` file, not exercising mode 1's own calibration here), then applies it
+    /// (mode 2, gain reduction on) to a *different* sound, confirming no clipping end to end.
+    #[test]
+    fn matrix_apply_gain_calibration_avoids_clipping_on_a_mismatched_source() {
+        let cdp_dir = require_cdp!();
+        let (sine_channels, sample_rate) = mono_sine_channels();
+        let len_samples = sine_channels[0].len();
+        let noise_channels = vec![white_noise_channels(len_samples)];
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let gen_def = catalog.find("matrix_matrix_1").expect("matrix_matrix_1 in catalog");
+        let channels_index = gen_def.params.iter().position(|p| p.name == "Analysis Channels").unwrap();
+        let choice_1024 = match &gen_def.params[channels_index].kind {
+            crate::model::cdp::def::ParamKind::Choice { options, .. } => {
+                options.iter().position(|o| o == "1024").unwrap()
+            }
+            _ => unreachable!("Analysis Channels is always a Choice"),
+        };
+        let gen_values = [
+            crate::model::cdp::ParamValue::Choice(choice_1024),
+            crate::model::cdp::ParamValue::Number(2.0),
+            crate::model::cdp::ParamValue::Toggle(false), // gain reduction irrelevant here -- just need a real matrix file
+            crate::model::cdp::ParamValue::Toggle(false),
+        ];
+        let gen_input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let gen_planned = crate::model::cdp::plan_job(
+            gen_def,
+            &gen_values,
+            std::slice::from_ref(&gen_input),
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+        let gen_runner = CdpRunner::new();
+        gen_runner.submit(Job {
+            id: 300,
+            cdp_dir: cdp_dir.clone(),
+            planned: gen_planned,
+            inputs: vec![sine_channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+        let CdpEvent::Finished { result, .. } = recv_finished(&gen_runner, Duration::from_secs(30)) else {
+            unreachable!()
+        };
+        let matrix_bytes =
+            result.unwrap().sidecar_bytes.expect("matrix matrix 1 should produce a matrix sidecar");
+
+        let matrix_path = std::env::temp_dir()
+            .join(format!("tui_wave_test_matrix_{}.matrix", std::process::id()));
+        std::fs::write(&matrix_path, &matrix_bytes).unwrap();
+
+        let apply_def = catalog.find("matrix_matrix_2").expect("matrix_matrix_2 in catalog");
+        let apply_values = [
+            crate::model::cdp::ParamValue::FilePath(matrix_path.to_string_lossy().into_owned()),
+            crate::model::cdp::ParamValue::Toggle(true),
+            crate::model::cdp::ParamValue::Toggle(false),
+        ];
+        let apply_input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let apply_planned = crate::model::cdp::plan_job(
+            apply_def,
+            &apply_values,
+            std::slice::from_ref(&apply_input),
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .unwrap();
+        assert!(apply_planned.matrix_gain_calibration.is_some(), "expected the two-pass job shape");
+
+        let apply_runner = CdpRunner::new();
+        apply_runner.submit(Job {
+            id: 301,
+            cdp_dir,
+            planned: apply_planned,
+            inputs: vec![noise_channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+        let CdpEvent::Finished { result, .. } = recv_finished(&apply_runner, Duration::from_secs(30)) else {
+            unreachable!()
+        };
+        let _ = std::fs::remove_file(&matrix_path);
+        let output = result.unwrap_or_else(|e| panic!("matrix matrix 2 should succeed, got {e:?}"));
+        let peak = output.results[0][0].iter().fold(0.0f32, |max, &s| max.max(s.abs()));
+        assert!(peak <= 0.96, "expected no clipping (peak <= ~TARGET_PEAK) on a mismatched source, got peak {peak}");
     }
 
     /// Regression test for a real bug found by manual testing: `grain_reposition`'s (and
@@ -2097,13 +2713,16 @@ mod tests {
                     }
                 })
                 .collect();
-            let input_count = match def.input {
-                crate::model::cdp::IoKind::None | crate::model::cdp::IoKind::Curve => 0,
-                crate::model::cdp::IoKind::Wav
-                | crate::model::cdp::IoKind::Ana
-                | crate::model::cdp::IoKind::WavGlob => 1,
-                crate::model::cdp::IoKind::DualWav | crate::model::cdp::IoKind::DualAna => 2,
-            };
+            // The declared minimum, which for every non-variadic kind *is* the exact arity
+            // (`ProcessDef::input_arity`). Deliberately the minimum and not more for a
+            // variadic process: several of them cross-check the file count against a
+            // companion datafile's own row count (`tesselate`'s two data lines, `crystal
+            // rotate`'s vertex triples), and `ParamKind::default_value` seeds exactly one
+            // row — so any count above the floor would fail on that mismatch rather than on
+            // anything this test is trying to exercise. Every input is the same fixture
+            // buffer, which also satisfies `repair repair`'s "paired files must be the same
+            // size" check for free.
+            let (input_count, ..) = def.input_arity();
             let inputs_spec = vec![input; input_count];
 
             let mut planned = match crate::model::cdp::plan_job(
