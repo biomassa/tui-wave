@@ -274,7 +274,10 @@ mod tests {
                             assert_column_sane(&proc.key, &param.name, col);
                         }
                     }
-                    ParamKind::Toggle { .. } | ParamKind::Choice { .. } | ParamKind::FormantBufferRef { .. } => {}
+                    ParamKind::Toggle { .. }
+                    | ParamKind::Choice { .. }
+                    | ParamKind::FormantBufferRef { .. }
+                    | ParamKind::FilePath { .. } => {}
                 }
             }
         }

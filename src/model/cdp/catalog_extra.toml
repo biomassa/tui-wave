@@ -14856,3 +14856,1737 @@ step = 0.01
 default = 0.5
 exponential = false
 scale = "plain"
+
+# ---- CDP Release 8 gap-list, batch 1 (2026-07-26) --------------------------------------
+# New entries covering a first batch of CDP-Release8-TODO.md's "real gap" list, each run
+# against the real binary (release-7.1-era build in ./cdp) before being written here. Several
+# candidates from that list were tried and dropped instead — documented in
+# CDP-Release8-TODO.md rather than here, since the doc tracks the whole release's coverage:
+# `envcut` mode 2 hits the exact same "Attack too long for envelope event" bug mode 1 was
+# already excluded for (confirmed: even a window landing exactly on end-of-file, zero
+# truncation needed, still fails); `pulser synth` segfaults reproducibly right at the end of
+# synthesis (confirmed: output file's own header is left unwritten/corrupt); `fofex extract`
+# mode 2's real required argv doesn't match its own usage text's four-argument form (adding a
+# plausible fifth "excludefile" placeholder just shifts the same "insufficient
+# parameters"/"not permitted" errors elsewhere) and needs a dedicated bisection pass, not a
+# guess.
+
+[[process]]
+key = "distmore_bright_1"
+bin = "distmore"
+subprog = "bright"
+mode = "1"
+title = "Distmore Reorder By Brightness (Heads, Tails Cut To Head Size)"
+category = "time"
+subcategory = "distort"
+short_description = "Reorders sound segments in order of average zero-crossing rate"
+description = """
+Cuts the source into paired Head/Tail segments at the given timemarks (e.g. a consonant \
+onset paired with its following vowel continuation) and reorders them by average \
+zero-crossing rate — brightest last by default. Mode 1 takes segments from both Heads and \
+from Tails, with each Tail segment cut down to approximately its paired Head's own size.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Head/Tail Marks"
+description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Splice Length"
+description = "Length of the splice at each cut segment's edge, in milliseconds"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 1.0
+max = 100.0
+step = 1.0
+default = 15.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Decreasing Order"
+description = "Reorder from brightest to dimmest instead of the default dimmest-to-brightest"
+flag = "-d"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "distmore_bright_2"
+bin = "distmore"
+subprog = "bright"
+mode = "2"
+title = "Distmore Reorder By Brightness (Heads And Tails, As Marked)"
+category = "time"
+subcategory = "distort"
+short_description = "Reorders sound segments in order of average zero-crossing rate"
+description = """
+Same reordering-by-brightness as Distmore Reorder By Brightness (Heads, Tails Cut To Head \
+Size), but Mode 2 takes both Heads and Tails exactly as delimited by the timemarks, with no \
+resizing.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Head/Tail Marks"
+description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Splice Length"
+description = "Length of the splice at each cut segment's edge, in milliseconds"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 1.0
+max = 100.0
+step = 1.0
+default = 15.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Decreasing Order"
+description = "Reorder from brightest to dimmest instead of the default dimmest-to-brightest"
+flag = "-d"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "distmore_bright_3"
+bin = "distmore"
+subprog = "bright"
+mode = "3"
+title = "Distmore Reorder By Brightness (Tails Only)"
+category = "time"
+subcategory = "distort"
+short_description = "Reorders sound segments in order of average zero-crossing rate"
+description = """
+Same reordering-by-brightness as Distmore Reorder By Brightness (Heads, Tails Cut To Head \
+Size), but Mode 3 takes segments from the Tails only.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Head/Tail Marks"
+description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Splice Length"
+description = "Length of the splice at each cut segment's edge, in milliseconds"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 1.0
+max = 100.0
+step = 1.0
+default = 15.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Decreasing Order"
+description = "Reorder from brightest to dimmest instead of the default dimmest-to-brightest"
+flag = "-d"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "ts_oscil"
+bin = "ts"
+subprog = "oscil"
+title = "Ts Oscillator (Time-Series To Waveform)"
+category = "time"
+subcategory = "synthesis"
+short_description = "Generates a sound by treating a list of numbers as one cycle of a waveform"
+description = """
+Treats a plain list of numbers as a single-cycle waveform plot and repeats it into a \
+continuous tone, downsampling (timestretching) it by the given number of octaves.
+"""
+input = "none"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Waveform Data"
+description = "Ordered list of numbers making up one cycle of the waveform"
+automatable = true
+required_list = true
+# `ts oscil indata outsnd downsample` -- the datafile sits BEFORE outfile here (there's no
+# real infile at all, `input = "none"`), confirmed against the real binary: without this,
+# `build_process_args`'s default after-outfile placement put "downsample" where "outsnd" was
+# expected, so `ts` tried to open the smoke test's own generic outfile name as its indata
+# textfile ("Failed to parse input file out.wav").
+before_outfile = true
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Downsample"
+description = "Downward transposition of the data, in octaves (also timestretches by the same power of two)"
+automatable = true
+kind = "number"
+min = 0.0
+max = 16.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Duration"
+description = "Maximum duration of the output, in seconds"
+flag = "-d"
+automatable = false
+kind = "number"
+min = 1.0
+max = 600.0
+step = 1.0
+default = 10.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Cubic Interpolation"
+description = "Interpolate the downsampled data with a cubic spline instead of the default linear interpolation"
+flag = "-c"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Force Duration"
+description = "Force the output to reach Max Duration by looping the input data if it would otherwise be shorter"
+flag = "-f"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "spin_stereo_1"
+bin = "spin"
+subprog = "stereo"
+mode = "1"
+title = "Spin Stereo Image"
+category = "time"
+subcategory = "space"
+short_description = "Spins a wide stereo image across the stereo space, with optional doppler-shift"
+description = """
+Rotates a wide stereo image around the stereo field at a given speed, with an optional \
+doppler pitch-shift on the moving edges as they sweep past centre.
+"""
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = true
+
+[[process.params]]
+name = "Spin Rate"
+description = "Spin speed in cycles per second — positive spins clockwise (viewed from above), negative anticlockwise"
+automatable = true
+kind = "number"
+min = -10.0
+max = 10.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Doppler Shift"
+description = "Maximum doppler pitchshift on the moving edges, in semitones"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Buffer Expansion"
+description = "Expands internal buffers by this factor — raise this if a larger Doppler Shift causes a \"CANNOT PROCEED\" memory error"
+automatable = false
+kind = "number"
+min = 1.0
+max = 20.0
+step = 0.1
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Boost"
+description = "Multiplicative level change as each edge passes through centre (one edge gets louder as the other gets quieter)"
+flag = "-b"
+automatable = true
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Attenuation"
+description = "Overall level attenuation as both edges pass through centre simultaneously"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process]]
+key = "matrix_matrix_3"
+bin = "matrix"
+subprog = "matrix"
+mode = "3"
+title = "Matrix Exchange Real/Imaginary"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Exchanges the real and imaginary parts of the spectrum"
+description = "Runs its own internal spectral analysis (Analysis Channels/Window Overlap below) and exchanges each window's real and imaginary FFT components before resynthesizing — a raw spectral-domain transform with no directly predictable audible result."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Analysis Channels"
+description = "FFT size for the internal analysis — must be a power of two"
+automatable = false
+kind = "choice"
+options = ["4", "8", "16", "32", "64", "128", "256", "512", "1024", "2048", "4096", "8192", "16384"]
+default = 8
+
+[[process.params]]
+name = "Window Overlap"
+description = "Overlap factor of analysis windows"
+automatable = false
+kind = "number"
+min = 1.0
+max = 4.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process]]
+key = "matrix_matrix_4"
+bin = "matrix"
+subprog = "matrix"
+mode = "4"
+title = "Matrix Invert Phase Per Channel"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Inverts the phase of each analysis channel independently"
+description = "Runs its own internal spectral analysis (Analysis Channels/Window Overlap below) and flips each channel's phase from positive to negative (or vice versa) before resynthesizing."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Analysis Channels"
+description = "FFT size for the internal analysis — must be a power of two"
+automatable = false
+kind = "choice"
+options = ["4", "8", "16", "32", "64", "128", "256", "512", "1024", "2048", "4096", "8192", "16384"]
+default = 8
+
+[[process.params]]
+name = "Window Overlap"
+description = "Overlap factor of analysis windows"
+automatable = false
+kind = "number"
+min = 1.0
+max = 4.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process]]
+key = "pulser_pulser_1"
+bin = "pulser"
+subprog = "pulser"
+mode = "1"
+title = "Pulser (Pitched From Source Brightness)"
+category = "time"
+subcategory = "synthesis"
+short_description = "Iterates a source into a stream of enveloped, pitched sound-packets"
+description = """
+Iterates the source into a continuous stream of enveloped sound-packets. Mode 1's packets \
+take their spectral brightness from the source but are pitched to the given Pitch \
+parameter, independent of the source's own pitch.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the output stream, in seconds"
+automatable = false
+kind = "number"
+min = 0.1
+max = 600.0
+step = 0.1
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Pitch"
+description = "MIDI pitch of the packets"
+automatable = true
+kind = "number"
+min = 24.0
+max = 96.0
+step = 1.0
+default = 60.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Rise Time"
+description = "Minimum risetime of the packet envelope, in seconds — actual risetime is randomized between Min and Max"
+automatable = false
+kind = "number"
+min = 0.002
+max = 0.2
+step = 0.001
+default = 0.01
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Rise Time"
+description = "Maximum risetime of the packet envelope, in seconds"
+automatable = false
+kind = "number"
+min = 0.002
+max = 0.2
+step = 0.001
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Sustain"
+description = "Minimum sustain of the packet envelope, in seconds — actual sustain is randomized between Min and Max"
+automatable = false
+kind = "number"
+min = 0.0
+max = 0.2
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Sustain"
+description = "Maximum sustain of the packet envelope, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 0.2
+step = 0.001
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Decay Time"
+description = "Minimum decaytime of the packet envelope, in seconds — actual decaytime is randomized between Min and Max"
+automatable = false
+kind = "number"
+min = 0.02
+max = 2.0
+step = 0.01
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Decay Time"
+description = "Maximum decaytime of the packet envelope, in seconds"
+automatable = false
+kind = "number"
+min = 0.02
+max = 2.0
+step = 0.01
+default = 0.2
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Speed"
+description = "Average time between packets in the output, in seconds"
+automatable = true
+kind = "number"
+min = 0.05
+max = 1.0
+step = 0.01
+default = 0.2
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Scatter"
+description = "Randomization of packet speed"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Rise Slope"
+description = "Shape of the envelope's rise (1 = linear, greater = steeper, less = shallower)"
+flag = "-e"
+automatable = true
+kind = "number"
+min = 0.25
+max = 4.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Decay Slope"
+description = "Shape of the envelope's decay (1 = linear, greater = steeper, less = shallower)"
+flag = "-E"
+automatable = true
+kind = "number"
+min = 0.25
+max = 4.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Jitter"
+description = "Random jitter of each packet's pitch, in semitones"
+flag = "-p"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Amplitude Jitter"
+description = "Random jitter of each packet's amplitude"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Lower Octave"
+description = "Amount of lower-octave reinforcement added to each packet"
+flag = "-o"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Bend"
+description = "Amount of upward pitchbend applied to each packet, in semitones"
+flag = "-b"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Seed"
+description = "Same seed produces identical output on successive runs"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 1.0
+max = 9999.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process]]
+key = "pulser_pulser_2"
+bin = "pulser"
+subprog = "pulser"
+mode = "2"
+title = "Pulser (Packets From Source Start)"
+category = "time"
+subcategory = "synthesis"
+short_description = "Iterates a source into a stream of enveloped, pitched sound-packets"
+description = """
+Iterates the source into a continuous stream of enveloped sound-packets. Mode 2's packets \
+are derived directly from the start of the source (its own pitch and timbre carry through, \
+unlike Mode 1's brightness-only packets).
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Duration"
+description = "Duration of the output stream, in seconds"
+automatable = false
+kind = "number"
+min = 0.1
+max = 600.0
+step = 0.1
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Min Rise Time"
+description = "Minimum risetime of the packet envelope, in seconds — actual risetime is randomized between Min and Max"
+automatable = false
+kind = "number"
+min = 0.002
+max = 0.2
+step = 0.001
+default = 0.01
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Rise Time"
+description = "Maximum risetime of the packet envelope, in seconds"
+automatable = false
+kind = "number"
+min = 0.002
+max = 0.2
+step = 0.001
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Sustain"
+description = "Minimum sustain of the packet envelope, in seconds — actual sustain is randomized between Min and Max"
+automatable = false
+kind = "number"
+min = 0.0
+max = 0.2
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Sustain"
+description = "Maximum sustain of the packet envelope, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 0.2
+step = 0.001
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min Decay Time"
+description = "Minimum decaytime of the packet envelope, in seconds — actual decaytime is randomized between Min and Max"
+automatable = false
+kind = "number"
+min = 0.02
+max = 2.0
+step = 0.01
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Decay Time"
+description = "Maximum decaytime of the packet envelope, in seconds"
+automatable = false
+kind = "number"
+min = 0.02
+max = 2.0
+step = 0.01
+default = 0.2
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Speed"
+description = "Average time between packets in the output, in seconds"
+automatable = true
+kind = "number"
+min = 0.05
+max = 1.0
+step = 0.01
+default = 0.2
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Scatter"
+description = "Randomization of packet speed"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Rise Slope"
+description = "Shape of the envelope's rise (1 = linear, greater = steeper, less = shallower)"
+flag = "-e"
+automatable = true
+kind = "number"
+min = 0.25
+max = 4.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Decay Slope"
+description = "Shape of the envelope's decay (1 = linear, greater = steeper, less = shallower)"
+flag = "-E"
+automatable = true
+kind = "number"
+min = 0.25
+max = 4.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Jitter"
+description = "Random jitter of each packet's pitch, in semitones"
+flag = "-p"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Amplitude Jitter"
+description = "Random jitter of each packet's amplitude"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Lower Octave"
+description = "Amount of lower-octave reinforcement added to each packet"
+flag = "-o"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Bend"
+description = "Amount of upward pitchbend applied to each packet, in semitones"
+flag = "-b"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Seed"
+description = "Same seed produces identical output on successive runs"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 1.0
+max = 9999.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+integer = true
+
+# ---- CDP Release 8 gap-list, batch 2 (2026-07-26) --------------------------------------
+# Continuing CDP-Release8-TODO.md's "partial coverage"/"real gap" lists, each run against
+# the real binary before being written here. `distmore segsbkwd`'s 9 modes share `bright`'s
+# marklist shape but confirmed to take NO other params at all (no splice/-d flags). `distmore
+# segszig`'s 3 modes have genuinely different argv per mode (mode 1 needs a marklist, modes
+# 2/3 don't; mode 3 additionally takes a duration). `tweet`'s EXCLUDE positional (all 3
+# modes) mirrors `fofex extract`'s own excludefile-or-0 slot -- confirmed the real binary
+# accepts a literal "0" there exactly like fofex does, so it's modeled as a fixed
+# always-0 param rather than a real file picker (this app doesn't yet support supplying real
+# exclude-region data); PKCNT/FRQ/CHIRP/MINLEVEL's exact CDP-enforced ranges aren't stated in
+# the binary's own usage text (unlike e.g. PITCHDATA), so their catalog ranges are
+# conservative guesses around the values confirmed to work in a real run, same convention
+# used elsewhere in this file when usage text is silent on a range.
+
+[[process]]
+key = "distmore_segsbkwd_1"
+bin = "distmore"
+subprog = "segsbkwd"
+mode = "1"
+title = "Distmore Reverse Tails"
+category = "time"
+subcategory = "distort"
+short_description = "Reverses certain segments delimited by a Head/Tail marklist"
+description = "Reverses every Tail segment in place, leaving the Head segments untouched."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Head/Tail Marks"
+description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "distmore_segsbkwd_2"
+bin = "distmore"
+subprog = "segsbkwd"
+mode = "2"
+title = "Distmore Reverse Heads"
+category = "time"
+subcategory = "distort"
+short_description = "Reverses certain segments delimited by a Head/Tail marklist"
+description = "Reverses every Head segment in place, leaving the Tail segments untouched."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Head/Tail Marks"
+description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "distmore_segsbkwd_3"
+bin = "distmore"
+subprog = "segsbkwd"
+mode = "3"
+title = "Distmore Reverse Head+Tail Pairs"
+category = "time"
+subcategory = "distort"
+short_description = "Reverses certain segments delimited by a Head/Tail marklist"
+description = "Reverses each Head+Tail pair together, as one unit."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Head/Tail Marks"
+description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "distmore_segsbkwd_4"
+bin = "distmore"
+subprog = "segsbkwd"
+mode = "4"
+title = "Distmore Reverse Head & Tail+Head+Tail Set"
+category = "time"
+subcategory = "distort"
+short_description = "Reverses certain segments delimited by a Head/Tail marklist"
+description = "Reverses a Head on its own, then separately reverses the following Tail+Head+Tail set as one unit."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Head/Tail Marks"
+description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "distmore_segsbkwd_5"
+bin = "distmore"
+subprog = "segsbkwd"
+mode = "5"
+title = "Distmore Reverse Head+Tail+Head+Tail Set"
+category = "time"
+subcategory = "distort"
+short_description = "Reverses certain segments delimited by a Head/Tail marklist"
+description = "Reverses a Head+Tail+Head+Tail run as one unit."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Head/Tail Marks"
+description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "distmore_segsbkwd_6"
+bin = "distmore"
+subprog = "segsbkwd"
+mode = "6"
+title = "Distmore Reverse Head & Tail+Head+Tail+Head+Tail Set"
+category = "time"
+subcategory = "distort"
+short_description = "Reverses certain segments delimited by a Head/Tail marklist"
+description = "Reverses a Head on its own, then separately reverses the following Tail+Head+Tail+Head+Tail set as one unit."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Head/Tail Marks"
+description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "distmore_segsbkwd_7"
+bin = "distmore"
+subprog = "segsbkwd"
+mode = "7"
+title = "Distmore Reverse Head+Tail+Head+Tail+Head+Tail Set"
+category = "time"
+subcategory = "distort"
+short_description = "Reverses certain segments delimited by a Head/Tail marklist"
+description = "Reverses a Head+Tail+Head+Tail+Head+Tail run as one unit."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Head/Tail Marks"
+description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "distmore_segsbkwd_8"
+bin = "distmore"
+subprog = "segsbkwd"
+mode = "8"
+title = "Distmore Reverse Head & Tail+Head+Tail+Head+Tail+Head+Tail Set"
+category = "time"
+subcategory = "distort"
+short_description = "Reverses certain segments delimited by a Head/Tail marklist"
+description = "Reverses a Head on its own, then separately reverses the following Tail+Head+Tail+Head+Tail+Head+Tail set as one unit."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Head/Tail Marks"
+description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "distmore_segsbkwd_9"
+bin = "distmore"
+subprog = "segsbkwd"
+mode = "9"
+title = "Distmore Reverse Head+Tail+Head+Tail+Head+Tail+Head+Tail Set"
+category = "time"
+subcategory = "distort"
+short_description = "Reverses certain segments delimited by a Head/Tail marklist"
+description = "Reverses a Head+Tail+Head+Tail+Head+Tail+Head+Tail run as one unit."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Head/Tail Marks"
+description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "distmore_segszig_1"
+bin = "distmore"
+subprog = "segszig"
+mode = "1"
+title = "Distmore Zigzag Tails"
+category = "time"
+subcategory = "distort"
+short_description = "Zigzags back and forth across segments while playing the source"
+description = "Zigzags back and forth across each Tail segment delimited by the marklist while otherwise playing the source normally."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Head/Tail Marks"
+description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
+automatable = true
+required_list = true
+list_is_time_sequence = true
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Zigzag Count"
+description = "Number of zigzags per zigged tail"
+automatable = true
+kind = "number"
+min = 1.0
+max = 50.0
+step = 1.0
+default = 5.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Shrink To"
+description = "Zigzags contract to this minimum size (milliseconds) as the tail plays on — 0 disables shrinking"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 0.0
+max = 2000.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Tail Proportion"
+description = "Proportion of the tail to zigzag across"
+flag = "-p"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Logarithmic Shrink"
+description = "Shrink zigzags logarithmically instead of the default linear shrink"
+flag = "-l"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "distmore_segszig_2"
+bin = "distmore"
+subprog = "segszig"
+mode = "2"
+title = "Distmore Zigzag Whole File"
+category = "time"
+subcategory = "distort"
+short_description = "Zigzags back and forth across the whole source"
+description = "Zigzags back and forth across the entire source file."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Zigzag Count"
+description = "Number of zigzags across the file"
+automatable = true
+kind = "number"
+min = 1.0
+max = 50.0
+step = 1.0
+default = 5.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Shrink To"
+description = "Zigzags contract to this minimum size (milliseconds) as playback advances — 0 disables shrinking"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 0.0
+max = 2000.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Proportion"
+description = "Proportion of each zigzagged span to use"
+flag = "-p"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Logarithmic Shrink"
+description = "Shrink zigzags logarithmically instead of the default linear shrink"
+flag = "-l"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "distmore_segszig_3"
+bin = "distmore"
+subprog = "segszig"
+mode = "3"
+title = "Distmore Zigzag Whole File (Fixed Duration)"
+category = "time"
+subcategory = "distort"
+short_description = "Zigzags back and forth across the whole source, to a fixed output duration"
+description = "Zigzags back and forth across the entire source file, stretching or compressing the result to the given output duration."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Zigzag Count"
+description = "Number of zigzags across the file"
+automatable = true
+kind = "number"
+min = 1.0
+max = 50.0
+step = 1.0
+default = 5.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Output Duration"
+description = "Duration of the zigzagged output, in seconds"
+automatable = false
+kind = "number"
+min = 0.1
+max = 600.0
+step = 0.1
+default = 2.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Shrink To"
+description = "Zigzags contract to this minimum size (milliseconds) as playback advances — 0 disables shrinking"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 0.0
+max = 2000.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Proportion"
+description = "Proportion of each zigzagged span to use"
+flag = "-p"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "tweet_tweet_1"
+bin = "tweet"
+subprog = "tweet"
+mode = "1"
+title = "Tweet Replace FOFs (Fixed Pitch)"
+category = "time"
+subcategory = "grain"
+short_description = "Replaces FOFs in a vocal sound with synthetic tweets or noise"
+description = """
+Replaces each pitch-synchronous grain (FOF) found in a vocal sound with a synthetic \
+"tweet" packet. Mode 1's packets all share one fixed pitch, independent of the source's \
+own pitch contour.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Exclude Regions"
+description = "Reserved (always 0 — this app doesn't yet support supplying a real exclude-regions file, so no part of the source is excluded)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Pitch Data"
+description = "Time/frequency breakpoint pitch trace of the source (e.g. from Extract Pitch Curve)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 16.0
+max = 11025.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Min Level"
+description = "Level (dB below the loudest FOF found) below which FOFs are rejected — 0 rejects none"
+automatable = false
+kind = "number"
+min = -96.0
+max = 1.0
+step = 0.1
+default = -20.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Tweet Count"
+description = "Number of tweet packets generated per replaced FOF"
+automatable = false
+kind = "number"
+min = 1.0
+max = 20.0
+step = 1.0
+default = 3.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Chirp"
+description = "Amount of frequency-chirp applied within each tweet packet"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Windowed"
+description = "Apply a cosine window to smooth each tweet packet's edges"
+flag = "-w"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "tweet_tweet_2"
+bin = "tweet"
+subprog = "tweet"
+mode = "2"
+title = "Tweet Replace FOFs (Fixed Frequency)"
+category = "time"
+subcategory = "grain"
+short_description = "Replaces FOFs in a vocal sound with synthetic tweets or noise"
+description = """
+Replaces each pitch-synchronous grain (FOF) found in a vocal sound with a synthetic \
+"tweet" packet. Mode 2's packets all share one fixed frequency (in Hz, rather than Mode \
+1's tweet-count parameter), independent of the source's own pitch contour.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Exclude Regions"
+description = "Reserved (always 0 — this app doesn't yet support supplying a real exclude-regions file, so no part of the source is excluded)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Pitch Data"
+description = "Time/frequency breakpoint pitch trace of the source (e.g. from Extract Pitch Curve)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 16.0
+max = 11025.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Min Level"
+description = "Level (dB below the loudest FOF found) below which FOFs are rejected — 0 rejects none"
+automatable = false
+kind = "number"
+min = -96.0
+max = 1.0
+step = 0.1
+default = -20.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Frequency"
+description = "Fixed frequency (Hz) of the tweet packets"
+automatable = false
+kind = "number"
+min = 20.0
+max = 20000.0
+step = 1.0
+default = 1000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Chirp"
+description = "Amount of frequency-chirp applied within each tweet packet"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Windowed"
+description = "Apply a cosine window to smooth each tweet packet's edges"
+flag = "-w"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "tweet_tweet_3"
+bin = "tweet"
+subprog = "tweet"
+mode = "3"
+title = "Tweet Replace FOFs With Noise"
+category = "time"
+subcategory = "grain"
+short_description = "Replaces FOFs in a vocal sound with noise bursts"
+description = "Replaces each pitch-synchronous grain (FOF) found in a vocal sound with a noise burst rather than a synthetic pitched tweet."
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Exclude Regions"
+description = "Reserved (always 0 — this app doesn't yet support supplying a real exclude-regions file, so no part of the source is excluded)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Pitch Data"
+description = "Time/frequency breakpoint pitch trace of the source (e.g. from Extract Pitch Curve)"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 16.0
+max = 11025.0
+step = 1.0
+default = 220.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Min Level"
+description = "Level (dB below the loudest FOF found) below which FOFs are rejected — 0 rejects none"
+automatable = false
+kind = "number"
+min = -96.0
+max = 1.0
+step = 0.1
+default = -20.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Windowed"
+description = "Apply a cosine window to smooth each noise burst's edges"
+flag = "-w"
+automatable = false
+kind = "toggle"
+default = false
+
+# ---- CDP Release 8 gap-list, batch 3 (2026-07-26) --------------------------------------
+# `speculate` re-added after fixing the `plan_wav_glob` Ana-input gap it exposed (see
+# `pipeline::plan_wav_glob`'s doc comment) — dropped from batch 1 rather than fixed on the
+# spot, now confirmed working end-to-end via the real binary.
+
+[[process]]
+key = "speculate_speculate"
+bin = "speculate"
+subprog = "speculate"
+title = "Speculate (Channel Permutation)"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Generates a numbered series of versions of the source with channel data progressively permuted"
+description = """
+Progressively permutes the spectral channel data within the given frequency band using a \
+bell-ringing "Plain Bob" style swapping sequence, writing out every intermediate step as its \
+own numbered output file. The number of files produced depends entirely on how many \
+channels fall inside Min/Max Frequency — a wide band across a normal analysis can produce \
+several hundred files, so narrow the band for a manageable result.
+"""
+input = "ana"
+output = "wav_glob"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Min Frequency"
+description = "Lowest frequency (Hz) to take part in the channel permutation"
+automatable = false
+kind = "number"
+min = 0.0
+max = 20000.0
+step = 1.0
+default = 200.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Max Frequency"
+description = "Highest frequency (Hz) to take part in the channel permutation"
+automatable = false
+kind = "number"
+min = 0.0
+max = 20000.0
+step = 1.0
+default = 2000.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Remove Other Components"
+description = "Remove spectral components outside the Min/Max Frequency band instead of leaving them untouched"
+flag = "-r"
+automatable = false
+kind = "toggle"
+default = false
+
+# ---- CDP Release 8 gap-list, batch 4 (2026-07-26) --------------------------------------
+# MATRIX mode 1 ("generate matrix + transformed sound"): confirmed by hand that despite the
+# usage text saying "outfiles" (plural), the real binary writes exactly two files sharing
+# the outfile's base name -- `<outfile>.wav` (the transformed sound, this entry's real
+# result) and `<outfile>.txt` (the generated matrix data, several MB of plain numbers).
+# `sidecar_extension = "txt"` (`ProcessDef`) tells `pipeline::plan_wav` to capture that
+# second file too; `cdp::runner` reads its bytes before the job's temp dir is cleaned up,
+# and a successful Apply prompts "Save Matrix As" (`Dialog::SaveMatrixAs`) so the user can
+# keep it under `.matrix` (`ui/app.rs`'s `MATRIX_EXTENSION`) before it's lost. Mode 2 (below)
+# applies a previously-saved `.matrix` file via `ParamKind::FilePath` — a real file the user
+# browses to (`Dialog::CdpParams.file_picker`, reuses `Dialog::LoadCurve`'s `FilePanel`
+# widget), not an in-app buffer: the file already exists wherever it was saved and CDP can
+# open it by that path directly (confirmed: `cdp::runner` spawns jobs with the temp job dir
+# as CWD, but an absolute path works regardless), so unlike `FormantBufferRef` there's no
+# bytes-injection/temp-copy step needed at all. (A fuller FormantBuffer-style in-memory
+# buffer + Buffers-panel mechanism was considered and deliberately not built — this file-path
+# approach was the chosen lighter alternative, CDP-Release8-TODO.md.)
+
+[[process]]
+key = "matrix_matrix_1"
+bin = "matrix"
+subprog = "matrix"
+mode = "1"
+title = "Matrix Generate And Transform"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Generates a random spectral matrix and applies it to the source in one step"
+description = """
+Runs its own internal spectral analysis (Analysis Channels/Window Overlap below), generates \
+a random matrix, and applies it to the source's spectrum in one step — a raw spectral-domain \
+transform with no directly predictable audible result. Also generates the matrix data itself \
+as a reusable file — after this runs, use "Save Matrix As" to keep it, then apply it to a \
+different sound later with Matrix Apply Saved Matrix.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+sidecar_extension = "txt"
+
+[[process.params]]
+name = "Analysis Channels"
+description = "FFT size for the internal analysis — must be a power of two"
+automatable = false
+kind = "choice"
+options = ["4", "8", "16", "32", "64", "128", "256", "512", "1024", "2048", "4096", "8192", "16384"]
+default = 8
+
+[[process.params]]
+name = "Window Overlap"
+description = "Overlap factor of analysis windows"
+automatable = false
+kind = "number"
+min = 1.0
+max = 4.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Cyclic"
+description = "Apply the matrix transform cyclically (window N is transformed by the matrix raised to the Nth power, instead of once)"
+flag = "-c"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "matrix_matrix_2"
+bin = "matrix"
+subprog = "matrix"
+mode = "2"
+title = "Matrix Apply Saved Matrix"
+category = "pvoc"
+subcategory = "spectrum"
+short_description = "Applies a previously-saved matrix-data file to the source's spectrum"
+description = """
+Runs its own internal spectral analysis and applies a previously-generated matrix-data file \
+(saved via Matrix Generate And Transform's "Save Matrix As" prompt) to the source's spectrum \
+— a raw spectral-domain transform with no directly predictable audible result.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Matrix File"
+description = "A .matrix file saved from a previous Matrix Generate And Transform run"
+automatable = false
+kind = "file_path"
+extension = "matrix"
+
+[[process.params]]
+name = "Cyclic"
+description = "Apply the matrix transform cyclically (window N is transformed by the matrix raised to the Nth power, instead of once)"
+flag = "-c"
+automatable = false
+kind = "toggle"
+default = false
