@@ -6115,11 +6115,17 @@ impl App {
         // processed (not the whole buffer) so both match what CDP is about to be handed. Both
         // exist because the catalog's static values made their process *always* fail — see
         // `ParamDef::range_scales_with_input_duration` / `default_from_dc_offset`.
-        let process_range = self
-            .active_document
-            .checked_sub(0)
-            .filter(|&i| i < self.documents.len())
-            .and_then(|i| self.operation_range(i, self.snap_to_zero));
+        // The range CDP will actually be handed: the selection if there is one, otherwise the
+        // whole document (`operation_range`'s own default). Falls back to the whole document
+        // when `operation_range` yields `None` too — a degenerate selection that zero-crossing
+        // snapping collapsed to nothing — so a stray click can't silently leave these defaults
+        // unscaled while the run itself still goes ahead on something.
+        let process_range = self.active_doc().and_then(|doc| {
+            let len = doc.len_samples();
+            (len > 0).then(|| {
+                self.operation_range(self.active_document, self.snap_to_zero).unwrap_or((0, len))
+            })
+        });
         if let (Some(doc), Some((start, end))) = (self.active_doc(), process_range) {
             let duration = (end.saturating_sub(start)) as f64 / doc.sample_rate.max(1) as f64;
             for (param, field) in def.params.iter().zip(&mut fields) {
@@ -21281,6 +21287,64 @@ mod tests {
             );
             assert!(value > *min && value < *max, "and comfortably inside the range");
         }
+    }
+
+    /// With nothing selected, a DISTMORE process must act on the **whole file** — every mark
+    /// in the document counts, and its marklist covers the entire timeline. Pins the
+    /// no-selection contract end to end: the range handed to `plan_job`, the marks that reach
+    /// the marklist, and the duration the dynamic ranges scale against.
+    #[test]
+    fn with_no_selection_a_distmore_process_covers_the_whole_file() {
+        let len = 44_100 * 4;
+        let mut app = new_app(Some(doc(0.1, len)), None);
+        app.documents[0].head_tail_marks = vec![1_000, 50_000, 100_000, 150_000];
+        assert!(app.documents[0].selection.is_none(), "nothing selected");
+
+        let range = app.operation_range(0, app.snap_to_zero).expect("a whole-file range");
+        assert_eq!(range, (0, len), "no selection means the entire document");
+
+        // Every mark survives, at its original position (rebasing against a zero start is a
+        // no-op), so the marklist CDP receives describes the whole file.
+        assert_eq!(
+            head_tail_marks_within(&app.documents[0].head_tail_marks, range),
+            vec![1_000, 50_000, 100_000, 150_000]
+        );
+
+        // And a duration-scaled range resolves against the full 4 seconds, not some fragment.
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "distmore_segszig_3")
+            .expect("distmore_segszig_3 in catalog");
+        app.open_cdp_params(index);
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!() };
+        let CdpField::Number { min, .. } = &fields[1] else { panic!() };
+        assert!((*min - (2.0 * 4.0 + 0.01)).abs() < 1e-6, "scaled against 4 seconds, got {min}");
+    }
+
+    /// A selection that zero-crossing snapping collapses to nothing must not leave the
+    /// duration-scaled ranges unscaled — the run itself falls back to the whole document, so
+    /// the defaults have to agree with it rather than silently keeping raw multipliers.
+    #[test]
+    fn a_degenerate_selection_still_scales_the_defaults_against_the_whole_file() {
+        let len = 44_100 * 2;
+        let mut app = new_app(Some(doc(0.1, len)), None);
+        // start == end: `operation_range` rejects it as degenerate.
+        app.documents[0].selection = Some(Selection { start: 500, end: 500 });
+        assert!(app.operation_range(0, app.snap_to_zero).is_none());
+
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "distmore_segszig_3")
+            .expect("distmore_segszig_3 in catalog");
+        app.open_cdp_params(index);
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!() };
+        let CdpField::Number { min, max, .. } = &fields[1] else { panic!() };
+        assert!((*min - (2.0 * 2.0 + 0.01)).abs() < 1e-6, "floor scaled against 2 seconds: {min}");
+        assert!((*max - (64.0 * 2.0 - 0.01)).abs() < 1e-6, "ceiling too: {max}");
     }
 
     /// The wheel scrolls every dialog that has a list, not just the process browser.
