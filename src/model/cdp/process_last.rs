@@ -13,11 +13,17 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::def::ParamValue;
+use super::input_buffers::CdpInputBuffers;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LastProcess {
     pub process_key: String,
     pub values: Vec<ParamValue>,
+    /// The variadic-input process's picked buffers, exactly as `CdpPreset.input_buffers`
+    /// carries them — "Recall last process" is an auto-saved preset in all but name, so it
+    /// restores the extra inputs too. `#[serde(default)]` for the same back-compat reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_buffers: CdpInputBuffers,
 }
 
 /// The path the last-applied process is saved to:
@@ -87,7 +93,7 @@ mod tests {
     }
 
     fn sample_process(key: &str) -> LastProcess {
-        LastProcess { process_key: key.into(), values: vec![ParamValue::Number(4.0)] }
+        LastProcess { process_key: key.into(), values: vec![ParamValue::Number(4.0)], ..Default::default() }
     }
 
     #[test]

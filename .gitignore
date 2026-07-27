@@ -17,3 +17,6 @@
 
 # CDP CLI binaries (170+ prebuilt tools, ~200MiB)
 /cdp/
+
+# Reference PDFs from CDP, kept locally alongside the working docs above
+*.pdf

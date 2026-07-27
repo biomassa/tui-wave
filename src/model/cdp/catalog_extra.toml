@@ -15037,83 +15037,6 @@ kind = "toggle"
 default = false
 
 [[process]]
-key = "ts_oscil"
-bin = "ts"
-subprog = "oscil"
-title = "Ts Oscillator (Time-Series To Waveform)"
-category = "time"
-subcategory = "synthesis"
-short_description = "Generates a sound by treating a list of numbers as one cycle of a waveform"
-description = """
-Treats a plain list of numbers as a single-cycle waveform plot and repeats it into a \
-continuous tone, downsampling (timestretching) it by the given number of octaves.
-"""
-input = "none"
-output = "wav"
-stereo_native = false
-output_is_stereo = false
-
-[[process.params]]
-name = "Waveform Data"
-description = "Ordered list of numbers making up one cycle of the waveform"
-automatable = true
-required_list = true
-# `ts oscil indata outsnd downsample` -- the datafile sits BEFORE outfile here (there's no
-# real infile at all, `input = "none"`), confirmed against the real binary: without this,
-# `build_process_args`'s default after-outfile placement put "downsample" where "outsnd" was
-# expected, so `ts` tried to open the smoke test's own generic outfile name as its indata
-# textfile ("Failed to parse input file out.wav").
-before_outfile = true
-kind = "number"
-min = -1.0
-max = 1.0
-step = 0.001
-default = 0.0
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Downsample"
-description = "Downward transposition of the data, in octaves (also timestretches by the same power of two)"
-automatable = true
-kind = "number"
-min = 0.0
-max = 16.0
-step = 1.0
-default = 2.0
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Max Duration"
-description = "Maximum duration of the output, in seconds"
-flag = "-d"
-automatable = false
-kind = "number"
-min = 1.0
-max = 600.0
-step = 1.0
-default = 10.0
-exponential = true
-scale = "plain"
-
-[[process.params]]
-name = "Cubic Interpolation"
-description = "Interpolate the downsampled data with a cubic spline instead of the default linear interpolation"
-flag = "-c"
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
-name = "Force Duration"
-description = "Force the output to reach Max Duration by looping the input data if it would otherwise be shorter"
-flag = "-f"
-automatable = false
-kind = "toggle"
-default = false
-
-[[process]]
 key = "spin_stereo_1"
 bin = "spin"
 subprog = "stereo"
@@ -16432,79 +16355,15 @@ kind = "toggle"
 default = false
 
 # ---- CDP Release 8 gap-list, batch 3 (2026-07-26) --------------------------------------
-# `speculate` re-added after fixing the `plan_wav_glob` Ana-input gap it exposed (see
-# `pipeline::plan_wav_glob`'s doc comment) — dropped from batch 1 rather than fixed on the
-# spot, now confirmed working end-to-end via the real binary.
-
-[[process]]
-key = "speculate_speculate"
-bin = "speculate"
-subprog = "speculate"
-title = "Speculate (Channel Permutation)"
-category = "pvoc"
-subcategory = "spectrum"
-short_description = "Generates a numbered series of versions of the source with channel data progressively permuted"
-description = """
-Progressively permutes the spectral channel data within the given frequency band using a \
-bell-ringing "Plain Bob" style swapping sequence, writing out every intermediate step as its \
-own numbered output file. The number of files produced depends entirely on how many \
-channels fall inside Min/Max Frequency — a wide band across a normal analysis can produce \
-several hundred files, so narrow the band for a manageable result.
-"""
-input = "ana"
-output = "wav_glob"
-stereo_native = false
-output_is_stereo = false
-
-[[process.params]]
-name = "Min Frequency"
-description = "Lowest frequency (Hz) to take part in the channel permutation"
-automatable = false
-kind = "number"
-min = 0.0
-max = 20000.0
-step = 1.0
-default = 200.0
-exponential = true
-scale = "plain"
-
-[[process.params]]
-name = "Max Frequency"
-description = "Highest frequency (Hz) to take part in the channel permutation"
-automatable = false
-kind = "number"
-min = 0.0
-max = 20000.0
-step = 1.0
-default = 2000.0
-exponential = true
-scale = "plain"
-
-[[process.params]]
-name = "Remove Other Components"
-description = "Remove spectral components outside the Min/Max Frequency band instead of leaving them untouched"
-flag = "-r"
-automatable = false
-kind = "toggle"
-default = false
-
-# ---- CDP Release 8 gap-list, batch 4 (2026-07-26) --------------------------------------
-# MATRIX mode 1 ("generate matrix + transformed sound"): confirmed by hand that despite the
-# usage text saying "outfiles" (plural), the real binary writes exactly two files sharing
-# the outfile's base name -- `<outfile>.wav` (the transformed sound, this entry's real
-# result) and `<outfile>.txt` (the generated matrix data, several MB of plain numbers).
-# `sidecar_extension = "txt"` (`ProcessDef`) tells `pipeline::plan_wav` to capture that
-# second file too; `cdp::runner` reads its bytes before the job's temp dir is cleaned up,
-# and a successful Apply prompts "Save Matrix As" (`Dialog::SaveMatrixAs`) so the user can
-# keep it under `.matrix` (`ui/app.rs`'s `MATRIX_EXTENSION`) before it's lost. Mode 2 (below)
-# applies a previously-saved `.matrix` file via `ParamKind::FilePath` — a real file the user
-# browses to (`Dialog::CdpParams.file_picker`, reuses `Dialog::LoadCurve`'s `FilePanel`
-# widget), not an in-app buffer: the file already exists wherever it was saved and CDP can
-# open it by that path directly (confirmed: `cdp::runner` spawns jobs with the temp job dir
-# as CWD, but an absolute path works regardless), so unlike `FormantBufferRef` there's no
-# bytes-injection/temp-copy step needed at all. (A fuller FormantBuffer-style in-memory
-# buffer + Buffers-panel mechanism was considered and deliberately not built — this file-path
-# approach was the chosen lighter alternative, CDP-Release8-TODO.md.)
+# `speculate` (Channel Permutation) was cataloged here and REMOVED again on 2026-07-27: its
+# numbered `cutout*.wav` outputs are not audio at all but CDP pvoc ANALYSIS files (confirmed
+# with `sfprops`), so the app read tens of spectral files as if they were WAV. Worse, the
+# output *count* depends only on how many analysis channels fall inside Min/Max Frequency
+# (84 at its own defaults) while each file scales with source duration — a 10-second mono
+# source produced 84 files / 1.3 GB — which froze the app outright while it tried to open a
+# buffer and build a waveform cache per file. Making it correct would need a per-output
+# `pvoc synth` pass and would still dump 80+ buffers into the Buffers panel, which is not a
+# usable result in this editor, so it is deliberately not offered. Do not re-add it.
 
 [[process]]
 key = "matrix_matrix_1"

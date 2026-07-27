@@ -16,15 +16,24 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::def::ParamValue;
+use super::input_buffers::CdpInputBuffers;
 
 /// One saved parameter set for a specific process. `values` is index-parallel to that
 /// process's `ProcessDef.params` at save time — a later catalog edit that adds/removes a
 /// param invalidates a saved preset, which `load_presets` detects (by length mismatch) and
 /// silently drops rather than risk applying values to the wrong params.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CdpPreset {
     pub name: String,
     pub values: Vec<ParamValue>,
+    /// The variadic-input process's picked buffers ("input buffers" row), if it has one —
+    /// see `input_buffers`'s module docs. Empty for every non-variadic process, and
+    /// `#[serde(default)]` so preset files written before this field existed still load.
+    /// Deliberately *not* covered by `load_presets_in`'s `expected_param_count` check: it
+    /// isn't index-parallel to `params`, and its own shape check happens at resolve time
+    /// (`input_buffers::resolve_against`) where the open-buffer list is actually known.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_buffers: CdpInputBuffers,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -145,15 +154,13 @@ mod tests {
     #[test]
     fn save_then_load_round_trips_every_param_value_variant() {
         let dir = TempDir::new("roundtrip");
-        let preset = CdpPreset {
-            name: "My Preset".into(),
+        let preset = CdpPreset { name: "My Preset".into(),
             values: vec![
                 ParamValue::Number(1.5),
                 ParamValue::Toggle(true),
                 ParamValue::Choice(2),
                 ParamValue::Breakpoints(vec![(0.0, 0.0), (0.5, 10.0), (1.0, 0.0)]),
-            ],
-        };
+            ], ..Default::default() };
         save_preset_in(&dir.0, "test_process", preset.clone());
 
         let loaded = load_presets_in(&dir.0, "test_process", 4);
@@ -164,8 +171,8 @@ mod tests {
     #[test]
     fn saving_a_preset_with_an_existing_name_overwrites_it() {
         let dir = TempDir::new("overwrite");
-        save_preset_in(&dir.0, "proc", CdpPreset { name: "A".into(), values: vec![ParamValue::Number(1.0)] });
-        save_preset_in(&dir.0, "proc", CdpPreset { name: "A".into(), values: vec![ParamValue::Number(2.0)] });
+        save_preset_in(&dir.0, "proc", CdpPreset { name: "A".into(), values: vec![ParamValue::Number(1.0)], ..Default::default() });
+        save_preset_in(&dir.0, "proc", CdpPreset { name: "A".into(), values: vec![ParamValue::Number(2.0)], ..Default::default() });
 
         let loaded = load_presets_in(&dir.0, "proc", 1);
         assert_eq!(loaded.len(), 1, "same name should overwrite, not append");
@@ -175,8 +182,8 @@ mod tests {
     #[test]
     fn presets_are_scoped_per_process() {
         let dir = TempDir::new("scoped");
-        save_preset_in(&dir.0, "proc_a", CdpPreset { name: "Shared Name".into(), values: vec![ParamValue::Number(1.0)] });
-        save_preset_in(&dir.0, "proc_b", CdpPreset { name: "Shared Name".into(), values: vec![ParamValue::Number(2.0)] });
+        save_preset_in(&dir.0, "proc_a", CdpPreset { name: "Shared Name".into(), values: vec![ParamValue::Number(1.0)], ..Default::default() });
+        save_preset_in(&dir.0, "proc_b", CdpPreset { name: "Shared Name".into(), values: vec![ParamValue::Number(2.0)], ..Default::default() });
 
         assert_eq!(load_presets_in(&dir.0, "proc_a", 1)[0].values, vec![ParamValue::Number(1.0)]);
         assert_eq!(load_presets_in(&dir.0, "proc_b", 1)[0].values, vec![ParamValue::Number(2.0)]);
@@ -185,8 +192,8 @@ mod tests {
     #[test]
     fn delete_removes_only_the_named_preset() {
         let dir = TempDir::new("delete");
-        save_preset_in(&dir.0, "proc", CdpPreset { name: "Keep".into(), values: vec![ParamValue::Number(1.0)] });
-        save_preset_in(&dir.0, "proc", CdpPreset { name: "Remove".into(), values: vec![ParamValue::Number(2.0)] });
+        save_preset_in(&dir.0, "proc", CdpPreset { name: "Keep".into(), values: vec![ParamValue::Number(1.0)], ..Default::default() });
+        save_preset_in(&dir.0, "proc", CdpPreset { name: "Remove".into(), values: vec![ParamValue::Number(2.0)], ..Default::default() });
 
         delete_preset_in(&dir.0, "proc", "Remove");
 
@@ -199,7 +206,7 @@ mod tests {
     fn delete_on_missing_file_or_name_is_a_harmless_no_op() {
         let dir = TempDir::new("delete_noop");
         delete_preset_in(&dir.0, "never_saved", "whatever"); // no file yet — must not panic
-        save_preset_in(&dir.0, "proc", CdpPreset { name: "Keep".into(), values: vec![ParamValue::Number(1.0)] });
+        save_preset_in(&dir.0, "proc", CdpPreset { name: "Keep".into(), values: vec![ParamValue::Number(1.0)], ..Default::default() });
         delete_preset_in(&dir.0, "proc", "does not exist");
         assert_eq!(load_presets_in(&dir.0, "proc", 1).len(), 1);
     }
@@ -209,11 +216,11 @@ mod tests {
     #[test]
     fn mismatched_param_count_preset_is_dropped_others_still_load() {
         let dir = TempDir::new("mismatch");
-        save_preset_in(&dir.0, "proc", CdpPreset { name: "Stale".into(), values: vec![ParamValue::Number(1.0)] });
+        save_preset_in(&dir.0, "proc", CdpPreset { name: "Stale".into(), values: vec![ParamValue::Number(1.0)], ..Default::default() });
         save_preset_in(
             &dir.0,
             "proc",
-            CdpPreset { name: "Current".into(), values: vec![ParamValue::Number(1.0), ParamValue::Number(2.0)] },
+            CdpPreset { name: "Current".into(), values: vec![ParamValue::Number(1.0), ParamValue::Number(2.0)], ..Default::default() },
         );
 
         let loaded = load_presets_in(&dir.0, "proc", 2);
@@ -236,10 +243,8 @@ mod tests {
     #[test]
     fn formant_buffer_ref_value_round_trips_through_a_preset_file() {
         let dir = TempDir::new("formant_ref");
-        let preset = CdpPreset {
-            name: "probe".into(),
-            values: vec![ParamValue::FormantBufferRef, ParamValue::Number(2.0), ParamValue::Toggle(true)],
-        };
+        let preset = CdpPreset { name: "probe".into(),
+            values: vec![ParamValue::FormantBufferRef, ParamValue::Number(2.0), ParamValue::Toggle(true)], ..Default::default() };
         save_preset_in(&dir.0, "probe_proc", preset.clone());
         let loaded = load_presets_in(&dir.0, "probe_proc", 3);
         assert_eq!(loaded, vec![preset], "FormantBufferRef unit variant must round-trip through a preset file");
@@ -263,9 +268,68 @@ mod tests {
                 }),
                 ParamValue::Number(2.0),
             ],
+            ..Default::default()
         };
         save_preset_in(&dir.0, "crystal_proc", preset.clone());
         let loaded = load_presets_in(&dir.0, "crystal_proc", 2);
         assert_eq!(loaded, vec![preset], "the compound VDAT value must round-trip through a preset file");
+    }
+
+    /// A variadic process's picked buffers ride alongside `values` and must survive the file
+    /// round-trip with their group *and* pick order intact — that order is what CDP reads as
+    /// structure (see `input_buffers`'s module docs), so a re-sort would silently change what
+    /// the preset does rather than merely losing it.
+    #[test]
+    fn picked_input_buffers_round_trip_with_their_group_and_pick_order() {
+        use super::super::input_buffers::CdpBufferRef;
+        let dir = TempDir::new("input_buffers");
+        let preset = CdpPreset {
+            name: "two groups".into(),
+            values: vec![ParamValue::Number(1.0)],
+            input_buffers: vec![
+                vec![CdpBufferRef { path: Some("/a/left.wav".into()), name: "left.wav".into() }],
+                vec![
+                    CdpBufferRef { path: Some("/a/z.wav".into()), name: "z.wav".into() },
+                    CdpBufferRef { path: None, name: "_NEW_002".into() },
+                ],
+            ],
+        };
+        save_preset_in(&dir.0, "repair_repair", preset.clone());
+        let loaded = load_presets_in(&dir.0, "repair_repair", 1);
+        assert_eq!(loaded, vec![preset]);
+    }
+
+    /// Every preset file written before `input_buffers` existed must still load, with the new
+    /// field defaulting to empty rather than the whole entry being dropped — that's what
+    /// `#[serde(default)]` buys, and it is worth pinning because the failure mode is silent
+    /// (`load_presets_in` returns an empty `Vec` on a parse error, so a broken field would
+    /// look exactly like "no presets saved").
+    #[test]
+    fn a_preset_file_written_before_input_buffers_existed_still_loads() {
+        let dir = TempDir::new("legacy_file");
+        std::fs::write(
+            preset_file_path(&dir.0, "legacy_proc"),
+            "[[preset]]\nname = \"old\"\nvalues = [{ Number = 3.5 }]\n",
+        )
+        .unwrap();
+        let loaded = load_presets_in(&dir.0, "legacy_proc", 1);
+        assert_eq!(loaded.len(), 1, "the old-format entry survives: {loaded:?}");
+        assert_eq!(loaded[0].name, "old");
+        assert!(loaded[0].input_buffers.is_empty(), "and defaults to no picked buffers");
+    }
+
+    /// The mirror of the above: a process with no picked buffers writes no `input_buffers`
+    /// key at all (`skip_serializing_if`), so saved files stay readable by an older build and
+    /// don't gain noise for the ~99% of processes that aren't variadic.
+    #[test]
+    fn a_preset_with_no_picked_buffers_writes_no_input_buffers_key() {
+        let dir = TempDir::new("no_key");
+        save_preset_in(
+            &dir.0,
+            "plain_proc",
+            CdpPreset { name: "plain".into(), values: vec![ParamValue::Number(1.0)], ..Default::default() },
+        );
+        let text = std::fs::read_to_string(preset_file_path(&dir.0, "plain_proc")).unwrap();
+        assert!(!text.contains("input_buffers"), "no empty key written: {text}");
     }
 }
