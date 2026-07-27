@@ -105,6 +105,33 @@ impl Viewport {
             (self.amplitude_scale / VERTICAL_ZOOM_FACTOR).clamp(MIN_AMPLITUDE_SCALE, MAX_AMPLITUDE_SCALE);
     }
 
+    /// Clamps `samples_per_column` so the visible window can never span more audio than the
+    /// document actually holds — i.e. zoomed out no further than "the whole file exactly fills
+    /// the pane".
+    ///
+    /// `zoom` already applies this bound as it goes, but nothing re-applied it when the
+    /// *document* changed underneath a fixed zoom level. Any process or undo that shortens the
+    /// audio (and CDP results are rarely the same length as their input) therefore left the
+    /// view zoomed out for the old, longer file, drawing the whole waveform squeezed into the
+    /// left edge with an expanse of empty pane to its right — user report, 2026-07-27, at
+    /// 5196.5 samples/column on a file far shorter than that spanned.
+    ///
+    /// Returns `true` if it actually changed anything, so a caller that needs to re-run
+    /// dependent work (rebuilding a waveform cache, re-fitting auto vertical zoom) can tell.
+    /// Leaves `scroll_offset` alone — callers pair this with `ensure_visible`, which is what
+    /// re-clamps that against the new span.
+    pub fn clamp_zoom_to_content(&mut self, width: u16) -> bool {
+        let max_zoom_out = (self.total_len as f64 / width.max(1) as f64).max(1.0);
+        let clamped = self
+            .samples_per_column
+            .clamp(self.min_samples_per_column, self.max_samples_per_column.min(max_zoom_out));
+        if clamped == self.samples_per_column {
+            return false;
+        }
+        self.samples_per_column = clamped;
+        true
+    }
+
     /// Sets the amplitude scale directly, clamped to the same bounds as the zoom-vertical
     /// actions. Used by auto vertical zoom to fit the display to a file's peak amplitude.
     pub fn set_amplitude_scale(&mut self, scale: f32) {
@@ -144,6 +171,52 @@ mod tests {
             total_len,
             auto_vertical_zoom: false,
         }
+    }
+
+    /// A document that got shorter (a process, or an undo of one) must not leave the view
+    /// zoomed out for the old length — that draws the whole waveform crushed into the left
+    /// edge with empty pane beside it (user report, 2026-07-27).
+    #[test]
+    fn shrinking_the_document_clamps_the_zoom_back_to_fit() {
+        let mut viewport = zoomed_in_viewport(1_000_000, 5_000.0);
+        // The file is cut down to a twentieth of its old length.
+        viewport.total_len = 50_000;
+        assert!(viewport.clamp_zoom_to_content(80), "the zoom needed correcting");
+        // 50000 / 80 = 625: exactly "the whole file fills the pane", never more.
+        assert!((viewport.samples_per_column - 625.0).abs() < 0.01, "{}", viewport.samples_per_column);
+        assert!(
+            viewport.span(80) <= viewport.total_len,
+            "the visible span never exceeds the audio that exists"
+        );
+    }
+
+    /// A zoom that already fits is left exactly as it is — the clamp must never *change* the
+    /// user's zoom level just because it ran.
+    #[test]
+    fn clamping_a_zoom_that_already_fits_is_a_no_op() {
+        let mut viewport = zoomed_in_viewport(1_000_000, 100.0);
+        assert!(!viewport.clamp_zoom_to_content(80), "nothing to correct");
+        assert!((viewport.samples_per_column - 100.0).abs() < f64::EPSILON);
+    }
+
+    /// Growing the document (undoing a cut, pasting) must not zoom *out* on its own — the
+    /// clamp is a ceiling, not a fit.
+    #[test]
+    fn growing_the_document_leaves_the_zoom_alone() {
+        let mut viewport = zoomed_in_viewport(10_000, 50.0);
+        viewport.total_len = 1_000_000;
+        assert!(!viewport.clamp_zoom_to_content(80));
+        assert!((viewport.samples_per_column - 50.0).abs() < f64::EPSILON);
+    }
+
+    /// The floor still wins: a file shorter than the pane is wide must not drive
+    /// samples_per_column below 1, which would mean fractional samples per column.
+    #[test]
+    fn a_file_shorter_than_the_pane_clamps_to_one_sample_per_column() {
+        let mut viewport = zoomed_in_viewport(1_000_000, 900.0);
+        viewport.total_len = 10;
+        viewport.clamp_zoom_to_content(80);
+        assert!(viewport.samples_per_column >= 1.0, "{}", viewport.samples_per_column);
     }
 
     #[test]

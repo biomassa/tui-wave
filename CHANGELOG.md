@@ -51,6 +51,10 @@
 - **Removed two processes that cannot work here**: Ts Oscillator (it takes no input sound at
   all) and Speculate (its numbered outputs are spectral analysis files, not audio, and a
   single run wrote over a gigabyte across 84 files, freezing the editor).
+- **Fixed: the waveform could end up crushed into the left edge with empty space beside it**
+  after a process (or an undo of one) shortened the sound. The horizontal zoom was left
+  scaled for the old, longer file; it is now re-clamped whenever the length changes, so the
+  view never spans more audio than the file actually holds.
 - Bumped version to 1.6.0.
 
 ## 2026-07-25
