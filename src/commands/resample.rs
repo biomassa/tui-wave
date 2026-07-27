@@ -104,7 +104,7 @@ impl Command for ResampleCommand {
         for m in &mut doc.head_tail_marks {
             *m = ((*m as f64 * ratio).round() as usize).min(new_len);
         }
-        doc.head_tail_marks.dedup();
+        doc.dedup_head_tail_marks();
         doc.sample_rate = self.target_rate;
         doc.selection = None;
         doc.cursor = 0;

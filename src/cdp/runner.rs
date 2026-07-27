@@ -2695,8 +2695,13 @@ mod tests {
         //     (added 2026-07-22, CDP-WASM-SUITE-gaps.md's "Align grains") hits this from both
         //     of its two inputs at once (fed the same constant-tone fixture on each side, per
         //     this harness's single-input-duplicated convention for dual-input processes).
-        //   housekeep_extract_4: "NO CHANGE to original sound file" against this specific
-        //     mono fixture — content-dependent, not an argv-shape problem.
+        //   (housekeep_extract_4 used to be listed here as "content-dependent". That was a
+        //     misdiagnosis: its catalog default was 0.0, and `housekeep extract 4` rejects a
+        //     zero shift outright with "NO CHANGE to original sound file" — so it failed on
+        //     *every* input, not just this fixture, and in the app too (user report,
+        //     2026-07-27). It now defaults to the negated measured DC offset
+        //     (`ParamDef::default_from_dc_offset`), which this harness mirrors above, and it
+        //     runs for real here — 2026-07-27.)
         //   modify_space_2, modify_space_4, tostereo_tostereo, spin_stereo_1: explicitly
         //     stereo-only ("MIRROR/NARROW only works with STEREO input files"; tostereo:
         //     "must be stereo"; spin stereo: "File in.wav is not of correct type (must be
@@ -2734,7 +2739,6 @@ mod tests {
             "grain_align",
             "grain_reverse",
             "grainex_extend",
-            "housekeep_extract_4",
             "matrix_matrix_2",
             "modify_brassage_4",
             "modify_space_2",
@@ -2807,6 +2811,27 @@ mod tests {
                             panic!("{}: required_list param {:?} is not a Number kind", def.key, p.name);
                         };
                         crate::model::cdp::ParamValue::List(vec![*default])
+                    } else if p.range_scales_with_input_duration {
+                        // `min`/`max`/`default` are multipliers of the input duration here,
+                        // not seconds — the app scales them in `App::cdp_fields_for`, so the
+                        // harness has to do the same or it would send a raw multiplier as a
+                        // duration and test nothing real.
+                        let crate::model::cdp::ParamKind::Number { default, min, max, .. } = &p.kind
+                        else {
+                            panic!("{}: range_scales_with_input_duration param {:?} is not a Number kind", def.key, p.name);
+                        };
+                        let lo = min * duration_secs + 0.01;
+                        let hi = (max * duration_secs - 0.01).max(lo);
+                        crate::model::cdp::ParamValue::Number((default * duration_secs).clamp(lo, hi))
+                    } else if p.default_from_dc_offset {
+                        // The app pre-fills this with the negated mean of the real selection;
+                        // this fixture is a symmetric sine, so that rounds to zero and the
+                        // fallback (one `step`) is what it would actually send. Zero is the
+                        // one value `housekeep extract 4` refuses outright.
+                        let crate::model::cdp::ParamKind::Number { step, .. } = &p.kind else {
+                            panic!("{}: default_from_dc_offset param {:?} is not a Number kind", def.key, p.name);
+                        };
+                        crate::model::cdp::ParamValue::Number(*step)
                     } else {
                         p.kind.default_value()
                     }

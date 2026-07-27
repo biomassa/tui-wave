@@ -107,6 +107,19 @@ impl Document {
         self.head_tail_marks.len() / 2
     }
 
+    /// Collapses head/tail marks that have landed on the same sample down to one, keeping the
+    /// list sorted. Duplicates are never valid: two marks on one sample describe a zero-length
+    /// segment *and*, since the Head-or-Tail role is derived from list index, flip the role of
+    /// every mark after them.
+    ///
+    /// A separate step rather than something `remove_range` does for itself, because that
+    /// primitive must preserve entry count and order for `commands::cdp`'s positional restore
+    /// — see the comment there. Every command that moves marks calls this once it has finished.
+    pub fn dedup_head_tail_marks(&mut self) {
+        self.head_tail_marks.sort_unstable();
+        self.head_tail_marks.dedup();
+    }
+
     /// Inserts a head/tail mark at `position`, keeping the list sorted, and returns its new
     /// index. A duplicate position is rejected (returns `None`) rather than inserted: two
     /// marks at the same sample would make a zero-length segment, and since roles are derived
@@ -362,11 +375,15 @@ impl Document {
         }
         // Head/tail marks shift identically — they are anchored to audio just as ordinary
         // markers are, and a DISTMORE marklist that drifted after an edit would cut the wrong
-        // segments. The one extra step: several marks inside the cut all collapse onto the
-        // same cut point, and since roles are derived from index, leaving duplicates there
-        // would keep zero-length segments in the list and flip later marks' roles. Dedupe
-        // instead, which is the same "a mark can't survive twice at one sample" rule
-        // `insert_head_tail_mark` enforces.
+        // segments.
+        //
+        // Several marks inside the cut all collapse onto the cut point, leaving duplicates.
+        // They are deliberately **not** deduped here: like the `markers` loop above, this
+        // primitive never reorders or removes an entry, and `commands::cdp`'s splice relies
+        // on that — it restores in-range marks by zipping the post-edit list positionally
+        // against a pre-edit snapshot, which silently drops entries the moment the two
+        // lengths diverge. Deduping is the caller's job, once it has finished moving things
+        // around: see `Document::dedup_head_tail_marks`.
         for m in &mut self.head_tail_marks {
             if *m >= end {
                 *m -= removed;
@@ -374,7 +391,6 @@ impl Document {
                 *m = start;
             }
         }
-        self.head_tail_marks.dedup();
         out
     }
 
@@ -603,15 +619,22 @@ mod tests {
         assert_eq!(document.head_tail_marks, vec![10, 20, 40, 60]);
     }
 
-    /// Several marks inside one cut all collapse onto the cut point. They must not survive as
-    /// duplicates: roles are derived from index, so leaving three marks stacked on one sample
-    /// would keep two zero-length segments in the list *and* flip the Head/Tail role of every
-    /// mark after them.
+    /// Several marks inside one cut all collapse onto the cut point. `remove_range` itself
+    /// leaves them stacked — it must preserve entry count and order for `commands::cdp`'s
+    /// positional restore — and `dedup_head_tail_marks` is what collapses them, which is what
+    /// every command calls once it has finished moving marks around.
     #[test]
-    fn marks_collapsing_onto_one_cut_point_are_deduped_not_stacked() {
+    fn marks_collapsing_onto_one_cut_point_stack_until_deduped() {
         let mut document = doc(vec![0.0; 100]);
         document.head_tail_marks = vec![10, 25, 30, 35, 60];
         document.remove_range(20..40);
+        assert_eq!(
+            document.head_tail_marks,
+            vec![10, 20, 20, 20, 40],
+            "the primitive preserves one entry per original mark"
+        );
+
+        document.dedup_head_tail_marks();
         assert_eq!(document.head_tail_marks, vec![10, 20, 40]);
         assert_eq!(document.head_tail_pairs(), 1, "one complete pair plus a spare Head");
     }

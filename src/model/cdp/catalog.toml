@@ -2423,11 +2423,12 @@ output_is_stereo = false
 
 [[process.params]]
 name = "Offset"
-description = "The amount to move the signal away from the 0 crossing line by"
+description = "Amount added to every sample. Pre-filled with the negative of this selection's measured DC offset, which is the value that removes it; a positive value deliberately adds offset instead"
 automatable = false
+default_from_dc_offset = true
 kind = "number"
-min = -0.02
-max = 0.02
+min = -1.0
+max = 1.0
 step = 0.001
 default = 0.0
 exponential = false
