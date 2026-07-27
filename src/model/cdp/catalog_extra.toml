@@ -15915,14 +15915,21 @@ scale = "plain"
 
 [[process.params]]
 name = "Output Duration"
-description = "Duration of the zigzagged output, in seconds"
+description = "Duration of the zigzagged output, in seconds. CDP's accepted range is 2x to 64x the input's own duration, so the range shown adapts to the selection"
 automatable = false
+# min/max/default here are MULTIPLES of the input duration, not seconds -- see
+# `ParamDef::range_scales_with_input_duration`. CDP enforces 2x..64x, verified against the
+# real binary at 1s, 2s and 4s inputs (-> [2,64], [4,128], [8,256]) and confirmed
+# independent of the zigzag count. The old flat [0.1-600.0] with a default of 2.0 sat below
+# the floor for any input longer than a second, so the process could never run at its own
+# defaults (user report, 2026-07-27).
+range_scales_with_input_duration = true
 kind = "number"
-min = 0.1
-max = 600.0
+min = 2.0
+max = 64.0
 step = 0.1
-default = 2.0
-exponential = true
+default = 4.0
+exponential = false
 scale = "plain"
 
 [[process.params]]

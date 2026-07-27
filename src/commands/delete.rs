@@ -38,6 +38,11 @@ impl Command for RemoveRangeCommand {
         self.markers_before = Some(doc.markers.clone());
         self.head_tail_marks_before = Some(doc.head_tail_marks.clone());
         self.removed = Some(doc.remove_range(self.range.clone()));
+        // `remove_range` deliberately leaves marks stacked on the cut point (it preserves
+        // entry count for `commands::cdp`'s positional restore) — collapse them here, now
+        // that nothing else needs the one-to-one correspondence. Undo restores the snapshot
+        // wholesale, so the collapse is fully reversible.
+        doc.dedup_head_tail_marks();
         doc.selection = None;
         doc.cursor = self.range.start.min(doc.len_samples());
         doc.dirty = true;

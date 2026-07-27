@@ -44,6 +44,10 @@ pub struct CdpProcessCommand {
     timing_tolerance: usize,
     removed: Option<Vec<Vec<f32>>>,
     markers_before: Option<Vec<Marker>>,
+    /// Head/tail marks (`Document.head_tail_marks`) snapshotted for undo, for exactly the
+    /// same reason as `markers_before` — and missed on the first pass, so undoing a DISTMORE
+    /// process left the marks it had just consumed destroyed (user report, 2026-07-27).
+    head_tail_marks_before: Option<Vec<usize>>,
     cursor_before: usize,
     /// Document channel count at `execute` time, so `undo` can shrink the document back
     /// after a result wider than the document (see `execute`'s widening step) grew it.
@@ -66,6 +70,7 @@ impl CdpProcessCommand {
             timing_tolerance,
             removed: None,
             markers_before: None,
+            head_tail_marks_before: None,
             cursor_before: 0,
             channels_before: 0,
         }
@@ -81,6 +86,7 @@ impl Command for CdpProcessCommand {
         // the point of most of these processes), matching the Trim/Resample precedent for
         // length-changing commands.
         self.markers_before = Some(doc.markers.clone());
+        self.head_tail_marks_before = Some(doc.head_tail_marks.clone());
         self.channels_before = doc.channels.len();
         // A result wider than the document is a real, legitimate case (e.g. Pan or rmverb
         // on a mono document: `output_is_stereo` processes emit true stereo from mono
@@ -109,17 +115,38 @@ impl Command for CdpProcessCommand {
         let removed_len = end - start;
         let delta = self.inserted_len.abs_diff(removed_len);
         if removed_len > 0 && delta <= self.timing_tolerance {
+            let result_end = start + self.inserted_len;
+            let restore = |position: usize, original: usize| -> usize {
+                if (start..end).contains(&original) {
+                    // Clamp inside the result for the (sub-tolerance) shorter case.
+                    original.min(result_end.saturating_sub(1).max(start))
+                } else {
+                    position
+                }
+            };
             if let Some(before) = &self.markers_before {
-                let result_end = start + self.inserted_len;
                 for (marker, original) in doc.markers.iter_mut().zip(before) {
-                    if (start..end).contains(&original.position) {
-                        // Clamp inside the result for the (sub-tolerance) shorter case.
-                        marker.position =
-                            original.position.min(result_end.saturating_sub(1).max(start));
-                    }
+                    marker.position = restore(marker.position, original.position);
+                }
+            }
+            // Head/tail marks get the identical treatment, and it matters more for them than
+            // for ordinary markers: the whole DISTMORE family is length-preserving, and its
+            // marks describe the segment boundaries the process just worked on — destroying
+            // them on a time-aligned splice would mean re-marking the file by hand before
+            // every subsequent DISTMORE run.
+            if let Some(before) = &self.head_tail_marks_before {
+                for (mark, &original) in doc.head_tail_marks.iter_mut().zip(before) {
+                    *mark = restore(*mark, original);
                 }
             }
         }
+        // Collapse any marks left stacked on one sample — by `remove_range`'s collapse-to-the
+        // -cut-point rule on a timing-*changing* splice, or by the restore above clamping
+        // several to `result_end - 1` on a shorter sub-tolerance one. Done after the restore,
+        // never before: the restore zips positionally against the pre-edit snapshot, so
+        // shortening the list first would silently drop marks. Undo restores that snapshot
+        // wholesale, so this is fully reversible.
+        doc.dedup_head_tail_marks();
         // Clear the selection and park the cursor at the *start* of the result, so pressing
         // Space immediately plays the processed audio from its beginning. (An earlier
         // version selected the whole result and left the cursor at its end — which left the
@@ -138,6 +165,9 @@ impl Command for CdpProcessCommand {
         }
         if let Some(markers) = self.markers_before.take() {
             doc.markers = markers;
+        }
+        if let Some(marks) = self.head_tail_marks_before.take() {
+            doc.head_tail_marks = marks;
         }
         // Undo the widening step: the added channels were copies of existing content
         // outside the splice (and the splice itself is removed above), so truncating
@@ -239,6 +269,65 @@ mod tests {
         assert_eq!(doc.markers, original_markers, "equal-length result must not move any marker");
         cmd.undo(&mut doc);
         assert_eq!(doc.markers, original_markers);
+    }
+
+    /// Undo must restore head/tail marks, not just ordinary markers. Missed on the first
+    /// pass: this command snapshotted `markers` only, so undoing a DISTMORE process left the
+    /// very marks it had just consumed destroyed, and the file had to be re-marked by hand
+    /// (user report, 2026-07-27).
+    #[test]
+    fn undo_restores_head_tail_marks_after_a_length_changing_splice() {
+        let mut doc = doc_with(vec![(0..20).map(|i| i as f32).collect()]);
+        doc.head_tail_marks = vec![2, 6, 10, 14];
+        let original = doc.head_tail_marks.clone();
+
+        // A result much shorter than the replaced range: a genuinely timing-*changing*
+        // process, so the in-range marks legitimately collapse on execute.
+        let mut cmd = CdpProcessCommand::new("CDP: Distort".into(), (4, 16), vec![vec![9.0, 9.0]], 0);
+        cmd.execute(&mut doc);
+        assert_ne!(doc.head_tail_marks, original, "a timing change does move them");
+
+        cmd.undo(&mut doc);
+        assert_eq!(doc.head_tail_marks, original, "undo restores them exactly");
+    }
+
+    /// The whole DISTMORE family is length-preserving, and its marks describe the segment
+    /// boundaries the process just worked on — so a time-aligned splice must leave them
+    /// exactly where they were, the same rule ordinary markers already follow. Without this,
+    /// every DISTMORE run would consume the marks needed for the next one.
+    #[test]
+    fn a_length_preserving_splice_keeps_head_tail_marks_in_place() {
+        let mut doc = doc_with(vec![vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]]);
+        doc.head_tail_marks = vec![0, 2, 3, 5];
+        let original = doc.head_tail_marks.clone();
+
+        let mut cmd = CdpProcessCommand::new(
+            "CDP: Distmore Reverse Heads".into(),
+            (1, 5),
+            vec![vec![9.0, 9.0, 9.0, 9.0]], // same length as the replaced range
+            0,
+        );
+        cmd.execute(&mut doc);
+        assert_eq!(doc.head_tail_marks, original, "an equal-length result must not move a mark");
+        cmd.undo(&mut doc);
+        assert_eq!(doc.head_tail_marks, original);
+    }
+
+    /// A shorter sub-tolerance result clamps several in-range marks onto the same sample.
+    /// They must not survive as duplicates: two marks on one sample are a zero-length segment
+    /// *and* flip the derived Head/Tail role of every mark after them.
+    #[test]
+    fn marks_clamped_onto_one_sample_by_a_shorter_result_are_deduped() {
+        let mut doc = doc_with(vec![(0..10).map(|i| i as f32).collect()]);
+        doc.head_tail_marks = vec![5, 6, 7, 9];
+        // Replaces 2..8 with 3 samples: a delta of 3, inside the tolerance below.
+        let mut cmd =
+            CdpProcessCommand::new("CDP: Blur".into(), (2, 8), vec![vec![9.0, 9.0, 9.0]], 4);
+        cmd.execute(&mut doc);
+        let mut sorted = doc.head_tail_marks.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(doc.head_tail_marks, sorted, "no duplicates, still sorted: {:?}", doc.head_tail_marks);
     }
 
     /// A result whose length differs by less than the tolerance (e.g. a pvoc round-trip's

@@ -2278,6 +2278,8 @@ mod tests {
 
     fn number_param(name: &str, min: f64, max: f64, default: f64, scale: NumberScale) -> ParamDef {
         ParamDef {
+            range_scales_with_input_duration: false,
+            default_from_dc_offset: false,
             name: name.into(),
             description: String::new(),
             flag: None,
@@ -2523,6 +2525,8 @@ mod tests {
         def.sidecar_extension = Some("txt".into());
         def.params = vec![
             ParamDef {
+                range_scales_with_input_duration: false,
+                default_from_dc_offset: false,
                 name: "Auto Gain Reduction".into(),
                 description: String::new(),
                 flag: None,
@@ -2534,6 +2538,8 @@ mod tests {
                 kind: ParamKind::Toggle { default: auto_gain_default },
             },
             ParamDef {
+                range_scales_with_input_duration: false,
+                default_from_dc_offset: false,
                 name: "Cyclic".into(),
                 description: String::new(),
                 flag: Some("-c".into()),
@@ -2654,6 +2660,8 @@ mod tests {
         def.mode = Some("2".into());
         def.params = vec![
             ParamDef {
+                range_scales_with_input_duration: false,
+                default_from_dc_offset: false,
                 name: "Matrix File".into(),
                 description: String::new(),
                 flag: None,
@@ -2665,6 +2673,8 @@ mod tests {
                 kind: ParamKind::FilePath { extension: "matrix".into() },
             },
             ParamDef {
+                range_scales_with_input_duration: false,
+                default_from_dc_offset: false,
                 name: "Auto Gain Reduction".into(),
                 description: String::new(),
                 flag: None,
@@ -2676,6 +2686,8 @@ mod tests {
                 kind: ParamKind::Toggle { default: auto_gain_default },
             },
             ParamDef {
+                range_scales_with_input_duration: false,
+                default_from_dc_offset: false,
                 name: "Cyclic".into(),
                 description: String::new(),
                 flag: Some("-c".into()),
@@ -2942,6 +2954,8 @@ mod tests {
         let mut def = base_def(IoKind::Wav, IoKind::Wav);
         def.params = vec![
             ParamDef {
+                range_scales_with_input_duration: false,
+                default_from_dc_offset: false,
                 name: "Omit".into(),
                 description: String::new(),
                 flag: Some("-x".into()),
@@ -2953,6 +2967,8 @@ mod tests {
                 kind: ParamKind::Toggle { default: false },
             },
             ParamDef {
+                range_scales_with_input_duration: false,
+                default_from_dc_offset: false,
                 name: "Rate".into(),
                 description: String::new(),
                 flag: None,
@@ -3113,6 +3129,8 @@ mod tests {
     fn breakpoints_emit_brk_file_and_reference_its_path() {
         let mut def = base_def(IoKind::Wav, IoKind::Wav);
         def.params = vec![ParamDef {
+            range_scales_with_input_duration: false,
+            default_from_dc_offset: false,
             name: "Gain".into(),
             description: String::new(),
             flag: Some("-f".into()),
@@ -3608,6 +3626,8 @@ mod tests {
         def.subprog = Some("rotate".into());
         def.mode = Some("1".into());
         def.params = vec![ParamDef {
+            range_scales_with_input_duration: false,
+            default_from_dc_offset: false,
             name: "Crystal Data".into(),
             description: String::new(),
             flag: None,

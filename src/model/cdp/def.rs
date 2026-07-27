@@ -592,6 +592,43 @@ pub struct ParamDef {
     /// would already get on its own.
     #[serde(default)]
     pub before_outfile: bool,
+    /// True for a `Number` param whose real CDP-enforced range is a **multiple of the input's
+    /// duration** rather than a fixed span of seconds. `min`/`max`/`default` are then read as
+    /// multipliers, and `App::cdp_fields_for` turns them into absolute seconds against the
+    /// selection actually being processed, so both the value the field starts at and the range
+    /// the dialog displays are right for that selection.
+    ///
+    /// Found on `distmore segszig` mode 3's `dur` (user report, 2026-07-27): the catalog
+    /// declared a flat `[0.1 – 600.0]` with a default of 2.0, and CDP rejected it with
+    /// "Value (2.000000) out of range (7.940000 to 254.080000)". Verified against the real
+    /// binary at three input lengths — 1s → `[2, 64]`, 2s → `[4, 128]`, 4s → `[8, 256]` — so
+    /// the rule is exactly 2× to 64× the input duration, and independent of every other
+    /// parameter (the zigzag count doesn't move it). A flat range can't express that: the
+    /// default was below the floor for *any* input longer than a second, i.e. the process
+    /// could never run at its own defaults on realistic material.
+    ///
+    /// Distinct from `NumberScale::CappedAtInputDuration`, which clamps the *value* at plan
+    /// time while leaving the catalog's literal range on display. Here the range itself is
+    /// what's data-dependent, and showing the real one is the whole point — a clamp alone
+    /// would silently rewrite what the user typed.
+    #[serde(default)]
+    pub range_scales_with_input_duration: bool,
+    /// True for a `Number` param that should default to the **negative of the input's mean
+    /// sample value** — i.e. the shift that cancels its DC offset.
+    ///
+    /// Exists for `housekeep extract 4` ("Remove DC Offset"), whose catalog default of 0.0
+    /// made it fail every single time: CDP rejects a zero shift outright with "CANNOT ACHIEVE
+    /// TASK: NO CHANGE to original sound file" (user report, 2026-07-27). The binary asks for
+    /// a shift amount and *adds* it to every sample — verified by hand: a file with a +0.1
+    /// mean given `shift = +0.1` comes back with a +0.2 mean, and given `-0.1` comes back at
+    /// 0.0 — so the value that actually removes the offset is the negated mean. Measuring it
+    /// in `App::cdp_fields_for` turns a process that could never run at its defaults into one
+    /// that does the thing its title promises.
+    ///
+    /// Falls back to one `step` when the measured offset rounds to zero, since zero is the
+    /// one value CDP refuses.
+    #[serde(default)]
+    pub default_from_dc_offset: bool,
     #[serde(flatten)]
     pub kind: ParamKind,
 }
@@ -735,6 +772,8 @@ mod tests {
             required_envelope: false,
             required_list: false,
             list_is_time_sequence: false,
+            range_scales_with_input_duration: false,
+            default_from_dc_offset: false,
             before_outfile: false,
             kind: ParamKind::Number {
                 min: 2.0,
@@ -784,6 +823,8 @@ mod tests {
             required_envelope: false,
             required_list: false,
             list_is_time_sequence: false,
+            range_scales_with_input_duration: false,
+            default_from_dc_offset: false,
             before_outfile: false,
             kind: ParamKind::Toggle { default: false },
         };
@@ -795,6 +836,8 @@ mod tests {
             required_envelope: false,
             required_list: false,
             list_is_time_sequence: false,
+            range_scales_with_input_duration: false,
+            default_from_dc_offset: false,
             before_outfile: false,
             kind: ParamKind::Choice {
                 options: vec!["44100".into(), "48000".into()],
@@ -840,6 +883,8 @@ mod tests {
             required_envelope: false,
             required_list: false,
             list_is_time_sequence: false,
+            range_scales_with_input_duration: false,
+            default_from_dc_offset: false,
             before_outfile: false,
             kind: ParamKind::Table {
                 columns: vec![
@@ -913,6 +958,8 @@ mod tests {
             required_envelope: false,
             required_list: false,
             list_is_time_sequence: false,
+            range_scales_with_input_duration: false,
+            default_from_dc_offset: false,
             before_outfile: false,
             kind: ParamKind::MarkerTimeList {
                 markers: vec!['a', 'b'],
@@ -969,6 +1016,8 @@ mod tests {
             required_envelope: false,
             required_list: false,
             list_is_time_sequence: false,
+            range_scales_with_input_duration: false,
+            default_from_dc_offset: false,
             before_outfile: false,
             kind: ParamKind::HiliteBand {
                 lofrq: bounds("Lo Freq", 20.0, 20000.0, 200.0),
@@ -1011,6 +1060,8 @@ mod tests {
             required_envelope: false,
             required_list: false,
             list_is_time_sequence: false,
+            range_scales_with_input_duration: false,
+            default_from_dc_offset: false,
             // The real argv is `crystal rotate <mode> fi [fi2..] fo vdat ...` — the datafile
             // sits *after* the outfile, so this is the ordinary (default) placement.
             before_outfile: false,

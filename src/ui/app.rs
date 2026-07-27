@@ -141,10 +141,15 @@ fn cdp_plan_error_message(err: &crate::model::cdp::PlanError) -> String {
         // user can go fix from here — they live on the waveform, so the message has to say
         // where to make them.
         PlanError::MissingHeadTailMarks { pairs } => {
+            // Leads with *inside the selection*, because the overwhelmingly likely cause is a
+            // file that has plenty of marks and a selection that contains almost none of them
+            // (user report, 2026-07-27: 4 pairs in the file, a 0.1s selection, and a message
+            // whose "in the selection" qualifier was clipped off the dialog's edge). The
+            // status bar already shows the file-wide pair count, so naming the in-selection
+            // count is what makes the discrepancy legible.
             format!(
-                "needs at least {} Head/Tail pairs ({} marks) in the selection, found {pairs} — press h on the waveform to add them",
+                "found {pairs} Head/Tail pair(s) inside the selection, needs {}. Marks outside the selection don't count — select all (Ctrl+A), or press h to add marks here.",
                 crate::model::cdp::pipeline::MIN_HEAD_TAIL_PAIRS,
-                crate::model::cdp::pipeline::MIN_HEAD_TAIL_PAIRS * 2,
             )
         }
         PlanError::SampleRateMismatch { first, second } => {
@@ -6106,6 +6111,52 @@ impl App {
             return (Vec::new(), None, None);
         };
         let mut fields: Vec<CdpField> = def.params.iter().map(CdpField::from_default).collect();
+        // Two per-document dynamic defaults, applied against the range that will actually be
+        // processed (not the whole buffer) so both match what CDP is about to be handed. Both
+        // exist because the catalog's static values made their process *always* fail — see
+        // `ParamDef::range_scales_with_input_duration` / `default_from_dc_offset`.
+        let process_range = self
+            .active_document
+            .checked_sub(0)
+            .filter(|&i| i < self.documents.len())
+            .and_then(|i| self.operation_range(i, self.snap_to_zero));
+        if let (Some(doc), Some((start, end))) = (self.active_doc(), process_range) {
+            let duration = (end.saturating_sub(start)) as f64 / doc.sample_rate.max(1) as f64;
+            for (param, field) in def.params.iter().zip(&mut fields) {
+                let CdpField::Number { input, min, max, step, .. } = field else { continue };
+                if param.range_scales_with_input_duration && duration > 0.0 {
+                    // `min`/`max`/`default` were multipliers; scale them into real seconds.
+                    // Nudged inward by a hundredth of a second at each end for the same
+                    // reason `NumberScale::CappedAtInputDuration` keeps a margin: CDP
+                    // recomputes the bound from its own reading of the file's length, and a
+                    // value sitting exactly on the boundary can round the wrong side of it.
+                    let scaled_min = *min * duration;
+                    let scaled_max = *max * duration;
+                    let default = input.value().parse::<f64>().unwrap_or(*min) * duration;
+                    *min = scaled_min + 0.01;
+                    *max = (scaled_max - 0.01).max(*min);
+                    *input = TextInput::new(format_cdp_float_for_display(
+                        default.clamp(*min, *max),
+                    ));
+                }
+                if param.default_from_dc_offset {
+                    // The shift CDP adds to every sample, so removing an offset of +x means
+                    // passing -x. Averaged across channels: `housekeep` shifts the whole file
+                    // by one value, so a per-channel figure has nothing to apply it to.
+                    let offset = mean_sample_value(doc, start, end);
+                    let mut shift = -offset;
+                    if !shift.is_finite() || shift.abs() < *step {
+                        // Zero is the one value CDP refuses outright ("NO CHANGE to original
+                        // sound file"), so a buffer with no measurable offset still gets a
+                        // runnable value rather than a guaranteed failure.
+                        shift = *step;
+                    }
+                    *input = TextInput::new(format_cdp_float_for_display(
+                        shift.clamp(*min, *max),
+                    ));
+                }
+            }
+        }
         // Synthesis processes carry a Sample Rate choice — preselect the option matching
         // the active document so the generated audio splices in at the right speed by
         // default (Apply hard-rejects a mismatch; see tick_cdp). Matched generically by
@@ -13231,6 +13282,24 @@ fn nearest_marker(markers: &[Marker], pos: usize) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+/// Mean sample value across every channel over `start..end` — the document's DC offset (see
+/// `ParamDef::default_from_dc_offset`). Averaged across channels rather than reported per
+/// channel because `housekeep extract 4` shifts the whole file by a single value, so there is
+/// nothing a per-channel figure could be applied to. Returns 0.0 for an empty range.
+fn mean_sample_value(doc: &Document, start: usize, end: usize) -> f64 {
+    let mut sum = 0.0f64;
+    let mut count = 0usize;
+    for channel in &doc.channels {
+        let end = end.min(channel.len());
+        let start = start.min(end);
+        for &sample in &channel[start..end] {
+            sum += sample as f64;
+            count += 1;
+        }
+    }
+    if count == 0 { 0.0 } else { sum / count as f64 }
+}
+
 /// The head/tail marks that fall inside `range`, rebased so they're relative to its start —
 /// the form `InputSpec.head_tail_marks` (and so CDP's marklist datafile) needs.
 ///
@@ -16266,9 +16335,20 @@ fn render_cdp_params_dialog(
     let width = (14 + label_width + range_width + 24).clamp(50, 110) as u16;
     let width = width.min(area.width);
     let has_extra_input = cdp_has_extra_input(second_input, variadic_input) as usize;
+    // The inline error is the one piece of content that can be far wider than the form —
+    // "found 0 Head/Tail pair(s) inside the selection…" is ~150 characters — so it wraps onto
+    // as many lines as it needs and the dialog reserves height for them. Widening instead
+    // would make every params dialog as wide as its longest possible error; clipping (what
+    // happened before) silently hid the half of the message that said *why* (user report,
+    // 2026-07-27: the "in the selection" qualifier fell off the right edge, leaving a message
+    // that looked simply wrong on a file that visibly had four pairs).
+    let error_lines: Vec<String> = match error {
+        Some(msg) => wrap_to_width(&format!(" ! {msg}"), width.saturating_sub(2) as usize),
+        None => vec![String::new()],
+    };
     // header spacer + preset row + blank + [fields] + extra-input? + blank + buttons +
-    // error/blank + hints, + 2 border.
-    let overhead = 1 + 1 + 1 + has_extra_input + 1 + 1 + 1 + 1;
+    // error + hints, + 2 border.
+    let overhead = 1 + 1 + 1 + has_extra_input + 1 + 1 + error_lines.len() + 1;
     let content_field_rows = fields.len().max(1);
     let ideal_height = overhead + content_field_rows + 2;
     let height = (ideal_height as u16).min(area.height);
@@ -16579,9 +16659,8 @@ fn render_cdp_params_dialog(
         Span::styled("[Apply]", apply_style),
     ]));
 
-    match error {
-        Some(msg) => lines.push(Line::from(Span::styled(format!(" ! {msg}"), error_style))),
-        None => lines.push(Line::raw("")),
+    for line in &error_lines {
+        lines.push(Line::from(Span::styled(line.clone(), error_style)));
     }
 
     // Enter means "open the buffer picker", not "run", while the variadic row is focused —
@@ -16654,8 +16733,41 @@ fn render_cdp_params_dialog(
         width: buttons.width.saturating_sub(preview_w),
         ..buttons
     });
-    rects.push(rect_at(buttons_line + 2));
+    rects.push(rect_at(buttons_line + 1 + error_lines.len()));
     rects
+}
+
+/// Greedily wraps `text` to `width` columns, breaking at spaces and hard-splitting a word
+/// longer than the whole width. Always returns at least one line, so a caller can size a
+/// popup off `len()` without special-casing the empty case.
+fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split(' ') {
+        let mut word = word;
+        // A single word longer than the line gets hard-split rather than overflowing.
+        while word.chars().count() > width {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            let head: String = word.chars().take(width).collect();
+            let consumed = head.len();
+            lines.push(head);
+            word = &word[consumed..];
+        }
+        let needed = word.chars().count() + usize::from(!current.is_empty());
+        if current.chars().count() + needed > width {
+            lines.push(std::mem::take(&mut current));
+        } else if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    lines.push(current);
+    lines
 }
 
 /// Hard-modal progress display for an in-flight CDP job. The spinner frame is derived from
@@ -20364,6 +20476,8 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
+                range_scales_with_input_duration: false,
+                default_from_dc_offset: false,
                 name: "Count".into(),
                 description: String::new(),
                 flag: None,
@@ -21082,6 +21196,91 @@ mod tests {
             before,
             "a bracket row is not selectable by click either"
         );
+    }
+
+    /// "Remove DC Offset" failed on every run because its catalog default was 0.0, and CDP
+    /// rejects a zero shift outright ("NO CHANGE to original sound file" — user report,
+    /// 2026-07-27). It now opens pre-filled with the shift that actually removes the measured
+    /// offset. The binary *adds* the shift (verified by hand against a file with a known
+    /// +0.1 mean), so the field must hold the **negative** of the mean.
+    #[test]
+    fn remove_dc_offset_defaults_to_the_shift_that_cancels_the_measured_offset() {
+        // A buffer sitting a clear +0.25 off zero.
+        let mut app = new_app(Some(doc(0.25, 10_000)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "housekeep_extract_4")
+            .expect("housekeep_extract_4 in catalog");
+        app.open_cdp_params(index);
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!() };
+        let CdpField::Number { input, .. } = &fields[0] else { panic!("Offset is a Number field") };
+        let value: f64 = input.value().parse().expect("a parseable default");
+        assert!(
+            (value - -0.25).abs() < 1e-4,
+            "should default to the negated mean (-0.25), got {value}"
+        );
+    }
+
+    /// The one value CDP refuses is zero, so a buffer with no measurable offset must still
+    /// open with something runnable rather than the guaranteed-failure default.
+    #[test]
+    fn remove_dc_offset_on_a_centred_buffer_still_defaults_to_a_runnable_value() {
+        let mut app = new_app(Some(doc(0.0, 10_000)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "housekeep_extract_4")
+            .expect("housekeep_extract_4 in catalog");
+        app.open_cdp_params(index);
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!() };
+        let CdpField::Number { input, .. } = &fields[0] else { panic!() };
+        let value: f64 = input.value().parse().expect("a parseable default");
+        assert_ne!(value, 0.0, "zero is the one value CDP rejects");
+    }
+
+    /// `distmore segszig` mode 3's Output Duration range is 2x-64x the input's own duration,
+    /// not a fixed span — its flat catalog range put the default below CDP's floor for any
+    /// input over a second, so it failed with "Value (2.000000) out of range (7.94 to 254.08)"
+    /// (user report, 2026-07-27). Both the range the dialog shows and the value it starts at
+    /// must now track the selection.
+    #[test]
+    fn zigzag_output_duration_range_and_default_scale_with_the_selection() {
+        let sample_rate = 44_100usize;
+        for (secs, expect_default) in [(2usize, 8.0f64), (10, 40.0)] {
+            let mut app = new_app(Some(doc(0.1, sample_rate * secs)), None);
+            let index = app
+                .cdp_catalog
+                .processes
+                .iter()
+                .position(|p| p.key == "distmore_segszig_3")
+                .expect("distmore_segszig_3 in catalog");
+            app.open_cdp_params(index);
+
+            let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!() };
+            let duration = secs as f64;
+            let CdpField::Number { input, min, max, .. } = &fields[1] else {
+                panic!("Output Duration is field 1")
+            };
+            assert!(
+                (*min - (2.0 * duration + 0.01)).abs() < 1e-6,
+                "{secs}s input: floor should be 2x duration, got {min}"
+            );
+            assert!(
+                (*max - (64.0 * duration - 0.01)).abs() < 1e-6,
+                "{secs}s input: ceiling should be 64x duration, got {max}"
+            );
+            let value: f64 = input.value().parse().expect("a parseable default");
+            assert!(
+                (value - expect_default).abs() < 0.05,
+                "{secs}s input: default should be 4x duration ({expect_default}), got {value}"
+            );
+            assert!(value > *min && value < *max, "and comfortably inside the range");
+        }
     }
 
     /// The wheel scrolls every dialog that has a list, not just the process browser.
@@ -22968,6 +23167,8 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
+                range_scales_with_input_duration: false,
+                default_from_dc_offset: false,
                 name: "Formants".into(),
                 description: String::new(),
                 flag: None,
@@ -23038,6 +23239,8 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
+                range_scales_with_input_duration: false,
+                default_from_dc_offset: false,
                 name: "Formants".into(),
                 description: String::new(),
                 flag: None,
@@ -23979,6 +24182,65 @@ mod tests {
             line.contains("3 files:"),
             "the summary itself still renders (not clipped away entirely): {line:?}"
         );
+    }
+
+    /// A long inline error must render in full, wrapped, instead of being clipped at the
+    /// dialog's right edge. Reported 2026-07-27: a DISTMORE process on a file with four
+    /// Head/Tail pairs and a 0.1-second selection showed "needs at least 2 Head/Tail pairs
+    /// (4 marks) in" — the "the selection" that explained *why* fell off the edge, so the
+    /// message read as simply wrong.
+    #[test]
+    fn a_long_inline_error_wraps_instead_of_being_clipped() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 44_100)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "distmore_segsbkwd_2")
+            .expect("distmore_segsbkwd_2 in catalog");
+        app.open_cdp_params(index);
+        let message = cdp_plan_error_message(&crate::model::cdp::PlanError::MissingHeadTailMarks {
+            pairs: 0,
+        });
+        if let Some(Dialog::CdpParams { error, .. }) = app.dialog.as_mut() {
+            *error = Some(message.clone());
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 44)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+
+        // Every word of the message is on screen somewhere, even though the message is far
+        // wider than the dialog.
+        for word in message.split_whitespace() {
+            assert!(screen.contains(word), "{word:?} was clipped away: {screen}");
+        }
+        // And the hints bar still renders below it — the wrapped error must push the dialog's
+        // height, not overwrite its own chrome.
+        assert!(screen.contains("Esc:cancel"), "the hints bar survives the wrap: {screen}");
+    }
+
+    /// The error's own text has to name the selection, since that is the actual cause when a
+    /// file visibly has enough marks.
+    #[test]
+    fn the_missing_marks_message_names_the_selection_as_the_cause() {
+        let message = cdp_plan_error_message(&crate::model::cdp::PlanError::MissingHeadTailMarks {
+            pairs: 0,
+        });
+        assert!(message.contains("selection"), "{message}");
+        assert!(message.contains("found 0"), "it names how many are actually usable: {message}");
+    }
+
+    #[test]
+    fn wrapping_breaks_at_spaces_and_hard_splits_an_overlong_word() {
+        assert_eq!(wrap_to_width("one two three", 9), vec!["one two", "three"]);
+        assert_eq!(wrap_to_width("", 10), vec![""], "always at least one line");
+        assert_eq!(wrap_to_width("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        // A width of zero can't wrap anything; it must not loop forever.
+        assert_eq!(wrap_to_width("anything", 0), vec![""]);
     }
 
     /// The bottom hint bar carries the "how do I open this" affordance the row no longer
@@ -26983,6 +27245,8 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
+                range_scales_with_input_duration: false,
+                default_from_dc_offset: false,
                 name: "Formants".into(),
                 description: String::new(),
                 flag: None,
