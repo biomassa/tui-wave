@@ -1,5 +1,58 @@
 # Changelog
 
+## 2026-07-27
+
+- **New Head/Tail mark system for the CDP DISTMORE family.** A second, separate set of marks
+  from ordinary cue markers: `h` inserts one at the cursor, `H` deletes the nearest, and they
+  can be dragged with the mouse. They are flat and alternating (Head, Tail, Head, Tail — the
+  first is always a Head), which is CDP's own convention, so both the `H1`/`T1`/`H2`/`T2`
+  labels and each mark's role fall out of its position: inserting one in the middle renumbers
+  everything after it. Drawn in orange with a dashed line, one label row below the ordinary
+  markers, and counted in the status bar as pairs. They shift with every edit and undo exactly
+  like ordinary markers, and persist to a `<name>.headstails` file beside the audio in CDP's
+  own marklist format, so the file is directly usable by `distmore` and readable by hand.
+  All thirteen DISTMORE processes now take their marks from the waveform instead of a
+  hand-typed list of times, which was unusable for something that describes positions in the
+  sound you are looking at.
+- **Picked input buffers now persist in CDP presets** and in "Recall last process". Buffers
+  are matched by file path first and display name second, so same-named files from different
+  folders resolve correctly and never-saved buffers resolve at all. If any buffer a preset
+  names is no longer open, the picker resets rather than restoring a partial pick — order is
+  what these processes read as structure, so a partial restore would silently change what the
+  preset does.
+- **Dialogs are now mouse-aware throughout.** Clicking inside a text field puts the caret on
+  the character you clicked; clicking a CDP parameter row focuses it, and clicking a row whose
+  editor is a separate overlay opens it (the input-buffers picker, and the list, table,
+  marker-time, hilite-band, formant and file editors); clicking a buffer in the picker toggles
+  it into the pick; chain-editor rows are selectable by click; and the wheel scrolls every
+  dialog that has a list. Eleven dialogs previously had no click handling at all.
+- Renamed the CDP "input files" row to **"input buffers"** — everything it offers is an
+  already-open document, never a file on disk — and stopped it overflowing the dialog.
+- **Fixed: undo after a CDP process lost Head/Tail marks.** A length-preserving process (which
+  every DISTMORE process is) now also leaves them exactly where they were, so one run no
+  longer consumes the marks the next one needs.
+- **Fixed: Housekeep "Remove DC Offset" failed every single time.** Its Offset defaulted to
+  zero, which CDP rejects outright. It now pre-fills with the negative of the selection's
+  measured DC offset — the value that actually removes it — and its range matches CDP's real
+  limits instead of a much narrower guess.
+- **Fixed: Tesselate failed with more than one source.** Its Sources table needs one row per
+  input file and never grew with the buffer pick, so it could not do the thing it exists for.
+  The table now tracks the pick, keeping values already typed and staggering the entry delays
+  CDP requires to differ.
+- **Fixed: Distmore Zigzag Whole File's Output Duration range was wrong.** CDP accepts 2x to
+  64x the input's own duration; the fixed range shown put the default below the floor for any
+  selection longer than a second. The range and default now scale with the selection.
+- **Fixed: a DISTMORE process is no longer defeated by a stray selection.** A selection too
+  small to hold two Head/Tail pairs is almost always an accidental drag, so those processes
+  widen back to the whole file instead of refusing. Every other process still honours a small
+  selection exactly as before.
+- Long errors in the CDP parameters dialog now wrap instead of being clipped at the right
+  edge, which had been hiding the half of the message that explained the cause.
+- **Removed two processes that cannot work here**: Ts Oscillator (it takes no input sound at
+  all) and Speculate (its numbered outputs are spectral analysis files, not audio, and a
+  single run wrote over a gigabyte across 84 files, freezing the editor).
+- Bumped version to 1.6.0.
+
 ## 2026-07-25
 
 - CDP Process and CDP Chain preset rows gain the same "(none)" cycle slot the envelope
