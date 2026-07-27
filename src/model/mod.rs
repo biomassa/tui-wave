@@ -7,6 +7,7 @@ pub mod curve_history;
 pub mod document;
 pub mod dsp;
 pub mod formant;
+pub mod headstails;
 pub mod history;
 pub mod io;
 pub mod selection;

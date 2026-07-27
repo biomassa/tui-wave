@@ -123,6 +123,7 @@ pub fn rasterize_waveform(
     cursor: usize,
     playhead: Option<usize>,
     markers: &[(usize, &str)],
+    head_tail_marks: &[usize],
     show_marker_labels: bool,
     cell_width: u16,
     pixel_width: u32,
@@ -256,6 +257,15 @@ pub fn rasterize_waveform(
         draw_marker_line(&mut img, viewport, marker, samples_per_pixel_column, color);
     }
 
+    // Head/tail marks (`Document.head_tail_marks`) are the second, separate marker system —
+    // drawn in their own color *and* with a dashed line, so the two lanes stay tellable apart
+    // without relying on hue alone. Drawn after ordinary markers (they're the more specific
+    // annotation) but still under the cursor and playhead.
+    let head_tail_color = color_to_rgba(theme::HEAD_TAIL_MARKER);
+    for &mark in head_tail_marks {
+        draw_dashed_marker_line(&mut img, viewport, mark, samples_per_pixel_column, head_tail_color);
+    }
+
     draw_marker_line(&mut img, viewport, cursor, samples_per_pixel_column, cursor_color);
     if let Some(ph) = playhead {
         draw_marker_line(&mut img, viewport, ph, samples_per_pixel_column, color_to_rgba(theme::PLAYHEAD));
@@ -267,6 +277,7 @@ pub fn rasterize_waveform(
     // the image for control of that row's escape sequence and corrupts the terminal display.
     if show_marker_labels {
         draw_marker_labels(&mut img, viewport, markers, cursor, samples_per_pixel_column);
+        draw_head_tail_labels(&mut img, viewport, head_tail_marks, samples_per_pixel_column);
     }
 
     img
@@ -369,6 +380,74 @@ fn draw_marker_line(img: &mut RgbaImage, viewport: &Viewport, sample: usize, sam
     }
 }
 
+/// The head/tail counterpart of [`draw_marker_line`]: same geometry, but dashed
+/// (`DASH_PERIOD_PX` on, `DASH_PERIOD_PX` off) so the two marker systems are distinguishable
+/// by line pattern as well as by color — see `theme::HEAD_TAIL_MARKER`.
+fn draw_dashed_marker_line(
+    img: &mut RgbaImage,
+    viewport: &Viewport,
+    sample: usize,
+    samples_per_pixel_column: f64,
+    color: Rgba<u8>,
+) {
+    if sample < viewport.scroll_offset {
+        return;
+    }
+    let col = ((sample - viewport.scroll_offset) as f64 / samples_per_pixel_column) as i64;
+    if !(0..img.width() as i64).contains(&col) {
+        return;
+    }
+    let col = col as u32;
+    for row in 0..img.height() {
+        if (row / DASH_PERIOD_PX) % 2 == 0 {
+            img.put_pixel(col, row, color);
+        }
+    }
+}
+
+/// Pixel length of one on (or off) segment of a dashed head/tail line. Three pixels reads as
+/// a clear dash at a typical terminal cell height (~16px, so ~5 segments per row) without
+/// becoming so sparse that a short pane shows only one or two marks' worth of line.
+const DASH_PERIOD_PX: u32 = 3;
+
+/// Head/tail marks' `H1`/`T1` labels, rasterized one glyph-row *below* the ordinary marker
+/// labels so a mark and a marker in the same column don't overprint each other. The label
+/// text is derived from the mark's index, exactly as the text renderer derives it — there is
+/// no stored label to pass in.
+fn draw_head_tail_labels(
+    img: &mut RgbaImage,
+    viewport: &Viewport,
+    head_tail_marks: &[usize],
+    samples_per_pixel_column: f64,
+) {
+    let color = color_to_rgba(theme::HEAD_TAIL_MARKER);
+    let background = color_to_rgba(theme::BASE);
+
+    let mut visible: Vec<(i64, String)> = head_tail_marks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &position)| {
+            if position < viewport.scroll_offset {
+                return None;
+            }
+            let col = ((position - viewport.scroll_offset) as f64 / samples_per_pixel_column) as i64;
+            (0..img.width() as i64)
+                .contains(&col)
+                .then(|| (col, crate::model::document::head_tail_label(index)))
+        })
+        .collect();
+    visible.sort_by_key(|&(col, _)| col);
+
+    for (i, (col, label)) in visible.iter().enumerate() {
+        let limit = visible.get(i + 1).map(|(c, _)| *c).unwrap_or(img.width() as i64);
+        let lx = col + LABEL_SCALE;
+        let max_chars = ((limit - lx) / GLYPH_PX).max(0) as usize;
+        for (ci, ch) in label.chars().take(max_chars).enumerate() {
+            draw_glyph(img, lx + ci as i64 * GLYPH_PX, GLYPH_PX, ch, color, background);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,7 +481,7 @@ mod tests {
 
     #[test]
     fn empty_samples_renders_background_only() {
-        let img = rasterize_waveform(&[], &viewport(0, 1.0), None, None, 0, None, &[], false, 80, 160, 40, true);
+        let img = rasterize_waveform(&[], &viewport(0, 1.0), None, None, 0, None, &[], &[], false, 80, 160, 40, true);
         let bg = color_to_rgba(theme::BASE);
         for pixel in img.pixels() {
             assert_eq!(*pixel, bg);
@@ -414,7 +493,7 @@ mod tests {
         // Oscillating between +1.0 and -1.0 so a single column's min/max spans the full
         // amplitude range (a constant 1.0 would only ever reach the *top*, since min==max).
         let samples: Vec<f32> = (0..1000).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
-        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 0, None, &[], false, 80, 160, 40, true);
+        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 0, None, &[], &[], false, 80, 160, 40, true);
         let bg = color_to_rgba(theme::BASE);
         assert_ne!(*img.get_pixel(80, 0), bg, "a full-amplitude signal should reach the top row");
         assert_ne!(*img.get_pixel(80, 39), bg, "a full-amplitude signal should reach the bottom row");
@@ -425,7 +504,7 @@ mod tests {
         let samples = vec![1.0f32; 1000];
         // cell_width=80, pixel_width=160 -> 2px per character column, samples_per_column=12.5
         // -> 1000 samples span the whole 80-column / 160px width.
-        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, Some((0, 500)), 0, None, &[], false, 80, 160, 40, true);
+        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, Some((0, 500)), 0, None, &[], &[], false, 80, 160, 40, true);
         let selected_color = color_to_rgba(theme::WAVEFORM_SELECTED);
         let unselected_color = dot_matrix_pixel_color(0, 20.0, 20.0, true);
         assert_eq!(*img.get_pixel(10, 0), selected_color, "left half (selected) should use the selected color");
@@ -436,7 +515,7 @@ mod tests {
     fn dot_matrix_uses_flat_green_when_gradient_is_off() {
         // Oscillating full-scale so a single pixel column's bar spans top to bottom.
         let samples: Vec<f32> = (0..1000).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
-        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 0, None, &[], false, 80, 160, 40, false);
+        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 0, None, &[], &[], false, 80, 160, 40, false);
         let low = color_to_rgba(theme::WAVEFORM_DOT_LOW);
         assert_eq!(*img.get_pixel(80, 0), low, "top row should be flat green with gradient off");
         assert_eq!(*img.get_pixel(80, 39), low, "bottom row should be flat green with gradient off");
@@ -446,7 +525,7 @@ mod tests {
     #[test]
     fn dot_matrix_gradient_reddens_toward_the_edges() {
         let samples: Vec<f32> = (0..1000).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
-        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 0, None, &[], false, 80, 160, 40, true);
+        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 0, None, &[], &[], false, 80, 160, 40, true);
         let low = color_to_rgba(theme::WAVEFORM_DOT_LOW);
         let edge = *img.get_pixel(80, 0);
         let center = *img.get_pixel(80, 20);
@@ -461,13 +540,13 @@ mod tests {
         let playhead_color = color_to_rgba(theme::PLAYHEAD);
 
         // Cursor alone, away from column 0, draws its color somewhere in its column.
-        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 500, None, &[], false, 80, 160, 40, true);
+        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 500, None, &[], &[], false, 80, 160, 40, true);
         let cursor_col = (500.0 / 12.5 * (160.0 / 80.0)) as u32; // sample -> pixel column
         assert_eq!(*img.get_pixel(cursor_col, 5), cursor_color);
 
         // With a playhead at the same sample position, the playhead color wins (drawn
         // after the cursor), matching the text renderer's "playhead overrides cursor" order.
-        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 500, Some(500), &[], false, 80, 160, 40, true);
+        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 500, Some(500), &[], &[], false, 80, 160, 40, true);
         assert_eq!(*img.get_pixel(cursor_col, 5), playhead_color);
     }
 
@@ -475,16 +554,72 @@ mod tests {
     fn marker_draws_a_vertical_line_in_the_marker_color() {
         let samples = vec![0.1f32; 1000];
         let marker_color = color_to_rgba(theme::MARKER);
-        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 0, None, &[(500, "")], false, 80, 160, 40, true);
+        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 0, None, &[(500, "")], &[], false, 80, 160, 40, true);
         let marker_col = (500.0 / 12.5 * (160.0 / 80.0)) as u32;
         assert_eq!(*img.get_pixel(marker_col, 5), marker_color);
+    }
+
+    /// Head/tail marks draw in their own color *and* dashed, so the two marker systems stay
+    /// distinguishable to someone who can't rely on hue. Both properties are asserted: a solid
+    /// line in the right color would still be a regression.
+    #[test]
+    fn head_tail_mark_draws_a_dashed_line_in_its_own_color() {
+        let samples = vec![0.1f32; 1000];
+        let head_tail_color = color_to_rgba(theme::HEAD_TAIL_MARKER);
+        let background = color_to_rgba(theme::BASE);
+        let img =
+            rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 0, None, &[], &[500], false, 80, 160, 40, true);
+        let col = (500.0 / 12.5 * (160.0 / 80.0)) as u32;
+
+        let column: Vec<_> = (0..img.height()).map(|y| *img.get_pixel(col, y)).collect();
+        assert!(column.contains(&head_tail_color), "the line is drawn in the head/tail color");
+        assert_ne!(
+            column.iter().filter(|&&p| p == head_tail_color).count(),
+            img.height() as usize,
+            "dashed, not solid — some rows in the column must be left unpainted"
+        );
+        // The first DASH_PERIOD_PX rows are "on", the next DASH_PERIOD_PX "off".
+        assert_eq!(column[0], head_tail_color);
+        assert_ne!(column[DASH_PERIOD_PX as usize], head_tail_color);
+        assert_eq!(column[DASH_PERIOD_PX as usize], background, "gaps show the background through");
+    }
+
+    /// A head/tail mark and an ordinary marker in the same column must both stay readable —
+    /// their labels sit on different glyph rows precisely so they can't overprint.
+    #[test]
+    fn head_tail_labels_render_one_glyph_row_below_the_marker_labels() {
+        let samples = vec![0.0f32; 1000];
+        let marker_color = color_to_rgba(theme::MARKER);
+        let head_tail_color = color_to_rgba(theme::HEAD_TAIL_MARKER);
+        let img = rasterize_waveform(
+            &samples,
+            &viewport(0, 12.5),
+            None,
+            None,
+            0,
+            None,
+            &[(500, "Marker 1")],
+            &[500],
+            true,
+            80,
+            400,
+            80,
+            true,
+        );
+        let row_has = |y: u32, want: Rgba<u8>| (0..img.width()).any(|x| *img.get_pixel(x, y) == want);
+        // Glyph row 0 is the marker label's, glyph row 1 the head/tail label's.
+        assert!(row_has(1, marker_color), "the marker label is on the first glyph row");
+        assert!(
+            row_has(GLYPH_PX as u32 + 1, head_tail_color),
+            "the head/tail label is one glyph row lower"
+        );
     }
 
     #[test]
     fn marker_at_the_cursor_uses_the_cursor_color_instead() {
         let samples = vec![0.1f32; 1000];
         let cursor_color = color_to_rgba(theme::CURSOR);
-        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 500, None, &[(500, "")], false, 80, 160, 40, true);
+        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 500, None, &[(500, "")], &[], false, 80, 160, 40, true);
         let marker_col = (500.0 / 12.5 * (160.0 / 80.0)) as u32;
         assert_eq!(
             *img.get_pixel(marker_col, 5),
@@ -496,7 +631,7 @@ mod tests {
     #[test]
     fn out_of_view_cursor_draws_nothing() {
         let samples = vec![0.1f32; 1000];
-        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 999_999, None, &[], false, 80, 160, 40, true);
+        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 999_999, None, &[], &[], false, 80, 160, 40, true);
         let cursor_color = color_to_rgba(theme::CURSOR);
         assert!(img.pixels().all(|p| *p != cursor_color), "a cursor scrolled out of view must not draw");
     }
@@ -512,7 +647,7 @@ mod tests {
         // -1.0 (bottom) to +1.0 (top) across the full visible width.
         let samples: Vec<f32> = (0..200).map(|i| (i as f32 / 199.0) * 2.0 - 1.0).collect();
         let vp = viewport(0, 20.0); // span = 20 * 10 cols = 200 samples
-        let img = rasterize_waveform(&samples, &vp, None, None, 0, None, &[], false, 10, 200, 80, true);
+        let img = rasterize_waveform(&samples, &vp, None, None, 0, None, &[], &[], false, 10, 200, 80, true);
         let bg = color_to_rgba(theme::BASE);
         assert!(
             img.pixels().any(|p| *p != bg),
@@ -540,7 +675,7 @@ mod tests {
         // cell_width=100 at 12 spl/col -> span 1200 samples over 200px -> 6 samples per
         // pixel column (bar mode, above the 4.0 polyline threshold).
         let vp = viewport(0, 12.0);
-        let img = rasterize_waveform(&samples, &vp, None, None, 0, None, &[], false, 100, 200, 200, true);
+        let img = rasterize_waveform(&samples, &vp, None, None, 0, None, &[], &[], false, 100, 200, 200, true);
         let bg = color_to_rgba(theme::BASE);
 
         // Any non-background pixel counts as trace coverage — anti-aliased edge pixels are
@@ -577,7 +712,7 @@ mod tests {
             .map(|i| 0.05 * (2.0 * std::f32::consts::PI * i as f32 / 1200.0).sin())
             .collect();
         let vp = viewport(0, 12.0); // 6 samples per pixel column -> bar mode
-        let img = rasterize_waveform(&samples, &vp, None, None, 0, None, &[], false, 100, 200, 200, true);
+        let img = rasterize_waveform(&samples, &vp, None, None, 0, None, &[], &[], false, 100, 200, 200, true);
         let bg = color_to_rgba(theme::BASE);
         let waveform_color = color_to_rgba(theme::WAVEFORM_DOT_LOW);
         let cursor_color = color_to_rgba(theme::CURSOR);
@@ -596,7 +731,7 @@ mod tests {
         let samples = vec![0.1f32; 1000];
         let marker_color = color_to_rgba(theme::MARKER);
         let background = color_to_rgba(theme::BASE);
-        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 0, None, &[(500, "M")], true, 80, 160, 40, true);
+        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 0, None, &[(500, "M")], &[], true, 80, 160, 40, true);
         let marker_col = (500.0 / 12.5 * (160.0 / 80.0)) as i64;
         let label_x = (marker_col + LABEL_SCALE) as u32;
         let has_label_pixels = (0..8u32).any(|row| {
@@ -604,7 +739,7 @@ mod tests {
         });
         assert!(has_label_pixels, "expected some marker-colored pixels in the label's glyph cell");
         // No label rendered without the request — column stays background past the line.
-        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 0, None, &[(500, "M")], false, 80, 160, 40, true);
+        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, 0, None, &[(500, "M")], &[], false, 80, 160, 40, true);
         assert!(
             (0..8u32).all(|row| (0..GLYPH_PX as u32).all(|col| *img.get_pixel(label_x + col, row) == background)),
             "expected no label pixels when show_marker_labels is false"

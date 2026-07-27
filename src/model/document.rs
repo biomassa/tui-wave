@@ -31,6 +31,19 @@ pub struct Document {
     pub path: Option<PathBuf>,
     /// Timeline markers, kept sorted by position. Loaded from / saved to WAV cue chunks.
     pub markers: Vec<Marker>,
+    /// Head/Tail marks for the CDP DISTMORE family, kept sorted by position. A **separate**
+    /// system from `markers`, not a flavor of it: they mean something specific to CDP, they
+    /// alternate in a way ordinary markers don't, and they persist to their own `.headstails`
+    /// sidecar rather than the WAV's cue chunks (see `model::headstails`).
+    ///
+    /// **Flat and alternating** — even index = Head, odd index = Tail — which is CDP's own
+    /// convention: *"the first mark is assumed to be at a Head segment"*. A Head is typically
+    /// a consonant onset and its Tail the vowel continuation; for melodic material, note
+    /// starts; for drums, stroke starts. Position-only, because both the role and the label
+    /// (`H1`/`T1`/`H2`/`T2`…) fall out of the index, leaving nothing to store per mark.
+    ///
+    /// DISTMORE needs at least two complete pairs — see [`Document::head_tail_pairs`].
+    pub head_tail_marks: Vec<usize>,
     /// Raw BWF `bext` chunk bytes, preserved verbatim across a load→save round-trip so
     /// editing a broadcast WAV doesn't strip its metadata. `None` for plain WAVs.
     pub bext: Option<Vec<u8>>,
@@ -47,12 +60,67 @@ impl Default for Document {
             dirty: false,
             path: None,
             markers: Vec::new(),
+            head_tail_marks: Vec::new(),
             bext: None,
         }
     }
 }
 
+/// Which half of a Head/Tail pair a mark is, derived from its index in
+/// `Document.head_tail_marks` — see that field's doc comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadTailRole {
+    Head,
+    Tail,
+}
+
+impl HeadTailRole {
+    /// The role of the mark at `index`, per CDP's "first mark is a Head" convention.
+    pub fn at(index: usize) -> Self {
+        if index % 2 == 0 {
+            HeadTailRole::Head
+        } else {
+            HeadTailRole::Tail
+        }
+    }
+
+    /// The single-letter prefix used in the on-screen label (`H3`, `T3`).
+    pub fn letter(self) -> char {
+        match self {
+            HeadTailRole::Head => 'H',
+            HeadTailRole::Tail => 'T',
+        }
+    }
+}
+
+/// The on-screen label for the head/tail mark at `index`: `H1`, `T1`, `H2`, `T2`, … Both
+/// halves of a pair carry the same number, so a glance at the waveform shows which Head goes
+/// with which Tail.
+pub fn head_tail_label(index: usize) -> String {
+    format!("{}{}", HeadTailRole::at(index).letter(), index / 2 + 1)
+}
+
 impl Document {
+    /// How many *complete* Head/Tail pairs the mark list holds. A trailing unpaired Head
+    /// doesn't count — CDP reads the list strictly in pairs.
+    pub fn head_tail_pairs(&self) -> usize {
+        self.head_tail_marks.len() / 2
+    }
+
+    /// Inserts a head/tail mark at `position`, keeping the list sorted, and returns its new
+    /// index. A duplicate position is rejected (returns `None`) rather than inserted: two
+    /// marks at the same sample would make a zero-length segment, and since roles are derived
+    /// from index, it would also silently flip the role of every later mark.
+    pub fn insert_head_tail_mark(&mut self, position: usize) -> Option<usize> {
+        match self.head_tail_marks.binary_search(&position) {
+            Ok(_) => None,
+            Err(index) => {
+                self.head_tail_marks.insert(index, position);
+                Some(index)
+            }
+        }
+    }
+
     /// Adjust `pos` to the nearest zero crossing (sign change or near-zero sample)
     /// within a search window. Returns the original position if no crossing is found
     /// within the window or if the channel data is empty/insufficient.
@@ -292,6 +360,21 @@ impl Document {
                 m.position = start;
             }
         }
+        // Head/tail marks shift identically — they are anchored to audio just as ordinary
+        // markers are, and a DISTMORE marklist that drifted after an edit would cut the wrong
+        // segments. The one extra step: several marks inside the cut all collapse onto the
+        // same cut point, and since roles are derived from index, leaving duplicates there
+        // would keep zero-length segments in the list and flip later marks' roles. Dedupe
+        // instead, which is the same "a mark can't survive twice at one sample" rule
+        // `insert_head_tail_mark` enforces.
+        for m in &mut self.head_tail_marks {
+            if *m >= end {
+                *m -= removed;
+            } else if *m > start {
+                *m = start;
+            }
+        }
+        self.head_tail_marks.dedup();
         out
     }
 
@@ -322,6 +405,11 @@ impl Document {
                 m.position += count;
             }
         }
+        for m in &mut self.head_tail_marks {
+            if *m >= at {
+                *m += count;
+            }
+        }
     }
 }
 
@@ -331,6 +419,7 @@ mod tests {
 
     fn doc(samples: Vec<f32>) -> Document {
         Document {
+            head_tail_marks: Vec::new(),
             channels: vec![samples],
             sample_rate: 44100,
             selection: None,
@@ -501,6 +590,71 @@ mod tests {
         document.insert_range(20, vec![vec![0.0; 5]]); // insert 5 at 20
         assert_eq!(document.markers[0].position, 10); // before insert, unchanged
         assert_eq!(document.markers[1].position, 35); // after insert, +5
+    }
+
+    /// Head/tail marks are anchored to audio exactly as ordinary markers are — a DISTMORE
+    /// marklist that drifted after a cut would slice the wrong segments. Mirrors
+    /// `remove_range_shifts_markers` position for position.
+    #[test]
+    fn remove_range_shifts_head_tail_marks() {
+        let mut document = doc(vec![0.0; 100]);
+        document.head_tail_marks = vec![10, 30, 60, 80];
+        document.remove_range(20..40); // removes 20 samples
+        assert_eq!(document.head_tail_marks, vec![10, 20, 40, 60]);
+    }
+
+    /// Several marks inside one cut all collapse onto the cut point. They must not survive as
+    /// duplicates: roles are derived from index, so leaving three marks stacked on one sample
+    /// would keep two zero-length segments in the list *and* flip the Head/Tail role of every
+    /// mark after them.
+    #[test]
+    fn marks_collapsing_onto_one_cut_point_are_deduped_not_stacked() {
+        let mut document = doc(vec![0.0; 100]);
+        document.head_tail_marks = vec![10, 25, 30, 35, 60];
+        document.remove_range(20..40);
+        assert_eq!(document.head_tail_marks, vec![10, 20, 40]);
+        assert_eq!(document.head_tail_pairs(), 1, "one complete pair plus a spare Head");
+    }
+
+    #[test]
+    fn insert_range_shifts_head_tail_marks() {
+        let mut document = doc(vec![0.0; 50]);
+        document.head_tail_marks = vec![10, 30];
+        document.insert_range(20, vec![vec![0.0; 5]]);
+        assert_eq!(document.head_tail_marks, vec![10, 35]);
+    }
+
+    #[test]
+    fn head_tail_roles_and_labels_alternate_from_a_head() {
+        assert_eq!(HeadTailRole::at(0), HeadTailRole::Head);
+        assert_eq!(HeadTailRole::at(1), HeadTailRole::Tail);
+        assert_eq!(HeadTailRole::at(2), HeadTailRole::Head);
+        assert_eq!(head_tail_label(0), "H1");
+        assert_eq!(head_tail_label(1), "T1", "both halves of a pair share a number");
+        assert_eq!(head_tail_label(2), "H2");
+        assert_eq!(head_tail_label(3), "T2");
+    }
+
+    #[test]
+    fn inserting_head_tail_marks_keeps_them_sorted_and_rejects_duplicates() {
+        let mut document = doc(vec![0.0; 100]);
+        assert_eq!(document.insert_head_tail_mark(50), Some(0));
+        assert_eq!(document.insert_head_tail_mark(20), Some(0), "sorted, so 20 lands first");
+        assert_eq!(document.insert_head_tail_mark(80), Some(2));
+        assert_eq!(document.head_tail_marks, vec![20, 50, 80]);
+        assert_eq!(document.insert_head_tail_mark(50), None, "a duplicate position is refused");
+        assert_eq!(document.head_tail_marks, vec![20, 50, 80]);
+    }
+
+    /// A trailing unpaired Head doesn't count — CDP reads the marklist strictly in pairs, and
+    /// DISTMORE's floor of "at least two pairs" is checked against this.
+    #[test]
+    fn an_odd_mark_count_reports_only_the_complete_pairs() {
+        let mut document = doc(vec![0.0; 100]);
+        document.head_tail_marks = vec![10, 20, 30];
+        assert_eq!(document.head_tail_pairs(), 1);
+        document.head_tail_marks.push(40);
+        assert_eq!(document.head_tail_pairs(), 2);
     }
 
     #[test]

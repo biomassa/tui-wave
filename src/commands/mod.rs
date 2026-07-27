@@ -3,6 +3,7 @@ pub mod cut;
 pub mod delete;
 pub mod fade;
 pub mod gain;
+pub mod head_tail_mark;
 pub mod marker;
 pub mod normalize;
 pub mod paste;

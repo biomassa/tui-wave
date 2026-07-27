@@ -84,6 +84,7 @@ mod tests {
     #[test]
     fn execute_normalizes_to_near_full_scale() {
         let mut doc = Document {
+            head_tail_marks: Vec::new(),
             channels: vec![vec![0.5, 0.3, 0.1, -0.2, -0.4]],
             sample_rate: 44100,
             selection: None,
@@ -106,6 +107,7 @@ mod tests {
     #[test]
     fn execute_then_undo_restores_original() {
         let mut doc = Document {
+            head_tail_marks: Vec::new(),
             channels: vec![vec![0.5, 0.3, 0.1]],
             sample_rate: 44100,
             selection: None,

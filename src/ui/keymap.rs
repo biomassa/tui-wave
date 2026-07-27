@@ -62,6 +62,12 @@ pub enum Action {
     DeleteMarker,
     JumpPrevMarker,
     JumpNextMarker,
+    /// Head/Tail marks are a second, separate marker system used by the CDP DISTMORE family
+    /// — see `Document.head_tail_marks`. They get their own actions (and their own `h`/`H`
+    /// keys) rather than a mode flag on the ordinary marker actions, so a menu entry, a
+    /// toolbar button and a keybinding all mean exactly one thing here as everywhere else.
+    InsertHeadTailMark,
+    DeleteHeadTailMark,
     NextRisingEdge,
     PrevRisingEdge,
     AutoInsertMarkers,
@@ -189,6 +195,10 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('m') => Some(Action::InsertMarker),
         KeyCode::Char('t') => Some(Action::AutoInsertMarkers),
         KeyCode::Char('M') => Some(Action::DeleteMarker),
+        // Head/tail marks mirror `m`/`M` one key over. `Ctrl+h` is already CDP Chain, but
+        // plain `h`/`H` were free.
+        KeyCode::Char('h') => Some(Action::InsertHeadTailMark),
+        KeyCode::Char('H') => Some(Action::DeleteHeadTailMark),
         KeyCode::Char('[') => Some(Action::JumpPrevMarker),
         KeyCode::Char(']') => Some(Action::JumpNextMarker),
         // Shift+[ / Shift+] send '{' / '}' as the character itself on most layouts — bound
@@ -339,6 +349,8 @@ pub fn default_keybindings() -> HashMap<String, Vec<String>> {
     bind!("ToggleGraphicsMode", "g");
     bind!("InsertMarker", "m");
     bind!("DeleteMarker", "M");
+    bind!("InsertHeadTailMark", "h");
+    bind!("DeleteHeadTailMark", "H");
     bind!("JumpPrevMarker", "[");
     bind!("JumpNextMarker", "]");
     bind!("NextRisingEdge", "/");
@@ -413,6 +425,8 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "ToggleDotMatrixGradient" => Some(Action::ToggleDotMatrixGradient),
         "InsertMarker" => Some(Action::InsertMarker),
         "DeleteMarker" => Some(Action::DeleteMarker),
+        "InsertHeadTailMark" => Some(Action::InsertHeadTailMark),
+        "DeleteHeadTailMark" => Some(Action::DeleteHeadTailMark),
         "JumpPrevMarker" => Some(Action::JumpPrevMarker),
         "JumpNextMarker" => Some(Action::JumpNextMarker),
         "NextRisingEdge" => Some(Action::NextRisingEdge),

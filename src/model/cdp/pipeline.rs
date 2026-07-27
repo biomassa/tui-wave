@@ -14,11 +14,23 @@ use super::def::{IoKind, NumberScale, ParamValue, ProcessDef};
 
 /// Describes the audio being processed — just enough for plan-time duration/lane
 /// calculations. The real sample data lives only in the runner.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct InputSpec {
     pub channels: usize,
     pub sample_rate: u32,
     pub len_samples: usize,
+    /// Head/Tail marks for the DISTMORE family (`ProcessDef.needs_head_tail_marks`), as
+    /// sample positions **relative to the start of this input** — already rebased to the
+    /// selection rather than absolute in the source document, and already filtered to those
+    /// that fall inside it.
+    ///
+    /// Rebased by the caller (`App::cdp_input_spec`) rather than here because only the caller
+    /// knows the selection's offset in the document. What CDP receives is a temp WAV of the
+    /// selection alone, so an absolute mark position would point somewhere else entirely in
+    /// the file the process actually opens.
+    ///
+    /// Empty for every process that doesn't need them, which is all but thirteen.
+    pub head_tail_marks: Vec<usize>,
 }
 
 impl InputSpec {
@@ -274,7 +286,16 @@ pub enum PlanError {
     /// param values and the real input count are in hand. `reason` is written to be shown
     /// verbatim (see `CrystalVdat::validate`); `param` names the field it belongs to.
     InvalidParamData { param: String, reason: String },
+    /// A DISTMORE-family process (`ProcessDef.needs_head_tail_marks`) was run against a
+    /// selection holding fewer than [`MIN_HEAD_TAIL_PAIRS`] complete Head/Tail pairs. Unlike
+    /// every other error here this isn't about the *parameters* at all — the marks live on the
+    /// document, so the fix is to place more of them (`h`), not to change a field.
+    MissingHeadTailMarks { pairs: usize },
 }
+
+/// Complete Head/Tail pairs a DISTMORE process needs before it will run. CDP's own
+/// documentation: *"At least two pairs of time-values must be given"* — i.e. four marks.
+pub const MIN_HEAD_TAIL_PAIRS: usize = 2;
 
 /// Parses the `decfactor` field out of a `.ana` file's RIFF `note` chunk (hex-encoded
 /// little-endian ints, one `key\nhex\n` pair per line — verified against real CDP8
@@ -672,6 +693,7 @@ fn build_process_args(
     duration_secs: f64,
     pvoc: &PvocSettings,
     sample_rate: u32,
+    head_tail_marks: &[usize],
     brk_files: &mut Vec<(String, String)>,
     brk_index_base: usize,
 ) -> Result<(Vec<String>, Vec<DeferredWindowTarget>), PlanError> {
@@ -717,6 +739,28 @@ fn build_process_args(
     }
 
     args.push(outfile.to_string());
+
+    // The DISTMORE family's Head/Tail marklist (`ProcessDef.needs_head_tail_marks`) is a
+    // positional datafile immediately after the outfile — `distmore bright 1-3 infile outfile
+    // marklist [-s… -d]` — and before any of the flagged params below. It has no `ParamDef`
+    // at all: the marks come from the document (`InputSpec.head_tail_marks`, already rebased
+    // to the selection), not from a form field, so it's emitted here rather than by
+    // `plan_param`. See `ProcessDef::needs_head_tail_marks` for why.
+    if def.needs_head_tail_marks {
+        let pairs = head_tail_marks.len() / 2;
+        if pairs < MIN_HEAD_TAIL_PAIRS {
+            return Err(PlanError::MissingHeadTailMarks { pairs });
+        }
+        // Truncated to whole pairs: CDP reads the list strictly two at a time, and a trailing
+        // unpaired Head would leave it reading past the end of the segment list.
+        let paired = &head_tail_marks[..pairs * 2];
+        let relative_name = "headstails.txt".to_string();
+        brk_files.push((
+            relative_name.clone(),
+            crate::model::headstails::marks_to_text(paired, sample_rate),
+        ));
+        args.push(relative_name);
+    }
 
     for (i, (param, value)) in def.params.iter().zip(values).enumerate() {
         if param.before_outfile {
@@ -985,6 +1029,7 @@ fn plan_wav_glob(
         duration,
         pvoc,
         input.sample_rate,
+            &[],
         &mut brk_files,
         0,
     )?;
@@ -1039,7 +1084,7 @@ fn plan_synthesis(
     // process (no input at all) never does. Placeholder value is inert for every other
     // scale, and no catalog entry pairs this scale with an `IoKind::None` process.
     let (args, deferred) =
-        build_process_args(def, values, &[], "out.wav", 0.0, pvoc, 44100, &mut brk_files, 0)?;
+        build_process_args(def, values, &[], "out.wav", 0.0, pvoc, 44100, &[], &mut brk_files, 0)?;
     debug_assert!(deferred.is_empty(), "synthesis processes have no ana-window-count params");
 
     let dest_channels = if def.output_is_stereo { vec![0, 1] } else { vec![0] };
@@ -1151,6 +1196,7 @@ fn plan_matrix_with_gain_calibration(
             duration,
             pvoc,
             input.sample_rate,
+            &[],
             &mut brk_files,
             0,
         )?;
@@ -1283,6 +1329,7 @@ fn plan_matrix_apply_with_gain_calibration(
             duration,
             pvoc,
             input.sample_rate,
+            &[],
             &mut brk_files,
             0,
         )?;
@@ -1317,6 +1364,7 @@ fn plan_matrix_apply_with_gain_calibration(
                 duration,
                 pvoc,
                 input.sample_rate,
+                &[],
                 &mut brk_files,
                 0,
             )?;
@@ -1380,6 +1428,7 @@ fn plan_wav(
             duration,
             pvoc,
             input.sample_rate,
+            &input.head_tail_marks,
             &mut brk_files,
             0,
         )?;
@@ -1443,6 +1492,10 @@ fn plan_wav(
             duration,
             pvoc,
             input.sample_rate,
+            // Every lane writes the same marklist file under the same name, which is
+            // harmless (identical content) and keeps the marks channel-independent — they
+            // describe positions on the timeline, not per-channel data.
+            &input.head_tail_marks,
             &mut brk_files,
             0,
         )?;
@@ -1484,6 +1537,7 @@ fn plan_dual_wav(
             duration,
             pvoc,
             a.sample_rate,
+            &[],
             &mut brk_files,
             0,
         )?;
@@ -1534,6 +1588,7 @@ fn plan_dual_wav(
             duration,
             pvoc,
             a.sample_rate,
+            &[],
             &mut brk_files,
             0,
         )?;
@@ -1595,6 +1650,7 @@ fn plan_variadic_wav(
         duration,
         pvoc,
         first.sample_rate,
+        &[],
         &mut brk_files,
         0,
     )?;
@@ -1703,6 +1759,7 @@ fn plan_dual_ana(
             duration,
             pvoc,
             a.sample_rate,
+            &[],
             &mut brk_files,
             0,
         )?;
@@ -1773,6 +1830,7 @@ fn plan_ana(
             duration,
             pvoc,
             input.sample_rate,
+            &[],
             &mut brk_files,
             0,
         )?;
@@ -1873,6 +1931,7 @@ pub fn plan_ana_chain(
                 duration,
                 pvoc,
                 input.sample_rate,
+                &[],
                 &mut brk_files,
                 step_idx * 1000,
             )?;
@@ -1980,6 +2039,7 @@ pub fn plan_curve_transform_job(
         0.0,
         &PvocSettings::default(),
         44100,
+        &[],
         &mut brk_files,
         0,
     )?;
@@ -2232,6 +2292,7 @@ mod tests {
 
     fn base_def(input: IoKind, output: IoKind) -> ProcessDef {
         ProcessDef {
+            needs_head_tail_marks: false,
             key: "test_key".into(),
             bin: "modify".into(),
             subprog: Some("speed".into()),
@@ -2250,10 +2311,109 @@ mod tests {
         }
     }
 
+    /// A DISTMORE-family process (`needs_head_tail_marks`) writes its marklist datafile from
+    /// `InputSpec.head_tail_marks` and emits its filename as the positional argument directly
+    /// after the outfile — the argv slot CDP's usage text specifies
+    /// (`distmore bright 1-3 infile outfile marklist [-s… -d]`). Flagged params still follow.
+    #[test]
+    fn a_head_tail_marklist_is_written_and_placed_directly_after_the_outfile() {
+        let mut def = base_def(IoKind::Wav, IoKind::Wav);
+        def.bin = "distmore".into();
+        def.subprog = Some("bright".into());
+        def.mode = Some("2".into());
+        def.needs_head_tail_marks = true;
+        def.params = vec![ParamDef {
+            flag: Some("-s".into()),
+            ..number_param("Splice Length", 1.0, 100.0, 15.0, NumberScale::Plain)
+        }];
+        let input = InputSpec {
+            channels: 1,
+            sample_rate: 10_000,
+            len_samples: 10_000,
+            head_tail_marks: vec![1_000, 2_000, 4_000, 5_000],
+        };
+
+        let job = plan_job(&def, &[ParamValue::Number(15.0)], std::slice::from_ref(&input), &PvocSettings::default())
+            .expect("two complete pairs is enough");
+
+        assert_eq!(
+            job.steps[0].args,
+            vec!["bright", "2", "in.wav", "out.wav", "headstails.txt", "-s15"],
+            "the marklist sits between the outfile and the flagged params"
+        );
+        let (_, contents) = job
+            .brk_files
+            .iter()
+            .find(|(name, _)| name == "headstails.txt")
+            .expect("the marklist datafile is written");
+        let secs: Vec<f64> = contents.lines().map(|l| l.parse().unwrap()).collect();
+        assert_eq!(secs, vec![0.1, 0.2, 0.4, 0.5], "positions converted to seconds, in order");
+    }
+
+    /// Fewer than `MIN_HEAD_TAIL_PAIRS` complete pairs is rejected at plan time rather than
+    /// left for CDP to fail on: the user needs to be told to place more marks, which CDP's own
+    /// error can't say.
+    #[test]
+    fn too_few_head_tail_pairs_is_a_plan_error() {
+        let mut def = base_def(IoKind::Wav, IoKind::Wav);
+        def.needs_head_tail_marks = true;
+        def.params = Vec::new();
+
+        for (marks, expected_pairs) in
+            [(vec![], 0), (vec![1_000], 0), (vec![1_000, 2_000], 1), (vec![1_000, 2_000, 4_000], 1)]
+        {
+            let input = InputSpec { channels: 1, sample_rate: 10_000, len_samples: 10_000, head_tail_marks: marks.clone() };
+            let err = plan_job(&def, &[], std::slice::from_ref(&input), &PvocSettings::default())
+                .expect_err("under two complete pairs must not plan");
+            assert!(
+                matches!(err, PlanError::MissingHeadTailMarks { pairs } if pairs == expected_pairs),
+                "{marks:?} should report {expected_pairs} pairs, got {err:?}"
+            );
+        }
+    }
+
+    /// A trailing unpaired Head is dropped rather than written: CDP reads the list strictly two
+    /// at a time, so an odd final entry would leave it reading past the end of the segment list.
+    #[test]
+    fn a_trailing_unpaired_head_is_truncated_out_of_the_marklist() {
+        let mut def = base_def(IoKind::Wav, IoKind::Wav);
+        def.needs_head_tail_marks = true;
+        def.params = Vec::new();
+        let input = InputSpec {
+            channels: 1,
+            sample_rate: 10_000,
+            len_samples: 10_000,
+            head_tail_marks: vec![1_000, 2_000, 4_000, 5_000, 7_000],
+        };
+
+        let job = plan_job(&def, &[], std::slice::from_ref(&input), &PvocSettings::default()).unwrap();
+        let (_, contents) = job.brk_files.iter().find(|(n, _)| n == "headstails.txt").unwrap();
+        assert_eq!(contents.lines().count(), 4, "only the two complete pairs are written");
+    }
+
+    /// A process that doesn't declare `needs_head_tail_marks` must ignore the field entirely,
+    /// even when the document happens to carry marks — otherwise every other process in the
+    /// catalog would gain a stray argv token the moment a user pressed `h`.
+    #[test]
+    fn a_process_that_does_not_need_marks_ignores_them_completely() {
+        let def = base_def(IoKind::Wav, IoKind::Wav);
+        let input = InputSpec {
+            channels: 1,
+            sample_rate: 10_000,
+            len_samples: 10_000,
+            head_tail_marks: vec![1_000, 2_000, 4_000, 5_000],
+        };
+
+        let job = plan_job(&def, &[ParamValue::Number(3.0)], std::slice::from_ref(&input), &PvocSettings::default())
+            .unwrap();
+        assert!(!job.steps[0].args.iter().any(|a| a.contains("headstails")));
+        assert!(job.brk_files.is_empty());
+    }
+
     #[test]
     fn mono_wav_single_lane_matches_modify_speed_2() {
         let def = base_def(IoKind::Wav, IoKind::Wav);
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let job = plan_job(&def, &[ParamValue::Number(3.0)], std::slice::from_ref(&input), &PvocSettings::default())
             .unwrap();
 
@@ -2275,7 +2435,7 @@ mod tests {
     fn sidecar_extension_becomes_a_named_output_sidecar_file() {
         let mut def = base_def(IoKind::Wav, IoKind::Wav);
         def.sidecar_extension = Some("txt".into());
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let job = plan_job(&def, &[ParamValue::Number(3.0)], std::slice::from_ref(&input), &PvocSettings::default())
             .unwrap();
         assert_eq!(job.output_sidecar, Some("out.txt".to_string()));
@@ -2284,7 +2444,7 @@ mod tests {
     #[test]
     fn no_sidecar_extension_means_no_output_sidecar() {
         let def = base_def(IoKind::Wav, IoKind::Wav);
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let job = plan_job(&def, &[ParamValue::Number(3.0)], std::slice::from_ref(&input), &PvocSettings::default())
             .unwrap();
         assert_eq!(job.output_sidecar, None);
@@ -2303,7 +2463,7 @@ mod tests {
         datafile_param.before_outfile = true;
         def.params = vec![datafile_param, number_param("After", -96.0, 96.0, 0.0, NumberScale::Plain)];
 
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let job = plan_job(
             &def,
             &[ParamValue::Breakpoints(vec![(0.0, 0.5)]), ParamValue::Number(10.0)],
@@ -2319,7 +2479,7 @@ mod tests {
     fn stereo_wav_non_native_splits_into_dual_mono_lanes() {
         let mut def = base_def(IoKind::Wav, IoKind::Wav);
         def.stereo_native = false;
-        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let job = plan_job(&def, &[ParamValue::Number(3.0)], std::slice::from_ref(&input), &PvocSettings::default())
             .unwrap();
 
@@ -2344,7 +2504,7 @@ mod tests {
         let mut def = base_def(IoKind::Wav, IoKind::Wav);
         def.stereo_native = false;
         def.sidecar_extension = Some("txt".into());
-        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let job = plan_job(&def, &[ParamValue::Number(3.0)], std::slice::from_ref(&input), &PvocSettings::default())
             .unwrap();
         assert_eq!(job.output_sidecar, Some("out_c1.txt".to_string()));
@@ -2391,7 +2551,7 @@ mod tests {
     #[test]
     fn matrix_gain_calibration_is_none_when_the_toggle_is_off() {
         let def = matrix_like_def(false);
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let job = plan_job(
             &def,
             &[ParamValue::Toggle(false), ParamValue::Toggle(false)],
@@ -2411,7 +2571,7 @@ mod tests {
         // — see the tests below) -- picking a process key that gets NEITHER calibration is
         // what actually exercises "any other process".
         def.key = "matrix_matrix_3".into();
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let job = plan_job(
             &def,
             &[ParamValue::Toggle(true), ParamValue::Toggle(false)],
@@ -2425,7 +2585,7 @@ mod tests {
     #[test]
     fn plan_job_builds_a_two_pass_matrix_gain_calibration_job_for_mono() {
         let def = matrix_like_def(true);
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let job = plan_job(
             &def,
             &[ParamValue::Toggle(true), ParamValue::Toggle(false)],
@@ -2454,7 +2614,7 @@ mod tests {
     #[test]
     fn plan_job_builds_a_two_pass_matrix_gain_calibration_job_per_lane_for_stereo() {
         let def = matrix_like_def(true);
-        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let job = plan_job(
             &def,
             &[ParamValue::Toggle(true), ParamValue::Toggle(true)], // Cyclic on this time
@@ -2533,7 +2693,7 @@ mod tests {
     #[test]
     fn matrix_apply_gain_calibration_is_none_when_the_toggle_is_off() {
         let def = matrix_apply_like_def(false);
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let values = [
             ParamValue::FilePath("/tmp/some.matrix".into()),
             ParamValue::Toggle(false),
@@ -2547,7 +2707,7 @@ mod tests {
     #[test]
     fn plan_job_builds_a_two_pass_matrix_apply_gain_calibration_job_for_mono() {
         let def = matrix_apply_like_def(true);
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let values = [
             ParamValue::FilePath("/tmp/some.matrix".into()),
             ParamValue::Toggle(true),
@@ -2570,7 +2730,7 @@ mod tests {
     #[test]
     fn plan_job_builds_a_two_pass_matrix_apply_gain_calibration_job_per_lane_for_stereo() {
         let def = matrix_apply_like_def(true);
-        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let values = [
             ParamValue::FilePath("/tmp/some.matrix".into()),
             ParamValue::Toggle(true),
@@ -2593,7 +2753,7 @@ mod tests {
     fn stereo_native_process_keeps_single_lane() {
         let mut def = base_def(IoKind::Wav, IoKind::Wav);
         def.stereo_native = true;
-        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let job = plan_job(&def, &[ParamValue::Number(3.0)], std::slice::from_ref(&input), &PvocSettings::default())
             .unwrap();
 
@@ -2613,7 +2773,7 @@ mod tests {
         def.mode = None;
         def.params = vec![number_param("Channels", 1.0, 200.0, 6.0, NumberScale::Plain)];
 
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 88200 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 88200, ..Default::default() };
         let job = plan_job(&def, &[ParamValue::Number(6.0)], std::slice::from_ref(&input), &PvocSettings::default())
             .unwrap();
 
@@ -2636,7 +2796,7 @@ mod tests {
         def.mode = None;
         def.params = vec![number_param("Channels", 1.0, 200.0, 6.0, NumberScale::Plain)];
 
-        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 88200 };
+        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 88200, ..Default::default() };
         let job = plan_job(&def, &[ParamValue::Number(6.0)], std::slice::from_ref(&input), &PvocSettings::default())
             .unwrap();
 
@@ -2668,7 +2828,7 @@ mod tests {
 
         let avrg_values = vec![ParamValue::Number(6.0)];
         let freeze_values: Vec<ParamValue> = vec![];
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 88200 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 88200, ..Default::default() };
         let job = plan_ana_chain(&[(&avrg, &avrg_values), (&freeze, &freeze_values)], &input, &PvocSettings::default())
             .unwrap();
 
@@ -2700,7 +2860,7 @@ mod tests {
         avrg.params = vec![number_param("Channels", 1.0, 200.0, 6.0, NumberScale::Plain)];
         let values = vec![ParamValue::Number(6.0)];
 
-        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 88200 };
+        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 88200, ..Default::default() };
         let job = plan_ana_chain(&[(&avrg, &values), (&avrg, &values)], &input, &PvocSettings::default()).unwrap();
 
         assert_eq!(job.steps.len(), 8, "2 channels x (1 anal + 2 process steps + 1 synth)");
@@ -2733,7 +2893,7 @@ mod tests {
         second.params = vec![number_param("Depth", 0.0, 1.0, 0.5, NumberScale::Plain)];
         let second_values = vec![ParamValue::Breakpoints(vec![(0.0, 0.2), (1.0, 0.9)])];
 
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let job = plan_ana_chain(&[(&first, &first_values), (&second, &second_values)], &input, &PvocSettings::default())
             .unwrap();
 
@@ -2766,7 +2926,7 @@ mod tests {
         second.params = vec![number_param("Window", 0.0, 100.0, 50.0, NumberScale::PercentOfAnaWindowCount)];
         let second_values = vec![ParamValue::Number(50.0)];
 
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let job = plan_ana_chain(&[(&first, &first_values), (&second, &second_values)], &input, &PvocSettings::default())
             .unwrap();
 
@@ -2804,7 +2964,7 @@ mod tests {
                 kind: ParamKind::Choice { options: vec!["44100".into(), "48000".into()], default: 0 },
             },
         ];
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
 
         let job_off = plan_job(
             &def,
@@ -2829,7 +2989,7 @@ mod tests {
     fn percent_of_input_duration_converts_to_seconds_with_100_percent_clamp() {
         let mut def = base_def(IoKind::Wav, IoKind::Wav);
         def.params = vec![number_param("At", 0.0, 100.0, 50.0, NumberScale::PercentOfInputDuration)];
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 * 2 }; // 2s
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 * 2, ..Default::default() }; // 2s
 
         let half = plan_job(&def, &[ParamValue::Number(50.0)], std::slice::from_ref(&input), &PvocSettings::default())
             .unwrap();
@@ -2846,7 +3006,7 @@ mod tests {
         def.subprog = Some("suppress".into());
         def.mode = None;
         def.params = vec![number_param("Amount", 0.0, 100.0, 50.0, NumberScale::PercentOfFftSize)];
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
 
         let job = plan_job(
             &def,
@@ -2866,7 +3026,7 @@ mod tests {
         def.subprog = Some("blur".into());
         def.mode = None;
         def.params = vec![number_param("Blurring", 0.1, 100.0, 20.0, NumberScale::PercentOfAnaWindowCount)];
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
 
         let job = plan_job(&def, &[ParamValue::Number(20.0)], std::slice::from_ref(&input), &PvocSettings::default())
             .unwrap();
@@ -2893,7 +3053,7 @@ mod tests {
         def.subprog = Some("blur".into());
         def.mode = None;
         def.params = vec![number_param("Blurring", 0.1, 100.0, 20.0, NumberScale::PercentOfAnaWindowCount)];
-        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100, ..Default::default() };
 
         let job = plan_job(&def, &[ParamValue::Number(20.0)], std::slice::from_ref(&input), &PvocSettings::default())
             .unwrap();
@@ -2923,7 +3083,7 @@ mod tests {
         def.subprog = Some("blur".into());
         def.mode = None;
         def.params = vec![number_param("Blurring", 0.1, 100.0, 20.0, NumberScale::PercentOfAnaWindowCount)];
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let points = vec![(0.0, 0.1), (1.0, 50.0)];
 
         let job = plan_job(
@@ -2971,7 +3131,7 @@ mod tests {
                 integer: false,
             },
         }];
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
 
         let job = plan_job(
             &def,
@@ -3017,7 +3177,7 @@ mod tests {
             number_param("Cycle Count", 1.0, 200.0, 10.0, NumberScale::Plain),
             number_param("Decay Shape", 0.1, 10.0, 1.0, NumberScale::Plain),
         ];
-        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 2, sample_rate: 44100, len_samples: 44100, ..Default::default() };
 
         let job = plan_job(
             &def,
@@ -3061,7 +3221,7 @@ mod tests {
             number_param("Min Frequency", 0.0, 20000.0, 200.0, NumberScale::Plain),
             number_param("Max Frequency", 0.0, 20000.0, 2000.0, NumberScale::Plain),
         ];
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
 
         let job = plan_job(
             &def,
@@ -3101,8 +3261,8 @@ mod tests {
 
     fn dual_inputs(a_channels: usize, b_channels: usize) -> [InputSpec; 2] {
         [
-            InputSpec { channels: a_channels, sample_rate: 44100, len_samples: 44100 },
-            InputSpec { channels: b_channels, sample_rate: 44100, len_samples: 88200 },
+            InputSpec { channels: a_channels, sample_rate: 44100, len_samples: 44100, ..Default::default() },
+            InputSpec { channels: b_channels, sample_rate: 44100, len_samples: 88200, ..Default::default() },
         ]
     }
 
@@ -3172,8 +3332,8 @@ mod tests {
     fn dual_input_sample_rate_mismatch_is_rejected_up_front() {
         let def = base_def(IoKind::DualWav, IoKind::Wav);
         let inputs = [
-            InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 },
-            InputSpec { channels: 1, sample_rate: 48000, len_samples: 48000 },
+            InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() },
+            InputSpec { channels: 1, sample_rate: 48000, len_samples: 48000, ..Default::default() },
         ];
         let err = plan_job(&def, &[ParamValue::Number(0.0)], &inputs, &PvocSettings::default())
             .unwrap_err();
@@ -3183,7 +3343,7 @@ mod tests {
     #[test]
     fn dual_input_process_with_one_input_is_a_count_mismatch() {
         let def = base_def(IoKind::DualWav, IoKind::Wav);
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let err = plan_job(&def, &[ParamValue::Number(0.0)], std::slice::from_ref(&input), &PvocSettings::default())
             .unwrap_err();
         assert!(matches!(err, PlanError::InputCountMismatch { expected: 2, actual: 1 }));
@@ -3209,7 +3369,7 @@ mod tests {
     #[test]
     fn param_count_mismatch_is_rejected() {
         let def = base_def(IoKind::Wav, IoKind::Wav);
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let err = plan_job(&def, &[], std::slice::from_ref(&input), &PvocSettings::default()).unwrap_err();
         assert!(matches!(err, PlanError::ParamCountMismatch { expected: 1, actual: 0 }));
     }
@@ -3475,7 +3635,7 @@ mod tests {
     #[test]
     fn crystal_vdat_datafile_writes_vertices_three_per_line_and_envelope_two_per_line() {
         let def = crystal_like_def();
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         let job = plan_job(
             &def,
             &[crystal_value(vec![[0.5, 0.25, -0.1]])],
@@ -3505,7 +3665,7 @@ mod tests {
     #[test]
     fn crystal_vertex_count_must_match_the_input_count_only_when_more_than_one_file() {
         let def = crystal_like_def();
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
 
         // One input file: any vertex count is legal (the file is re-read once per vertex).
         for vertices in [vec![[0.0, 0.0, 0.0]], vec![[0.1, 0.0, 0.0], [-0.1, 0.0, 0.0], [0.0, 0.2, 0.0]]] {
@@ -3520,7 +3680,7 @@ mod tests {
         let err = plan_job(
             &def,
             &[crystal_value(vec![[0.1, 0.0, 0.0], [-0.1, 0.0, 0.0], [0.0, 0.2, 0.0]])],
-            &[input, input],
+            &[input.clone(), input.clone()],
             &PvocSettings::default(),
         )
         .unwrap_err();
@@ -3534,7 +3694,7 @@ mod tests {
         assert!(plan_job(
             &def,
             &[crystal_value(vec![[0.1, 0.0, 0.0], [-0.1, 0.0, 0.0]])],
-            &[input, input],
+            &[input.clone(), input.clone()],
             &PvocSettings::default(),
         )
         .is_ok());
@@ -3545,7 +3705,7 @@ mod tests {
     #[test]
     fn crystal_vdat_structural_errors_block_planning_with_the_real_reason() {
         let def = crystal_like_def();
-        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100 };
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
         // Each coordinate is inside -1..1 but the vector length is >1 — the constraint CDP's
         // `get_vectorlen` really does enforce.
         let err = plan_job(

@@ -63,8 +63,12 @@ pub fn resample_channel(input: &[f32], ratio: f64) -> Vec<f32> {
 #[derive(Debug)]
 pub struct ResampleCommand {
     target_rate: u32,
-    /// Original channels, sample rate, and markers, captured for undo.
-    original: Option<(Vec<Vec<f32>>, u32, Vec<crate::model::document::Marker>)>,
+    /// Original channels, sample rate, markers, and head/tail marks, captured for undo.
+    /// Both mark systems are snapshotted rather than re-scaled by the inverse ratio: rounding
+    /// to whole samples is lossy, so scaling back would drift a mark by a sample or two per
+    /// undo — and for head/tail marks, two adjacent ones could round onto the same sample and
+    /// silently flip the Head/Tail role of every mark after them.
+    original: Option<(Vec<Vec<f32>>, u32, Vec<crate::model::document::Marker>, Vec<usize>)>,
 }
 
 impl ResampleCommand {
@@ -82,7 +86,8 @@ impl Command for ResampleCommand {
             return;
         }
         let ratio = self.target_rate as f64 / doc.sample_rate as f64;
-        self.original = Some((doc.channels.clone(), doc.sample_rate, doc.markers.clone()));
+        self.original =
+            Some((doc.channels.clone(), doc.sample_rate, doc.markers.clone(), doc.head_tail_marks.clone()));
         doc.channels = doc
             .channels
             .iter()
@@ -93,6 +98,13 @@ impl Command for ResampleCommand {
         for m in &mut doc.markers {
             m.position = ((m.position as f64 * ratio).round() as usize).min(new_len);
         }
+        // Head/tail marks scale the same way. Deduped after, because two marks close enough
+        // together can round onto the same sample when downsampling, and duplicates would
+        // both add a zero-length segment and flip every later mark's derived role.
+        for m in &mut doc.head_tail_marks {
+            *m = ((*m as f64 * ratio).round() as usize).min(new_len);
+        }
+        doc.head_tail_marks.dedup();
         doc.sample_rate = self.target_rate;
         doc.selection = None;
         doc.cursor = 0;
@@ -100,10 +112,11 @@ impl Command for ResampleCommand {
     }
 
     fn undo(&mut self, doc: &mut Document) {
-        if let Some((channels, rate, markers)) = self.original.take() {
+        if let Some((channels, rate, markers, head_tail_marks)) = self.original.take() {
             doc.channels = channels;
             doc.sample_rate = rate;
             doc.markers = markers;
+            doc.head_tail_marks = head_tail_marks;
         }
         doc.selection = None;
         doc.cursor = 0;
@@ -123,8 +136,30 @@ pub fn resample_command(target_rate: u32) -> Box<dyn Command> {
 mod tests {
     use super::*;
 
+    /// Head/tail marks are sample positions, so they scale with the rate change; undo restores
+    /// the snapshot rather than scaling back, because the round-to-whole-samples in each
+    /// direction is lossy and would drift them.
+    #[test]
+    fn resample_scales_head_tail_marks_and_undo_restores_them_exactly() {
+        let mut doc = Document {
+            head_tail_marks: vec![0, 11_025, 22_050, 44_099],
+            channels: vec![vec![0.0; 44_100]],
+            sample_rate: 44_100,
+            ..Default::default()
+        };
+        let mut cmd = ResampleCommand::new(22_050);
+        cmd.execute(&mut doc);
+        assert_eq!(doc.sample_rate, 22_050);
+        assert_eq!(doc.head_tail_marks, vec![0, 5_513, 11_025, 22_050]);
+
+        cmd.undo(&mut doc);
+        assert_eq!(doc.sample_rate, 44_100);
+        assert_eq!(doc.head_tail_marks, vec![0, 11_025, 22_050, 44_099]);
+    }
+
     fn doc(channels: Vec<Vec<f32>>, rate: u32) -> Document {
         Document {
+            head_tail_marks: Vec::new(),
             channels,
             sample_rate: rate,
             selection: None,

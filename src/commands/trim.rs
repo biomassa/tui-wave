@@ -7,6 +7,9 @@ pub struct TrimCommand {
     before: Option<Vec<Vec<f32>>>,
     after: Option<Vec<Vec<f32>>>,
     markers_before: Option<Vec<Marker>>,
+    /// Snapshotted for the same reason as `markers_before`: trimming drops every mark outside
+    /// the kept region, which re-basing alone can't undo.
+    head_tail_marks_before: Option<Vec<usize>>,
 }
 
 impl TrimCommand {
@@ -16,6 +19,7 @@ impl TrimCommand {
             before: None,
             after: None,
             markers_before: None,
+            head_tail_marks_before: None,
         }
     }
 }
@@ -38,6 +42,15 @@ impl Command for TrimCommand {
         for m in &mut doc.markers {
             m.position -= start;
         }
+        // Head/tail marks get the identical treatment. Dropping the marks outside the kept
+        // region can leave an odd count, which flips the Head/Tail role of everything after
+        // the trim point — that is the honest result (the segments they described are gone),
+        // and the DISTMORE dialog's own "needs at least 2 pairs" check is what catches it.
+        self.head_tail_marks_before = Some(doc.head_tail_marks.clone());
+        doc.head_tail_marks.retain(|&m| m >= start && m <= end);
+        for m in &mut doc.head_tail_marks {
+            *m -= start;
+        }
         doc.selection = None;
         doc.cursor = 0;
         doc.dirty = true;
@@ -56,6 +69,9 @@ impl Command for TrimCommand {
         if let Some(markers) = self.markers_before.take() {
             doc.markers = markers;
         }
+        if let Some(marks) = self.head_tail_marks_before.take() {
+            doc.head_tail_marks = marks;
+        }
         doc.cursor = start;
         doc.dirty = true;
     }
@@ -73,9 +89,27 @@ pub fn trim_command(start: usize, end: usize) -> Box<dyn Command> {
 mod tests {
     use super::*;
 
+    /// Trim keeps only the marks inside the kept region, re-based to the new origin, and undo
+    /// puts the dropped ones back — the same contract ordinary markers already had.
+    #[test]
+    fn trim_rebases_head_tail_marks_and_undo_restores_the_dropped_ones() {
+        let mut doc = Document {
+            head_tail_marks: vec![5, 25, 40, 90],
+            channels: vec![vec![0.0; 100]],
+            ..Default::default()
+        };
+        let mut cmd = TrimCommand::new(20, 50);
+        cmd.execute(&mut doc);
+        assert_eq!(doc.head_tail_marks, vec![5, 20], "kept and re-based to the new origin");
+
+        cmd.undo(&mut doc);
+        assert_eq!(doc.head_tail_marks, vec![5, 25, 40, 90]);
+    }
+
     #[test]
     fn trim_keeps_only_selection() {
         let mut doc = Document {
+            head_tail_marks: Vec::new(),
             channels: vec![vec![1.0, 2.0, 3.0, 4.0, 5.0]],
             sample_rate: 44100,
             selection: None,
@@ -96,6 +130,7 @@ mod tests {
     #[test]
     fn execute_then_undo_restores_original() {
         let mut doc = Document {
+            head_tail_marks: Vec::new(),
             channels: vec![vec![1.0, 2.0, 3.0, 4.0, 5.0]],
             sample_rate: 44100,
             selection: None,
@@ -116,6 +151,7 @@ mod tests {
     #[test]
     fn trim_entire_file_is_no_op() {
         let mut doc = Document {
+            head_tail_marks: Vec::new(),
             channels: vec![vec![1.0, 2.0, 3.0]],
             sample_rate: 44100,
             selection: None,
