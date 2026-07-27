@@ -92,6 +92,20 @@ impl TextInput {
         self.cursor = self.char_len();
     }
 
+    /// Places the cursor at character offset `column` — how a mouse click inside the field
+    /// lands the caret where it was clicked rather than merely focusing the field. `column` is
+    /// the click's column *within the text itself*, so the caller subtracts whatever label or
+    /// padding precedes it.
+    ///
+    /// Clamped to the end of the text: clicking in the empty space past the last character is
+    /// a click at the end, which is what every text field everywhere does. Clears `fresh` for
+    /// the same reason the arrow keys do — deliberately positioning the caret is a commitment
+    /// to editing the existing value, not to replacing it wholesale.
+    pub fn set_cursor_from_column(&mut self, column: usize) {
+        self.fresh = false;
+        self.cursor = column.min(self.char_len());
+    }
+
     /// Splits the text for rendering a cursor: `(before, under_cursor, after)`. The middle
     /// is the single character the cursor sits on, or a space when the cursor is at the end.
     pub fn split_at_cursor(&self) -> (String, String, String) {
@@ -148,6 +162,40 @@ mod tests {
         t.home();
         t.delete();
         assert_eq!(t.value(), "abX");
+    }
+
+    /// Clicking inside a field puts the caret on the clicked character, and clicking past the
+    /// end lands at the end rather than out of bounds.
+    #[test]
+    fn clicking_positions_the_cursor_and_clamps_past_the_end() {
+        let mut t = TextInput::new("abcdef");
+        t.set_cursor_from_column(2);
+        t.insert('X');
+        assert_eq!(t.value(), "abXcdef");
+
+        t.set_cursor_from_column(999);
+        t.insert('Z');
+        assert_eq!(t.value(), "abXcdefZ", "a click past the text ends up at the end");
+    }
+
+    /// Deliberately positioning the caret is a commitment to editing the prefilled value, not
+    /// replacing it — the same rule the arrow keys already follow.
+    #[test]
+    fn clicking_a_fresh_field_cancels_its_auto_erase() {
+        let mut t = TextInput::fresh("default.wav");
+        t.set_cursor_from_column(0);
+        t.insert('x');
+        assert_eq!(t.value(), "xdefault.wav");
+    }
+
+    /// Char offsets, not byte offsets: clicking column 2 of a multi-byte string must land
+    /// between the second and third *characters*, not split one.
+    #[test]
+    fn click_positioning_counts_characters_not_bytes() {
+        let mut t = TextInput::new("äöü.wav");
+        t.set_cursor_from_column(2);
+        t.insert('X');
+        assert_eq!(t.value(), "äöXü.wav");
     }
 
     #[test]
