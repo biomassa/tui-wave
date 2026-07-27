@@ -311,6 +311,15 @@ pub struct TableColumn {
     /// entries (where no column needs this) don't need updating.
     #[serde(default)]
     pub integer: bool,
+    /// True for a column whose values CDP requires to be **all different from each other**
+    /// (`tesselate`'s Entry Delay: "All vals must be different. (With same value, 2 sources
+    /// would collapse into one double-src)"). Only meaningful on a table that
+    /// `rows_match_input_count` auto-sizes — that is where rows appear without the user
+    /// typing them, so seeding a new row with this column's plain `default` would produce a
+    /// duplicate every time. New rows instead get a value staggered past the largest one
+    /// already present (see `App::sync_cdp_table_to_input_count`).
+    #[serde(default)]
+    pub must_be_distinct: bool,
 }
 
 /// The shape of one parameter: its range/default for a slider, or its set of named options.
@@ -629,6 +638,20 @@ pub struct ParamDef {
     /// one value CDP refuses.
     #[serde(default)]
     pub default_from_dc_offset: bool,
+    /// True for a `Table` param on a variadic-input process whose datafile must hold
+    /// **exactly one row per input file**. The row count then isn't a free choice at all, so
+    /// the UI keeps it in step with the buffer pick rather than making the user maintain it
+    /// (`App::sync_cdp_table_to_input_count`).
+    ///
+    /// Exists for `tesselate`, whose datafile CDP describes as "two lines, with the same
+    /// number of entries per line, and the number of entries corresponds to the number of
+    /// input files". Its table shipped with a single default row, so picking any number of
+    /// buffers other than one failed with "No of data items (1) in 1st line of file
+    /// table_0.txt doesn't correspond to no of input files (5)" — i.e. it could never run
+    /// with more than one source, which is the entire point of the process (user report,
+    /// 2026-07-27).
+    #[serde(default)]
+    pub rows_match_input_count: bool,
     #[serde(flatten)]
     pub kind: ParamKind,
 }
@@ -774,6 +797,7 @@ mod tests {
             list_is_time_sequence: false,
             range_scales_with_input_duration: false,
             default_from_dc_offset: false,
+            rows_match_input_count: false,
             before_outfile: false,
             kind: ParamKind::Number {
                 min: 2.0,
@@ -825,6 +849,7 @@ mod tests {
             list_is_time_sequence: false,
             range_scales_with_input_duration: false,
             default_from_dc_offset: false,
+            rows_match_input_count: false,
             before_outfile: false,
             kind: ParamKind::Toggle { default: false },
         };
@@ -838,6 +863,7 @@ mod tests {
             list_is_time_sequence: false,
             range_scales_with_input_duration: false,
             default_from_dc_offset: false,
+            rows_match_input_count: false,
             before_outfile: false,
             kind: ParamKind::Choice {
                 options: vec!["44100".into(), "48000".into()],
@@ -885,10 +911,12 @@ mod tests {
             list_is_time_sequence: false,
             range_scales_with_input_duration: false,
             default_from_dc_offset: false,
+            rows_match_input_count: false,
             before_outfile: false,
             kind: ParamKind::Table {
                 columns: vec![
                     TableColumn {
+                        must_be_distinct: false,
                         name: "Time".into(),
                         min: 0.0,
                         max: 60.0,
@@ -898,6 +926,7 @@ mod tests {
                         integer: false,
                     },
                     TableColumn {
+                        must_be_distinct: false,
                         name: "Amp".into(),
                         min: 0.0,
                         max: 1.0,
@@ -907,6 +936,7 @@ mod tests {
                         integer: false,
                     },
                     TableColumn {
+                        must_be_distinct: false,
                         name: "Pan".into(),
                         min: -1.0,
                         max: 1.0,
@@ -960,6 +990,7 @@ mod tests {
             list_is_time_sequence: false,
             range_scales_with_input_duration: false,
             default_from_dc_offset: false,
+            rows_match_input_count: false,
             before_outfile: false,
             kind: ParamKind::MarkerTimeList {
                 markers: vec!['a', 'b'],
@@ -1000,6 +1031,7 @@ mod tests {
     #[test]
     fn hilite_band_param_round_trips_through_toml() {
         let bounds = |name: &str, min, max, default| TableColumn {
+            must_be_distinct: false,
             name: name.into(),
             min,
             max,
@@ -1018,6 +1050,7 @@ mod tests {
             list_is_time_sequence: false,
             range_scales_with_input_duration: false,
             default_from_dc_offset: false,
+            rows_match_input_count: false,
             before_outfile: false,
             kind: ParamKind::HiliteBand {
                 lofrq: bounds("Lo Freq", 20.0, 20000.0, 200.0),
@@ -1062,6 +1095,7 @@ mod tests {
             list_is_time_sequence: false,
             range_scales_with_input_duration: false,
             default_from_dc_offset: false,
+            rows_match_input_count: false,
             // The real argv is `crystal rotate <mode> fi [fi2..] fo vdat ...` — the datafile
             // sits *after* the outfile, so this is the ordinary (default) placement.
             before_outfile: false,

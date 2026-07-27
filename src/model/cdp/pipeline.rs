@@ -950,6 +950,25 @@ fn check_compound_param_data(
     input_count: usize,
 ) -> Result<(), PlanError> {
     for (param, value) in def.params.iter().zip(values) {
+        // A `rows_match_input_count` table must hold exactly one row per input file — CDP
+        // checks it too ("No of data items (1) in 1st line of file table_0.txt doesn't
+        // correspond to no of input files (5)"), but only after the job has been written out
+        // and spawned. The UI keeps the two in step automatically
+        // (`App::sync_cdp_table_to_input_count`), so reaching here means something bypassed
+        // that — a hand-edited preset, most likely — and a named error beats CDP's.
+        if param.rows_match_input_count {
+            if let ParamValue::Table(rows) = value {
+                if rows.len() != input_count {
+                    return Err(PlanError::InvalidParamData {
+                        param: param.name.clone(),
+                        reason: format!(
+                            "{} row(s) but {input_count} input file(s) — this table needs exactly one row per input",
+                            rows.len()
+                        ),
+                    });
+                }
+            }
+        }
         let ParamValue::CrystalVdat(vdat) = value else { continue };
         if let Err(reason) = vdat.validate() {
             return Err(PlanError::InvalidParamData { param: param.name.clone(), reason });
@@ -2278,6 +2297,7 @@ mod tests {
 
     fn number_param(name: &str, min: f64, max: f64, default: f64, scale: NumberScale) -> ParamDef {
         ParamDef {
+            rows_match_input_count: false,
             range_scales_with_input_duration: false,
             default_from_dc_offset: false,
             name: name.into(),
@@ -2525,6 +2545,7 @@ mod tests {
         def.sidecar_extension = Some("txt".into());
         def.params = vec![
             ParamDef {
+                rows_match_input_count: false,
                 range_scales_with_input_duration: false,
                 default_from_dc_offset: false,
                 name: "Auto Gain Reduction".into(),
@@ -2538,6 +2559,7 @@ mod tests {
                 kind: ParamKind::Toggle { default: auto_gain_default },
             },
             ParamDef {
+                rows_match_input_count: false,
                 range_scales_with_input_duration: false,
                 default_from_dc_offset: false,
                 name: "Cyclic".into(),
@@ -2660,6 +2682,7 @@ mod tests {
         def.mode = Some("2".into());
         def.params = vec![
             ParamDef {
+                rows_match_input_count: false,
                 range_scales_with_input_duration: false,
                 default_from_dc_offset: false,
                 name: "Matrix File".into(),
@@ -2673,6 +2696,7 @@ mod tests {
                 kind: ParamKind::FilePath { extension: "matrix".into() },
             },
             ParamDef {
+                rows_match_input_count: false,
                 range_scales_with_input_duration: false,
                 default_from_dc_offset: false,
                 name: "Auto Gain Reduction".into(),
@@ -2686,6 +2710,7 @@ mod tests {
                 kind: ParamKind::Toggle { default: auto_gain_default },
             },
             ParamDef {
+                rows_match_input_count: false,
                 range_scales_with_input_duration: false,
                 default_from_dc_offset: false,
                 name: "Cyclic".into(),
@@ -2954,6 +2979,7 @@ mod tests {
         let mut def = base_def(IoKind::Wav, IoKind::Wav);
         def.params = vec![
             ParamDef {
+                rows_match_input_count: false,
                 range_scales_with_input_duration: false,
                 default_from_dc_offset: false,
                 name: "Omit".into(),
@@ -2967,6 +2993,7 @@ mod tests {
                 kind: ParamKind::Toggle { default: false },
             },
             ParamDef {
+                rows_match_input_count: false,
                 range_scales_with_input_duration: false,
                 default_from_dc_offset: false,
                 name: "Rate".into(),
@@ -3129,6 +3156,7 @@ mod tests {
     fn breakpoints_emit_brk_file_and_reference_its_path() {
         let mut def = base_def(IoKind::Wav, IoKind::Wav);
         def.params = vec![ParamDef {
+            rows_match_input_count: false,
             range_scales_with_input_duration: false,
             default_from_dc_offset: false,
             name: "Gain".into(),
@@ -3626,6 +3654,7 @@ mod tests {
         def.subprog = Some("rotate".into());
         def.mode = Some("1".into());
         def.params = vec![ParamDef {
+            rows_match_input_count: false,
             range_scales_with_input_duration: false,
             default_from_dc_offset: false,
             name: "Crystal Data".into(),

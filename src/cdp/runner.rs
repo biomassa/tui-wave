@@ -1058,6 +1058,80 @@ mod tests {
         assert_eq!(output.results[0].len(), 2, "tesselate at chans=2 emits stereo");
     }
 
+    /// Three real inputs through `tesselate` with an auto-sized Sources table — the shape the
+    /// UI now produces for a three-buffer pick. Before the table tracked the pick, this failed
+    /// with "No of data items (1) in 1st line of file table_0.txt doesn't correspond to no of
+    /// input files (3)" for every pick above one source, i.e. the process could never do the
+    /// thing it exists for (user report, 2026-07-27).
+    #[test]
+    fn tesselate_runs_with_three_inputs_and_a_matching_auto_sized_table() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+        let reversed: Vec<Vec<f32>> = vec![channels[0].iter().rev().copied().collect()];
+        let quiet: Vec<Vec<f32>> = vec![channels[0].iter().map(|s| s * 0.4).collect()];
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("tesselate_tesselate").expect("tesselate_tesselate in catalog");
+        let sources = def
+            .params
+            .iter()
+            .find(|p| p.name == "Sources")
+            .expect("a Sources param");
+        assert!(sources.rows_match_input_count, "its row count tracks the input count");
+
+        // Exactly what `App::sync_cdp_table_to_input_count` builds for three inputs: the
+        // column defaults, with the `must_be_distinct` Entry Delay staggered by one step.
+        let mut values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+        values[0] = crate::model::cdp::ParamValue::Table(vec![
+            vec![4.0, 0.0],
+            vec![4.0, 0.01],
+            vec![4.0, 0.02],
+        ]);
+
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            &[input.clone(), input.clone(), input.clone()],
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .expect("three inputs with three rows should plan");
+
+        let (_, table) = planned
+            .brk_files
+            .iter()
+            .find(|(name, _)| name.starts_with("table_"))
+            .expect("tesselate writes a table datafile");
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines.len(), 2, "always exactly two lines: {table:?}");
+        for line in &lines {
+            assert_eq!(
+                line.split_whitespace().count(),
+                3,
+                "one entry per input file, which is what CDP checks: {table:?}"
+            );
+        }
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 420,
+            cdp_dir,
+            planned,
+            inputs: vec![channels, reversed, quiet],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(60))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("tesselate should accept three inputs and a three-row table");
+        assert_eq!(output.results.len(), 1);
+        assert_eq!(output.results[0].len(), 2, "chans=2 emits stereo");
+        assert!(output.results[0][0].iter().any(|s| s.abs() > 1e-3), "and real audio");
+    }
+
     /// Real end-to-end coverage for the channel-grouped variadic kind
     /// (`IoKind::GroupedWav`) plus the variadic *glob* output path: `repair repair` writes
     /// `out_0.wav`, `out_1.wav`, … rather than one `out.wav`, so this checks both that the

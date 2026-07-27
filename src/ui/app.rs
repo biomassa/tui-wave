@@ -1358,6 +1358,7 @@ fn crystal_vertex_columns() -> Vec<crate::model::cdp::TableColumn> {
     ["X (time / position)", "Y (pitch)", "Z (brightness)"]
         .iter()
         .map(|name| crate::model::cdp::TableColumn {
+            must_be_distinct: false,
             name: (*name).into(),
             min: crate::model::cdp::CrystalVdat::COORD_MIN,
             max: crate::model::cdp::CrystalVdat::COORD_MAX,
@@ -4950,6 +4951,7 @@ impl App {
         let mut curve_run: Option<usize> = None;
         // The same deferral for the CDP params form: opening a sub-editor / running a job
         // needs `&mut self`, which can't be taken while `self.dialog` is borrowed below.
+        let mut cdp_sync_table_rows = false;
         let mut cdp_open_focused_editor = false;
         let mut cdp_open_variadic_picker = false;
         let mut cdp_run_from_click = false;
@@ -5150,6 +5152,7 @@ impl App {
                             None => picks.push(row),
                         }
                     }
+                    cdp_sync_table_rows = true;
                 }
             }
             // The CDP params form. `row` is the dialog's own `focus` value by construction
@@ -5250,6 +5253,9 @@ impl App {
         // `open_cdp_focused_editor` self-checks which field kind is focused, and
         // `open_cdp_variadic_picker` self-checks that focus really is on a variadic process's
         // extra-input row, so neither needs the click arm to re-establish that here.
+        if cdp_sync_table_rows {
+            self.sync_cdp_table_to_input_count();
+        }
         if cdp_open_focused_editor {
             // The same opener chain the 'e'/'b' keys use — each returns `false` for a field
             // kind it doesn't handle, so exactly one fires for the focused field.
@@ -5295,6 +5301,61 @@ impl App {
             (start, end)
         };
         (start < end).then_some((start, end))
+    }
+
+    /// Keeps a `rows_match_input_count` table's row count equal to the process's input-file
+    /// count, so the datafile CDP reads always has one entry per file.
+    ///
+    /// The row count on such a table is not a free choice — it *is* the input count — so
+    /// maintaining it by hand was pure busywork that, left undone, made the process fail
+    /// outright: `tesselate` shipped with one default row and refused every pick above one
+    /// source with "No of data items (1) in 1st line of file table_0.txt doesn't correspond
+    /// to no of input files (5)" (user report, 2026-07-27).
+    ///
+    /// Values already typed are preserved: growing appends, shrinking drops from the end
+    /// (those rows describe files that are no longer picked, so there is nothing they could
+    /// mean). A column marked `must_be_distinct` gets each new row staggered one `step` past
+    /// the largest value already in that column rather than its plain `default`, because CDP
+    /// rejects duplicates there and every auto-added row would otherwise collide.
+    fn sync_cdp_table_to_input_count(&mut self) {
+        let Some(Dialog::CdpParams { catalog_index, fields, variadic_input: Some(variadic), .. }) =
+            self.dialog.as_mut()
+        else {
+            return;
+        };
+        let Some(def) = self.cdp_catalog.processes.get(*catalog_index) else { return };
+        let target = variadic.total_input_count().max(1);
+        for (param, field) in def.params.iter().zip(fields.iter_mut()) {
+            if !param.rows_match_input_count {
+                continue;
+            }
+            let CdpField::Table { rows, columns, .. } = field else { continue };
+            while rows.len() > target {
+                rows.pop();
+            }
+            while rows.len() < target {
+                let row = columns
+                    .iter()
+                    .enumerate()
+                    .map(|(c, col)| {
+                        if !col.must_be_distinct {
+                            return col.default;
+                        }
+                        let highest = rows
+                            .iter()
+                            .filter_map(|r| r.get(c))
+                            .copied()
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        if highest.is_finite() {
+                            (highest + col.step).clamp(col.min, col.max)
+                        } else {
+                            col.default
+                        }
+                    })
+                    .collect();
+                rows.push(row);
+            }
+        }
     }
 
     /// The range a CDP process will actually be run over: [`Self::operation_range`], except
@@ -6108,6 +6169,10 @@ impl App {
         {
             variadic.groups = groups;
         }
+        // A restored pick changes the input count, so a `rows_match_input_count` table has to
+        // follow it — otherwise "Recall last process" would reopen with the right buffers and
+        // a table sized for the wrong count.
+        self.sync_cdp_table_to_input_count();
         let Some(def) = self.cdp_catalog.processes.get(catalog_index) else { return };
         if values.len() != def.params.len() {
             return;
@@ -7585,6 +7650,7 @@ impl App {
                         None => group.push(picker.cursor),
                     }
                 }
+                self.sync_cdp_table_to_input_count();
             }
             KeyCode::Esc => {
                 let original = picker.original.clone();
@@ -7592,11 +7658,14 @@ impl App {
                 if let Some(Dialog::CdpParams { variadic_picker, .. }) = self.dialog.as_mut() {
                     *variadic_picker = None;
                 }
+                // Cancelling restores the open-time pick, so the table has to follow it back.
+                self.sync_cdp_table_to_input_count();
             }
             KeyCode::Enter => {
                 if let Some(Dialog::CdpParams { variadic_picker, .. }) = self.dialog.as_mut() {
                     *variadic_picker = None;
                 }
+                self.sync_cdp_table_to_input_count();
             }
             _ => {}
         }
@@ -8273,6 +8342,9 @@ impl App {
         }
         *preset_selected = Some(new_index);
         *cv = custom_values;
+        // Loading a preset can change both the values *and* the pick, so a
+        // `rows_match_input_count` table is re-synced after both have landed.
+        self.sync_cdp_table_to_input_count();
     }
 
     /// Opens the preset-name prompt ('s' key), prefilled with the currently-loaded preset's
@@ -20515,6 +20587,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
+                rows_match_input_count: false,
                 range_scales_with_input_duration: false,
                 default_from_dc_offset: false,
                 name: "Count".into(),
@@ -21456,6 +21529,114 @@ mod tests {
             .clone();
         let range = app.cdp_process_range(0, &def).expect("a range");
         assert_eq!(head_tail_marks_within(&marks, range), marks);
+    }
+
+    /// Tesselate's Sources table needs exactly one row per input file, and it shipped with a
+    /// single default row — so picking any number of buffers above one failed outright with
+    /// "No of data items (1) ... doesn't correspond to no of input files (5)" (user report,
+    /// 2026-07-27). The table now tracks the pick, growing and shrinking with it.
+    #[test]
+    fn tesselates_sources_table_tracks_the_number_of_picked_buffers() {
+        let mut app = new_app(Some(doc(0.1, 10_000)), None);
+        for v in [0.2, 0.3, 0.4] {
+            app.push_document(doc(v, 10_000));
+        }
+        app.active_document = 0;
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "tesselate_tesselate")
+            .expect("tesselate_tesselate in catalog");
+        app.open_cdp_params(index);
+
+        let rows = |app: &App| match &app.dialog {
+            Some(Dialog::CdpParams { fields, .. }) => match &fields[0] {
+                CdpField::Table { rows, .. } => rows.clone(),
+                _ => panic!("Sources is a Table field"),
+            },
+            _ => panic!(),
+        };
+        assert_eq!(rows(&app).len(), 1, "one input (the selection) to start with");
+
+        let focus_extra_input = |app: &mut App| {
+            let n = match &app.dialog {
+                Some(Dialog::CdpParams { fields, .. }) => fields.len(),
+                _ => panic!("the params dialog is open"),
+            };
+            if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+                *focus = cdp_params_focus_extra_input(n);
+            }
+        };
+
+        // Pick all three extra buffers through the real picker.
+        focus_extra_input(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        for _ in 0..3 {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let picked = rows(&app);
+        assert_eq!(picked.len(), 4, "selection + three picked buffers");
+        // Entry Delay (column 1) is `must_be_distinct`: CDP collapses two sources that share
+        // one, so the auto-added rows must not all repeat the column default.
+        let delays: Vec<f64> = picked.iter().map(|r| r[1]).collect();
+        for (i, a) in delays.iter().enumerate() {
+            for b in &delays[i + 1..] {
+                assert_ne!(a, b, "entry delays must all differ: {delays:?}");
+            }
+        }
+        // Resync Count has no such rule, so every added row keeps the plain default.
+        assert!(picked.iter().all(|r| r[0] == 4.0), "resync counts stay at the default");
+
+        // Un-picking shrinks it back.
+        focus_extra_input(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(rows(&app).len(), 3, "removing a buffer removes its row");
+    }
+
+    /// Values already typed survive a resize — only the trailing rows, which describe files
+    /// that are no longer picked, are dropped.
+    #[test]
+    fn resizing_the_sources_table_preserves_values_already_entered() {
+        let mut app = new_app(Some(doc(0.1, 10_000)), None);
+        app.push_document(doc(0.2, 10_000));
+        app.active_document = 0;
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "tesselate_tesselate")
+            .expect("tesselate_tesselate in catalog");
+        app.open_cdp_params(index);
+
+        if let Some(Dialog::CdpParams { fields, .. }) = app.dialog.as_mut() {
+            if let CdpField::Table { rows, .. } = &mut fields[0] {
+                rows[0] = vec![9.0, 0.5];
+            }
+        }
+        let n = match &app.dialog {
+            Some(Dialog::CdpParams { fields, .. }) => fields.len(),
+            _ => panic!(),
+        };
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = cdp_params_focus_extra_input(n);
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!() };
+        let CdpField::Table { rows, .. } = &fields[0] else { panic!() };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], vec![9.0, 0.5], "the hand-entered row is untouched");
+        assert!(rows[1][1] > 0.5, "the new row's delay is staggered past it, not reset");
     }
 
     /// The wheel scrolls every dialog that has a list, not just the process browser.
@@ -23342,6 +23523,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
+                rows_match_input_count: false,
                 range_scales_with_input_duration: false,
                 default_from_dc_offset: false,
                 name: "Formants".into(),
@@ -23414,6 +23596,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
+                rows_match_input_count: false,
                 range_scales_with_input_duration: false,
                 default_from_dc_offset: false,
                 name: "Formants".into(),
@@ -27420,6 +27603,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
+                rows_match_input_count: false,
                 range_scales_with_input_duration: false,
                 default_from_dc_offset: false,
                 name: "Formants".into(),
