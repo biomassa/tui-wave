@@ -17433,6 +17433,10 @@ output_is_stereo = true
 name = "Sources"
 description = "One row per input file, in input order: how many repeats before the drifting copy resynchronises, and how long after time zero that source first enters. Entry delays must all differ and must each be less than Cycle Duration"
 automatable = false
+# One row per input file -- CDP: "the number of entries corresponds to the number of
+# input files". The UI keeps the row count in step with the buffer pick, so it is never
+# something to maintain by hand (see `ParamDef::rows_match_input_count`).
+rows_match_input_count = true
 kind = "table"
 transposed = true
 
@@ -17452,6 +17456,9 @@ max = 60.0
 step = 0.01
 default = 0.0
 scale = "plain"
+# CDP: "All vals must be different. (With same value, 2 sources would collapse into one
+# double-src)" -- so an auto-added row is staggered past the largest delay already set.
+must_be_distinct = true
 
 [[process.params]]
 name = "Output Channels"
