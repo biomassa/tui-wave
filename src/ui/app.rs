@@ -1367,6 +1367,54 @@ fn crystal_vertex_columns() -> Vec<crate::model::cdp::TableColumn> {
 /// The column definitions for an open table editor session — the field's own for a `Table`,
 /// CDP's fixed X/Y/Z triple for a crystal vertex table. The table editor's counterpart to
 /// `cdp_envelope_bounds`.
+/// On-screen width of each table-editor column: the longer of the column's own name and the
+/// widest formatted value in it, floored at 4. Shared by `render_cdp_table_editor` and the
+/// click handler's column hit-test so the two can never disagree about where a column starts —
+/// the widths are data-dependent, so a second, independently-written copy would drift the
+/// moment a value's formatting changed.
+fn cdp_table_column_widths(
+    columns: &[crate::model::cdp::TableColumn],
+    rows: &[Vec<f64>],
+) -> Vec<usize> {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(c, col)| {
+            let widest_value = rows
+                .iter()
+                .filter_map(|row| row.get(c))
+                .map(|v| format_cdp_float_for_display(*v).len())
+                .max()
+                .unwrap_or(0);
+            col.name.chars().count().max(widest_value).max(4)
+        })
+        .collect()
+}
+
+/// Which table-editor column the click column `x_in_row` falls in, or `None` for a click on
+/// the row-number gutter before the first column. Mirrors `render_cdp_table_editor`'s own row
+/// layout: a `" {:>3}: "` gutter (`CDP_TABLE_GUTTER_WIDTH`), then each column padded to its
+/// width plus two spaces of separation.
+fn cdp_table_column_at(
+    columns: &[crate::model::cdp::TableColumn],
+    rows: &[Vec<f64>],
+    x_in_row: u16,
+) -> Option<usize> {
+    let mut x = CDP_TABLE_GUTTER_WIDTH;
+    for (c, w) in cdp_table_column_widths(columns, rows).into_iter().enumerate() {
+        x += w as u16 + 2;
+        if x_in_row < x {
+            return Some(c);
+        }
+    }
+    // Past the last column — clicking the empty space to the right of a short final column
+    // still means that column, which is friendlier than ignoring the click.
+    columns.len().checked_sub(1)
+}
+
+/// Width of the `" {:>3}: "` row-number gutter every table-shaped CDP editor renders.
+const CDP_TABLE_GUTTER_WIDTH: u16 = 6;
+
 fn cdp_table_columns(fields: &[CdpField], edit: &CdpTableEdit) -> Option<Vec<crate::model::cdp::TableColumn>> {
     match (edit.target, fields.get(edit.field_index)) {
         (CdpTableTarget::TableField, Some(CdpField::Table { columns, .. })) => Some(columns.clone()),
@@ -4791,6 +4839,56 @@ impl App {
     /// `dialog_row_rects`, which for this dialog holds per-row click targets, not the two
     /// column regions a wheel event needs. A no-op for every other dialog.
     fn handle_cdp_browser_scroll(&mut self, mouse: MouseEvent) {
+        let delta_rows: isize = if mouse.kind == MouseEventKind::ScrollUp { -1 } else { 1 };
+        // Every other dialog with a scrolling list moves its own selection/scroll by a row,
+        // rather than the wheel being inert everywhere except the browser. Each of these
+        // reuses the same clamping the arrow keys already apply, so a wheel event can never
+        // put the cursor somewhere Up/Down couldn't.
+        match self.dialog.as_mut() {
+            Some(Dialog::CdpOutput { lines, scroll, .. }) => {
+                let max = lines.len().saturating_sub(1);
+                *scroll = (*scroll as isize + delta_rows).clamp(0, max as isize) as usize;
+                return;
+            }
+            Some(Dialog::CdpParams { variadic_input: Some(v), variadic_picker: Some(p), .. }) => {
+                let max = v.names.len().saturating_sub(1);
+                p.cursor = (p.cursor as isize + delta_rows).clamp(0, max as isize) as usize;
+                return;
+            }
+            Some(Dialog::CdpParams { formant_picker: Some(p), .. }) => {
+                let max = p.entries.len().saturating_sub(1);
+                p.selected = (p.selected as isize + delta_rows).clamp(0, max as isize) as usize;
+                return;
+            }
+            Some(Dialog::CdpParams { list_edit: Some(edit), .. }) => {
+                let max = edit.values.len().saturating_sub(1);
+                edit.editing = None;
+                edit.selected = (edit.selected as isize + delta_rows).clamp(0, max as isize) as usize;
+                return;
+            }
+            Some(Dialog::CdpParams { table_edit: Some(edit), .. }) => {
+                let max = edit.rows.len().saturating_sub(1);
+                edit.editing = None;
+                edit.selected_row =
+                    (edit.selected_row as isize + delta_rows).clamp(0, max as isize) as usize;
+                return;
+            }
+            Some(Dialog::CdpParams { marker_time_list_edit: Some(edit), .. }) => {
+                let max = edit.entries.len().saturating_sub(1);
+                edit.editing = None;
+                edit.selected_row =
+                    (edit.selected_row as isize + delta_rows).clamp(0, max as isize) as usize;
+                return;
+            }
+            Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) => {
+                let max = edit.rows.len().saturating_sub(1);
+                edit.editing = None;
+                edit.selected_row =
+                    (edit.selected_row as isize + delta_rows).clamp(0, max as isize) as usize;
+                return;
+            }
+            _ => {}
+        }
         let Some(Dialog::CdpBrowser { entries, selected, desc_scroll, .. }) = self.dialog.as_mut() else { return };
         let pos = Position::new(mouse.column, mouse.row);
         let layout = cdp_browser_layout(self.last_frame_area);
@@ -4845,8 +4943,13 @@ impl App {
         // list editor / running the transform both need `&mut self`).
         let mut curve_open_list = false;
         let mut curve_run: Option<usize> = None;
+        // The same deferral for the CDP params form: opening a sub-editor / running a job
+        // needs `&mut self`, which can't be taken while `self.dialog` is borrowed below.
+        let mut cdp_open_focused_editor = false;
+        let mut cdp_open_variadic_picker = false;
+        let mut cdp_run_from_click = false;
         match self.dialog.as_mut() {
-            Some(Dialog::Gain { focused, tanh_clip, per_channel, is_stereo, .. }) => {
+            Some(Dialog::Gain { input, right_input, focused, tanh_clip, per_channel, is_stereo }) => {
                 let rows = GainRows::new(*is_stereo, *per_channel);
                 if row >= rows.total { return; }
                 *focused = row;
@@ -4854,12 +4957,24 @@ impl App {
                     *per_channel = !*per_channel;
                 } else if row == rows.tanh {
                     *tanh_clip = !*tanh_clip;
+                } else {
+                    // A value row: land the caret on the clicked character rather than only
+                    // focusing a field. The labels differ in width, so the value column comes
+                    // from the same label the renderer used.
+                    let is_right = Some(row) == rows.right;
+                    let col = value_column_for(gain_row_label(*is_stereo, *per_channel, is_right));
+                    let field = if is_right { right_input } else { input };
+                    field.set_cursor_from_column(x_in_row.saturating_sub(col) as usize);
                 }
             }
             Some(Dialog::MixToMono { inputs, focused, tanh_clip }) => {
                 let n = inputs.len();
                 if row < n {
                     *focused = row;
+                    let col = value_column_for(mix_to_mono_row_label(n, row));
+                    if let Some(field) = inputs.get_mut(row) {
+                        field.set_cursor_from_column(x_in_row.saturating_sub(col) as usize);
+                    }
                 } else if row == n {
                     *focused = n;
                     *tanh_clip = !*tanh_clip;
@@ -4943,7 +5058,193 @@ impl App {
                     curve_run = Some(params.catalog_index);
                 }
             }
+            // The CDP sub-editor overlays. Each records one rect per row (see the
+            // `list_row_rects` helper), so `row` is the entry/row index directly. Clicking
+            // moves the selection there — the mouse equivalent of arrowing to it — and leaves
+            // committing to Enter or the hints bar, since a click on a *value* row is a
+            // "select this" gesture, not a "commit and close" one.
+            //
+            // These arms come first because while an overlay is open `dialog_row_rects`
+            // describes *it*, not the params form underneath (whose own arm is guarded on no
+            // overlay being open).
+            Some(Dialog::CdpParams { list_edit: Some(edit), .. }) => {
+                if row < edit.values.len() {
+                    // Moving off a half-typed entry discards it, exactly as the arrow keys do
+                    // — otherwise the buffer would follow the cursor onto a different row.
+                    edit.editing = None;
+                    edit.selected = row;
+                }
+            }
+            Some(Dialog::CdpParams { fields, table_edit: Some(edit), .. }) => {
+                if row < edit.rows.len() {
+                    edit.editing = None;
+                    edit.selected_row = row;
+                    // Column widths depend on the rendered values, so the hit-test reads
+                    // them from the same helper the renderer does.
+                    if let Some(columns) = cdp_table_columns(fields, edit) {
+                        if let Some(col) = cdp_table_column_at(&columns, &edit.rows, x_in_row) {
+                            edit.selected_col = col;
+                        }
+                    }
+                }
+            }
+            Some(Dialog::CdpParams { marker_time_list_edit: Some(edit), .. }) => {
+                if row < edit.entries.len() {
+                    edit.editing = None;
+                    edit.selected_row = row;
+                }
+            }
+            Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) => {
+                if row < edit.rows.len() {
+                    edit.editing = None;
+                    edit.selected_row = row;
+                }
+            }
+            Some(Dialog::CdpParams { formant_picker: Some(picker), .. }) => {
+                if row < picker.entries.len() {
+                    picker.selected = row;
+                }
+            }
+            // The input-buffers picker overlay. Its rects are one per open buffer (see
+            // `render_cdp_variadic_picker`), so a click both moves the cursor there and
+            // toggles that buffer into/out of the current group — a mouse user has no
+            // separate "Space" to press, and clicking a row in a checklist meaning "pick this"
+            // is the universal convention. Order still comes from click order, exactly as it
+            // comes from Space order on the keyboard.
+            //
+            // Matched before the params-form arm below, which is guarded on no overlay being
+            // open — while this one is up, `dialog_row_rects` describes *it*, not the form.
+            Some(Dialog::CdpParams {
+                variadic_input: Some(variadic),
+                variadic_picker: Some(picker),
+                ..
+            }) => {
+                if row < variadic.names.len() {
+                    picker.cursor = row;
+                    let group = picker.group.min(variadic.groups.len().saturating_sub(1));
+                    if let Some(picks) = variadic.groups.get_mut(group) {
+                        match picks.iter().position(|&i| i == row) {
+                            Some(at) => {
+                                picks.remove(at);
+                            }
+                            None => picks.push(row),
+                        }
+                    }
+                }
+            }
+            // The CDP params form. `row` is the dialog's own `focus` value by construction
+            // (see `render_cdp_params_dialog`'s click-target block), so focusing is a direct
+            // assignment with no layout arithmetic here.
+            //
+            // Clicking a row *focuses* it; clicking a row whose real editor is a separate
+            // overlay also *opens* that overlay, because the row itself shows only a summary
+            // and there is nothing else a click on it could usefully mean. That covers the
+            // input-buffers picker, the list/table/marker-time/hilite-band editors, the
+            // envelope editor, the formant picker and the file picker — all of which were
+            // Enter-only before. The two buttons run, matching Enter on them.
+            //
+            // Skipped entirely while any sub-editor overlay is already open: `dialog_row_rects`
+            // still describes the form *underneath* it (the overlay renderers record their own
+            // rects), so acting on a row here would edit the wrong thing.
+            Some(Dialog::CdpParams {
+                fields,
+                second_input,
+                variadic_input,
+                focus,
+                envelope,
+                list_edit,
+                table_edit,
+                marker_time_list_edit,
+                hilite_band_edit,
+                formant_picker,
+                file_picker,
+                variadic_picker,
+                save_prompt,
+                ..
+            }) if envelope.is_none()
+                && list_edit.is_none()
+                && table_edit.is_none()
+                && marker_time_list_edit.is_none()
+                && hilite_band_edit.is_none()
+                && formant_picker.is_none()
+                && file_picker.is_none()
+                && variadic_picker.is_none()
+                && save_prompt.is_none() =>
+            {
+                let field_count = fields.len();
+                let has_extra = cdp_has_extra_input(second_input.as_ref(), variadic_input.as_ref());
+                let extra_row = cdp_params_focus_extra_input(field_count);
+                let preview_row = cdp_params_focus_preview(field_count, has_extra);
+                let apply_row = cdp_params_focus_apply(field_count, has_extra);
+
+                if row == CDP_PRESET_FOCUS {
+                    *focus = CDP_PRESET_FOCUS;
+                } else if row <= field_count {
+                    *focus = row;
+                    // A Toggle flips in place (it has no editor); everything else with a
+                    // dedicated overlay opens it. A plain Number/Choice just takes focus.
+                    match fields.get_mut(row - 1) {
+                        Some(CdpField::Toggle { on }) => *on = !*on,
+                        Some(
+                            CdpField::List { .. }
+                            | CdpField::Table { .. }
+                            | CdpField::MarkerTimeList { .. }
+                            | CdpField::HiliteBand { .. }
+                            | CdpField::FormantBufferRef { .. }
+                            | CdpField::FilePath { .. },
+                        ) => cdp_open_focused_editor = true,
+                        _ => {}
+                    }
+                } else if has_extra && row == extra_row {
+                    *focus = extra_row;
+                    if variadic_input.is_some() {
+                        cdp_open_variadic_picker = true;
+                    }
+                } else if row == preview_row || row == apply_row {
+                    *focus = if row == preview_row { preview_row } else { apply_row };
+                    cdp_run_from_click = true;
+                }
+            }
+            // Every single-field text dialog (`render_dialog`'s shared tail) records exactly
+            // one interactive rect, spanning just its text, so `x_in_row` *is* the character
+            // offset — clicking lands the caret on the clicked character instead of only
+            // focusing a field that was already focused (these dialogs have one field).
+            Some(
+                Dialog::CdpSetup { input, .. }
+                | Dialog::Normalize { input }
+                | Dialog::Resample { input, .. }
+                | Dialog::RenameMarker { input, .. }
+                | Dialog::OpenDirectory { input }
+                | Dialog::RenameBuffer { input, .. }
+                | Dialog::RenameFile { input, .. }
+                | Dialog::SaveCurveAs { input, .. }
+                | Dialog::SaveMatrixAs { input, .. },
+            ) => {
+                if row == 0 {
+                    input.set_cursor_from_column(x_in_row as usize);
+                }
+            }
             _ => {}
+        }
+        // Deferred CDP-params actions, for the same reason as the curve ones below.
+        // `open_cdp_focused_editor` self-checks which field kind is focused, and
+        // `open_cdp_variadic_picker` self-checks that focus really is on a variadic process's
+        // extra-input row, so neither needs the click arm to re-establish that here.
+        if cdp_open_focused_editor {
+            // The same opener chain the 'e'/'b' keys use — each returns `false` for a field
+            // kind it doesn't handle, so exactly one fires for the focused field.
+            let _ = self.open_cdp_list_editor()
+                || self.open_cdp_table_editor()
+                || self.open_cdp_marker_time_list_editor()
+                || self.open_cdp_hilite_band_editor()
+                || self.open_cdp_formant_picker()
+                || self.open_cdp_file_picker();
+        }
+        if cdp_open_variadic_picker {
+            self.open_cdp_variadic_picker();
+        }
+        if cdp_run_from_click {
+            self.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         }
         // Deferred curve-params actions (see the locals' declaration above): now that the
         // `self.dialog` borrow has ended, these can take `&mut self`.
@@ -13118,11 +13419,7 @@ fn render_mix_to_mono_dialog(
 
     let mut lines: Vec<Line> = vec![Line::raw("")];
     for (i, ti) in inputs.iter().enumerate() {
-        let ch_label = if n == 2 {
-            if i == 0 { "L (dB): " } else { "R (dB): " }
-        } else {
-            "Ch (dB): "
-        };
+        let ch_label = mix_to_mono_row_label(n, i);
         let (before, under, after) = ti.split_at_cursor();
         if i == focused {
             lines.push(Line::from(vec![
@@ -13197,6 +13494,33 @@ fn render_mix_to_mono_dialog(
 ///
 /// Tab:next  Space:check  Enter:apply
 /// ```
+
+/// The label the Gain dialog renders on the row that edits `input` — `"Right (dB): "` is a
+/// character longer than the other two, so the click handler can't assume a fixed value
+/// column and reads the real label from here, exactly as the renderer does.
+fn gain_row_label(is_stereo: bool, per_channel: bool, is_right_row: bool) -> &'static str {
+    match (is_right_row, is_stereo && per_channel) {
+        (true, _) => "Right (dB): ",
+        (false, true) => "Left (dB): ",
+        (false, false) => "Gain (dB): ",
+    }
+}
+
+/// The `Dialog::MixToMono` counterpart of [`gain_row_label`] — a stereo document labels its
+/// two rows L/R, anything else labels every row the same.
+fn mix_to_mono_row_label(channel_count: usize, index: usize) -> &'static str {
+    if channel_count == 2 {
+        if index == 0 { "L (dB): " } else { "R (dB): " }
+    } else {
+        "Ch (dB): "
+    }
+}
+
+/// Character offset of the value text within a row rendered as `" {label}{value}"` — the one
+/// leading space plus the label itself.
+fn value_column_for(label: &str) -> u16 {
+    1 + label.chars().count() as u16
+}
 fn render_gain_dialog(
     frame: &mut Frame,
     area: Rect,
@@ -13241,8 +13565,7 @@ fn render_gain_dialog(
         }
     };
 
-    let gain_label = if is_stereo && per_channel { "Left (dB): " } else { "Gain (dB): " };
-    let gain_line = field_line(gain_label, input, 0);
+    let gain_line = field_line(gain_row_label(is_stereo, per_channel, false), input, 0);
 
     let tanh_label = if tanh_clip { " [X] Tanh limiter" } else { " [ ] Tanh limiter" };
     let tanh_style = if focused == rows.tanh { cursor_style } else { label_style };
@@ -13266,7 +13589,11 @@ fn render_gain_dialog(
 
     let (lines, mut rects): (Vec<Line>, Vec<Rect>) = if is_stereo {
         let right_line = if per_channel {
-            field_line("Right (dB): ", right_input, rows.right.expect("right is focusable when per_channel is on"))
+            field_line(
+                gain_row_label(is_stereo, per_channel, true),
+                right_input,
+                rows.right.expect("right is focusable when per_channel is on"),
+            )
         } else {
             Line::raw("")
         };
@@ -13547,7 +13874,47 @@ fn render_dialog(
         lines.push(Line::styled(hint, hint_style));
     }
     frame.render_widget(Paragraph::new(lines).block(block), popup);
-    Vec::new()
+
+    // Click targets. Exactly two, in `handle_dialog_row_click`'s convention: the interactive
+    // rows first, then one trailing "submit" rect (`dialog_n_interactive` is derived as
+    // `len - 1`).
+    //
+    // Row 0 spans just the *text* of the field, not the whole line — its `x` starts past the
+    // label prefix, so the click's offset within the rect is already the character offset
+    // `TextInput::set_cursor_from_column` wants, with no per-dialog prefix arithmetic at the
+    // handler end. One column wider than the text so clicking the space after the last
+    // character lands the caret at the end.
+    //
+    // The trailing entry is the hint row where one exists and a zero-width rect otherwise —
+    // `Rect::contains` is always false for that, so a dialog with no hint line simply has
+    // nothing that submits on click, rather than having its whole body become a submit
+    // button (which is what returning a single rect would silently mean here).
+    let inner = block_inner(popup);
+    let text_x = inner.x.saturating_add(prefix.chars().count() as u16);
+    let text_width = input.map(|i| i.value().chars().count() as u16 + 1).unwrap_or(0);
+    let input_rect = Rect {
+        x: text_x.min(inner.x + inner.width),
+        y: inner.y + 1,
+        width: text_width.min((inner.x + inner.width).saturating_sub(text_x)),
+        height: 1,
+    };
+    let submit_rect = match hint {
+        Some(_) => Rect { x: inner.x, y: inner.y + 2, width: inner.width, height: 1 },
+        None => Rect { x: 0, y: 0, width: 0, height: 0 },
+    };
+    vec![input_rect, submit_rect]
+}
+
+/// A `Block`'s inner area without having to keep the block itself around — `Block::inner`
+/// consumes nothing but borrows, and several renderers here build their block after the
+/// geometry they need it for.
+fn block_inner(popup: Rect) -> Rect {
+    Rect {
+        x: popup.x + 1,
+        y: popup.y + 1,
+        width: popup.width.saturating_sub(2),
+        height: popup.height.saturating_sub(2),
+    }
 }
 
 fn render_export_regions_dialog(
@@ -13800,7 +14167,19 @@ fn render_cdp_setup_dialog(
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
-    Vec::new()
+
+    // Row 0 is the path field, spanning just its text (its `x` is past the one-space indent),
+    // so `x_in_row` is the character offset; the trailing entry is the hints bar.
+    let inner = block_inner(popup);
+    vec![
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 2,
+            width: inner.width.saturating_sub(1),
+            height: 1,
+        },
+        dialog_submit_rect(inner),
+    ]
 }
 
 /// Formats a `ParamKind::Number`'s valid range for inline display next to its field, e.g.
@@ -14360,7 +14739,12 @@ fn render_cdp_formant_picker(
     ]));
 
     frame.render_widget(Paragraph::new(lines), inner);
-    Vec::new()
+
+    // One rect per buffer (this list never scrolls — the popup is sized to it), then the
+    // trailing submit slot, where Enter means "use the selected buffer".
+    let mut rects = list_row_rects(inner, names.len(), 0, names.len(), 0);
+    rects.push(dialog_submit_rect(inner));
+    rects
 }
 
 /// Fixed visible-row count for `render_cdp_variadic_picker`'s buffer list — the same
@@ -14494,7 +14878,27 @@ fn render_cdp_variadic_picker(
     lines.push(Line::from(hint_spans));
 
     frame.render_widget(Paragraph::new(lines), inner);
-    Vec::new()
+
+    // Click targets, one per buffer in `variadic.names` — including scrolled-out ones, which
+    // get an unhittable zero-size rect, so `row` is the buffer index directly and the handler
+    // never re-derives `scroll_top` (same convention as `render_cdp_params_dialog`'s).
+    // Trailing entry is the hint line, which commits the pick: `dialog_n_interactive` is
+    // `len - 1`, so it is the generic "submit" slot, and Enter here means "done".
+    const HIDDEN: Rect = Rect { x: 0, y: 0, width: 0, height: 0 };
+    let mut rects: Vec<Rect> = (0..variadic.names.len())
+        .map(|i| match i.checked_sub(scroll_top).filter(|v| *v < visible) {
+            // heading + blank = 2 lines before the first row.
+            Some(v) => Rect { x: inner.x, y: inner.y + 2 + v as u16, width: inner.width, height: 1 },
+            None => HIDDEN,
+        })
+        .collect();
+    rects.push(Rect {
+        x: inner.x,
+        y: inner.y + inner.height.saturating_sub(1),
+        width: inner.width,
+        height: 1,
+    });
+    rects
 }
 
 /// Fixed visible-row count for `render_cdp_list_editor` — a plain scrolling list, no
@@ -14605,7 +15009,46 @@ fn render_cdp_list_editor(
     ]));
 
     frame.render_widget(Paragraph::new(lines), inner);
-    Vec::new()
+
+    // One click target per entry (scrolled-out ones unhittable, so `row` is the entry index
+    // directly — see `render_cdp_params_dialog`'s click-target block for the convention),
+    // then the trailing "submit" slot, which here means Enter = save.
+    let mut rects = list_row_rects(inner, edit.values.len(), scroll_top, list_rows, 1);
+    rects.push(dialog_submit_rect(inner));
+    rects
+}
+
+/// One click rect per item in a scrolling list rendered inside `inner`, with items outside
+/// the visible window given an unhittable zero-size rect so a click's row index is the item
+/// index directly — no `scroll_top` arithmetic duplicated at the handler end, which is
+/// exactly how a click ends up hitting the wrong item after a scroll. `first_line` is the
+/// logical line the first *visible* item is drawn on.
+fn list_row_rects(
+    inner: Rect,
+    item_count: usize,
+    scroll_top: usize,
+    visible_rows: usize,
+    first_line: u16,
+) -> Vec<Rect> {
+    const HIDDEN: Rect = Rect { x: 0, y: 0, width: 0, height: 0 };
+    (0..item_count)
+        .map(|i| match i.checked_sub(scroll_top).filter(|v| *v < visible_rows) {
+            Some(v) => Rect {
+                x: inner.x,
+                y: inner.y + first_line + v as u16,
+                width: inner.width,
+                height: 1,
+            },
+            None => HIDDEN,
+        })
+        .collect()
+}
+
+/// The trailing "submit" rect every dialog's click-target list ends with — the bottom line of
+/// `inner`, which is always the hints bar. `handle_dialog_row_click` treats any row at or past
+/// `dialog_n_interactive` (i.e. this one) as Enter.
+fn dialog_submit_rect(inner: Rect) -> Rect {
+    Rect { x: inner.x, y: inner.y + inner.height.saturating_sub(1), width: inner.width, height: 1 }
 }
 
 /// Fixed visible-row count for `render_cdp_table_editor`, matching `CDP_LIST_EDITOR_ROWS`'s
@@ -15067,14 +15510,7 @@ fn render_cdp_table_editor(
     // value in it — the same "computed from actual content, not a fixed guess" convention
     // `cdp_params_column_widths` already established for the main params dialog (a fixed
     // guess is exactly what let a long label collide with its own range there).
-    let col_widths: Vec<usize> = columns
-        .iter()
-        .enumerate()
-        .map(|(c, col)| {
-            let widest_value = edit.rows.iter().map(|row| format_cdp_float_for_display(row[c]).len()).max().unwrap_or(0);
-            col.name.chars().count().max(widest_value).max(4)
-        })
-        .collect();
+    let col_widths: Vec<usize> = cdp_table_column_widths(columns, &edit.rows);
 
     let hint_line_1 = " \u{2190}\u{2192}\u{2191}\u{2193}:select  type:edit value  n:insert  Del:remove";
     let hint_line_2 = " Enter:save  Esc:cancel";
@@ -15168,7 +15604,13 @@ fn render_cdp_table_editor(
     lines.push(Line::from(closing_hints));
 
     frame.render_widget(Paragraph::new(lines), inner);
-    Vec::new()
+
+    // One click target per row — which column a click landed in is resolved by the handler
+    // from `x_in_row`, since a whole row is one rect here (columns are rendered inline, not
+    // as separate areas). Scrolled-out rows are unhittable, so `row` is the row index.
+    let mut rects = list_row_rects(inner, edit.rows.len(), scroll_top, table_rows, 1);
+    rects.push(dialog_submit_rect(inner));
+    rects
 }
 
 /// The marker-prefixed time-list editor: a fixed 2-column table (Marker, Time) — the
@@ -15293,7 +15735,13 @@ fn render_cdp_marker_time_list_editor(
     ]));
 
     frame.render_widget(Paragraph::new(lines), inner);
-    Vec::new()
+
+    // One click target per row — which column a click landed in is resolved by the handler
+    // from `x_in_row`, since a whole row is one rect here (columns are rendered inline, not
+    // as separate areas). Scrolled-out rows are unhittable, so `row` is the row index.
+    let mut rects = list_row_rects(inner, edit.entries.len(), scroll_top, table_rows, 1);
+    rects.push(dialog_submit_rect(inner));
+    rects
 }
 
 /// One cell's display text for `render_cdp_hilite_band_editor` — a checkbox cell always
@@ -15416,7 +15864,13 @@ fn render_cdp_hilite_band_editor(
     ]));
 
     frame.render_widget(Paragraph::new(lines), inner);
-    Vec::new()
+
+    // One click target per row — which column a click landed in is resolved by the handler
+    // from `x_in_row`, since a whole row is one rect here (columns are rendered inline, not
+    // as separate areas). Scrolled-out rows are unhittable, so `row` is the row index.
+    let mut rects = list_row_rects(inner, edit.rows.len(), scroll_top, table_rows, 1);
+    rects.push(dialog_submit_rect(inner));
+    rects
 }
 
 /// The unified CDP process browser/params dialog: a Groups column, a searchable Processes
@@ -16133,7 +16587,60 @@ fn render_cdp_params_dialog(
     ]));
 
     frame.render_widget(Paragraph::new(lines), inner);
-    Vec::new()
+
+    // ---- Click targets ----
+    //
+    // One rect per *logical* row, in the dialog's own `focus` order, so
+    // `handle_dialog_row_click`'s `row` index and `focus` are the same number and the handler
+    // needs no layout knowledge of its own:
+    //
+    //   [0]                  preset row
+    //   [1 ..= fields.len()] one per field — **including scrolled-out ones**, which get a
+    //                        zero-size (unhittable) rect. Emitting a placeholder rather than
+    //                        packing only the visible rows is what keeps `row` == `focus`
+    //                        without the handler re-deriving `scroll_top`; duplicating that
+    //                        arithmetic is exactly how a click ends up editing the wrong field
+    //                        after a scroll.
+    //   [..]                 the extra-input row, if the process has one
+    //   [..] [..]            Preview, then Apply
+    //   [last]               the hints bar — `dialog_n_interactive` is `len - 1`, so this is
+    //                        the generic "submit" slot every dialog ends with.
+    //
+    // `lines` was rendered into `inner` by a `Paragraph`, so logical line *k* is at
+    // `inner.y + k`; the offsets below mirror the pushes above in order.
+    let row_w = inner.width;
+    let rect_at = |line: usize| Rect {
+        x: inner.x,
+        y: inner.y + line as u16,
+        width: row_w,
+        height: 1,
+    };
+    const HIDDEN: Rect = Rect { x: 0, y: 0, width: 0, height: 0 };
+    let field_line_base = 3; // header spacer + preset + blank
+    let mut rects = vec![rect_at(1)];
+    for i in 0..fields.len() {
+        match i.checked_sub(scroll_top).filter(|v| *v < visible_field_rows) {
+            Some(visible_row) => rects.push(rect_at(field_line_base + visible_row)),
+            None => rects.push(HIDDEN),
+        }
+    }
+    let after_fields = field_line_base + visible_field_rows;
+    if has_extra_input == 1 {
+        rects.push(rect_at(after_fields));
+    }
+    let buttons_line = after_fields + has_extra_input + 1;
+    // Preview and Apply share one rendered line; split at the width of the Preview label so a
+    // click resolves to the button actually under the pointer.
+    let buttons = rect_at(buttons_line);
+    let preview_w = (preview_label.chars().count() + 2) as u16;
+    rects.push(Rect { width: preview_w.min(buttons.width), ..buttons });
+    rects.push(Rect {
+        x: buttons.x + preview_w.min(buttons.width),
+        width: buttons.width.saturating_sub(preview_w),
+        ..buttons
+    });
+    rects.push(rect_at(buttons_line + 2));
+    rects
 }
 
 /// Hard-modal progress display for an in-flight CDP job. The spinner frame is derived from
@@ -20353,6 +20860,165 @@ mod tests {
 
     fn cdp_mouse_at(col: u16, row: u16, kind: MouseEventKind, modifiers: KeyModifiers) -> MouseEvent {
         MouseEvent { kind, column: col, row, modifiers }
+    }
+
+    /// Renders one frame, then finds the screen cell at the given text and left-clicks it.
+    /// Every mouse test below goes through a *real render* rather than hand-poking
+    /// `dialog_row_rects` — the rects are computed by the renderers, so a test that set them
+    /// by hand would keep passing after a layout change that broke every real click.
+    fn render_and_click(app: &mut App, find: &str, extra_cols: u16) {
+        render_and_click_after(app, None, find, extra_cols)
+    }
+
+    /// As `render_and_click`, but only considers rows *below* the first row containing
+    /// `anchor`. Needed whenever the text being clicked also appears behind the dialog — a
+    /// buffer name, for instance, is in the Buffers panel as well as in the picker, and the
+    /// panel is drawn higher up, so an unanchored search would click straight through to it.
+    fn render_and_click_after(app: &mut App, anchor: Option<&str>, find: &str, extra_cols: u16) {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let row_text = |y: u16| -> String { (0..area.width).map(|x| buffer[(x, y)].symbol()).collect() };
+        let start = match anchor {
+            Some(a) => (0..area.height)
+                .find(|&y| row_text(y).contains(a))
+                .unwrap_or_else(|| panic!("anchor {a:?} is not on screen")),
+            None => 0,
+        };
+        let hit = (start..area.height).find_map(|y| {
+            let row = row_text(y);
+            row.find(find).map(|byte_col| (row[..byte_col].chars().count() as u16 + extra_cols, y))
+        });
+        let (col, row) = hit.unwrap_or_else(|| panic!("{find:?} is not on screen below the anchor"));
+        app.handle_mouse(cdp_mouse_at(col, row, MouseEventKind::Down(MouseButton::Left), KeyModifiers::NONE));
+    }
+
+    /// The reported bug in plain terms: the "input buffers" row could only be opened with
+    /// Enter. Clicking it now opens the picker, and clicking a buffer row inside the picker
+    /// toggles it into the pick — a mouse user has no Space to press.
+    #[test]
+    fn clicking_the_input_buffers_row_opens_the_picker_and_clicking_a_buffer_picks_it() {
+        let mut app = new_app(Some(doc(0.1, 10_000)), None);
+        app.documents[0].path = Some(std::path::PathBuf::from("/takes/one.wav"));
+        app.push_document(doc(0.2, 10_000));
+        app.documents[1].path = Some(std::path::PathBuf::from("/takes/two.wav"));
+        app.active_document = 0;
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "pulser_multi_1")
+            .expect("pulser_multi_1 in catalog");
+        app.open_cdp_params(index);
+
+        render_and_click(&mut app, VARIADIC_INPUT_LABEL, 0);
+        let Some(Dialog::CdpParams { variadic_picker: Some(_), focus, fields, .. }) = &app.dialog else {
+            panic!("clicking the row must open the picker")
+        };
+        assert_eq!(*focus, cdp_params_focus_extra_input(fields.len()), "and focus it");
+
+        render_and_click_after(&mut app, Some("Input Buffers"), "two.wav", 0);
+        let Some(Dialog::CdpParams { variadic_input: Some(v), .. }) = &app.dialog else { panic!() };
+        assert_eq!(v.picked_doc_indices(), vec![1], "the clicked buffer is picked");
+
+        // Clicking it again un-picks it, the same as Space would.
+        render_and_click_after(&mut app, Some("Input Buffers"), "two.wav", 0);
+        let Some(Dialog::CdpParams { variadic_input: Some(v), .. }) = &app.dialog else { panic!() };
+        assert!(v.picked_doc_indices().is_empty(), "a second click toggles it back off");
+    }
+
+    /// Clicking a param row focuses it, and clicking a row whose real editor is a separate
+    /// overlay opens that overlay — those were Enter/'e'-only before.
+    #[test]
+    fn clicking_a_cdp_param_row_focuses_it_and_opens_its_editor() {
+        let mut app = new_app(Some(doc(0.1, 44_100)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "distmark_distmark_1")
+            .expect("distmark_distmark_1 in catalog");
+        app.open_cdp_params(index);
+
+        // A plain Number row: focus only, no editor.
+        render_and_click(&mut app, "Unit Length", 0);
+        let Some(Dialog::CdpParams { focus, list_edit, .. }) = &app.dialog else { panic!() };
+        assert!(list_edit.is_none(), "a Number row opens nothing");
+        let unit_length_focus = *focus;
+        assert_ne!(unit_length_focus, CDP_PRESET_FOCUS);
+
+        // A List row: focus *and* open its editor.
+        render_and_click(&mut app, "Mark List", 0);
+        let Some(Dialog::CdpParams { list_edit: Some(_), .. }) = &app.dialog else {
+            panic!("clicking a list row opens the list editor")
+        };
+    }
+
+    /// Clicking a text field lands the caret on the clicked character rather than only
+    /// focusing the field — checked through a real render so the value-column arithmetic is
+    /// under test too, not just `TextInput`'s own clamping.
+    #[test]
+    fn clicking_inside_a_text_dialog_positions_the_caret_at_the_clicked_character() {
+        let mut app = new_app(Some(doc(0.1, 1_000)), None);
+        app.dialog = Some(Dialog::RenameBuffer { index: 0, input: TextInput::new("abcdef") });
+
+        // Click on the "c" (offset 2 within the value).
+        render_and_click(&mut app, "abcdef", 2);
+        let Some(Dialog::RenameBuffer { input, .. }) = app.dialog.as_mut() else { panic!() };
+        input.insert('X');
+        assert_eq!(input.value(), "abXcdef");
+    }
+
+    /// The Gain dialog's labels are not all the same width ("Right (dB): " is one longer), so
+    /// the caret column is derived from the real label rather than a constant. Pins that the
+    /// right-channel row lands the caret where it was clicked, not one character off.
+    #[test]
+    fn clicking_the_gain_dialogs_right_channel_field_positions_the_caret_correctly() {
+        let mut app = new_app(Some(stereo_doc(0.1, 0.2, 1_000)), None);
+        app.dialog = Some(Dialog::Gain {
+            input: TextInput::new("0.0"),
+            right_input: TextInput::new("123456"),
+            tanh_clip: false,
+            per_channel: true,
+            is_stereo: true,
+            focused: 0,
+        });
+
+        render_and_click(&mut app, "123456", 3);
+        let Some(Dialog::Gain { right_input, focused, .. }) = app.dialog.as_mut() else { panic!() };
+        assert_eq!(*focused, 1, "the right-channel row is focused");
+        right_input.insert('X');
+        assert_eq!(right_input.value(), "123X456");
+    }
+
+    /// The wheel scrolls every dialog that has a list, not just the process browser.
+    #[test]
+    fn the_wheel_scrolls_the_cdp_output_viewer() {
+        let mut app = new_app(Some(doc(0.1, 1_000)), None);
+        app.dialog = Some(Dialog::CdpOutput {
+            title: "CDP Error".into(),
+            lines: (0..40).map(|i| format!("line {i}")).collect(),
+            scroll: 0,
+        });
+
+        let wheel = |kind| MouseEvent { kind, column: 40, row: 10, modifiers: KeyModifiers::NONE };
+        app.handle_mouse(wheel(MouseEventKind::ScrollDown));
+        app.handle_mouse(wheel(MouseEventKind::ScrollDown));
+        let Some(Dialog::CdpOutput { scroll, .. }) = &app.dialog else { panic!() };
+        assert_eq!(*scroll, 2);
+
+        app.handle_mouse(wheel(MouseEventKind::ScrollUp));
+        let Some(Dialog::CdpOutput { scroll, .. }) = &app.dialog else { panic!() };
+        assert_eq!(*scroll, 1);
+
+        // Clamped at the top, never negative.
+        app.handle_mouse(wheel(MouseEventKind::ScrollUp));
+        app.handle_mouse(wheel(MouseEventKind::ScrollUp));
+        let Some(Dialog::CdpOutput { scroll, .. }) = &app.dialog else { panic!() };
+        assert_eq!(*scroll, 0);
     }
 
     /// The envelope editor's curve now renders as braille dot-matrix glyphs (2x horizontal,
