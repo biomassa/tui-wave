@@ -5058,6 +5058,21 @@ impl App {
                     curve_run = Some(params.catalog_index);
                 }
             }
+            // The chain editor. Its rects are one per *display* row (`chain_display_rows`),
+            // so `row` indexes that list directly. A click selects; committing stays with
+            // Enter/the hints bar, matching how a click behaves on every other row-selection
+            // dialog here. Non-selectable synthetic rows already have unhittable rects, so
+            // there's nothing to filter out again at this end.
+            Some(Dialog::CdpChainEditor) => {
+                let Some(state) = self.cdp_chain_editor.as_ref() else { return };
+                let rows = chain_display_rows(state, &self.cdp_catalog);
+                if let Some(DisplayRow::Row(clicked)) = rows.get(row) {
+                    let clicked = clicked.clone();
+                    if let Some(state) = self.cdp_chain_editor.as_mut() {
+                        state.selected = clicked;
+                    }
+                }
+            }
             // The CDP sub-editor overlays. Each records one rect per row (see the
             // `list_row_rects` helper), so `row` is the entry/row index directly. Clicking
             // moves the selection there — the mouse equivalent of arrowing to it — and leaves
@@ -16910,7 +16925,37 @@ fn render_cdp_chain_editor_dialog(
         ])),
         hints_area,
     );
-    Vec::new()
+
+    // Click targets, one per row in the *display* list (`chain_display_rows`) — including the
+    // Preset header at index 0, which renders outside the scrolled body but is a selectable
+    // row like any other. Rows scrolled out of the body get an unhittable zero-size rect, so
+    // `row` is the display index directly and the handler never re-derives `scroll_top` (the
+    // same convention every other list dialog here uses).
+    //
+    // Non-selectable synthetic rows (the pale PVOC Analyze/Resynthesize brackets) also get an
+    // unhittable rect: the cursor can never land on one via the keyboard either, so a click
+    // must not be able to put it there.
+    const HIDDEN: Rect = Rect { x: 0, y: 0, width: 0, height: 0 };
+    let mut rects = vec![Rect { x: header_area.x, y: header_area.y + 1, width: header_area.width, height: 1 }];
+    for (i, row) in body_rows.iter().enumerate() {
+        let visible_row = i
+            .checked_sub(scroll_top)
+            .filter(|v| *v < list_height)
+            .filter(|_| matches!(row, DisplayRow::Row(_)));
+        rects.push(match visible_row {
+            Some(v) => Rect {
+                x: list_area.x,
+                y: list_area.y + v as u16,
+                width: list_area.width,
+                height: 1,
+            },
+            None => HIDDEN,
+        });
+    }
+    // The hints bar is the generic trailing "submit" slot; Enter in this dialog opens/runs
+    // whatever is selected, which is the right thing for a click there.
+    rects.push(hints_area);
+    rects
 }
 
 fn render_cdp_output_dialog(frame: &mut Frame, area: Rect, title: &str, lines_text: &[String], scroll: usize) -> Vec<Rect> {
@@ -20992,6 +21037,51 @@ mod tests {
         assert_eq!(*focused, 1, "the right-channel row is focused");
         right_input.insert('X');
         assert_eq!(right_input.value(), "123X456");
+    }
+
+    /// Clicking a chain-editor row selects it. Also pins that a click can't land on one of the
+    /// pale PVOC Analyze/Resynthesize rows — the keyboard cursor skips straight over them, so
+    /// the mouse must not be able to put the cursor somewhere Up/Down can't reach.
+    #[test]
+    fn clicking_a_chain_editor_row_selects_it_and_skips_the_pvoc_bracket_rows() {
+        let mut app = new_app(Some(doc(0.1, 44_100)), None);
+        let blur = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").expect("blur_avrg");
+        let gain = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "modify_speed_2")
+            .expect("modify_speed_2");
+        app.open_cdp_chain_entry();
+        {
+            let state = app.cdp_chain_editor.as_mut().expect("the chain editor is open");
+            for index in [gain, blur] {
+                let def = &app.cdp_catalog.processes[index];
+                state.chain.steps.push(crate::model::cdp::ChainStep {
+                    process_key: def.key.clone(),
+                    values: def.params.iter().map(|p| p.kind.default_value()).collect(),
+                    side_chain: Vec::new(),
+                });
+            }
+            state.selected = ChainEditorRow::Preset;
+        }
+
+        render_and_click(&mut app, "\u{25b6} Run", 0);
+        assert_eq!(
+            app.cdp_chain_editor.as_ref().map(|s| s.selected.clone()),
+            Some(ChainEditorRow::Run),
+            "clicking the Run row selects it"
+        );
+
+        // The blur step is bracketed by a "PVOC Analyze" row; clicking that row must leave the
+        // selection where it was rather than moving it to an unselectable row.
+        let before = app.cdp_chain_editor.as_ref().map(|s| s.selected.clone());
+        render_and_click(&mut app, "PVOC Analyze", 0);
+        assert_eq!(
+            app.cdp_chain_editor.as_ref().map(|s| s.selected.clone()),
+            before,
+            "a bracket row is not selectable by click either"
+        );
     }
 
     /// The wheel scrolls every dialog that has a list, not just the process browser.
