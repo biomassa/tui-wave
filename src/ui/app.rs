@@ -12569,6 +12569,11 @@ impl App {
             // scroll_offset against the stale (longer) length and leave the view
             // overhanging past the new end-of-file.
             viewport.total_len = new_len;
+            // A shorter document can leave the zoom spanning more audio than exists, which
+            // draws the whole waveform crushed against the left edge with empty pane beside
+            // it. Clamped before `ensure_visible` so that re-clamps `scroll_offset` against
+            // the corrected span rather than the stale one.
+            viewport.clamp_zoom_to_content(content_width);
             viewport.ensure_visible(cursor, content_width);
         }
         if mutates_samples {
@@ -12848,6 +12853,12 @@ impl App {
             v
         });
         viewport.total_len = total_len;
+        // The backstop for every path that changes the document's length without going
+        // through `handle_action`'s own sync above — undo/redo from a panel, a CDP splice, a
+        // buffer switch, a reload from disk. `total_len` was already refreshed here every
+        // frame for exactly that reason; the zoom needs the same treatment or the view stays
+        // scaled for whatever the previous length was.
+        viewport.clamp_zoom_to_content(inner_waveform_area.width);
 
         let channel_count = self.documents[doc_idx].channel_count().max(1);
         // Drop stale per-channel image state from a previous document with more channels
@@ -21637,6 +21648,37 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0], vec![9.0, 0.5], "the hand-entered row is untouched");
         assert!(rows[1][1] > 0.5, "the new row's delay is staggered past it, not reset");
+    }
+
+    /// The reported scenario end to end: a process (or an undo of one) shortens the document
+    /// while the view is zoomed out for the old length, and the waveform ends up crushed into
+    /// the left edge with empty pane beside it. Driven through a real render so the
+    /// render-time backstop is what's under test, not just the viewport method.
+    #[test]
+    fn a_render_after_the_document_shrinks_reclamps_the_zoom() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.5, 400_000)), None);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let width = app.content_width;
+        assert!(width > 0);
+
+        // Cut the document down to a fraction of its length, behind the viewport's back —
+        // exactly what an undo of a length-changing CDP splice does.
+        app.documents[0].channels[0].truncate(20_000);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let viewport = app.viewport.as_ref().expect("a viewport");
+        assert_eq!(viewport.total_len, 20_000, "length synced");
+        assert!(
+            viewport.span(width) <= viewport.total_len,
+            "the view spans {} samples of a {}-sample file — the gap bug",
+            viewport.span(width),
+            viewport.total_len
+        );
     }
 
     /// The wheel scrolls every dialog that has a list, not just the process browser.
