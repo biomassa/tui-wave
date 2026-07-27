@@ -8,6 +8,7 @@ pub mod chain_preset;
 pub mod chain_recent;
 pub mod def;
 pub mod envelope_preset;
+pub mod input_buffers;
 pub mod pipeline;
 pub mod preset;
 pub mod process_last;

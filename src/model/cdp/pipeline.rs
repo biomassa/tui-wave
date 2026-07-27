@@ -930,13 +930,21 @@ fn check_compound_param_data(
 /// `GlobOutputSpec`'s doc comment for why stereo isn't supported here). `expected_output`
 /// checks for `<prefix>0.wav` specifically — CDP numbers this family of outputs from 0.
 ///
-/// `def.input == IoKind::Ana` (e.g. `speculate`, whose numbered outputs are spectral
-/// permutation steps) gets the same single-lane `pvoc anal` pre-pass `plan_ana` gives every
-/// other Ana-domain process — but no resynthesis step after, unlike `plan_ana`: the
-/// process's own numbered `.wav` outputs already ARE the final result, not a `.ana` file
-/// still waiting on `pvoc synth`. Found missing (`plan_wav_glob` unconditionally treated its
-/// input as a plain WAV) while cataloging `speculate` against the real binary (2026-07-26,
-/// CDP-Release8-TODO.md) — every glob-output process cataloged before it took `Wav` input.
+/// `def.input == IoKind::Ana` gets the same single-lane `pvoc anal` pre-pass `plan_ana`
+/// gives every other Ana-domain process — but no resynthesis step after, unlike `plan_ana`:
+/// such a process's own numbered `.wav` outputs are taken to already BE the final result,
+/// not `.ana` files still waiting on `pvoc synth`. Found missing (`plan_wav_glob`
+/// unconditionally treated its input as a plain WAV) while cataloging `speculate` against
+/// the real binary (2026-07-26) — every glob-output process cataloged before it took `Wav`
+/// input.
+///
+/// **No catalog entry currently takes this branch.** `speculate`, the one that prompted it,
+/// was removed on 2026-07-27 once its numbered outputs turned out to be pvoc *analysis*
+/// files despite the `.wav` names, so the no-resynthesis assumption above was wrong for it
+/// specifically (see the batch-3 note in `catalog_extra.toml`). The branch is kept because
+/// it is the right shape for a genuinely audio-emitting Ana-input glob process, and its
+/// unit test below pins the behavior; a future entry that needs per-output resynthesis
+/// would be a *third* case, not a fix to this one.
 fn plan_wav_glob(
     def: &ProcessDef,
     values: &[ParamValue],
@@ -3032,12 +3040,17 @@ mod tests {
         assert_eq!(job.input_files[0].source_channels, vec![0]);
     }
 
-    /// An `Ana`-input glob-output process (`speculate`'s shape — a spectral permutation
-    /// that writes each intermediate step to its own numbered file) gets a `pvoc anal`
-    /// pre-pass first, reads that `.ana` file (not a plain `.wav`), and has no resynthesis
-    /// step after — its own numbered outputs already are the final result. Found missing
-    /// (this function's original form only ever wrote `in.wav` unconditionally) while
-    /// cataloging `speculate` against the real binary (2026-07-26).
+    /// An `Ana`-input glob-output process gets a `pvoc anal` pre-pass first, reads that
+    /// `.ana` file (not a plain `.wav`), and has no resynthesis step after — its own
+    /// numbered outputs are taken to already be the final result. Found missing (this
+    /// function's original form only ever wrote `in.wav` unconditionally) while cataloging
+    /// `speculate` against the real binary (2026-07-26).
+    ///
+    /// `speculate` itself was removed from the catalog on 2026-07-27 (its numbered outputs
+    /// are pvoc analysis files, not audio — see `plan_wav_glob`'s doc comment), so this
+    /// test now defines the contract for a hypothetical future entry of that shape rather
+    /// than mirroring a live one. Kept deliberately: deleting it would leave the branch
+    /// untested and quietly rot.
     #[test]
     fn glob_output_with_ana_input_gets_an_anal_prepass_and_no_synth_step() {
         let mut def = base_def(IoKind::Ana, IoKind::WavGlob);

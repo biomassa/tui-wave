@@ -132,7 +132,7 @@ fn cdp_plan_error_message(err: &crate::model::cdp::PlanError) -> String {
         // (`CdpVariadicInput`), so an unusable count is a normal user state, not a bug.
         // `reason` already reads as a sentence fragment describing the rule.
         PlanError::VariadicInputCount { reason, actual } => {
-            format!("{actual} input file(s): {reason}")
+            format!("{actual} input buffer(s): {reason}")
         }
         PlanError::SampleRateMismatch { first, second } => {
             format!("an extra input is {second} Hz, selection is {first} Hz — resample one first")
@@ -2697,6 +2697,100 @@ impl App {
         self.documents.push(document);
         self.histories.push(History::new());
         self.active_document = self.documents.len() - 1;
+    }
+
+    /// Every open buffer as an `input_buffers::OpenBuffer` — the identity list a saved
+    /// variadic pick is resolved against. Built fresh at each resolve rather than cached:
+    /// buffers open, close and get saved-to-a-path between one dialog and the next, and a
+    /// stale list is exactly what would make a valid pick silently reset.
+    fn open_buffer_identities(&self) -> Vec<(usize, Option<String>, String)> {
+        (0..self.documents.len())
+            .map(|i| {
+                let path = self.documents[i]
+                    .path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned());
+                (i, path, self.buffer_name(i))
+            })
+            .collect()
+    }
+
+    /// A live variadic pick, flattened into the persistable form (`CdpInputBuffers`) a preset
+    /// or the "recall last" slot stores. Group and pick order are preserved verbatim — they
+    /// are the whole point of the structure (see `CdpVariadicInput`'s doc comment).
+    ///
+    /// A pick whose `doc_indices` entry no longer resolves is skipped rather than panicking,
+    /// matching `CdpVariadicInput::picked_doc_indices`; `doc_indices` is an open-time snapshot
+    /// and the dialog is modal, so this can only happen if that invariant is broken.
+    fn variadic_input_buffer_refs(
+        &self,
+        variadic: &CdpVariadicInput,
+    ) -> crate::model::cdp::input_buffers::CdpInputBuffers {
+        use crate::model::cdp::input_buffers::CdpBufferRef;
+        variadic
+            .groups
+            .iter()
+            .map(|group| {
+                group
+                    .iter()
+                    .filter_map(|&i| variadic.doc_indices.get(i).copied())
+                    .map(|doc| CdpBufferRef {
+                        path: self.documents.get(doc).and_then(|d| {
+                            d.path.as_ref().map(|p| p.to_string_lossy().into_owned())
+                        }),
+                        name: self.buffer_name(doc),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Restores a saved pick onto `variadic` in place. Resolves every saved reference against
+    /// the currently-open buffers (path first, then display name) and rewrites
+    /// `variadic.groups` to match; on **any** failure — a closed buffer, a group-count change
+    /// — clears the pick to "selection only" instead of partially restoring it. See
+    /// `input_buffers`'s module docs for why that is all-or-nothing.
+    ///
+    /// An empty `saved` means the preset predates this feature (or was written by a version
+    /// that didn't record picks), so it carries no intent about inputs at all: the pick is
+    /// left exactly as it is rather than being cleared out from under the user.
+    fn apply_saved_input_buffers(
+        &self,
+        variadic: &mut CdpVariadicInput,
+        saved: &crate::model::cdp::input_buffers::CdpInputBuffers,
+    ) {
+        use crate::model::cdp::input_buffers::{resolve_against, OpenBuffer};
+        if saved.is_empty() {
+            return;
+        }
+        let identities = self.open_buffer_identities();
+        let open: Vec<OpenBuffer<'_>> = identities
+            .iter()
+            .map(|(index, path, name)| OpenBuffer {
+                index: *index,
+                path: path.as_deref(),
+                name: name.as_str(),
+            })
+            .collect();
+        // `groups` resolve to real document indices, but `CdpVariadicInput.groups` holds
+        // indices into its own `doc_indices` snapshot — map back through it, and treat a
+        // document that isn't in the snapshot as an unresolved pick (same all-or-nothing
+        // rule), since the picker could not offer it.
+        let resolved = resolve_against(saved, &open, variadic.groups.len()).and_then(|groups| {
+            groups
+                .iter()
+                .map(|group| {
+                    group
+                        .iter()
+                        .map(|&doc| variadic.doc_indices.iter().position(|&d| d == doc))
+                        .collect::<Option<Vec<usize>>>()
+                })
+                .collect::<Option<Vec<Vec<usize>>>>()
+        });
+        variadic.groups = match resolved {
+            Some(groups) => groups,
+            None => vec![Vec::new(); variadic.groups.len()],
+        };
     }
 
     /// Display name for buffer `idx`: its file name, or `_NEW_NNN` for a never-saved buffer
@@ -5603,8 +5697,29 @@ impl App {
     /// catalog's own param list for this process changed shape since `values` was saved).
     /// Used by "Recall last process" (`Ctrl+L` in the browser, `App::recall_last_process`)
     /// to reopen the params dialog exactly as it was last applied.
-    fn open_cdp_params_with_values(&mut self, catalog_index: usize, values: &[crate::model::cdp::ParamValue]) {
+    fn open_cdp_params_with_values(
+        &mut self,
+        catalog_index: usize,
+        values: &[crate::model::cdp::ParamValue],
+        input_buffers: &crate::model::cdp::input_buffers::CdpInputBuffers,
+    ) {
         self.open_cdp_params(catalog_index);
+        // The picked buffers are restored even when the param count no longer matches: the
+        // two are independent (one is index-parallel to `def.params`, the other isn't), so a
+        // catalog reshape that invalidates the values has no bearing on the inputs.
+        let restored_groups = match &self.dialog {
+            Some(Dialog::CdpParams { variadic_input: Some(variadic), .. }) => {
+                let mut probe = variadic.clone();
+                self.apply_saved_input_buffers(&mut probe, input_buffers);
+                Some(probe.groups)
+            }
+            _ => None,
+        };
+        if let (Some(Dialog::CdpParams { variadic_input: Some(variadic), .. }), Some(groups)) =
+            (self.dialog.as_mut(), restored_groups)
+        {
+            variadic.groups = groups;
+        }
         let Some(def) = self.cdp_catalog.processes.get(catalog_index) else { return };
         if values.len() != def.params.len() {
             return;
@@ -5631,7 +5746,7 @@ impl App {
             });
             return;
         };
-        self.open_cdp_params_with_values(catalog_index, &last.values);
+        self.open_cdp_params_with_values(catalog_index, &last.values, &last.input_buffers);
     }
 
     /// Builds fresh default-valued `fields` plus whichever extra-input state the process
@@ -7698,13 +7813,30 @@ impl App {
         }
         let new_index = new_slot - 1;
 
-        let Some(Dialog::CdpParams { presets, preset_selected, fields, custom_values: cv, .. }) =
+        // The picked buffers ride along with the values (`CdpPreset.input_buffers`), but
+        // restoring them needs `&self` to see the open-buffer list — so resolve first, into a
+        // plain `groups` value, before taking the `&mut self.dialog` borrow below.
+        let restored_groups = match &self.dialog {
+            Some(Dialog::CdpParams { presets, variadic_input: Some(variadic), .. }) => {
+                presets.get(new_index).map(|preset| {
+                    let mut probe = variadic.clone();
+                    self.apply_saved_input_buffers(&mut probe, &preset.input_buffers);
+                    probe.groups
+                })
+            }
+            _ => None,
+        };
+
+        let Some(Dialog::CdpParams { presets, preset_selected, fields, variadic_input, custom_values: cv, .. }) =
             self.dialog.as_mut()
         else {
             return;
         };
         let Some(preset) = presets.get(new_index) else { return };
         *fields = params.iter().zip(preset.values.iter()).map(|(p, v)| CdpField::from_value(p, v)).collect();
+        if let (Some(variadic), Some(groups)) = (variadic_input.as_mut(), restored_groups) {
+            variadic.groups = groups;
+        }
         *preset_selected = Some(new_index);
         *cv = custom_values;
     }
@@ -7742,7 +7874,8 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                let Some(Dialog::CdpParams { catalog_index, fields, save_prompt, .. }) = self.dialog.as_mut()
+                let Some(Dialog::CdpParams { catalog_index, fields, variadic_input, save_prompt, .. }) =
+                    self.dialog.as_mut()
                 else {
                     return;
                 };
@@ -7752,13 +7885,25 @@ impl App {
                     return;
                 }
                 let values: Vec<_> = fields.iter().map(CdpField::to_value).collect();
+                let variadic_input = variadic_input.clone();
                 let catalog_index = *catalog_index;
+                // The picked input buffers are as much a part of "these settings" as the
+                // numeric params are — a `pulser multi` preset that forgets which buffers it
+                // combined is only half a preset (user report, 2026-07-27).
+                let input_buffers = variadic_input
+                    .as_ref()
+                    .map(|v| self.variadic_input_buffer_refs(v))
+                    .unwrap_or_default();
                 let Some(def) = self.cdp_catalog.processes.get(catalog_index) else { return };
                 let key_str = def.key.clone();
                 let param_count = def.params.len();
                 crate::model::cdp::preset::save_preset(
                     &key_str,
-                    crate::model::cdp::preset::CdpPreset { name: name.clone(), values: values.clone() },
+                    crate::model::cdp::preset::CdpPreset {
+                        name: name.clone(),
+                        values: values.clone(),
+                        input_buffers,
+                    },
                 );
                 let new_presets = crate::model::cdp::preset::load_presets(&key_str, param_count);
                 let new_selected = new_presets.iter().position(|p| p.name == name);
@@ -9302,6 +9447,17 @@ impl App {
                     // `Ctrl+L` in the browser (`App::recall_last_process`).
                     let last_process_values: Vec<crate::model::cdp::ParamValue> =
                         pending.fields.iter().map(CdpField::to_value).collect();
+                    // Recall must restore the extra inputs too, or re-running the last
+                    // `pulser multi` silently drops back to the selection alone. Captured
+                    // from the pending job (not the live dialog — that's `CdpRunning` by
+                    // now) and resolved against the documents as they were when the job was
+                    // submitted; a glob-output Apply only ever *appends* buffers, so the
+                    // indices in `variadic_input.doc_indices` are still valid here.
+                    let last_process_input_buffers = pending
+                        .variadic_input
+                        .as_ref()
+                        .map(|v| self.variadic_input_buffer_refs(v))
+                        .unwrap_or_default();
 
                     match result {
                         Ok(mut output) => match purpose {
@@ -9338,6 +9494,7 @@ impl App {
                                     crate::model::cdp::process_last::save_last_process(&crate::model::cdp::process_last::LastProcess {
                                         process_key: key.clone(),
                                         values: last_process_values.clone(),
+                                        input_buffers: last_process_input_buffers.clone(),
                                     });
                                 }
                             }
@@ -9385,6 +9542,7 @@ impl App {
                                     crate::model::cdp::process_last::save_last_process(&crate::model::cdp::process_last::LastProcess {
                                         process_key: key.clone(),
                                         values: last_process_values.clone(),
+                                        input_buffers: last_process_input_buffers.clone(),
                                     });
                                 }
                             }
@@ -14050,7 +14208,7 @@ fn render_cdp_variadic_picker(
     frame.render_widget(ratatui::widgets::Clear, popup);
 
     let block = Block::default()
-        .title(" Input Files ")
+        .title(" Input Buffers ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
@@ -15312,9 +15470,48 @@ fn cdp_browser_desc_max_scroll(description: &str, width: u16, visible_height: u1
 /// row's label happens to be — a long param name used to run straight into its own range
 /// text with no separating space (`"Grain Size Limit[2.0-200.0]"`) because the old fixed
 /// 14-column guess didn't account for names longer than that.
+/// Clips `text` to at most `width` terminal columns, marking a clip with a trailing `…`.
+/// Counts `char`s rather than bytes so a multi-byte label can't be cut mid-character; the
+/// CJK/emoji double-width case isn't handled because nothing this is used for renders any
+/// (process titles, buffer names, and the fixed English chrome around them).
+fn truncate_to_width(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut out: String = text.chars().take(width.saturating_sub(1)).collect();
+    out.push('\u{2026}');
+    out
+}
+
+/// The extra-input row's label for a variadic-input process. A *buffer* picker, not a file
+/// picker — every entry it offers is an already-open document in the Buffers panel, never
+/// something browsed for on disk (contrast `Dialog::CdpParams.file_picker`, which really is
+/// a file). Named as a constant because the label width calculation, the row renderer and
+/// the picker overlay's title all have to agree on it.
+const VARIADIC_INPUT_LABEL: &str = "input buffers";
+
 fn cdp_params_column_widths(def: &crate::model::cdp::ProcessDef) -> (usize, usize) {
     use crate::model::cdp::ParamKind;
-    let label_width = def.params.iter().map(|p| p.name.chars().count()).max().unwrap_or(0).max(9);
+    // The floor covers the extra-input row's own label, which is chrome rather than a param
+    // and so never appears in `def.params`: "2nd input" (9) for a dual-input process,
+    // "input buffers" (13) for a variadic one. Keyed off `def.input` rather than applied
+    // flatly so a process with neither row doesn't pay for a column it never renders.
+    let extra_input_label_width = match def.input {
+        crate::model::cdp::IoKind::VariadicWav | crate::model::cdp::IoKind::GroupedWav => {
+            VARIADIC_INPUT_LABEL.chars().count()
+        }
+        _ => 9,
+    };
+    let label_width = def
+        .params
+        .iter()
+        .map(|p| p.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(extra_input_label_width);
     let range_width = def
         .params
         .iter()
@@ -15621,18 +15818,22 @@ fn render_cdp_params_dialog(
         ]));
     }
     // Shares the dual-input row's slot (an `IoKind` is never both -- see
-    // `cdp_params_focus_extra_input`). Collapsed to a summary plus an explicit "Enter" hint
-    // rather than the left/right cycle affordance the dual row uses, because unlike a
-    // single-choice cycle this row's real editor is the overlay
-    // (`render_cdp_variadic_picker`) and Enter is the only way in.
+    // `cdp_params_focus_extra_input`). Collapsed to a bare summary rather than the left/right
+    // cycle affordance the dual row uses, because unlike a single-choice cycle this row's
+    // real editor is the overlay (`render_cdp_variadic_picker`).
+    //
+    // The "how do I open it" hint lives in the bottom hint bar, not inline on the row: the
+    // summary is already the widest thing the row can hold (`repair`'s two-group form reads
+    // "4 files: ch1 selection +1, ch2 2") and an inline "(Enter: pick)" pushed it straight
+    // past the popup's right border. The summary itself is truncated to what actually fits
+    // as a backstop, so no pick can overflow the row either.
     if let Some(variadic) = variadic_input {
         let is_focused = focus == cdp_params_focus_extra_input(fields.len());
-        let label = format!(" {:<label_width$}  ", "input files");
-        let value = if is_focused {
-            format!(" {}  (Enter: pick)", variadic.summary())
-        } else {
-            format!(" {}", variadic.summary())
-        };
+        let label = format!(" {:<label_width$}  ", VARIADIC_INPUT_LABEL);
+        let value_width = (inner.width as usize)
+            .saturating_sub(label.chars().count())
+            .saturating_sub(range_width);
+        let value = truncate_to_width(&format!(" {}", variadic.summary()), value_width);
         lines.push(Line::from(vec![
             Span::styled(label, if is_focused { cursor_style } else { label_style }),
             Span::styled(format!("{:<range_width$}", ""), range_style),
@@ -15669,13 +15870,19 @@ fn render_cdp_params_dialog(
         None => lines.push(Line::raw("")),
     }
 
+    // Enter means "open the buffer picker", not "run", while the variadic row is focused —
+    // so the hint bar says so rather than leaving the row's only affordance undocumented
+    // (it used to be an inline "(Enter: pick)" on the row itself, which overflowed it).
+    let variadic_row_focused =
+        variadic_input.is_some() && focus == cdp_params_focus_extra_input(fields.len());
+    let enter_hint = if variadic_row_focused { ":pick  " } else { ":run  " };
     lines.push(Line::from(vec![
         Span::styled(" \u{2191}\u{2193}", hint_style),
         Span::styled(":nudge  ", label_style),
         Span::styled("Tab", hint_style),
         Span::styled(":next  ", label_style),
         Span::styled("Enter", hint_style),
-        Span::styled(":run  ", label_style),
+        Span::styled(enter_hint, label_style),
         Span::styled("Esc", hint_style),
         Span::styled(":cancel", label_style),
     ]));
@@ -20154,11 +20361,11 @@ mod tests {
 
         crate::model::cdp::preset::save_preset(
             "blur_avrg",
-            crate::model::cdp::preset::CdpPreset { name: "Wide".into(), values: vec![crate::model::cdp::ParamValue::Number(42.0)] },
+            crate::model::cdp::preset::CdpPreset { name: "Wide".into(), values: vec![crate::model::cdp::ParamValue::Number(42.0)], ..Default::default() },
         );
         crate::model::cdp::preset::save_preset(
             "blur_avrg",
-            crate::model::cdp::preset::CdpPreset { name: "Narrow".into(), values: vec![crate::model::cdp::ParamValue::Number(3.0)] },
+            crate::model::cdp::preset::CdpPreset { name: "Narrow".into(), values: vec![crate::model::cdp::ParamValue::Number(3.0)], ..Default::default() },
         );
 
         let mut app = new_app(Some(doc(0.1, 100)), None);
@@ -20198,11 +20405,11 @@ mod tests {
 
         crate::model::cdp::preset::save_preset(
             "blur_avrg",
-            crate::model::cdp::preset::CdpPreset { name: "Wide".into(), values: vec![crate::model::cdp::ParamValue::Number(42.0)] },
+            crate::model::cdp::preset::CdpPreset { name: "Wide".into(), values: vec![crate::model::cdp::ParamValue::Number(42.0)], ..Default::default() },
         );
         crate::model::cdp::preset::save_preset(
             "blur_avrg",
-            crate::model::cdp::preset::CdpPreset { name: "Narrow".into(), values: vec![crate::model::cdp::ParamValue::Number(3.0)] },
+            crate::model::cdp::preset::CdpPreset { name: "Narrow".into(), values: vec![crate::model::cdp::ParamValue::Number(3.0)], ..Default::default() },
         );
 
         let mut app = new_app(Some(doc(0.1, 100)), None);
@@ -20297,7 +20504,7 @@ mod tests {
         // Rights are needed to wrap all the way back around to "(none)".
         crate::model::cdp::preset::save_preset(
             "blur_avrg",
-            crate::model::cdp::preset::CdpPreset { name: "Zebra".into(), values: vec![crate::model::cdp::ParamValue::Number(99.0)] },
+            crate::model::cdp::preset::CdpPreset { name: "Zebra".into(), values: vec![crate::model::cdp::ParamValue::Number(99.0)], ..Default::default() },
         );
 
         let mut app = new_app(Some(doc(0.1, 100)), None);
@@ -20348,7 +20555,7 @@ mod tests {
 
         crate::model::cdp::preset::save_preset(
             "blur_avrg",
-            crate::model::cdp::preset::CdpPreset { name: "ToDelete".into(), values: vec![crate::model::cdp::ParamValue::Number(7.0)] },
+            crate::model::cdp::preset::CdpPreset { name: "ToDelete".into(), values: vec![crate::model::cdp::ParamValue::Number(7.0)], ..Default::default() },
         );
 
         let mut app = new_app(Some(doc(0.1, 100)), None);
@@ -22447,6 +22654,157 @@ mod tests {
         assert_eq!(v.picked_doc_indices(), vec![1], "restored to the open-time pick");
     }
 
+    /// Opens `pulser_multi_1` (a flat `VariadicWav` process) with three named buffers open
+    /// and picks buffers 2 and 1 — in that order, so the assertions below can tell a restored
+    /// pick apart from a coincidentally-sorted one. Returns the app with the params dialog
+    /// still open.
+    fn pulser_multi_with_two_picked_in_reverse_order() -> App {
+        let mut app = new_app(Some(doc(0.1, 10_000)), None);
+        app.documents[0].path = Some(std::path::PathBuf::from("/takes/one.wav"));
+        app.push_document(doc(0.2, 10_000));
+        app.documents[1].path = Some(std::path::PathBuf::from("/takes/two.wav"));
+        app.push_document(doc(0.3, 10_000));
+        app.documents[2].path = Some(std::path::PathBuf::from("/takes/three.wav"));
+        app.active_document = 0;
+
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "pulser_multi_1")
+            .expect("pulser_multi_1 in catalog");
+        app.open_cdp_params(index);
+        if let Some(Dialog::CdpParams { variadic_input: Some(v), .. }) = app.dialog.as_mut() {
+            v.groups[0] = vec![2, 1];
+        }
+        app
+    }
+
+    /// Saving a preset for a variadic process records the picked buffers, and loading that
+    /// preset back puts them in the picker again — in the same order. Before this, a
+    /// `pulser multi` preset silently reset to "selection only" every time it was loaded
+    /// (user report, 2026-07-27).
+    #[test]
+    fn a_preset_restores_the_picked_input_buffers_in_pick_order() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir =
+            std::env::temp_dir().join(format!("tui_wave_variadic_preset_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = pulser_multi_with_two_picked_in_reverse_order();
+        // Save through the real prompt so the save path itself is under test.
+        app.open_cdp_preset_save_prompt();
+        for ch in "Combo".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Clear the pick by hand, then cycle the preset back on.
+        if let Some(Dialog::CdpParams { variadic_input: Some(v), preset_selected, .. }) = app.dialog.as_mut() {
+            v.groups[0].clear();
+            *preset_selected = None;
+        }
+        app.cdp_params_cycle_preset(true);
+
+        let Some(Dialog::CdpParams { variadic_input: Some(v), preset_selected, .. }) = &app.dialog else {
+            panic!("the params dialog stays open")
+        };
+        assert_eq!(*preset_selected, Some(0), "the preset loaded");
+        assert_eq!(
+            v.picked_doc_indices(),
+            vec![2, 1],
+            "both buffers are back, in the order they were picked"
+        );
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// If any buffer a preset names is no longer open, the picker resets to its default
+    /// "selection only" state rather than restoring a partial pick — the user's stated rule,
+    /// and the only safe one given that pick *order* is what these processes read as
+    /// structure (a partial restore silently shifts every later file into a different role).
+    #[test]
+    fn a_preset_naming_a_closed_buffer_resets_the_picker_to_selection_only() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir =
+            std::env::temp_dir().join(format!("tui_wave_variadic_preset_reset_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = pulser_multi_with_two_picked_in_reverse_order();
+        app.open_cdp_preset_save_prompt();
+        for ch in "Combo".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.dialog = None;
+
+        // Close "three.wav" and reopen the dialog: only one of the two saved picks can resolve.
+        app.documents.remove(2);
+        app.histories.remove(2);
+        app.active_document = 0;
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "pulser_multi_1")
+            .expect("pulser_multi_1 in catalog");
+        app.open_cdp_params(index);
+        app.cdp_params_cycle_preset(true);
+
+        let Some(Dialog::CdpParams { variadic_input: Some(v), .. }) = &app.dialog else {
+            panic!("the params dialog stays open")
+        };
+        assert!(
+            v.picked_doc_indices().is_empty(),
+            "one unresolvable buffer resets the whole pick, not just its own entry: {:?}",
+            v.picked_doc_indices()
+        );
+        assert_eq!(v.total_input_count(), 1, "back to the selection alone");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// "Recall last process" is an auto-saved preset in all but name, so it restores the
+    /// picked buffers too — otherwise re-running the last `pulser multi` quietly dropped back
+    /// to the selection alone.
+    #[test]
+    fn recall_last_process_restores_the_picked_input_buffers() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir =
+            std::env::temp_dir().join(format!("tui_wave_variadic_recall_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = pulser_multi_with_two_picked_in_reverse_order();
+        let values: Vec<crate::model::cdp::ParamValue> = match &app.dialog {
+            Some(Dialog::CdpParams { fields, .. }) => fields.iter().map(CdpField::to_value).collect(),
+            _ => panic!("the params dialog is open"),
+        };
+        let input_buffers = match &app.dialog {
+            Some(Dialog::CdpParams { variadic_input: Some(v), .. }) => app.variadic_input_buffer_refs(v),
+            _ => panic!("a variadic process"),
+        };
+        crate::model::cdp::process_last::save_last_process(&crate::model::cdp::process_last::LastProcess {
+            process_key: "pulser_multi_1".into(),
+            values,
+            input_buffers,
+        });
+        app.dialog = None;
+
+        app.recall_last_process();
+        let Some(Dialog::CdpParams { variadic_input: Some(v), .. }) = &app.dialog else {
+            panic!("recall reopens the params dialog")
+        };
+        assert_eq!(v.picked_doc_indices(), vec![2, 1], "the recalled inputs match what was applied");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
     /// Tab cycles which channel-role list Space adds to, for a `GroupedWav` process only —
     /// with one group there is nothing to switch to and Tab must be inert (it must not, for
     /// instance, fall through to the dialog's own focus walk while the overlay is up).
@@ -22521,7 +22879,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
         let screen = buffer_text(terminal.backend().buffer());
-        assert!(screen.contains("input files"), "the extra-input row is labeled: {screen}");
+        assert!(screen.contains("input buffers"), "the extra-input row is labeled: {screen}");
         assert!(screen.contains("1 file: ch1 selection +0"), "the row leads with the total: {screen}");
 
         // Open the overlay and pick buffer 1 into ch2.
@@ -22531,7 +22889,7 @@ mod tests {
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         terminal.draw(|frame| app.render(frame)).unwrap();
         let screen = buffer_text(terminal.backend().buffer());
-        assert!(screen.contains("Input Files"), "the overlay's title: {screen}");
+        assert!(screen.contains("Input Buffers"), "the overlay's title: {screen}");
         assert!(screen.contains("adding to: ch2"), "the overlay names the group Space adds to: {screen}");
         assert!(screen.contains("[ch2 1]"), "the picked buffer shows its group and pick position: {screen}");
         assert!(screen.contains("Tab:group"), "a grouped picker offers the Tab hint: {screen}");
@@ -22541,6 +22899,116 @@ mod tests {
         terminal.draw(|frame| app.render(frame)).unwrap();
         let screen = buffer_text(terminal.backend().buffer());
         assert!(screen.contains("2 files:"), "the row's total tracks the pick: {screen}");
+    }
+
+    /// The "input buffers" row must stay inside the dialog's right border. It used to carry
+    /// an inline "(Enter: pick)" hint on top of an already-wide summary and spilled straight
+    /// out of the popup (reported from a manual test pass, 2026-07-27) — the hint now lives
+    /// in the bottom hint bar and the summary is clipped to the row.
+    ///
+    /// Checked structurally rather than by eyeballing the screen dump: find the row, find the
+    /// dialog's own border columns on that row, and assert every cell between them that isn't
+    /// blank sits inside. `repair_repair` is the worst case in the catalog — two groups, so
+    /// its summary is the longest one `summary_detail` can produce.
+    #[test]
+    fn the_input_buffers_row_stays_inside_the_dialog_border() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 10_000)), None);
+        app.push_document(doc(0.2, 10_000));
+        app.push_document(doc(0.3, 10_000));
+        let variadic = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "repair_repair")
+            .expect("repair_repair in catalog");
+        app.open_cdp_params(variadic);
+        let field_count = match &app.dialog {
+            Some(Dialog::CdpParams { fields, .. }) => fields.len(),
+            _ => panic!(),
+        };
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = cdp_params_focus_extra_input(field_count);
+        }
+        // Pick both extra buffers into ch2 so the summary is at its longest.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let row_text = |y: u16| {
+            (0..area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>()
+        };
+        let y = (0..area.height)
+            .find(|&y| row_text(y).contains(VARIADIC_INPUT_LABEL))
+            .expect("the input buffers row renders");
+        let line = row_text(y);
+        // The popup is the only thing on this row, so its vertical borders are the first and
+        // last box-drawing characters present.
+        let left = line.find('\u{2502}').expect("the dialog's left border");
+        let right = line.rfind('\u{2502}').expect("the dialog's right border");
+        assert!(left < right, "two distinct borders on the row: {line:?}");
+        // Nothing may be drawn to the right of the closing border.
+        assert!(
+            line[right + '\u{2502}'.len_utf8()..].trim().is_empty(),
+            "the row spilled past the dialog's right border: {line:?}"
+        );
+        assert!(
+            line[..left].trim().is_empty(),
+            "the row spilled past the dialog's left border: {line:?}"
+        );
+        assert!(
+            line.contains("3 files:"),
+            "the summary itself still renders (not clipped away entirely): {line:?}"
+        );
+    }
+
+    /// The bottom hint bar carries the "how do I open this" affordance the row no longer
+    /// does — and only while that row is focused, since Enter genuinely means "run" anywhere
+    /// else in the form.
+    #[test]
+    fn the_hint_bar_says_pick_only_while_the_input_buffers_row_is_focused() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 10_000)), None);
+        app.push_document(doc(0.2, 10_000));
+        let variadic = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "pulser_multi_1")
+            .expect("pulser_multi_1 in catalog");
+        app.open_cdp_params(variadic);
+        let field_count = match &app.dialog {
+            Some(Dialog::CdpParams { fields, .. }) => fields.len(),
+            _ => panic!(),
+        };
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 44)).unwrap();
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = 1; // an ordinary param field
+        }
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(screen.contains("Enter:run"), "a param field still runs on Enter: {screen}");
+
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = cdp_params_focus_extra_input(field_count);
+        }
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(screen.contains("Enter:pick"), "the extra-input row opens the picker: {screen}");
+        assert!(!screen.contains("Enter:run"), "and does not also claim to run: {screen}");
     }
 
     /// Every rendered cell joined row-by-row — enough to assert a label appears somewhere on
@@ -23364,6 +23832,7 @@ mod tests {
         crate::model::cdp::process_last::save_last_process(&crate::model::cdp::process_last::LastProcess {
             process_key: "blur_avrg".into(),
             values: vec![crate::model::cdp::ParamValue::Number(42.0)],
+            ..Default::default()
         });
 
         app.open_cdp_browser();
