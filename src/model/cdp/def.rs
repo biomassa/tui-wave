@@ -675,6 +675,25 @@ pub struct ProcessDef {
     /// by running each binary at every count around its boundary.
     #[serde(default)]
     pub min_inputs: Option<usize>,
+    /// True for a process that takes a **Head/Tail marklist** datafile — the DISTMORE family
+    /// (`distmore bright` modes 1-3, `distmore segsbkwd` modes 1-9, `distmore segszig` mode
+    /// 1), and nothing else in the catalog.
+    ///
+    /// The marklist is a plain text file of timemarks in seconds, in increasing order,
+    /// alternating Head then Tail (the first is always a Head), needing **at least two
+    /// complete pairs**. CDP takes it as a positional argument immediately after the outfile:
+    /// `distmore bright 1-3 infile outfile marklist [-s… -d]`.
+    ///
+    /// It is deliberately **not** a `ParamDef` with `required_list = true`, which is how these
+    /// processes were first cataloged. Hand-typing a list of times into a dialog field is
+    /// unusable for the thing it describes — the marks are positions in the waveform the user
+    /// is looking at. So the content comes from `Document.head_tail_marks` (placed with `h`,
+    /// dragged with the mouse, persisted in a `.headstails` sidecar) and reaches the pipeline
+    /// via `InputSpec.head_tail_marks`, already rebased to the selection. `pipeline` writes
+    /// the datafile and inserts its filename in the right argv slot; there is no form field
+    /// for it at all.
+    #[serde(default)]
+    pub needs_head_tail_marks: bool,
     /// Ordered — this order is exactly the order these values appear as positional
     /// arguments on the CDP command line (flagged params are still emitted in this order,
     /// just as `-x<value>` tokens instead of bare ones). A process with no parameters emits
@@ -746,6 +765,7 @@ mod tests {
             stereo_native: false,
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
+            needs_head_tail_marks: false,
             params: vec![sample_number()],
         };
 
@@ -796,6 +816,7 @@ mod tests {
             stereo_native: false,
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
+            needs_head_tail_marks: false,
             params: vec![toggle, choice],
         };
 
@@ -869,6 +890,7 @@ mod tests {
             stereo_native: false,
             output_is_stereo: true,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
+            needs_head_tail_marks: false,
             params: vec![table],
         };
 
@@ -916,6 +938,7 @@ mod tests {
             stereo_native: false,
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
+            needs_head_tail_marks: false,
             params: vec![param],
         };
 
@@ -970,6 +993,7 @@ mod tests {
             stereo_native: false,
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
+            needs_head_tail_marks: false,
             params: vec![param],
         };
 
@@ -1011,6 +1035,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false,
             sidecar_extension: None,
+            needs_head_tail_marks: false,
             min_inputs: None,
             params,
         }

@@ -38,9 +38,22 @@ impl<'a> Widget for StatusBar<'a> {
         let snap = if self.snap_to_zero { " Zero x: on " } else { "" };
         let loop_ = if self.loop_playback { " Loop: on " } else { "" };
         let fine = if self.fine_mode { " Fine: on " } else { "" };
+        // Head/Tail marks are shown as a *pair* count, because that is the unit every DISTMORE
+        // process is specified in ("at least two pairs of time-values") — a raw mark count
+        // would leave the user doing the division to find out whether a process will run. The
+        // "+1" flags a trailing unpaired Head, which is otherwise invisible in a pair count and
+        // is exactly the state a half-finished marking session leaves behind. Hidden entirely
+        // when there are none, so files that never use the feature pay no status-bar width.
+        let head_tail = if self.document.head_tail_marks.is_empty() {
+            String::new()
+        } else {
+            let pairs = self.document.head_tail_pairs();
+            let odd = if self.document.head_tail_marks.len() % 2 == 1 { " +1" } else { "" };
+            format!(" H/T: {pairs} pairs{odd} ")
+        };
         let last = self.last_action.map(|l| format!(" last: {} ", l)).unwrap_or_default();
         let text = format!(
-            " pos: {} ({:.3}s) | {}/{}-bit | zoom: {:.1} spl/col | amp: {:.2}x | sel: {} | edge: {:.0}dB |{}{}{}{}",
+            " pos: {} ({:.3}s) | {}/{}-bit | zoom: {:.1} spl/col | amp: {:.2}x | sel: {} | edge: {:.0}dB |{}{}{}{}{}",
             self.document.cursor,
             seconds,
             rate_str,
@@ -52,6 +65,7 @@ impl<'a> Widget for StatusBar<'a> {
             snap,
             loop_,
             fine,
+            head_tail,
             last,
         );
         Paragraph::new(Line::from(text))

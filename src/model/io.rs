@@ -36,7 +36,15 @@ pub fn load_wav(path: impl AsRef<Path>) -> color_eyre::Result<Document> {
         m.position = m.position.min(len);
     }
 
+    // Head/tail marks live in a `.headstails` sidecar next to the audio, not in the WAV's own
+    // chunks — see `model::headstails`. Absent or unreadable simply means "no marks".
+    let head_tail_marks: Vec<usize> = super::headstails::load(&path, spec.sample_rate)
+        .into_iter()
+        .map(|m| m.min(len))
+        .collect();
+
     Ok(Document {
+        head_tail_marks,
         channels,
         sample_rate: spec.sample_rate,
         bits_per_sample: spec.bits_per_sample,
@@ -190,6 +198,15 @@ pub fn save_wav_with(
     writer.finalize()?;
     // Append cue/adtl marker chunks and any preserved bext after hound's fmt/data.
     super::bwf::append_aux_chunks(path, &doc.markers, &doc.bext)?;
+    // Head/tail marks go to their own sidecar rather than into the WAV — see
+    // `model::headstails`. Done here, in the one function every save path funnels through
+    // (quick Save, Save As, Save All, region export, the Buffers panel's own save), so no
+    // call site has to remember to do it; and after `finalize`, so a failed audio write never
+    // leaves a sidecar describing a file that wasn't written.
+    //
+    // On Save As this writes next to the *new* path, so the marks follow the buffer. Any
+    // sidecar beside the original file is left alone, exactly as the original audio is.
+    super::headstails::save(path, &doc.head_tail_marks, doc.sample_rate);
     Ok(())
 }
 
@@ -232,6 +249,7 @@ mod tests {
 
     fn approx_doc(samples: Vec<f32>) -> Document {
         Document {
+            head_tail_marks: Vec::new(),
             channels: vec![samples],
             sample_rate: 44100,
             selection: None,
@@ -267,6 +285,66 @@ mod tests {
             assert!((a - b).abs() < 1.0 / 4_000_000.0, "24-bit drift too large: {a} vs {b}");
         }
         std::fs::remove_file(&tmp).unwrap();
+    }
+
+    /// Head/tail marks go to a `.headstails` sidecar rather than into the WAV, and every save
+    /// path funnels through `save_wav_with`, so this covers Save, Save As, Save All and region
+    /// export in one. Also pins that the marks stay *out* of the WAV's own chunks — an
+    /// implementation that folded them into the cue list would pass a naive round-trip check
+    /// while corrupting the ordinary marker list.
+    #[test]
+    fn head_tail_marks_round_trip_through_a_sidecar_beside_the_wav() {
+        let dir = std::env::temp_dir()
+            .join(format!("tui_wave_headstails_io_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("take.wav");
+
+        let mut doc = approx_doc(vec![0.0; 44_100]);
+        doc.head_tail_marks = vec![4_410, 8_820, 22_050, 30_870];
+        save_wav(&doc, &wav).unwrap();
+
+        assert!(
+            crate::model::headstails::sidecar_path(&wav).exists(),
+            "the sidecar is written next to the audio"
+        );
+        let reloaded = load_wav(&wav).unwrap();
+        assert_eq!(reloaded.head_tail_marks, doc.head_tail_marks);
+        assert!(reloaded.markers.is_empty(), "and not as ordinary cue-chunk markers");
+
+        // Clearing them and saving again removes the sidecar, so the next load finds none.
+        doc.head_tail_marks.clear();
+        save_wav(&doc, &wav).unwrap();
+        assert!(!crate::model::headstails::sidecar_path(&wav).exists());
+        assert!(load_wav(&wav).unwrap().head_tail_marks.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Save As writes the sidecar beside the *new* file, so the marks follow the buffer — and
+    /// leaves the original's sidecar alone, exactly as it leaves the original audio alone.
+    #[test]
+    fn save_as_writes_the_sidecar_next_to_the_new_path() {
+        let dir = std::env::temp_dir()
+            .join(format!("tui_wave_headstails_saveas_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("original.wav");
+        let copy = dir.join("copy.wav");
+
+        let mut doc = approx_doc(vec![0.0; 44_100]);
+        doc.head_tail_marks = vec![1_000, 2_000, 3_000, 4_000];
+        save_wav(&doc, &original).unwrap();
+
+        doc.head_tail_marks = vec![5_000, 6_000];
+        save_wav_with(&doc, &copy, BitDepth::Int16, false).unwrap();
+
+        assert_eq!(load_wav(&copy).unwrap().head_tail_marks, vec![5_000, 6_000]);
+        assert_eq!(
+            load_wav(&original).unwrap().head_tail_marks,
+            vec![1_000, 2_000, 3_000, 4_000],
+            "the original's sidecar is untouched"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

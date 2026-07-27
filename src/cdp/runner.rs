@@ -906,7 +906,7 @@ mod tests {
         assert!(warnings.is_empty());
         let def = catalog.find("modify_speed_2").expect("modify_speed_2 in catalog");
 
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let planned = crate::model::cdp::plan_job(
             def,
             &[crate::model::cdp::ParamValue::Number(12.0)],
@@ -960,12 +960,12 @@ mod tests {
         assert_eq!(def.input, crate::model::cdp::IoKind::VariadicWav);
         assert_eq!(def.input_arity().0, 2, "pulser multi rejects fewer than 2 input files");
 
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
         let planned = crate::model::cdp::plan_job(
             def,
             &values,
-            &[input, input],
+            &[input.clone(), input.clone()],
             &crate::model::cdp::PvocSettings::default(),
         )
         .expect("plan_job should accept two inputs for a variadic process");
@@ -1020,11 +1020,11 @@ mod tests {
         let mut values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
         values[0] = crate::model::cdp::ParamValue::Table(vec![vec![4.0, 0.0], vec![4.0, 0.2]]);
 
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let planned = crate::model::cdp::plan_job(
             def,
             &values,
-            &[input, input],
+            &[input.clone(), input.clone()],
             &crate::model::cdp::PvocSettings::default(),
         )
         .expect("plan_job should accept two inputs");
@@ -1078,11 +1078,11 @@ mod tests {
         assert_eq!(def.output, crate::model::cdp::IoKind::WavGlob);
 
         let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
 
         // An odd count has no valid channel-1/channel-2 split -- rejected before CDP is even
         // spawned, with the group wording rather than CDP's "not a multiple of 2".
-        let odd = crate::model::cdp::plan_job(def, &values, &[input], &crate::model::cdp::PvocSettings::default());
+        let odd = crate::model::cdp::plan_job(def, &values, &[input.clone()], &crate::model::cdp::PvocSettings::default());
         assert!(
             matches!(odd, Err(crate::model::cdp::PlanError::VariadicInputCount { .. })),
             "one input file is not a valid grouped pick: {odd:?}"
@@ -1091,7 +1091,7 @@ mod tests {
         let planned = crate::model::cdp::plan_job(
             def,
             &values,
-            &[input, input],
+            &[input.clone(), input.clone()],
             &crate::model::cdp::PvocSettings::default(),
         )
         .expect("two inputs is one channel-1 source and one channel-2 source");
@@ -1187,7 +1187,7 @@ mod tests {
         assert!(!def.output_is_stereo, "mode 1 is the mono mode");
 
         let values = crystal_values(def, vec![[0.0, 0.0, 0.0]], vec![(0.0, 0.0), (0.25, 1.0), (0.5, 0.0)], 5.0);
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let planned = crate::model::cdp::plan_job(
             def,
             &values,
@@ -1230,6 +1230,105 @@ mod tests {
         }
     }
 
+    /// The DISTMORE family end-to-end against the real binaries, for both argv shapes in it:
+    /// `distmore bright` (marklist *plus* trailing flagged params) and `distmore segsbkwd`
+    /// (marklist and nothing else). Both take the marklist as a positional immediately after
+    /// the outfile — `distmore bright 1-3 infile outfile marklist [-s… -d]` — which is the one
+    /// thing most likely to be silently wrong, since a misplaced filename token just makes CDP
+    /// read some other argument as its datafile.
+    ///
+    /// The marks come from `InputSpec.head_tail_marks` rather than any parameter (see
+    /// `ProcessDef::needs_head_tail_marks`), so this also pins that whole path: document →
+    /// `InputSpec` → `headstails::marks_to_text` → temp datafile → CDP.
+    #[test]
+    fn distmore_reads_a_head_tail_marklist_written_from_the_documents_marks() {
+        let cdp_dir = require_cdp!();
+        // A constant sine has no varying zero-crossing rate for `bright` to sort by, but it
+        // doesn't need one to prove the marklist was read: what's being checked is that CDP
+        // accepts the file and produces real audio, not what it reorders it into.
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+
+        let (catalog, warnings) = crate::model::cdp::CdpCatalog::load(None);
+        assert!(warnings.is_empty(), "catalog failed to parse: {warnings:?}");
+
+        // Three complete pairs, comfortably above `MIN_HEAD_TAIL_PAIRS`.
+        let marks = vec![
+            len_samples / 10,
+            len_samples * 2 / 10,
+            len_samples * 4 / 10,
+            len_samples * 5 / 10,
+            len_samples * 7 / 10,
+            len_samples * 8 / 10,
+        ];
+
+        for (job_id, key) in [(400u64, "distmore_bright_2"), (401, "distmore_segsbkwd_3")] {
+            let def = catalog.find(key).unwrap_or_else(|| panic!("{key} in catalog"));
+            assert!(def.needs_head_tail_marks, "{key} is a marklist process");
+            assert!(
+                !def.params.iter().any(|p| p.name.contains("Head/Tail")),
+                "{key} must take its marks from the document, not a form field"
+            );
+
+            let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+            let input = crate::model::cdp::InputSpec {
+                channels: 1,
+                sample_rate,
+                len_samples,
+                head_tail_marks: marks.clone(),
+            };
+            let planned = crate::model::cdp::plan_job(
+                def,
+                &values,
+                std::slice::from_ref(&input),
+                &crate::model::cdp::PvocSettings::default(),
+            )
+            .unwrap_or_else(|e| panic!("{key} should plan with 3 pairs: {e:?}"));
+
+            // The marklist must be written as a real datafile, and its filename must be the
+            // argv token immediately after the outfile.
+            let (_, marklist) = planned
+                .brk_files
+                .iter()
+                .find(|(name, _)| name == "headstails.txt")
+                .unwrap_or_else(|| panic!("{key} should write a headstails datafile"));
+            assert_eq!(
+                marklist.lines().count(),
+                marks.len(),
+                "{key}: one timemark per line, in seconds"
+            );
+            let args = &planned.steps[0].args;
+            let out_at = args.iter().position(|a| a == "out.wav").expect("an outfile token");
+            assert_eq!(
+                args[out_at + 1],
+                "headstails.txt",
+                "{key}: the marklist is positional, directly after the outfile — got {args:?}"
+            );
+
+            let runner = CdpRunner::new();
+            runner.submit(Job {
+                id: job_id,
+                cdp_dir: cdp_dir.clone(),
+                planned,
+                inputs: vec![channels.clone()],
+                input_sample_rate: sample_rate,
+                purpose: JobPurpose::Apply,
+            });
+            let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(60))
+            else {
+                unreachable!()
+            };
+            let output = result.unwrap_or_else(|e| panic!("{key} should accept the marklist: {e:?}"));
+            assert_eq!(output.results.len(), 1, "{key} produces one result");
+            let audio = &output.results[0];
+            assert!(!audio[0].is_empty(), "{key} produced no samples");
+            assert!(
+                audio[0].iter().any(|s| s.abs() > 1e-3),
+                "{key} produced silence, so nothing was really segmented"
+            );
+        }
+    }
+
     /// Mode 2 (stereo) plus the variadic input ordering in one check: two mono sources, one
     /// loud and one a tenth of its amplitude, driving two vertices placed at opposite ends of
     /// the X axis. X is both the time offset *and* (in this mode only) the stereo position,
@@ -1252,7 +1351,7 @@ mod tests {
         assert!(def.output_is_stereo, "mode 2 is the stereo mode");
 
         let envelope = vec![(0.0, 0.0), (0.25, 1.0), (0.5, 0.0)];
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
 
         // Two files but three vertices: rejected here, before any temp file is written or
         // any process spawned, naming both counts.
@@ -1265,7 +1364,7 @@ mod tests {
         let err = crate::model::cdp::plan_job(
             def,
             &mismatched,
-            &[input, input],
+            &[input.clone(), input.clone()],
             &crate::model::cdp::PvocSettings::default(),
         )
         .unwrap_err();
@@ -1279,7 +1378,7 @@ mod tests {
         let planned = crate::model::cdp::plan_job(
             def,
             &values,
-            &[input, input],
+            &[input.clone(), input.clone()],
             &crate::model::cdp::PvocSettings::default(),
         )
         .expect("two files and two vertices agree");
@@ -1323,7 +1422,7 @@ mod tests {
         let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
         let def = catalog.find("blur_avrg").expect("blur_avrg in catalog");
 
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let planned = crate::model::cdp::plan_job(
             def,
             &[crate::model::cdp::ParamValue::Number(6.0)],
@@ -1406,7 +1505,7 @@ mod tests {
         ];
 
         for (label, source_channels) in [("sine", sine_channels), ("white noise", noise_channels)] {
-            let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+            let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
             let planned = crate::model::cdp::plan_job(
                 def,
                 &values,
@@ -1466,7 +1565,7 @@ mod tests {
             crate::model::cdp::ParamValue::Toggle(false), // gain reduction irrelevant here -- just need a real matrix file
             crate::model::cdp::ParamValue::Toggle(false),
         ];
-        let gen_input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let gen_input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let gen_planned = crate::model::cdp::plan_job(
             gen_def,
             &gen_values,
@@ -1499,7 +1598,7 @@ mod tests {
             crate::model::cdp::ParamValue::Toggle(true),
             crate::model::cdp::ParamValue::Toggle(false),
         ];
-        let apply_input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let apply_input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let apply_planned = crate::model::cdp::plan_job(
             apply_def,
             &apply_values,
@@ -1551,7 +1650,7 @@ mod tests {
         let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
         let def = catalog.find("grain_reposition").expect("grain_reposition in catalog");
 
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let values: Vec<_> = def
             .params
             .iter()
@@ -1610,7 +1709,7 @@ mod tests {
         let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
         let def = catalog.find("rmverb").expect("rmverb in catalog");
 
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
         let planned = crate::model::cdp::plan_job(
             def,
@@ -1688,7 +1787,7 @@ mod tests {
         let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
         let def = catalog.find("strange_glis_2").expect("strange_glis_2 in catalog");
 
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
         let planned = crate::model::cdp::plan_job(
             def,
@@ -1736,7 +1835,7 @@ mod tests {
         let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
         let def = catalog.find("blur_blur").expect("blur_blur in catalog");
 
-        let input = crate::model::cdp::InputSpec { channels: 2, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 2, sample_rate, len_samples, ..Default::default() };
         let planned = crate::model::cdp::plan_job(
             def,
             &[crate::model::cdp::ParamValue::Number(20.0)],
@@ -1779,7 +1878,7 @@ mod tests {
         let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
         let def = catalog.find("blur_blur").expect("blur_blur in catalog");
 
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let planned = crate::model::cdp::plan_job(
             def,
             &[crate::model::cdp::ParamValue::Breakpoints(vec![(0.0, 0.1), (1.0, 50.0)])],
@@ -1815,7 +1914,7 @@ mod tests {
         let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
         let def = catalog.find("modify_speed_2").expect("modify_speed_2 in catalog");
 
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         // Speed's real range is [-96, 96] semitones; 999999 is deliberately out of range so
         // CDP itself rejects it (matches the Phase 0 spike S4 finding).
         let planned = crate::model::cdp::plan_job(
@@ -1858,8 +1957,8 @@ mod tests {
         let def = catalog.find("sfedit_join").expect("sfedit_join in catalog");
 
         let inputs_spec = [
-            crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples },
-            crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples },
+            crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() },
+            crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() },
         ];
         let planned = crate::model::cdp::plan_job(
             def,
@@ -1917,7 +2016,7 @@ mod tests {
             ]),
             V::Number(0.5), // Trail Time
         ];
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let planned = crate::model::cdp::plan_job(
             def,
             &values,
@@ -1991,7 +2090,7 @@ mod tests {
             V::Number(1.0), // Randomize Delay: none
             V::Number(0.0), // Randomize Pitch: none
         ];
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let planned = crate::model::cdp::plan_job(
             def,
             &values,
@@ -2047,7 +2146,7 @@ mod tests {
             V::Number(1.0), // Randomize Delay: none
             V::Number(0.0), // Randomize Pitch: none
         ];
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let planned = crate::model::cdp::plan_job(
             def,
             &values,
@@ -2101,7 +2200,7 @@ mod tests {
 
         use crate::model::cdp::ParamValue as V;
         let values = vec![V::MarkerTimeList(vec![('b', 0.2), ('a', 0.5), ('a', 0.8)])];
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let planned = crate::model::cdp::plan_job(
             def,
             &values,
@@ -2198,7 +2297,7 @@ mod tests {
             },
         ];
         let values = vec![V::HiliteBand(rows)];
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let planned = crate::model::cdp::plan_job(
             def,
             &values,
@@ -2270,7 +2369,7 @@ mod tests {
             V::Toggle(true),               // Advance By Fixed Step (-a)
         ];
 
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let planned = crate::model::cdp::plan_job(
             def,
             &values,
@@ -2392,7 +2491,7 @@ mod tests {
             V::Number(1.0),  // Decay Shape
             V::Number(70.0), // Limit (-c)
         ];
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let planned = crate::model::cdp::plan_job(
             def,
             &values,
@@ -2444,8 +2543,8 @@ mod tests {
         let def = catalog.find("combine_diff").expect("combine_diff in catalog");
 
         let inputs_spec = [
-            crate::model::cdp::InputSpec { channels: 2, sample_rate, len_samples },
-            crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples: mono[0].len() },
+            crate::model::cdp::InputSpec { channels: 2, sample_rate, len_samples, ..Default::default() },
+            crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples: mono[0].len(), ..Default::default() },
         ];
         let planned = crate::model::cdp::plan_job(
             def,
@@ -2501,7 +2600,7 @@ mod tests {
             V::Number(0.5),  // Maximum Step (percent)
             V::Number(0.05), // Clock
         ];
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
         let planned = crate::model::cdp::plan_job(
             def,
             &values,
@@ -2562,7 +2661,22 @@ mod tests {
         let cdp_dir = require_cdp!();
         let (channels, sample_rate) = mono_sine_channels();
         let len_samples = channels[0].len();
-        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples };
+        // Four evenly-spread head/tail marks — two complete pairs, `MIN_HEAD_TAIL_PAIRS` —
+        // so the DISTMORE family's marklist (`ProcessDef.needs_head_tail_marks`) is seeded
+        // with something CDP will actually accept. This is what took all thirteen of those
+        // entries *out* of `KNOWN_FIXTURE_FAILURES`: while the marklist was a `required_list`
+        // param, the generic seeding below could only ever produce one entry, which CDP
+        // rejects outright ("must be at least 2 pairs"). Now the marks come from the document
+        // rather than a form field, the harness can supply a real pair set. Every other
+        // process ignores this field entirely.
+        let head_tail_marks =
+            vec![len_samples / 8, len_samples / 4, len_samples / 2, len_samples * 3 / 4];
+        let input = crate::model::cdp::InputSpec {
+            channels: 1,
+            sample_rate,
+            len_samples,
+            head_tail_marks,
+        };
 
         // Entries that fail against this harness's specific test fixture (a 1-second, full-
         // level, constant sine tone) for reasons that have nothing to do with the catalog
@@ -2593,13 +2707,11 @@ mod tests {
         //     chase.
         //   specfnu_specfnu_19: the CDP binary itself crashes ("double free or corruption")
         //     on this input — a CDP bug, nothing tui-wave's plan/argv can work around.
-        //   distmore_bright_{1,2,3}, distmore_segsbkwd_{1..9}, distmore_segszig_1: same
-        //     "needs at least 2 Head/Tail mark *pairs* (4 marks)" limitation, on the same
-        //     binary's other marklist-shaped subprograms/modes — the smoke test's generic
-        //     `required_list` seeding (one entry, at the param's own default value — mirrors
-        //     the UI's own never-opened-list-editor seeding) can never satisfy that,
-        //     regardless of catalog correctness. Verified correct by hand with a real
-        //     4-entry marklist (2026-07-26).
+        //   (The thirteen `distmore_*` entries used to be listed here: their Head/Tail
+        //     marklist was a `required_list` param, and the generic one-entry seeding below
+        //     could never satisfy CDP's "at least 2 pairs". They now take their marks from
+        //     `InputSpec.head_tail_marks`, which this harness seeds with two real pairs, so
+        //     they run for real here — 2026-07-27.)
         //   matrix_matrix_2: its `FilePath` param (`ParamKind::FilePath`) has no catalog
         //     default at all — `ParamKind::default_value` can only supply an empty string
         //     ("Cannot open datafile"), same "no real value to seed with" situation as
@@ -2612,19 +2724,6 @@ mod tests {
         // CDP's actually-enforced range for extend_scramble_1 (0.02 vs 0.031-0.985) and
         // modify_brassage_4 (2500 vs 0-2000).
         const KNOWN_FIXTURE_FAILURES: &[&str] = &[
-            "distmore_bright_1",
-            "distmore_bright_2",
-            "distmore_bright_3",
-            "distmore_segsbkwd_1",
-            "distmore_segsbkwd_2",
-            "distmore_segsbkwd_3",
-            "distmore_segsbkwd_4",
-            "distmore_segsbkwd_5",
-            "distmore_segsbkwd_6",
-            "distmore_segsbkwd_7",
-            "distmore_segsbkwd_8",
-            "distmore_segsbkwd_9",
-            "distmore_segszig_1",
             "envspeak_envspeak_1",
             "envspeak_envspeak_2",
             "envspeak_envspeak_5",
@@ -2723,7 +2822,7 @@ mod tests {
             // buffer, which also satisfies `repair repair`'s "paired files must be the same
             // size" check for free.
             let (input_count, ..) = def.input_arity();
-            let inputs_spec = vec![input; input_count];
+            let inputs_spec = vec![input.clone(); input_count];
 
             let mut planned = match crate::model::cdp::plan_job(
                 def,

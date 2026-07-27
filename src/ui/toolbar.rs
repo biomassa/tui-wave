@@ -106,6 +106,8 @@ impl Toolbar {
                 buttons: vec![
                     ("Add",      sc(Action::InsertMarker,               "m"), Action::InsertMarker),
                     ("Del",      sc(Action::DeleteMarker,               "M"), Action::DeleteMarker),
+                    ("AddHT",    sc(Action::InsertHeadTailMark,         "h"), Action::InsertHeadTailMark),
+                    ("DelHT",    sc(Action::DeleteHeadTailMark,         "H"), Action::DeleteHeadTailMark),
                     ("Prev",     sc(Action::JumpPrevMarker,             "["), Action::JumpPrevMarker),
                     ("Next",     sc(Action::JumpNextMarker,             "]"), Action::JumpNextMarker),
                     ("ExtPrev",  sc(Action::ExtendSelectionToPrevMarker,"{"), Action::ExtendSelectionToPrevMarker),

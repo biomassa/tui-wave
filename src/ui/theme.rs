@@ -34,6 +34,17 @@ pub const PLAYHEAD: Color = Color::Rgb(0xff, 0xff, 0xff);
 pub const DB_SCALE: Color = SUBTEXT0;
 /// Timeline markers (cue points) — vertical line and label.
 pub const MARKER: Color = MAUVE;
+/// Head/Tail marks for the CDP DISTMORE family (`Document.head_tail_marks`) — a second,
+/// separate marker system, so it gets its own color rather than sharing `MARKER`'s.
+///
+/// Catppuccin Mocha's **Maroon**, an orange-red, deliberately *not* Mocha's own Peach: Peach
+/// is already spoken for twice over as `FOCUS` and `SHORTCUT`, so reusing it would make a
+/// head/tail line read as a focus accent. Maroon is the nearest orange left that's distinct
+/// from both Peach and `MARKER`'s Mauve. Color alone isn't the only tell — the marks also
+/// draw with a different line pattern (see `waveform_image::rasterize_waveform` and the
+/// marker overlay in `App::render`), so the two systems stay distinguishable to anyone who
+/// can't rely on hue.
+pub const HEAD_TAIL_MARKER: Color = Color::Rgb(0xeb, 0xa0, 0xac);
 /// Window/pane borders and titles.
 pub const BORDER: Color = LAVENDER;
 /// Border accent for the focused panel (file list, buffers, or the waveform when active).

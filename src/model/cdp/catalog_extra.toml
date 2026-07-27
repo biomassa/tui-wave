@@ -14885,25 +14885,14 @@ Cuts the source into paired Head/Tail segments at the given timemarks (e.g. a co
 onset paired with its following vowel continuation) and reorders them by average \
 zero-crossing rate — brightest last by default. Mode 1 takes segments from both Heads and \
 from Tails, with each Tail segment cut down to approximately its paired Head's own size.
+
+Segments come from this buffer's own Head/Tail marks (press h on the waveform to place one, H to delete the nearest; they persist in a .headstails file beside the audio). Marks alternate Head, Tail, Head, Tail — the first is always a Head — and at least two complete pairs must fall inside the selection for this process to run.
 """
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-[[process.params]]
-name = "Head/Tail Marks"
-description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
-automatable = true
-required_list = true
-list_is_time_sequence = true
-kind = "number"
-min = 0.0
-max = 7200.0
-step = 0.01
-default = 0.0
-exponential = false
-scale = "plain"
+needs_head_tail_marks = true
 
 [[process.params]]
 name = "Splice Length"
@@ -14940,25 +14929,14 @@ description = """
 Same reordering-by-brightness as Distmore Reorder By Brightness (Heads, Tails Cut To Head \
 Size), but Mode 2 takes both Heads and Tails exactly as delimited by the timemarks, with no \
 resizing.
+
+Segments come from this buffer's own Head/Tail marks (press h on the waveform to place one, H to delete the nearest; they persist in a .headstails file beside the audio). Marks alternate Head, Tail, Head, Tail — the first is always a Head — and at least two complete pairs must fall inside the selection for this process to run.
 """
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-[[process.params]]
-name = "Head/Tail Marks"
-description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
-automatable = true
-required_list = true
-list_is_time_sequence = true
-kind = "number"
-min = 0.0
-max = 7200.0
-step = 0.01
-default = 0.0
-exponential = false
-scale = "plain"
+needs_head_tail_marks = true
 
 [[process.params]]
 name = "Splice Length"
@@ -14994,25 +14972,14 @@ short_description = "Reorders sound segments in order of average zero-crossing r
 description = """
 Same reordering-by-brightness as Distmore Reorder By Brightness (Heads, Tails Cut To Head \
 Size), but Mode 3 takes segments from the Tails only.
+
+Segments come from this buffer's own Head/Tail marks (press h on the waveform to place one, H to delete the nearest; they persist in a .headstails file beside the audio). Marks alternate Head, Tail, Head, Tail — the first is always a Head — and at least two complete pairs must fall inside the selection for this process to run.
 """
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-[[process.params]]
-name = "Head/Tail Marks"
-description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
-automatable = true
-required_list = true
-list_is_time_sequence = true
-kind = "number"
-min = 0.0
-max = 7200.0
-step = 0.01
-default = 0.0
-exponential = false
-scale = "plain"
+needs_head_tail_marks = true
 
 [[process.params]]
 name = "Splice Length"
@@ -15660,26 +15627,13 @@ mode = "1"
 title = "Distmore Reverse Tails"
 category = "time"
 subcategory = "distort"
-short_description = "Reverses certain segments delimited by a Head/Tail marklist"
-description = "Reverses every Tail segment in place, leaving the Head segments untouched."
+short_description = "Reverses certain segments delimited by the file's Head/Tail marks"
+description = "Reverses every Tail segment in place, leaving the Head segments untouched.\n\nSegments come from this buffer's own Head/Tail marks (press h on the waveform to place one, H to delete the nearest; they persist in a .headstails file beside the audio). Marks alternate Head, Tail, Head, Tail — the first is always a Head — and at least two complete pairs must fall inside the selection for this process to run."
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-[[process.params]]
-name = "Head/Tail Marks"
-description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
-automatable = true
-required_list = true
-list_is_time_sequence = true
-kind = "number"
-min = 0.0
-max = 7200.0
-step = 0.01
-default = 0.0
-exponential = false
-scale = "plain"
+needs_head_tail_marks = true
 
 [[process]]
 key = "distmore_segsbkwd_2"
@@ -15689,26 +15643,13 @@ mode = "2"
 title = "Distmore Reverse Heads"
 category = "time"
 subcategory = "distort"
-short_description = "Reverses certain segments delimited by a Head/Tail marklist"
-description = "Reverses every Head segment in place, leaving the Tail segments untouched."
+short_description = "Reverses certain segments delimited by the file's Head/Tail marks"
+description = "Reverses every Head segment in place, leaving the Tail segments untouched.\n\nSegments come from this buffer's own Head/Tail marks (press h on the waveform to place one, H to delete the nearest; they persist in a .headstails file beside the audio). Marks alternate Head, Tail, Head, Tail — the first is always a Head — and at least two complete pairs must fall inside the selection for this process to run."
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-[[process.params]]
-name = "Head/Tail Marks"
-description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
-automatable = true
-required_list = true
-list_is_time_sequence = true
-kind = "number"
-min = 0.0
-max = 7200.0
-step = 0.01
-default = 0.0
-exponential = false
-scale = "plain"
+needs_head_tail_marks = true
 
 [[process]]
 key = "distmore_segsbkwd_3"
@@ -15718,26 +15659,13 @@ mode = "3"
 title = "Distmore Reverse Head+Tail Pairs"
 category = "time"
 subcategory = "distort"
-short_description = "Reverses certain segments delimited by a Head/Tail marklist"
-description = "Reverses each Head+Tail pair together, as one unit."
+short_description = "Reverses certain segments delimited by the file's Head/Tail marks"
+description = "Reverses each Head+Tail pair together, as one unit.\n\nSegments come from this buffer's own Head/Tail marks (press h on the waveform to place one, H to delete the nearest; they persist in a .headstails file beside the audio). Marks alternate Head, Tail, Head, Tail — the first is always a Head — and at least two complete pairs must fall inside the selection for this process to run."
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-[[process.params]]
-name = "Head/Tail Marks"
-description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
-automatable = true
-required_list = true
-list_is_time_sequence = true
-kind = "number"
-min = 0.0
-max = 7200.0
-step = 0.01
-default = 0.0
-exponential = false
-scale = "plain"
+needs_head_tail_marks = true
 
 [[process]]
 key = "distmore_segsbkwd_4"
@@ -15747,26 +15675,13 @@ mode = "4"
 title = "Distmore Reverse Head & Tail+Head+Tail Set"
 category = "time"
 subcategory = "distort"
-short_description = "Reverses certain segments delimited by a Head/Tail marklist"
-description = "Reverses a Head on its own, then separately reverses the following Tail+Head+Tail set as one unit."
+short_description = "Reverses certain segments delimited by the file's Head/Tail marks"
+description = "Reverses a Head on its own, then separately reverses the following Tail+Head+Tail set as one unit.\n\nSegments come from this buffer's own Head/Tail marks (press h on the waveform to place one, H to delete the nearest; they persist in a .headstails file beside the audio). Marks alternate Head, Tail, Head, Tail — the first is always a Head — and at least two complete pairs must fall inside the selection for this process to run."
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-[[process.params]]
-name = "Head/Tail Marks"
-description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
-automatable = true
-required_list = true
-list_is_time_sequence = true
-kind = "number"
-min = 0.0
-max = 7200.0
-step = 0.01
-default = 0.0
-exponential = false
-scale = "plain"
+needs_head_tail_marks = true
 
 [[process]]
 key = "distmore_segsbkwd_5"
@@ -15776,26 +15691,13 @@ mode = "5"
 title = "Distmore Reverse Head+Tail+Head+Tail Set"
 category = "time"
 subcategory = "distort"
-short_description = "Reverses certain segments delimited by a Head/Tail marklist"
-description = "Reverses a Head+Tail+Head+Tail run as one unit."
+short_description = "Reverses certain segments delimited by the file's Head/Tail marks"
+description = "Reverses a Head+Tail+Head+Tail run as one unit.\n\nSegments come from this buffer's own Head/Tail marks (press h on the waveform to place one, H to delete the nearest; they persist in a .headstails file beside the audio). Marks alternate Head, Tail, Head, Tail — the first is always a Head — and at least two complete pairs must fall inside the selection for this process to run."
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-[[process.params]]
-name = "Head/Tail Marks"
-description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
-automatable = true
-required_list = true
-list_is_time_sequence = true
-kind = "number"
-min = 0.0
-max = 7200.0
-step = 0.01
-default = 0.0
-exponential = false
-scale = "plain"
+needs_head_tail_marks = true
 
 [[process]]
 key = "distmore_segsbkwd_6"
@@ -15805,26 +15707,13 @@ mode = "6"
 title = "Distmore Reverse Head & Tail+Head+Tail+Head+Tail Set"
 category = "time"
 subcategory = "distort"
-short_description = "Reverses certain segments delimited by a Head/Tail marklist"
-description = "Reverses a Head on its own, then separately reverses the following Tail+Head+Tail+Head+Tail set as one unit."
+short_description = "Reverses certain segments delimited by the file's Head/Tail marks"
+description = "Reverses a Head on its own, then separately reverses the following Tail+Head+Tail+Head+Tail set as one unit.\n\nSegments come from this buffer's own Head/Tail marks (press h on the waveform to place one, H to delete the nearest; they persist in a .headstails file beside the audio). Marks alternate Head, Tail, Head, Tail — the first is always a Head — and at least two complete pairs must fall inside the selection for this process to run."
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-[[process.params]]
-name = "Head/Tail Marks"
-description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
-automatable = true
-required_list = true
-list_is_time_sequence = true
-kind = "number"
-min = 0.0
-max = 7200.0
-step = 0.01
-default = 0.0
-exponential = false
-scale = "plain"
+needs_head_tail_marks = true
 
 [[process]]
 key = "distmore_segsbkwd_7"
@@ -15834,26 +15723,13 @@ mode = "7"
 title = "Distmore Reverse Head+Tail+Head+Tail+Head+Tail Set"
 category = "time"
 subcategory = "distort"
-short_description = "Reverses certain segments delimited by a Head/Tail marklist"
-description = "Reverses a Head+Tail+Head+Tail+Head+Tail run as one unit."
+short_description = "Reverses certain segments delimited by the file's Head/Tail marks"
+description = "Reverses a Head+Tail+Head+Tail+Head+Tail run as one unit.\n\nSegments come from this buffer's own Head/Tail marks (press h on the waveform to place one, H to delete the nearest; they persist in a .headstails file beside the audio). Marks alternate Head, Tail, Head, Tail — the first is always a Head — and at least two complete pairs must fall inside the selection for this process to run."
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-[[process.params]]
-name = "Head/Tail Marks"
-description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
-automatable = true
-required_list = true
-list_is_time_sequence = true
-kind = "number"
-min = 0.0
-max = 7200.0
-step = 0.01
-default = 0.0
-exponential = false
-scale = "plain"
+needs_head_tail_marks = true
 
 [[process]]
 key = "distmore_segsbkwd_8"
@@ -15863,26 +15739,13 @@ mode = "8"
 title = "Distmore Reverse Head & Tail+Head+Tail+Head+Tail+Head+Tail Set"
 category = "time"
 subcategory = "distort"
-short_description = "Reverses certain segments delimited by a Head/Tail marklist"
-description = "Reverses a Head on its own, then separately reverses the following Tail+Head+Tail+Head+Tail+Head+Tail set as one unit."
+short_description = "Reverses certain segments delimited by the file's Head/Tail marks"
+description = "Reverses a Head on its own, then separately reverses the following Tail+Head+Tail+Head+Tail+Head+Tail set as one unit.\n\nSegments come from this buffer's own Head/Tail marks (press h on the waveform to place one, H to delete the nearest; they persist in a .headstails file beside the audio). Marks alternate Head, Tail, Head, Tail — the first is always a Head — and at least two complete pairs must fall inside the selection for this process to run."
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-[[process.params]]
-name = "Head/Tail Marks"
-description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
-automatable = true
-required_list = true
-list_is_time_sequence = true
-kind = "number"
-min = 0.0
-max = 7200.0
-step = 0.01
-default = 0.0
-exponential = false
-scale = "plain"
+needs_head_tail_marks = true
 
 [[process]]
 key = "distmore_segsbkwd_9"
@@ -15892,26 +15755,13 @@ mode = "9"
 title = "Distmore Reverse Head+Tail+Head+Tail+Head+Tail+Head+Tail Set"
 category = "time"
 subcategory = "distort"
-short_description = "Reverses certain segments delimited by a Head/Tail marklist"
-description = "Reverses a Head+Tail+Head+Tail+Head+Tail+Head+Tail run as one unit."
+short_description = "Reverses certain segments delimited by the file's Head/Tail marks"
+description = "Reverses a Head+Tail+Head+Tail+Head+Tail+Head+Tail run as one unit.\n\nSegments come from this buffer's own Head/Tail marks (press h on the waveform to place one, H to delete the nearest; they persist in a .headstails file beside the audio). Marks alternate Head, Tail, Head, Tail — the first is always a Head — and at least two complete pairs must fall inside the selection for this process to run."
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-[[process.params]]
-name = "Head/Tail Marks"
-description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
-automatable = true
-required_list = true
-list_is_time_sequence = true
-kind = "number"
-min = 0.0
-max = 7200.0
-step = 0.01
-default = 0.0
-exponential = false
-scale = "plain"
+needs_head_tail_marks = true
 
 [[process]]
 key = "distmore_segszig_1"
@@ -15922,25 +15772,12 @@ title = "Distmore Zigzag Tails"
 category = "time"
 subcategory = "distort"
 short_description = "Zigzags back and forth across segments while playing the source"
-description = "Zigzags back and forth across each Tail segment delimited by the marklist while otherwise playing the source normally."
+description = "Zigzags back and forth across each Tail segment delimited by the marklist while otherwise playing the source normally.\n\nSegments come from this buffer's own Head/Tail marks (press h on the waveform to place one, H to delete the nearest; they persist in a .headstails file beside the audio). Marks alternate Head, Tail, Head, Tail — the first is always a Head — and at least two complete pairs must fall inside the selection for this process to run."
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-[[process.params]]
-name = "Head/Tail Marks"
-description = "Ordered list of timemarks (seconds) in the source, alternating Head then Tail — the first mark is always a Head; needs at least 2 pairs (4 marks)"
-automatable = true
-required_list = true
-list_is_time_sequence = true
-kind = "number"
-min = 0.0
-max = 7200.0
-step = 0.01
-default = 0.0
-exponential = false
-scale = "plain"
+needs_head_tail_marks = true
 
 [[process.params]]
 name = "Zigzag Count"

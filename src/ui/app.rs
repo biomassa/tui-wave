@@ -17,6 +17,9 @@ use crate::commands::cut::cut_command;
 use crate::commands::delete::delete_command;
 use crate::commands::fade::{fade_command, technical_fades_command, FadeCurve};
 use crate::commands::gain::gain_command;
+use crate::commands::head_tail_mark::{
+    delete_head_tail_mark_command, insert_head_tail_mark_command, move_head_tail_mark_command,
+};
 use crate::commands::marker::{
     auto_insert_markers_command, delete_marker_command, insert_marker_command, move_marker_command, rename_marker_command,
 };
@@ -133,6 +136,16 @@ fn cdp_plan_error_message(err: &crate::model::cdp::PlanError) -> String {
         // `reason` already reads as a sentence fragment describing the rule.
         PlanError::VariadicInputCount { reason, actual } => {
             format!("{actual} input buffer(s): {reason}")
+        }
+        // Names the key rather than just the shortfall: the marks aren't a dialog field the
+        // user can go fix from here — they live on the waveform, so the message has to say
+        // where to make them.
+        PlanError::MissingHeadTailMarks { pairs } => {
+            format!(
+                "needs at least {} Head/Tail pairs ({} marks) in the selection, found {pairs} — press h on the waveform to add them",
+                crate::model::cdp::pipeline::MIN_HEAD_TAIL_PAIRS,
+                crate::model::cdp::pipeline::MIN_HEAD_TAIL_PAIRS * 2,
+            )
         }
         PlanError::SampleRateMismatch { first, second } => {
             format!("an extra input is {second} Hz, selection is {first} Hz — resample one first")
@@ -1899,8 +1912,20 @@ pub struct App {
     /// The dragged marker's position when the drag started, so the whole gesture (not each
     /// intermediate mouse-move) becomes a single undoable `MoveMarkerCommand` at drag-end.
     dragging_marker_start_position: Option<usize>,
+    /// Index into `Document.head_tail_marks` of the mark currently being dragged, and its
+    /// position when the drag began — the head/tail counterparts of `dragging_marker` /
+    /// `dragging_marker_start_position`, kept separate for the same reason
+    /// `head_tail_label_rects` is: the two systems apply different commands on drop.
+    dragging_head_tail_mark: Option<usize>,
+    dragging_head_tail_mark_start_position: Option<usize>,
     /// Rendered marker-label rects (label box + marker index) for mouse hit-testing.
     marker_label_rects: Vec<(Rect, usize)>,
+    /// The head/tail-mark counterpart of `marker_label_rects`: one clickable rect per visible
+    /// head/tail mark (its line column plus its `H1`/`T1` label), paired with its index into
+    /// `Document.head_tail_marks`. Kept separate rather than tagged into one list so a click
+    /// can never resolve to "some mark, in one of two systems" — which system was hit decides
+    /// which command the drag ends up applying.
+    head_tail_label_rects: Vec<(Rect, usize)>,
     /// Time/cell of the last left mouse-down, used to detect double-clicks.
     last_click: Option<(Instant, u16, u16)>,
     /// Time/cell of the last left mouse-down *in the waveform background* (not on a marker
@@ -2627,7 +2652,10 @@ impl App {
             mouse_down_anchor: None,
             dragging_marker: None,
             dragging_marker_start_position: None,
+            dragging_head_tail_mark: None,
+            dragging_head_tail_mark_start_position: None,
             marker_label_rects: Vec::new(),
+            head_tail_label_rects: Vec::new(),
             last_click: None,
             last_waveform_click: None,
             last_cdp_envelope_click: None,
@@ -8220,6 +8248,10 @@ impl App {
         let mut input_specs = Vec::new();
         if def.input != IoKind::None {
             input_specs.push(crate::model::cdp::InputSpec {
+                // Only the selection's own spec carries head/tail marks — CDP is handed a
+                // temp WAV of the selection, and the DISTMORE family reads its marklist
+                // against that file. Extra inputs (dual/variadic) never take one.
+                head_tail_marks: head_tail_marks_within(&doc.head_tail_marks, range),
                 channels: doc.channel_count(),
                 sample_rate: doc.sample_rate,
                 len_samples: range.1 - range.0,
@@ -8231,6 +8263,7 @@ impl App {
                 return;
             };
             input_specs.push(crate::model::cdp::InputSpec {
+                head_tail_marks: Vec::new(),
                 channels: doc_b.channel_count(),
                 sample_rate: doc_b.sample_rate,
                 len_samples: doc_b.len_samples(),
@@ -8245,6 +8278,7 @@ impl App {
         for doc_index in &variadic_docs {
             let Some(extra) = self.documents.get(*doc_index) else { continue };
             input_specs.push(crate::model::cdp::InputSpec {
+                head_tail_marks: Vec::new(),
                 channels: extra.channel_count(),
                 sample_rate: extra.sample_rate,
                 len_samples: extra.len_samples(),
@@ -8714,6 +8748,7 @@ impl App {
         };
 
         let mut input_specs = vec![crate::model::cdp::InputSpec {
+            head_tail_marks: Vec::new(),
             channels: primary.len().max(1),
             sample_rate: primary_rate,
             len_samples: primary.first().map(|c| c.len()).unwrap_or(0),
@@ -8721,6 +8756,7 @@ impl App {
         let mut inputs = vec![primary];
         if let Some(secondary) = &secondary {
             input_specs.push(crate::model::cdp::InputSpec {
+                head_tail_marks: Vec::new(),
                 channels: secondary.len().max(1),
                 sample_rate: primary_rate,
                 len_samples: secondary.first().map(|c| c.len()).unwrap_or(0),
@@ -8798,6 +8834,7 @@ impl App {
             defs.iter().zip(steps.iter()).map(|(def, step)| (def, step.values.as_slice())).collect();
 
         let input_spec = crate::model::cdp::InputSpec {
+            head_tail_marks: Vec::new(),
             channels: primary.len().max(1),
             sample_rate: primary_rate,
             len_samples: primary.first().map(|c| c.len()).unwrap_or(0),
@@ -9474,6 +9511,7 @@ impl App {
                                     .unwrap_or(32);
                                 for channels in output.results.drain(..) {
                                     self.push_document(Document {
+                                        head_tail_marks: Vec::new(),
                                         channels,
                                         sample_rate: output.sample_rate,
                                         bits_per_sample,
@@ -10170,6 +10208,7 @@ impl App {
         }
 
         let new_doc = Document {
+            head_tail_marks: Vec::new(),
             channels: vec![mixed],
             sample_rate,
             bits_per_sample,
@@ -10314,6 +10353,7 @@ impl App {
                 }
             }
             let region_doc = Document {
+                head_tail_marks: Vec::new(),
                 channels: region_channels,
                 sample_rate,
                 bits_per_sample: bits,
@@ -10665,6 +10705,12 @@ impl App {
 
         // Marker interaction (drag a line to move it, double-click a label to rename) takes
         // priority over selection when the press lands on a marker.
+        // Before the ordinary-marker handler: the two label lanes sit on adjacent rows, and
+        // the head/tail lane is the lower, more specific one — see
+        // `try_handle_head_tail_mark_mouse`'s doc comment.
+        if self.try_handle_head_tail_mark_mouse(mouse) {
+            return;
+        }
         if self.try_handle_marker_mouse(mouse) {
             return;
         }
@@ -10981,6 +11027,92 @@ impl App {
                 true
             }
             _ => true,
+        }
+    }
+
+    /// The head/tail-mark counterpart of `try_handle_marker_mouse`: press-and-drag a
+    /// head/tail mark to move it. Returns `true` if the event was consumed.
+    ///
+    /// No double-click-to-rename arm, unlike ordinary markers — a head/tail mark's label is
+    /// derived from its index (`H1`/`T1`/…), so there is nothing to rename. Checked *before*
+    /// `try_handle_marker_mouse` so that where the two lanes' labels sit on adjacent rows, the
+    /// head/tail row (which is the lower, more specific one) wins its own clicks rather than
+    /// being shadowed.
+    fn try_handle_head_tail_mark_mouse(&mut self, mouse: MouseEvent) -> bool {
+        let area = self.waveform_area;
+        let in_area = mouse.column >= area.x
+            && mouse.column < area.x + area.width
+            && mouse.row >= area.y
+            && mouse.row < area.y + area.height;
+        let idx = self.active_document;
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Ctrl+click is reserved for selection extension, same as the marker lane.
+                if !in_area || mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                    return false;
+                }
+                let hit = self
+                    .head_tail_label_rects
+                    .iter()
+                    .find(|(r, _)| {
+                        r.x <= mouse.column
+                            && mouse.column < r.x + r.width
+                            && r.y <= mouse.row
+                            && mouse.row < r.y + r.height
+                    })
+                    .map(|(_, hi)| *hi);
+                let Some(hi) = hit else { return false };
+                self.dragging_head_tail_mark = Some(hi);
+                self.dragging_head_tail_mark_start_position =
+                    self.documents.get(idx).and_then(|d| d.head_tail_marks.get(hi)).copied();
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(hi) = self.dragging_head_tail_mark else { return false };
+                let Some(viewport) = self.viewport.as_ref() else { return true };
+                let scroll = viewport.scroll_offset;
+                let spc = viewport.samples_per_column;
+                let Some(doc) = self.documents.get_mut(idx) else { return true };
+                let total = doc.len_samples();
+                if total == 0 {
+                    return true;
+                }
+                let colx = mouse.column.clamp(area.x, area.x + area.width - 1);
+                let col = (colx - area.x) as f64;
+                let pos = ((scroll as f64 + col * spc) as usize).min(total - 1);
+                let mut path = None;
+                if let Some(m) = doc.head_tail_marks.get_mut(hi) {
+                    *m = pos;
+                    doc.dirty = true;
+                    path = doc.path.clone();
+                }
+                if let Some(p) = path {
+                    self.file_panel.mark_dirty(&p, true);
+                }
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some(hi) = self.dragging_head_tail_mark.take() else { return false };
+                let start_pos = self.dragging_head_tail_mark_start_position.take();
+                if let Some(doc) = self.documents.get_mut(idx) {
+                    // Capture the live-dragged-to position before sorting reshuffles indices,
+                    // then collapse the whole gesture into one undoable command — exactly as
+                    // the marker lane does. Sorting matters more here: role is derived from
+                    // index, so a mark left out of order would silently read as the wrong
+                    // half of a pair.
+                    let end_pos = doc.head_tail_marks.get(hi).copied();
+                    doc.head_tail_marks.sort_unstable();
+                    doc.head_tail_marks.dedup();
+                    if let (Some(from), Some(to)) = (start_pos, end_pos) {
+                        if from != to {
+                            self.histories[idx].apply(move_head_tail_mark_command(from, to), doc);
+                        }
+                    }
+                }
+                true
+            }
+            _ => false,
         }
     }
 
@@ -11327,6 +11459,8 @@ impl App {
             action,
             Action::InsertMarker
                 | Action::DeleteMarker
+                | Action::InsertHeadTailMark
+                | Action::DeleteHeadTailMark
                 | Action::JumpPrevMarker
                 | Action::JumpNextMarker
         ) {
@@ -11433,6 +11567,7 @@ impl App {
             });
             if let Some((samples, markers, sample_rate, bits_per_sample)) = result {
                 let new_doc = Document {
+                    head_tail_marks: Vec::new(),
                     channels: samples,
                     sample_rate,
                     bits_per_sample,
@@ -11562,6 +11697,7 @@ impl App {
             });
             if let Some((channels, markers, sample_rate, bits_per_sample)) = result {
                 let new_doc = Document {
+                    head_tail_marks: Vec::new(),
                     channels,
                     sample_rate,
                     bits_per_sample,
@@ -11661,6 +11797,8 @@ impl App {
             | Action::TechnicalFades
             | Action::InsertMarker
             | Action::DeleteMarker
+            | Action::InsertHeadTailMark
+            | Action::DeleteHeadTailMark
             | Action::JumpPrevMarker
             | Action::JumpNextMarker
             | Action::NextRisingEdge
@@ -12018,6 +12156,27 @@ impl App {
                     changed = true;
                 }
             }
+            // Head/tail marks mirror the two actions above against the *other* mark list.
+            // No auto-generated name to pick: the label (`H1`/`T1`/…) and the Head-or-Tail
+            // role are both derived from position in the sorted list, so inserting one in the
+            // middle correctly renumbers everything after it with no extra bookkeeping.
+            Action::InsertHeadTailMark => {
+                let doc = &self.documents[idx];
+                let pos = doc.cursor;
+                if !doc.head_tail_marks.contains(&pos) {
+                    self.histories[idx]
+                        .apply(insert_head_tail_mark_command(pos), &mut self.documents[idx]);
+                    changed = true;
+                }
+            }
+            Action::DeleteHeadTailMark => {
+                let doc = &self.documents[idx];
+                if let Some(pos) = nearest_head_tail_mark(&doc.head_tail_marks, doc.cursor) {
+                    self.histories[idx]
+                        .apply(delete_head_tail_mark_command(pos), &mut self.documents[idx]);
+                    changed = true;
+                }
+            }
             Action::JumpPrevMarker => {
                 let doc = &mut self.documents[idx];
                 if let Some(p) =
@@ -12247,6 +12406,10 @@ impl App {
             self.confirm.is_some() || self.save_as_active || self.dialog.is_some() || self.menu.is_open();
         let marker_refs: Vec<(usize, &str)> =
             self.documents[doc_idx].markers.iter().map(|m| (m.position, m.label.as_str())).collect();
+        // Cloned rather than borrowed: unlike `marker_refs`, this outlives the immutable
+        // borrow of `self.documents` that the per-channel loop below takes mutably elsewhere.
+        // It's a `Vec<usize>` of a handful of entries, so the copy is free in practice.
+        let head_tail_refs: Vec<usize> = self.documents[doc_idx].head_tail_marks.clone();
         // Per-channel terminal row range actually covered by a rendered graphics image this
         // frame, so the marker overlay below knows which rows already have marker lines baked
         // into the bitmap (and must not also draw a buffer-cell line there — see the comment
@@ -12326,6 +12489,7 @@ impl App {
                         self.documents[doc_idx].cursor,
                         self.playhead_position,
                         &marker_refs,
+                        &head_tail_refs,
                         i == 0,
                         channel_inner.width,
                         pixel_width,
@@ -12416,6 +12580,64 @@ impl App {
                 Rect { x, y: wf.y, width: shown_w + 1, height: 1 },
                 mi,
             ));
+        }
+
+        // Head/tail mark overlay: the second, separate marker system
+        // (`Document.head_tail_marks`). Same geometry as the loop above, deliberately
+        // distinguished on *two* axes rather than one — `theme::HEAD_TAIL_MARKER` (orange)
+        // instead of Mauve, and a dotted `╎` line instead of the marker lane's `┊` — so the
+        // two systems stay tellable apart in a screenshot or by anyone who can't rely on hue.
+        //
+        // Labels sit one row below the ordinary markers' row, so a head/tail mark and a
+        // marker at the same column don't overprint each other's text.
+        let head_tail_style = Style::default().fg(theme::HEAD_TAIL_MARKER).bg(theme::BASE);
+        let label_row = (wf.y + 1).min(wf.y + wf.height.saturating_sub(1));
+        self.head_tail_label_rects.clear();
+        let mut visible_ht: Vec<(u16, usize)> = self.documents[doc_idx]
+            .head_tail_marks
+            .iter()
+            .enumerate()
+            .filter_map(|(hi, &position)| {
+                if position < scroll {
+                    return None;
+                }
+                let col = ((position - scroll) as f64 / spc) as i64;
+                (0..wf.width as i64).contains(&col).then(|| (wf.x + col as u16, hi))
+            })
+            .collect();
+        visible_ht.sort_by_key(|&(x, _)| x);
+        let buf = frame.buffer_mut();
+        for (k, &(x, hi)) in visible_ht.iter().enumerate() {
+            for y in wf.y..wf.y + wf.height {
+                // Same graphics-mode exclusion as the marker lane above — see that loop's
+                // comment for why drawing a buffer cell over a rendered image corrupts the
+                // row.
+                if channel_image_rows.iter().flatten().any(|&(start, end)| y >= start && y < end) {
+                    continue;
+                }
+                buf[(x, y)]
+                    .set_char('\u{254E}')
+                    .set_style(head_tail_style)
+                    .set_diff_option(CellDiffOption::AlwaysUpdate);
+            }
+            let lx = x + 1;
+            let limit = visible_ht.get(k + 1).map(|&(nx, _)| nx).unwrap_or(wf.x + wf.width);
+            let avail = limit.saturating_sub(lx) as usize;
+            let shown: String =
+                crate::model::document::head_tail_label(hi).chars().take(avail).collect();
+            let shown_w = shown.chars().count() as u16;
+            let label_row_has_image = channel_image_rows
+                .iter()
+                .flatten()
+                .any(|&(start, end)| label_row >= start && label_row < end);
+            if shown_w > 0 && !label_row_has_image {
+                buf.set_string(lx, label_row, &shown, head_tail_style);
+                for cx in lx..lx + shown_w {
+                    buf[(cx, label_row)].set_diff_option(CellDiffOption::AlwaysUpdate);
+                }
+            }
+            self.head_tail_label_rects
+                .push((Rect { x, y: label_row, width: shown_w + 1, height: 1 }, hi));
         }
 
         frame.render_widget(StatusBar { document: &self.documents[doc_idx], viewport, snap_to_zero: self.snap_to_zero, loop_playback: self.loop_playback, fine_mode: self.fine_mode, transient_threshold_db: self.transient_threshold_db, last_action: self.histories[doc_idx].last_label() }, status_area);
@@ -12691,6 +12913,29 @@ fn nearest_marker(markers: &[Marker], pos: usize) -> Option<usize> {
         .enumerate()
         .min_by_key(|(_, m)| m.position.abs_diff(pos))
         .map(|(i, _)| i)
+}
+
+/// The head/tail marks that fall inside `range`, rebased so they're relative to its start —
+/// the form `InputSpec.head_tail_marks` (and so CDP's marklist datafile) needs.
+///
+/// CDP receives a temp WAV of the selection alone, so an absolute document position would
+/// point somewhere else entirely in the file the process opens. Marks outside the range are
+/// dropped: they describe audio the process never sees.
+///
+/// A range that cuts through a Head/Tail pair leaves the surviving half in the list, which
+/// shifts the derived role of every later mark. That's deliberate — the alternative (refusing
+/// to run) would block a legitimate "process this phrase" selection over a technicality, and
+/// `MIN_HEAD_TAIL_PAIRS` still guards the case where too little survives to run at all.
+fn head_tail_marks_within(marks: &[usize], range: (usize, usize)) -> Vec<usize> {
+    let (start, end) = range;
+    marks.iter().filter(|&&m| m >= start && m < end).map(|&m| m - start).collect()
+}
+
+/// Position of the head/tail mark closest to `pos`, or `None` if there are none. Returns the
+/// *position*, not the index, because that's what every head/tail command is keyed on — see
+/// `commands::head_tail_mark`'s module docs for why index would be the wrong key here.
+fn nearest_head_tail_mark(marks: &[usize], pos: usize) -> Option<usize> {
+    marks.iter().copied().min_by_key(|m| m.abs_diff(pos))
 }
 
 /// Peak sample magnitude within the visible window. Takes explicit parameters to avoid
@@ -16554,6 +16799,7 @@ mod tests {
 
     fn doc(val: f32, len: usize) -> Document {
         Document {
+            head_tail_marks: Vec::new(),
             channels: vec![vec![val; len]],
             sample_rate: 44100,
             selection: None,
@@ -16568,6 +16814,7 @@ mod tests {
 
     fn stereo_doc(left: f32, right: f32, len: usize) -> Document {
         Document {
+            head_tail_marks: Vec::new(),
             channels: vec![vec![left; len], vec![right; len]],
             sample_rate: 44100,
             selection: None,
@@ -16670,6 +16917,7 @@ mod tests {
         let mut channel = vec![0.01f32; quiet_frames * FRAME_LEN];
         channel.extend(std::iter::repeat(0.5f32).take(loud_frames * FRAME_LEN));
         Document {
+            head_tail_marks: Vec::new(),
             channels: vec![channel],
             sample_rate: 44100,
             selection: None,
@@ -16779,6 +17027,7 @@ mod tests {
         let channel: Vec<f32> =
             segments.iter().flat_map(|&(level, frames)| std::iter::repeat(level).take(frames * FRAME_LEN)).collect();
         Document {
+            head_tail_marks: Vec::new(),
             channels: vec![channel],
             sample_rate: 44100,
             selection: None,
@@ -19547,6 +19796,7 @@ mod tests {
     fn non_integer_plain_number_field_blocks_validation() {
         use crate::model::cdp::{Category, IoKind, ParamDef, ParamKind};
         let def = crate::model::cdp::ProcessDef {
+            needs_head_tail_marks: false,
             key: "test_integer_number".into(),
             bin: "modify".into(),
             subprog: None,
@@ -20049,6 +20299,7 @@ mod tests {
             *s = 0.9;
         }
         let document = Document {
+            head_tail_marks: Vec::new(),
             channels: vec![channel],
             sample_rate: 44100,
             selection: None,
@@ -21945,6 +22196,7 @@ mod tests {
             ),
         ];
         let def = ProcessDef {
+            needs_head_tail_marks: false,
             key: "test_formant_put".into(),
             bin: "formants".into(),
             subprog: Some("put".into()),
@@ -22014,6 +22266,7 @@ mod tests {
             "test",
         )];
         let def = ProcessDef {
+            needs_head_tail_marks: false,
             key: "test_formant_put".into(),
             bin: "formants".into(),
             subprog: Some("put".into()),
@@ -23985,6 +24238,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tuiwave_export_norm_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let document = Document {
+            head_tail_marks: Vec::new(),
             channels: vec![samples],
             sample_rate: 44100,
             selection: None,
@@ -24032,6 +24286,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tuiwave_export_limit_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let document = Document {
+            head_tail_marks: Vec::new(),
             channels: vec![samples],
             sample_rate: 1000,
             selection: None,
@@ -24076,6 +24331,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tuiwave_export_limit_short_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let document = Document {
+            head_tail_marks: Vec::new(),
             channels: vec![samples],
             sample_rate: 1000,
             selection: None,
@@ -24219,6 +24475,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tuiwave_export_subsample_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let document = Document {
+            head_tail_marks: Vec::new(),
             channels: vec![vec![0.5f32; 100]],
             sample_rate: 44100,
             selection: None,
@@ -24765,6 +25022,170 @@ mod tests {
         assert_eq!(app.documents[0].markers[0].position, 50);
         app.handle_action(Action::Undo);
         assert_eq!(app.documents[0].markers[0].position, 100);
+    }
+
+    /// The head/tail lane's own drag: same one-gesture-one-undo contract as ordinary markers,
+    /// against the other mark list and the other command.
+    #[test]
+    fn dragging_a_head_tail_mark_is_undoable_as_one_move() {
+        let mut app = new_app(Some(doc(0.1, 1_000)), None);
+        app.documents[0].head_tail_marks = vec![100, 400];
+        app.content_width = 80;
+        app.waveform_area = Rect { x: 0, y: 0, width: 80, height: 4 };
+        app.viewport = Some(Viewport { samples_per_column: 1.0, scroll_offset: 0, amplitude_scale: 1.0, min_samples_per_column: 1.0, max_samples_per_column: 1_000.0, total_len: 1_000, auto_vertical_zoom: false });
+        app.head_tail_label_rects = vec![(Rect { x: 5, y: 1, width: 3, height: 1 }, 0)];
+
+        let mouse_at = |col: u16, kind: MouseEventKind| MouseEvent { kind, column: col, row: 1, modifiers: KeyModifiers::NONE };
+        app.handle_mouse(mouse_at(6, MouseEventKind::Down(MouseButton::Left)));
+        app.handle_mouse(mouse_at(50, MouseEventKind::Drag(MouseButton::Left)));
+        app.handle_mouse(mouse_at(50, MouseEventKind::Up(MouseButton::Left)));
+
+        assert_eq!(app.documents[0].head_tail_marks, vec![50, 400]);
+        app.handle_action(Action::Undo);
+        assert_eq!(app.documents[0].head_tail_marks, vec![100, 400]);
+    }
+
+    /// Dragging a head/tail mark past its neighbour must re-sort the list, because the
+    /// Head-or-Tail role of every mark is derived from its index — an out-of-order list would
+    /// silently relabel marks rather than merely looking untidy.
+    #[test]
+    fn dragging_a_head_tail_mark_past_its_neighbour_re_sorts_the_list() {
+        let mut app = new_app(Some(doc(0.1, 1_000)), None);
+        app.documents[0].head_tail_marks = vec![100, 400];
+        app.content_width = 80;
+        app.waveform_area = Rect { x: 0, y: 0, width: 80, height: 4 };
+        app.viewport = Some(Viewport { samples_per_column: 1.0, scroll_offset: 0, amplitude_scale: 1.0, min_samples_per_column: 1.0, max_samples_per_column: 1_000.0, total_len: 1_000, auto_vertical_zoom: false });
+        app.head_tail_label_rects = vec![(Rect { x: 5, y: 1, width: 3, height: 1 }, 0)];
+
+        let mouse_at = |col: u16, kind: MouseEventKind| MouseEvent { kind, column: col, row: 1, modifiers: KeyModifiers::NONE };
+        app.handle_mouse(mouse_at(6, MouseEventKind::Down(MouseButton::Left)));
+        app.handle_mouse(mouse_at(600, MouseEventKind::Drag(MouseButton::Left)));
+        app.handle_mouse(mouse_at(600, MouseEventKind::Up(MouseButton::Left)));
+
+        // Clamped to the last column (width 80), so the dragged mark lands at 79, before 400.
+        assert_eq!(app.documents[0].head_tail_marks, vec![79, 400], "still sorted");
+    }
+
+    /// `h` inserts at the cursor, `H` deletes the nearest, and both are undoable — the
+    /// head/tail counterparts of `m`/`M`.
+    #[test]
+    fn h_and_shift_h_insert_and_delete_head_tail_marks_undoably() {
+        let mut app = new_app(Some(doc(0.1, 1_000)), None);
+        app.documents[0].cursor = 200;
+        app.handle_action(Action::InsertHeadTailMark);
+        assert_eq!(app.documents[0].head_tail_marks, vec![200]);
+
+        app.documents[0].cursor = 600;
+        app.handle_action(Action::InsertHeadTailMark);
+        assert_eq!(app.documents[0].head_tail_marks, vec![200, 600]);
+
+        // A second insert at an occupied position is refused rather than duplicating.
+        app.handle_action(Action::InsertHeadTailMark);
+        assert_eq!(app.documents[0].head_tail_marks, vec![200, 600]);
+
+        // Delete removes the nearest to the cursor, not the last inserted.
+        app.documents[0].cursor = 250;
+        app.handle_action(Action::DeleteHeadTailMark);
+        assert_eq!(app.documents[0].head_tail_marks, vec![600]);
+
+        app.handle_action(Action::Undo);
+        assert_eq!(app.documents[0].head_tail_marks, vec![200, 600]);
+    }
+
+    /// CDP receives a temp WAV of the *selection*, so the marklist it's handed must hold only
+    /// the marks inside that selection, with times measured from the selection's start. An
+    /// absolute position would point somewhere else entirely in the file the process opens —
+    /// the single easiest thing to get silently wrong in the whole DISTMORE path.
+    #[test]
+    fn head_tail_marks_are_filtered_and_rebased_to_the_processed_range() {
+        let marks = [100, 500, 900, 1_500, 2_400];
+
+        // Whole file: nothing dropped, nothing shifted.
+        assert_eq!(head_tail_marks_within(&marks, (0, 3_000)), vec![100, 500, 900, 1_500, 2_400]);
+
+        // A sub-range keeps only what's inside it, rebased to its start.
+        assert_eq!(head_tail_marks_within(&marks, (400, 1_600)), vec![100, 500, 1_100]);
+
+        // The range's end is exclusive — a mark exactly on it belongs to the audio after it.
+        assert_eq!(head_tail_marks_within(&marks, (100, 900)), vec![0, 400]);
+
+        // A range containing no marks yields none, which `plan_job` turns into
+        // `PlanError::MissingHeadTailMarks` rather than a silently empty datafile.
+        assert!(head_tail_marks_within(&marks, (1_600, 2_000)).is_empty());
+    }
+
+    /// `h`/`H` must not disturb the ordinary marker list, and `m`/`M` must not disturb the
+    /// head/tail list — the whole point of them being two systems.
+    #[test]
+    fn the_two_marker_systems_do_not_touch_each_other() {
+        let mut app = new_app(Some(doc(0.1, 1_000)), None);
+        app.documents[0].cursor = 300;
+        app.handle_action(Action::InsertMarker);
+        app.handle_action(Action::InsertHeadTailMark);
+        assert_eq!(app.documents[0].markers.len(), 1);
+        assert_eq!(app.documents[0].head_tail_marks, vec![300]);
+
+        app.handle_action(Action::DeleteHeadTailMark);
+        assert_eq!(app.documents[0].markers.len(), 1, "deleting a head/tail mark spares the marker");
+        assert!(app.documents[0].head_tail_marks.is_empty());
+
+        app.handle_action(Action::InsertHeadTailMark);
+        app.handle_action(Action::DeleteMarker);
+        assert!(app.documents[0].markers.is_empty());
+        assert_eq!(app.documents[0].head_tail_marks, vec![300], "and vice versa");
+    }
+
+    /// The status bar reports head/tail marks in *pairs*, since that's the unit DISTMORE is
+    /// specified in, and flags a trailing unpaired Head — the state a half-finished marking
+    /// session leaves behind, which a bare pair count would hide.
+    #[test]
+    fn the_status_bar_reports_head_tail_marks_as_pairs() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 1_000)), None);
+        let mut terminal = Terminal::new(TestBackend::new(200, 20)).unwrap();
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(
+            !buffer_text(terminal.backend().buffer()).contains("H/T:"),
+            "hidden entirely when the file has none"
+        );
+
+        app.documents[0].head_tail_marks = vec![10, 20, 30, 40];
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(buffer_text(terminal.backend().buffer()).contains("H/T: 2 pairs"));
+
+        app.documents[0].head_tail_marks.push(50);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(buffer_text(terminal.backend().buffer()).contains("H/T: 2 pairs +1"));
+    }
+
+    /// The text-mode overlay draws head/tail marks in their own color and with their own line
+    /// glyph, and puts their derived `H1`/`T1` labels one row below the ordinary marker labels
+    /// so the two can share a column without overprinting.
+    #[test]
+    fn head_tail_marks_render_as_their_own_lane_in_text_mode() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 1_000)), None);
+        app.documents[0].head_tail_marks = vec![200, 400, 600];
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(screen.contains("H1"), "the first mark is labelled as a Head: {screen}");
+        assert!(screen.contains("T1"), "the second as its Tail: {screen}");
+        assert!(screen.contains("H2"), "the third opens the next pair: {screen}");
+        assert!(screen.contains('\u{254E}'), "drawn with the dashed head/tail glyph: {screen}");
+
+        let buffer = terminal.backend().buffer();
+        let wf = app.waveform_area;
+        let colored = (0..buffer.area().width).any(|x| {
+            (wf.y..wf.y + wf.height).any(|y| buffer[(x, y)].fg == theme::HEAD_TAIL_MARKER)
+        });
+        assert!(colored, "and in the head/tail color, not the ordinary marker's");
     }
 
     /// A plain click on a marker label (mouse down + up, no drag in between) must not push
@@ -25651,6 +26072,7 @@ mod tests {
         // so snapping always moves both endpoints to the same position → the bug triggers.
         let samples = vec![0.5f32; 20];
         let document = Document {
+            head_tail_marks: Vec::new(),
             channels: vec![samples],
             sample_rate: 44100,
             selection: Some(crate::model::selection::Selection { start: 8, end: 12 }),
@@ -25681,6 +26103,7 @@ mod tests {
     fn fade_out_on_tiny_selection_is_applied_not_silently_skipped() {
         let samples = vec![0.5f32; 20];
         let document = Document {
+            head_tail_marks: Vec::new(),
             channels: vec![samples],
             sample_rate: 44100,
             selection: Some(crate::model::selection::Selection { start: 8, end: 12 }),
@@ -25788,6 +26211,7 @@ mod tests {
         use crate::model::cdp::{Category, IoKind, ParamDef, ParamKind};
         use crate::model::formant::FormantBufferKind;
         let def = crate::model::cdp::ProcessDef {
+            needs_head_tail_marks: false,
             key: "test_formant_ref".into(),
             bin: "formants".into(),
             subprog: Some("put".into()),

@@ -133,6 +133,8 @@ impl MenuBar {
                 entries: vec![
                     entry("Insert Marker",                        Action::InsertMarker,               "m"),
                     entry("Delete Marker",                        Action::DeleteMarker,               "M"),
+                    entry("Insert Head/Tail Mark",                Action::InsertHeadTailMark,         "h"),
+                    entry("Delete Head/Tail Mark",                Action::DeleteHeadTailMark,         "H"),
                     entry("Previous Marker",                      Action::JumpPrevMarker,             "["),
                     entry("Next Marker",                          Action::JumpNextMarker,             "]"),
                     entry("Extend Selection to Previous Marker",  Action::ExtendSelectionToPrevMarker,"{"),
