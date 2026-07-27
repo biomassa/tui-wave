@@ -5297,6 +5297,45 @@ impl App {
         (start < end).then_some((start, end))
     }
 
+    /// The range a CDP process will actually be run over: [`Self::operation_range`], except
+    /// that a **DISTMORE-family process widens back to the whole document when the selection
+    /// doesn't hold enough complete Head/Tail pairs to run** (`MIN_HEAD_TAIL_PAIRS`).
+    ///
+    /// The user's call (2026-07-27), after a stray one-column drag left a 10274-sample
+    /// selection that silently defeated the process: honour a real selection, but fall back
+    /// rather than refuse when it can't possibly work. A selection too small to contain two
+    /// pairs is almost always accidental — a deliberate one is chosen around the marks — so
+    /// treating it as "no selection" is the reading that matches intent far more often than
+    /// failing does.
+    ///
+    /// Only applies to processes that actually consume the marks
+    /// (`ProcessDef::needs_head_tail_marks`); every other process honours the selection
+    /// unconditionally, as before.
+    fn cdp_process_range(
+        &self,
+        idx: usize,
+        def: &crate::model::cdp::ProcessDef,
+    ) -> Option<(usize, usize)> {
+        let doc = self.documents.get(idx)?;
+        let total_len = doc.len_samples();
+        if total_len == 0 {
+            return None;
+        }
+        // A degenerate selection (one zero-crossing snapping collapsed to nothing) already
+        // means "the whole document" for every process — see `operation_range`.
+        let range = self.operation_range(idx, self.snap_to_zero).unwrap_or((0, total_len));
+        if !def.needs_head_tail_marks || range == (0, total_len) {
+            return Some(range);
+        }
+        let pairs_in_range =
+            head_tail_marks_within(&doc.head_tail_marks, range).len() / 2;
+        if pairs_in_range >= crate::model::cdp::pipeline::MIN_HEAD_TAIL_PAIRS {
+            Some(range)
+        } else {
+            Some((0, total_len))
+        }
+    }
+
     /// The sample range a fade should act on: the current selection if one exists, otherwise
     /// a fade-direction-specific default — fade in runs from the start of the file to the
     /// cursor, fade out from the cursor to the end of the file — rather than
@@ -6115,17 +6154,11 @@ impl App {
         // processed (not the whole buffer) so both match what CDP is about to be handed. Both
         // exist because the catalog's static values made their process *always* fail — see
         // `ParamDef::range_scales_with_input_duration` / `default_from_dc_offset`.
-        // The range CDP will actually be handed: the selection if there is one, otherwise the
-        // whole document (`operation_range`'s own default). Falls back to the whole document
-        // when `operation_range` yields `None` too — a degenerate selection that zero-crossing
-        // snapping collapsed to nothing — so a stray click can't silently leave these defaults
-        // unscaled while the run itself still goes ahead on something.
-        let process_range = self.active_doc().and_then(|doc| {
-            let len = doc.len_samples();
-            (len > 0).then(|| {
-                self.operation_range(self.active_document, self.snap_to_zero).unwrap_or((0, len))
-            })
-        });
+        // The exact range the run will use — `cdp_process_range`, not `operation_range`, so
+        // these defaults can't disagree with it (it widens a DISTMORE process back to the
+        // whole document when the selection holds too few Head/Tail pairs, and a duration
+        // scaled against the narrow selection would then be wrong).
+        let process_range = self.cdp_process_range(self.active_document, def);
         if let (Some(doc), Some((start, end))) = (self.active_doc(), process_range) {
             let duration = (end.saturating_sub(start)) as f64 / doc.sample_rate.max(1) as f64;
             for (param, field) in def.params.iter().zip(&mut fields) {
@@ -8570,7 +8603,7 @@ impl App {
         let range = if def.input == IoKind::None {
             (doc.cursor, doc.cursor)
         } else {
-            match self.operation_range(idx, self.snap_to_zero) {
+            match self.cdp_process_range(idx, &def) {
                 Some(r) => r,
                 None => {
                     self.dialog = Some(reopen(focus, "no audio to process".into(), fields, second_input, variadic_input, preview, presets, preset_selected));
@@ -21345,6 +21378,84 @@ mod tests {
         let CdpField::Number { min, max, .. } = &fields[1] else { panic!() };
         assert!((*min - (2.0 * 2.0 + 0.01)).abs() < 1e-6, "floor scaled against 2 seconds: {min}");
         assert!((*max - (64.0 * 2.0 - 0.01)).abs() < 1e-6, "ceiling too: {max}");
+    }
+
+    /// A selection too small to hold two complete Head/Tail pairs is almost always an
+    /// accidental drag (the report that prompted this: a one-column drag at 10164 samples per
+    /// column left a 10274-sample selection that silently defeated the process). A DISTMORE
+    /// process widens back to the whole document rather than refusing.
+    #[test]
+    fn a_distmore_process_widens_past_a_selection_too_small_to_hold_two_pairs() {
+        let len = 44_100 * 4;
+        let mut app = new_app(Some(doc(0.1, len)), None);
+        app.documents[0].head_tail_marks = vec![1_000, 50_000, 100_000, 150_000];
+        // A stray one-column-ish drag, containing exactly one mark and so zero complete pairs.
+        app.documents[0].selection = Some(Selection { start: 900, end: 11_000 });
+
+        let def = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .find(|p| p.key == "distmore_segsbkwd_2")
+            .expect("distmore_segsbkwd_2 in catalog")
+            .clone();
+        assert!(def.needs_head_tail_marks);
+        assert_eq!(
+            app.cdp_process_range(0, &def),
+            Some((0, len)),
+            "widens to the whole document instead of failing"
+        );
+
+        // A *deliberate* selection — one chosen around two real pairs — is still honoured.
+        app.documents[0].selection = Some(Selection { start: 500, end: 160_000 });
+        assert_eq!(app.cdp_process_range(0, &def), Some((500, 160_000)));
+    }
+
+    /// The widening is specific to processes that consume the marks. Every other process must
+    /// keep honouring a small selection exactly as before — that is the whole point of being
+    /// able to run e.g. a filter on a short fragment.
+    #[test]
+    fn a_non_distmore_process_still_honours_a_tiny_selection() {
+        let len = 44_100 * 4;
+        let mut app = new_app(Some(doc(0.1, len)), None);
+        app.documents[0].head_tail_marks = vec![1_000, 50_000, 100_000, 150_000];
+        app.documents[0].selection = Some(Selection { start: 900, end: 11_000 });
+
+        let def = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .find(|p| p.key == "blur_avrg")
+            .expect("blur_avrg in catalog")
+            .clone();
+        assert!(!def.needs_head_tail_marks);
+        assert_eq!(
+            app.cdp_process_range(0, &def),
+            Some((900, 11_000)),
+            "an ordinary process is unaffected by the DISTMORE fallback"
+        );
+    }
+
+    /// After the widening, the marklist CDP receives must describe the whole file — all four
+    /// marks, unrebased — not the fragment that was selected. Guards the case where the range
+    /// widens but the marks were still taken from the old one.
+    #[test]
+    fn the_widened_range_carries_every_mark_in_the_document() {
+        let len = 44_100 * 4;
+        let mut app = new_app(Some(doc(0.1, len)), None);
+        let marks = vec![1_000, 50_000, 100_000, 150_000];
+        app.documents[0].head_tail_marks = marks.clone();
+        app.documents[0].selection = Some(Selection { start: 900, end: 11_000 });
+
+        let def = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .find(|p| p.key == "distmore_segsbkwd_2")
+            .expect("distmore_segsbkwd_2 in catalog")
+            .clone();
+        let range = app.cdp_process_range(0, &def).expect("a range");
+        assert_eq!(head_tail_marks_within(&marks, range), marks);
     }
 
     /// The wheel scrolls every dialog that has a list, not just the process browser.
