@@ -8,6 +8,7 @@ pub mod chain_preset;
 pub mod chain_recent;
 pub mod def;
 pub mod envelope_preset;
+pub mod group;
 pub mod input_buffers;
 pub mod pipeline;
 pub mod preset;
@@ -16,6 +17,7 @@ pub mod recent;
 
 pub use catalog::CdpCatalog;
 pub use chain::{step_at, steps_at, steps_at_mut, CdpChain, ChainError, ChainStep};
+pub use group::{cdp_group, groups_for, CdpGroup};
 pub use def::{
     Category, CrystalVdat, HiliteBandRow, IoKind, ParamDef, ParamKind, ParamValue, ProcessDef,
     TableColumn,
