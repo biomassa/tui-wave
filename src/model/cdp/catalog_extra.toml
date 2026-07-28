@@ -17931,3 +17931,1856 @@ step = 0.05
 default = 0.7
 exponential = true
 scale = "plain"
+
+# ---- cdistort.htm gap-list implementation (2026-07-28) -------------------------------
+# Adds the `distort`-family processes documented at composersdesktop.com/docs/html/cdistort.htm
+# that this catalog was still missing. Every entry below is verified against the real binary
+# in `cdp/` (CDP Release 7.1), not just its usage text -- each argv shape was invoked, and the
+# ranges here are the ones the binary actually accepts, bisected where its usage text gives
+# none.
+#
+# Two deliberate exclusions from that page, documented rather than silently dropped:
+#
+#   `distcut distcut 2`: broken in this build. With CYCLESTEP >= 3 it writes a single
+#     truncated output and warns "Can't close output sf-soundfile : can't truncate SFfile"
+#     -- reproduced across two fixtures (a 2s decaying tone and a 3s constant one) at
+#     cyclecnt=20/step=3,4,5,10,20,40 and cyclecnt=4/step=4. Even step=2, which does produce
+#     files, yields implausible counts (121 outputs from a 660-waveset source where ~330 are
+#     expected). Mode 1 has none of this and is already in the catalog. Same class of
+#     real-binary bug as `filter iterated`'s readsamps_with_wrap() crash noted above.
+#
+#   `distort cyclecnt`: not a transformation at all -- it prints a waveset count to the
+#     console and writes no outfile, so it has no place in a process catalog whose every
+#     entry produces a buffer. (`distort shuffle` remains excluded for the free-text
+#     domain-image param reason given in the gap-list note further up this file.)
+#
+# `distort delete` mode 2 (in catalog.toml, not here) carries a stale comment claiming the
+# binary rejects a non-integer cycle count; it does not -- see the correction there. The
+# delete 1/3 entries below set integer = false to match what the binary actually does.
+
+
+# Verified against the real binary (2026-07-28): `distort repeat2 infile outfile multiplier
+# [-ccyclecnt] [-sskipcycles]`. Multiplier's floor is a real one -- 1 is rejected with
+# "INCORRECT USE", 2 is the smallest accepted value. Non-integers are accepted and silently
+# rounded (3.5 produced byte-identical output to 4), so integer is left false here; contrast
+# `distrep`, whose own comments record a genuine INVALID DATA rejection.
+[[process]]
+key = "distort_repeat2"
+bin = "distort"
+subprog = "repeat2"
+title = "Waveset Repeat In Place — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Repeats each waveset group without lengthening the sound"
+description = """
+Repeats each group of wavecycles a set number of times, but drops the wavecycles those repeats displace instead of pushing them along, so the output stays the same length as the input. Where Waveset Repeat stretches the sound, this one keeps its timing and spends the repetition on texture: a buzzing, pitch-flattened version of the source that stays in sync with the original.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Multiplier"
+description = "The number of times each wavecycle group repeats"
+automatable = true
+kind = "number"
+min = 2.0
+max = 64.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Count"
+description = "The number of wavecycles in each repeated group"
+flag = "-c"
+automatable = true
+kind = "number"
+min = 1.0
+max = 64.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Skip Cycles"
+description = "Number of wavecycles to leave untouched at the start of the sound"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `distort replim infile outfile multiplier
+# [-ccyclecnt] [-sskipcycles] [-fhilim]`. HILIM's range is sample-rate dependent -- the binary
+# reports "out of range (440.000000 to 22050.000000)" on a 44.1kHz file and "(440.000000 to
+# 11025.000000)" on a 22.05kHz one -- hence `hz_capped_to_nyquist` (NumberScale, def.rs) on
+# that one param. The 440Hz floor is fixed at every rate, so it stays a literal `min`.
+[[process]]
+key = "distort_replim"
+bin = "distort"
+subprog = "replim"
+title = "Waveset Repeat Below Frequency — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Time-stretches by repeating only the wavecycles below a frequency limit"
+description = """
+Repeats wavecycles to stretch the sound, exactly as Waveset Repeat does, but only counts wavecycles whose frequency falls below the high limit. Short (high-frequency) wavecycles pass through untouched, so the low end of the sound stretches and thickens while the top end keeps its original timing -- a way to stretch a sound's body without smearing its transients into buzz.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Multiplier"
+description = "The number of times each qualifying wavecycle group repeats"
+automatable = true
+kind = "number"
+min = 2.0
+max = 64.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Count"
+description = "The number of wavecycles in each repeated group"
+flag = "-c"
+automatable = true
+kind = "number"
+min = 1.0
+max = 64.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Skip Cycles"
+description = "Number of wavecycles to leave untouched at the start of the sound"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "High Limit"
+description = "Only wavecycles below this frequency (Hz) are repeated"
+flag = "-f"
+automatable = false
+kind = "number"
+min = 440.0
+max = 22050.0
+step = 10.0
+default = 2000.0
+exponential = true
+scale = "hz_capped_to_nyquist"
+
+# Verified against the real binary (2026-07-28): `distort delete 1 infile outfile cyclecnt
+# [-sskipcycles]` -- mode 1 keeps whichever wavecycle comes first in each group. Cycle Count's floor is real (1 is rejected with
+# "INCORRECT USE", 2 is the smallest accepted value); non-integers are accepted and rounded,
+# so integer stays false.
+[[process]]
+key = "distort_delete_1"
+bin = "distort"
+subprog = "delete"
+mode = "1"
+title = "Waveset Thin (Keep One In N) — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Shortens a sound by keeping only one wavecycle out of every group"
+description = """
+Takes each group of wavecycles and throws away all but the first, shortening the sound without transposing it. Unlike the Strongest/Weakest variants this picks purely by position, so it thins the sound evenly rather than tracking its dynamics -- the result is grittier and less predictable, closer to a sample-rate crush than an edit.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Cycle Count"
+description = "The size of the group to delete wavecycles from"
+automatable = true
+kind = "number"
+min = 2.0
+max = 64.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Skip Cycles"
+description = "Number of wavecycles to leave untouched at the start of the sound"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `distort delete 3 infile outfile cyclecnt
+# [-sskipcycles]` -- mode 3 deletes the quietest wavecycle in each group, keeping the rest. Cycle Count's floor is real (1 is rejected with
+# "INCORRECT USE", 2 is the smallest accepted value); non-integers are accepted and rounded,
+# so integer stays false.
+[[process]]
+key = "distort_delete_3"
+bin = "distort"
+subprog = "delete"
+mode = "3"
+title = "Waveset Thin (Drop Weakest) — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Shortens a sound by deleting the quietest wavecycle in each group"
+description = """
+Takes each group of wavecycles and deletes only the quietest one, shortening the sound without transposing it. Because it removes the least of each group rather than keeping the most, it contracts far more gently than the other two delete modes -- the sound shortens while keeping most of its original character.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Cycle Count"
+description = "The size of the group to delete wavecycles from"
+automatable = true
+kind = "number"
+min = 2.0
+max = 64.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Skip Cycles"
+description = "Number of wavecycles to leave untouched at the start of the sound"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `distort reform 1 infile outfile` --
+# modes 1-7 take no parameters at all beyond the two filenames.
+[[process]]
+key = "distort_reform_1"
+bin = "distort"
+subprog = "reform"
+mode = "1"
+title = "Waveset To Fixed Square — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Replaces every wavecycle with a full-level square wave of the same length"
+description = """
+Replaces each wavecycle with a square wave of the same length but always at full level, discarding the original's amplitude entirely. The pitch contour of the source survives while its dynamics do not, so the output is a flat, buzzing, maximally-loud version of the source's own melody -- the harshest member of the reform family.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+# Verified against the real binary (2026-07-28): `distort reform 3 infile outfile` --
+# modes 1-7 take no parameters at all beyond the two filenames.
+[[process]]
+key = "distort_reform_3"
+bin = "distort"
+subprog = "reform"
+mode = "3"
+title = "Waveset To Fixed Triangle — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Replaces every wavecycle with a full-level triangle wave of the same length"
+description = """
+Replaces each wavecycle with a triangle wave of the same length at full level, discarding the original's amplitude. The same flattening as the fixed square mode but with a far softer waveform, so the source's pitch contour comes through as a steady reedy tone rather than a buzz.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+# Verified against the real binary (2026-07-28): `distort reform 5 infile outfile` --
+# modes 1-7 take no parameters at all beyond the two filenames.
+[[process]]
+key = "distort_reform_5"
+bin = "distort"
+subprog = "reform"
+mode = "5"
+title = "Waveset Half-Cycle Invert — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Flips alternate half-wavecycles so the waveform folds around zero"
+description = """
+Inverts every other half-wavecycle, folding the waveform around the zero line. This roughly halves the apparent wavelength, so the sound jumps up an octave while gaining a hollow, hard-edged timbre -- a distortion that transposes as a side effect of reshaping rather than by resampling.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+# Verified against the real binary (2026-07-28): `distort reform 8 infile outfile
+# exaggeration`. The range is the binary's own -- it rejects 50 with "Value (50.000000) out of
+# range (0.000002 to 40.000000)".
+[[process]]
+key = "distort_reform_8"
+bin = "distort"
+subprog = "reform"
+mode = "8"
+title = "Waveset Contour Exaggerate — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Exaggerates or smooths the shape of every wavecycle"
+description = """
+Reshapes each wavecycle by pushing its contour away from or toward a straight line. Values below 1 flatten the waveform toward a square, hardening the sound; values above 1 round it off toward a sine, softening it. Unlike the other reform modes this keeps the original waveform's identity and only bends it, so the amount of distortion is fully dialable -- and being automatable, it can sweep across the sound.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Exaggeration"
+description = "Below 1 flattens each wavecycle toward a square, above 1 rounds it toward a sine"
+automatable = true
+kind = "number"
+min = 2e-06
+max = 40.0
+step = 0.01
+default = 2.0
+exponential = true
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `quirk quirk 2 infile outfile powfac`. Range
+# confirmed by invocation (0.005 and 101 both rejected, 0.01 and 100 both accepted), matching
+# the binary's own usage text.
+[[process]]
+key = "quirk_quirk_2"
+bin = "quirk"
+subprog = "quirk"
+mode = "2"
+title = "Quirk Power Factor (Whole Signal) — quirk"
+category = "time"
+subcategory = "distort"
+short_description = "Distortion by raising sample values to a power across the whole signal"
+description = """
+Raises every sample value to a power, measured against the amplitude range of the entire signal rather than each half-waveset separately. Because the reference range is global, quiet passages stay quiet instead of being pushed up to match loud ones -- so this preserves the sound's dynamics where mode 1 levels them, making it the gentler of the two on material that already has a shape to it.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Power Factor"
+description = "The power to raise each sample to (below 1 exaggerates the contour, above 1 smooths it)"
+automatable = false
+kind = "number"
+min = 0.01
+max = 100.0
+step = 0.01
+default = 0.7
+exponential = true
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `scramble scramble 1 infile outfile dur seed
+# [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
+# trns 0-12, atten 0-1 all reject one step outside those bounds.
+[[process]]
+key = "scramble_scramble_1"
+bin = "scramble"
+subprog = "scramble"
+mode = "1"
+title = "Scramble Wavesets Randomly — scramble"
+category = "time"
+subcategory = "texture"
+short_description = "Reassembles the sound from randomly chosen waveset groups"
+description = """
+Cuts the sound into waveset groups and reassembles it by picking them at random, to a duration you choose. Because groups are drawn independently each time, some are reused and others never appear -- the result keeps the source's grain and timbre but loses its shape entirely, which makes it a good way to turn a short recording into a bed of arbitrary length.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Output Duration"
+description = "How long the reassembled sound should be, in seconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 3600.0
+step = 0.1
+default = 5.0
+exponential = false
+scale = "output_duration_seconds"
+
+[[process.params]]
+name = "Random Seed"
+description = "Using the same seed with the same random parameters reproduces the same output"
+automatable = false
+kind = "number"
+min = 0.0
+max = 256.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Count"
+description = "The number of wavesets in each group that gets reordered"
+flag = "-c"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 20.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Pitch"
+description = "The maximum amount in semitones to randomise each group's pitch by"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Amplitude"
+description = "The maximum amount to randomise each group's level by"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `scramble scramble 2 infile outfile dur seed
+# [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
+# trns 0-12, atten 0-1 all reject one step outside those bounds.
+[[process]]
+key = "scramble_scramble_2"
+bin = "scramble"
+subprog = "scramble"
+mode = "2"
+title = "Scramble Wavesets (Permuted) — scramble"
+category = "time"
+subcategory = "texture"
+short_description = "Reassembles the sound from shuffled waveset groups, using each before reusing any"
+description = """
+Cuts the sound into waveset groups and reassembles it in a shuffled order, exhausting every group before any is reused. Compared with the plain random mode this guarantees even coverage of the source, so nothing gets lost and nothing dominates -- a more faithful scramble that keeps the original's overall balance while destroying its order.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Output Duration"
+description = "How long the reassembled sound should be, in seconds"
+automatable = false
+kind = "number"
+min = 1.0
+max = 3600.0
+step = 0.1
+default = 5.0
+exponential = false
+scale = "output_duration_seconds"
+
+[[process.params]]
+name = "Random Seed"
+description = "Using the same seed with the same random parameters reproduces the same output"
+automatable = false
+kind = "number"
+min = 0.0
+max = 256.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Count"
+description = "The number of wavesets in each group that gets reordered"
+flag = "-c"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 20.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Pitch"
+description = "The maximum amount in semitones to randomise each group's pitch by"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Amplitude"
+description = "The maximum amount to randomise each group's level by"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `scramble scramble 3 infile outfile seed
+# [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
+# trns 0-12, atten 0-1 all reject one step outside those bounds.
+[[process]]
+key = "scramble_scramble_3"
+bin = "scramble"
+subprog = "scramble"
+mode = "3"
+title = "Scramble Wavesets By Rising Size — scramble"
+category = "time"
+subcategory = "texture"
+short_description = "Reorders every waveset group from shortest to longest"
+description = """
+Reorders all waveset groups by length, shortest first. Since a waveset's length is its period, this sorts the sound by pitch and plays it back as a continuous downward glide through everything the source contained -- an ordering process rather than a random one, so the same input always gives the same output.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Random Seed"
+description = "Using the same seed with the same random parameters reproduces the same output"
+automatable = false
+kind = "number"
+min = 0.0
+max = 256.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Count"
+description = "The number of wavesets in each group that gets reordered"
+flag = "-c"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 20.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Pitch"
+description = "The maximum amount in semitones to randomise each group's pitch by"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Amplitude"
+description = "The maximum amount to randomise each group's level by"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `scramble scramble 4 infile outfile seed
+# [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
+# trns 0-12, atten 0-1 all reject one step outside those bounds.
+[[process]]
+key = "scramble_scramble_4"
+bin = "scramble"
+subprog = "scramble"
+mode = "4"
+title = "Scramble Wavesets By Falling Size — scramble"
+category = "time"
+subcategory = "texture"
+short_description = "Reorders every waveset group from longest to shortest"
+description = """
+Reorders all waveset groups by length, longest first, producing a continuous upward glide through every pitch present in the source. The mirror of the rising-size mode, and equally deterministic -- useful as a riser built entirely out of the source's own material.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Random Seed"
+description = "Using the same seed with the same random parameters reproduces the same output"
+automatable = false
+kind = "number"
+min = 0.0
+max = 256.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Count"
+description = "The number of wavesets in each group that gets reordered"
+flag = "-c"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 20.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Pitch"
+description = "The maximum amount in semitones to randomise each group's pitch by"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Amplitude"
+description = "The maximum amount to randomise each group's level by"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `scramble scramble 5 infile outfile cuts seed
+# [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
+# trns 0-12, atten 0-1 all reject one step outside those bounds.
+[[process]]
+key = "scramble_scramble_5"
+bin = "scramble"
+subprog = "scramble"
+mode = "5"
+title = "Scramble Wavesets By Rising Size Per Segment — scramble"
+category = "time"
+subcategory = "texture"
+short_description = "Sorts wavesets shortest-first within each marked segment"
+description = """
+Splits the sound at the times you supply and sorts the waveset groups by length within each segment separately, shortest first. Each segment becomes its own falling glide, so instead of one long sweep across the whole file you get a repeating gesture that restarts at every cut -- rhythm the whole-file modes can't produce.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+# min/default are both strictly above zero on purpose: CDP rejects a cut time of exactly 0
+# with "Invalid time (0.000000) on line 1 ... Must be greater than zero" (confirmed against
+# the real binary, 2026-07-28). A time past the end of the file is accepted and ignored.
+[[process.params]]
+name = "Cut Times"
+description = "Times within the source that split it into separately-processed segments"
+automatable = true
+kind = "number"
+min = 0.001
+max = 999999.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+required_list = true
+list_is_time_sequence = true
+
+[[process.params]]
+name = "Random Seed"
+description = "Using the same seed with the same random parameters reproduces the same output"
+automatable = false
+kind = "number"
+min = 0.0
+max = 256.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Count"
+description = "The number of wavesets in each group that gets reordered"
+flag = "-c"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 20.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Pitch"
+description = "The maximum amount in semitones to randomise each group's pitch by"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Amplitude"
+description = "The maximum amount to randomise each group's level by"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `scramble scramble 6 infile outfile cuts seed
+# [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
+# trns 0-12, atten 0-1 all reject one step outside those bounds.
+[[process]]
+key = "scramble_scramble_6"
+bin = "scramble"
+subprog = "scramble"
+mode = "6"
+title = "Scramble Wavesets By Falling Size Per Segment — scramble"
+category = "time"
+subcategory = "texture"
+short_description = "Sorts wavesets longest-first within each marked segment"
+description = """
+Splits the sound at the times you supply and sorts the waveset groups by length within each segment separately, longest first. Each segment becomes its own rising glide, restarting at every cut.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+# min/default are both strictly above zero on purpose: CDP rejects a cut time of exactly 0
+# with "Invalid time (0.000000) on line 1 ... Must be greater than zero" (confirmed against
+# the real binary, 2026-07-28). A time past the end of the file is accepted and ignored.
+[[process.params]]
+name = "Cut Times"
+description = "Times within the source that split it into separately-processed segments"
+automatable = true
+kind = "number"
+min = 0.001
+max = 999999.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+required_list = true
+list_is_time_sequence = true
+
+[[process.params]]
+name = "Random Seed"
+description = "Using the same seed with the same random parameters reproduces the same output"
+automatable = false
+kind = "number"
+min = 0.0
+max = 256.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Count"
+description = "The number of wavesets in each group that gets reordered"
+flag = "-c"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 20.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Pitch"
+description = "The maximum amount in semitones to randomise each group's pitch by"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Amplitude"
+description = "The maximum amount to randomise each group's level by"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `scramble scramble 7 infile outfile cuts seed
+# [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
+# trns 0-12, atten 0-1 all reject one step outside those bounds.
+[[process]]
+key = "scramble_scramble_7"
+bin = "scramble"
+subprog = "scramble"
+mode = "7"
+title = "Scramble Wavesets Size Up Then Down — scramble"
+category = "time"
+subcategory = "texture"
+short_description = "Sorts wavesets shortest-to-longest then back again"
+description = """
+Sorts the waveset groups by length in a rise-then-fall arc, so the sound glides down through its pitch range and back up in one gesture. The cut times split the source into segments the arc is built from.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+# min/default are both strictly above zero on purpose: CDP rejects a cut time of exactly 0
+# with "Invalid time (0.000000) on line 1 ... Must be greater than zero" (confirmed against
+# the real binary, 2026-07-28). A time past the end of the file is accepted and ignored.
+[[process.params]]
+name = "Cut Times"
+description = "Times within the source that split it into separately-processed segments"
+automatable = true
+kind = "number"
+min = 0.001
+max = 999999.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+required_list = true
+list_is_time_sequence = true
+
+[[process.params]]
+name = "Random Seed"
+description = "Using the same seed with the same random parameters reproduces the same output"
+automatable = false
+kind = "number"
+min = 0.0
+max = 256.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Count"
+description = "The number of wavesets in each group that gets reordered"
+flag = "-c"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 20.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Pitch"
+description = "The maximum amount in semitones to randomise each group's pitch by"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Amplitude"
+description = "The maximum amount to randomise each group's level by"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `scramble scramble 8 infile outfile cuts seed
+# [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
+# trns 0-12, atten 0-1 all reject one step outside those bounds.
+[[process]]
+key = "scramble_scramble_8"
+bin = "scramble"
+subprog = "scramble"
+mode = "8"
+title = "Scramble Wavesets Size Down Then Up — scramble"
+category = "time"
+subcategory = "texture"
+short_description = "Sorts wavesets longest-to-shortest then back again"
+description = """
+Sorts the waveset groups by length in a fall-then-rise arc, gliding up through the sound's pitch range and back down. The mirror of the up-then-down mode.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+# min/default are both strictly above zero on purpose: CDP rejects a cut time of exactly 0
+# with "Invalid time (0.000000) on line 1 ... Must be greater than zero" (confirmed against
+# the real binary, 2026-07-28). A time past the end of the file is accepted and ignored.
+[[process.params]]
+name = "Cut Times"
+description = "Times within the source that split it into separately-processed segments"
+automatable = true
+kind = "number"
+min = 0.001
+max = 999999.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+required_list = true
+list_is_time_sequence = true
+
+[[process.params]]
+name = "Random Seed"
+description = "Using the same seed with the same random parameters reproduces the same output"
+automatable = false
+kind = "number"
+min = 0.0
+max = 256.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Count"
+description = "The number of wavesets in each group that gets reordered"
+flag = "-c"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 20.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Pitch"
+description = "The maximum amount in semitones to randomise each group's pitch by"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Amplitude"
+description = "The maximum amount to randomise each group's level by"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `scramble scramble 11 infile outfile cuts seed
+# [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
+# trns 0-12, atten 0-1 all reject one step outside those bounds.
+[[process]]
+key = "scramble_scramble_11"
+bin = "scramble"
+subprog = "scramble"
+mode = "11"
+title = "Scramble Wavesets By Rising Level Per Segment — scramble"
+category = "time"
+subcategory = "texture"
+short_description = "Sorts wavesets quietest-first within each marked segment"
+description = """
+Splits the sound at the times you supply and sorts the waveset groups by loudness within each segment separately, quietest first. Each segment becomes its own crescendo, so the cuts set the rhythm of a repeating swell -- the segment-wise counterpart to the whole-file rising-level mode.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+# min/default are both strictly above zero on purpose: CDP rejects a cut time of exactly 0
+# with "Invalid time (0.000000) on line 1 ... Must be greater than zero" (confirmed against
+# the real binary, 2026-07-28). A time past the end of the file is accepted and ignored.
+[[process.params]]
+name = "Cut Times"
+description = "Times within the source that split it into separately-processed segments"
+automatable = true
+kind = "number"
+min = 0.001
+max = 999999.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+required_list = true
+list_is_time_sequence = true
+
+[[process.params]]
+name = "Random Seed"
+description = "Using the same seed with the same random parameters reproduces the same output"
+automatable = false
+kind = "number"
+min = 0.0
+max = 256.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Count"
+description = "The number of wavesets in each group that gets reordered"
+flag = "-c"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 20.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Pitch"
+description = "The maximum amount in semitones to randomise each group's pitch by"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Amplitude"
+description = "The maximum amount to randomise each group's level by"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `scramble scramble 12 infile outfile cuts seed
+# [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
+# trns 0-12, atten 0-1 all reject one step outside those bounds.
+[[process]]
+key = "scramble_scramble_12"
+bin = "scramble"
+subprog = "scramble"
+mode = "12"
+title = "Scramble Wavesets By Falling Level Per Segment — scramble"
+category = "time"
+subcategory = "texture"
+short_description = "Sorts wavesets loudest-first within each marked segment"
+description = """
+Splits the sound at the times you supply and sorts the waveset groups by loudness within each segment separately, loudest first, turning each segment into its own decay.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+# min/default are both strictly above zero on purpose: CDP rejects a cut time of exactly 0
+# with "Invalid time (0.000000) on line 1 ... Must be greater than zero" (confirmed against
+# the real binary, 2026-07-28). A time past the end of the file is accepted and ignored.
+[[process.params]]
+name = "Cut Times"
+description = "Times within the source that split it into separately-processed segments"
+automatable = true
+kind = "number"
+min = 0.001
+max = 999999.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+required_list = true
+list_is_time_sequence = true
+
+[[process.params]]
+name = "Random Seed"
+description = "Using the same seed with the same random parameters reproduces the same output"
+automatable = false
+kind = "number"
+min = 0.0
+max = 256.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Count"
+description = "The number of wavesets in each group that gets reordered"
+flag = "-c"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 20.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Pitch"
+description = "The maximum amount in semitones to randomise each group's pitch by"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Amplitude"
+description = "The maximum amount to randomise each group's level by"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `scramble scramble 13 infile outfile cuts seed
+# [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
+# trns 0-12, atten 0-1 all reject one step outside those bounds.
+[[process]]
+key = "scramble_scramble_13"
+bin = "scramble"
+subprog = "scramble"
+mode = "13"
+title = "Scramble Wavesets Level Up Then Down — scramble"
+category = "time"
+subcategory = "texture"
+short_description = "Sorts wavesets quiet-to-loud then back again"
+description = """
+Sorts the waveset groups by loudness in a swell-then-decay arc built from the segments the cut times define -- the sound rises out of nothing and falls back into it, using only its own material.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+# min/default are both strictly above zero on purpose: CDP rejects a cut time of exactly 0
+# with "Invalid time (0.000000) on line 1 ... Must be greater than zero" (confirmed against
+# the real binary, 2026-07-28). A time past the end of the file is accepted and ignored.
+[[process.params]]
+name = "Cut Times"
+description = "Times within the source that split it into separately-processed segments"
+automatable = true
+kind = "number"
+min = 0.001
+max = 999999.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+required_list = true
+list_is_time_sequence = true
+
+[[process.params]]
+name = "Random Seed"
+description = "Using the same seed with the same random parameters reproduces the same output"
+automatable = false
+kind = "number"
+min = 0.0
+max = 256.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Count"
+description = "The number of wavesets in each group that gets reordered"
+flag = "-c"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 20.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Pitch"
+description = "The maximum amount in semitones to randomise each group's pitch by"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Amplitude"
+description = "The maximum amount to randomise each group's level by"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `scramble scramble 14 infile outfile cuts seed
+# [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
+# trns 0-12, atten 0-1 all reject one step outside those bounds.
+[[process]]
+key = "scramble_scramble_14"
+bin = "scramble"
+subprog = "scramble"
+mode = "14"
+title = "Scramble Wavesets Level Down Then Up — scramble"
+category = "time"
+subcategory = "texture"
+short_description = "Sorts wavesets loud-to-quiet then back again"
+description = """
+Sorts the waveset groups by loudness in a decay-then-swell arc, dropping away and building back up. The mirror of the up-then-down level mode.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+# min/default are both strictly above zero on purpose: CDP rejects a cut time of exactly 0
+# with "Invalid time (0.000000) on line 1 ... Must be greater than zero" (confirmed against
+# the real binary, 2026-07-28). A time past the end of the file is accepted and ignored.
+[[process.params]]
+name = "Cut Times"
+description = "Times within the source that split it into separately-processed segments"
+automatable = true
+kind = "number"
+min = 0.001
+max = 999999.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+required_list = true
+list_is_time_sequence = true
+
+[[process.params]]
+name = "Random Seed"
+description = "Using the same seed with the same random parameters reproduces the same output"
+automatable = false
+kind = "number"
+min = 0.0
+max = 256.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Cycle Count"
+description = "The number of wavesets in each group that gets reordered"
+flag = "-c"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 20.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Pitch"
+description = "The maximum amount in semitones to randomise each group's pitch by"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random Amplitude"
+description = "The maximum amount to randomise each group's level by"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+# Verified against the real binary (2026-07-28): `distort pulsed 1 infile outfile env stime dur
+# frq frand trand arand transp tranrand [-s] [-e]`. Ranges confirmed by invocation -- frq
+# 0.1-50, frand 0-12, trand/arand 0-1 all reject a step outside. Both breakpoint files have
+# their own value bounds the binary enforces with INVALID DATA: the impulse envelope 0-1, the
+# transposition contour -12 to 12 semitones (13 is rejected). STIME and DUR are both capped at
+# the input's own duration (dur=100 on a 3-second file is rejected).
+[[process]]
+key = "distort_pulsed_1"
+bin = "distort"
+subprog = "pulsed"
+mode = "1"
+title = "Impulse Train Over Source — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Imposes a repeating impulse envelope on the sound"
+description = """
+Chops the sound into a stream of impulses by imposing a repeating envelope on it, at a rate you set. The source plays through underneath unaltered -- only its amplitude is being gated -- so this reads as rhythm applied to existing material rather than new material generated from it. The randomisation controls keep the pulse from sounding mechanical, and the two keep-toggles decide whether the audio outside the impulse train survives.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Impulse Envelope"
+description = "Shape of a single impulse -- time/level pairs, rescaled to each impulse's own duration"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Start Time"
+description = "Where in the sound the impulses begin, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Duration"
+description = "How long the impulse train lasts, in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 7200.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Frequency"
+description = "How many impulses per second"
+automatable = false
+kind = "number"
+min = 0.1
+max = 50.0
+step = 0.1
+default = 8.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Frequency Randomization"
+description = "Randomises each impulse's spacing, in semitones of the pulse frequency"
+automatable = false
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Time Randomization"
+description = "Randomises where the envelope's peaks and troughs fall from impulse to impulse"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Amplitude Randomization"
+description = "Randomises the envelope's peak and trough levels from impulse to impulse"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Transposition Contour"
+description = "Time/semitone pairs shaping the pitch of the sound inside each impulse, rescaled to its duration"
+automatable = true
+required_envelope = true
+kind = "number"
+min = -12.0
+max = 12.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Transposition Randomization"
+description = "Randomises the transposition contour from impulse to impulse"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Keep Start"
+description = "Keep the source audio before the impulses begin"
+flag = "-s"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Keep End"
+description = "Keep the source audio after the impulses end"
+flag = "-e"
+automatable = false
+kind = "toggle"
+default = false
+
+# Verified against the real binary (2026-07-28): `distort pulsed 2 infile outfile env stime dur
+# frq frand trand arand cyctime transp tranrand [-s] [-e]` -- CYCTIME sits between arand and
+# transp, and in this mode is a duration in seconds. Its floor is the binary's parse limit
+# (0.0006 rejected outright); values much above 1 fail with "CANNOT ACHIEVE TASK" on ordinary
+# material, hence the max here. Same envelope/contour value bounds as mode 1.
+[[process]]
+key = "distort_pulsed_2"
+bin = "distort"
+subprog = "pulsed"
+mode = "2"
+title = "Impulse Train From Grabbed Wavecycles — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Builds a synthetic impulse train whose contents are looped wavecycles from the source"
+description = """
+Grabs a short slice of the source and loops it inside every impulse of a synthetic pulse train, instead of gating the source in place. The result is a new sound built from the old one's timbre: a steady pulsed tone whose pitch comes from the grab length and whose colour comes from wherever in the source you grabbed. Where mode 1 rhythmicises what's already there, this one manufactures material.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Impulse Envelope"
+description = "Shape of a single impulse -- time/level pairs, rescaled to each impulse's own duration"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Start Time"
+description = "Where in the sound to grab the looped content from, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 7200.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Duration"
+description = "How long the impulse train lasts, in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 7200.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Frequency"
+description = "How many impulses per second"
+automatable = false
+kind = "number"
+min = 0.1
+max = 50.0
+step = 0.1
+default = 8.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Frequency Randomization"
+description = "Randomises each impulse's spacing, in semitones of the pulse frequency"
+automatable = false
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Time Randomization"
+description = "Randomises where the envelope's peaks and troughs fall from impulse to impulse"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Amplitude Randomization"
+description = "Randomises the envelope's peak and trough levels from impulse to impulse"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Grab Length"
+description = "Duration of the wavecycles grabbed as the sound inside each impulse, in seconds"
+automatable = false
+kind = "number"
+min = 0.001
+max = 1.0
+step = 0.001
+default = 0.05
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Transposition Contour"
+description = "Time/semitone pairs shaping the pitch of the sound inside each impulse, rescaled to its duration"
+automatable = true
+required_envelope = true
+kind = "number"
+min = -12.0
+max = 12.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Transposition Randomization"
+description = "Randomises the transposition contour from impulse to impulse"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Keep Start"
+description = "Keep the source audio before the impulses begin"
+flag = "-s"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Keep End"
+description = "Keep the source audio after the impulses end"
+flag = "-e"
+automatable = false
+kind = "toggle"
+default = false
+
+# Verified against the real binary (2026-07-28): `distort pulsed 3 infile outfile env stime dur
+# frq frand trand arand cyctime transp tranrand [-s] [-e]`. Two units differ from mode 2 and
+# the binary's own usage text calls both out: STIME is a *sample count* here ("In mode 3, time
+# as samplecnt" -- 132299 accepted and 200000 rejected on a 3s/44.1k file, i.e. capped at the
+# file's length, hence `capped_at_input_samples`), and CYCTIME is a *count of wavecycles*
+# rather than a duration (1-256; 0 and 1000 both rejected).
+[[process]]
+key = "distort_pulsed_3"
+bin = "distort"
+subprog = "pulsed"
+mode = "3"
+title = "Impulse Train From Grabbed Wavecycle Count — distort"
+category = "time"
+subcategory = "distort"
+short_description = "Builds a synthetic impulse train from a counted number of source wavecycles"
+description = """
+The same synthetic impulse train as the previous mode, but the grabbed content is specified as a number of wavecycles rather than a duration. Counting wavecycles makes the grab track the source's own pitch instead of a fixed clock, so the looped content stays musically coherent wherever in the file it comes from -- the mode to reach for when the source has a clear pitch and a duration-based grab keeps landing mid-cycle.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Impulse Envelope"
+description = "Shape of a single impulse -- time/level pairs, rescaled to each impulse's own duration"
+automatable = true
+required_envelope = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Start Time"
+description = "Where in the sound to grab the looped content from, as a sample count (this mode only)"
+automatable = false
+kind = "number"
+min = 0.0
+max = 10000000.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "capped_at_input_samples"
+
+[[process.params]]
+name = "Duration"
+description = "How long the impulse train lasts, in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 7200.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Frequency"
+description = "How many impulses per second"
+automatable = false
+kind = "number"
+min = 0.1
+max = 50.0
+step = 0.1
+default = 8.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Frequency Randomization"
+description = "Randomises each impulse's spacing, in semitones of the pulse frequency"
+automatable = false
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Time Randomization"
+description = "Randomises where the envelope's peaks and troughs fall from impulse to impulse"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Amplitude Randomization"
+description = "Randomises the envelope's peak and trough levels from impulse to impulse"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Grab Cycles"
+description = "Number of wavecycles grabbed as the sound inside each impulse"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 10.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Transposition Contour"
+description = "Time/semitone pairs shaping the pitch of the sound inside each impulse, rescaled to its duration"
+automatable = true
+required_envelope = true
+kind = "number"
+min = -12.0
+max = 12.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Transposition Randomization"
+description = "Randomises the transposition contour from impulse to impulse"
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Keep Start"
+description = "Keep the source audio before the impulses begin"
+flag = "-s"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Keep End"
+description = "Keep the source audio after the impulses end"
+flag = "-e"
+automatable = false
+kind = "toggle"
+default = false

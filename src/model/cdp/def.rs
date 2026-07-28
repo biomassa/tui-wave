@@ -107,6 +107,29 @@ pub enum NumberScale {
     /// on the real input's sample rate, not just its duration, so this needed a new scale
     /// rather than reusing `CappedAtInputDuration`.
     HzCappedToAnalysisRange,
+    /// A frequency value (Hz) whose valid range runs up to the input's own Nyquist frequency
+    /// (`sample_rate / 2`). Confirmed against `distort replim`'s `-f` HILIM (2026-07-28): the
+    /// binary reports "Value (439.0) out of range (440.000000 to 22050.000000)" on a 44.1kHz
+    /// file and "(440.000000 to 11025.000000)" on a 22.05kHz one — the floor is a fixed 440Hz
+    /// (the catalog's own `min` covers that), only the ceiling tracks the file.
+    ///
+    /// Distinct from `HzCappedToAnalysisRange`, which caps at `sample_rate / 4` and additionally
+    /// floors at one analysis channel's width: that scale describes a *spectral* param bounded
+    /// by the pvoc window, this one a time-domain param bounded only by the sample rate, so
+    /// they can't share an arm. The catalog's static `max` still applies as an outer safety cap
+    /// — this only ever clamps *down*, never raises a value past what the entry declares.
+    HzCappedToNyquist,
+    /// A position expressed as a **sample count** rather than seconds, clamped down to the
+    /// real input's length. `distort pulsed` mode 3's STIME is the only such param so far —
+    /// its own usage text calls this out explicitly ("In mode 3, time as samplecnt") while
+    /// modes 1 and 2 take the same argument in seconds, which is why it can't just reuse
+    /// `CappedAtInputDuration`: the two differ in unit, not only in ceiling. Confirmed
+    /// against the real binary (2026-07-28): 132299 accepted and 200000 rejected on a
+    /// 3-second 44.1kHz file, i.e. the ceiling is the file's own sample count.
+    ///
+    /// Clamps to `len_samples - 1` for the same reason `CappedAtInputDuration` subtracts a
+    /// small margin: a start position exactly at the end leaves no audio to work with.
+    CappedAtInputSamples,
 }
 
 /// A concrete value for one parameter, as edited in the UI. Also the shape a saved CDP

@@ -638,8 +638,13 @@ output = "wav"
 stereo_native = false
 output_is_stereo = false
 
-# integer = true: confirmed against the real binary (2026-07-15) -- "distort delete 2
-# test.wav out.wav 5.5" -> "ERROR: INVALID DATA" (5 succeeds).
+# integer = true: CORRECTION (2026-07-28) -- this comment previously claimed "distort delete 2
+# test.wav out.wav 5.5" -> "ERROR: INVALID DATA" (confirmed 2026-07-15). Re-tested against the
+# same binary in cdp/ (CDP Release 7.1) while adding delete modes 1 and 3: all three modes
+# *accept* 5.5 and silently round it. The flag stays true regardless -- CDP's own usage text
+# calls this an integer, and offering a decimal that quietly snaps to another value is worse
+# than not offering it -- but it is a UI choice here, not a constraint the binary enforces.
+# delete 1/3 (catalog_extra.toml) set integer = false; see their notes.
 [[process.params]]
 name = "Cycle Count"
 description = "The size of the group to delete wavecycles from"

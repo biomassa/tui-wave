@@ -393,6 +393,20 @@ fn scale_number_value(
             let nyquist_half = sample_rate as f64 / 4.0;
             raw.clamp(channel_width, nyquist_half)
         }
+        // See NumberScale::HzCappedToNyquist's doc comment (def.rs): only the *ceiling* is
+        // sample-rate-dependent here (the floor is a fixed Hz value the catalog's own `min`
+        // already declares), so this clamps down and never up — unlike
+        // `HzCappedToAnalysisRange`, whose lower bound is data-dependent too.
+        NumberScale::HzCappedToNyquist => raw.min(sample_rate as f64 / 2.0),
+        // `duration_secs * sample_rate` recovers the input's sample count exactly —
+        // `InputSpec::duration_secs` is `len_samples / sample_rate`, so this is that division
+        // undone, not an approximation. Reconstructing it here keeps `len_samples` off this
+        // function's signature and out of all seven of its call sites for the sake of one
+        // scale. `- 1.0` for the same reason `CappedAtInputDuration` keeps a margin: a start
+        // position exactly at end-of-file leaves nothing to process.
+        NumberScale::CappedAtInputSamples => {
+            raw.min((duration_secs * sample_rate as f64 - 1.0).max(0.0)).round()
+        }
     }
 }
 
@@ -3060,6 +3074,72 @@ mod tests {
         .unwrap();
         // args: [subprog, infile, outfile, param] -- the process step is steps[1]
         assert_eq!(job.steps[1].args.last().unwrap(), "1024");
+    }
+
+    /// `distort replim`'s `-f` HILIM: the accepted ceiling is the input's own Nyquist
+    /// frequency, so the same catalog `max` has to resolve differently per sample rate. Only
+    /// the ceiling moves — a value already under Nyquist is passed through untouched, and the
+    /// catalog's own `min` (a fixed 440Hz floor CDP enforces at every rate) is not this
+    /// scale's business. See `NumberScale::HzCappedToNyquist` (def.rs).
+    #[test]
+    fn hz_capped_to_nyquist_clamps_down_per_sample_rate() {
+        let mut def = base_def(IoKind::Wav, IoKind::Wav);
+        def.subprog = Some("replim".into());
+        def.mode = None;
+        def.params =
+            vec![number_param("High Limit", 440.0, 22050.0, 2000.0, NumberScale::HzCappedToNyquist)];
+
+        let at = |sample_rate: u32, raw: f64| {
+            let input =
+                InputSpec { channels: 1, sample_rate, len_samples: sample_rate as usize, ..Default::default() };
+            plan_job(&def, &[ParamValue::Number(raw)], std::slice::from_ref(&input), &PvocSettings::default())
+                .unwrap()
+                .steps[0]
+                .args
+                .last()
+                .unwrap()
+                .clone()
+        };
+
+        // Under Nyquist at both rates -- passed through unchanged.
+        assert_eq!(at(44100, 2000.0), "2000");
+        assert_eq!(at(22050, 2000.0), "2000");
+        // Over Nyquist at 22.05k but not at 44.1k -- clamped only where CDP would reject it.
+        assert_eq!(at(44100, 22050.0), "22050");
+        assert_eq!(at(22050, 22050.0), "11025");
+        // A higher-rate file is *not* raised past what the catalog entry declares.
+        assert_eq!(at(96000, 22050.0), "22050");
+    }
+
+    /// `distort pulsed` mode 3's START TIME is a sample count (modes 1-2 take the same
+    /// argument in seconds), capped at the input's own length. See
+    /// `NumberScale::CappedAtInputSamples` (def.rs).
+    #[test]
+    fn capped_at_input_samples_clamps_to_the_inputs_own_length() {
+        let mut def = base_def(IoKind::Wav, IoKind::Wav);
+        def.subprog = Some("pulsed".into());
+        def.mode = Some("3".into());
+        def.params =
+            vec![number_param("Start Time", 0.0, 10_000_000.0, 0.0, NumberScale::CappedAtInputSamples)];
+
+        let at = |len_samples: usize, raw: f64| {
+            let input = InputSpec { channels: 1, sample_rate: 44100, len_samples, ..Default::default() };
+            plan_job(&def, &[ParamValue::Number(raw)], std::slice::from_ref(&input), &PvocSettings::default())
+                .unwrap()
+                .steps[0]
+                .args
+                .last()
+                .unwrap()
+                .clone()
+        };
+
+        // Inside the file -- untouched.
+        assert_eq!(at(132_300, 1000.0), "1000");
+        // Past the end -- pulled back to the last usable sample, matching the real binary's
+        // own ceiling (132299 accepted, 200000 rejected, on this exact 3s/44.1k length).
+        assert_eq!(at(132_300, 200_000.0), "132299");
+        // A longer file leaves the same value alone.
+        assert_eq!(at(441_000, 200_000.0), "200000");
     }
 
     #[test]
