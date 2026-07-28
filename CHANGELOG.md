@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-07-28
+
+- **24 more CDP distortion processes**, completing the coverage of CDP's own `cdistort`
+  documentation page. New: Waveset Repeat In Place (`distort repeat2`), Waveset Repeat Below
+  Frequency (`replim`), two more Waveset Thin modes (`delete 1`/`3`), four more Waveset Reform
+  shapes (fixed square, fixed triangle, half-cycle invert, contour exaggerate), all three
+  Impulse Train modes (`pulsed`), Quirk Power Factor over the whole signal, and twelve more
+  Scramble reorderings — by size, by level, and segment-wise versions of both, where only two
+  were available before. Every entry was verified by running the real binary rather than
+  reading its usage text, which is how several ranges were corrected before shipping.
+- **Fixed: many CDP processes clipped their output.** Reported for Accumulate and Convolution
+  Reverb, but a sweep of the whole catalog found 46 processes affected, and the cause was
+  shared: CDP's own spectral resynthesis stage clamps at full scale, destroying the peaks
+  before the result ever reaches the editor. Those processes now run with headroom reserved
+  and the level restored exactly afterwards — bit-for-bit, so anything that never needed the
+  headroom is untouched — and only if the result genuinely still exceeds full scale is it
+  brought down, with the reduction named in the status bar instead of changing level silently.
+  Convolution Reverb additionally writes floating-point output now, so its peaks survive at
+  all.
+- **Spectral Bridge (Frozen Points) works.** It has never been runnable — it needs a
+  window-grabbing pre-pass that was never built, and refused to start with "not supported
+  yet". The pre-pass now runs automatically as part of the process.
+- **Removed the broken "Grab Static Spectrum Window" process.** It returned an empty buffer
+  every single time, by construction. Spectral Freeze is the working version of the same idea.
+- **Fixed: the envelope editor drew two curves at once** in terminals with graphics support —
+  the real curve and a stale text-mode one about a row below it. The y-axis labels could also
+  push a tick mark into the plot area.
+- Fixed the Waveset Band-Filter (Between) defaults, which described an impossible band and so
+  discarded the entire sound whatever it was given.
+- Bumped version to 1.7.0.
+
 ## 2026-07-27
 
 - **New Head/Tail mark system for the CDP DISTMORE family.** A second, separate set of marks
