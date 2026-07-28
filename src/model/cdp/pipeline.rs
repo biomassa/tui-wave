@@ -249,6 +249,120 @@ pub struct PlannedJob {
     /// `write_inputs` knows to write plain 16-bit integer PCM instead of the normal 32-bit
     /// float for this one job's input file(s). See that field's doc comment for why.
     pub needs_simple_wav_input: bool,
+    /// `Some(g)` for a process in `CLIP_HEADROOM_PROCESSES`: every input file was written
+    /// attenuated by `CLIP_HEADROOM_ATTENUATION`, and the runner must multiply the finished
+    /// result by `g` (the exact inverse) to undo it. See that list's doc comment for the
+    /// measurements this came from, and `cdp::runner`'s `restore_clip_headroom` for what
+    /// happens when the restored peak still exceeds full scale.
+    pub clip_headroom_restore: Option<f64>,
+}
+
+/// How far a `CLIP_HEADROOM_PROCESSES` entry's input is attenuated before it reaches CDP.
+///
+/// −24 dB, chosen by measurement rather than taste: a catalog-wide sweep at a realistic 0.95
+/// input peak found 59-63 entries whose output clipped (the count varies slightly run to run —
+/// a few sit right on the threshold), and re-running that same sweep with the input scaled by
+/// this factor left exactly two still clipping. Neither of those two is fixable this way —
+/// `hilite_arpeg_1` normalizes to full scale by design (it still returns a peak of 1.0000 from
+/// a −36 dB input, a gain of +36.6 dB, so no amount of attenuation changes its output), and
+/// `fastconv` is handled by forcing its own `-f` float-output flag instead.
+///
+/// Costs **no** dynamic range, which is what makes so generous a figure affordable. The value
+/// is deliberately a power of two and the path is 32-bit float end to end (temp inputs are
+/// written `BitDepth::Float32`, CDP works in float, `pvoc synth` writes float back), so
+/// scaling by 2⁻⁴ only decrements the exponent — every mantissa bit survives, and multiplying
+/// by 2⁴ on the way back restores the original bit pattern exactly. Verified over 2 million
+/// random float32 samples: the ÷16 → ×16 round trip is bit-identical, where a non-power-of-two
+/// factor (0.1 → ×10) is not. So a process that never needed the headroom is returned
+/// unchanged, not merely close to unchanged.
+///
+/// The reasoning would not hold for a fixed-point path, where 4 bits of headroom really is 4
+/// bits of resolution gone — which is why `requires_simple_wav_input` processes (the only ones
+/// handed 16-bit integer temp files) must never appear in `CLIP_HEADROOM_PROCESSES`. None do
+/// today, and `clip_headroom_never_applies_to_integer_input_processes` keeps it that way.
+pub const CLIP_HEADROOM_ATTENUATION: f64 = 1.0 / 16.0;
+
+/// Processes whose output CDP **destructively** clamps at ±1.0 — the clipped samples are gone
+/// before the app ever sees the result, so no amount of post-hoc gain can recover them. Their
+/// inputs get `CLIP_HEADROOM_ATTENUATION` applied so the clamp is never reached, and the
+/// result is scaled back up afterwards.
+///
+/// Measured, not guessed: this is the set the catalog-wide clipping sweep reported at a 0.95
+/// input peak with a peak of exactly 1.0000 *and* a run of consecutive samples pinned there
+/// (a flat run is what distinguishes a real clamp from a signal that merely touches full scale
+/// once). Runs ranged from 5 to 45056 samples. The union of two sweep runs is used because a
+/// few entries sit right on the detection threshold and appear in one run but not the other.
+///
+/// Deliberately **not** the sweep's other group: 13 entries returned honest peaks *above* 1.0
+/// (up to 1.94) rather than clamping. Those lose nothing and are left alone.
+///
+/// `hilite_arpeg_1` is excluded despite clamping — see `CLIP_HEADROOM_ATTENUATION`.
+///
+/// Kept here rather than as a `ProcessDef` field because all but a couple of these live in
+/// `catalog.toml`, which is machine-generated and carries a "do not hand-edit" header; adding
+/// a flag there would mean either losing it on the next converter run or duplicating 45
+/// generated entries into `catalog_extra.toml` purely to set one boolean. This is an empirical
+/// measurement about CDP's binaries, not a property of the catalog data, so it lives in code
+/// next to the constant that explains it.
+pub const CLIP_HEADROOM_PROCESSES: &[&str] = &[
+    "analjoin_join",
+    "blur_chorus_5",
+    "blur_drunk",
+    "blur_scatter",
+    "combine_sum",
+    "fastconv_fastconv",
+    "filter_bank_5",
+    "filter_sweeping_1",
+    "filter_sweeping_2",
+    "filter_sweeping_3",
+    "filter_sweeping_4",
+    "filter_variable_3",
+    "focus_accu",
+    "focus_exag",
+    "focus_freeze_1",
+    "focus_hold",
+    "formants_put_1",
+    "formants_put_2",
+    "fractal_spectrum",
+    "hilite_arpeg_2",
+    "matrix_matrix_3",
+    "oneform_put_1",
+    "oneform_put_2",
+    "pitch_octmove_1",
+    "pitch_octmove_2",
+    "pitch_octmove_3",
+    "repitch_transpose_1",
+    "repitch_transpose_2",
+    "repitch_transpose_3",
+    "repitch_transpose_3b",
+    "repitch_transposef_1",
+    "repitch_transposef_2",
+    "repitch_transposef_3",
+    "repitch_transposef_3b",
+    "specfnu_specfnu_10",
+    "specfnu_specfnu_23",
+    "specfnu_specfnu_9",
+    "spectstr_stretch",
+    "spectwin_spectwin_1",
+    "spectwin_spectwin_3",
+    "strange_glis_1",
+    "strange_glis_2",
+    "strange_glis_3",
+    "stretch_spectrum_2",
+    "superaccu_superaccu_1",
+    "superaccu_superaccu_2",
+];
+
+/// Peak a headroom-restored result is scaled down to when it still exceeds full scale after
+/// the attenuation is undone. A little under 1.0 rather than exactly 1.0, so the result has
+/// somewhere to go when it is later resampled, summed with neighbouring audio, or converted to
+/// an integer depth on save — all of which can overshoot a signal sitting exactly at full
+/// scale. Matches `MatrixGainCalibration.target_peak`'s reasoning.
+pub const CLIP_HEADROOM_TARGET_PEAK: f32 = 0.99;
+
+/// Whether `key` is in `CLIP_HEADROOM_PROCESSES`.
+pub fn needs_clip_headroom(key: &str) -> bool {
+    CLIP_HEADROOM_PROCESSES.contains(&key)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -901,6 +1015,36 @@ pub fn plan_job(
         return plan_wav_glob(def, values, first, pvoc);
     }
 
+    apply_clip_headroom(def, plan_job_inner(def, values, inputs, pvoc)?)
+}
+
+/// Attenuates every input file of a `CLIP_HEADROOM_PROCESSES` job and records the exact
+/// inverse for the runner to undo — applied once here, after the dispatch, so all four audio
+/// input kinds (`Wav`/`Ana`/`DualWav`/`DualAna`) are covered by one rule rather than four
+/// copies of it.
+///
+/// Deliberately skipped when `matrix_gain_calibration` is set: that scheme already attenuates
+/// the input itself and derives a gain from measuring the result, so layering this on top
+/// would corrupt its measurement. The two never overlap in practice (`matrix_matrix_3` is on
+/// the headroom list; the calibration only ever applies to modes 1 and 2), and this keeps that
+/// true by construction rather than by coincidence.
+fn apply_clip_headroom(def: &ProcessDef, mut job: PlannedJob) -> Result<PlannedJob, PlanError> {
+    if !needs_clip_headroom(&def.key) || job.matrix_gain_calibration.is_some() {
+        return Ok(job);
+    }
+    for spec in &mut job.input_files {
+        spec.gain = Some(spec.gain.unwrap_or(1.0) * CLIP_HEADROOM_ATTENUATION);
+    }
+    job.clip_headroom_restore = Some(1.0 / CLIP_HEADROOM_ATTENUATION);
+    Ok(job)
+}
+
+fn plan_job_inner(
+    def: &ProcessDef,
+    values: &[ParamValue],
+    inputs: &[InputSpec],
+    pvoc: &PvocSettings,
+) -> Result<PlannedJob, PlanError> {
     match def.input {
         IoKind::None => plan_synthesis(def, values, pvoc),
         // `matrix_matrix_1`/`matrix_matrix_2` with "Auto Gain Reduction" on each get their
@@ -1093,7 +1237,7 @@ fn plan_wav_glob(
         brk_files,
         binary_input_files: Vec::new(),
         deferred_window_params,
-        needs_simple_wav_input: def.requires_simple_wav_input,
+        needs_simple_wav_input: def.requires_simple_wav_input, clip_headroom_restore: None,
     })
 }
 
@@ -1127,7 +1271,7 @@ fn plan_synthesis(
         output_curve: None,
         output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
         deferred_window_params: Vec::new(),
-        needs_simple_wav_input: def.requires_simple_wav_input,
+        needs_simple_wav_input: def.requires_simple_wav_input, clip_headroom_restore: None,
     })
 }
 
@@ -1304,7 +1448,7 @@ fn plan_matrix_with_gain_calibration(
             brk_files,
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: def.requires_simple_wav_input,
+            needs_simple_wav_input: def.requires_simple_wav_input, clip_headroom_restore: None,
         })
     })())
 }
@@ -1428,7 +1572,7 @@ fn plan_matrix_apply_with_gain_calibration(
             brk_files,
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: def.requires_simple_wav_input,
+            needs_simple_wav_input: def.requires_simple_wav_input, clip_headroom_restore: None,
         })
     })())
 }
@@ -1489,7 +1633,7 @@ fn plan_wav(
             output_sidecar: def.sidecar_extension.as_ref().map(|ext| format!("out.{ext}")),
         matrix_gain_calibration: None,
         deferred_window_params: Vec::new(),
-        needs_simple_wav_input: def.requires_simple_wav_input,
+        needs_simple_wav_input: def.requires_simple_wav_input, clip_headroom_restore: None,
         });
     }
 
@@ -1533,7 +1677,7 @@ fn plan_wav(
         }
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar, matrix_gain_calibration: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar, matrix_gain_calibration: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input , clip_headroom_restore: None})
 }
 
 /// Dual-input time-domain process: `bin subprog [mode] inA inB out params...`. Lanes work
@@ -1593,7 +1737,7 @@ fn plan_dual_wav(
             output_curve: None,
             output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
         deferred_window_params: Vec::new(),
-        needs_simple_wav_input: def.requires_simple_wav_input,
+        needs_simple_wav_input: def.requires_simple_wav_input, clip_headroom_restore: None,
         });
     }
 
@@ -1630,7 +1774,7 @@ fn plan_dual_wav(
         output_files.push(OutputWavSpec { relative_name: outfile, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input , clip_headroom_restore: None})
 }
 
 /// Variadic-input time-domain process: `bin subprog [mode] in_1.wav in_2.wav … out.wav
@@ -1719,7 +1863,7 @@ fn plan_variadic_wav(
         output_sidecar: None,
         matrix_gain_calibration: None,
         deferred_window_params: Vec::new(),
-        needs_simple_wav_input: def.requires_simple_wav_input,
+        needs_simple_wav_input: def.requires_simple_wav_input, clip_headroom_restore: None,
     })
 }
 
@@ -1851,7 +1995,7 @@ fn plan_dual_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None, brk_files, binary_input_files: Vec::new(), deferred_window_params: Vec::new(), needs_simple_wav_input: def.requires_simple_wav_input , clip_headroom_restore: None})
 }
 
 fn plan_ana(
@@ -1928,7 +2072,7 @@ fn plan_ana(
         output_files.push(OutputWavSpec { relative_name: wav_out, dest_channels: vec![ch] });
     }
 
-    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None, brk_files, binary_input_files: Vec::new(), deferred_window_params, needs_simple_wav_input: def.requires_simple_wav_input })
+    Ok(PlannedJob { steps, input_files, output_files, glob_output: None, output_curve: None, output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None, brk_files, binary_input_files: Vec::new(), deferred_window_params, needs_simple_wav_input: def.requires_simple_wav_input , clip_headroom_restore: None})
 }
 
 /// Plans a run of 2+ consecutive single-input spectral (`IoKind::Ana`-in/`IoKind::Ana`-out)
@@ -2044,6 +2188,11 @@ pub fn plan_ana_chain(
         binary_input_files: Vec::new(),
         deferred_window_params,
         needs_simple_wav_input: steps.iter().any(|(def, _)| def.requires_simple_wav_input),
+        // A chain runs several processes back to back over one analysis; attenuating for one
+        // link would silently rescale every other link's result too. Chains are built from an
+        // explicit user-assembled step list rather than the single-process dialog, so this is
+        // left off rather than guessed at — see CLIP_HEADROOM_PROCESSES.
+        clip_headroom_restore: None,
     })
 }
 
@@ -2146,7 +2295,7 @@ pub fn plan_curve_transform_job(
         brk_files,
         binary_input_files: vec![("curve_in.wav".to_string(), spliced)],
         deferred_window_params: Vec::new(),
-        needs_simple_wav_input: false,
+        needs_simple_wav_input: false, clip_headroom_restore: None,
     })
 }
 
@@ -2221,7 +2370,7 @@ pub fn plan_extract_pitch_curve(pvoc: &PvocSettings) -> PlannedJob {
         brk_files: Vec::new(),
         binary_input_files: Vec::new(),
         deferred_window_params: Vec::new(),
-        needs_simple_wav_input: false,
+        needs_simple_wav_input: false, clip_headroom_restore: None,
     }
 }
 
@@ -2304,7 +2453,7 @@ pub fn plan_extract_formants(pvoc: &PvocSettings, mode: FormantExtractionMode) -
         brk_files: Vec::new(),
         binary_input_files: Vec::new(),
         deferred_window_params: Vec::new(),
-        needs_simple_wav_input: false,
+        needs_simple_wav_input: false, clip_headroom_restore: None,
     }
 }
 
@@ -2338,7 +2487,7 @@ pub fn plan_oneform_get(formant_buffer_bytes: &[u8], time_secs: f64) -> PlannedJ
         brk_files: Vec::new(),
         binary_input_files: vec![("in.for".to_string(), formant_buffer_bytes.to_vec())],
         deferred_window_params: Vec::new(),
-        needs_simple_wav_input: false,
+        needs_simple_wav_input: false, clip_headroom_restore: None,
     }
 }
 
@@ -3567,6 +3716,60 @@ mod tests {
         assert!(glide_args.contains(&"g_b1.ana".to_string()), "reads grab B, got {glide_args:?}");
         assert!(!glide_args.iter().any(|a| a == "25" || a == "50"), "positions leaked: {glide_args:?}");
         assert_eq!(glide_args.last().unwrap(), "10");
+    }
+
+    /// The headroom attenuation is only lossless because the path is float end to end. A
+    /// `requires_simple_wav_input` process is handed a 16-bit *integer* temp file instead,
+    /// where −24 dB really would cost 4 bits of resolution — so the two must never coincide.
+    /// None do today; this keeps it that way if either list grows.
+    #[test]
+    fn clip_headroom_never_applies_to_integer_input_processes() {
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let offenders: Vec<_> = CLIP_HEADROOM_PROCESSES
+            .iter()
+            .filter(|key| catalog.find(key).is_some_and(|d| d.requires_simple_wav_input))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "these are on the headroom list but get 16-bit integer temp input, where the \
+             attenuation is lossy: {offenders:?}"
+        );
+    }
+
+    /// Every key on the headroom list must actually exist, so a catalog rename can't silently
+    /// turn an entry's clipping fix back off.
+    #[test]
+    fn clip_headroom_process_keys_all_exist() {
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let missing: Vec<_> =
+            CLIP_HEADROOM_PROCESSES.iter().filter(|key| catalog.find(key).is_none()).collect();
+        assert!(missing.is_empty(), "headroom list names processes not in the catalog: {missing:?}");
+    }
+
+    /// A flagged process gets every input attenuated and records the exact inverse; an
+    /// unflagged one is untouched.
+    #[test]
+    fn clip_headroom_attenuates_inputs_and_records_the_inverse() {
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("focus_accu").expect("focus_accu in catalog");
+        let input = InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
+        let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+        let job =
+            plan_job(def, &values, std::slice::from_ref(&input), &PvocSettings::default()).unwrap();
+
+        assert_eq!(job.clip_headroom_restore, Some(16.0));
+        assert!(!job.input_files.is_empty());
+        for spec in &job.input_files {
+            assert_eq!(spec.gain, Some(CLIP_HEADROOM_ATTENUATION));
+        }
+
+        // An unflagged process in the same family is left alone.
+        let other = catalog.find("blur_blur").or_else(|| catalog.find("spec_gain")).unwrap();
+        let ovalues: Vec<_> = other.params.iter().map(|p| p.kind.default_value()).collect();
+        let ojob =
+            plan_job(other, &ovalues, std::slice::from_ref(&input), &PvocSettings::default()).unwrap();
+        assert_eq!(ojob.clip_headroom_restore, None);
+        assert!(ojob.input_files.iter().all(|s| s.gain.is_none()));
     }
 
     /// Without the flag, a dual-ana process is planned exactly as before — no grab steps, and

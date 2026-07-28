@@ -10032,8 +10032,18 @@ impl App {
                                     continue;
                                 }
                                 let channels = output.results.into_iter().next().unwrap_or_default();
+                                // A headroom-restored result that still exceeded full scale was
+                                // scaled down (`cdp::runner::restore_clip_headroom`). Say so in
+                                // the command label rather than silently: the label is what the
+                                // status bar shows as the last action and what the undo entry is
+                                // named, so the level change stays visible without interrupting
+                                // with a modal for something that is working as intended.
+                                let label = match output.clip_headroom_reduction_db {
+                                    Some(db) => format!("{} (auto -{:.1} dB)", pending.label, -db),
+                                    None => pending.label,
+                                };
                                 self.histories[pending.doc_index].apply(
-                                    crate::commands::cdp::cdp_process_command(pending.label, pending.range, channels, timing_tolerance),
+                                    crate::commands::cdp::cdp_process_command(label, pending.range, channels, timing_tolerance),
                                     &mut self.documents[pending.doc_index],
                                 );
                                 self.viewport = None;
@@ -20352,7 +20362,7 @@ mod tests {
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: false,
+            needs_simple_wav_input: false, clip_headroom_restore: None,
         };
         app.cdp_runner.submit(crate::cdp::Job {
             id: 9,
@@ -22239,7 +22249,7 @@ mod tests {
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: false,
+            needs_simple_wav_input: false, clip_headroom_restore: None,
         };
         app.cdp_runner.submit(crate::cdp::Job {
             id: 42,
@@ -22328,7 +22338,7 @@ mod tests {
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: false,
+            needs_simple_wav_input: false, clip_headroom_restore: None,
         };
         app.cdp_runner.submit(crate::cdp::Job {
             id: 99,
@@ -22498,7 +22508,7 @@ mod tests {
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: false,
+            needs_simple_wav_input: false, clip_headroom_restore: None,
         };
         app.cdp_runner.submit(crate::cdp::Job {
             id: 7,
@@ -22564,7 +22574,7 @@ mod tests {
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: false,
+            needs_simple_wav_input: false, clip_headroom_restore: None,
         };
         app.cdp_runner.submit(crate::cdp::Job {
             id: 7,
@@ -22637,7 +22647,7 @@ mod tests {
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: false,
+            needs_simple_wav_input: false, clip_headroom_restore: None,
         };
         app.cdp_runner.submit(crate::cdp::Job {
             id: 9,
@@ -22696,7 +22706,7 @@ mod tests {
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: false,
+            needs_simple_wav_input: false, clip_headroom_restore: None,
         };
         app.cdp_runner.submit(crate::cdp::Job {
             id: 11,
@@ -22836,7 +22846,7 @@ mod tests {
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: false,
+            needs_simple_wav_input: false, clip_headroom_restore: None,
         };
         app.cdp_runner.submit(crate::cdp::Job {
             id: job_id,
@@ -23599,7 +23609,7 @@ mod tests {
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: false,
+            needs_simple_wav_input: false, clip_headroom_restore: None,
         };
 
         App::splice_formant_buffer_refs(&def, &fields, &formant_buffers, &mut planned);
@@ -23673,7 +23683,7 @@ mod tests {
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: false,
+            needs_simple_wav_input: false, clip_headroom_restore: None,
         };
 
         App::splice_formant_buffer_refs(&def, &fields, &formant_buffers, &mut planned);
@@ -25375,7 +25385,7 @@ mod tests {
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: false,
+            needs_simple_wav_input: false, clip_headroom_restore: None,
         };
         app.cdp_runner.submit(crate::cdp::Job {
             id: 99,
@@ -25465,7 +25475,7 @@ mod tests {
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: false,
+            needs_simple_wav_input: false, clip_headroom_restore: None,
         };
         app.cdp_runner.submit(crate::cdp::Job {
             id: 99,
