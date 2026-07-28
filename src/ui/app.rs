@@ -13199,6 +13199,7 @@ impl App {
                 render_dialog(
                     frame, area, d, &self.cdp_catalog, &self.curve_histories, &self.curves,
                     &self.formant_buffers, self.cdp_chain_editor.as_ref(), &self.documents,
+                    self.graphics_mode && self.picker.is_some(),
                 )
             })
             .unwrap_or_default();
@@ -13916,6 +13917,7 @@ fn render_dialog(
     formant_buffers: &[crate::model::formant::FormantBuffer],
     chain_editor: Option<&ChainEditorState>,
     documents: &[Document],
+    graphics_mode: bool,
 ) -> Vec<Rect> {
     match dialog {
         Dialog::MixToMono { inputs, focused, tanh_clip } => {
@@ -13955,7 +13957,7 @@ fn render_dialog(
         } => {
             let def = catalog.processes.get(*catalog_index);
             if let Some(edit) = envelope {
-                return render_cdp_envelope_editor(frame, area, fields, edit, def, curves);
+                return render_cdp_envelope_editor(frame, area, fields, edit, def, curves, graphics_mode);
             }
             if let Some(edit) = list_edit {
                 return render_cdp_list_editor(frame, area, fields, edit, def);
@@ -14511,7 +14513,23 @@ const CDP_ENVELOPE_GRID_HEIGHT: usize = 16;
 // column off from where breakpoints are actually drawn (a real bug this constant caused
 // once already: `8` here against a 7-wide label made a click squarely on the leftmost
 // point's marker land just outside `grid`, missing it entirely).
-const CDP_ENVELOPE_Y_LABEL_WIDTH: u16 = 7;
+/// Columns reserved to the left of the grid for the y-axis value labels and their `\u{2524}`
+/// tick. 8, not 7: the label is right-aligned into `WIDTH - 1` columns with the tick in the
+/// last one, and 7 was one short for a perfectly ordinary bound like `10000.0` (7 characters),
+/// which pushed the tick into the grid's own first column. `format_cdp_envelope_y_label`
+/// additionally truncates anything still too long, so no bound can overflow the gutter no
+/// matter how it formats.
+const CDP_ENVELOPE_Y_LABEL_WIDTH: u16 = 8;
+
+/// One y-axis label, right-aligned and tick-suffixed, guaranteed to occupy exactly
+/// `CDP_ENVELOPE_Y_LABEL_WIDTH` columns. Truncation is by character, not byte, so a
+/// multi-byte digit grouping or minus sign can't split mid-character.
+fn format_cdp_envelope_y_label(value: f64) -> String {
+    let width = CDP_ENVELOPE_Y_LABEL_WIDTH as usize - 1;
+    let text = format_cdp_float_for_display(value);
+    let text: String = text.chars().take(width).collect();
+    format!("{text:>width$}\u{2524}")
+}
 
 fn cdp_envelope_layout(area: Rect) -> CdpEnvelopeLayout {
     let width = 130u16.min(area.width);
@@ -14552,6 +14570,10 @@ fn render_cdp_envelope_editor(
     edit: &CdpEnvelopeEdit,
     def: Option<&crate::model::cdp::ProcessDef>,
     curves: &[crate::model::curve::PitchCurve],
+    // True when `App::render` will paint a bitmap over the grid immediately after this
+    // returns. The grid's braille curve and point markers are then skipped entirely rather
+    // than drawn and relied upon to be occluded -- see the loop below for why.
+    graphics_mode: bool,
 ) -> Vec<Rect> {
     if let Some(picker) = &edit.curve_picker {
         return render_envelope_curve_picker(frame, area, picker, curves);
@@ -14667,16 +14689,30 @@ fn render_cdp_envelope_editor(
     for row in 0..GRID_HEIGHT {
         let mut spans: Vec<Span> = Vec::with_capacity(grid_width + Y_LABEL_WIDTH);
         let y_label = if row == 0 {
-            format!("{:>6}\u{2524}", format_cdp_float_for_display(max))
+            format_cdp_envelope_y_label(max)
         } else if row + 1 == GRID_HEIGHT {
-            format!("{:>6}\u{2524}", format_cdp_float_for_display(min))
+            format_cdp_envelope_y_label(min)
         } else {
-            format!("{:>7}", "")
+            " ".repeat(Y_LABEL_WIDTH)
         };
         spans.push(Span::styled(y_label, dim_style));
 
+        // In graphics mode the grid cells are left blank rather than drawn and then relied
+        // upon to be hidden. `App::render` paints a bitmap over exactly this `Rect`
+        // afterwards, and the old approach assumed that bitmap lands on precisely the same
+        // cells — it does not always. The image is sized `grid.height * font.height` pixels
+        // from the picker's *reported* cell size, and where that disagrees with the terminal's
+        // real cell height by even a fraction, the bitmap comes up about a row short and the
+        // braille curve plus its `●` markers stay visible underneath it. That showed as two
+        // envelope curves at once, the bitmap's and the ASCII one a row below it (user report
+        // with screenshots, 2026-07-28, reproduced at several terminal sizes).
+        //
+        // Blanking is the fix rather than trying to make the two agree exactly: the bitmap is
+        // the complete rendering on its own, so anything drawn under it is at best invisible
+        // and at worst a second contradictory curve. The y-axis label span above is still
+        // pushed — it sits outside the grid `Rect` and must survive.
         for col in 0..grid_width {
-            let ch = braille_char(masks[row * grid_width + col]);
+            let ch = if graphics_mode { ' ' } else { braille_char(masks[row * grid_width + col]) };
             spans.push(Span::styled(ch.to_string(), base));
         }
         lines.push(Line::from(spans));
@@ -14685,8 +14721,11 @@ fn render_cdp_envelope_editor(
     // Overlay breakpoint markers on top of the interpolated backdrop. Uses the same forward
     // mapping the mouse handler's hit-testing does (`cdp_envelope_point_cell`), so a click
     // can never land somewhere that visually disagrees with where the dot is drawn.
+    // Skipped in graphics mode for the same reason the braille grid above is blanked: the
+    // bitmap draws its own filled-disc breakpoints, and a `●` glyph surviving underneath it
+    // reads as a duplicate point at a slightly different position.
     let mut overlay_lines = lines.clone();
-    for (i, &point) in edit.points.iter().enumerate() {
+    for (i, &point) in edit.points.iter().enumerate().filter(|_| !graphics_mode) {
         let (screen_col, screen_row) = cdp_envelope_point_cell(layout.grid, edit.time_max, min, max, point);
         let col = (screen_col - layout.grid.x) as usize;
         let row = (screen_row - layout.grid.y) as usize;
@@ -17646,6 +17685,106 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let row: String = (1..6u16).map(|x| buffer[(x, 2)].symbol()).collect();
         assert_eq!(row, "Save ", "the dropdown's first entry must survive on top of the toolbar row beneath it");
+    }
+
+    /// In graphics mode the envelope editor's grid cells must be left blank: `App::render`
+    /// paints a bitmap over that exact `Rect` immediately afterwards, and anything drawn
+    /// underneath it is at best invisible.
+    ///
+    /// It is not always hidden, which is the bug this guards (user report with screenshots,
+    /// 2026-07-28). The bitmap is sized from the picker's *reported* cell height, and where
+    /// that disagrees with the terminal's real cell height the image lands about a row short —
+    /// leaving the braille curve and its `●` markers showing beneath it, so the editor drew
+    /// two envelope curves at once, a row apart. Blanking makes the bitmap the only curve
+    /// regardless of how the rounding falls.
+    ///
+    /// Renders both ways and compares, so it fails if either the blanking stops happening or
+    /// the text renderer stops drawing a curve at all in non-graphics mode.
+    #[test]
+    fn envelope_editor_leaves_the_grid_blank_for_the_bitmap_in_graphics_mode() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let fields = vec![CdpField::Number {
+            input: TextInput::fresh("220"),
+            min: 20.0,
+            max: 10_000.0,
+            step: 1.0,
+            integer: false,
+            envelope: Some(vec![(0.0, 220.0), (1.0, 9000.0), (2.0, 220.0)]),
+        }];
+        let edit = CdpEnvelopeEdit {
+            field_index: 0,
+            target: CdpEnvelopeTarget::NumberField,
+            points: vec![(0.0, 220.0), (1.0, 9000.0), (2.0, 220.0)],
+            selected: 0,
+            original: None,
+            time_max: 2.0,
+            range: (0, 96_000),
+            curve_picker: None,
+            save_prompt: None,
+            presets: Vec::new(),
+            preset_selected: None,
+            custom_points: None,
+        };
+
+        let render = |graphics: bool| {
+            let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+            let mut grid = Rect::default();
+            terminal
+                .draw(|frame| {
+                    let rects = render_cdp_envelope_editor(
+                        frame,
+                        frame.area(),
+                        &fields,
+                        &edit,
+                        None,
+                        &[],
+                        graphics,
+                    );
+                    grid = rects[0];
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let mut painted = 0usize;
+            for y in grid.y..grid.y + grid.height {
+                for x in grid.x..grid.x + grid.width {
+                    if buffer[(x, y)].symbol() != " " {
+                        painted += 1;
+                    }
+                }
+            }
+            painted
+        };
+
+        assert_eq!(
+            render(true),
+            0,
+            "graphics mode must leave every grid cell blank for the bitmap to own"
+        );
+        assert!(
+            render(false) > 0,
+            "text mode must still draw the braille curve — the blanking is conditional"
+        );
+    }
+
+    /// A y-axis label must never spill past its gutter into the grid. `{:>6}` pads but does
+    /// not truncate, so a 7-character bound like `10000.0` — an entirely ordinary one, and the
+    /// exact value in the reported screenshots — pushed the `┤` tick into the grid's first
+    /// column, where in graphics mode it sat as a stray glyph on top of the bitmap.
+    #[test]
+    fn envelope_y_axis_labels_never_overflow_their_gutter() {
+        for value in [10_000.0, 20.0, 0.0, -10_000.0, 123_456.789, 1e9, -0.000_001] {
+            let label = format_cdp_envelope_y_label(value);
+            assert_eq!(
+                label.chars().count(),
+                CDP_ENVELOPE_Y_LABEL_WIDTH as usize,
+                "label for {value} is {:?}, which is not exactly {} columns",
+                label,
+                CDP_ENVELOPE_Y_LABEL_WIDTH
+            );
+            assert!(label.ends_with('\u{2524}'), "label for {value} must end with the tick");
+        }
     }
 
     /// A selection with loop playback off must bound (not loop) playback to the selection's
