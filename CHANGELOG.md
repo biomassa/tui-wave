@@ -1,6 +1,21 @@
 # Changelog
 
-## 2026-07-28
+## 2026-07-28 (1.7.1)
+
+- **CDP processes are now grouped the way CDP groups them.** The browser's group list followed
+  a taxonomy of our own (`distort`, `texture`, `filter`, …); it now uses CDP's own headings —
+  DISTORT, BLUR, FOCUS, MORPH, REPITCH and the rest — taken straight from its two index pages.
+  Anything you read about CDP in its documentation, manuals or GUI now names the same group you
+  see here. The old scheme also had a `texture` bucket holding 82 of 407 processes next to
+  groups holding one, which was not much of a taxonomy.
+- **The browser has a Domain column.** Choosing All, Recent, Time-domain or Spectral on the left
+  fills the Groups column beside it, so picking a process is two narrow choices instead of one
+  long list. Each domain offers "All" first, so you can browse a whole domain without picking a
+  group. Tab and the arrow keys move across all the columns and skip the Groups column when
+  there is nothing in it.
+- Bumped version to 1.7.1.
+
+## 2026-07-28 (1.7.0)
 
 - **24 more CDP distortion processes**, completing the coverage of CDP's own `cdistort`
   documentation page. New: Waveset Repeat In Place (`distort repeat2`), Waveset Repeat Below
