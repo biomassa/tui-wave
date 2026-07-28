@@ -559,6 +559,21 @@ fn is_cdp_table_edit_char(c: char) -> bool {
 /// own doc comment). The CDP browser (`App::cdp_filter_entries`) excludes these entirely,
 /// since Apply/Preview there always targets the active document and would fail immediately;
 /// the standalone curve editor's own 't' picker (`App::open_curve_transform_picker`) is the
+/// Whether `p` belongs under the highlighted Groups-column row. `All` matches everything;
+/// `Recent` never reaches here (`cdp_filter_entries` returns early for it, since that group is
+/// an *ordering* rather than a predicate); a domain row matches its whole domain; a group row
+/// matches exactly the CDP group `model::cdp::group` derives for the process.
+fn group_matches(group: &CdpGroupRow, p: &crate::model::cdp::ProcessDef) -> bool {
+    match group {
+        CdpGroupRow::All | CdpGroupRow::Recent => true,
+        CdpGroupRow::Domain { category, .. } => p.category == *category,
+        CdpGroupRow::Group { category, name } => {
+            crate::model::cdp::cdp_group(p)
+                == Some(crate::model::cdp::CdpGroup { category: *category, name })
+        }
+    }
+}
+
 /// only place these are ever reachable.
 fn is_curve_only_process(p: &crate::model::cdp::ProcessDef) -> bool {
     p.input == crate::model::cdp::IoKind::Curve && p.output == crate::model::cdp::IoKind::Curve
@@ -772,9 +787,9 @@ enum Dialog {
     /// resizing itself as you browse (the thing the browser/params split exists to fix;
     /// they used to be one merged dialog).
     ///
-    /// `groups` is `["All", "Recent", ...every real `subcategory` value in the catalog,
-    /// alphabetically]` (`App::cdp_groups`), computed once at open time since the catalog
-    /// doesn't change while the dialog is up. `group_selected` indexes into `groups`;
+    /// `groups` is the Groups column's rows (`App::cdp_group_rows` — `All`, `Recent`, the two
+    /// domains, and the expanded domain's CDP groups), rebuilt whenever the highlight moves to
+    /// a different domain. `group_selected` indexes into `groups`;
     /// `recent` is a snapshot of `model::cdp::recent::load_recent()` taken at open time
     /// (most-recent-first — the *order* `entries` should show when "Recent" is highlighted,
     /// not just a membership filter, so it can't be re-derived from `entries` itself).
@@ -793,7 +808,7 @@ enum Dialog {
     /// focus — only the highlighted *process* row matters for that, not `group_focus`.
     CdpBrowser {
         search: TextInput,
-        groups: Vec<String>,
+        groups: Vec<CdpGroupRow>,
         group_selected: usize,
         group_focus: bool,
         recent: Vec<String>,
@@ -1769,13 +1784,84 @@ fn cdp_params_focus_apply(field_count: usize, has_extra_input: bool) -> usize {
 /// PageUp/PageDown step size for `Dialog::CdpBrowser`'s process list.
 const CDP_BROWSER_PAGE_SIZE: usize = 10;
 
-/// `Dialog::CdpBrowser`'s always-first group: no group filter, `search` spans the whole
-/// catalog — the pre-Phase-7 behavior. Not a real `subcategory` value, so it can't collide
-/// with one.
-const CDP_GROUP_ALL: &str = "All";
-/// `Dialog::CdpBrowser`'s always-second group: the entries in `Dialog::CdpBrowser.recent`,
-/// most-recently-used first (not catalog order — see `App::cdp_filter_entries`).
-const CDP_GROUP_RECENT: &str = "Recent";
+/// One row of `Dialog::CdpBrowser`'s Groups column.
+///
+/// The column is **domain-first**, mirroring CDP's own documentation: CDP publishes two
+/// separate index pages (`cgroundx.htm` for the time domain, `cspecndx.htm` for the spectral
+/// one) and every group heading belongs to exactly one of them. So the two domains are rows in
+/// their own right, and a domain's groups appear indented beneath it when it is highlighted.
+///
+/// That nesting is what makes the column fit. There are 26 CDP groups across both domains,
+/// which with All and Recent would need 28 rows against a `CDP_BROWSER_LIST_ROWS` of 24 — and
+/// the browser deliberately never scrolls this column (a row index means the same thing in
+/// both columns, which is what keeps `handle_dialog_row_click` simple). Only one domain is
+/// ever expanded, so the worst case is 4 fixed rows plus the larger domain's 14 groups.
+///
+/// **Expansion follows the highlight** rather than needing a key of its own: moving onto a
+/// domain row expands it and collapses the other. Enter is already spoken for (it opens the
+/// highlighted *process*, from either column), and a domain row is a useful filter in itself —
+/// highlighting it shows everything in that domain.
+#[derive(Debug, Clone, PartialEq)]
+enum CdpGroupRow {
+    /// No group filter at all; `search` spans the whole catalog — the long-standing default,
+    /// and what the browser opens on.
+    All,
+    /// The entries in `Dialog::CdpBrowser.recent`, most-recently-used first (not catalog
+    /// order — see `App::cdp_filter_entries`).
+    Recent,
+    /// A whole domain. `expanded` is display state only — it is always true for the domain
+    /// containing the highlighted row and false otherwise.
+    Domain { category: crate::model::cdp::Category, expanded: bool },
+    /// One CDP group within the expanded domain, named exactly as CDP's index page names it.
+    Group { category: crate::model::cdp::Category, name: &'static str },
+}
+
+impl CdpGroupRow {
+    /// The text this row renders as, indentation and disclosure marker included, so the
+    /// renderer stays a plain "print each label" loop.
+    fn label(&self) -> String {
+        use crate::model::cdp::Category;
+        match self {
+            CdpGroupRow::All => "All".into(),
+            CdpGroupRow::Recent => "Recent".into(),
+            CdpGroupRow::Domain { category, expanded } => {
+                let marker = if *expanded { '\u{25be}' } else { '\u{25b8}' };
+                let name = match category {
+                    Category::Time => "Time-domain",
+                    Category::Pvoc => "Spectral",
+                };
+                format!("{marker} {name}")
+            }
+            CdpGroupRow::Group { name, .. } => format!("  {name}"),
+        }
+    }
+
+    /// Whether two rows denote the same selection. Deliberately ignores `Domain.expanded`,
+    /// which is display state: highlighting a collapsed domain row *makes* it expanded, so the
+    /// rebuilt row is never `==` the row that was clicked or arrowed onto. Comparing with `==`
+    /// there silently reset the selection to row 0 (caught by
+    /// `selecting_a_group_filters_the_process_list_by_cdp_group`).
+    fn same_target(&self, other: &CdpGroupRow) -> bool {
+        match (self, other) {
+            (CdpGroupRow::All, CdpGroupRow::All) | (CdpGroupRow::Recent, CdpGroupRow::Recent) => true,
+            (CdpGroupRow::Domain { category: a, .. }, CdpGroupRow::Domain { category: b, .. }) => a == b,
+            (
+                CdpGroupRow::Group { category: a, name: an },
+                CdpGroupRow::Group { category: b, name: bn },
+            ) => a == b && an == bn,
+            _ => false,
+        }
+    }
+
+    /// The domain a row belongs to, for deciding which domain to expand when it is
+    /// highlighted. `None` for All/Recent, which span both.
+    fn category(&self) -> Option<crate::model::cdp::Category> {
+        match self {
+            CdpGroupRow::All | CdpGroupRow::Recent => None,
+            CdpGroupRow::Domain { category, .. } | CdpGroupRow::Group { category, .. } => Some(*category),
+        }
+    }
+}
 /// Width of `Dialog::CdpBrowser`'s Groups column (`render_cdp_browser_dialog`) — shared
 /// with `App::handle_dialog_row_click`'s Groups-vs-Processes hit-test so the two can't
 /// disagree about which column an `x_in_row` falls in.
@@ -4771,7 +4857,7 @@ impl App {
     fn refresh_cdp_browser_filter(&mut self) {
         let Some(Dialog::CdpBrowser { search, groups, group_selected, recent, .. }) = &self.dialog else { return };
         let query = search.value().to_string();
-        let group = groups.get(*group_selected).cloned().unwrap_or_else(|| CDP_GROUP_ALL.to_string());
+        let group = groups.get(*group_selected).cloned().unwrap_or(CdpGroupRow::All);
         let recent = recent.clone();
         let new_entries = self.cdp_filter_entries(&query, &group, &recent);
         if let Some(Dialog::CdpBrowser { entries, selected, desc_scroll, .. }) = &mut self.dialog {
@@ -4787,12 +4873,25 @@ impl App {
     /// group so the process list never shows stale results for the group that used to be
     /// highlighted.
     fn cdp_browser_move_group(&mut self, delta: isize) {
+        let Some(Dialog::CdpBrowser { groups, group_selected, .. }) = &self.dialog else { return };
+        if groups.is_empty() {
+            return;
+        }
+        let target_index = (*group_selected as isize + delta).clamp(0, groups.len() as isize - 1) as usize;
+        let target = groups[target_index].clone();
+        self.cdp_browser_select_group(target);
+    }
+
+    /// Highlights `target`, expanding whichever domain it belongs to and collapsing the other,
+    /// then re-filters. Selection is re-found by *identity* rather than kept as an index
+    /// because expanding one domain while collapsing the other renumbers every row below —
+    /// holding the old index would land the highlight on an unrelated group.
+    fn cdp_browser_select_group(&mut self, target: CdpGroupRow) {
+        let rows = self.cdp_group_rows(target.category());
+        let index = rows.iter().position(|r| r.same_target(&target)).unwrap_or(0);
         if let Some(Dialog::CdpBrowser { groups, group_selected, .. }) = self.dialog.as_mut() {
-            let n = groups.len();
-            if n == 0 {
-                return;
-            }
-            *group_selected = (*group_selected as isize + delta).clamp(0, n as isize - 1) as usize;
+            *groups = rows;
+            *group_selected = index;
         }
         self.refresh_cdp_browser_filter();
     }
@@ -5026,12 +5125,11 @@ impl App {
             // there is for e.g. a checkbox row elsewhere in this function. `row` is 0-based
             // into the *visible* window (`render_cdp_browser_dialog`'s own scroll_top math,
             // mirrored here so the two can't disagree about which entry a given row means).
-            Some(Dialog::CdpBrowser { groups, group_selected, group_focus, entries, selected, .. }) => {
+            Some(Dialog::CdpBrowser { groups, group_focus, entries, selected, .. }) => {
                 if x_in_row < CDP_GROUP_COL_WIDTH {
-                    if row < groups.len() {
+                    if let Some(target) = groups.get(row).cloned() {
                         *group_focus = true;
-                        *group_selected = row;
-                        self.refresh_cdp_browser_filter();
+                        self.cdp_browser_select_group(target);
                     }
                 } else {
                     *group_focus = false;
@@ -6020,10 +6118,10 @@ impl App {
     /// `group == CDP_GROUP_RECENT` returns entries in `recent`'s own most-recently-used
     /// order instead of catalog order — order carries meaning there (it's *why* the group
     /// exists) in a way it doesn't for the other groups. Every other `group` value matches
-    /// `ProcessDef::subcategory` exactly. For every case but Recent, catalog order
+    /// the row's CDP group exactly (`group_matches`). For every case but Recent, catalog order
     /// (alphabetical by key, from the conversion script) is preserved rather than re-sorted,
     /// so results don't reshuffle confusingly as the user types.
-    fn cdp_filter_entries(&self, query: &str, group: &str, recent: &[String]) -> Vec<usize> {
+    fn cdp_filter_entries(&self, query: &str, group: &CdpGroupRow, recent: &[String]) -> Vec<usize> {
         let query = query.to_lowercase();
         // Name only — `key` (the internal identifier, e.g. "blur_avrg") and `title` (the
         // displayed name, e.g. "Blur Average"). `short_description`/`description` used to be
@@ -6046,7 +6144,7 @@ impl App {
         };
         let is_eligible =
             |p: &crate::model::cdp::ProcessDef| !is_curve_only_process(p) && matches_query(p) && is_chainable(p);
-        if group == CDP_GROUP_RECENT {
+        if *group == CdpGroupRow::Recent {
             return recent
                 .iter()
                 .filter_map(|key| self.cdp_catalog.processes.iter().position(|p| &p.key == key))
@@ -6057,39 +6155,43 @@ impl App {
             .processes
             .iter()
             .enumerate()
-            .filter(|(_, p)| (group == CDP_GROUP_ALL || p.subcategory == group) && is_eligible(p))
+            .filter(|(_, p)| group_matches(group, p) && is_eligible(p))
             .map(|(i, _)| i)
             .collect()
     }
 
-    /// `Dialog::CdpBrowser`'s group list: `CDP_GROUP_ALL`, `CDP_GROUP_RECENT`, then every
-    /// real `subcategory` value in the catalog that has at least one entry this browser can
-    /// actually show, alphabetically — the taxonomy `scripts/convert_soundthread_catalog.py`'s
-    /// `resolve_subcategory` reconciles down to one clean set (see CDP-Ext-Plan.md Phase 7),
-    /// used verbatim rather than re-derived here. Filtered through the same
-    /// `is_curve_only_process` exclusion `cdp_filter_entries` applies (user report,
-    /// 2026-07-21): "pitch curve" is a real subcategory, but every process tagged with it is
-    /// curve-in/curve-out and therefore invisible to this browser (`cdp_filter_entries`
-    /// excludes those unconditionally — they're only reachable via the standalone curve
-    /// editor's own `t` picker, `App::open_curve_transform_picker`). Without this filter that
-    /// group would always list, always highlight-able, and always show "No matches" — a dead
-    /// end with no explanation. `psow`'s pitch-subcategory processes (e.g. "Psow Reinforce
-    /// Harmonics") are ordinary wav-in/wav-out and unaffected by this filter; they already
-    /// show up in the real "pitch" group, just further down its (long, unsorted-by-name)
-    /// list than a quick glance catches.
-    fn cdp_groups(&self) -> Vec<String> {
-        let mut subcategories: Vec<String> = self
-            .cdp_catalog
-            .processes
-            .iter()
-            .filter(|p| !is_curve_only_process(p))
-            .map(|p| p.subcategory.clone())
-            .collect();
-        subcategories.sort();
-        subcategories.dedup();
-        let mut groups = vec![CDP_GROUP_ALL.to_string(), CDP_GROUP_RECENT.to_string()];
-        groups.extend(subcategories);
-        groups
+    /// `Dialog::CdpBrowser`'s Groups column, as rows: `All`, `Recent`, then one row per
+    /// domain, with `expanded`'s domain followed by its own CDP groups indented beneath.
+    /// See `CdpGroupRow` for why the column nests instead of listing all 26 groups flat.
+    ///
+    /// A group is only listed if it has at least one entry this browser can actually show,
+    /// using the same `is_curve_only_process` exclusion `cdp_filter_entries` applies. That
+    /// matters concretely rather than theoretically: every one of the 17 time-domain REPITCH
+    /// processes is a curve-in/curve-out pitch-curve transform, invisible here and reachable
+    /// only from the curve editor's own `t` picker, so listing REPITCH under the time domain
+    /// would give a row that always highlights and always reads "No matches" — the exact dead
+    /// end a user reported (2026-07-21) for the old "pitch curve" subcategory.
+    fn cdp_group_rows(&self, expanded: Option<crate::model::cdp::Category>) -> Vec<CdpGroupRow> {
+        use crate::model::cdp::Category;
+        let mut rows = vec![CdpGroupRow::All, CdpGroupRow::Recent];
+        for category in [Category::Time, Category::Pvoc] {
+            let is_expanded = expanded == Some(category);
+            rows.push(CdpGroupRow::Domain { category, expanded: is_expanded });
+            if !is_expanded {
+                continue;
+            }
+            for name in crate::model::cdp::groups_for(category) {
+                let has_entries = self.cdp_catalog.processes.iter().any(|p| {
+                    !is_curve_only_process(p)
+                        && crate::model::cdp::cdp_group(p)
+                            == Some(crate::model::cdp::CdpGroup { category, name })
+                });
+                if has_entries {
+                    rows.push(CdpGroupRow::Group { category, name });
+                }
+            }
+        }
+        rows
     }
 
     /// Opens the CDP process browser: a plain searchable, group-filterable list, no controls
@@ -6098,9 +6200,9 @@ impl App {
     /// with the process list focused, matching the pre-Phase-7 behavior for anyone who never
     /// touches the groups column.
     fn open_cdp_browser(&mut self) {
-        let groups = self.cdp_groups();
+        let groups = self.cdp_group_rows(None);
         let recent = crate::model::cdp::recent::load_recent();
-        let entries = self.cdp_filter_entries("", CDP_GROUP_ALL, &recent);
+        let entries = self.cdp_filter_entries("", &CdpGroupRow::All, &recent);
         self.dialog = Some(Dialog::CdpBrowser {
             search: TextInput::new(""),
             groups,
@@ -16135,8 +16237,9 @@ fn render_cdp_hilite_band_editor(
 /// content-dependent) shared between the renderer and `App::handle_dialog_row_click`'s
 /// scroll-position math, so a click can never disagree with what's actually on screen. Also
 /// the fixed height of the Groups column's list — the full group list (currently under 20
-/// entries: `All`, `Recent`, plus one row per real `subcategory`) always fits without its
-/// own scrolling, which is what lets `row` mean the same "row index" in both columns.
+/// entries: `All`, `Recent`, the two domain rows, and the expanded domain's CDP groups —
+/// `cdp_group_rows_always_fit_the_groups_column` pins this) always fits without its own
+/// scrolling, which is what lets `row` mean the same "row index" in both columns.
 const CDP_BROWSER_LIST_ROWS: usize = 24;
 
 /// Width of `Dialog::CdpBrowser`'s Processes column — widened from 46 (user report,
@@ -16198,7 +16301,7 @@ fn render_cdp_browser_dialog(
     frame: &mut Frame,
     area: Rect,
     search: &TextInput,
-    groups: &[String],
+    groups: &[CdpGroupRow],
     group_selected: usize,
     group_focus: bool,
     entries: &[usize],
@@ -16264,8 +16367,8 @@ fn render_cdp_browser_dialog(
         Line::from(Span::styled(" Groups", if group_focus { focus_label_style } else { label_style })),
         Line::raw(""),
     ];
-    for (i, name) in groups.iter().enumerate() {
-        let text = format!(" {name}");
+    for (i, row) in groups.iter().enumerate() {
+        let text = format!(" {}", row.label());
         let style = if i == group_selected {
             if group_focus { cursor_style } else { soft_selected_style }
         } else {
@@ -24216,22 +24319,100 @@ mod tests {
         assert_eq!(input.value(), "my new name");
     }
 
-    /// `App::cdp_groups` always starts with `CDP_GROUP_ALL` then `CDP_GROUP_RECENT`,
-    /// followed by every real `subcategory` in the catalog, alphabetically sorted with no
-    /// duplicates — the taxonomy `scripts/convert_soundthread_catalog.py` reconciles down to
-    /// one clean set (CDP-Ext-Plan.md Phase 7).
+    /// The Groups column is All, Recent, then one row per domain — and, when a domain is
+    /// expanded, its own CDP groups in CDP's listing order directly beneath it. Collapsed, it
+    /// is exactly four rows.
     #[test]
-    fn cdp_groups_lists_all_recent_then_alphabetical_subcategories() {
+    fn cdp_group_rows_are_all_recent_then_the_two_domains() {
+        use crate::model::cdp::Category;
         let app = new_app(Some(doc(0.1, 100)), None);
-        let groups = app.cdp_groups();
-        assert_eq!(groups[0], CDP_GROUP_ALL);
-        assert_eq!(groups[1], CDP_GROUP_RECENT);
-        let subcategories = &groups[2..];
-        assert!(!subcategories.is_empty(), "the real catalog has real subcategories");
-        let mut sorted = subcategories.to_vec();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(subcategories, sorted.as_slice(), "should already be sorted with no duplicates");
+
+        let collapsed = app.cdp_group_rows(None);
+        assert_eq!(
+            collapsed,
+            vec![
+                CdpGroupRow::All,
+                CdpGroupRow::Recent,
+                CdpGroupRow::Domain { category: Category::Time, expanded: false },
+                CdpGroupRow::Domain { category: Category::Pvoc, expanded: false },
+            ]
+        );
+
+        let expanded = app.cdp_group_rows(Some(Category::Time));
+        assert_eq!(expanded[2], CdpGroupRow::Domain { category: Category::Time, expanded: true });
+        let time_groups: Vec<&str> = expanded
+            .iter()
+            .filter_map(|r| match r {
+                CdpGroupRow::Group { category: Category::Time, name } => Some(*name),
+                _ => None,
+            })
+            .collect();
+        assert!(time_groups.contains(&"DISTORT"), "got {time_groups:?}");
+        assert!(!time_groups.is_empty());
+        // Only the expanded domain contributes group rows.
+        assert!(!expanded.iter().any(|r| matches!(r, CdpGroupRow::Group { category: Category::Pvoc, .. })));
+        // CDP's own listing order, not alphabetical-by-accident.
+        let expected: Vec<&str> = crate::model::cdp::groups_for(Category::Time)
+            .iter()
+            .copied()
+            .filter(|n| time_groups.contains(n))
+            .collect();
+        assert_eq!(time_groups, expected, "groups must follow CDP's index-page order");
+    }
+
+    /// End-to-end render check: the Groups column must actually show CDP's own headings,
+    /// nested under their domain, in the real dialog rather than only in `cdp_group_rows`.
+    #[test]
+    fn groups_column_renders_cdp_headings_under_their_domain() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        app.open_cdp_browser();
+        app.cdp_browser_move_group(2); // onto Time-domain, which expands
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let screen: Vec<String> = (0..buffer.area.height)
+            .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        let text = screen.join("\n");
+
+        for expected in ["All", "Recent", "Time-domain", "Spectral", "DISTORT", "EXTEND", "FILTER"] {
+            assert!(text.contains(expected), "Groups column is missing {expected:?}\n{text}");
+        }
+        // The collapsed domain contributes no group rows.
+        assert!(!text.contains("BLUR"), "the collapsed spectral domain must not list its groups");
+        // Group rows sit indented under their domain. Measured by where each label starts
+        // within the row, not by leading whitespace: a full screen row also contains the file
+        // panel and the waveform to the left of this dialog.
+        let distort = screen.iter().find(|l| l.contains("DISTORT")).expect("DISTORT row");
+        let domain = screen.iter().find(|l| l.contains("Time-domain")).expect("domain row");
+        let group_at = distort.find("DISTORT").expect("DISTORT label");
+        let domain_at = domain.find('\u{25be}').expect("expanded-domain marker");
+        assert!(
+            group_at > domain_at,
+            "group rows must sit indented under their domain (group at {group_at}, domain marker at {domain_at})"
+        );
+    }
+
+    /// The whole column must always fit — it never scrolls, and `handle_dialog_row_click`
+    /// depends on a row index meaning the same thing in both columns. Nesting the groups under
+    /// their domain is what buys this: flat, the 26 CDP groups plus All and Recent would need
+    /// 28 rows against 24 available.
+    #[test]
+    fn cdp_group_rows_always_fit_the_groups_column() {
+        use crate::model::cdp::Category;
+        let app = new_app(Some(doc(0.1, 100)), None);
+        for expanded in [None, Some(Category::Time), Some(Category::Pvoc)] {
+            let rows = app.cdp_group_rows(expanded);
+            assert!(
+                rows.len() <= CDP_BROWSER_LIST_ROWS,
+                "{expanded:?} expands to {} rows, over the {CDP_BROWSER_LIST_ROWS}-row column",
+                rows.len()
+            );
+        }
     }
 
     /// Regression (user report, 2026-07-21): "pitch curve" is a real `subcategory` in the
@@ -24243,13 +24424,27 @@ mod tests {
     /// least one entry from "All"'s own eligible set.
     #[test]
     fn cdp_groups_never_lists_a_group_the_browser_can_only_ever_show_empty() {
+        use crate::model::cdp::Category;
         let app = new_app(Some(doc(0.1, 100)), None);
-        let groups = app.cdp_groups();
-        assert!(!groups.iter().any(|g| g == "pitch curve"), "\"pitch curve\" only has curve-only entries -- it must be filtered out");
-        for group in &groups[2..] {
-            let entries = app.cdp_filter_entries("", group, &[]);
-            assert!(!entries.is_empty(), "group {group:?} is listed but has no eligible entries");
+        for expanded in [Some(Category::Time), Some(Category::Pvoc)] {
+            for group in app.cdp_group_rows(expanded) {
+                // All spans everything and Recent is an ordering over a history this test
+                // deliberately leaves empty; neither can be a dead end the way a real group can.
+                if matches!(group, CdpGroupRow::All | CdpGroupRow::Recent) {
+                    continue;
+                }
+                let entries = app.cdp_filter_entries("", &group, &[]);
+                assert!(!entries.is_empty(), "group {:?} is listed but has no eligible entries", group.label());
+            }
         }
+        // The concrete case behind this rule: every time-domain REPITCH process is a
+        // curve-only pitch-curve transform, invisible to this browser, so REPITCH must not be
+        // offered under the time domain at all.
+        let time = app.cdp_group_rows(Some(Category::Time));
+        assert!(
+            !time.iter().any(|r| matches!(r, CdpGroupRow::Group { category: Category::Time, name: "REPITCH" })),
+            "time-domain REPITCH holds only curve-only processes -- it must be filtered out"
+        );
     }
 
     /// Chain-mode filtering (`cdp_chain_edit_target.is_some()`): synthesis (`IoKind::None`)
@@ -24260,7 +24455,7 @@ mod tests {
     fn chain_edit_mode_excludes_synthesis_and_glob_output_processes_from_the_browser() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
         app.cdp_chain_edit_target = Some(ChainEditTarget::Append(Vec::new()));
-        let entries = app.cdp_filter_entries("", CDP_GROUP_ALL, &[]);
+        let entries = app.cdp_filter_entries("", &CdpGroupRow::All, &[]);
         let keys: Vec<&str> = entries.iter().map(|&i| app.cdp_catalog.processes[i].key.as_str()).collect();
 
         assert!(!keys.contains(&"synth_wave_1"), "a synthesis process (no real input) must not appear while building a chain");
@@ -24268,7 +24463,7 @@ mod tests {
         assert!(keys.contains(&"blur_avrg"), "an ordinary chainable process must still appear");
 
         app.cdp_chain_edit_target = None;
-        let entries = app.cdp_filter_entries("", CDP_GROUP_ALL, &[]);
+        let entries = app.cdp_filter_entries("", &CdpGroupRow::All, &[]);
         let keys: Vec<&str> = entries.iter().map(|&i| app.cdp_catalog.processes[i].key.as_str()).collect();
         assert!(keys.contains(&"synth_wave_1"), "outside chain mode, synthesis processes are normal browser entries");
     }
@@ -24852,7 +25047,7 @@ mod tests {
     fn chain_edit_mode_excludes_variadic_input_processes_from_the_browser() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
         app.cdp_chain_edit_target = Some(ChainEditTarget::Append(Vec::new()));
-        let entries = app.cdp_filter_entries("", CDP_GROUP_ALL, &[]);
+        let entries = app.cdp_filter_entries("", &CdpGroupRow::All, &[]);
         let keys: Vec<&str> = entries.iter().map(|&i| app.cdp_catalog.processes[i].key.as_str()).collect();
         for key in ["pulser_multi_1", "pulser_multi_2", "pulser_multi_3", "tesselate_tesselate", "repair_repair"] {
             assert!(!keys.contains(&key), "{key} takes a variadic input list and cannot be a chain step");
@@ -25257,14 +25452,19 @@ mod tests {
         assert_eq!(state.chain.steps[0].side_chain[0].process_key, "blur_avrg");
     }
 
-    /// Regression (user report, 2026-07-21): `psow`'s pitch-subcategory processes (e.g.
-    /// "Psow Reinforce Harmonics") are ordinary wav-in/wav-out and were never actually
-    /// excluded from the "pitch" group -- they just sit at the end of its (long,
-    /// catalog-order, not alphabetical) list, past what a single screenful shows.
+    /// Regression (user report, 2026-07-21), rewritten for CDP grouping: `psow`'s processes
+    /// (e.g. "Psow Reinforce Harmonics") are ordinary wav-in/wav-out and must be reachable
+    /// from the groups column. Under the old semantic taxonomy they lived in "pitch" and the
+    /// report was that they seemed missing; under CDP's own grouping they are in PSOW, where
+    /// CDP's documentation puts them, which is a good deal easier to predict.
     #[test]
-    fn psow_pitch_processes_appear_in_the_real_pitch_group() {
+    fn psow_processes_appear_in_the_psow_group() {
         let app = new_app(Some(doc(0.1, 100)), None);
-        let entries = app.cdp_filter_entries("", "pitch", &[]);
+        let entries = app.cdp_filter_entries(
+            "",
+            &CdpGroupRow::Group { category: crate::model::cdp::Category::Time, name: "PSOW" },
+            &[],
+        );
         // Checked by `key` prefix, not title text: titles no longer necessarily start with
         // "Psow" (see CDP-WASM-SUITE-analysis.md's rename pass — bin-name prefixes were
         // deliberately dropped from titles), but every process's `bin` field is stable and
@@ -25288,7 +25488,7 @@ mod tests {
             app.cdp_catalog.processes.iter().any(is_curve_only_process),
             "the catalog must actually have curve-only entries for this test to mean anything"
         );
-        let entries = app.cdp_filter_entries("", CDP_GROUP_ALL, &[]);
+        let entries = app.cdp_filter_entries("", &CdpGroupRow::All, &[]);
         for &i in &entries {
             assert!(
                 !is_curve_only_process(&app.cdp_catalog.processes[i]),
@@ -25322,25 +25522,41 @@ mod tests {
         assert!(!group_focus, "Tab toggles — a second press returns focus to the process list");
     }
 
-    /// Highlighting a real `subcategory` group filters `entries` down to exactly the
-    /// processes in that subcategory — the reason the groups column exists at all.
+    /// Highlighting a group filters `entries` down to exactly that CDP group — the reason the
+    /// groups column exists at all. Also pins the expand-on-highlight behaviour: moving onto
+    /// the time-domain row reveals its groups, so row 3 (the first thing below it) is one of
+    /// them rather than the other domain.
     #[test]
-    fn selecting_a_group_filters_the_process_list_by_subcategory() {
+    fn selecting_a_group_filters_the_process_list_by_cdp_group() {
+        use crate::model::cdp::Category;
         let mut app = new_app(Some(doc(0.1, 100)), None);
         app.open_cdp_browser();
-        let Some(Dialog::CdpBrowser { groups, entries, .. }) = &app.dialog else { panic!("no dialog") };
-        assert!(groups.len() > 2, "need at least one real subcategory group");
-        let target_group = groups[2].clone();
+        let Some(Dialog::CdpBrowser { entries, .. }) = &app.dialog else { panic!("no dialog") };
         let unfiltered_count = entries.len();
 
-        // All(0) -> Recent(1) -> the first real subcategory(2).
+        // All(0) -> Recent(1) -> Time-domain(2), which expands beneath itself.
         app.cdp_browser_move_group(2);
-        let Some(Dialog::CdpBrowser { entries, group_selected, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(Dialog::CdpBrowser { groups, group_selected, .. }) = &app.dialog else { panic!("no dialog") };
         assert_eq!(*group_selected, 2);
-        assert!(!entries.is_empty(), "the chosen group came from the catalog's own subcategories, so it must have members");
+        assert_eq!(groups[2], CdpGroupRow::Domain { category: Category::Time, expanded: true });
+
+        // One more step lands on that domain's first group.
+        app.cdp_browser_move_group(1);
+        let Some(Dialog::CdpBrowser { groups, group_selected, entries, .. }) = &app.dialog else { panic!("no dialog") };
+        let CdpGroupRow::Group { category, name } = groups[*group_selected].clone() else {
+            panic!("expected a group row, got {:?}", groups[*group_selected])
+        };
+        assert_eq!(category, Category::Time);
+        assert!(!entries.is_empty(), "a listed group always has members");
         assert!(entries.len() <= unfiltered_count);
         for &i in entries {
-            assert_eq!(app.cdp_catalog.processes[i].subcategory, target_group);
+            let p = &app.cdp_catalog.processes[i];
+            assert_eq!(
+                crate::model::cdp::cdp_group(p),
+                Some(crate::model::cdp::CdpGroup { category, name }),
+                "{} leaked into group {name}",
+                p.key
+            );
         }
     }
 

@@ -700,6 +700,11 @@ pub struct ProcessDef {
     pub mode: Option<String>,
     pub title: String,
     pub category: Category,
+    /// The old hand-assigned *semantic* taxonomy (`distort`, `texture`, `filter`, …). No longer
+    /// what the browser groups by — that is now CDP's own grouping, derived from `bin` in
+    /// `model::cdp::group`. Kept because `catalog.toml` is machine-generated and still carries
+    /// the field, and because it remains a reasonable secondary descriptor; nothing reads it
+    /// for navigation. See `group.rs`'s module doc for why the switch happened.
     pub subcategory: String,
     pub short_description: String,
     pub description: String,

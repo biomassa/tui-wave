@@ -289,9 +289,13 @@ mod tests {
     }
 
     /// Every process's title must reveal which CDP binary it came from (e.g. "Blur
-    /// Average", "Hilite Band") — the browser's Groups column filters by `subcategory` (a
-    /// semantic category like "spectrum"), not by binary, so without this the process's CDP
-    /// family is invisible anywhere in the UI (user report, 2026-07-14). Checked
+    /// Average", "Hilite Band"). This began as a workaround: the Groups column used to filter
+    /// by a semantic `subcategory` rather than by binary, leaving a process's CDP family
+    /// invisible anywhere in the UI (user report, 2026-07-14). The column now groups by CDP
+    /// family directly (`model::cdp::group`), so the suffix is no longer load-bearing — it is
+    /// kept because the title alone still has to identify the process when it is read outside
+    /// the browser (recent lists, chain steps, presets, the status bar), where no group is in
+    /// view. Dropping it from ~200 titles would be a separate, deliberate rename pass. Checked
     /// space-insensitively (title with spaces removed must contain the bin name) since a
     /// title can legitimately spell a compound bin name as separate words, e.g. tapdelay's
     /// "Tap Delay". The handful of processes literally titled after their own bin (e.g.
