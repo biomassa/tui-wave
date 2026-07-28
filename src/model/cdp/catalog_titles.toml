@@ -1066,9 +1066,9 @@ title = "Spectral Gain"
 key = "spec_gate"
 title = "Spectral Gate"
 
-[[title]]
-key = "spec_grab"
-title = "Grab Static Spectrum Window"
+# (No `spec_grab` override: that process was removed from catalog_extra.toml on 2026-07-28 --
+# see the note there. An override whose key matches nothing is reported as a load warning, so
+# this one had to go with it rather than linger harmlessly.)
 
 [[title]]
 key = "spec_magnify"

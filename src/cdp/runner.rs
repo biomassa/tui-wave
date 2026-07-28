@@ -2489,6 +2489,60 @@ mod tests {
         );
     }
 
+    /// End-to-end proof of the `spec_grab_prepass` chain against the real binaries — the one
+    /// that matters, since the unit test only inspects planned argv. `morph glide` was
+    /// unrunnable before this (`PlanError::UnsupportedInV1`), so this is also the regression
+    /// guard for the process working at all. Its Output Duration param sets the result length
+    /// directly, which gives a real assertion beyond "exit 0" and proves the two grabbed
+    /// single-window analyses actually reached the glide: with a full multi-window analysis on
+    /// either side the binary rejects the run outright rather than producing a short file.
+    #[test]
+    fn morph_glide_runs_end_to_end_via_the_spec_grab_prepass() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("morph_glide").expect("morph_glide in catalog");
+        assert!(def.spec_grab_prepass, "morph_glide must carry the pre-pass flag");
+
+        use crate::model::cdp::ParamValue as V;
+        // Window 1/2 Position (percentages, consumed by the grabs) then Output Duration.
+        let values = vec![V::Number(25.0), V::Number(75.0), V::Number(3.0)];
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
+        let planned = crate::model::cdp::plan_job(
+            def,
+            &values,
+            &[input.clone(), input.clone()],
+            &crate::model::cdp::PvocSettings::default(),
+        )
+        .expect("morph glide plans now that the pre-pass exists");
+
+        let grabs = planned.steps.iter().filter(|s| s.bin == "spec").count();
+        assert_eq!(grabs, 2, "expected one spec grab per input: {:?}", planned.steps);
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 111,
+            cdp_dir,
+            planned,
+            inputs: vec![channels.clone(), channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(60))
+        else {
+            unreachable!()
+        };
+        let output = result.expect("morph glide should succeed via the spec-grab pre-pass");
+        let duration = output.results[0][0].len() as f64 / output.sample_rate as f64;
+        assert!(
+            (duration - 3.0).abs() < 0.2,
+            "Output Duration param was 3.0s but the result is {duration:.2}s"
+        );
+    }
+
     /// Exercises a synthesis process (`IoKind::None`) whose first param is a
     /// `required_list` of *values* (MIDI pitches — no time axis, no ordering constraint)
     /// followed by two `Choice` params — the full "no input buffer at all, output becomes
@@ -2723,8 +2777,11 @@ mod tests {
     /// a `pvoc anal`/`synth` wrap), which is fine for a manually-triggered check but not for
     /// every `cargo test`. A dual-input process gets the same mono input on both sides
     /// (self-processing is always valid for the argv shapes we care about here); a
-    /// `PlanError::UnsupportedInV1` (currently only `morph_glide`) is a known, accepted gap,
-    /// not a smoke-test failure. Collects every failure before asserting, so one bad entry's
+    /// `PlanError::UnsupportedInV1` is a known, accepted gap, not a smoke-test failure —
+    /// though as of 2026-07-28 no catalog entry produces one any more (`morph_glide`, the only
+    /// entry that ever did, now plans via `ProcessDef::spec_grab_prepass`), so that branch is
+    /// a safety net for the non-catalog `IoKind`s rather than something exercised in practice.
+    /// Collects every failure before asserting, so one bad entry's
     /// error doesn't hide every other one behind it.
     #[test]
     fn catalog_smoke_test() {
@@ -2802,6 +2859,22 @@ mod tests {
         // scripts/convert_soundthread_catalog.py, don't hand-edit) has a default outside
         // CDP's actually-enforced range for extend_scramble_1 (0.02 vs 0.031-0.985) and
         // modify_brassage_4 (2500 vs 0-2000).
+        // Entries that legitimately produce *no* output against this harness's fixture while
+        // working fine on real material -- the empty-output counterpart to
+        // KNOWN_FIXTURE_FAILURES above, and bounded/documented for the same reason:
+        //   distort_filter_1 ("omit cycles below FREQ", 1000Hz default) and distort_filter_3
+        //     ("omit below FREQ1 and above FREQ2", 500-2000Hz default band): this harness's
+        //     fixture is a single low-frequency sine, so every wavecycle in it sits below both
+        //     cutoffs and is correctly omitted. Confirmed to be the fixture and not the
+        //     entries (2026-07-28): filter 1 at 100Hz returns all 132100 frames, and filter 3
+        //     at its shipped 500-2000 default returns 88156 frames from a 1kHz tone.
+        // Investigating this list is what turned up a real bug in filter_3 alongside the
+        // artifact -- it used to default to Low = High = 1000.0, which passes only wavecycles
+        // sitting exactly on the boundary frequency and discards everything else regardless of
+        // input. Fixed in the entry (see its note in catalog_extra.toml); it stays listed here
+        // because the fixture still can't exercise it.
+        const KNOWN_EMPTY_OUTPUT: &[&str] = &["distort_filter_1", "distort_filter_3"];
+
         const KNOWN_FIXTURE_FAILURES: &[&str] = &[
             "envspeak_envspeak_1",
             "envspeak_envspeak_2",
@@ -3002,8 +3075,20 @@ mod tests {
             else {
                 unreachable!()
             };
-            if let Err(e) = result {
-                failures.push(format!("{}: {e:?}", def.key));
+            match result {
+                Err(e) => failures.push(format!("{}: {e:?}", def.key)),
+                // Exit 0 alone used to be the whole assertion, which let an entry that runs
+                // cleanly and produces *nothing* pass unnoticed -- that is how `spec_grab`
+                // (a single grabbed analysis window always synthesises to zero frames) sat in
+                // the catalog as a user-facing process. Checking the result is non-empty
+                // closes that hole; see KNOWN_EMPTY_OUTPUT for the one legitimate exception.
+                Ok(out) if !KNOWN_EMPTY_OUTPUT.contains(&def.key.as_str()) => {
+                    let has_audio = out.results.iter().any(|buf| buf.iter().any(|ch| !ch.is_empty()));
+                    if !has_audio && out.curve_points.is_none() && out.formant_buffer_bytes.is_none() {
+                        failures.push(format!("{}: ran clean but produced no output at all", def.key));
+                    }
+                }
+                Ok(_) => {}
             }
         }
 

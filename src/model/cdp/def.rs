@@ -777,6 +777,30 @@ pub struct ProcessDef {
     /// for it at all.
     #[serde(default)]
     pub needs_head_tail_marks: bool,
+    /// True for a process whose analysis input(s) must each contain **exactly one** window,
+    /// which CDP produces only via a separate `spec grab` run. The planner emits that grab as
+    /// a pre-pass step per input, between `pvoc anal` and the process itself, and feeds the
+    /// process the grabbed files rather than the full analyses.
+    ///
+    /// When set, the **first N params are the grab positions**, one per input, in input order
+    /// — each a percentage of *that* input's own duration (which is why the conversion can't
+    /// be a `NumberScale`: `PercentOfInputDuration` resolves everything against input 0, and
+    /// input 1's percentage has to resolve against input 1). The remaining params are the
+    /// process's own, and only those are passed to it.
+    ///
+    /// Two processes need this and they need different counts, which is why it's a flag read
+    /// against the input arity rather than a hardcoded key check: `morph glide` takes two
+    /// single-window analyses ("INTERPOLATE, LINEARLY, BETWEEN 2 SINGLE ANALYSIS WINDOWS
+    /// EXTRACTED WITH spec grab" — its own usage text names the pre-pass), and
+    /// `get_partials harmonic` modes 1-2 take one ("file must have only a single analysis
+    /// window"; modes 3-4 take a TIME argument instead and do their own grabbing, so they
+    /// must NOT set this).
+    ///
+    /// Not to be confused with the several processes that *sound* like they need it and don't
+    /// — `spec magnify`, `focus freeze`, `extend freeze`, `psow sustain` all take an ordinary
+    /// multi-window analysis and freeze internally.
+    #[serde(default)]
+    pub spec_grab_prepass: bool,
     /// Ordered — this order is exactly the order these values appear as positional
     /// arguments on the CDP command line (flagged params are still emitted in this order,
     /// just as `-x<value>` tokens instead of bare ones). A process with no parameters emits
@@ -852,6 +876,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
+            spec_grab_prepass: false,
             params: vec![sample_number()],
         };
 
@@ -909,6 +934,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
+            spec_grab_prepass: false,
             params: vec![toggle, choice],
         };
 
@@ -989,6 +1015,7 @@ mod tests {
             output_is_stereo: true,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
+            spec_grab_prepass: false,
             params: vec![table],
         };
 
@@ -1040,6 +1067,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
+            spec_grab_prepass: false,
             params: vec![param],
         };
 
@@ -1099,6 +1127,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
+            spec_grab_prepass: false,
             params: vec![param],
         };
 
@@ -1144,6 +1173,7 @@ mod tests {
             requires_simple_wav_input: false,
             sidecar_extension: None,
             needs_head_tail_marks: false,
+            spec_grab_prepass: false,
             min_inputs: None,
             params,
         }
