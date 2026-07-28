@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
-use crate::model::cdp::pipeline::{parse_ana_decfactor, window_count_from_decfactor, PlannedJob, TempWavSpec};
+use crate::model::cdp::pipeline::{parse_ana_decfactor, CLIP_HEADROOM_TARGET_PEAK, window_count_from_decfactor, PlannedJob, TempWavSpec};
 use crate::model::document::Document;
 use crate::model::io::{load_wav, save_wav_with, BitDepth};
 
@@ -51,6 +51,12 @@ pub struct Job {
 pub struct JobOutput {
     pub results: Vec<Vec<Vec<f32>>>,
     pub sample_rate: u32,
+    /// `Some(db)` (always negative) when `restore_clip_headroom` had to pull the result down
+    /// to stay inside full scale — i.e. the process genuinely outputs louder than its input,
+    /// not merely that headroom was reserved. `None` on every job that needed no reduction,
+    /// including every process not on the headroom list. The UI reports it so the level change
+    /// is visible rather than silent.
+    pub clip_headroom_reduction_db: Option<f32>,
     /// `Some` only for a curve job (`PlannedJob.output_curve` — `IoKind::Curve`, the
     /// `repitch` pitch-curve transforms); `results` is always empty in that case, mirroring
     /// how `glob_output`/`output_files` are already mutually exclusive result shapes. The
@@ -200,7 +206,57 @@ fn run_job_body(
         }
     }
 
-    load_outputs(job, temp_dir)
+    let mut output = load_outputs(job, temp_dir)?;
+    restore_clip_headroom(job, &mut output);
+    Ok(output)
+}
+
+/// Undoes the `CLIP_HEADROOM_ATTENUATION` a `CLIP_HEADROOM_PROCESSES` job's inputs were
+/// written with, and keeps the result inside full scale.
+///
+/// Two stages, and the order matters:
+///
+/// 1. **Restore.** Multiply by the exact inverse the planner recorded. Both factors are powers
+///    of two and the samples are `f32`, so this is bit-exact — a process that never needed the
+///    headroom comes back byte-identical to what it would have produced untouched. That is the
+///    whole reason the attenuation can be this generous without costing dynamic range, and it
+///    holds for integer source files too: `model::io::load_wav` normalizes 16/24-bit PCM to
+///    `f32` by dividing by a power of two, so those sample values are exactly representable
+///    and survive the round trip unchanged (verified across every representable 16- and
+///    24-bit value).
+///
+/// 2. **Normalize only if still over.** If the true peak exceeds full scale even after
+///    restoring — the process really does output louder than its input — scale down to
+///    `CLIP_HEADROOM_TARGET_PEAK` and report the reduction so it is visible rather than
+///    silent. A result that already fits is left at its natural level, deliberately: silently
+///    normalizing every run would break level-matching against the untouched parts of the
+///    document, and the point of the pre-attenuation is to stop CDP destroying peaks, not to
+///    take over gain-staging.
+fn restore_clip_headroom(job: &Job, output: &mut JobOutput) {
+    let Some(restore) = job.planned.clip_headroom_restore else {
+        return;
+    };
+    let restore = restore as f32;
+    let mut peak: f32 = 0.0;
+    for buf in &mut output.results {
+        for ch in buf.iter_mut() {
+            for s in ch.iter_mut() {
+                *s *= restore;
+                peak = peak.max(s.abs());
+            }
+        }
+    }
+    if peak > CLIP_HEADROOM_TARGET_PEAK {
+        let reduction = CLIP_HEADROOM_TARGET_PEAK / peak;
+        for buf in &mut output.results {
+            for ch in buf.iter_mut() {
+                for s in ch.iter_mut() {
+                    *s *= reduction;
+                }
+            }
+        }
+        output.clip_headroom_reduction_db = Some(20.0 * reduction.log10());
+    }
 }
 
 fn write_inputs(job: &Job, temp_dir: &Path) -> Result<(), CdpError> {
@@ -467,6 +523,7 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
             None => None,
         };
         return Ok(JobOutput {
+            clip_headroom_reduction_db: None,
             results: Vec::new(),
             sample_rate: job.input_sample_rate,
             curve_points: Some(points),
@@ -482,6 +539,7 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
             message: e.to_string(),
         })?;
         return Ok(JobOutput {
+            clip_headroom_reduction_db: None,
             results: Vec::new(),
             sample_rate: job.input_sample_rate,
             curve_points: None,
@@ -531,7 +589,7 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
         None => None,
     };
 
-    Ok(JobOutput { results: vec![channels], sample_rate, curve_points: None, curve_binary_template: None, formant_buffer_bytes: None, sidecar_bytes })
+    Ok(JobOutput { clip_headroom_reduction_db: None, results: vec![channels], sample_rate, curve_points: None, curve_binary_template: None, formant_buffer_bytes: None, sidecar_bytes })
 }
 
 /// Loads every `<prefix>N.wav` (N = 0, 1, 2, …) found in `temp_dir`, in numeric order, as
@@ -561,7 +619,7 @@ fn load_glob_outputs(
     if results.is_empty() {
         return Err(CdpError::NoOutput { step: format!("{}0.wav", glob.prefix) });
     }
-    Ok(JobOutput { results, sample_rate, curve_points: None, curve_binary_template: None, formant_buffer_bytes: None, sidecar_bytes: None })
+    Ok(JobOutput { clip_headroom_reduction_db: None, results, sample_rate, curve_points: None, curve_binary_template: None, formant_buffer_bytes: None, sidecar_bytes: None })
 }
 
 #[cfg(test)]
@@ -627,7 +685,7 @@ mod tests {
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: false,
+            needs_simple_wav_input: false, clip_headroom_restore: None,
         }
     }
 
@@ -695,7 +753,7 @@ mod tests {
             brk_files: Vec::new(),
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: false,
+            needs_simple_wav_input: false, clip_headroom_restore: None,
         };
 
         let runner = CdpRunner::new();
@@ -744,7 +802,7 @@ mod tests {
             brk_files: vec![("curve_in.txt".into(), "0 220\n1 440".into())],
             binary_input_files: Vec::new(),
             deferred_window_params: Vec::new(),
-            needs_simple_wav_input: false,
+            needs_simple_wav_input: false, clip_headroom_restore: None,
         };
 
         let runner = CdpRunner::new();
@@ -2487,6 +2545,174 @@ mod tests {
             duration > 0.5 && duration <= 1.05,
             "Duration param was 1.0s (outer pulse period 0.5s) but output is {duration:.2}s"
         );
+    }
+
+    /// The headroom scheme's core claim, checked against the real binaries rather than
+    /// asserted: attenuating the input and scaling the result back must reproduce what the
+    /// process would have produced untouched — apart from the clipping it avoids.
+    ///
+    /// Runs each process twice, once as planned (attenuated, then restored) and once with the
+    /// headroom stripped back out of the very same plan, and compares. Where the unattenuated
+    /// run did not clip, the two must match closely; where it did clip, they must differ, since
+    /// the whole point is that the clipped version lost data.
+    ///
+    /// `specfnu_specfnu_10` is in the sample deliberately: it is pitch-based, and CDP's pitch
+    /// trackers can carry absolute amplitude floors that a −24 dB shift could fall through.
+    /// This is what rules that out for the entries actually on the list.
+    #[test]
+    fn clip_headroom_restores_what_the_process_would_have_produced() {
+        let cdp_dir = require_cdp!();
+        let (mut channels, sample_rate) = mono_sine_channels();
+        // The stock fixture peaks at 0.5; push it to a realistic level so the flagged
+        // processes are actually driven into the range where CDP would clamp them.
+        for ch in &mut channels {
+            for s in ch.iter_mut() {
+                *s *= 1.9;
+            }
+        }
+        let len_samples = channels[0].len();
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+
+        for key in ["focus_accu", "specfnu_specfnu_10", "repitch_transpose_1", "strange_glis_1"] {
+            let def = catalog.find(key).unwrap_or_else(|| panic!("{key} in catalog"));
+            assert!(
+                crate::model::cdp::pipeline::needs_clip_headroom(key),
+                "{key} should be on the headroom list"
+            );
+            let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+            let input =
+                crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
+            let planned = crate::model::cdp::plan_job(
+                def,
+                &values,
+                std::slice::from_ref(&input),
+                &crate::model::cdp::PvocSettings::default(),
+            )
+            .unwrap();
+
+            // The same plan with the headroom removed — i.e. exactly what this job was before.
+            let mut bare = planned.clone();
+            bare.clip_headroom_restore = None;
+            for spec in &mut bare.input_files {
+                spec.gain = None;
+            }
+
+            let runner = CdpRunner::new();
+            let run = |id: u64, plan: crate::model::cdp::pipeline::PlannedJob| {
+                runner.submit(Job {
+                    id,
+                    cdp_dir: cdp_dir.clone(),
+                    planned: plan,
+                    inputs: vec![channels.clone()],
+                    input_sample_rate: sample_rate,
+                    purpose: JobPurpose::Apply,
+                });
+                let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(60))
+                else {
+                    unreachable!()
+                };
+                result.unwrap_or_else(|e| panic!("{key} should run: {e:?}"))
+            };
+
+            let with = run(200, planned);
+            let without = run(201, bare);
+
+            let a = &with.results[0][0];
+            let b = &without.results[0][0];
+            let n = a.len().min(b.len());
+            assert!(n > 0, "{key} produced no samples");
+
+            let bare_peak = b.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+            let bare_clipped = bare_peak >= 0.9999;
+            let worst = (0..n).fold(0.0f32, |m, i| m.max((a[i] - b[i]).abs()));
+
+            if bare_clipped {
+                // The unattenuated run hit CDP's clamp, so the headroom version must differ --
+                // that difference is precisely the data the clamp was destroying.
+                assert!(
+                    worst > 1e-4,
+                    "{key}: unattenuated output clipped (peak {bare_peak:.4}) yet the headroom \
+                     version is identical -- the headroom is doing nothing"
+                );
+            } else {
+                // Nothing was clipped, so restoring must reproduce the original almost exactly.
+                // Not bit-exact end to end: CDP re-runs its own float maths on a rescaled input,
+                // so tiny numerical differences are expected even though the scaling itself is
+                // lossless.
+                assert!(
+                    worst < 1e-3,
+                    "{key}: no clipping to avoid (peak {bare_peak:.4}) but the headroom version \
+                     differs by {worst:.6} -- the process is level-dependent and does not belong \
+                     on the headroom list"
+                );
+            }
+        }
+    }
+
+    /// The two processes originally reported as clipping (2026-07-28) must now come back
+    /// inside full scale, driven at a level that made both clip before the headroom scheme.
+    /// `fastconv` is the harder case: convolution against a tonal impulse measured +32.7 dB,
+    /// far past what attenuation alone covers, so it also depends on its `-f` float-output
+    /// default keeping the true peak alive for the gain stage to scale down.
+    #[test]
+    fn reported_clipping_processes_come_back_within_full_scale() {
+        let cdp_dir = require_cdp!();
+        let (mut channels, sample_rate) = mono_sine_channels();
+        for ch in &mut channels {
+            for s in ch.iter_mut() {
+                *s *= 1.9;
+            }
+        }
+        let len_samples = channels[0].len();
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+
+        for key in ["focus_accu", "fastconv_fastconv"] {
+            let def = catalog.find(key).unwrap_or_else(|| panic!("{key} in catalog"));
+            let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+            let input =
+                crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
+            let (arity, ..) = def.input_arity();
+            let planned = crate::model::cdp::plan_job(
+                def,
+                &values,
+                &vec![input.clone(); arity],
+                &crate::model::cdp::PvocSettings::default(),
+            )
+            .unwrap();
+            assert_eq!(planned.clip_headroom_restore, Some(16.0), "{key} should reserve headroom");
+
+            let runner = CdpRunner::new();
+            runner.submit(Job {
+                id: 300,
+                cdp_dir: cdp_dir.clone(),
+                planned,
+                inputs: vec![channels.clone(); arity],
+                input_sample_rate: sample_rate,
+                purpose: JobPurpose::Apply,
+            });
+            let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(60))
+            else {
+                unreachable!()
+            };
+            let out = result.unwrap_or_else(|e| panic!("{key} should run: {e:?}"));
+
+            let mut peak = 0.0f32;
+            let mut worst_run = 0usize;
+            for ch in &out.results[0] {
+                let mut run = 0usize;
+                for &s in ch {
+                    peak = peak.max(s.abs());
+                    if s.abs() >= 0.9999 {
+                        run += 1;
+                        worst_run = worst_run.max(run);
+                    } else {
+                        run = 0;
+                    }
+                }
+            }
+            assert!(peak <= 1.0, "{key}: peak {peak:.4} still exceeds full scale");
+            assert!(worst_run < 4, "{key}: {worst_run} consecutive samples pinned at full scale");
+        }
     }
 
     /// End-to-end proof of the `spec_grab_prepass` chain against the real binaries — the one

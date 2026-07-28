@@ -8496,12 +8496,20 @@ exponential = true
 scale = "plain"
 flag = "-a"
 
+# Defaults ON as of 2026-07-28 (it was off). Convolution against a tonal impulse produces
+# enormous gain -- measured at peak 43.4 (+32.7 dB) convolving a 220Hz tone with a decaying
+# 220Hz impulse, with 135935 samples past full scale. Without -f, CDP hard-clips all of that
+# into the integer output file and the peaks are gone before the app reads the result back;
+# with -f the true peak survives for the headroom stage (pipeline's CLIP_HEADROOM_PROCESSES,
+# which lists fastconv) to scale down cleanly. The app always reads the result back as float
+# and re-splices it, so an integer intermediate has no upside here at all -- it can only
+# discard data. CDP's own usage text for the flag reads "write output as floats (no clipping)".
 [[process.params]]
 name = "Force Float Output"
 description = "Write the output as floating-point, avoiding clipping"
 automatable = false
 kind = "toggle"
-default = false
+default = true
 flag = "-f"
 
 [[process]]
