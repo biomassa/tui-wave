@@ -20583,6 +20583,7 @@ mod tests {
         use crate::model::cdp::{Category, IoKind, ParamDef, ParamKind};
         let def = crate::model::cdp::ProcessDef {
             needs_head_tail_marks: false,
+            spec_grab_prepass: false,
             key: "test_integer_number".into(),
             bin: "modify".into(),
             subprog: None,
@@ -23550,6 +23551,7 @@ mod tests {
         ];
         let def = ProcessDef {
             needs_head_tail_marks: false,
+            spec_grab_prepass: false,
             key: "test_formant_put".into(),
             bin: "formants".into(),
             subprog: Some("put".into()),
@@ -23623,6 +23625,7 @@ mod tests {
         )];
         let def = ProcessDef {
             needs_head_tail_marks: false,
+            spec_grab_prepass: false,
             key: "test_formant_put".into(),
             bin: "formants".into(),
             subprog: Some("put".into()),
@@ -27630,6 +27633,7 @@ mod tests {
         use crate::model::formant::FormantBufferKind;
         let def = crate::model::cdp::ProcessDef {
             needs_head_tail_marks: false,
+            spec_grab_prepass: false,
             key: "test_formant_ref".into(),
             bin: "formants".into(),
             subprog: Some("put".into()),

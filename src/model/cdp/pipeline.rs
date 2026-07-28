@@ -825,15 +825,6 @@ pub fn plan_job(
     inputs: &[InputSpec],
     pvoc: &PvocSettings,
 ) -> Result<PlannedJob, PlanError> {
-    // morph_glide needs a `spec grab` pre-pass extracting one window from each input before
-    // the glide itself (its two position params are percentages into each file, not plain
-    // args) — SoundThread special-cases it the same way; not generalizable, not built.
-    if def.key == "morph_glide" {
-        return Err(PlanError::UnsupportedInV1 {
-            reason: "morph glide needs a spec-grab pre-pass, not built yet".into(),
-        });
-    }
-
     // Arity comes from `ProcessDef::input_arity` (min, optional max, must-be-even) rather
     // than a table local to this function, so the UI's own pre-Apply gate can consult
     // exactly the same rule — see that method's doc comment. `Curve` reports 0 here even
@@ -1747,6 +1738,32 @@ fn plan_dual_ana(
     let duration = a.duration_secs();
     let lanes = a.channels.max(b.channels).max(1);
 
+    // A `spec_grab_prepass` process consumes its first two params as grab positions (one per
+    // input) rather than passing them to the binary, so the def/values handed to
+    // `build_process_args` below have to be the *remainder*. Split once here rather than per
+    // channel — the trimmed def is identical for every lane. See
+    // `ProcessDef::spec_grab_prepass` for why each percentage resolves against its own input's
+    // duration and can't be a `NumberScale`.
+    let grab_times = if def.spec_grab_prepass {
+        if def.params.len() < 2 || values.len() < 2 {
+            return Err(PlanError::ParamCountMismatch { expected: 2, actual: values.len() });
+        }
+        let percent = |v: &ParamValue| match v {
+            ParamValue::Number(n) => Ok(*n),
+            _ => Err(PlanError::ParamCountMismatch { expected: 2, actual: values.len() }),
+        };
+        Some((percent(&values[0])? / 100.0 * a.duration_secs(), percent(&values[1])? / 100.0 * b.duration_secs()))
+    } else {
+        None
+    };
+    let trimmed_def;
+    let (def, values) = if grab_times.is_some() {
+        trimmed_def = ProcessDef { params: def.params[2..].to_vec(), ..def.clone() };
+        (&trimmed_def, &values[2..])
+    } else {
+        (def, values)
+    };
+
     let mut steps = Vec::new();
     let mut input_files = Vec::new();
     let mut output_files = Vec::new();
@@ -1784,10 +1801,31 @@ fn plan_dual_ana(
             });
         }
 
+        // With a pre-pass, the process reads the single-window grabs, not the full analyses.
+        let (proc_in_a, proc_in_b) = match grab_times {
+            None => (ana_a.clone(), ana_b.clone()),
+            Some((time_a, time_b)) => {
+                let grab_a = format!("g_a{}.ana", ch + 1);
+                let grab_b = format!("g_b{}.ana", ch + 1);
+                for (src, dest, time, which) in [
+                    (&ana_a, &grab_a, time_a, "A"),
+                    (&ana_b, &grab_b, time_b, "B"),
+                ] {
+                    steps.push(Invocation {
+                        bin: "spec".into(),
+                        args: vec!["grab".into(), src.clone(), dest.clone(), format_number(time)],
+                        label: format!("spec grab {which}{label_suffix}"),
+                        expected_output: dest.clone(),
+                    });
+                }
+                (grab_a, grab_b)
+            }
+        };
+
         let (args, deferred) = build_process_args(
             def,
             values,
-            &[ana_a.as_str(), ana_b.as_str()],
+            &[proc_in_a.as_str(), proc_in_b.as_str()],
             &ana_out,
             duration,
             pvoc,
@@ -2329,6 +2367,7 @@ mod tests {
     fn base_def(input: IoKind, output: IoKind) -> ProcessDef {
         ProcessDef {
             needs_head_tail_marks: false,
+            spec_grab_prepass: false,
             key: "test_key".into(),
             bin: "modify".into(),
             subprog: Some("speed".into()),
@@ -3475,13 +3514,71 @@ mod tests {
         assert!(matches!(err, PlanError::InputCountMismatch { expected: 2, actual: 1 }));
     }
 
+    /// The `spec_grab_prepass` chain, which replaced `morph_glide`'s old blanket
+    /// `UnsupportedInV1` rejection: two `spec grab` steps sit between the analyses and the
+    /// process, the process reads the *grabbed* files rather than the full analyses, and the
+    /// two position params are consumed by the grabs instead of reaching the binary.
     #[test]
-    fn morph_glide_stays_unsupported() {
+    fn spec_grab_prepass_inserts_a_grab_per_input_and_consumes_the_position_params() {
         let mut def = base_def(IoKind::DualAna, IoKind::Ana);
         def.key = "morph_glide".into();
-        let err = plan_job(&def, &[ParamValue::Number(0.0)], &dual_inputs(1, 1), &PvocSettings::default())
-            .unwrap_err();
-        assert!(matches!(err, PlanError::UnsupportedInV1 { .. }));
+        def.bin = "morph".into();
+        def.subprog = Some("glide".into());
+        def.mode = None;
+        def.spec_grab_prepass = true;
+        def.params = vec![
+            number_param("Window 1 Position", 0.0, 100.0, 10.0, NumberScale::Plain),
+            number_param("Window 2 Position", 0.0, 100.0, 10.0, NumberScale::Plain),
+            number_param("Output Duration", 1.0, 1000.0, 60.0, NumberScale::Plain),
+        ];
+
+        // Input A is 2s, input B is 4s -- deliberately different, since each position is a
+        // percentage of its *own* input's duration.
+        let inputs = vec![
+            InputSpec { channels: 1, sample_rate: 44100, len_samples: 88_200, ..Default::default() },
+            InputSpec { channels: 1, sample_rate: 44100, len_samples: 176_400, ..Default::default() },
+        ];
+        let job = plan_job(
+            &def,
+            &[ParamValue::Number(25.0), ParamValue::Number(50.0), ParamValue::Number(10.0)],
+            &inputs,
+            &PvocSettings::default(),
+        )
+        .unwrap();
+
+        let grabs: Vec<_> = job.steps.iter().filter(|s| s.args.first().map(String::as_str) == Some("grab")).collect();
+        assert_eq!(grabs.len(), 2, "one spec grab per input");
+        assert_eq!(grabs[0].bin, "spec");
+        // 25% of 2s and 50% of 4s -- each against its own input, not both against input 0.
+        assert_eq!(grabs[0].args.last().unwrap(), "0.5");
+        assert_eq!(grabs[1].args.last().unwrap(), "2");
+
+        // The grabs run after the analyses and before the glide.
+        let idx = |pred: &dyn Fn(&Invocation) -> bool| job.steps.iter().position(pred).unwrap();
+        let last_anal = job.steps.iter().rposition(|s| s.args.first().map(String::as_str) == Some("anal")).unwrap();
+        let glide = idx(&|s: &Invocation| s.bin == "morph");
+        assert!(last_anal < idx(&|s: &Invocation| s.args.first().map(String::as_str) == Some("grab")));
+        assert!(grabs.iter().all(|g| job.steps.iter().position(|s| std::ptr::eq(s, *g)).unwrap() < glide));
+
+        // The glide reads the grabbed windows, and its only param is Output Duration -- the
+        // two positions were consumed by the pre-pass and must not appear here.
+        let glide_args = &job.steps[glide].args;
+        assert!(glide_args.contains(&"g_a1.ana".to_string()), "reads grab A, got {glide_args:?}");
+        assert!(glide_args.contains(&"g_b1.ana".to_string()), "reads grab B, got {glide_args:?}");
+        assert!(!glide_args.iter().any(|a| a == "25" || a == "50"), "positions leaked: {glide_args:?}");
+        assert_eq!(glide_args.last().unwrap(), "10");
+    }
+
+    /// Without the flag, a dual-ana process is planned exactly as before — no grab steps, and
+    /// every param reaches the binary.
+    #[test]
+    fn dual_ana_without_the_prepass_flag_is_unchanged() {
+        let mut def = base_def(IoKind::DualAna, IoKind::Ana);
+        def.subprog = Some("bridge".into());
+        def.params = vec![number_param("Amount", 0.0, 100.0, 50.0, NumberScale::Plain)];
+        let job =
+            plan_job(&def, &[ParamValue::Number(50.0)], &dual_inputs(1, 1), &PvocSettings::default()).unwrap();
+        assert!(!job.steps.iter().any(|s| s.args.first().map(String::as_str) == Some("grab")));
     }
 
     #[test]
