@@ -31,6 +31,11 @@ pub struct Config {
     /// flat at `theme::WAVEFORM_DOT_LOW`. Defaults to `true`; toggled via the View menu
     /// (`Action::ToggleDotMatrixGradient`, no default keybinding).
     pub dot_matrix_gradient: bool,
+    /// Whether the horizontal m:ss time ruler (`widgets::time_ruler`) is shown on a reserved
+    /// row between the waveform panes and the status bar. Defaults to `true`; toggled via the
+    /// View menu (`Action::ToggleTimeRuler`, no default keybinding). Costs one terminal row
+    /// of waveform height, which is why it's a toggle at all.
+    pub time_ruler: bool,
     /// Path to the directory containing CDP (Composer's Desktop Project) binaries. Defaults
     /// to `~/cdp` (see `default_cdp_dir`, `~` resolved against the real `$HOME` at startup,
     /// not stored as a literal `~` — nothing downstream expands one) but still just a guess:
@@ -60,6 +65,7 @@ impl Default for Config {
             transient_threshold_db: 13.0,
             graphics_mode: true,
             dot_matrix_gradient: true,
+            time_ruler: true,
             cdp_dir: default_cdp_dir(),
             keybindings: HashMap::new(),
         }
@@ -159,6 +165,7 @@ mod tests {
             transient_threshold_db: 9.0,
             graphics_mode: false,
             dot_matrix_gradient: true,
+            time_ruler: false,
             cdp_dir: "/opt/cdp/bin".into(),
             keybindings: HashMap::new(),
         };
@@ -219,6 +226,7 @@ mod tests {
             transient_threshold_db: 12.0,
             graphics_mode: false,
             dot_matrix_gradient: true,
+            time_ruler: false,
             cdp_dir: String::new(),
             keybindings: HashMap::new(),
         };

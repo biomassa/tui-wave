@@ -139,6 +139,9 @@ pub fn rasterize_waveform(
     }
 
     if samples.is_empty() || cell_width == 0 {
+        // A silent/empty channel still gets the zero axis — the reference matters most
+        // exactly where there's no trace to infer it from (mirrors the text renderer).
+        draw_zero_line(&mut img);
         return img;
     }
 
@@ -159,6 +162,12 @@ pub fn rasterize_waveform(
             }
         }
     }
+
+    // The amplitude-zero axis, drawn after the selection fill (which would otherwise paint
+    // over it) but before the trace, so the waveform renders on top of it — it's a background
+    // reference for where zero crossings land, not an annotation competing with the signal.
+    // The trace's anti-aliased edge rows blend against it like any other underlying pixel.
+    draw_zero_line(&mut img);
 
     // Below ~4 samples per pixel column the filled-bar approach breaks down: bars become
     // 1-2px tall and look disconnected, and below 1.0 spc integer truncation makes
@@ -281,6 +290,17 @@ pub fn rasterize_waveform(
     }
 
     img
+}
+
+/// Draws the amplitude-zero axis: a 1px `theme::ZERO_LINE` line across the pixel row that
+/// amplitude 0.0 maps to (`mid_y`, floored — the same centreline the trace is drawn around).
+/// The pixel-resolution counterpart of the text renderer's `waveform::zero_row` `─` row.
+fn draw_zero_line(img: &mut RgbaImage) {
+    let row = (img.height() / 2).min(img.height().saturating_sub(1));
+    let color = color_to_rgba(theme::ZERO_LINE);
+    for col in 0..img.width() {
+        img.put_pixel(col, row, color);
+    }
 }
 
 /// Pixel width/height of one rendered glyph at [`LABEL_SCALE`] — `font8x8` glyphs are 8x8.
@@ -480,12 +500,30 @@ mod tests {
     }
 
     #[test]
-    fn empty_samples_renders_background_only() {
+    fn empty_samples_renders_background_and_the_zero_axis_only() {
         let img = rasterize_waveform(&[], &viewport(0, 1.0), None, None, 0, None, &[], &[], false, 80, 160, 40, true);
         let bg = color_to_rgba(theme::BASE);
-        for pixel in img.pixels() {
-            assert_eq!(*pixel, bg);
+        let zero = color_to_rgba(theme::ZERO_LINE);
+        for (x, y, pixel) in img.enumerate_pixels() {
+            // Even with no audio at all, the zero axis draws — it's the reference for where
+            // silence sits, so a blank channel is exactly when it must be visible.
+            let expected = if y == 20 { zero } else { bg };
+            assert_eq!(*pixel, expected, "pixel ({x},{y})");
         }
+    }
+
+    /// The zero line is a *background* reference: the trace draws over it, so a column where
+    /// the waveform passes through the centre row shows the waveform there, not the axis.
+    #[test]
+    fn zero_line_spans_the_image_and_the_waveform_draws_over_it() {
+        // Quiet enough (0.1) that the bar never reaches the centre row on the right-hand
+        // half, but full-scale on the left so the trace does cover the axis there.
+        let mut samples: Vec<f32> = (0..500).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+        samples.extend(std::iter::repeat(0.5).take(500));
+        let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, usize::MAX, None, &[], &[], false, 80, 160, 40, true);
+        let zero = color_to_rgba(theme::ZERO_LINE);
+        assert_ne!(*img.get_pixel(10, 20), zero, "the full-scale trace must cover the axis");
+        assert_eq!(*img.get_pixel(150, 20), zero, "the axis shows through where the trace doesn't reach it");
     }
 
     #[test]
@@ -679,9 +717,12 @@ mod tests {
         let bg = color_to_rgba(theme::BASE);
 
         // Any non-background pixel counts as trace coverage — anti-aliased edge pixels are
-        // blends, not the exact waveform color.
+        // blends, not the exact waveform color. The zero axis is excluded explicitly: it
+        // paints every column's centre row, which would otherwise make every pair of columns
+        // trivially "share a row" and the check meaningless.
+        let zero = color_to_rgba(theme::ZERO_LINE);
         let rows_of = |x: u32| -> Vec<u32> {
-            (0..img.height()).filter(|&y| *img.get_pixel(x, y) != bg).collect()
+            (0..img.height()).filter(|&y| *img.get_pixel(x, y) != bg && *img.get_pixel(x, y) != zero).collect()
         };
         // Skip column 0/1 (the cursor line at sample 0 recolors column 0).
         for x in 2..img.width() - 1 {
@@ -716,9 +757,12 @@ mod tests {
         let bg = color_to_rgba(theme::BASE);
         let waveform_color = color_to_rgba(theme::WAVEFORM_DOT_LOW);
         let cursor_color = color_to_rgba(theme::CURSOR);
+        // The zero axis is a flat, un-blended color too — excluded so it can't stand in for
+        // the anti-aliased edge pixels this test is actually looking for.
+        let zero_color = color_to_rgba(theme::ZERO_LINE);
         let blended = img
             .pixels()
-            .filter(|p| **p != bg && **p != waveform_color && **p != cursor_color)
+            .filter(|p| **p != bg && **p != waveform_color && **p != cursor_color && **p != zero_color)
             .count();
         assert!(
             blended > 0,

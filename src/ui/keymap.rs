@@ -39,6 +39,10 @@ pub enum Action {
     ToggleViewportFollowsPlayback,
     ToggleGraphicsMode,
     ToggleDotMatrixGradient,
+    /// The horizontal m:ss time axis below the waveform (`widgets::time_ruler`). Menu-only
+    /// (no default keybinding) — it's a set-and-forget layout preference, not something
+    /// reached for mid-edit, and plain keys are a scarcer resource than menu rows.
+    ToggleTimeRuler,
     SaveAs,
     SaveAll,
     ToggleZeroSnap,
@@ -113,6 +117,7 @@ impl Action {
                 | Action::ToggleViewportFollowsPlayback
                 | Action::ToggleGraphicsMode
                 | Action::ToggleDotMatrixGradient
+                | Action::ToggleTimeRuler
         )
     }
 }
@@ -423,6 +428,7 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "ToggleViewportFollowsPlayback" => Some(Action::ToggleViewportFollowsPlayback),
         "ToggleGraphicsMode" => Some(Action::ToggleGraphicsMode),
         "ToggleDotMatrixGradient" => Some(Action::ToggleDotMatrixGradient),
+        "ToggleTimeRuler" => Some(Action::ToggleTimeRuler),
         "InsertMarker" => Some(Action::InsertMarker),
         "DeleteMarker" => Some(Action::DeleteMarker),
         "InsertHeadTailMark" => Some(Action::InsertHeadTailMark),

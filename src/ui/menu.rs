@@ -96,6 +96,7 @@ impl MenuBar {
                     entry("Viewport Follows Playback",        Action::ToggleViewportFollowsPlayback, "f"),
                     entry("Graphics Mode",                    Action::ToggleGraphicsMode,          "g"),
                     entry("Gradient",                         Action::ToggleDotMatrixGradient,     ""),
+                    entry("Time Ruler",                       Action::ToggleTimeRuler,             ""),
                 ],
             },
             MenuItem {
