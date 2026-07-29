@@ -67,6 +67,10 @@ pub const DIRTY: Color = RED;
 /// labels they're attached to, so a shortcut always reads as "this is the key," not part
 /// of the label.
 pub const SHORTCUT: Color = PEACH;
+/// Column headings inside a dialog that lays its content out in columns (Export Channels'
+/// `Ch / Export as / Output file`) — an accent rather than a muted grey, so the headings read
+/// as a label for the rows under them instead of blending into the border.
+pub const COLUMN_HEADER: Color = PEACH;
 /// Active / enabled toggle state in the toolbar.
 pub const ACTIVE: Color = Color::Rgb(0xa6, 0xe3, 0xa1);
 /// Toolbar section labels (EDIT:, VIEW:, …) — same hue as the selected-menu highlight
