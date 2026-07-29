@@ -92,6 +92,9 @@ pub enum Action {
     DecreaseTransientThreshold,
     ResetConfig,
     ExportRegions,
+    /// Split a multichannel buffer into per-channel WAVs (File menu). Menu-only: `Shift+E` is
+    /// already Export Regions, and this is a once-per-file step, not a mid-edit reach.
+    ExportChannels,
     CdpProcess,
     CdpChain,
     ConfigureCdpDirectory,
@@ -470,6 +473,7 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "DecreaseTransientThreshold" => Some(Action::DecreaseTransientThreshold),
         "ResetConfig" => Some(Action::ResetConfig),
         "ExportRegions" => Some(Action::ExportRegions),
+        "ExportChannels" => Some(Action::ExportChannels),
         "CdpProcess" => Some(Action::CdpProcess),
         "CdpChain" => Some(Action::CdpChain),
         "ConfigureCdpDirectory" => Some(Action::ConfigureCdpDirectory),

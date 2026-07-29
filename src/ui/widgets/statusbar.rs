@@ -21,6 +21,13 @@ pub struct StatusBar<'a> {
     pub last_action: Option<&'a str>,
 }
 
+/// `"96kHz"` / `"44.1kHz"` — a whole-thousand rate drops the decimal. Shared by the status
+/// bar and the Export Channels header so the two can never disagree about how a rate reads.
+pub fn format_sample_rate(rate: u32) -> String {
+    let khz = rate as f64 / 1000.0;
+    if rate % 1000 == 0 { format!("{khz:.0}kHz") } else { format!("{khz:.1}kHz") }
+}
+
 impl<'a> Widget for StatusBar<'a> {
     fn render(self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         let seconds = self.document.cursor as f64 / self.document.sample_rate as f64;
@@ -28,12 +35,7 @@ impl<'a> Widget for StatusBar<'a> {
             Some(sel) if !sel.is_empty() => format!("{} samples", sel.len()),
             _ => "none".to_string(),
         };
-        let rate_khz = self.document.sample_rate as f64 / 1000.0;
-        let rate_str = if self.document.sample_rate % 1000 == 0 {
-            format!("{:.0}kHz", rate_khz)
-        } else {
-            format!("{:.1}kHz", rate_khz)
-        };
+        let rate_str = format_sample_rate(self.document.sample_rate);
         let bits = self.document.bits_per_sample;
         let snap = if self.snap_to_zero { " Zero x: on " } else { "" };
         let loop_ = if self.loop_playback { " Loop: on " } else { "" };
