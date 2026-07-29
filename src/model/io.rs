@@ -208,6 +208,22 @@ pub fn load_wav(path: impl AsRef<Path>) -> color_eyre::Result<Document> {
     })
 }
 
+/// Quantizes one f32 sample to a `bits`-deep signed integer, optionally with TPDF dither.
+///
+/// Full-scale maps to 2^(bits-1), matching the normalization `load_wav` uses on the way in, so
+/// a load→save round-trip at the same depth is stable. Shared by the WAV writer and the FLAC
+/// encoder (`model::export`) so the two can never drift apart on rounding or clipping — FLAC
+/// is integer-only, and a second copy of this arithmetic is exactly the kind of duplication
+/// `model::dsp` exists to prevent.
+pub(crate) fn quantize(sample: f32, bits: u16, dither: Option<&mut DitherRng>) -> i32 {
+    let scale = (1i64 << (bits - 1)) as f32;
+    let mut v = sample * scale;
+    if let Some(rng) = dither {
+        v += rng.tpdf();
+    }
+    v.round().clamp(-scale, scale - 1.0) as i32
+}
+
 /// Output sample format chosen at save time. The in-memory representation is always f32;
 /// `Int16`/`Int24` re-quantize on the way out (with optional dithering), while `Float32`
 /// round-trips losslessly.
@@ -243,7 +259,7 @@ impl BitDepth {
         }
     }
 
-    fn bits(self) -> u16 {
+    pub(crate) fn bits(self) -> u16 {
         match self {
             BitDepth::Int16 => 16,
             BitDepth::Int24 => 24,
@@ -276,10 +292,10 @@ impl BitDepth {
 /// Small, dependency-free xorshift PRNG used purely to generate dither noise. A fixed seed
 /// keeps saves reproducible; dither only needs to be decorrelated from the signal, not
 /// cryptographically random.
-struct DitherRng(u32);
+pub(crate) struct DitherRng(u32);
 
 impl DitherRng {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         DitherRng(0x9E3779B9)
     }
     /// Uniform f32 in [0, 1).
@@ -328,19 +344,11 @@ pub fn save_wav_with(
             }
         }
         BitDepth::Int16 | BitDepth::Int24 => {
-            // Full-scale maps to 2^(bits-1), matching the normalization `load_wav` uses on
-            // the way in, so a load→save round-trip at the same depth is stable.
-            let scale = (1i64 << (depth.bits() - 1)) as f32;
-            let max = scale - 1.0;
-            let min = -scale;
+            let bits = depth.bits();
             let mut rng = DitherRng::new();
             for i in 0..doc.len_samples() {
                 for channel in &doc.channels {
-                    let mut v = channel[i] * scale;
-                    if dither {
-                        v += rng.tpdf();
-                    }
-                    let q = v.round().clamp(min, max) as i32;
+                    let q = quantize(channel[i], bits, dither.then_some(&mut rng));
                     writer.write_sample(q)?;
                 }
             }

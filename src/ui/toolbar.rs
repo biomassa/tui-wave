@@ -62,6 +62,7 @@ impl Toolbar {
                     ("Quit",         sc(Action::Quit,          "q"),     Action::Quit),
                     ("regToFolder",  sc(Action::ExportRegions, "S+E"),   Action::ExportRegions),
                     ("expChannels",  sc(Action::ExportChannels, ""),     Action::ExportChannels),
+                    ("export",       sc(Action::Export, ""),             Action::Export),
                     ("newFromLeft",  sc(Action::NewFromLeft,   "L"),     Action::NewFromLeft),
                     ("newFromRight", sc(Action::NewFromRight,  "R"),     Action::NewFromRight),
                 ],

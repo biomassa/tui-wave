@@ -1,5 +1,30 @@
 # Third-Party Notices
 
+## LAME (MP3 encoding) — LGPL-2.1+
+
+File ▸ Export's MP3 output uses [LAME](https://lame.sourceforge.io/) through the
+[`mp3lame-encoder`](https://crates.io/crates/mp3lame-encoder) crate, whose `mp3lame-sys`
+dependency **builds libmp3lame from source and links it statically into the binary**. LAME is
+released under the [GNU Lesser General Public License, version 2.1 or later
+(LGPL-2.1+)](https://github.com/lameproject/lame/blob/master/COPYING).
+
+Because it is statically linked, anyone distributing a compiled binary of this project must
+also satisfy the LGPL's relinking requirement — in practice, by making available the object
+files or source needed to relink against a modified LAME, alongside this notice and a copy of
+the LGPL. This is the only non-permissive component in the build; everything else is MIT or
+Apache-2.0. Building from source (the normal case for this project) is unaffected.
+
+MP3 is also patent-unencumbered as of 2017, when the last relevant patents expired.
+
+## FLAC encoding and decoding
+
+FLAC output uses [`flacenc`](https://crates.io/crates/flacenc) (Apache-2.0), a pure-Rust FLAC
+encoder. FLAC, AIFF and WAV *decoding* uses
+[Symphonia](https://github.com/pdeljanov/Symphonia) (MPL-2.0). Neither is statically linked C
+code and neither imposes obligations beyond attribution.
+
+The FLAC format itself is developed by the Xiph.Org Foundation and is royalty-free.
+
 ## SoundThread process catalog data
 
 `src/model/cdp/catalog.toml` (the built-in CDP process definitions — parameter names,
