@@ -36,6 +36,19 @@ pub struct WaveformWidget<'a> {
     pub gradient: bool,
 }
 
+/// The glyph the amplitude-zero axis is drawn with. Kept as a named constant because the
+/// widget's own tests need to tell "a zero-line cell" apart from "a waveform cell" when
+/// asserting what actually got drawn.
+pub const ZERO_LINE_CHAR: char = '─';
+
+/// The character row amplitude 0.0 maps to within a pane of `height` rows — the same
+/// `mid_row` the dot geometry in `render_dots` is built around, floored to a whole row.
+/// Shared with the graphics-mode rasterizer's equivalent (`waveform_image`) only in intent;
+/// that one works in pixels and computes its own.
+pub fn zero_row(height: u16) -> u16 {
+    height / 2
+}
+
 /// The terminal column the playhead falls on, given the current scroll/zoom, or `None`
 /// when it's scrolled out of view (off the left edge or past the right edge).
 fn playhead_column(viewport: &Viewport, playhead: usize, width: u16) -> Option<u16> {
@@ -56,6 +69,18 @@ impl<'a> Widget for WaveformWidget<'a> {
             for x in area.x..area.x + area.width {
                 buf[(x, y)].set_bg(theme::BASE);
             }
+        }
+
+        // The amplitude-zero axis, drawn *before* the waveform so the dots overwrite it
+        // wherever the trace passes through the centre row — the line is a background
+        // reference for where zero crossings land, not something that should sit on top of
+        // the signal. Drawn even for an empty channel, so a silent pane still shows the axis
+        // rather than reading as "nothing rendered".
+        let zero_y = area.y + zero_row(area.height);
+        for x in area.x..area.x + area.width {
+            buf[(x, zero_y)]
+                .set_char(ZERO_LINE_CHAR)
+                .set_style(Style::default().fg(theme::ZERO_LINE).bg(theme::BASE));
         }
 
         if self.samples.is_empty() {
@@ -191,6 +216,13 @@ impl<'a> WaveformWidget<'a> {
 mod tests {
     use super::*;
 
+    /// Whether the cell holds an actual waveform glyph, as opposed to blank space or the
+    /// zero-line axis that's now drawn across every pane's centre row underneath the trace.
+    fn is_waveform_cell(buf: &Buffer, x: u16, y: u16) -> bool {
+        let symbol = buf[(x, y)].symbol();
+        symbol != " " && symbol != ZERO_LINE_CHAR.to_string()
+    }
+
     fn viewport(scroll_offset: usize, samples_per_column: f64) -> Viewport {
         Viewport {
             samples_per_column,
@@ -244,7 +276,7 @@ mod tests {
         widget.render(area, &mut buf);
 
         for x in 0..20u16 {
-            let has_mark = (0..10u16).any(|y| buf[(x, y)].symbol() != " ");
+            let has_mark = (0..10u16).any(|y| is_waveform_cell(&buf, x, y));
             assert!(has_mark, "column {x} rendered nothing for a non-zero single-sample value");
         }
     }
@@ -269,13 +301,15 @@ mod tests {
         widget.render(area, &mut buf);
 
         for x in 0..26u16 {
-            let has_mark = (0..10u16).any(|y| buf[(x, y)].symbol() != " ");
+            let has_mark = (0..10u16).any(|y| is_waveform_cell(&buf, x, y));
             assert!(has_mark, "column {x} rendered nothing at a fractional zoom level");
         }
     }
 
     /// A literally silent (all-zero) single-sample column is the one case that should
-    /// legitimately render nothing — there's no amplitude to show a dot for.
+    /// legitimately render no *waveform* — there's no amplitude to show a dot for. The
+    /// zero-line axis still draws through it (that's the whole point of the axis: silence is
+    /// exactly where the reference matters).
     #[test]
     fn single_sample_silent_column_renders_nothing() {
         let samples = vec![0.0f32; 5];
@@ -294,8 +328,40 @@ mod tests {
 
         for x in 0..5u16 {
             for y in 0..10u16 {
+                if y == zero_row(10) {
+                    assert_eq!(buf[(x, y)].symbol(), ZERO_LINE_CHAR.to_string(), "the zero axis must still be drawn through silence");
+                    continue;
+                }
                 assert_eq!(buf[(x, y)].symbol(), " ", "a silent sample should not draw a mark");
             }
+        }
+    }
+
+    /// The zero line is a *background* reference: it must be drawn under the waveform, so a
+    /// column whose trace passes through the centre row shows the trace there, not the axis.
+    #[test]
+    fn zero_line_spans_the_pane_but_the_waveform_draws_over_it() {
+        // Column 0 is silent (no dots anywhere), columns 1+ are full-scale (dots everywhere).
+        let mut samples = vec![0.0f32; 4];
+        samples.extend((0..76).map(|i| if i % 2 == 0 { 0.95 } else { -0.95 }));
+        let area = Rect::new(0, 0, 20, 10);
+        let mut buf = Buffer::empty(area);
+        let widget = WaveformWidget {
+            samples: &samples,
+            viewport: &viewport(0, 4.0),
+            cache: None,
+            selection: None,
+            cursor: usize::MAX,
+            playhead: None,
+            gradient: true,
+        };
+        widget.render(area, &mut buf);
+
+        let zero_y = zero_row(10);
+        assert_eq!(buf[(0, zero_y)].symbol(), ZERO_LINE_CHAR.to_string(), "the axis shows through a silent column");
+        assert_eq!(buf[(0, zero_y)].fg, theme::ZERO_LINE);
+        for x in 1..20u16 {
+            assert!(is_waveform_cell(&buf, x, zero_y), "the waveform must draw over the axis at column {x}");
         }
     }
 
@@ -317,9 +383,8 @@ mod tests {
 
         for x in 0..20u16 {
             for y in 0..10u16 {
-                let cell = &buf[(x, y)];
-                if cell.symbol() != " " {
-                    assert_eq!(cell.fg, theme::WAVEFORM_DOT_LOW, "dot at ({x},{y}) should be flat green with gradient off");
+                if is_waveform_cell(&buf, x, y) {
+                    assert_eq!(buf[(x, y)].fg, theme::WAVEFORM_DOT_LOW, "dot at ({x},{y}) should be flat green with gradient off");
                 }
             }
         }

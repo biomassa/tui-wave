@@ -32,6 +32,16 @@ pub const CURSOR: Color = YELLOW;
 pub const PLAYHEAD: Color = Color::Rgb(0xff, 0xff, 0xff);
 /// dB scale gutter labels.
 pub const DB_SCALE: Color = SUBTEXT0;
+/// The amplitude-zero (silence) axis drawn across the middle of every channel pane —
+/// without it there's no visual reference for where a zero crossing actually lands. Pale on
+/// purpose: it's a background reference the waveform draws *on top of* (see
+/// `waveform::WaveformWidget::render` and `waveform_image::rasterize_waveform`), not an
+/// annotation competing with the trace, so it's a step below even `ANNOTATION`/`OVERLAY0`.
+pub const ZERO_LINE: Color = SURFACE1;
+/// The horizontal time ruler's ticks and m:ss labels (`widgets::time_ruler`) — same muted
+/// text as the vertical dB gutter, since the two are the same kind of thing (an axis
+/// annotating the waveform) on perpendicular edges.
+pub const TIME_RULER: Color = SUBTEXT0;
 /// Timeline markers (cue points) — vertical line and label.
 pub const MARKER: Color = MAUVE;
 /// Head/Tail marks for the CDP DISTMORE family (`Document.head_tail_marks`) — a second,

@@ -51,6 +51,7 @@ use super::widgets::db_scale::{DbScaleWidget, DB_GUTTER_WIDTH};
 use super::widgets::cdp_envelope_image::{self, interp_cdp_envelope};
 use super::widgets::formant_image;
 use super::widgets::statusbar::StatusBar;
+use super::widgets::time_ruler::TimeRulerWidget;
 use super::widgets::waveform::WaveformWidget;
 use super::widgets::waveform_image;
 
@@ -2013,6 +2014,11 @@ pub struct App {
     /// renderers. Persisted, defaults to `true` — see `Config.dot_matrix_gradient`. Toggled
     /// with `Action::ToggleDotMatrixGradient` (View menu, no default keybinding).
     pub dot_matrix_gradient: bool,
+    /// Whether the horizontal m:ss time ruler (`widgets::time_ruler`) is shown on its own row
+    /// between the waveform panes and the status bar. Persisted, defaults to `true` — see
+    /// `Config.time_ruler`. Toggled with `Action::ToggleTimeRuler` (View menu, no default
+    /// keybinding).
+    pub time_ruler: bool,
     /// Per-channel graphics-mode image state, index-parallel to the active document's
     /// channels. Rebuilt fresh every frame from the live `viewport`/`selection`/`cursor`/
     /// `playhead` (via `Picker::new_resize_protocol`, the crate's intended way to swap in
@@ -2806,6 +2812,7 @@ impl App {
             picker: None,
             graphics_mode: config.graphics_mode,
             dot_matrix_gradient: config.dot_matrix_gradient,
+            time_ruler: config.time_ruler,
             graphics_protocols: Vec::new(),
             cdp_envelope_graphics_protocol: None,
             cdp_formant_graphics_protocol: None,
@@ -10403,6 +10410,7 @@ impl App {
             transient_threshold_db: self.transient_threshold_db,
             graphics_mode: self.graphics_mode,
             dot_matrix_gradient: self.dot_matrix_gradient,
+            time_ruler: self.time_ruler,
             cdp_dir,
             keybindings,
         };
@@ -12167,6 +12175,12 @@ impl App {
             return;
         }
 
+        if action == Action::ToggleTimeRuler {
+            self.time_ruler = !self.time_ruler;
+            self.save_config();
+            return;
+        }
+
         if matches!(
             action,
             Action::InsertMarker
@@ -12495,6 +12509,7 @@ impl App {
             | Action::ToggleViewportFollowsPlayback
             | Action::ToggleGraphicsMode
             | Action::ToggleDotMatrixGradient
+            | Action::ToggleTimeRuler
             | Action::ClearSelection
             | Action::SelectAll
             | Action::SaveAs
@@ -13014,6 +13029,9 @@ impl App {
         if self.dot_matrix_gradient {
             self.menu.active_actions.insert(Action::ToggleDotMatrixGradient);
         }
+        if self.time_ruler {
+            self.menu.active_actions.insert(Action::ToggleTimeRuler);
+        }
         self.toolbar.render(frame, chrome.toolbar, focus);
         // Fill the spacer row with the base background so it matches the toolbar below it
         // (rather than showing through to the terminal default).
@@ -13066,8 +13084,17 @@ impl App {
         let inner = outer.inner(chrome.content);
         frame.render_widget(outer, chrome.content);
 
-        let [waveform_area, status_area] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+        // The time ruler takes a row out of the waveform's own height (between it and the
+        // status bar), rather than overlaying the waveform — an overlay would either hide a
+        // row of signal or fight the graphics-mode bitmap for control of that row, the same
+        // conflict the marker overlay has to work around below.
+        let ruler_height = if self.time_ruler { 1 } else { 0 };
+        let [waveform_area, ruler_area, status_area] = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(ruler_height),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
 
         let gutter = DB_GUTTER_WIDTH.min(waveform_area.width / 2);
         let inner_waveform_area = Rect {
@@ -13361,6 +13388,21 @@ impl App {
             }
             self.head_tail_label_rects
                 .push((Rect { x, y: label_row, width: shown_w + 1, height: 1 }, hi));
+        }
+
+        // Inset by the same dB gutter the waveform panes are, so a tick sits directly under
+        // the column holding that instant rather than one gutter-width off.
+        if self.time_ruler && ruler_area.height > 0 {
+            let ruler_inner = Rect {
+                x: ruler_area.x + gutter,
+                y: ruler_area.y,
+                width: ruler_area.width.saturating_sub(gutter * 2),
+                height: ruler_area.height,
+            };
+            frame.render_widget(
+                TimeRulerWidget { viewport, sample_rate: self.documents[doc_idx].sample_rate },
+                ruler_inner,
+            );
         }
 
         frame.render_widget(StatusBar { document: &self.documents[doc_idx], viewport, snap_to_zero: self.snap_to_zero, loop_playback: self.loop_playback, fine_mode: self.fine_mode, transient_threshold_db: self.transient_threshold_db, last_action: self.histories[doc_idx].last_label() }, status_area);
@@ -27192,6 +27234,46 @@ mod tests {
         app.documents[0].head_tail_marks.push(50);
         terminal.draw(|frame| app.render(frame)).unwrap();
         assert!(buffer_text(terminal.backend().buffer()).contains("H/T: 2 pairs +1"));
+    }
+
+    /// The time ruler is on by default and occupies a real row between the waveform and the
+    /// status bar — so toggling it must give that row back to the waveform, not just blank it.
+    #[test]
+    fn the_time_ruler_labels_the_timeline_and_its_row_returns_to_the_waveform_when_off() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        // The toggle persists through `save_config`, so redirect that write to a temp dir
+        // rather than letting the test rewrite the real user config.
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_time_ruler_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        // 10 seconds at 44.1kHz, so the visible span is measured in whole seconds.
+        let mut app = new_app(Some(doc(0.1, 441_000)), None);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(screen.contains("┬0:00"), "the ruler is on by default: {screen}");
+        assert!(screen.contains("┬0:02"), "and labels the visible range in m:ss: {screen}");
+        let waveform_height_with_ruler = app.waveform_area.height;
+
+        app.handle_action(Action::ToggleTimeRuler);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(!screen.contains("┬0:00"), "toggling it off removes the ruler: {screen}");
+        assert_eq!(
+            app.waveform_area.height,
+            waveform_height_with_ruler + 1,
+            "the reclaimed row must go back to the waveform"
+        );
+        assert!(!app.config.time_ruler, "the toggle is persisted");
+        assert!(!Config::load().time_ruler, "and written straight to disk");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     /// The text-mode overlay draws head/tail marks in their own color and with their own line
