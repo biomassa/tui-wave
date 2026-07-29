@@ -97,6 +97,8 @@ impl MenuBar {
                     entry("Graphics Mode",                    Action::ToggleGraphicsMode,          "g"),
                     entry("Gradient",                         Action::ToggleDotMatrixGradient,     ""),
                     entry("Time Ruler",                       Action::ToggleTimeRuler,             ""),
+                    entry("Scroll Channels Up",               Action::ScrollChannelsUp,            ","),
+                    entry("Scroll Channels Down",             Action::ScrollChannelsDown,          "."),
                 ],
             },
             MenuItem {
