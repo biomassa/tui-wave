@@ -1,4 +1,5 @@
 pub mod bwf;
+pub mod channel_export;
 pub mod cdp;
 pub mod clipboard;
 pub mod command;

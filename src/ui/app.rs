@@ -25,6 +25,7 @@ use crate::commands::marker::{
 };
 use crate::commands::paste::paste_command;
 use crate::commands::remove_channels::remove_channels_command;
+use crate::model::channel_export::{self, ChannelExportMode};
 use crate::commands::normalize::normalize_command;
 use crate::commands::resample::resample_command;
 use crate::commands::reverse::reverse_command;
@@ -51,7 +52,7 @@ use super::widgets::braille::{braille_char, DOT_BITS};
 use super::widgets::db_scale::{DbScaleWidget, DB_GUTTER_WIDTH};
 use super::widgets::cdp_envelope_image::{self, interp_cdp_envelope};
 use super::widgets::formant_image;
-use super::widgets::statusbar::StatusBar;
+use super::widgets::statusbar::{format_sample_rate, StatusBar};
 use super::widgets::time_ruler::TimeRulerWidget;
 use super::widgets::waveform::WaveformWidget;
 use super::widgets::waveform_image;
@@ -97,6 +98,48 @@ mod er_focus {
     /// the checkbox; clicks on/after it focus the value field for editing.
     pub const VALUE_COL: u16 = (3 + 3 + 1 + ROW_LABEL_WIDTH + 1) as u16;
 }
+
+/// Focus indices for `Dialog::ExportChannels`. Only two stops: the channel list (with its own
+/// `selected` row moving inside it) and the Subfolder field. Tab moves between them.
+mod ec_focus {
+    pub const CHANNELS: usize = 0;
+    pub const SUBFOLDER: usize = 1;
+    pub const COUNT: usize = 2;
+
+    /// Column within a channel row's Rect where the mode selector starts. A click left of it
+    /// only moves the highlight; at or past it, the click also cycles the mode — the same
+    /// split-at-a-column contract Export Regions' checkbox rows use. Must match the width the
+    /// renderer pads the `Ch` column to, or a click disagrees with what is drawn.
+    pub const MODE_COL: u16 = 10;
+}
+
+/// How many channel rows the Export Channels dialog can draw in `area`. Grows to fill the
+/// terminal so a 30-channel file is mostly visible, never below [`EC_MIN_CHANNEL_ROWS`], and
+/// never more rows than there are channels.
+fn ec_visible_rows(area: Rect, channel_count: usize) -> usize {
+    let by_height = (area.height.saturating_sub(EC_CHROME_ROWS) as usize).max(EC_MIN_CHANNEL_ROWS);
+    by_height.min(channel_count.max(1))
+}
+
+/// Topmost visible channel row. Derived from `selected` rather than stored, so the renderer
+/// and the click handler always agree; the window is kept flush with the end so the last page
+/// is full rather than trailing blanks.
+fn ec_scroll_top(selected: usize, visible: usize, channel_count: usize) -> usize {
+    selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(channel_count.saturating_sub(visible))
+}
+
+/// Channel rows the Export Channels dialog draws at once when the terminal allows it. The
+/// list grows to fill the available height rather than sitting at a fixed size — a 30-channel
+/// file would otherwise be mostly invisible — but never shrinks below this.
+const EC_MIN_CHANNEL_ROWS: usize = 6;
+/// Rows the dialog always spends, whatever the channel count: two borders, the header, the
+/// column header, the summary, the Subfolder field and the hints bar.
+const EC_FIXED_ROWS: u16 = 7;
+/// …plus the two possible scroll indicators. Used only to size the channel list against the
+/// available height; the popup itself is sized to the indicators actually drawn.
+const EC_CHROME_ROWS: u16 = EC_FIXED_ROWS + 2;
 
 /// Optional per-region processing for [`App::export_regions`], one field per Export
 /// Regions dialog checkbox: `None` means the option is off, `Some(value)` enables it.
@@ -767,6 +810,23 @@ enum Dialog {
     /// silence). `focused` is the index of the currently-active field; Tab cycles through.
     /// `tanh_clip` enables a tanh soft-limiter on the mixed output (same as Gain's option).
     MixToMono { inputs: Vec<TextInput>, focused: usize, tanh_clip: bool },
+    /// Export Channels: one row per source channel, each Mono / Skip / paired with the row
+    /// below it (`ChannelExportMode`), written as WAVs into `folder_input`. `selected` is the
+    /// highlighted channel row — the list scrolls, because arbitrary channel counts are in
+    /// scope. The scroll position is *derived* from `selected` by `ec_scroll_top` rather than
+    /// stored, so the renderer and `handle_dialog_row_click` cannot disagree about which
+    /// channel a given screen row is — the same stateless approach the CDP browser uses.
+    ExportChannels {
+        modes: Vec<ChannelExportMode>,
+        selected: usize,
+        folder_input: TextInput,
+        focused: usize,
+        /// `"take01.wav — 30 ch · 96 kHz · 24-bit"`, built once when the dialog opens: none of
+        /// it can change while the dialog is up, and `render_dialog` only gets `&Dialog`.
+        header: String,
+        /// The source stem the suffixes attach to, for the Output file column.
+        stem: String,
+    },
     /// Remove Empty Channels: drops every channel whose peak is below `input` dBFS. One
     /// field and no preview — the effect is visible in the waveform the moment it applies,
     /// and Ctrl+Z puts the channels back (`RemoveChannelsCommand`), so there is nothing a
@@ -4189,9 +4249,62 @@ impl App {
         }
     }
 
+    /// The keys `Dialog::ExportChannels` owns while the channel list has focus: Up/Down move
+    /// the highlighted row, Left/Right cycle its mode, Space pairs/unpairs it with the row
+    /// below. Returns whether the key was consumed — Enter, Esc and Tab deliberately are not,
+    /// so they keep the generic dialog behaviour.
+    ///
+    /// With the Subfolder field focused only Up/Down are taken (to get back to the list);
+    /// Left/Right must stay caret movement there.
+    fn handle_export_channels_key(&mut self, key: KeyEvent) -> bool {
+        let Some(Dialog::ExportChannels { modes, selected, focused, .. }) = self.dialog.as_mut()
+        else {
+            return false;
+        };
+        let on_list = *focused == ec_focus::CHANNELS;
+        match key.code {
+            KeyCode::Up => {
+                *focused = ec_focus::CHANNELS;
+                *selected = selected.saturating_sub(1);
+                true
+            }
+            KeyCode::Down => {
+                *focused = ec_focus::CHANNELS;
+                *selected = (*selected + 1).min(modes.len().saturating_sub(1));
+                true
+            }
+            KeyCode::Home if on_list => {
+                *selected = 0;
+                true
+            }
+            KeyCode::End if on_list => {
+                *selected = modes.len().saturating_sub(1);
+                true
+            }
+            KeyCode::Left if on_list => {
+                channel_export::cycle_mode(modes, *selected, false);
+                true
+            }
+            KeyCode::Right if on_list => {
+                channel_export::cycle_mode(modes, *selected, true);
+                true
+            }
+            KeyCode::Char(' ') if on_list => {
+                channel_export::toggle_pair(modes, *selected);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// `&mut TextInput` for the active dialog, if it's a text-bearing one.
     fn dialog_input(&mut self) -> Option<&mut TextInput> {
         match self.dialog.as_mut()? {
+            // Only while the Subfolder field has focus — with the channel list focused,
+            // typing must not leak into the folder name behind it.
+            Dialog::ExportChannels { folder_input, focused, .. } => {
+                (*focused == ec_focus::SUBFOLDER).then_some(folder_input)
+            }
             Dialog::RemoveEmptyChannels { input }
             | Dialog::Normalize { input }
             | Dialog::Resample { input, .. }
@@ -4379,11 +4492,33 @@ impl App {
             self.handle_cdp_preset_save_prompt_key(key);
             return;
         }
+        // Export Channels owns Up/Down/Left/Right/Space while the channel list has focus, so
+        // it is intercepted ahead of the generic arms below (which would treat Left/Right as
+        // caret movement). Enter, Esc and Tab fall through to them unchanged.
+        if let Some(Dialog::ExportChannels { .. }) = &self.dialog {
+            if self.handle_export_channels_key(key) {
+                return;
+            }
+        }
+
         match key.code {
             KeyCode::Enter => match self.dialog.take() {
                 Some(Dialog::Normalize { input }) => {
                     let db = input.value().parse::<f32>().unwrap_or(-1.0).min(0.0);
                     self.apply_normalize(db);
+                }
+                Some(Dialog::ExportChannels { modes, folder_input, selected, focused: _, header, stem }) => {
+                    let folder = folder_input.value().trim().to_string();
+                    if folder.is_empty() {
+                        // Matches the dimmed Enter hint: re-created unchanged rather than
+                        // writing files into the source directory itself.
+                        self.dialog = Some(Dialog::ExportChannels {
+                            modes, folder_input, selected, header, stem,
+                            focused: ec_focus::SUBFOLDER,
+                        });
+                        return;
+                    }
+                    self.export_channels(&folder, &modes);
                 }
                 Some(Dialog::RemoveEmptyChannels { input }) => {
                     match input.value().trim().parse::<f32>() {
@@ -5066,6 +5201,7 @@ impl App {
                 *curve = if forward { curve.next() } else { curve.prev() };
             }
             Some(Dialog::ExportRegions { focused, .. }) => *focused = step(*focused, er_focus::COUNT),
+            Some(Dialog::ExportChannels { focused, .. }) => *focused = step(*focused, ec_focus::COUNT),
             // Only two columns receive keyboard focus (Groups, Processes — the description
             // column is display-only), so Tab and Shift+Tab both just flip it.
             Some(Dialog::CdpBrowser { focus, groups, .. }) => {
@@ -5234,6 +5370,28 @@ impl App {
                 } else if row == n {
                     *focused = n;
                     *tanh_clip = !*tanh_clip;
+                }
+            }
+            // The channel rows come first, then Subfolder. `ec_scroll_top` is recomputed from
+            // the same `selected` the renderer used, so a click can't land on a different
+            // channel than the one drawn there.
+            Some(Dialog::ExportChannels { modes, selected, focused, .. }) => {
+                let visible = ec_visible_rows(self.last_frame_area, modes.len());
+                let top = ec_scroll_top(*selected, visible, modes.len());
+                let channel_rows = visible.min(modes.len());
+                if row < channel_rows {
+                    let clicked = top + row;
+                    if clicked < modes.len() {
+                        *focused = ec_focus::CHANNELS;
+                        *selected = clicked;
+                        // Left of the mode column only moves the highlight; on or past it the
+                        // click also cycles, which is how a mouse user commits a choice.
+                        if x_in_row >= ec_focus::MODE_COL {
+                            channel_export::cycle_mode(modes, clicked, true);
+                        }
+                    }
+                } else {
+                    *focused = ec_focus::SUBFOLDER;
                 }
             }
             Some(Dialog::ExportRegions {
@@ -11326,6 +11484,95 @@ impl App {
         }
     }
 
+    /// Writes one WAV per planned output file into `subfolder`, next to the source file.
+    ///
+    /// Always WAV, at the source buffer's own sample rate and bit depth — this dialog has no
+    /// format controls, because splitting channels is not the moment to also change format.
+    /// A synthesized buffer (CDP output, Copy to New) reports 32 bits, so it exports as
+    /// 32-bit float, which is the correct lossless answer for it.
+    ///
+    /// Unlike `export_regions`, markers and head/tail marks are carried over **verbatim**:
+    /// the timeline is unchanged here, so every position is still valid and rebasing them
+    /// would be wrong. `bext` is dropped, matching every other new-file path in the app.
+    fn export_channels(&mut self, subfolder: &str, modes: &[ChannelExportMode]) {
+        let idx = self.active_document;
+        let Some(doc) = self.documents.get(idx) else { return };
+
+        let files = channel_export::plan(modes);
+        if files.is_empty() {
+            self.dialog = Some(Dialog::Info {
+                message: "Every channel is set to Skip — nothing to export.".to_string(),
+            });
+            return;
+        }
+
+        let parent_dir = doc
+            .path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.file_panel.directory.clone());
+        let out_dir = parent_dir.join(subfolder);
+        if std::fs::create_dir_all(&out_dir).is_err() {
+            self.dialog =
+                Some(Dialog::Info { message: format!("Could not create folder: {subfolder}") });
+            return;
+        }
+
+        let stem = doc
+            .path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "untitled".to_string());
+        let depth = BitDepth::from_bits(doc.bits_per_sample);
+        let sample_rate = doc.sample_rate;
+        let bits = doc.bits_per_sample;
+        let markers = doc.markers.clone();
+        let head_tail_marks = doc.head_tail_marks.clone();
+
+        let mut error: Option<String> = None;
+        let mut written = 0usize;
+        for file in &files {
+            let channels: Vec<Vec<f32>> = file
+                .channels
+                .iter()
+                .map(|&c| doc.channels.get(c).cloned().unwrap_or_default())
+                .collect();
+            let out_doc = Document {
+                head_tail_marks: head_tail_marks.clone(),
+                channels,
+                sample_rate,
+                bits_per_sample: bits,
+                selection: None,
+                cursor: 0,
+                dirty: false,
+                path: None,
+                markers: markers.clone(),
+                bext: None,
+            };
+            let path = out_dir.join(format!("{stem}_{}.wav", file.suffix));
+            if let Err(e) = crate::model::io::save_wav_with(&out_doc, &path, depth, false) {
+                error = Some(format!("Save failed: {e}"));
+                break;
+            }
+            written += 1;
+        }
+
+        self.dialog = Some(match error {
+            Some(msg) => Dialog::Info { message: msg },
+            None => {
+                self.file_panel.scan();
+                Dialog::Info {
+                    message: format!(
+                        "Saved {written} file{} to {subfolder}/",
+                        if written == 1 { "" } else { "s" },
+                    ),
+                }
+            }
+        });
+    }
+
     fn load_file(&mut self, path: PathBuf) {
         self.stop_audition();
         if let Some(audio) = self.audio.take() {
@@ -12589,6 +12836,44 @@ impl App {
             return;
         }
 
+        if action == Action::ExportChannels {
+            if let Some(doc) = self.active_doc() {
+                let channels = doc.channel_count();
+                if channels < 2 {
+                    self.dialog = Some(Dialog::Info {
+                        message: "Only one channel — nothing to split.".to_string(),
+                    });
+                } else {
+                    let name = doc
+                        .path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "untitled.wav".to_string());
+                    let stem = doc
+                        .path
+                        .as_ref()
+                        .and_then(|p| p.file_stem())
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "untitled".to_string());
+                    let header = format!(
+                        "{name} — {channels} ch · {} · {}",
+                        format_sample_rate(doc.sample_rate),
+                        BitDepth::from_bits(doc.bits_per_sample).label(),
+                    );
+                    self.dialog = Some(Dialog::ExportChannels {
+                        modes: channel_export::default_modes(channels),
+                        selected: 0,
+                        folder_input: TextInput::new("channels"),
+                        focused: ec_focus::CHANNELS,
+                        header,
+                        stem,
+                    });
+                }
+            }
+            return;
+        }
+
         if action == Action::ExportRegions {
             if let Some(doc) = self.active_doc() {
                 if doc.markers.is_empty() {
@@ -12772,6 +13057,7 @@ impl App {
             | Action::ToggleGraphicsMode
             | Action::ToggleDotMatrixGradient
             | Action::ToggleTimeRuler
+            | Action::ExportChannels
             | Action::RemoveEmptyChannels
             | Action::ScrollChannelsUp
             | Action::ScrollChannelsDown
@@ -14666,6 +14952,11 @@ fn render_dialog(
                 *fade_in, fade_in_input, *fade_out, fade_out_input, *focused,
             );
         }
+        Dialog::ExportChannels { modes, selected, folder_input, focused, header, stem } => {
+            return render_export_channels_dialog(
+                frame, area, modes, *selected, folder_input, *focused, header, stem,
+            );
+        }
         Dialog::Info { message } => {
             return render_info_dialog(frame, area, message);
         }
@@ -14770,6 +15061,7 @@ fn render_dialog(
         | Dialog::CurveEditor(_)
         | Dialog::FormantInfo { .. }
         | Dialog::CdpChainEditor
+        | Dialog::ExportChannels { .. }
         | Dialog::LoadCurve { .. } => {
             unreachable!("handled by match arms above")
         }
@@ -14859,6 +15151,187 @@ fn block_inner(popup: Rect) -> Rect {
         width: popup.width.saturating_sub(2),
         height: popup.height.saturating_sub(2),
     }
+}
+
+/// Export Channels. Unlike every other dialog in the app this one is *not* a fixed-height
+/// popup: the channel list grows to fill the terminal, because a fixed ten or twelve rows
+/// would leave a 30-channel file mostly invisible. Rows that don't fit are marked with
+/// `▲ N more` / `▼ N more` — without them a long list gives no sign the rest exists.
+///
+/// Returns one rect per *visible* channel row, then the Subfolder row, then the hints bar
+/// (always last, and always the submit target — `dialog_n_interactive` is `len - 1`).
+#[allow(clippy::too_many_arguments)]
+fn render_export_channels_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    modes: &[ChannelExportMode],
+    selected: usize,
+    folder_input: &TextInput,
+    focused: usize,
+    header: &str,
+    stem: &str,
+) -> Vec<Rect> {
+    let files = channel_export::plan(modes);
+    let width = 66u16.min(area.width);
+    let visible = ec_visible_rows(area, modes.len());
+    let scroll_top = ec_scroll_top(selected, visible, modes.len());
+    let end = (scroll_top + visible).min(modes.len());
+    let hidden_above = scroll_top;
+    let hidden_below = modes.len() - end;
+    // `EC_CHROME_ROWS` is the worst case, used to size `visible`; the popup itself is sized
+    // to the rows actually drawn, so a list that needs no scroll indicators doesn't leave two
+    // blank rows above the bottom border.
+    let indicator_rows = u16::from(hidden_above > 0) + u16::from(hidden_below > 0);
+    let height = (visible as u16 + indicator_rows + EC_FIXED_ROWS).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+
+    let w = channel_export::digit_width(modes.len());
+    // Which output file each channel belongs to, so a row can show the name it contributes to
+    // — including on the lower half of a pair, where the name sits on the upper row.
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(format!(" {header}"), label_style)),
+        Line::from(Span::styled(
+            format!("  {:<w$}   Export as        Output file", "Ch", w = w.max(2)),
+            dim_style,
+        )),
+    ];
+
+    if hidden_above > 0 {
+        lines.push(Line::from(Span::styled(format!("  ▲ {hidden_above} more"), dim_style)));
+    }
+    let mut row_rects: Vec<Rect> = Vec::with_capacity(visible + 2);
+    // `lines` already carries the header, column header and any `▲` row, so this is the
+    // screen row the first channel lands on.
+    let list_top = popup.y + 1 + lines.len() as u16;
+
+    for (row, ch) in (scroll_top..end).enumerate() {
+        let consumed = channel_export::is_consumed(modes, ch);
+        let is_sel = ch == selected && focused == ec_focus::CHANNELS;
+        // The bracket column: `┐` on the upper half of a pair, `┘` on the lower.
+        let bracket = if consumed {
+            "┘"
+        } else if modes[ch] == ChannelExportMode::PairWithNext && ch + 1 < modes.len() {
+            "┐"
+        } else {
+            " "
+        };
+        let marker = if is_sel { "▸" } else { " " };
+        let num = format!("{marker}{:>w$}  {bracket} ", ch + 1, w = w.max(2));
+
+        // A consumed row shows nothing in the mode column — the pair above it owns the choice.
+        let (mode_text, file_text) = if consumed {
+            (String::new(), String::new())
+        } else {
+            let label = match modes[ch] {
+                ChannelExportMode::Mono => "Mono",
+                ChannelExportMode::Skip => "Skip",
+                ChannelExportMode::PairWithNext => "Stereo pair",
+            };
+            let mode = if is_sel {
+                format!("◄ {label:<11} ►")
+            } else {
+                format!("  {label:<11}  ")
+            };
+            let file = files
+                .iter()
+                .find(|f| f.channels.first() == Some(&ch))
+                .map(|f| format!("{stem}_{}.wav", f.suffix))
+                .unwrap_or_else(|| "—".to_string());
+            (mode, file)
+        };
+        let num_style = if is_sel { label_style } else { dim_style };
+        lines.push(Line::from(vec![
+            Span::styled(num, num_style),
+            Span::styled(mode_text, if is_sel { cursor_style } else { base }),
+            Span::styled(format!("  {file_text}"), dim_style),
+        ]));
+        row_rects.push(Rect {
+            x: popup.x + 1,
+            y: list_top + row as u16,
+            width: popup.width.saturating_sub(2),
+            height: 1,
+        });
+    }
+    if hidden_below > 0 {
+        lines.push(Line::from(Span::styled(format!("  ▼ {hidden_below} more"), dim_style)));
+    }
+
+    let used: usize = files.iter().map(|f| f.channels.len()).sum();
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  {} file{} · {used} of {} channels",
+            files.len(),
+            if files.len() == 1 { "" } else { "s" },
+            modes.len(),
+        ),
+        label_style,
+    )));
+
+    let folder_focused = focused == ec_focus::SUBFOLDER;
+    lines.push(if folder_focused {
+        let (before, under, after) = folder_input.split_at_cursor();
+        Line::from(vec![
+            Span::styled(" Subfolder: ", label_style),
+            Span::styled(before, base),
+            Span::styled(under, cursor_style),
+            Span::styled(after, base),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" Subfolder: ", label_style),
+            Span::styled(folder_input.value().to_string(), base),
+        ])
+    });
+    let folder_row = Rect {
+        x: popup.x + 1,
+        y: popup.y + lines.len() as u16,
+        width: popup.width.saturating_sub(2),
+        height: 1,
+    };
+
+    let can_export = !folder_input.value().trim().is_empty() && !files.is_empty();
+    let go_style = if can_export { hint_style } else { dim_style };
+    lines.push(Line::from(vec![
+        Span::styled(" ↑↓", hint_style),
+        Span::styled(":row  ", label_style),
+        Span::styled("←→", hint_style),
+        Span::styled(":mode  ", label_style),
+        Span::styled("Space", hint_style),
+        Span::styled(":pair  ", label_style),
+        Span::styled("Tab", hint_style),
+        Span::styled(":next  ", label_style),
+        Span::styled("Enter", go_style),
+        Span::styled(":Export", label_style),
+    ]));
+    let hints_row = Rect {
+        x: popup.x + 1,
+        y: popup.y + lines.len() as u16,
+        width: popup.width.saturating_sub(2),
+        height: 1,
+    };
+
+    let block = Block::default()
+        .title("Export Channels")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(Style::default().bg(theme::SURFACE0));
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+
+    row_rects.push(folder_row);
+    row_rects.push(hints_row);
+    row_rects
 }
 
 fn render_export_regions_dialog(
@@ -27980,6 +28453,191 @@ mod tests {
                     "more slack than one row short of a pane per channel: {rects:?}"
                 );
             }
+        }
+    }
+
+    /// Builds a 6-channel document saved to a temp dir, exports it, and reads back what
+    /// landed on disk — the only way to prove the right source channels reached the right
+    /// files. Returns the output directory so the caller can inspect and clean up.
+    fn export_channels_fixture(
+        name: &str,
+        channel_count: usize,
+        modes: Vec<ChannelExportMode>,
+    ) -> (PathBuf, Vec<Vec<f32>>) {
+        let dir = std::env::temp_dir().join(format!("tui_wave_expch_{name}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Each channel holds a distinct constant, so a misrouted channel is unmistakable.
+        let channels: Vec<Vec<f32>> =
+            (0..channel_count).map(|c| vec![(c as f32 + 1.0) / 100.0; 32]).collect();
+        let mut doc = doc_with_channels(channels.clone());
+        doc.bits_per_sample = 32;
+        let src = dir.join("take01.wav");
+        crate::model::io::save_wav(&doc, &src).unwrap();
+        doc.path = Some(src);
+
+        let mut app = new_app(Some(doc), Some(dir.clone()));
+        app.export_channels("out", &modes);
+        (dir, channels)
+    }
+
+    /// The whole point: each written file must hold exactly the source channels its name
+    /// claims, at the source's own rate and depth.
+    #[test]
+    fn export_channels_writes_the_named_source_channels_to_each_file() {
+        use crate::model::channel_export::ChannelExportMode::*;
+        let (dir, channels) = export_channels_fixture(
+            "routing",
+            6,
+            vec![PairWithNext, Mono, Mono, Skip, PairWithNext, Mono],
+        );
+
+        let pair = crate::model::io::load_wav(dir.join("out/take01_ch1-2.wav")).unwrap();
+        assert_eq!(pair.channel_count(), 2);
+        assert_eq!(pair.channels[0], channels[0]);
+        assert_eq!(pair.channels[1], channels[1]);
+        assert_eq!(pair.sample_rate, 44100);
+
+        let mono = crate::model::io::load_wav(dir.join("out/take01_ch3.wav")).unwrap();
+        assert_eq!(mono.channel_count(), 1);
+        assert_eq!(mono.channels[0], channels[2]);
+
+        let last = crate::model::io::load_wav(dir.join("out/take01_ch5-6.wav")).unwrap();
+        assert_eq!(last.channels[0], channels[4]);
+        assert_eq!(last.channels[1], channels[5]);
+
+        // Channel 4 was Skipped, so no file mentions it.
+        assert!(!dir.join("out/take01_ch4.wav").exists());
+        let written: Vec<String> = std::fs::read_dir(dir.join("out"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(written.len(), 3, "exactly three files, got {written:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Unlike Export Regions, the timeline is unchanged here, so markers must survive at
+    /// exactly their original positions rather than being rebased.
+    #[test]
+    fn export_channels_carries_markers_over_unchanged() {
+        let dir = std::env::temp_dir().join(format!("tui_wave_expch_markers_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut doc = doc_with_channels(vec![vec![0.1f32; 64], vec![0.2f32; 64]]);
+        doc.markers = vec![
+            Marker { position: 10, label: "one".into() },
+            Marker { position: 40, label: "two".into() },
+        ];
+        let src = dir.join("take01.wav");
+        crate::model::io::save_wav(&doc, &src).unwrap();
+        doc.path = Some(src);
+
+        let mut app = new_app(Some(doc), Some(dir.clone()));
+        app.export_channels("out", &channel_export::default_modes(2));
+
+        let out = crate::model::io::load_wav(dir.join("out/take01_ch1-2.wav")).unwrap();
+        assert_eq!(out.markers.len(), 2);
+        assert_eq!(out.markers[0].position, 10);
+        assert_eq!(out.markers[1].position, 40);
+        assert_eq!(out.markers[1].label, "two");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A 30-channel export must zero-pad so a directory listing sorts in channel order.
+    #[test]
+    fn export_channels_zero_pads_names_on_a_thirty_channel_file() {
+        let (dir, _) = export_channels_fixture("padding", 30, channel_export::default_modes(30));
+        let mut written: Vec<String> = std::fs::read_dir(dir.join("out"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        written.sort();
+        assert_eq!(written.len(), 15);
+        assert_eq!(written[0], "take01_ch01-02.wav");
+        assert_eq!(written[14], "take01_ch29-30.wav");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An all-Skip mode list writes nothing and says so, rather than silently creating an
+    /// empty folder and reporting success.
+    #[test]
+    fn export_channels_refuses_when_everything_is_skipped() {
+        use crate::model::channel_export::ChannelExportMode::Skip;
+        let (dir, _) = export_channels_fixture("allskip", 4, vec![Skip; 4]);
+        assert!(!dir.join("out").exists(), "no folder is created for an empty export");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The dialog's keys: Left/Right cycle the highlighted row's mode, Space pairs it with the
+    /// row below, Up/Down move the highlight, and Tab reaches the Subfolder field.
+    #[test]
+    fn the_export_channels_dialog_keys_edit_the_highlighted_row() {
+        use crate::model::channel_export::ChannelExportMode::*;
+        let mut app = new_app(Some(doc_with_channels(vec![vec![0.1f32; 8]; 4])), None);
+        app.handle_action(Action::ExportChannels);
+
+        let modes = |app: &App| match &app.dialog {
+            Some(Dialog::ExportChannels { modes, .. }) => modes.clone(),
+            _ => panic!("expected the Export Channels dialog"),
+        };
+        assert_eq!(modes(&app), vec![PairWithNext, Mono, PairWithNext, Mono]);
+
+        // Space on row 0 breaks the default pair; Space again re-pairs it.
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(modes(&app)[0], Mono);
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(modes(&app)[0], PairWithNext);
+
+        // Down twice reaches row 2 (row 1 is consumed but still highlightable); Right cycles.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(modes(&app)[2], Mono, "Stereo pair cycles on to Mono");
+
+        // Tab moves to the Subfolder field, where typing lands in the folder name.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        match &app.dialog {
+            Some(Dialog::ExportChannels { folder_input, focused, .. }) => {
+                assert_eq!(*focused, ec_focus::SUBFOLDER);
+                assert_eq!(folder_input.value(), "channelsx");
+            }
+            _ => panic!("expected the Export Channels dialog"),
+        }
+    }
+
+    /// A mono buffer has nothing to split, so the action reports that instead of opening a
+    /// one-row dialog.
+    #[test]
+    fn export_channels_refuses_a_mono_buffer() {
+        let mut app = new_app(Some(doc_with_channels(vec![vec![0.1f32; 8]])), None);
+        app.handle_action(Action::ExportChannels);
+        match &app.dialog {
+            Some(Dialog::Info { message }) => assert!(message.contains("Only one channel")),
+            _ => panic!("expected the mono refusal"),
+        }
+    }
+
+    /// The list scrolls, and the click handler must resolve a screen row to the same channel
+    /// the renderer drew there — they share `ec_scroll_top`, so this pins that agreement.
+    #[test]
+    fn the_export_channels_scroll_window_keeps_the_selection_visible() {
+        let area = Rect::new(0, 0, 80, 24);
+        let visible = ec_visible_rows(area, 30);
+        assert!(visible >= EC_MIN_CHANNEL_ROWS);
+
+        // Selection at the top: window starts at the top.
+        assert_eq!(ec_scroll_top(0, visible, 30), 0);
+        // Selection at the very end: the window is flush with the end, not past it.
+        let top = ec_scroll_top(29, visible, 30);
+        assert_eq!(top, 30 - visible);
+        assert!(29 >= top && 29 < top + visible, "the selected row is on screen");
+        // Every selection is visible in its own window.
+        for sel in 0..30 {
+            let top = ec_scroll_top(sel, visible, 30);
+            assert!(sel >= top && sel < top + visible, "row {sel} fell outside its window");
         }
     }
 

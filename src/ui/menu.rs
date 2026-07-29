@@ -56,6 +56,7 @@ impl MenuBar {
                     entry("Save As",                  Action::SaveAs,      "Ctrl+Shift+S"),
                     entry("Save All",                 Action::SaveAll,     "Ctrl+l"),
                     entry("Export Regions to Subfolder", Action::ExportRegions, "Shift+E"),
+                    entry("Export Channels",             Action::ExportChannels, ""),
                     entry("New from Left Channel",    Action::NewFromLeft,  "L"),
                     entry("New from Right Channel",   Action::NewFromRight, "R"),
                     entry("Reset Config to Defaults", Action::ResetConfig, ""),
