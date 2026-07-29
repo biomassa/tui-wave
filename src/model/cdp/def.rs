@@ -704,6 +704,32 @@ pub struct ParamDef {
     pub kind: ParamKind,
 }
 
+/// Lets one process offer a "process both channels separately" option: a toggle that, when
+/// on, runs the (otherwise `stereo_native`) binary once per channel with a *different* value
+/// for one of its params.
+///
+/// Exists for Remove DC Offset (`housekeep extract 4`), which shifts the whole file by a
+/// single value — so on a stereo file with different offsets per channel, no single value
+/// removes both. CDP has no per-channel mode of its own; the split is the app running the
+/// binary once per channel, which the lane machinery in `pipeline::plan_wav` already does for
+/// every mono-only process.
+///
+/// The toggle and the extra value params are **never emitted to argv** (`ProcessDef::is_ui_only_param`):
+/// they exist to be filled in by the user and read here. Everything else about the process is
+/// unchanged, including its behaviour with the toggle off.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelSplit {
+    /// Index of the `Toggle` param that turns the split on. Off, or on a mono input, the
+    /// process runs exactly as it did before this existed.
+    pub toggle: usize,
+    /// Index of the param whose value becomes per-channel. Channel 0 keeps using it.
+    pub param: usize,
+    /// Params supplying channels 1, 2, … in order (channel 0 uses `param`). A channel past
+    /// the end of this list reuses the last entry, so a 4-channel file never fails outright
+    /// on a declaration written for stereo.
+    pub extra: Vec<usize>,
+}
+
 /// One CDP process: which binary to invoke, what its parameters are, and how it fits into
 /// the wav/ana pipeline.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -832,6 +858,11 @@ pub struct ProcessDef {
     /// flags ahead of the infile, so this stays an explicit opt-in rather than a heuristic.
     #[serde(default)]
     pub flags_before_infile: bool,
+    /// `Some` for a process offering a "process both channels separately" toggle — see
+    /// [`ChannelSplit`]. `None` (the default) for every other process, which behaves exactly
+    /// as it did before this existed.
+    #[serde(default)]
+    pub channel_split: Option<ChannelSplit>,
     /// True for a process whose analysis input(s) must each contain **exactly one** window,
     /// which CDP produces only via a separate `spec grab` run. The planner emits that grab as
     /// a pre-pass step per input, between `pvoc anal` and the process itself, and feeds the
@@ -871,6 +902,42 @@ impl ProcessDef {
     /// "can Apply run yet?" gate read, so the two can never disagree about whether a given
     /// pick is runnable. `None` for a max means unbounded (every variadic process — CDP
     /// imposes no ceiling beyond memory).
+    /// Whether param `index` exists only to be filled in by the user and read by the app,
+    /// never emitted as an argv token — today exactly the [`ChannelSplit`] toggle and its
+    /// per-channel value params. CDP has no flag for either; they describe *how the app runs
+    /// the binary*, not something the binary is told.
+    pub fn is_ui_only_param(&self, index: usize) -> bool {
+        self.channel_split
+            .as_ref()
+            .is_some_and(|split| split.toggle == index || split.extra.contains(&index))
+    }
+
+    /// The per-channel value params from [`ChannelSplit`], resolved for `channel` — `None`
+    /// when the process has no split, the toggle is off, or the input is mono. `values` is
+    /// the full param list in catalog order, as everywhere else.
+    ///
+    /// Returns the *param index* to read this channel's value from, so the caller can
+    /// substitute it into the split param's slot.
+    pub fn channel_split_value_index(&self, values: &[ParamValue], channel: usize) -> Option<usize> {
+        let split = self.channel_split.as_ref()?;
+        if !matches!(values.get(split.toggle), Some(ParamValue::Toggle(true))) {
+            return None;
+        }
+        if channel == 0 {
+            return Some(split.param);
+        }
+        // A channel past the declared list reuses the last entry rather than failing: a
+        // declaration written for stereo shouldn't make a 4-channel file unrunnable.
+        split.extra.get(channel - 1).or_else(|| split.extra.last()).copied()
+    }
+
+    /// Whether this run should split into per-channel lanes because of its [`ChannelSplit`]
+    /// toggle, overriding `stereo_native`. Mono inputs never split — there is nothing to
+    /// separate.
+    pub fn channel_split_active(&self, values: &[ParamValue], channels: usize) -> bool {
+        channels > 1 && self.channel_split_value_index(values, 0).is_some()
+    }
+
     pub fn input_arity(&self) -> (usize, Option<usize>, bool) {
         match self.input {
             IoKind::None | IoKind::Curve => (0, Some(0), false),
@@ -932,6 +999,7 @@ mod tests {
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             flags_before_infile: false,
+            channel_split: None,
             spec_grab_prepass: false,
             params: vec![sample_number()],
         };
@@ -991,6 +1059,7 @@ mod tests {
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             flags_before_infile: false,
+            channel_split: None,
             spec_grab_prepass: false,
             params: vec![toggle, choice],
         };
@@ -1073,6 +1142,7 @@ mod tests {
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             flags_before_infile: false,
+            channel_split: None,
             spec_grab_prepass: false,
             params: vec![table],
         };
@@ -1126,6 +1196,7 @@ mod tests {
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             flags_before_infile: false,
+            channel_split: None,
             spec_grab_prepass: false,
             params: vec![param],
         };
@@ -1187,6 +1258,7 @@ mod tests {
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             flags_before_infile: false,
+            channel_split: None,
             spec_grab_prepass: false,
             params: vec![param],
         };
@@ -1234,6 +1306,7 @@ mod tests {
             sidecar_extension: None,
             needs_head_tail_marks: false,
             flags_before_infile: false,
+            channel_split: None,
             spec_grab_prepass: false,
             min_inputs: None,
             params,

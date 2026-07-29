@@ -20152,3 +20152,59 @@ step = 0.01
 default = 0.5
 exponential = false
 scale = "ana_frame_step_seconds"
+
+# NOTE: this key deliberately OVERRIDES the SoundThread-derived catalog.toml entry (same
+# key, later merge order wins -- see catalog.rs's module doc) to add the per-channel option.
+# `housekeep extract 4` shifts the whole file by one value, so on a stereo file whose two
+# channels have different DC offsets no single value removes both. CDP has no per-channel
+# mode; ChannelSplit runs the binary once per channel instead, which is what the lane
+# machinery already does for every mono-only process. Everything else is copied from
+# catalog.toml verbatim so the next converter run stays a no-op diff against it.
+[[process]]
+key = "housekeep_extract_4"
+bin = "housekeep"
+subprog = "extract"
+mode = "4"
+title = "Housekeep DC Offset"
+category = "time"
+subcategory = "utility"
+short_description = "Adjust DC offset"
+description = "This process is intended for removing DC offset from a soundfile. You can specify how much the signal should be moved away from the 0 crossing line. It can also be used to deliberately add a DC offset into the sound file before further processing. For processes in the Distort catagory this will allow for an asymetrical application of their processing providing different timbres. Note, working this way is not how the processes are intended to be used and may produce errors on runtime and unpredictable results. Playing signals with significant DC bias in them is not good for the longterm health of your loudspeakers. If you do deliberately add a DC offset, you should run the process in the opposite direction after you are done processing to remove the DC bias. "
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+channel_split = { toggle = 2, param = 0, extra = [1] }
+
+[[process.params]]
+name = "Offset"
+description = "Amount added to every sample. Pre-filled with the negative of the measured DC offset, which is the value that removes it; a positive value deliberately adds offset instead. With channels processed separately this is the left channel's own value"
+automatable = false
+default_from_dc_offset = true
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Offset (Right)"
+description = "The right channel's own offset. Only used when Process Channels Separately is on"
+automatable = false
+default_from_dc_offset = true
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Process Channels Separately"
+description = "Measure and correct each channel's DC offset on its own, instead of shifting the whole file by one value. No effect on a mono file"
+automatable = false
+kind = "toggle"
+default = false

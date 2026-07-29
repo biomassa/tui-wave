@@ -395,8 +395,12 @@ mod tests {
             &[("matrix_matrix_1", "Auto Gain Reduction"), ("matrix_matrix_2", "Auto Gain Reduction")];
         let (catalog, _) = CdpCatalog::load(None);
         for proc in &catalog.processes {
-            for param in &proc.params {
+            for (i, param) in proc.params.iter().enumerate() {
+                // A `ChannelSplit` toggle is flagless for the same reason: it tells the app
+                // to run the binary once per channel, which is not something the binary is
+                // told (`ProcessDef::is_ui_only_param`).
                 if matches!(param.kind, ParamKind::Toggle { .. })
+                    && !proc.is_ui_only_param(i)
                     && !DELIBERATELY_FLAGLESS.contains(&(proc.key.as_str(), param.name.as_str()))
                 {
                     assert!(

@@ -853,7 +853,7 @@ fn build_process_args(
     // than erroring. Only flagged params move; bare positionals keep their usual slot.
     if def.flags_before_infile {
         for (i, (param, value)) in def.params.iter().zip(values).enumerate() {
-            if param.flag.is_none() {
+            if param.flag.is_none() || def.is_ui_only_param(i) {
                 continue;
             }
             let plan = plan_param(param, value, duration_secs, pvoc, sample_rate, brk_files, brk_index_base + i);
@@ -882,7 +882,7 @@ fn build_process_args(
     // first pass simply emits nothing and the second pass is byte-identical to the old
     // single-pass loop.
     for (i, (param, value)) in def.params.iter().zip(values).enumerate() {
-        if !param.before_outfile || (def.flags_before_infile && param.flag.is_some()) {
+        if !param.before_outfile || (def.flags_before_infile && param.flag.is_some()) || def.is_ui_only_param(i) {
             continue;
         }
         let plan = plan_param(param, value, duration_secs, pvoc, sample_rate, brk_files, brk_index_base + i);
@@ -925,7 +925,9 @@ fn build_process_args(
     }
 
     for (i, (param, value)) in def.params.iter().zip(values).enumerate() {
-        if param.before_outfile || (def.flags_before_infile && param.flag.is_some()) {
+        // A ui-only param (the ChannelSplit toggle and its per-channel values) is read by
+        // the app to decide *how* to run the binary, and has no argv token of its own.
+        if param.before_outfile || (def.flags_before_infile && param.flag.is_some()) || def.is_ui_only_param(i) {
             continue;
         }
         let plan = plan_param(param, value, duration_secs, pvoc, sample_rate, brk_files, brk_index_base + i);
@@ -1620,7 +1622,8 @@ fn plan_wav(
     let mut brk_files = Vec::new();
     let duration = input.duration_secs();
 
-    if input.channels <= 1 || def.stereo_native {
+    let split_active = def.channel_split_active(values, input.channels);
+    if (input.channels <= 1 || def.stereo_native) && !split_active {
         let source_channels: Vec<usize> = (0..input.channels.max(1)).collect();
         let (args, deferred) = build_process_args(
             def,
@@ -1686,9 +1689,21 @@ fn plan_wav(
     for ch in 0..input.channels {
         let infile = format!("in_c{}.wav", ch + 1);
         let outfile = format!("out_c{}.wav", ch + 1);
+        // A ChannelSplit process gives each lane its own value for the split param (see
+        // `ProcessDef::channel_split_value_index`); every other process passes `values`
+        // through untouched, so the clone only happens where it changes something.
+        let lane_values: Vec<ParamValue> = match def.channel_split_value_index(values, ch) {
+            Some(source) if split_active => {
+                let mut lane = values.to_vec();
+                let split_param = def.channel_split.as_ref().map(|s| s.param).unwrap_or(source);
+                lane[split_param] = values[source].clone();
+                lane
+            }
+            _ => values.to_vec(),
+        };
         let (args, deferred) = build_process_args(
             def,
-            values,
+            &lane_values,
             &[infile.as_str()],
             &outfile,
             duration,
@@ -2551,6 +2566,7 @@ mod tests {
         ProcessDef {
             needs_head_tail_marks: false,
             flags_before_infile: false,
+            channel_split: None,
             spec_grab_prepass: false,
             key: "test_key".into(),
             bin: "modify".into(),
@@ -2590,6 +2606,54 @@ mod tests {
             vec!["-a1", "-f", "in_a.wav", "in_b.wav", "out.wav", "0"],
             "fastconv's own usage: fastconv [-aX][-f] infile impulsefile outfile [dry]"
         );
+    }
+
+    /// With its "process channels separately" toggle on, a `ChannelSplit` process runs once
+    /// per channel — overriding `stereo_native` — with each lane taking its own value for the
+    /// split param. Neither the toggle nor the extra value params ever reach argv.
+    #[test]
+    fn channel_split_runs_one_lane_per_channel_with_its_own_value() {
+        let (catalog, _) = crate::model::cdp::catalog::CdpCatalog::load(None);
+        let def = catalog
+            .processes
+            .iter()
+            .find(|p| p.key == "housekeep_extract_4")
+            .expect("Remove DC Offset is in the built-in catalog");
+        assert!(def.stereo_native, "the premise: CDP itself handles stereo in one run");
+        let input = InputSpec { channels: 2, sample_rate: 44_100, len_samples: 44_100, head_tail_marks: vec![] };
+
+        let off = vec![ParamValue::Number(-0.004), ParamValue::Number(0.003), ParamValue::Toggle(false)];
+        let job = plan_job(def, &off, std::slice::from_ref(&input), &PvocSettings::default()).unwrap();
+        assert_eq!(job.steps.len(), 1, "with the toggle off it is one stereo run, as before");
+        assert_eq!(
+            job.steps[0].args,
+            vec!["extract", "4", "in.wav", "out.wav", "-0.004"],
+            "and neither ui-only param reaches argv"
+        );
+
+        let on = vec![ParamValue::Number(-0.004), ParamValue::Number(0.003), ParamValue::Toggle(true)];
+        let job = plan_job(def, &on, std::slice::from_ref(&input), &PvocSettings::default()).unwrap();
+        assert_eq!(job.steps.len(), 2, "with it on, one run per channel");
+        assert_eq!(job.steps[0].args, vec!["extract", "4", "in_c1.wav", "out_c1.wav", "-0.004"]);
+        assert_eq!(job.steps[1].args, vec!["extract", "4", "in_c2.wav", "out_c2.wav", "0.003"]);
+        // Each lane reads one source channel and writes back to that same channel.
+        assert_eq!(job.input_files[0].source_channels, vec![0]);
+        assert_eq!(job.input_files[1].source_channels, vec![1]);
+        assert_eq!(job.output_files[0].dest_channels, vec![0]);
+        assert_eq!(job.output_files[1].dest_channels, vec![1]);
+    }
+
+    /// The toggle is inert on a mono file — there is nothing to separate, and splitting would
+    /// mean planning a "lane" per channel for a single channel.
+    #[test]
+    fn channel_split_does_nothing_on_a_mono_input() {
+        let (catalog, _) = crate::model::cdp::catalog::CdpCatalog::load(None);
+        let def = catalog.processes.iter().find(|p| p.key == "housekeep_extract_4").unwrap();
+        let input = InputSpec { channels: 1, sample_rate: 44_100, len_samples: 44_100, head_tail_marks: vec![] };
+        let on = vec![ParamValue::Number(-0.004), ParamValue::Number(0.003), ParamValue::Toggle(true)];
+        let job = plan_job(def, &on, &[input], &PvocSettings::default()).unwrap();
+        assert_eq!(job.steps.len(), 1);
+        assert_eq!(job.steps[0].args, vec!["extract", "4", "in.wav", "out.wav", "-0.004"]);
     }
 
     /// `focus step`'s time step is bounded at both ends by data — see
