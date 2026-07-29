@@ -836,9 +836,33 @@ fn build_process_args(
     if let Some(mode) = &def.mode {
         args.push(mode.clone());
     }
-    args.extend(infiles.iter().map(|s| s.to_string()));
-
     let mut deferred = Vec::new();
+
+    // `fastconv` parses its flags getopt-style, ahead of the filenames — see
+    // `ProcessDef::flags_before_infile` for why trailing flags there fail silently rather
+    // than erroring. Only flagged params move; bare positionals keep their usual slot.
+    if def.flags_before_infile {
+        for (i, (param, value)) in def.params.iter().zip(values).enumerate() {
+            if param.flag.is_none() {
+                continue;
+            }
+            let plan = plan_param(param, value, duration_secs, pvoc, sample_rate, brk_files, brk_index_base + i);
+            if let Some(token) = plan.arg {
+                match plan.deferred {
+                    Some(DeferredParamKind::Arg { flag, percent }) => {
+                        deferred.push(DeferredWindowTarget::Arg { arg_index: args.len(), flag, percent });
+                    }
+                    Some(DeferredParamKind::BrkFile { relative_name, points }) => {
+                        deferred.push(DeferredWindowTarget::BrkFile { relative_name, points });
+                    }
+                    None => {}
+                }
+                args.push(token);
+            }
+        }
+    }
+
+    args.extend(infiles.iter().map(|s| s.to_string()));
     // Two passes rather than one: a handful of real CDP processes (`pitch altharms`/
     // `octmove`, `formants put`) place a required datafile *between* the input and output
     // filenames — `ParamDef.before_outfile` marks which param(s) need that. Emitting those
@@ -848,7 +872,7 @@ fn build_process_args(
     // first pass simply emits nothing and the second pass is byte-identical to the old
     // single-pass loop.
     for (i, (param, value)) in def.params.iter().zip(values).enumerate() {
-        if !param.before_outfile {
+        if !param.before_outfile || (def.flags_before_infile && param.flag.is_some()) {
             continue;
         }
         let plan = plan_param(param, value, duration_secs, pvoc, sample_rate, brk_files, brk_index_base + i);
@@ -891,7 +915,7 @@ fn build_process_args(
     }
 
     for (i, (param, value)) in def.params.iter().zip(values).enumerate() {
-        if param.before_outfile {
+        if param.before_outfile || (def.flags_before_infile && param.flag.is_some()) {
             continue;
         }
         let plan = plan_param(param, value, duration_secs, pvoc, sample_rate, brk_files, brk_index_base + i);
@@ -2516,6 +2540,7 @@ mod tests {
     fn base_def(input: IoKind, output: IoKind) -> ProcessDef {
         ProcessDef {
             needs_head_tail_marks: false,
+            flags_before_infile: false,
             spec_grab_prepass: false,
             key: "test_key".into(),
             bin: "modify".into(),
@@ -2533,6 +2558,81 @@ mod tests {
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![number_param("Speed", -96.0, 96.0, 0.0, NumberScale::Plain)],
         }
+    }
+
+    /// The real catalog entry, planned through the real planner: `fastconv`'s flags must come
+    /// out ahead of the filenames and its dry/wet value after the outfile. A unit test on a
+    /// synthetic def can't catch the entry itself losing `flags_before_infile`.
+    #[test]
+    fn the_real_fastconv_entry_emits_flags_before_the_filenames() {
+        let (catalog, _) = crate::model::cdp::catalog::CdpCatalog::load(None);
+        let def = catalog
+            .processes
+            .iter()
+            .find(|p| p.key == "fastconv_fastconv")
+            .expect("fastconv is in the built-in catalog");
+        assert!(def.flags_before_infile, "the catalog entry must opt in");
+        let values: Vec<ParamValue> = def.params.iter().map(|p| p.kind.default_value()).collect();
+        let input = InputSpec { channels: 1, sample_rate: 44_100, len_samples: 44_100, head_tail_marks: vec![] };
+        let job = plan_job(def, &values, &[input.clone(), input], &PvocSettings::default()).expect("plans");
+        assert_eq!(
+            job.steps[0].args,
+            vec!["-a1", "-f", "in_a.wav", "in_b.wav", "out.wav", "0"],
+            "fastconv's own usage: fastconv [-aX][-f] infile impulsefile outfile [dry]"
+        );
+    }
+
+    /// `fastconv` parses its flags getopt-style, *before* the filenames — with them trailing
+    /// it silently ignores `-a`, `-f` and the positional dry value all at once, so every
+    /// setting produced the same clipped result (user report). Bare positional params (its
+    /// own `[dry]`) must still land after the outfile.
+    #[test]
+    fn flags_before_infile_puts_flagged_params_ahead_of_the_filenames() {
+        let mut def = base_def(IoKind::DualWav, IoKind::Wav);
+        def.bin = "fastconv".into();
+        def.subprog = None;
+        def.mode = None;
+        def.flags_before_infile = true;
+        def.params = vec![
+            number_param("Dry/Wet Mix", 0.0, 1.0, 0.0, NumberScale::Plain),
+            ParamDef { flag: Some("-a".into()), ..number_param("Amplitude Scale", 0.01, 10.0, 1.0, NumberScale::Plain) },
+            ParamDef {
+                flag: Some("-f".into()),
+                kind: ParamKind::Toggle { default: true },
+                ..number_param("Force Float Output", 0.0, 1.0, 1.0, NumberScale::Plain)
+            },
+        ];
+        let input = InputSpec { channels: 1, sample_rate: 44_100, len_samples: 44_100, head_tail_marks: vec![] };
+
+        let job = plan_job(
+            &def,
+            &[ParamValue::Number(0.5), ParamValue::Number(0.2), ParamValue::Toggle(true)],
+            &[input.clone(), input],
+            &PvocSettings::default(),
+        )
+        .expect("a dual-input wav job plans");
+
+        let args = &job.steps[0].args;
+        let infile_at = args.iter().position(|a| a.ends_with(".wav")).expect("an infile");
+        assert!(
+            args[..infile_at].iter().any(|a| a.starts_with("-a")) && args[..infile_at].iter().any(|a| a == "-f"),
+            "both flags must precede the filenames: {args:?}"
+        );
+        assert_eq!(args.last().unwrap(), "0.5", "the bare positional dry value stays after the outfile: {args:?}");
+    }
+
+    /// The default shape is unchanged for every other process: flags stay after the outfile,
+    /// which is what the shared CDP framework's own argument scanning expects.
+    #[test]
+    fn without_the_flag_flagged_params_still_follow_the_outfile() {
+        let mut def = base_def(IoKind::Wav, IoKind::Wav);
+        def.params = vec![ParamDef {
+            flag: Some("-a".into()),
+            ..number_param("Amplitude", 0.0, 10.0, 1.0, NumberScale::Plain)
+        }];
+        let input = InputSpec { channels: 1, sample_rate: 44_100, len_samples: 44_100, head_tail_marks: vec![] };
+        let job = plan_job(&def, &[ParamValue::Number(2.0)], &[input], &PvocSettings::default()).unwrap();
+        assert_eq!(job.steps[0].args, vec!["speed", "2", "in.wav", "out.wav", "-a2"]);
     }
 
     /// A DISTMORE-family process (`needs_head_tail_marks`) writes its marklist datafile from

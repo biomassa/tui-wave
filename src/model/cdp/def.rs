@@ -782,6 +782,31 @@ pub struct ProcessDef {
     /// for it at all.
     #[serde(default)]
     pub needs_head_tail_marks: bool,
+    /// True for a process whose flagged params must be emitted **before the input filenames**
+    /// rather than after the outfile.
+    ///
+    /// Nearly every CDP program is built on the shared CDP framework, which scans for flags
+    /// *after* the positional filenames — the shape `build_process_args` emits by default.
+    /// `fastconv` is not: it's one of RWD's standalone programs, parsing flags getopt-style
+    /// with a leading `while (argv[1][0] == '-')` loop, so its own usage text reads
+    /// `fastconv [-aX][-f] infile impulsefile outfile [dry]`.
+    ///
+    /// Getting this wrong fails *silently and completely*, which is why it needs a flag
+    /// rather than being left to chance: with the flags trailing, `fastconv` never sees them
+    /// **and** stops reading the positional `[dry]` too (it only accepts the dry value when
+    /// the argument count is exactly right), so amplitude scaling, float output and dry/wet
+    /// mix are all ignored at once and every setting produces a byte-identical, clipped,
+    /// integer-quantised result — exactly the user report ("still heavily clips and sounds
+    /// the same no matter what the settings are") that turned this up. Verified against the
+    /// real binary: `src ir out 0.5 -a0.2 -f` gives peak 0.0417 with a 16-bit file, while
+    /// `-a0.2 -f src ir out 0.5` gives peak 0.3558 with a float one.
+    ///
+    /// Only params that actually carry a `flag` move; bare positional params (fastconv's own
+    /// `[dry]`) keep their place after the outfile. A sweep of every binary in this catalog
+    /// with a flagged param (59 of them) found `fastconv` to be the only one whose usage puts
+    /// flags ahead of the infile, so this stays an explicit opt-in rather than a heuristic.
+    #[serde(default)]
+    pub flags_before_infile: bool,
     /// True for a process whose analysis input(s) must each contain **exactly one** window,
     /// which CDP produces only via a separate `spec grab` run. The planner emits that grab as
     /// a pre-pass step per input, between `pvoc anal` and the process itself, and feeds the
@@ -881,6 +906,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
+            flags_before_infile: false,
             spec_grab_prepass: false,
             params: vec![sample_number()],
         };
@@ -939,6 +965,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
+            flags_before_infile: false,
             spec_grab_prepass: false,
             params: vec![toggle, choice],
         };
@@ -1020,6 +1047,7 @@ mod tests {
             output_is_stereo: true,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
+            flags_before_infile: false,
             spec_grab_prepass: false,
             params: vec![table],
         };
@@ -1072,6 +1100,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
+            flags_before_infile: false,
             spec_grab_prepass: false,
             params: vec![param],
         };
@@ -1132,6 +1161,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
+            flags_before_infile: false,
             spec_grab_prepass: false,
             params: vec![param],
         };
@@ -1178,6 +1208,7 @@ mod tests {
             requires_simple_wav_input: false,
             sidecar_extension: None,
             needs_head_tail_marks: false,
+            flags_before_infile: false,
             spec_grab_prepass: false,
             min_inputs: None,
             params,
