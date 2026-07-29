@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased (1.9.0)
+
+Multichannel support and other audio formats.
+
+- **The waveform shows six channel panes at a time, scrolled with the mouse wheel.** The pane
+  layout divided the whole waveform area by the channel count, so a 30-channel file got one row
+  per channel — no centre row for the zero line, room for a single dB gutter mark — and past
+  about 42 channels the split collapsed to zero-height panes. The area now shows a window of six,
+  moved with the wheel over the waveform or `,`/`.` (one pane) and `<`/`>` (a whole window), with
+  the visible range in the title and a scrollbar on the right edge. At six channels or fewer
+  nothing changes: same split, no indicator, wheel inert.
+- **Process ▸ Remove Empty Channels.** Measures each channel's peak across the whole file and
+  drops every channel below a threshold, default -48 dBFS, so a 30-channel capture with real
+  audio on four becomes a 4-channel buffer. Peak rather than RMS, so a channel that is silent
+  apart from one short event is kept. Undoable — Ctrl+Z puts the channels back.
+- **File ▸ Export Channels.** Splits a multichannel buffer into per-channel WAVs: each channel
+  is Mono, Skip, or paired with the channel below it, written into a subfolder as
+  `<stem>_chN.wav` / `<stem>_chN-M.wav`. Channel numbers are zero-padded to the source's channel
+  count, so a 30-channel export sorts in channel order rather than ch1, ch10, ch11, … ch2.
+  Always WAV at the source's own rate and depth. Until now only channels 1 and 2 were reachable
+  as separate audio, via New from Left/Right Channel.
+- **FLAC and AIFF files open like WAVs.** The Files panel lists `.wav`, `.flac`, `.aif` and
+  `.aiff` intermixed, and all four load, play and audition. WAV still goes through its own
+  reader, so BWF markers and `bext` survive; the `.headstails` sidecar works for every format.
+  MP3 is export-only and is not listed.
+- **File ▸ Export writes FLAC or MP3.** Mono and stereo only — a multichannel buffer is blocked
+  with a pointer at Export Channels, and MP3 blocks a sample rate it cannot store (96 kHz among
+  them) naming Resample, rather than failing after you commit. MP3 is CBR with a
+  128/160/192/256/320 kbps picker. Save and Save As are unchanged and still own the WAV working
+  file.
+- **Fixed: quick Save on a buffer loaded from a FLAC or AIFF would have written WAV bytes over
+  the source** under a misleading extension. Save and the Buffers panel now redirect to Save As
+  prefilled with a `.wav` name; Save All skips such buffers and leaves them dirty rather than
+  interrupting the batch with a modal.
+- **Fixed: Save As showed the last-used bit depth rather than the document's own**, and prefilled
+  the whole file name — so a buffer opened from `beta.flac` offered `beta.flac.wav`. Only the
+  queued Save As path had been setting the depth.
+
 ## 2026-07-29 (1.8.0)
 
 - **A zero line across every channel.** The waveform had no visual reference for where
