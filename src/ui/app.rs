@@ -4741,6 +4741,9 @@ impl App {
             // File/Marker, Open Directory, Save Curve As, Load Pitch Curve, CDP Setup) could
             // ever contain a space at all, silently dropping the keystroke with no feedback.
             KeyCode::Char(' ') => {
+                // Set when the flipped toggle was a CDP params one, so any `ChannelSplit`
+                // defaults that depend on its state can be re-seeded once the borrow ends.
+                let mut flipped_toggle = false;
                 let toggled = match self.dialog.as_mut() {
                     Some(Dialog::MixToMono { inputs, focused, tanh_clip }) => {
                         if *focused == inputs.len() {
@@ -4792,6 +4795,7 @@ impl App {
                     Some(Dialog::CdpParams { fields, focus, .. }) if *focus != CDP_PRESET_FOCUS => {
                         if let Some(CdpField::Toggle { on }) = fields.get_mut(*focus - 1) {
                             *on = !*on;
+                            flipped_toggle = true;
                             true
                         } else {
                             false
@@ -4799,6 +4803,9 @@ impl App {
                     }
                     _ => false,
                 };
+                if flipped_toggle {
+                    self.reseed_channel_split_defaults();
+                }
                 if !toggled && self.dialog_accepts(' ') {
                     if let Some(input) = self.dialog_input() {
                         input.insert(' ');
@@ -5161,6 +5168,8 @@ impl App {
         // The same deferral for the CDP params form: opening a sub-editor / running a job
         // needs `&mut self`, which can't be taken while `self.dialog` is borrowed below.
         let mut cdp_sync_table_rows = false;
+        // Same deferral as the rest: the re-seed needs `&mut self` after the dialog borrow ends.
+        let mut cdp_flipped_toggle = false;
         let mut cdp_open_focused_editor = false;
         let mut cdp_open_variadic_picker = false;
         let mut cdp_run_from_click = false;
@@ -5424,7 +5433,10 @@ impl App {
                     // A Toggle flips in place (it has no editor); everything else with a
                     // dedicated overlay opens it. A plain Number/Choice just takes focus.
                     match fields.get_mut(row - 1) {
-                        Some(CdpField::Toggle { on }) => *on = !*on,
+                        Some(CdpField::Toggle { on }) => {
+                            *on = !*on;
+                            cdp_flipped_toggle = true;
+                        }
                         Some(
                             CdpField::List { .. }
                             | CdpField::Table { .. }
@@ -5470,6 +5482,9 @@ impl App {
         // `open_cdp_focused_editor` self-checks which field kind is focused, and
         // `open_cdp_variadic_picker` self-checks that focus really is on a variadic process's
         // extra-input row, so neither needs the click arm to re-establish that here.
+        if cdp_flipped_toggle {
+            self.reseed_channel_split_defaults();
+        }
         if cdp_sync_table_rows {
             self.sync_cdp_table_to_input_count();
         }
@@ -6439,6 +6454,57 @@ impl App {
         self.open_cdp_params_with_values(catalog_index, &last.values, &last.input_buffers);
     }
 
+    /// Re-seeds the DC-offset fields of a `ChannelSplit` process after its
+    /// "process channels separately" toggle changes.
+    ///
+    /// The split param's field means two different things either side of that toggle — the
+    /// whole file's average offset with it off, the left channel's own with it on — so the
+    /// pre-filled value has to follow. Without this, checking the box would leave "Offset"
+    /// holding a figure averaged across both channels and apply it to the left one alone,
+    /// which is precisely the correction the option exists to avoid.
+    ///
+    /// Only fields still holding their previously-seeded value are rewritten: a number the
+    /// user typed themselves is theirs to keep, toggle or no toggle.
+    fn reseed_channel_split_defaults(&mut self) {
+        let Some(Dialog::CdpParams { catalog_index, fields, .. }) = &self.dialog else { return };
+        let Some(def) = self.cdp_catalog.processes.get(*catalog_index) else { return };
+        if def.channel_split.is_none() {
+            return;
+        }
+        let split_on = def
+            .channel_split
+            .as_ref()
+            .and_then(|s| fields.get(s.toggle))
+            .is_some_and(|f| matches!(f, CdpField::Toggle { on: true }));
+        let Some((start, end)) = self.cdp_process_range(self.active_document, def) else { return };
+        let Some(doc) = self.active_doc() else { return };
+
+        let mut updates: Vec<(usize, String)> = Vec::new();
+        for (i, (param, field)) in def.params.iter().zip(fields.iter()).enumerate() {
+            if !param.default_from_dc_offset {
+                continue;
+            }
+            let CdpField::Number { input, min, max, step, .. } = field else { continue };
+            // Both readings of this field, so an untouched one can be recognised whichever
+            // state it was last seeded in.
+            let seeded = |split: bool| {
+                let offset = mean_sample_value(doc, start, end, dc_offset_channel(def, i, split));
+                format_cdp_float_for_display(dc_offset_shift(offset, *step).clamp(*min, *max))
+            };
+            let fresh = seeded(split_on);
+            if input.value() == seeded(!split_on) && input.value() != fresh {
+                updates.push((i, fresh));
+            }
+        }
+
+        let Some(Dialog::CdpParams { fields, .. }) = &mut self.dialog else { return };
+        for (i, value) in updates {
+            if let Some(CdpField::Number { input, .. }) = fields.get_mut(i) {
+                *input = TextInput::new(value);
+            }
+        }
+    }
+
     /// Builds fresh default-valued `fields` plus whichever extra-input state the process
     /// needs — `second_input` for a dual-input one, `variadic_input` for a variadic one, never
     /// both (see `cdp_params_focus_extra_input`). Used by `open_cdp_params` to seed a freshly
@@ -6463,7 +6529,7 @@ impl App {
         let process_range = self.cdp_process_range(self.active_document, def);
         if let (Some(doc), Some((start, end))) = (self.active_doc(), process_range) {
             let duration = (end.saturating_sub(start)) as f64 / doc.sample_rate.max(1) as f64;
-            for (param, field) in def.params.iter().zip(&mut fields) {
+            for (i, (param, field)) in def.params.iter().zip(&mut fields).enumerate() {
                 let CdpField::Number { input, min, max, step, .. } = field else { continue };
                 if param.range_scales_with_input_duration && duration > 0.0 {
                     // `min`/`max`/`default` were multipliers; scale them into real seconds.
@@ -6482,18 +6548,14 @@ impl App {
                 }
                 if param.default_from_dc_offset {
                     // The shift CDP adds to every sample, so removing an offset of +x means
-                    // passing -x. Averaged across channels: `housekeep` shifts the whole file
-                    // by one value, so a per-channel figure has nothing to apply it to.
-                    let offset = mean_sample_value(doc, start, end);
-                    let mut shift = -offset;
-                    if !shift.is_finite() || shift.abs() < *step {
-                        // Zero is the one value CDP refuses outright ("NO CHANGE to original
-                        // sound file"), so a buffer with no measurable offset still gets a
-                        // runnable value rather than a guaranteed failure.
-                        shift = *step;
-                    }
+                    // passing -x. Which samples get measured depends on whether this param is
+                    // one channel's own value or the whole file's — see `dc_offset_channel`.
+                    // A freshly-opened dialog always has the split toggle at its default
+                    // (off), so "Offset" seeds as the whole-file average exactly as before.
+                    let channel = dc_offset_channel(def, i, false);
+                    let offset = mean_sample_value(doc, start, end, channel);
                     *input = TextInput::new(format_cdp_float_for_display(
-                        shift.clamp(*min, *max),
+                        dc_offset_shift(offset, *step).clamp(*min, *max),
                     ));
                 }
             }
@@ -13700,22 +13762,55 @@ fn nearest_marker(markers: &[Marker], pos: usize) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
-/// Mean sample value across every channel over `start..end` — the document's DC offset (see
-/// `ParamDef::default_from_dc_offset`). Averaged across channels rather than reported per
-/// channel because `housekeep extract 4` shifts the whole file by a single value, so there is
-/// nothing a per-channel figure could be applied to. Returns 0.0 for an empty range.
-fn mean_sample_value(doc: &Document, start: usize, end: usize) -> f64 {
+/// Mean sample value over `start..end` — the document's DC offset (see
+/// `ParamDef::default_from_dc_offset`). `channel` selects one channel's own offset, or `None`
+/// averages across every channel, which is right when the process shifts the whole file by a
+/// single value. Returns 0.0 for an empty range.
+fn mean_sample_value(doc: &Document, start: usize, end: usize, channel: Option<usize>) -> f64 {
     let mut sum = 0.0f64;
     let mut count = 0usize;
-    for channel in &doc.channels {
-        let end = end.min(channel.len());
+    for (i, samples) in doc.channels.iter().enumerate() {
+        if channel.is_some_and(|c| c != i) {
+            continue;
+        }
+        let end = end.min(samples.len());
         let start = start.min(end);
-        for &sample in &channel[start..end] {
+        for &sample in &samples[start..end] {
             sum += sample as f64;
             count += 1;
         }
     }
     if count == 0 { 0.0 } else { sum / count as f64 }
+}
+
+/// Which channel's DC offset param `index` should be pre-filled from: `None` (average of all
+/// channels) for a process that shifts the whole file by one value, or a specific channel for
+/// a `ChannelSplit` process whose per-channel toggle is on.
+///
+/// Channel 0's field doubles as the whole-file field with the toggle off, which is why this
+/// takes `split_on` rather than reading the param's position alone: with the split off,
+/// "Offset" must keep meaning what it always did (the average across channels), and it is
+/// re-seeded (`App::reseed_channel_split_defaults`) when the toggle actually changes.
+fn dc_offset_channel(
+    def: &crate::model::cdp::ProcessDef,
+    index: usize,
+    split_on: bool,
+) -> Option<usize> {
+    let split = def.channel_split.as_ref()?;
+    if split.param == index {
+        return split_on.then_some(0);
+    }
+    // The extra params only ever describe their own channel; they are unused with the
+    // split off, so there is no whole-file meaning for them to fall back to.
+    split.extra.iter().position(|&p| p == index).map(|i| i + 1)
+}
+
+/// The shift value that cancels a measured DC `offset`. Zero is the one value CDP refuses
+/// outright ("NO CHANGE to original sound file"), so a buffer with no measurable offset still
+/// gets a runnable value rather than a guaranteed failure.
+fn dc_offset_shift(offset: f64, step: f64) -> f64 {
+    let shift = -offset;
+    if !shift.is_finite() || shift.abs() < step { step } else { shift }
 }
 
 /// The head/tail marks that fall inside `range`, rebased so they're relative to its start —
@@ -21113,6 +21208,7 @@ mod tests {
         let def = crate::model::cdp::ProcessDef {
             needs_head_tail_marks: false,
             flags_before_infile: false,
+            channel_split: None,
             spec_grab_prepass: false,
             key: "test_integer_number".into(),
             bin: "modify".into(),
@@ -24082,6 +24178,7 @@ mod tests {
         let def = ProcessDef {
             needs_head_tail_marks: false,
             flags_before_infile: false,
+            channel_split: None,
             spec_grab_prepass: false,
             key: "test_formant_put".into(),
             bin: "formants".into(),
@@ -24157,6 +24254,7 @@ mod tests {
         let def = ProcessDef {
             needs_head_tail_marks: false,
             flags_before_infile: false,
+            channel_split: None,
             spec_grab_prepass: false,
             key: "test_formant_put".into(),
             bin: "formants".into(),
@@ -27303,6 +27401,77 @@ mod tests {
         assert!(buffer_text(terminal.backend().buffer()).contains("H/T: 2 pairs +1"));
     }
 
+    /// The DC-offset field means the whole file's average with "process channels separately"
+    /// off, and the left channel's own with it on — so flipping the toggle has to re-seed it.
+    /// Without that, checking the box would apply a both-channel average to the left channel
+    /// alone, which is exactly the correction the option exists to avoid.
+    #[test]
+    fn toggling_per_channel_dc_offset_reseeds_the_offset_fields() {
+        // Channels offset in opposite directions: their average is ~0 while each channel's
+        // own offset is large, so a stale seed is unmistakable.
+        let mut doc = stereo_doc(0.0, 0.0, 1_000);
+        doc.channels[0].iter_mut().for_each(|s| *s = 0.02);
+        doc.channels[1].iter_mut().for_each(|s| *s = -0.03);
+        let mut app = new_app(Some(doc), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "housekeep_extract_4")
+            .expect("Remove DC Offset in catalog");
+        app.open_cdp_params(index);
+
+        let value = |app: &App, i: usize| -> f64 {
+            let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no params dialog") };
+            let CdpField::Number { input, .. } = &fields[i] else { panic!("field {i} is not a number") };
+            input.value().parse().unwrap()
+        };
+
+        // Toggle off: the shift is the negative of the *whole file's* average, which for
+        // these two channels is about +0.005.
+        assert!((value(&app, 0) - 0.005).abs() < 1e-4, "got {}", value(&app, 0));
+
+        // Flip "Process Channels Separately" on (field 2).
+        let Some(Dialog::CdpParams { focus, .. }) = &mut app.dialog else { panic!() };
+        *focus = 3; // focus 0 is the preset row; fields start at 1
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+
+        assert!((value(&app, 0) + 0.02).abs() < 1e-4, "left channel's own offset: got {}", value(&app, 0));
+        assert!((value(&app, 1) - 0.03).abs() < 1e-4, "right channel's own offset: got {}", value(&app, 1));
+
+        // And back off again restores the whole-file reading.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!((value(&app, 0) - 0.005).abs() < 1e-4, "got {}", value(&app, 0));
+    }
+
+    /// A value the user typed themselves is theirs to keep — the re-seed only ever replaces a
+    /// field still holding what it was seeded with.
+    #[test]
+    fn toggling_per_channel_dc_offset_leaves_a_hand_typed_offset_alone() {
+        let mut doc = stereo_doc(0.0, 0.0, 1_000);
+        doc.channels[0].iter_mut().for_each(|s| *s = 0.02);
+        doc.channels[1].iter_mut().for_each(|s| *s = -0.03);
+        let mut app = new_app(Some(doc), None);
+        let index = app.cdp_catalog.processes.iter().position(|p| p.key == "housekeep_extract_4").unwrap();
+        app.open_cdp_params(index);
+        {
+            let Some(Dialog::CdpParams { fields, focus, .. }) = &mut app.dialog else { panic!() };
+            fields[0] = CdpField::Number {
+                input: TextInput::new("0.5"),
+                min: -1.0,
+                max: 1.0,
+                step: 0.001,
+                integer: false,
+                envelope: None,
+            };
+            *focus = 3;
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!() };
+        let CdpField::Number { input, .. } = &fields[0] else { panic!() };
+        assert_eq!(input.value(), "0.5", "a hand-typed value must survive the toggle");
+    }
+
     /// Every channel pane must be the same height and an odd number of rows, whatever the
     /// available height — user report: a stereo file rendered its two channels at different
     /// vertical scales, with different dB gutter marks beside each ("-30" vs "-24/-24"),
@@ -28462,6 +28631,7 @@ mod tests {
         let def = crate::model::cdp::ProcessDef {
             needs_head_tail_marks: false,
             flags_before_infile: false,
+            channel_split: None,
             spec_grab_prepass: false,
             key: "test_formant_ref".into(),
             bin: "formants".into(),

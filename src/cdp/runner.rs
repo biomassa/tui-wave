@@ -1218,6 +1218,58 @@ mod tests {
         assert!(out.lane_pad_samples > 0, "this material is meant to make the lanes diverge");
     }
 
+    /// Remove DC Offset with "process channels separately" on, against the real binary: each
+    /// channel must come back with *its own* offset removed. A stereo file whose channels are
+    /// offset in opposite directions is the case a single whole-file shift cannot fix, and the
+    /// one the option exists for.
+    #[test]
+    fn dc_offset_per_channel_removes_each_channels_own_offset() {
+        let cdp_dir = require_cdp!();
+        let (mono, sample_rate) = mono_sine_channels();
+        let n = mono[0].len();
+        // Opposite offsets: no single shift removes both, and their average is ~0, so a
+        // whole-file run would leave both channels almost exactly as they started.
+        let left: Vec<f32> = mono[0].iter().map(|s| s * 0.5 + 0.02).collect();
+        let right: Vec<f32> = mono[0].iter().map(|s| s * 0.5 - 0.03).collect();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("housekeep_extract_4").expect("Remove DC Offset in catalog");
+        let mean = |ch: &[f32]| ch.iter().map(|s| *s as f64).sum::<f64>() / ch.len() as f64;
+        let values = vec![
+            crate::model::cdp::ParamValue::Number(-mean(&left)),
+            crate::model::cdp::ParamValue::Number(-mean(&right)),
+            crate::model::cdp::ParamValue::Toggle(true),
+        ];
+        let input = crate::model::cdp::InputSpec { channels: 2, sample_rate, len_samples: n, ..Default::default() };
+        let planned = crate::model::cdp::plan_job(def, &values, &[input], &crate::model::cdp::PvocSettings::default()).unwrap();
+        assert_eq!(planned.steps.len(), 2, "one CDP run per channel");
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 330,
+            cdp_dir,
+            planned,
+            inputs: vec![vec![left.clone(), right.clone()]],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(60))
+        else {
+            unreachable!()
+        };
+        let out = result.expect("Remove DC Offset should run per channel");
+        let channels = &out.results[0];
+        assert_eq!(channels.len(), 2);
+        for (i, (before, after)) in [(&left, &channels[0]), (&right, &channels[1])].iter().enumerate() {
+            let before_offset = mean(before).abs();
+            let after_offset = mean(after).abs();
+            assert!(
+                after_offset < before_offset / 10.0,
+                "channel {i}: offset {before_offset:.5} should be largely removed, got {after_offset:.5}"
+            );
+        }
+    }
+
     /// Real end-to-end coverage for `tesselate` -- the one process needing a `transposed`
     /// table (`ParamKind::Table.transposed`). Its datafile must have exactly two lines with
     /// one entry per input file; getting that wrong is silent in a fake job and a hard
