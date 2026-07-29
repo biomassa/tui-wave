@@ -1957,6 +1957,12 @@ const AUDITION_DEBOUNCE: Duration = Duration::from_millis(200);
 const TRANSIENT_THRESHOLD_MIN_DB: f32 = 1.0;
 const TRANSIENT_THRESHOLD_MAX_DB: f32 = 24.0;
 
+/// How much silent padding the channel-lane merge has to add (`JobOutput::lane_pad_samples`)
+/// before the CDP command label mentions it. A sample or two of rounding difference between
+/// per-channel lanes is normal for many processes and worth no words; a genuinely
+/// content-dependent divergence is tens of milliseconds or more.
+const LANE_PAD_NOTICE_MS: f64 = 5.0;
+
 /// A pending y/n confirmation modal. Generalizes the old quit-only prompt so closing a
 /// dirty buffer can reuse the same flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10269,10 +10275,24 @@ impl App {
                                 // status bar shows as the last action and what the undo entry is
                                 // named, so the level change stays visible without interrupting
                                 // with a modal for something that is working as intended.
-                                let label = match output.clip_headroom_reduction_db {
+                                let mut label = match output.clip_headroom_reduction_db {
                                     Some(db) => format!("{} (auto -{:.1} dB)", pending.label, -db),
                                     None => pending.label,
                                 };
+                                // A mono-only, content-dependent length-changing process
+                                // (the waveset family) returns per-channel lanes of genuinely
+                                // different lengths, and the merge pads the shorter with
+                                // silence — see `JobOutput::lane_pad_samples`. Named here for
+                                // the same reason the headroom reduction is: a silent tail in
+                                // one channel and not the other otherwise reads as the process
+                                // having broken. Below `LANE_PAD_NOTICE_MS` it's the sample or
+                                // two of rounding every process can produce, and saying so
+                                // would be noise.
+                                let pad_ms = output.lane_pad_samples as f64 * 1000.0
+                                    / output.sample_rate.max(1) as f64;
+                                if pad_ms >= LANE_PAD_NOTICE_MS {
+                                    label = format!("{label} (padded {pad_ms:.0}ms)");
+                                }
                                 self.histories[pending.doc_index].apply(
                                     crate::commands::cdp::cdp_process_command(label, pending.range, channels, timing_tolerance),
                                     &mut self.documents[pending.doc_index],

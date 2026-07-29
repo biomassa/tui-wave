@@ -81,6 +81,21 @@ pub struct JobOutput {
     /// output, not the whole result. Raw bytes, verbatim; the app layer decides what to do
     /// with them (`App::tick_cdp`'s Save-As prompt).
     pub sidecar_bytes: Option<Vec<u8>>,
+    /// How many samples of silence the channel-lane merge had to pad the shortest channel
+    /// with to match the longest — 0 whenever the lanes agreed (the overwhelmingly common
+    /// case, and always so for a `stereo_native` process, which never splits into lanes).
+    ///
+    /// A process CDP only implements for mono runs as one job per channel, and a
+    /// length-changing one whose output length depends on the *content* (the waveset family:
+    /// each channel has its own wavecycle boundaries, so "delete the quietest cycle in each
+    /// group of four" removes a different number of samples from each) returns lanes of
+    /// genuinely different lengths — 172157 vs 169457 samples on a two-second stereo test
+    /// signal, not the sample or two of rounding the merge was originally written for. The
+    /// padding keeps every sample CDP produced, but a silent tail in one channel and not the
+    /// other reads as the process having broken (user report: "after process there's zeroed
+    /// data in the right channel only"), so the UI names it in the command label instead of
+    /// leaving it to be discovered in the waveform.
+    pub lane_pad_samples: usize,
 }
 
 #[derive(Debug)]
@@ -530,6 +545,7 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
             curve_binary_template,
             formant_buffer_bytes: None,
             sidecar_bytes: None,
+            lane_pad_samples: 0,
         });
     }
     if let Some(relative_name) = &job.planned.output_formant_buffer {
@@ -546,6 +562,7 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
             curve_binary_template: None,
             formant_buffer_bytes: Some(bytes),
             sidecar_bytes: None,
+            lane_pad_samples: 0,
         });
     }
 
@@ -571,12 +588,16 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
         }
     }
 
-    // CDP's per-channel outputs can differ by a sample or two from rounding; pad shorter
-    // channels with silence rather than leaving channels out of sync.
+    // CDP's per-channel outputs can differ — by a sample or two from rounding on most
+    // processes, by a great deal more on a content-dependent length-changing one (see
+    // `JobOutput::lane_pad_samples`). Pad the shorter channels with silence rather than
+    // leaving the channels out of sync, and report how much was added.
     let max_len = channels.iter().map(|c| c.len()).max().unwrap_or(0);
+    let min_len = channels.iter().map(|c| c.len()).min().unwrap_or(0);
     for c in &mut channels {
         c.resize(max_len, 0.0);
     }
+    let lane_pad_samples = max_len - min_len;
 
     let sidecar_bytes = match &job.planned.output_sidecar {
         Some(relative_name) => {
@@ -589,7 +610,7 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
         None => None,
     };
 
-    Ok(JobOutput { clip_headroom_reduction_db: None, results: vec![channels], sample_rate, curve_points: None, curve_binary_template: None, formant_buffer_bytes: None, sidecar_bytes })
+    Ok(JobOutput { clip_headroom_reduction_db: None, results: vec![channels], sample_rate, curve_points: None, curve_binary_template: None, formant_buffer_bytes: None, sidecar_bytes, lane_pad_samples })
 }
 
 /// Loads every `<prefix>N.wav` (N = 0, 1, 2, …) found in `temp_dir`, in numeric order, as
@@ -619,7 +640,7 @@ fn load_glob_outputs(
     if results.is_empty() {
         return Err(CdpError::NoOutput { step: format!("{}0.wav", glob.prefix) });
     }
-    Ok(JobOutput { clip_headroom_reduction_db: None, results, sample_rate, curve_points: None, curve_binary_template: None, formant_buffer_bytes: None, sidecar_bytes: None })
+    Ok(JobOutput { clip_headroom_reduction_db: None, results, sample_rate, curve_points: None, curve_binary_template: None, formant_buffer_bytes: None, sidecar_bytes: None, lane_pad_samples: 0 })
 }
 
 #[cfg(test)]
@@ -1139,6 +1160,62 @@ mod tests {
         // And the result stays inside full scale -- the clipping half of the same report.
         let peak = wet.iter().fold(0.0f32, |m, s| m.max(s.abs()));
         assert!(peak <= 1.0001, "convolution output must not exceed full scale (peak {peak})");
+    }
+
+    /// A mono-only, content-dependent length-changing process run on stereo returns lanes of
+    /// genuinely different lengths, and the merge pads the shorter one with silence — the
+    /// user-visible symptom being "after process there's zeroed data in the right channel
+    /// only" (Waveset Thin). The padding itself is deliberate (it keeps every sample CDP
+    /// produced); what this pins down is that the amount is *reported*, so the UI can name it
+    /// rather than leaving a silent tail to be discovered in the waveform.
+    #[test]
+    fn a_waveset_process_on_stereo_reports_how_much_lane_padding_it_needed() {
+        let cdp_dir = require_cdp!();
+        let sr = 44100u32;
+        let n = (sr * 2) as usize;
+        // The two channels must be genuinely different material: identical channels produce
+        // identical wavecycle boundaries and therefore identical lane lengths, which is
+        // exactly the case this bug hides in.
+        let mut seed: u32 = 7;
+        let mut noise = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1 << 23) as f32 - 1.0
+        };
+        let tone = |hz: f32, i: usize| 0.4 * (2.0 * std::f32::consts::PI * hz * i as f32 / sr as f32).sin();
+        let left: Vec<f32> = (0..n).map(|i| tone(220.0, i) + 0.05 * noise()).collect();
+        let right: Vec<f32> = (0..n).map(|i| tone(331.0, i) + 0.05 * noise()).collect();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("distort_delete_3").expect("Waveset Thin (Drop Weakest) in catalog");
+        assert!(!def.stereo_native, "the premise: CDP only runs this mono, so the app splits into lanes");
+        let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+        let input = crate::model::cdp::InputSpec { channels: 2, sample_rate: sr, len_samples: n, ..Default::default() };
+        let planned = crate::model::cdp::plan_job(def, &values, &[input], &crate::model::cdp::PvocSettings::default()).unwrap();
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 320,
+            cdp_dir,
+            planned,
+            inputs: vec![vec![left, right]],
+            input_sample_rate: sr,
+            purpose: JobPurpose::Apply,
+        });
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(120))
+        else {
+            unreachable!()
+        };
+        let out = result.expect("Waveset Thin should run on both lanes");
+
+        let channels = &out.results[0];
+        assert_eq!(channels.len(), 2);
+        assert_eq!(channels[0].len(), channels[1].len(), "merged channels must stay the same length");
+        // One channel really does end early: its silent tail is the padding, and its length
+        // must be exactly what the job reported.
+        let audible = |ch: &[f32]| ch.iter().rposition(|s| *s != 0.0).map(|p| p + 1).unwrap_or(0);
+        let pad = channels[0].len() - audible(&channels[0]).min(audible(&channels[1]));
+        assert_eq!(out.lane_pad_samples, pad, "the reported padding must match the real silent tail");
+        assert!(out.lane_pad_samples > 0, "this material is meant to make the lanes diverge");
     }
 
     /// Real end-to-end coverage for `tesselate` -- the one process needing a `transposed`
