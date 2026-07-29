@@ -13125,8 +13125,7 @@ impl App {
         // Drop stale per-channel image state from a previous document with more channels
         // — never reuse it for a channel index that no longer exists.
         self.graphics_protocols.truncate(channel_count);
-        let full_chunks =
-            Layout::vertical(vec![Constraint::Fill(1); channel_count]).split(waveform_area);
+        let full_chunks = channel_pane_rects(waveform_area, channel_count);
         let selection = self.documents[doc_idx].selection.map(|s| s.normalized());
 
         // When auto vertical zoom is on, dynamically fit amplitude_scale to the visible
@@ -13720,6 +13719,51 @@ fn head_tail_marks_within(marks: &[usize], range: (usize, usize)) -> Vec<usize> 
 /// `commands::head_tail_mark`'s module docs for why index would be the wrong key here.
 fn nearest_head_tail_mark(marks: &[usize], pos: usize) -> Option<usize> {
     marks.iter().copied().min_by_key(|m| m.abs_diff(pos))
+}
+
+/// Rows of blank separation allowed between two channel panes, so the leftover height that
+/// [`channel_pane_rects`] can't divide evenly is spent on something legible rather than an
+/// arbitrarily large void. Anything past this stays unused at the bottom.
+const MAX_CHANNEL_GAP: u16 = 2;
+
+/// Splits the waveform area into one pane per channel, all **exactly the same height** and
+/// each an **odd** number of rows.
+///
+/// `Layout::vertical(Fill(1))` was the obvious way to do this and is wrong on both counts.
+/// It hands the undividable remainder row to one pane, so on a stereo file the two channels
+/// got different heights — and since every amplitude→row mapping in the pane is derived from
+/// its height, that made the two channels render at visibly different vertical scales with
+/// *different dB gutter marks* beside them (user report: "-30" on one channel, "-24/-24" on
+/// the other). Equal heights are what makes the two channels directly comparable at all.
+///
+/// The odd-height constraint is what makes the zero line exact rather than approximate. With
+/// an even pane height, amplitude 0.0 falls on the boundary *between* two rows, so no row is
+/// the zero row and the axis is drawn half a row off. With an odd height it lands in the
+/// middle of the centre row (and, in braille terms, on dot-row 2 of that cell's 4), which is
+/// where a `─` glyph actually draws.
+///
+/// The leftover rows become blank separation between panes (capped at [`MAX_CHANNEL_GAP`]),
+/// which also reads as a deliberate divider between channels rather than as slack.
+fn channel_pane_rects(area: Rect, channel_count: usize) -> Vec<Rect> {
+    let count = channel_count.max(1);
+    let n = count as u16;
+    let base = area.height / n;
+    if base == 0 {
+        // Too short to give every channel even one row — no equal-height split exists, so
+        // fall back to ratatui's own division rather than producing overlapping panes.
+        return Layout::vertical(vec![Constraint::Fill(1); count]).split(area).to_vec();
+    }
+    let pane = if base % 2 == 1 { base } else { base - 1 };
+    let leftover = area.height - pane * n;
+    let gap = if n > 1 { (leftover / (n - 1)).min(MAX_CHANNEL_GAP) } else { 0 };
+    (0..n)
+        .map(|i| Rect {
+            x: area.x,
+            y: area.y + i * (pane + gap),
+            width: area.width,
+            height: pane,
+        })
+        .collect()
 }
 
 /// Peak sample magnitude within the visible window. Takes explicit parameters to avoid
@@ -27236,6 +27280,73 @@ mod tests {
         assert!(buffer_text(terminal.backend().buffer()).contains("H/T: 2 pairs +1"));
     }
 
+    /// Every channel pane must be the same height and an odd number of rows, whatever the
+    /// available height — user report: a stereo file rendered its two channels at different
+    /// vertical scales, with different dB gutter marks beside each ("-30" vs "-24/-24"),
+    /// because `Fill(1)` handed the undividable row to one of them.
+    #[test]
+    fn channel_panes_are_equal_odd_heights_with_the_slack_as_a_gap() {
+        for height in 4..40u16 {
+            for channels in 1..=4usize {
+                let rects = channel_pane_rects(Rect::new(0, 0, 80, height), channels);
+                assert_eq!(rects.len(), channels);
+                let h = rects[0].height;
+                assert!(rects.iter().all(|r| r.height == h), "unequal panes at height {height}/{channels}ch: {rects:?}");
+                assert_eq!(h % 2, 1, "pane height {h} must be odd (height {height}, {channels}ch) so zero has a centre row");
+                // Panes stay inside the area, in order, and never overlap.
+                for pair in rects.windows(2) {
+                    assert!(pair[1].y >= pair[0].y + pair[0].height, "overlapping panes: {rects:?}");
+                }
+                let last = rects.last().unwrap();
+                assert!(last.y + last.height <= height, "panes overflow the area: {rects:?}");
+            }
+        }
+    }
+
+    /// A pane can't be given an odd height when there isn't even one row per channel — that
+    /// path falls back to ratatui's own split rather than producing overlapping panes.
+    #[test]
+    fn channel_panes_degrade_gracefully_when_there_is_no_room() {
+        let rects = channel_pane_rects(Rect::new(0, 0, 80, 1), 2);
+        assert_eq!(rects.len(), 2);
+        assert!(rects.iter().all(|r| r.y + r.height <= 1), "panes must stay inside a 1-row area: {rects:?}");
+    }
+
+    /// Both channels of a stereo file must show the *same* dB gutter marks — the visible
+    /// symptom of the unequal-pane bug, checked through the real render path.
+    #[test]
+    fn both_stereo_channels_render_the_same_db_scale() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(stereo_doc(0.5, 0.5, 44_100)), None);
+        let mut terminal = Terminal::new(TestBackend::new(120, 31)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        // The left dB gutter starts at the waveform pane's x minus the gutter width.
+        let gutter_x = app.waveform_area.x - DB_GUTTER_WIDTH;
+        let marks_in = |y0: u16, h: u16| -> Vec<String> {
+            (y0..y0 + h)
+                .map(|y| {
+                    (0..DB_GUTTER_WIDTH)
+                        .map(|i| buffer[(gutter_x + i, y)].symbol().chars().next().unwrap_or(' '))
+                        .collect::<String>()
+                        .trim()
+                        .to_string()
+                })
+                .collect()
+        };
+        let panes = channel_pane_rects(
+            Rect { height: app.waveform_area.height, ..app.waveform_area },
+            2,
+        );
+        let left = marks_in(panes[0].y, panes[0].height);
+        let right = marks_in(panes[1].y, panes[1].height);
+        assert_eq!(left, right, "both channels must show an identical dB axis");
+        assert!(left.iter().any(|m| m == "0dB"), "sanity: the axis actually rendered: {left:?}");
+    }
+
     /// The time ruler is on by default and occupies a real row between the waveform and the
     /// status bar — so toggling it must give that row back to the waveform, not just blank it.
     #[test]
@@ -27256,14 +27367,14 @@ mod tests {
 
         terminal.draw(|frame| app.render(frame)).unwrap();
         let screen = buffer_text(terminal.backend().buffer());
-        assert!(screen.contains("┬0:00"), "the ruler is on by default: {screen}");
-        assert!(screen.contains("┬0:02"), "and labels the visible range in m:ss: {screen}");
+        assert!(screen.contains("│0:00"), "the ruler is on by default: {screen}");
+        assert!(screen.contains("│0:02"), "and labels the visible range in m:ss: {screen}");
         let waveform_height_with_ruler = app.waveform_area.height;
 
         app.handle_action(Action::ToggleTimeRuler);
         terminal.draw(|frame| app.render(frame)).unwrap();
         let screen = buffer_text(terminal.backend().buffer());
-        assert!(!screen.contains("┬0:00"), "toggling it off removes the ruler: {screen}");
+        assert!(!screen.contains("│0:00"), "toggling it off removes the ruler: {screen}");
         assert_eq!(
             app.waveform_area.height,
             waveform_height_with_ruler + 1,
