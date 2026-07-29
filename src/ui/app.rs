@@ -117,12 +117,49 @@ mod ec_focus {
     pub const CHANNELS: usize = 0;
     pub const SUBFOLDER: usize = 1;
     pub const COUNT: usize = 2;
+}
 
-    /// Column within a channel row's Rect where the mode selector starts. A click left of it
-    /// only moves the highlight; at or past it, the click also cycles the mode — the same
-    /// split-at-a-column contract Export Regions' checkbox rows use. Must match the width the
-    /// renderer pads the `Ch` column to, or a click disagrees with what is drawn.
-    pub const MODE_COL: u16 = 10;
+/// The channel-row column layout, derived from the row's own pieces rather than hardcoded, so
+/// the header line, the rows and `handle_dialog_row_click` cannot disagree — and so it stays
+/// right when a 100-channel file widens the number column.
+///
+/// A row is: marker (1) + right-aligned channel number (`digits`) + gap (2) + pairing bracket
+/// (1) + space (1), then the 15-column mode cell, then two spaces, then the file name.
+struct EcColumns {
+    /// Where the mode cell starts. A click left of this only moves the highlight; at or past
+    /// it, the click also cycles the mode — the same split-at-a-column contract Export
+    /// Regions' checkbox rows use.
+    mode: usize,
+    /// Where the mode's *label text* starts, inside the `◄ … ►` cell.
+    mode_label: usize,
+    /// Where the output file name starts.
+    file: usize,
+}
+
+/// Width of the mode cell — `"◄ Stereo pair ►"`, the longest label plus its arrows.
+const EC_MODE_CELL_WIDTH: usize = 15;
+
+/// The `Ch / Export as / Output file` header, padded so each label sits exactly over the
+/// column it names.
+fn ec_header_line(channel_count: usize) -> String {
+    let cols = ec_columns(channel_count);
+    let mut line = format!(" {:<w$}", "Ch", w = channel_export::digit_width(channel_count).max(2));
+    let pad_to = |line: &mut String, col: usize| {
+        while line.chars().count() < col {
+            line.push(' ');
+        }
+    };
+    pad_to(&mut line, cols.mode_label);
+    line.push_str("Export as");
+    pad_to(&mut line, cols.file);
+    line.push_str("Output file");
+    line
+}
+
+fn ec_columns(channel_count: usize) -> EcColumns {
+    let digits = channel_export::digit_width(channel_count).max(2);
+    let mode = 1 + digits + 2 + 1 + 1;
+    EcColumns { mode, mode_label: mode + 2, file: mode + EC_MODE_CELL_WIDTH + 2 }
 }
 
 /// How many channel rows the Export Channels dialog can draw in `area`. Grows to fill the
@@ -147,8 +184,10 @@ fn ec_scroll_top(selected: usize, visible: usize, channel_count: usize) -> usize
 /// file would otherwise be mostly invisible — but never shrinks below this.
 const EC_MIN_CHANNEL_ROWS: usize = 6;
 /// Rows the dialog always spends, whatever the channel count: two borders, the header, the
-/// column header, the summary, the Subfolder field and the hints bar.
-const EC_FIXED_ROWS: u16 = 7;
+/// column header, the summary, the Subfolder field, the hints bar — and the five blank rows
+/// that keep those four groups apart (after the title, after the header, before the summary,
+/// before Subfolder, before the hints).
+const EC_FIXED_ROWS: u16 = 12;
 /// …plus the two possible scroll indicators. Used only to size the channel list against the
 /// available height; the popup itself is sized to the indicators actually drawn.
 const EC_CHROME_ROWS: u16 = EC_FIXED_ROWS + 2;
@@ -5449,7 +5488,7 @@ impl App {
                         *selected = clicked;
                         // Left of the mode column only moves the highlight; on or past it the
                         // click also cycles, which is how a mouse user commits a choice.
-                        if x_in_row >= ec_focus::MODE_COL {
+                        if (x_in_row as usize) >= ec_columns(modes.len()).mode {
                             channel_export::cycle_mode(modes, clicked, true);
                         }
                     }
@@ -15501,7 +15540,9 @@ fn render_export_channels_dialog(
     stem: &str,
 ) -> Vec<Rect> {
     let files = channel_export::plan(modes);
-    let width = 66u16.min(area.width);
+    // Wide enough that a long stem plus a `_chNN-MM.wav` suffix still fits beside the mode
+    // selector without the Output file column running into the border.
+    let width = 84u16.min(area.width);
     let visible = ec_visible_rows(area, modes.len());
     let scroll_top = ec_scroll_top(selected, visible, modes.len());
     let end = (scroll_top + visible).min(modes.len());
@@ -15529,12 +15570,15 @@ fn render_export_channels_dialog(
     let w = channel_export::digit_width(modes.len());
     // Which output file each channel belongs to, so a row can show the name it contributes to
     // — including on the lower half of a pair, where the name sits on the upper row.
+    // Blank rows separate the four parts of this dialog — header, channel list, summary,
+    // and the Subfolder/hints footer. Without them everything butts against everything else
+    // and against the border, which on a 30-row channel list reads as one undifferentiated
+    // block. `EC_FIXED_ROWS` counts them.
     let mut lines: Vec<Line> = vec![
-        Line::from(Span::styled(format!(" {header}"), label_style)),
-        Line::from(Span::styled(
-            format!("  {:<w$}   Export as        Output file", "Ch", w = w.max(2)),
-            dim_style,
-        )),
+        Line::from(""),
+        Line::from(Span::styled(format!("  {header}"), label_style)),
+        Line::from(""),
+        Line::from(Span::styled(ec_header_line(modes.len()), dim_style)),
     ];
 
     if hidden_above > 0 {
@@ -15598,6 +15642,7 @@ fn render_export_channels_dialog(
     }
 
     let used: usize = files.iter().map(|f| f.channels.len()).sum();
+    lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         format!(
             "  {} file{} · {used} of {} channels",
@@ -15608,18 +15653,19 @@ fn render_export_channels_dialog(
         label_style,
     )));
 
+    lines.push(Line::from(""));
     let folder_focused = focused == ec_focus::SUBFOLDER;
     lines.push(if folder_focused {
         let (before, under, after) = folder_input.split_at_cursor();
         Line::from(vec![
-            Span::styled(" Subfolder: ", label_style),
+            Span::styled("  Subfolder: ", label_style),
             Span::styled(before, base),
             Span::styled(under, cursor_style),
             Span::styled(after, base),
         ])
     } else {
         Line::from(vec![
-            Span::styled(" Subfolder: ", label_style),
+            Span::styled("  Subfolder: ", label_style),
             Span::styled(folder_input.value().to_string(), base),
         ])
     });
@@ -15630,10 +15676,11 @@ fn render_export_channels_dialog(
         height: 1,
     };
 
+    lines.push(Line::from(""));
     let can_export = !folder_input.value().trim().is_empty() && !files.is_empty();
     let go_style = if can_export { hint_style } else { dim_style };
     lines.push(Line::from(vec![
-        Span::styled(" ↑↓", hint_style),
+        Span::styled("  ↑↓", hint_style),
         Span::styled(":row  ", label_style),
         Span::styled("←→", hint_style),
         Span::styled(":mode  ", label_style),
@@ -29087,6 +29134,31 @@ mod tests {
             Some(Dialog::Info { message }) => assert!(message.contains("Only one channel")),
             _ => panic!("expected the mono refusal"),
         }
+    }
+
+    /// The header labels must sit exactly over the columns they name, and the layout must
+    /// widen with the channel count — a 100-channel file needs a three-digit number column,
+    /// which shifts everything after it.
+    #[test]
+    fn the_export_channels_header_lines_up_with_its_columns() {
+        for count in [2usize, 30, 100] {
+            let cols = ec_columns(count);
+            let header = ec_header_line(count);
+            assert_eq!(
+                header.char_indices().nth(cols.mode_label).map(|(_, c)| c),
+                Some('E'),
+                "'Export as' must start at the mode label column for {count} channels: {header:?}",
+            );
+            assert!(
+                header[cols.file..].starts_with("Output file"),
+                "'Output file' must start at the file column for {count} channels: {header:?}",
+            );
+            // The mode cell has to leave room for the widest label plus its arrows.
+            assert_eq!(cols.file - cols.mode, EC_MODE_CELL_WIDTH + 2);
+        }
+        // More channels means a wider number column, so every later column shifts right.
+        assert!(ec_columns(100).mode > ec_columns(30).mode);
+        assert_eq!(ec_columns(2).mode, ec_columns(30).mode, "1 and 2 digits both pad to two");
     }
 
     /// The list scrolls, and the click handler must resolve a screen row to the same channel
