@@ -15,12 +15,39 @@ pub struct Viewport {
     /// (and re-fits after edits); the dB scale gutters switch from absolute dBFS to
     /// dB-relative-to-peak to match.
     pub auto_vertical_zoom: bool,
+    /// Index of the topmost channel pane currently drawn. Always 0 while every channel fits
+    /// (see [`VISIBLE_CHANNELS`]) — the vertical counterpart to `scroll_offset`, and kept
+    /// here rather than on `App` for the same reason: it's pure view state, so the clamping
+    /// math is unit-testable without a terminal.
+    pub channel_scroll: usize,
 }
 
 const ZOOM_FACTOR: f64 = 1.5;
 const VERTICAL_ZOOM_FACTOR: f32 = 1.25;
 const MIN_AMPLITUDE_SCALE: f32 = 0.1;
 const MAX_AMPLITUDE_SCALE: f32 = 10.0;
+
+/// Channel panes drawn at once. Beyond this the waveform area scrolls vertically
+/// (`Viewport::channel_scroll`) instead of subdividing further: `channel_pane_rects` splits
+/// the waveform area evenly, so at 30 channels every pane gets a single row — no centre row
+/// for the zero line, and a dB gutter that can show one mark — and past ~42 channels the
+/// split degenerates to zero-height panes entirely.
+pub const VISIBLE_CHANNELS: usize = 6;
+
+/// How many channel panes actually get drawn.
+///
+/// At or below [`VISIBLE_CHANNELS`] this is simply the channel count — every channel is drawn
+/// and nothing scrolls, including on a terminal too short to give each pane a row, where
+/// `channel_pane_rects`'s own degrade path takes over exactly as it did before channel
+/// scrolling existed. Only past the cap does `height` come into it, and only to avoid asking
+/// for more panes than there are rows. Returns at least 1 so callers can divide by it.
+pub fn visible_channels(height: u16, channel_count: usize) -> usize {
+    let count = channel_count.max(1);
+    if count <= VISIBLE_CHANNELS {
+        return count;
+    }
+    VISIBLE_CHANNELS.min((height as usize).max(1)).max(1)
+}
 
 impl Viewport {
     /// Fit the whole file into `width` columns.
@@ -38,7 +65,32 @@ impl Viewport {
             max_samples_per_column,
             total_len,
             auto_vertical_zoom: false,
+            channel_scroll: 0,
         }
+    }
+
+    /// Largest `channel_scroll` that leaves the last window full rather than trailing blank
+    /// panes: 30 channels showing 6 at a time tops out at 24, not 29.
+    pub fn max_channel_scroll(channel_count: usize, height: u16) -> usize {
+        channel_count.saturating_sub(visible_channels(height, channel_count))
+    }
+
+    /// Pins `channel_scroll` inside range. Called every frame, so shrinking the terminal,
+    /// switching to a document with fewer channels, or an edit that removes channels
+    /// (Remove Empty Channels) can never leave the window pointing past the end.
+    pub fn clamp_channel_scroll(&mut self, channel_count: usize, height: u16) {
+        self.channel_scroll =
+            self.channel_scroll.min(Self::max_channel_scroll(channel_count, height));
+    }
+
+    /// Moves the channel window by `delta` panes, clamped at both ends. Returns whether it
+    /// actually moved, so a caller can leave the event unconsumed when it didn't.
+    pub fn scroll_channels(&mut self, delta: isize, channel_count: usize, height: u16) -> bool {
+        let max = Self::max_channel_scroll(channel_count, height) as isize;
+        let next = (self.channel_scroll as isize + delta).clamp(0, max) as usize;
+        let moved = next != self.channel_scroll;
+        self.channel_scroll = next;
+        moved
     }
 
     /// Number of samples spanned by `width` terminal columns at the current zoom level.
@@ -143,6 +195,81 @@ impl Viewport {
 mod tests {
     use super::*;
 
+    /// Below the cap every channel is drawn, so nothing about a mono/stereo file changes.
+    #[test]
+    fn every_channel_is_visible_below_the_window_cap() {
+        for count in 1..=VISIBLE_CHANNELS {
+            assert_eq!(visible_channels(40, count), count);
+            assert_eq!(Viewport::max_channel_scroll(count, 40), 0);
+        }
+    }
+
+    #[test]
+    fn the_window_caps_at_visible_channels() {
+        assert_eq!(visible_channels(40, 30), VISIBLE_CHANNELS);
+        assert_eq!(visible_channels(40, 120), VISIBLE_CHANNELS);
+    }
+
+    /// Past the cap, a terminal too short to give each pane a row shrinks the window rather
+    /// than asking for more panes than there are rows. Never zero — callers divide by it.
+    #[test]
+    fn the_window_shrinks_on_a_very_short_terminal() {
+        assert_eq!(visible_channels(3, 30), 3);
+        assert_eq!(visible_channels(1, 30), 1);
+        assert_eq!(visible_channels(0, 30), 1);
+    }
+
+    /// ...but at or below the cap the height is irrelevant: every channel is still drawn, and
+    /// a too-short area is `channel_pane_rects`'s own degrade path to handle, exactly as it
+    /// was before channel scrolling existed. A stereo file must never scroll.
+    #[test]
+    fn a_short_terminal_never_hides_channels_below_the_cap() {
+        assert_eq!(visible_channels(1, 2), 2);
+        assert_eq!(visible_channels(1, 6), 6);
+        assert_eq!(Viewport::max_channel_scroll(2, 1), 0);
+    }
+
+    /// The last window is flush with the end: 30 channels showing 6 tops out at 24, so the
+    /// final view is channels 25-30 rather than 30 plus five blank panes.
+    #[test]
+    fn the_last_channel_window_is_full_not_trailing_blanks() {
+        assert_eq!(Viewport::max_channel_scroll(30, 40), 24);
+        let mut v = Viewport::fit_to_width(1_000, 80);
+        v.channel_scroll = 29;
+        v.clamp_channel_scroll(30, 40);
+        assert_eq!(v.channel_scroll, 24);
+    }
+
+    /// The clamp is what protects against a channel count that *shrinks* underneath the
+    /// scroll position — a terminal resize, a buffer switch, or Remove Empty Channels.
+    #[test]
+    fn clamping_recovers_when_the_channel_count_shrinks() {
+        let mut v = Viewport::fit_to_width(1_000, 80);
+        v.channel_scroll = 24;
+        v.clamp_channel_scroll(4, 40);
+        assert_eq!(v.channel_scroll, 0, "4 channels all fit, so there is nothing to scroll");
+    }
+
+    #[test]
+    fn scrolling_channels_clamps_at_both_ends_and_reports_movement() {
+        let mut v = Viewport::fit_to_width(1_000, 80);
+        assert!(v.scroll_channels(1, 30, 40));
+        assert_eq!(v.channel_scroll, 1);
+        assert!(v.scroll_channels(-5, 30, 40), "overshooting the top still moves to it");
+        assert_eq!(v.channel_scroll, 0);
+        assert!(!v.scroll_channels(-1, 30, 40), "already at the top, nothing moved");
+        assert!(v.scroll_channels(100, 30, 40));
+        assert_eq!(v.channel_scroll, 24);
+        assert!(!v.scroll_channels(1, 30, 40), "already at the bottom, nothing moved");
+    }
+
+    #[test]
+    fn scrolling_channels_is_inert_when_every_channel_fits() {
+        let mut v = Viewport::fit_to_width(1_000, 80);
+        assert!(!v.scroll_channels(1, 2, 40));
+        assert_eq!(v.channel_scroll, 0);
+    }
+
     #[test]
     fn fits_whole_file_into_width() {
         let viewport = Viewport::fit_to_width(44_100, 80);
@@ -170,6 +297,7 @@ mod tests {
             max_samples_per_column: total_len as f64,
             total_len,
             auto_vertical_zoom: false,
+            channel_scroll: 0,
         }
     }
 

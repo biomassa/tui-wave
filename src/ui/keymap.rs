@@ -43,6 +43,15 @@ pub enum Action {
     /// (no default keybinding) — it's a set-and-forget layout preference, not something
     /// reached for mid-edit, and plain keys are a scarcer resource than menu rows.
     ToggleTimeRuler,
+    /// Move the channel window (`Viewport::channel_scroll`) by one pane, or by a full window
+    /// of `viewport::VISIBLE_CHANNELS`. Bound to plain `,`/`.`/`<`/`>`: Up/Down are horizontal
+    /// zoom and Shift+Up/Down vertical zoom, and every double-modifier+arrow combination is
+    /// swallowed by the terminal before the app sees it — the same constraint that made fine
+    /// stepping a backtick toggle. All four are no-ops when every channel already fits.
+    ScrollChannelsUp,
+    ScrollChannelsDown,
+    ScrollChannelsPageUp,
+    ScrollChannelsPageDown,
     SaveAs,
     SaveAll,
     ToggleZeroSnap,
@@ -183,6 +192,12 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         // same reasoning that keeps every other shifted-symbol key in this app keyed off
         // its own character, not a modifier combo a terminal might not report consistently).
         KeyCode::Char('?') => Some(Action::PrevRisingEdge),
+        // Channel-window scrolling. Like '?' above, the shifted forms are bound as the literal
+        // characters the terminal actually sends rather than ','/'.' plus a Shift flag.
+        KeyCode::Char(',') => Some(Action::ScrollChannelsUp),
+        KeyCode::Char('.') => Some(Action::ScrollChannelsDown),
+        KeyCode::Char('<') => Some(Action::ScrollChannelsPageUp),
+        KeyCode::Char('>') => Some(Action::ScrollChannelsPageDown),
         KeyCode::Up if shift => Some(Action::ZoomInVertical),
         KeyCode::Down if shift => Some(Action::ZoomOutVertical),
         KeyCode::Up => Some(Action::ZoomIn),
@@ -361,6 +376,10 @@ pub fn default_keybindings() -> HashMap<String, Vec<String>> {
     bind!("NextRisingEdge", "/");
     bind!("PrevRisingEdge", "?");
     bind!("AutoInsertMarkers", "t");
+    bind!("ScrollChannelsUp", ",");
+    bind!("ScrollChannelsDown", ".");
+    bind!("ScrollChannelsPageUp", "<");
+    bind!("ScrollChannelsPageDown", ">");
     bind!("IncreaseTransientThreshold", "+", "=");
     bind!("DecreaseTransientThreshold", "-", "_");
     m
@@ -429,6 +448,10 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "ToggleGraphicsMode" => Some(Action::ToggleGraphicsMode),
         "ToggleDotMatrixGradient" => Some(Action::ToggleDotMatrixGradient),
         "ToggleTimeRuler" => Some(Action::ToggleTimeRuler),
+        "ScrollChannelsUp" => Some(Action::ScrollChannelsUp),
+        "ScrollChannelsDown" => Some(Action::ScrollChannelsDown),
+        "ScrollChannelsPageUp" => Some(Action::ScrollChannelsPageUp),
+        "ScrollChannelsPageDown" => Some(Action::ScrollChannelsPageDown),
         "InsertMarker" => Some(Action::InsertMarker),
         "DeleteMarker" => Some(Action::DeleteMarker),
         "InsertHeadTailMark" => Some(Action::InsertHeadTailMark),

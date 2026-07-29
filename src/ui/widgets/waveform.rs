@@ -237,6 +237,7 @@ mod tests {
             max_samples_per_column: 1_000_000.0,
             total_len: 1_000_000,
             auto_vertical_zoom: false,
+            channel_scroll: 0,
         }
     }
 

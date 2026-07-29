@@ -44,7 +44,7 @@ use super::terminal::Tui;
 use super::text_input::TextInput;
 use super::theme;
 use super::toolbar::Toolbar;
-use super::viewport::Viewport;
+use super::viewport::{self as viewport, Viewport};
 use super::waveform_cache::WaveformCache;
 use super::widgets::braille::{braille_char, DOT_BITS};
 use super::widgets::db_scale::{DbScaleWidget, DB_GUTTER_WIDTH};
@@ -2096,6 +2096,12 @@ pub struct App {
     /// a redraw, so it's cached here instead.
     pub content_width: u16,
     pub waveform_area: Rect,
+    /// Absolute channel indices whose panes were drawn in the last frame — the range
+    /// `channel_pane_rects` returned. Cached for the same reason `waveform_area` is: mouse
+    /// and key handlers need to know how far a channel-scroll can go without re-deriving the
+    /// layout, and it must be the *rendered* value so input can never disagree with what's on
+    /// screen. `0..0` until the first render of a loaded document.
+    pub visible_channel_range: std::ops::Range<usize>,
     /// Rendered area of the Files panel, for mouse-click focus hit-testing.
     file_panel_area: Rect,
     /// Rendered area of the Buffers panel, for mouse-click focus hit-testing.
@@ -2845,6 +2851,7 @@ impl App {
             waveform_caches,
             content_width: 1,
             waveform_area: Rect::default(),
+            visible_channel_range: 0..0,
             file_panel_area: Rect::default(),
             buffer_panel_area: Rect::default(),
             confirm: None,
@@ -5663,6 +5670,25 @@ impl App {
     /// Shared tail for every operation that mutates sample data on `idx` (which is always
     /// the active document): mark the file dirty, hand the new buffer to the audio engine,
     /// rebuild the waveform caches, and re-fit auto vertical zoom if it's on.
+    /// Moves the channel window by `delta` panes (negative = towards channel 1). Shared by
+    /// the mouse wheel over the waveform and the `,`/`.`/`<`/`>` keys, so the two can't
+    /// disagree about the bounds.
+    ///
+    /// Sizes itself from `waveform_area.height` — the *rendered* height, cached by `render` —
+    /// rather than re-deriving the layout, so the scroll limit always matches how many panes
+    /// are actually on screen. A no-op while every channel fits.
+    fn scroll_channels(&mut self, delta: isize) {
+        let channel_count = self
+            .documents
+            .get(self.active_document)
+            .map(|d| d.channel_count())
+            .unwrap_or(0);
+        let height = self.waveform_area.height;
+        if let Some(viewport) = self.viewport.as_mut() {
+            viewport.scroll_channels(delta, channel_count, height);
+        }
+    }
+
     fn after_sample_mutation(&mut self, idx: usize) {
         if self.documents[idx].dirty {
             if let Some(path) = self.documents[idx].path.clone() {
@@ -11574,6 +11600,16 @@ impl App {
             }
             return;
         }
+        // The wheel scrolls the *channel* window, not the timeline — it's the primary gesture
+        // for reaching channels 7..30 of a multichannel file, and it was previously unhandled
+        // here (the match below only ever covered Down/Drag/Up), so nothing is displaced. Runs
+        // before the seek/select math since none of that applies to a wheel event.
+        if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+            let delta: isize = if mouse.kind == MouseEventKind::ScrollUp { -1 } else { 1 };
+            self.scroll_channels(delta);
+            return;
+        }
+
         // Computed before `document` below takes a mutable borrow of `self.documents[idx]`.
         let playback_bound = self.playback_bound();
 
@@ -12308,6 +12344,20 @@ impl App {
             return;
         }
 
+        // Channel-window scrolling. Handled here, before the document-borrowing match below,
+        // because it touches only view state — and it must stay reachable with no selection
+        // and on a document of any length, unlike everything in that match.
+        if let Some(delta) = match action {
+            Action::ScrollChannelsUp => Some(-1),
+            Action::ScrollChannelsDown => Some(1),
+            Action::ScrollChannelsPageUp => Some(-(viewport::VISIBLE_CHANNELS as isize)),
+            Action::ScrollChannelsPageDown => Some(viewport::VISIBLE_CHANNELS as isize),
+            _ => None,
+        } {
+            self.scroll_channels(delta);
+            return;
+        }
+
         if matches!(
             action,
             Action::InsertMarker
@@ -12637,6 +12687,10 @@ impl App {
             | Action::ToggleGraphicsMode
             | Action::ToggleDotMatrixGradient
             | Action::ToggleTimeRuler
+            | Action::ScrollChannelsUp
+            | Action::ScrollChannelsDown
+            | Action::ScrollChannelsPageUp
+            | Action::ScrollChannelsPageDown
             | Action::ClearSelection
             | Action::SelectAll
             | Action::SaveAs
@@ -13195,21 +13249,11 @@ impl App {
             return;
         };
 
-        let title_text = format!(" {} ", self.buffer_name(doc_idx));
-        let title = Line::from(vec![
-            Span::styled(title_text, Style::default().fg(border_color)),
-            Span::styled(
-                if self.documents[doc_idx].dirty { "* " } else { "" },
-                Style::default().fg(theme::DIRTY),
-            ),
-        ]);
-        let outer = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color))
-            .style(Style::default().bg(theme::BASE));
-        let inner = outer.inner(chrome.content);
-        frame.render_widget(outer, chrome.content);
+        // The bordered inner area is needed *before* the title can be built: the title carries
+        // the visible-channel range, and that depends on the waveform height this area gives.
+        // `Block::inner` only ever subtracts the borders, so computing it from a titleless
+        // block and rendering the titled one below is exactly equivalent.
+        let inner = Block::default().borders(Borders::ALL).inner(chrome.content);
 
         // The time ruler takes a row out of the waveform's own height (between it and the
         // status bar), rather than overlaying the waveform — an overlay would either hide a
@@ -13233,6 +13277,9 @@ impl App {
 
         self.content_width = inner_waveform_area.width;
         self.waveform_area = inner_waveform_area;
+        // Taken before `viewport` below borrows `self` mutably — the title is built after the
+        // channel window is known, by which point that borrow is still live.
+        let buffer_title = format!(" {} ", self.buffer_name(doc_idx));
         let total_len = self.documents[doc_idx].len_samples();
         let auto_vertical_zoom_default = self.config.auto_vertical_zoom;
         let viewport = self.viewport.get_or_insert_with(|| {
@@ -13252,7 +13299,44 @@ impl App {
         // Drop stale per-channel image state from a previous document with more channels
         // — never reuse it for a channel index that no longer exists.
         self.graphics_protocols.truncate(channel_count);
-        let full_chunks = channel_pane_rects(waveform_area, channel_count);
+        // Same backstop as `clamp_zoom_to_content` above, for the vertical axis: a terminal
+        // resize, a buffer switch, or an edit that removes channels (Remove Empty Channels)
+        // can all leave the channel window pointing past the end.
+        viewport.clamp_channel_scroll(channel_count, waveform_area.height);
+        let channel_scroll = viewport.channel_scroll;
+        let (full_chunks, visible_channels) =
+            channel_pane_rects(waveform_area, channel_count, channel_scroll);
+        // `visible_channels.start` is what every per-channel lookup below indexes by — a
+        // pane's position in `full_chunks` is not a channel index once scrolling is active.
+        let first_channel = visible_channels.start;
+        self.visible_channel_range = visible_channels.clone();
+
+        // The waveform border, now that the channel window is known. Rendered here rather
+        // than before the layout so the title's channel range is *this* frame's — deriving it
+        // from the previous frame left the label reading one keypress behind while scrolling.
+        // Still drawn before any waveform content below, so the layering is unchanged.
+        let channel_indicator = if channel_count > visible_channels.len() {
+            format!("ch {}-{} of {channel_count} ", first_channel + 1, visible_channels.end)
+        } else {
+            String::new()
+        };
+        let title = Line::from(vec![
+            Span::styled(buffer_title, Style::default().fg(border_color)),
+            Span::styled(
+                if self.documents[doc_idx].dirty { "* " } else { "" },
+                Style::default().fg(theme::DIRTY),
+            ),
+            Span::styled(channel_indicator, Style::default().fg(theme::CHROME_FG)),
+        ]);
+        frame.render_widget(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
+                .style(Style::default().bg(theme::BASE)),
+            chrome.content,
+        );
+
         let selection = self.documents[doc_idx].selection.map(|s| s.normalized());
 
         // When auto vertical zoom is on, dynamically fit amplitude_scale to the visible
@@ -13302,7 +13386,13 @@ impl App {
         // between the two channels). All channels render together or not at all, so this is
         // one flag rather than a per-row test.
 
-        for (i, channel_full_area) in full_chunks.iter().enumerate() {
+        for (pane, channel_full_area) in full_chunks.iter().enumerate() {
+            // The absolute channel this pane shows. Every per-channel lookup below — samples,
+            // waveform cache, graphics image state — must use this and not `pane`: with a
+            // channel window open, pane 0 is channel `first_channel`, and indexing
+            // `graphics_protocols` by the pane position would repaint one channel's waveform
+            // into another channel's cached image.
+            let i = first_channel + pane;
             let channel_inner = Rect {
                 x: channel_full_area.x + gutter,
                 y: channel_full_area.y,
@@ -13374,7 +13464,10 @@ impl App {
                         self.playhead_position,
                         &marker_refs,
                         &head_tail_refs,
-                        i == 0,
+                        // Marker labels go on the topmost *drawn* pane, not on absolute
+                        // channel 0 — with a channel window open, scrolling past channel 0
+                        // would otherwise take the labels off screen entirely.
+                        pane == 0,
                         channel_inner.width,
                         pixel_width,
                         pixel_height,
@@ -13393,6 +13486,31 @@ impl App {
             let db_scale = DbScaleWidget { amplitude_scale: viewport.amplitude_scale, peak_db };
             frame.render_widget(db_scale, left_gutter);
             frame.render_widget(db_scale, right_gutter);
+        }
+
+        // Channel scrollbar: a one-column track on the last column of the right dB gutter, so
+        // it costs no waveform width. Drawn only when there are channels off screen — at six
+        // or fewer the waveform area looks exactly as it always has.
+        if channel_count > full_chunks.len() && gutter > 0 && !full_chunks.is_empty() {
+            let track_x = waveform_area.x + waveform_area.width - 1;
+            let track_top = waveform_area.y;
+            let track_height = waveform_area.height;
+            // Thumb length in proportion to how much of the document is on screen, at least
+            // one row so it never vanishes on a 100-channel file.
+            let thumb_len = ((track_height as usize * full_chunks.len()) / channel_count).max(1) as u16;
+            let travel = track_height.saturating_sub(thumb_len);
+            let max_scroll = channel_count - full_chunks.len();
+            let thumb_top = track_top
+                + ((travel as usize * first_channel) / max_scroll.max(1)) as u16;
+            for y in track_top..track_top + track_height {
+                let on_thumb = y >= thumb_top && y < thumb_top + thumb_len;
+                let (glyph, color) =
+                    if on_thumb { ("█", theme::FOCUS) } else { ("│", theme::BORDER) };
+                frame.render_widget(
+                    Paragraph::new(Span::styled(glyph, Style::default().fg(color).bg(theme::BASE))),
+                    Rect { x: track_x, y, width: 1, height: 1 },
+                );
+            }
         }
 
         let images_rendered = channel_image_rows.iter().any(Option::is_some);
@@ -13934,19 +14052,42 @@ fn nearest_head_tail_mark(marks: &[usize], pos: usize) -> Option<usize> {
 /// ordinary padding above the ruler/status bar. It was originally spent as separation
 /// *between* the panes, which on the heights where it came to two rows read as a gap wide
 /// enough to look like a mistake (user report).
-fn channel_pane_rects(area: Rect, channel_count: usize) -> Vec<Rect> {
+/// Panes for the channels currently on screen, plus the absolute channel index range they
+/// correspond to.
+///
+/// Up to [`viewport::VISIBLE_CHANNELS`] the whole document fits and the split is the same
+/// equal division it has always been — that path is unchanged, so nothing about a 1-6 channel
+/// file moves. Past it the area shows a *window* of channels starting at `channel_scroll`
+/// instead of subdividing further: an even split over 30 channels gives each pane one row,
+/// which leaves the zero line no centre row and the dB gutter room for a single mark.
+///
+/// The returned range is what callers must index the document's channels, waveform caches
+/// and per-channel graphics state by — the pane's position in the returned Vec is *not* a
+/// channel index once scrolling is active.
+fn channel_pane_rects(
+    area: Rect,
+    channel_count: usize,
+    channel_scroll: usize,
+) -> (Vec<Rect>, std::ops::Range<usize>) {
     let count = channel_count.max(1);
-    let n = count as u16;
+    let visible = viewport::visible_channels(area.height, count);
+    let first = channel_scroll.min(count.saturating_sub(visible));
+    let range = first..(first + visible);
+    let n = visible as u16;
     let base = area.height / n;
     if base == 0 {
-        // Too short to give every channel even one row — no equal-height split exists, so
-        // fall back to ratatui's own division rather than producing overlapping panes.
-        return Layout::vertical(vec![Constraint::Fill(1); count]).split(area).to_vec();
+        // Too short to give every visible channel even one row — no equal-height split
+        // exists, so fall back to ratatui's own division rather than producing overlapping
+        // panes. Nearly unreachable now that `visible` is capped at VISIBLE_CHANNELS: it
+        // needs a waveform area shorter than that cap.
+        let rects = Layout::vertical(vec![Constraint::Fill(1); visible]).split(area).to_vec();
+        return (rects, range);
     }
     let pane = if base % 2 == 1 { base } else { base - 1 };
-    (0..n)
+    let rects = (0..n)
         .map(|i| Rect { x: area.x, y: area.y + i * pane, width: area.width, height: pane })
-        .collect()
+        .collect();
+    (rects, range)
 }
 
 /// Peak sample magnitude within the visible window. Takes explicit parameters to avoid
@@ -18220,6 +18361,23 @@ mod tests {
         }
     }
 
+    /// An arbitrary-channel-count document, for the multichannel paths (channel scrolling,
+    /// Remove Empty Channels, Export Channels) that `stereo_doc` can't express.
+    fn doc_with_channels(channels: Vec<Vec<f32>>) -> Document {
+        Document {
+            head_tail_marks: Vec::new(),
+            channels,
+            sample_rate: 44100,
+            selection: None,
+            cursor: 0,
+            dirty: false,
+            path: None,
+            markers: Vec::new(),
+            bits_per_sample: 32,
+            bext: None,
+        }
+    }
+
     /// A regression test for a real bug: the menu used to render *before* the waveform
     /// content, so an open dropdown (which extends below the menu bar into the content
     /// area) got overdrawn by it — the dropdown's own text never survived to the screen.
@@ -18451,6 +18609,7 @@ mod tests {
             max_samples_per_column: 1_000_000.0,
             total_len: app.documents[0].len_samples(),
             auto_vertical_zoom: false,
+            channel_scroll: 0,
         });
 
         app.handle_action(Action::NextRisingEdge);
@@ -18475,6 +18634,7 @@ mod tests {
             max_samples_per_column: 1_000_000.0,
             total_len: app.documents[0].len_samples(),
             auto_vertical_zoom: false,
+            channel_scroll: 0,
         });
         app.documents[0].cursor = 45 * 441; // inside the loudest segment
 
@@ -27338,7 +27498,7 @@ mod tests {
         app.documents[0].markers = vec![Marker { position: 100, label: "M".to_string() }];
         app.content_width = 80;
         app.waveform_area = Rect { x: 0, y: 0, width: 80, height: 4 };
-        app.viewport = Some(Viewport { samples_per_column: 1.0, scroll_offset: 0, amplitude_scale: 1.0, min_samples_per_column: 1.0, max_samples_per_column: 1_000.0, total_len: 1_000, auto_vertical_zoom: false });
+        app.viewport = Some(Viewport { samples_per_column: 1.0, scroll_offset: 0, amplitude_scale: 1.0, min_samples_per_column: 1.0, max_samples_per_column: 1_000.0, total_len: 1_000, auto_vertical_zoom: false , channel_scroll: 0 });
         app.marker_label_rects = vec![(Rect { x: 5, y: 0, width: 5, height: 1 }, 0)];
 
         let mouse_at = |col: u16, kind: MouseEventKind| MouseEvent { kind, column: col, row: 0, modifiers: KeyModifiers::NONE };
@@ -27359,7 +27519,7 @@ mod tests {
         app.documents[0].head_tail_marks = vec![100, 400];
         app.content_width = 80;
         app.waveform_area = Rect { x: 0, y: 0, width: 80, height: 4 };
-        app.viewport = Some(Viewport { samples_per_column: 1.0, scroll_offset: 0, amplitude_scale: 1.0, min_samples_per_column: 1.0, max_samples_per_column: 1_000.0, total_len: 1_000, auto_vertical_zoom: false });
+        app.viewport = Some(Viewport { samples_per_column: 1.0, scroll_offset: 0, amplitude_scale: 1.0, min_samples_per_column: 1.0, max_samples_per_column: 1_000.0, total_len: 1_000, auto_vertical_zoom: false , channel_scroll: 0 });
         app.head_tail_label_rects = vec![(Rect { x: 5, y: 1, width: 3, height: 1 }, 0)];
 
         let mouse_at = |col: u16, kind: MouseEventKind| MouseEvent { kind, column: col, row: 1, modifiers: KeyModifiers::NONE };
@@ -27381,7 +27541,7 @@ mod tests {
         app.documents[0].head_tail_marks = vec![100, 400];
         app.content_width = 80;
         app.waveform_area = Rect { x: 0, y: 0, width: 80, height: 4 };
-        app.viewport = Some(Viewport { samples_per_column: 1.0, scroll_offset: 0, amplitude_scale: 1.0, min_samples_per_column: 1.0, max_samples_per_column: 1_000.0, total_len: 1_000, auto_vertical_zoom: false });
+        app.viewport = Some(Viewport { samples_per_column: 1.0, scroll_offset: 0, amplitude_scale: 1.0, min_samples_per_column: 1.0, max_samples_per_column: 1_000.0, total_len: 1_000, auto_vertical_zoom: false , channel_scroll: 0 });
         app.head_tail_label_rects = vec![(Rect { x: 5, y: 1, width: 3, height: 1 }, 0)];
 
         let mouse_at = |col: u16, kind: MouseEventKind| MouseEvent { kind, column: col, row: 1, modifiers: KeyModifiers::NONE };
@@ -27707,8 +27867,9 @@ mod tests {
     fn channel_panes_are_equal_odd_heights_packed_against_the_top() {
         for height in 4..40u16 {
             for channels in 1..=4usize {
-                let rects = channel_pane_rects(Rect::new(0, 0, 80, height), channels);
+                let (rects, range) = channel_pane_rects(Rect::new(0, 0, 80, height), channels, 0);
                 assert_eq!(rects.len(), channels);
+                assert_eq!(range, 0..channels, "every channel is visible below the window cap");
                 let h = rects[0].height;
                 assert!(rects.iter().all(|r| r.height == h), "unequal panes at height {height}/{channels}ch: {rects:?}");
                 assert_eq!(h % 2, 1, "pane height {h} must be odd (height {height}, {channels}ch) so zero has a centre row");
@@ -27733,11 +27894,93 @@ mod tests {
         }
     }
 
+    /// The regression guard for "inert below the threshold": a 6-channel file must produce
+    /// exactly the split it did before channel scrolling existed, so nothing about an
+    /// ordinary mono/stereo/6-channel file moved.
+    #[test]
+    fn six_channels_still_fill_the_whole_area_unscrolled() {
+        let area = Rect::new(0, 0, 80, 42);
+        let (rects, range) = channel_pane_rects(area, 6, 0);
+        assert_eq!(range, 0..6);
+        assert_eq!(rects.len(), 6);
+        assert!(rects.iter().all(|r| r.height == 7), "42 rows / 6 channels = 7 each: {rects:?}");
+    }
+
+    /// Past the cap the area shows a *window* of channels: six panes, still equal and odd
+    /// height, contiguous, inside the area — and reporting which absolute channels they are.
+    #[test]
+    fn thirty_channels_show_a_scrolled_window_of_six() {
+        let area = Rect::new(0, 0, 80, 42);
+        let (rects, range) = channel_pane_rects(area, 30, 12);
+        assert_eq!(range, 12..18, "pane 0 is channel 12, not channel 0");
+        assert_eq!(rects.len(), 6);
+        let h = rects[0].height;
+        assert_eq!(h % 2, 1, "pane height {h} must stay odd so zero has a centre row");
+        assert!(rects.iter().all(|r| r.height == h));
+        for pair in rects.windows(2) {
+            assert_eq!(pair[1].y, pair[0].y + pair[0].height, "panes stay contiguous: {rects:?}");
+        }
+        let last = rects.last().unwrap();
+        assert!(last.y + last.height <= area.height, "panes overflow the area: {rects:?}");
+    }
+
+    /// A scroll position past the last full window is pulled back to it, so the final view is
+    /// channels 25-30 rather than channel 30 plus five blank panes.
+    #[test]
+    fn an_overshot_channel_scroll_snaps_to_the_last_full_window() {
+        let (rects, range) = channel_pane_rects(Rect::new(0, 0, 80, 42), 30, 99);
+        assert_eq!(range, 24..30);
+        assert_eq!(rects.len(), 6);
+    }
+
+    /// The wheel over the waveform moves the channel window on a multichannel file, and is
+    /// inert on a stereo one — it must not become a second, surprising way to scroll a
+    /// two-channel file's view.
+    #[test]
+    fn the_wheel_over_the_waveform_scrolls_channels_only_when_they_overflow() {
+        let wheel = |kind| MouseEvent { kind, column: 10, row: 5, modifiers: KeyModifiers::NONE };
+
+        let many: Vec<Vec<f32>> = (0..30).map(|_| vec![0.1f32; 1_000]).collect();
+        let mut app = new_app(Some(doc_with_channels(many)), None);
+        app.waveform_area = Rect { x: 0, y: 0, width: 80, height: 42 };
+        app.viewport = Some(Viewport::fit_to_width(1_000, 80));
+        app.handle_mouse(wheel(MouseEventKind::ScrollDown));
+        assert_eq!(app.viewport.as_ref().unwrap().channel_scroll, 1);
+        app.handle_mouse(wheel(MouseEventKind::ScrollUp));
+        assert_eq!(app.viewport.as_ref().unwrap().channel_scroll, 0);
+
+        let mut stereo = new_app(Some(stereo_doc(0.5, 0.5, 44_100)), None);
+        stereo.waveform_area = Rect { x: 0, y: 0, width: 80, height: 42 };
+        stereo.viewport = Some(Viewport::fit_to_width(1_000, 80));
+        stereo.handle_mouse(wheel(MouseEventKind::ScrollDown));
+        assert_eq!(stereo.viewport.as_ref().unwrap().channel_scroll, 0);
+    }
+
+    /// The page keys move a whole window; the single-step keys move one pane. Both clamp.
+    #[test]
+    fn the_channel_scroll_keys_move_one_pane_and_one_window() {
+        let many: Vec<Vec<f32>> = (0..30).map(|_| vec![0.1f32; 1_000]).collect();
+        let mut app = new_app(Some(doc_with_channels(many)), None);
+        app.waveform_area = Rect { x: 0, y: 0, width: 80, height: 42 };
+        app.viewport = Some(Viewport::fit_to_width(1_000, 80));
+
+        app.handle_action(Action::ScrollChannelsDown);
+        assert_eq!(app.viewport.as_ref().unwrap().channel_scroll, 1);
+        app.handle_action(Action::ScrollChannelsPageDown);
+        assert_eq!(app.viewport.as_ref().unwrap().channel_scroll, 7);
+        app.handle_action(Action::ScrollChannelsPageUp);
+        assert_eq!(app.viewport.as_ref().unwrap().channel_scroll, 1);
+        app.handle_action(Action::ScrollChannelsUp);
+        assert_eq!(app.viewport.as_ref().unwrap().channel_scroll, 0);
+        app.handle_action(Action::ScrollChannelsUp);
+        assert_eq!(app.viewport.as_ref().unwrap().channel_scroll, 0, "clamped at the top");
+    }
+
     /// A pane can't be given an odd height when there isn't even one row per channel — that
     /// path falls back to ratatui's own split rather than producing overlapping panes.
     #[test]
     fn channel_panes_degrade_gracefully_when_there_is_no_room() {
-        let rects = channel_pane_rects(Rect::new(0, 0, 80, 1), 2);
+        let (rects, _) = channel_pane_rects(Rect::new(0, 0, 80, 1), 2, 0);
         assert_eq!(rects.len(), 2);
         assert!(rects.iter().all(|r| r.y + r.height <= 1), "panes must stay inside a 1-row area: {rects:?}");
     }
@@ -27767,9 +28010,10 @@ mod tests {
                 })
                 .collect()
         };
-        let panes = channel_pane_rects(
+        let (panes, _) = channel_pane_rects(
             Rect { height: app.waveform_area.height, ..app.waveform_area },
             2,
+            0,
         );
         let left = marks_in(panes[0].y, panes[0].height);
         let right = marks_in(panes[1].y, panes[1].height);
@@ -27852,7 +28096,7 @@ mod tests {
         app.documents[0].markers = vec![Marker { position: 100, label: "M".to_string() }];
         app.content_width = 80;
         app.waveform_area = Rect { x: 0, y: 0, width: 80, height: 4 };
-        app.viewport = Some(Viewport { samples_per_column: 1.0, scroll_offset: 0, amplitude_scale: 1.0, min_samples_per_column: 1.0, max_samples_per_column: 1_000.0, total_len: 1_000, auto_vertical_zoom: false });
+        app.viewport = Some(Viewport { samples_per_column: 1.0, scroll_offset: 0, amplitude_scale: 1.0, min_samples_per_column: 1.0, max_samples_per_column: 1_000.0, total_len: 1_000, auto_vertical_zoom: false , channel_scroll: 0 });
         app.marker_label_rects = vec![(Rect { x: 5, y: 0, width: 5, height: 1 }, 0)];
 
         let mouse_at = |col: u16, kind: MouseEventKind| MouseEvent { kind, column: col, row: 0, modifiers: KeyModifiers::NONE };
@@ -28393,6 +28637,7 @@ mod tests {
             max_samples_per_column: 1_000_000.0,
             total_len: 1_000_000,
             auto_vertical_zoom: false,
+            channel_scroll: 0,
         });
         app.viewport_follows_playback = true;
 
@@ -28646,6 +28891,7 @@ mod tests {
             max_samples_per_column: 1_000_000.0,
             total_len: 1000,
             auto_vertical_zoom: false,
+            channel_scroll: 0,
         });
         app.documents[0].cursor = 100;
         app
