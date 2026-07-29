@@ -18883,6 +18883,15 @@ scale = "plain"
 # [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
 # trns 0-12, atten 0-1 all reject one step outside those bounds.
 [[process]]
+# The "cuts" datafile is taken from the buffer's Head/Tail marks (`h` to place one) rather
+# than a dialog field, for the same reason the DISTMORE family's marklist is: these are
+# positions in the waveform in front of you, and hand-typing times into a form to describe
+# them is unusable. Every mark is one cut boundary on its own -- the even/odd Head/Tail roles
+# mean nothing here -- so `head_tail_marks_unpaired` lifts the "two complete pairs" floor.
+# A mark at the very start of the range is dropped rather than written out: CDP rejects a cut
+# time of exactly 0 ("Invalid time (0.000000) on line 1 ... Must be greater than zero",
+# confirmed against the real binary, 2026-07-28), and it would describe a cut with nothing
+# before it. A time past the end of the file is accepted and ignored.
 key = "scramble_scramble_5"
 bin = "scramble"
 subprog = "scramble"
@@ -18892,29 +18901,14 @@ category = "time"
 subcategory = "texture"
 short_description = "Sorts wavesets shortest-first within each marked segment"
 description = """
-Splits the sound at the times you supply and sorts the waveset groups by length within each segment separately, shortest first. Each segment becomes its own falling glide, so instead of one long sweep across the whole file you get a repeating gesture that restarts at every cut -- rhythm the whole-file modes can't produce.
+Splits the sound at your Head/Tail marks and sorts the waveset groups by length within each segment separately, shortest first. Each segment becomes its own falling glide, so instead of one long sweep across the whole file you get a repeating gesture that restarts at every cut -- rhythm the whole-file modes can't produce.
 """
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-# min/default are both strictly above zero on purpose: CDP rejects a cut time of exactly 0
-# with "Invalid time (0.000000) on line 1 ... Must be greater than zero" (confirmed against
-# the real binary, 2026-07-28). A time past the end of the file is accepted and ignored.
-[[process.params]]
-name = "Cut Times"
-description = "Times within the source that split it into separately-processed segments"
-automatable = true
-kind = "number"
-min = 0.001
-max = 999999.0
-step = 0.01
-default = 0.5
-exponential = false
-scale = "plain"
-required_list = true
-list_is_time_sequence = true
+needs_head_tail_marks = true
+head_tail_marks_unpaired = true
 
 [[process.params]]
 name = "Random Seed"
@@ -18971,6 +18965,15 @@ scale = "plain"
 # [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
 # trns 0-12, atten 0-1 all reject one step outside those bounds.
 [[process]]
+# The "cuts" datafile is taken from the buffer's Head/Tail marks (`h` to place one) rather
+# than a dialog field, for the same reason the DISTMORE family's marklist is: these are
+# positions in the waveform in front of you, and hand-typing times into a form to describe
+# them is unusable. Every mark is one cut boundary on its own -- the even/odd Head/Tail roles
+# mean nothing here -- so `head_tail_marks_unpaired` lifts the "two complete pairs" floor.
+# A mark at the very start of the range is dropped rather than written out: CDP rejects a cut
+# time of exactly 0 ("Invalid time (0.000000) on line 1 ... Must be greater than zero",
+# confirmed against the real binary, 2026-07-28), and it would describe a cut with nothing
+# before it. A time past the end of the file is accepted and ignored.
 key = "scramble_scramble_6"
 bin = "scramble"
 subprog = "scramble"
@@ -18980,29 +18983,14 @@ category = "time"
 subcategory = "texture"
 short_description = "Sorts wavesets longest-first within each marked segment"
 description = """
-Splits the sound at the times you supply and sorts the waveset groups by length within each segment separately, longest first. Each segment becomes its own rising glide, restarting at every cut.
+Splits the sound at your Head/Tail marks and sorts the waveset groups by length within each segment separately, longest first. Each segment becomes its own rising glide, restarting at every cut.
 """
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-# min/default are both strictly above zero on purpose: CDP rejects a cut time of exactly 0
-# with "Invalid time (0.000000) on line 1 ... Must be greater than zero" (confirmed against
-# the real binary, 2026-07-28). A time past the end of the file is accepted and ignored.
-[[process.params]]
-name = "Cut Times"
-description = "Times within the source that split it into separately-processed segments"
-automatable = true
-kind = "number"
-min = 0.001
-max = 999999.0
-step = 0.01
-default = 0.5
-exponential = false
-scale = "plain"
-required_list = true
-list_is_time_sequence = true
+needs_head_tail_marks = true
+head_tail_marks_unpaired = true
 
 [[process.params]]
 name = "Random Seed"
@@ -19059,6 +19047,15 @@ scale = "plain"
 # [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
 # trns 0-12, atten 0-1 all reject one step outside those bounds.
 [[process]]
+# The "cuts" datafile is taken from the buffer's Head/Tail marks (`h` to place one) rather
+# than a dialog field, for the same reason the DISTMORE family's marklist is: these are
+# positions in the waveform in front of you, and hand-typing times into a form to describe
+# them is unusable. Every mark is one cut boundary on its own -- the even/odd Head/Tail roles
+# mean nothing here -- so `head_tail_marks_unpaired` lifts the "two complete pairs" floor.
+# A mark at the very start of the range is dropped rather than written out: CDP rejects a cut
+# time of exactly 0 ("Invalid time (0.000000) on line 1 ... Must be greater than zero",
+# confirmed against the real binary, 2026-07-28), and it would describe a cut with nothing
+# before it. A time past the end of the file is accepted and ignored.
 key = "scramble_scramble_7"
 bin = "scramble"
 subprog = "scramble"
@@ -19074,23 +19071,8 @@ input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-# min/default are both strictly above zero on purpose: CDP rejects a cut time of exactly 0
-# with "Invalid time (0.000000) on line 1 ... Must be greater than zero" (confirmed against
-# the real binary, 2026-07-28). A time past the end of the file is accepted and ignored.
-[[process.params]]
-name = "Cut Times"
-description = "Times within the source that split it into separately-processed segments"
-automatable = true
-kind = "number"
-min = 0.001
-max = 999999.0
-step = 0.01
-default = 0.5
-exponential = false
-scale = "plain"
-required_list = true
-list_is_time_sequence = true
+needs_head_tail_marks = true
+head_tail_marks_unpaired = true
 
 [[process.params]]
 name = "Random Seed"
@@ -19147,6 +19129,15 @@ scale = "plain"
 # [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
 # trns 0-12, atten 0-1 all reject one step outside those bounds.
 [[process]]
+# The "cuts" datafile is taken from the buffer's Head/Tail marks (`h` to place one) rather
+# than a dialog field, for the same reason the DISTMORE family's marklist is: these are
+# positions in the waveform in front of you, and hand-typing times into a form to describe
+# them is unusable. Every mark is one cut boundary on its own -- the even/odd Head/Tail roles
+# mean nothing here -- so `head_tail_marks_unpaired` lifts the "two complete pairs" floor.
+# A mark at the very start of the range is dropped rather than written out: CDP rejects a cut
+# time of exactly 0 ("Invalid time (0.000000) on line 1 ... Must be greater than zero",
+# confirmed against the real binary, 2026-07-28), and it would describe a cut with nothing
+# before it. A time past the end of the file is accepted and ignored.
 key = "scramble_scramble_8"
 bin = "scramble"
 subprog = "scramble"
@@ -19162,23 +19153,8 @@ input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-# min/default are both strictly above zero on purpose: CDP rejects a cut time of exactly 0
-# with "Invalid time (0.000000) on line 1 ... Must be greater than zero" (confirmed against
-# the real binary, 2026-07-28). A time past the end of the file is accepted and ignored.
-[[process.params]]
-name = "Cut Times"
-description = "Times within the source that split it into separately-processed segments"
-automatable = true
-kind = "number"
-min = 0.001
-max = 999999.0
-step = 0.01
-default = 0.5
-exponential = false
-scale = "plain"
-required_list = true
-list_is_time_sequence = true
+needs_head_tail_marks = true
+head_tail_marks_unpaired = true
 
 [[process.params]]
 name = "Random Seed"
@@ -19235,6 +19211,15 @@ scale = "plain"
 # [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
 # trns 0-12, atten 0-1 all reject one step outside those bounds.
 [[process]]
+# The "cuts" datafile is taken from the buffer's Head/Tail marks (`h` to place one) rather
+# than a dialog field, for the same reason the DISTMORE family's marklist is: these are
+# positions in the waveform in front of you, and hand-typing times into a form to describe
+# them is unusable. Every mark is one cut boundary on its own -- the even/odd Head/Tail roles
+# mean nothing here -- so `head_tail_marks_unpaired` lifts the "two complete pairs" floor.
+# A mark at the very start of the range is dropped rather than written out: CDP rejects a cut
+# time of exactly 0 ("Invalid time (0.000000) on line 1 ... Must be greater than zero",
+# confirmed against the real binary, 2026-07-28), and it would describe a cut with nothing
+# before it. A time past the end of the file is accepted and ignored.
 key = "scramble_scramble_11"
 bin = "scramble"
 subprog = "scramble"
@@ -19244,29 +19229,14 @@ category = "time"
 subcategory = "texture"
 short_description = "Sorts wavesets quietest-first within each marked segment"
 description = """
-Splits the sound at the times you supply and sorts the waveset groups by loudness within each segment separately, quietest first. Each segment becomes its own crescendo, so the cuts set the rhythm of a repeating swell -- the segment-wise counterpart to the whole-file rising-level mode.
+Splits the sound at your Head/Tail marks and sorts the waveset groups by loudness within each segment separately, quietest first. Each segment becomes its own crescendo, so the cuts set the rhythm of a repeating swell -- the segment-wise counterpart to the whole-file rising-level mode.
 """
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-# min/default are both strictly above zero on purpose: CDP rejects a cut time of exactly 0
-# with "Invalid time (0.000000) on line 1 ... Must be greater than zero" (confirmed against
-# the real binary, 2026-07-28). A time past the end of the file is accepted and ignored.
-[[process.params]]
-name = "Cut Times"
-description = "Times within the source that split it into separately-processed segments"
-automatable = true
-kind = "number"
-min = 0.001
-max = 999999.0
-step = 0.01
-default = 0.5
-exponential = false
-scale = "plain"
-required_list = true
-list_is_time_sequence = true
+needs_head_tail_marks = true
+head_tail_marks_unpaired = true
 
 [[process.params]]
 name = "Random Seed"
@@ -19323,6 +19293,15 @@ scale = "plain"
 # [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
 # trns 0-12, atten 0-1 all reject one step outside those bounds.
 [[process]]
+# The "cuts" datafile is taken from the buffer's Head/Tail marks (`h` to place one) rather
+# than a dialog field, for the same reason the DISTMORE family's marklist is: these are
+# positions in the waveform in front of you, and hand-typing times into a form to describe
+# them is unusable. Every mark is one cut boundary on its own -- the even/odd Head/Tail roles
+# mean nothing here -- so `head_tail_marks_unpaired` lifts the "two complete pairs" floor.
+# A mark at the very start of the range is dropped rather than written out: CDP rejects a cut
+# time of exactly 0 ("Invalid time (0.000000) on line 1 ... Must be greater than zero",
+# confirmed against the real binary, 2026-07-28), and it would describe a cut with nothing
+# before it. A time past the end of the file is accepted and ignored.
 key = "scramble_scramble_12"
 bin = "scramble"
 subprog = "scramble"
@@ -19332,29 +19311,14 @@ category = "time"
 subcategory = "texture"
 short_description = "Sorts wavesets loudest-first within each marked segment"
 description = """
-Splits the sound at the times you supply and sorts the waveset groups by loudness within each segment separately, loudest first, turning each segment into its own decay.
+Splits the sound at your Head/Tail marks and sorts the waveset groups by loudness within each segment separately, loudest first, turning each segment into its own decay.
 """
 input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-# min/default are both strictly above zero on purpose: CDP rejects a cut time of exactly 0
-# with "Invalid time (0.000000) on line 1 ... Must be greater than zero" (confirmed against
-# the real binary, 2026-07-28). A time past the end of the file is accepted and ignored.
-[[process.params]]
-name = "Cut Times"
-description = "Times within the source that split it into separately-processed segments"
-automatable = true
-kind = "number"
-min = 0.001
-max = 999999.0
-step = 0.01
-default = 0.5
-exponential = false
-scale = "plain"
-required_list = true
-list_is_time_sequence = true
+needs_head_tail_marks = true
+head_tail_marks_unpaired = true
 
 [[process.params]]
 name = "Random Seed"
@@ -19411,6 +19375,15 @@ scale = "plain"
 # [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
 # trns 0-12, atten 0-1 all reject one step outside those bounds.
 [[process]]
+# The "cuts" datafile is taken from the buffer's Head/Tail marks (`h` to place one) rather
+# than a dialog field, for the same reason the DISTMORE family's marklist is: these are
+# positions in the waveform in front of you, and hand-typing times into a form to describe
+# them is unusable. Every mark is one cut boundary on its own -- the even/odd Head/Tail roles
+# mean nothing here -- so `head_tail_marks_unpaired` lifts the "two complete pairs" floor.
+# A mark at the very start of the range is dropped rather than written out: CDP rejects a cut
+# time of exactly 0 ("Invalid time (0.000000) on line 1 ... Must be greater than zero",
+# confirmed against the real binary, 2026-07-28), and it would describe a cut with nothing
+# before it. A time past the end of the file is accepted and ignored.
 key = "scramble_scramble_13"
 bin = "scramble"
 subprog = "scramble"
@@ -19426,23 +19399,8 @@ input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-# min/default are both strictly above zero on purpose: CDP rejects a cut time of exactly 0
-# with "Invalid time (0.000000) on line 1 ... Must be greater than zero" (confirmed against
-# the real binary, 2026-07-28). A time past the end of the file is accepted and ignored.
-[[process.params]]
-name = "Cut Times"
-description = "Times within the source that split it into separately-processed segments"
-automatable = true
-kind = "number"
-min = 0.001
-max = 999999.0
-step = 0.01
-default = 0.5
-exponential = false
-scale = "plain"
-required_list = true
-list_is_time_sequence = true
+needs_head_tail_marks = true
+head_tail_marks_unpaired = true
 
 [[process.params]]
 name = "Random Seed"
@@ -19499,6 +19457,15 @@ scale = "plain"
 # [-ccnt] [-ttrns] [-aatten]`. Ranges confirmed by invocation -- seed 0-256, cnt 1-256,
 # trns 0-12, atten 0-1 all reject one step outside those bounds.
 [[process]]
+# The "cuts" datafile is taken from the buffer's Head/Tail marks (`h` to place one) rather
+# than a dialog field, for the same reason the DISTMORE family's marklist is: these are
+# positions in the waveform in front of you, and hand-typing times into a form to describe
+# them is unusable. Every mark is one cut boundary on its own -- the even/odd Head/Tail roles
+# mean nothing here -- so `head_tail_marks_unpaired` lifts the "two complete pairs" floor.
+# A mark at the very start of the range is dropped rather than written out: CDP rejects a cut
+# time of exactly 0 ("Invalid time (0.000000) on line 1 ... Must be greater than zero",
+# confirmed against the real binary, 2026-07-28), and it would describe a cut with nothing
+# before it. A time past the end of the file is accepted and ignored.
 key = "scramble_scramble_14"
 bin = "scramble"
 subprog = "scramble"
@@ -19514,23 +19481,8 @@ input = "wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
-
-# min/default are both strictly above zero on purpose: CDP rejects a cut time of exactly 0
-# with "Invalid time (0.000000) on line 1 ... Must be greater than zero" (confirmed against
-# the real binary, 2026-07-28). A time past the end of the file is accepted and ignored.
-[[process.params]]
-name = "Cut Times"
-description = "Times within the source that split it into separately-processed segments"
-automatable = true
-kind = "number"
-min = 0.001
-max = 999999.0
-step = 0.01
-default = 0.5
-exponential = false
-scale = "plain"
-required_list = true
-list_is_time_sequence = true
+needs_head_tail_marks = true
+head_tail_marks_unpaired = true
 
 [[process.params]]
 name = "Random Seed"

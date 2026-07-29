@@ -1270,6 +1270,47 @@ mod tests {
         }
     }
 
+    /// `scramble`'s per-segment modes take their cuts datafile from the Head/Tail marks — the
+    /// real binary must accept the file this produces, in that argv slot, with an odd number
+    /// of times in it (every mark is its own cut, unlike the DISTMORE marklist).
+    #[test]
+    fn scramble_per_segment_runs_with_cut_times_from_head_tail_marks() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("scramble_scramble_5").expect("scramble mode 5 in catalog");
+        let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+        // Three marks: an odd count, which the paired DISTMORE reading would truncate.
+        let input = crate::model::cdp::InputSpec {
+            channels: 1,
+            sample_rate,
+            len_samples,
+            head_tail_marks: vec![len_samples / 4, len_samples / 2, len_samples * 3 / 4],
+        };
+        let planned = crate::model::cdp::plan_job(def, &values, &[input], &crate::model::cdp::PvocSettings::default())
+            .expect("three marks is three cut times");
+        let (_, cuts) = planned.brk_files.iter().find(|(n, _)| n == "headstails.txt").unwrap();
+        assert_eq!(cuts.lines().count(), 3, "all three marks reach CDP: {cuts:?}");
+
+        let runner = CdpRunner::new();
+        runner.submit(Job {
+            id: 340,
+            cdp_dir,
+            planned,
+            inputs: vec![channels],
+            input_sample_rate: sample_rate,
+            purpose: JobPurpose::Apply,
+        });
+        let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(60))
+        else {
+            unreachable!()
+        };
+        let out = result.expect("scramble per-segment should accept a cuts file from the marks");
+        assert!(!out.results[0][0].is_empty(), "output should contain audio");
+    }
+
     /// Real end-to-end coverage for `tesselate` -- the one process needing a `transposed`
     /// table (`ParamKind::Table.transposed`). Its datafile must have exactly two lines with
     /// one entry per input file; getting that wrong is silent in a fake job and a hard

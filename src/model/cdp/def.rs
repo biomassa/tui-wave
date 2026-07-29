@@ -833,6 +833,22 @@ pub struct ProcessDef {
     /// for it at all.
     #[serde(default)]
     pub needs_head_tail_marks: bool,
+    /// Refines `needs_head_tail_marks`: the marks are a plain list of **times**, not
+    /// Head/Tail *pairs*, so every mark counts on its own and one is enough.
+    ///
+    /// `scramble`'s eight per-segment and up-then-down modes take a "cuts" datafile —
+    /// "Textfile of (increasing) times in src: process in each separate segment" — in exactly
+    /// the argv slot the DISTMORE marklist occupies (`scramble scramble 5-8 infile outfile
+    /// cuts seed …`), and in the same one-time-per-line format. What differs is only the
+    /// reading: DISTMORE consumes marks two at a time as segment starts and ends, while a cut
+    /// time is just a boundary, so the even/odd Head/Tail roles carry no meaning here and the
+    /// "at least two complete pairs" floor would reject a perfectly good single cut.
+    ///
+    /// Typing those times into a dialog field was the alternative, and is unusable for the
+    /// same reason it was for DISTMORE: they describe positions in the waveform in front of
+    /// you.
+    #[serde(default)]
+    pub head_tail_marks_unpaired: bool,
     /// True for a process whose flagged params must be emitted **before the input filenames**
     /// rather than after the outfile.
     ///
@@ -998,6 +1014,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
+            head_tail_marks_unpaired: false,
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
@@ -1058,6 +1075,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
+            head_tail_marks_unpaired: false,
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
@@ -1141,6 +1159,7 @@ mod tests {
             output_is_stereo: true,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
+            head_tail_marks_unpaired: false,
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
@@ -1195,6 +1214,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
+            head_tail_marks_unpaired: false,
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
@@ -1257,6 +1277,7 @@ mod tests {
             output_is_stereo: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
+            head_tail_marks_unpaired: false,
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
@@ -1305,6 +1326,7 @@ mod tests {
             requires_simple_wav_input: false,
             sidecar_extension: None,
             needs_head_tail_marks: false,
+            head_tail_marks_unpaired: false,
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,

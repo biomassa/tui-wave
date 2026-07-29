@@ -153,6 +153,14 @@ fn cdp_plan_error_message(err: &crate::model::cdp::PlanError) -> String {
                 crate::model::cdp::pipeline::MIN_HEAD_TAIL_PAIRS,
             )
         }
+        // Same reasoning as the pair message above — the cut times aren't a dialog field, so
+        // the message has to name the key that makes them. Never says "pairs": here every
+        // mark is one cut boundary on its own, and a single one is a usable run.
+        PlanError::MissingCutTimes { .. } => {
+            "no cut times inside the selection — press h to mark where the sound should be cut, \
+             or select all (Ctrl+A) if the marks are elsewhere in the file"
+                .to_string()
+        }
         PlanError::SampleRateMismatch { first, second } => {
             format!("an extra input is {second} Hz, selection is {first} Hz — resample one first")
         }
@@ -6452,6 +6460,43 @@ impl App {
             return;
         };
         self.open_cdp_params_with_values(catalog_index, &last.values, &last.input_buffers);
+    }
+
+    /// Why the open CDP params dialog's process can't run yet, as a sentence to show inline —
+    /// `None` when nothing is blocking it.
+    ///
+    /// Only covers what the dialog itself can't: a process taking its data from the
+    /// *document* rather than from a form field has no field for the user to look at and see
+    /// is empty, so without this the first sign of trouble is Apply appearing to do nothing.
+    /// Every field-level problem is already caught by `cdp_validate_fields` when a run is
+    /// attempted, which is soon enough for something the user can see and fix in front of
+    /// them.
+    fn cdp_params_blocker(&self) -> Option<String> {
+        let Some(Dialog::CdpParams { catalog_index, .. }) = &self.dialog else { return None };
+        let def = self.cdp_catalog.processes.get(*catalog_index)?;
+        if !def.needs_head_tail_marks {
+            return None;
+        }
+        let range = self.cdp_process_range(self.active_document, def)?;
+        let doc = self.documents.get(self.active_document)?;
+        let marks = head_tail_marks_within(&doc.head_tail_marks, range);
+        if def.head_tail_marks_unpaired {
+            // Every mark is its own cut boundary; one is enough. A mark rebased to exactly 0
+            // is dropped by the planner (CDP rejects a cut time of zero), so it can't count
+            // here either.
+            (!marks.iter().any(|&m| m > 0)).then(|| {
+                "no cut times in the selection — press h to mark where the sound should be cut"
+                    .to_string()
+            })
+        } else {
+            let pairs = marks.len() / 2;
+            (pairs < crate::model::cdp::pipeline::MIN_HEAD_TAIL_PAIRS).then(|| {
+                format!(
+                    "{pairs} Head/Tail pair(s) in the selection, needs {} — press h to add marks",
+                    crate::model::cdp::pipeline::MIN_HEAD_TAIL_PAIRS
+                )
+            })
+        }
     }
 
     /// Re-seeds the DC-offset fields of a `ChannelSplit` process after its
@@ -13539,6 +13584,9 @@ impl App {
             self.dialog_row_rects = rects;
         }
 
+        // Why the open CDP process can't run yet, if anything — computed here rather than in
+        // the renderer because it depends on the document and the range the run would use.
+        let blocked = self.cdp_params_blocker();
         let dialog_rects = self
             .dialog
             .as_ref()
@@ -13546,7 +13594,7 @@ impl App {
                 render_dialog(
                     frame, area, d, &self.cdp_catalog, &self.curve_histories, &self.curves,
                     &self.formant_buffers, self.cdp_chain_editor.as_ref(), &self.documents,
-                    self.graphics_mode && self.picker.is_some(),
+                    self.graphics_mode && self.picker.is_some(), blocked.as_deref(),
                 )
             })
             .unwrap_or_default();
@@ -14343,6 +14391,9 @@ fn render_dialog(
     chain_editor: Option<&ChainEditorState>,
     documents: &[Document],
     graphics_mode: bool,
+    // Why the open `CdpParams` process can't run yet (see `App::cdp_params_blocker`), or
+    // `None` when it can — shown in place of the error line, with Preview/Apply dimmed.
+    blocked: Option<&str>,
 ) -> Vec<Rect> {
     match dialog {
         Dialog::MixToMono { inputs, focused, tanh_clip } => {
@@ -14409,7 +14460,7 @@ fn render_dialog(
             }
             return render_cdp_params_dialog(
                 frame, area, def, fields, second_input.as_ref(), variadic_input.as_ref(), *focus, error, preview,
-                presets, *preset_selected, save_prompt.as_ref(), *scroll, formant_buffers,
+                presets, *preset_selected, save_prompt.as_ref(), *scroll, formant_buffers, blocked,
             );
         }
         Dialog::CdpRunning { title, step_label, step_index, step_total, started, purpose, .. } => {
@@ -16973,6 +17024,7 @@ fn render_cdp_params_dialog(
     save_prompt: Option<&TextInput>,
     _scroll: usize,
     formant_buffers: &[crate::model::formant::FormantBuffer],
+    blocked: Option<&str>,
 ) -> Vec<Rect> {
     let Some(def) = def else { return Vec::new() };
     let (label_width, range_width) = cdp_params_column_widths(def);
@@ -16987,7 +17039,11 @@ fn render_cdp_params_dialog(
     // happened before) silently hid the half of the message that said *why* (user report,
     // 2026-07-27: the "in the selection" qualifier fell off the right edge, leaving a message
     // that looked simply wrong on a file that visibly had four pairs).
-    let error_lines: Vec<String> = match error {
+    // A blocker is shown the moment the dialog opens, rather than waiting for the user to
+    // press Apply and be told why nothing happened — the marks it asks for live on the
+    // waveform behind the dialog, so knowing before pressing anything is the whole point. A
+    // real error from an attempted run still wins: it describes something that just happened.
+    let error_lines: Vec<String> = match error.as_deref().or(blocked) {
         Some(msg) => wrap_to_width(&format!(" ! {msg}"), width.saturating_sub(2) as usize),
         None => vec![String::new()],
     };
@@ -17296,8 +17352,16 @@ fn render_cdp_params_dialog(
             && p.formant_selections == formant_field_selections(fields)
     });
     let preview_label = if preview_fresh { " [Preview \u{2713}]" } else { " [Preview]" };
-    let preview_style = if focus == preview_focus { cursor_style } else { hint_style };
-    let apply_style = if focus == apply_focus { cursor_style } else { hint_style };
+    // Dimmed while the run is blocked, so the two buttons read as unavailable rather than as
+    // something that ought to work. They stay focusable and still respond — pressing one
+    // surfaces the same reason as an inline error, which is more use than a dead key.
+    let button_style = |focused: bool| match (blocked.is_some(), focused) {
+        (true, _) => Style::default().fg(theme::ANNOTATION),
+        (false, true) => cursor_style,
+        (false, false) => hint_style,
+    };
+    let preview_style = button_style(focus == preview_focus);
+    let apply_style = button_style(focus == apply_focus);
     lines.push(Line::from(vec![
         Span::styled(preview_label, preview_style),
         Span::raw("  "),
@@ -21207,6 +21271,7 @@ mod tests {
         use crate::model::cdp::{Category, IoKind, ParamDef, ParamKind};
         let def = crate::model::cdp::ProcessDef {
             needs_head_tail_marks: false,
+            head_tail_marks_unpaired: false,
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
@@ -24177,6 +24242,7 @@ mod tests {
         ];
         let def = ProcessDef {
             needs_head_tail_marks: false,
+            head_tail_marks_unpaired: false,
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
@@ -24253,6 +24319,7 @@ mod tests {
         )];
         let def = ProcessDef {
             needs_head_tail_marks: false,
+            head_tail_marks_unpaired: false,
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
@@ -27472,6 +27539,56 @@ mod tests {
         assert_eq!(input.value(), "0.5", "a hand-typed value must survive the toggle");
     }
 
+    /// A process whose data comes from the document rather than a form field has no field to
+    /// look at and see is empty, so the dialog says so up front instead of letting Apply
+    /// appear to do nothing — and the warning clears as soon as the marks exist.
+    #[test]
+    fn scramble_per_segment_warns_in_the_dialog_until_marks_exist() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 44_100)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "scramble_scramble_5")
+            .expect("scramble mode 5 in catalog");
+        app.open_cdp_params(index);
+
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(screen.contains("no cut times"), "expected the inline warning: {screen}");
+        assert!(screen.contains("press h"), "and it must name the key that fixes it: {screen}");
+
+        app.documents[0].head_tail_marks = vec![10_000, 20_000];
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(!screen.contains("no cut times"), "the warning must clear once marks exist: {screen}");
+    }
+
+    /// The DISTMORE family gets the same up-front warning, in its own units (pairs) — the
+    /// blocker is keyed on what the process actually needs, not on one process's wording.
+    #[test]
+    fn a_distmore_process_warns_about_pairs_rather_than_cut_times() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 44_100)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.bin == "distmore" && p.needs_head_tail_marks && !p.head_tail_marks_unpaired)
+            .expect("a DISTMORE process in catalog");
+        app.open_cdp_params(index);
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(screen.contains("Head/Tail pair(s)"), "expected the pair-count warning: {screen}");
+    }
+
     /// Every channel pane must be the same height and an odd number of rows, whatever the
     /// available height — user report: a stereo file rendered its two channels at different
     /// vertical scales, with different dB gutter marks beside each ("-30" vs "-24/-24"),
@@ -28630,6 +28747,7 @@ mod tests {
         use crate::model::formant::FormantBufferKind;
         let def = crate::model::cdp::ProcessDef {
             needs_head_tail_marks: false,
+            head_tail_marks_unpaired: false,
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
