@@ -521,6 +521,16 @@ fn scale_number_value(
         NumberScale::CappedAtInputSamples => {
             raw.min((duration_secs * sample_rate as f64 - 1.0).max(0.0)).round()
         }
+        // See NumberScale::AnaFrameStepSeconds (def.rs) for the measurements: the floor is two
+        // analysis frames of `points / 2^overlap` samples each, the ceiling the input's own
+        // duration. `.max(floor)` on the ceiling keeps the clamp well-formed for a selection
+        // shorter than two frames — there is no valid value at all then, so it emits the floor
+        // and lets CDP report its own range rather than silently sending a smaller number.
+        NumberScale::AnaFrameStepSeconds => {
+            let decimation = pvoc.points as f64 / 2f64.powi(pvoc.overlap as i32);
+            let floor = 2.0 * decimation / sample_rate.max(1) as f64;
+            raw.clamp(floor, (duration_secs - 0.01).max(floor))
+        }
     }
 }
 
@@ -2580,6 +2590,41 @@ mod tests {
             vec!["-a1", "-f", "in_a.wav", "in_b.wav", "out.wav", "0"],
             "fastconv's own usage: fastconv [-aX][-f] infile impulsefile outfile [dry]"
         );
+    }
+
+    /// `focus step`'s time step is bounded at both ends by data — see
+    /// `NumberScale::AnaFrameStepSeconds`. Values checked against what the real binary
+    /// reports for the same settings, so a change to the decimation formula fails here
+    /// rather than as an INCORRECT USE at run time.
+    #[test]
+    fn ana_frame_step_seconds_clamps_to_two_frames_and_the_input_duration() {
+        let clamp = |raw: f64, points: u32, overlap: u32, rate: u32, duration: f64| {
+            scale_number_value(
+                NumberScale::AnaFrameStepSeconds,
+                raw,
+                duration,
+                &PvocSettings { points, overlap },
+                rate,
+            )
+        };
+        // The reported case: 1.0 on a 0.85s selection, which CDP rejects outright.
+        let capped = clamp(1.0, 1024, 3, 96_000, 0.85);
+        assert!((capped - 0.84).abs() < 1e-9, "should cap just under the duration, got {capped}");
+        // Floors measured against the real binary at four (points, overlap, rate) settings.
+        for (points, overlap, rate, floor) in [
+            (1024u32, 3u32, 44_100u32, 0.005805),
+            (2048, 3, 44_100, 0.011610),
+            (1024, 1, 48_000, 0.021333),
+            (1024, 4, 48_000, 0.002667),
+        ] {
+            let got = clamp(0.0001, points, overlap, rate, 10.0);
+            assert!(
+                (got - floor).abs() < 1e-5,
+                "{points}/{overlap}/{rate}: expected floor {floor}, got {got}"
+            );
+        }
+        // A value already inside both bounds is passed through untouched.
+        assert_eq!(clamp(0.5, 1024, 3, 44_100, 10.0), 0.5);
     }
 
     /// `fastconv` parses its flags getopt-style, *before* the filenames — with them trailing
