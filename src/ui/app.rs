@@ -13293,18 +13293,14 @@ impl App {
         // which rows still need the legacy buffer-cell line (text-mode/no-picker/overlay-open
         // channels, and channel 0's reserved top row — see below).
         let mut channel_image_rows: Vec<Option<(u16, u16)>> = vec![None; channel_count];
-        // Rows a marker/head-tail line must not draw a buffer cell on. Every row *between*
-        // the topmost and bottommost rendered image counts, not just the rows an image
-        // actually covers: the blank separation `channel_pane_rects` leaves between channel
-        // panes sits in that span, and a plain-text dashed segment drawn across it reads as a
-        // glitch next to the anti-aliased lines baked into the bitmaps either side of it
-        // (user report, with a screenshot of exactly that band between the two channels).
-        // Skipping it leaves the gap clean, which is what the gap is for.
-        let image_span = |rows: &[Option<(u16, u16)>]| -> Option<(u16, u16)> {
-            let top = rows.iter().flatten().map(|&(start, _)| start).min()?;
-            let bottom = rows.iter().flatten().map(|&(_, end)| end).max()?;
-            Some((top, bottom))
-        };
+        // Whether this frame rendered the waveform as graphics images at all. When it did,
+        // marker and head/tail lines are baked into those bitmaps and none is drawn as a
+        // buffer cell *anywhere* in the waveform area — not merely on the rows an image
+        // covers. The rows `channel_pane_rects` can't divide evenly are the reason: a
+        // plain-text dashed segment drawn across them reads as a glitch next to the
+        // anti-aliased lines in the bitmaps around it (user report, of exactly that band
+        // between the two channels). All channels render together or not at all, so this is
+        // one flag rather than a per-row test.
 
         for (i, channel_full_area) in full_chunks.iter().enumerate() {
             let channel_inner = Rect {
@@ -13399,6 +13395,8 @@ impl App {
             frame.render_widget(db_scale, right_gutter);
         }
 
+        let images_rendered = channel_image_rows.iter().any(Option::is_some);
+
         // Marker overlay: a dashed vertical line spanning all channels at each marker's
         // column, with its label on the top row. Label rects are recorded for double-click
         // (rename) and the lines for drag (move) hit-testing in `handle_mouse`.
@@ -13436,15 +13434,14 @@ impl App {
                 marker_style
             };
             for y in wf.y..wf.y + wf.height {
-                // Rows covered by a rendered graphics image already have this marker's line
-                // baked into the bitmap (see `rasterize_waveform`'s `markers` param) —
-                // drawing it again here as a plain character cell would fight the kitty
-                // unicode-placeholder image for control of that row's escape sequence and
-                // corrupt the terminal's cursor-position bookkeeping for the whole row, which
-                // is what caused markers to glitch the display in graphics mode. The gap rows
-                // between panes are skipped too — see `image_span`.
-                if image_span(&channel_image_rows).is_some_and(|(top, bottom)| y >= top && y < bottom) {
-                    continue;
+                // A rendered graphics image already has this marker's line baked into it (see
+                // `rasterize_waveform`'s `markers` param) — drawing it again here as a plain
+                // character cell would fight the kitty unicode-placeholder image for control
+                // of that row's escape sequence and corrupt the terminal's cursor-position
+                // bookkeeping for the whole row, which is what made markers glitch the display
+                // in graphics mode. See `images_rendered` for why the whole area is skipped.
+                if images_rendered {
+                    break;
                 }
                 buf[(x, y)].set_char('┊').set_style(style).set_diff_option(CellDiffOption::AlwaysUpdate);
             }
@@ -13499,10 +13496,9 @@ impl App {
         for (k, &(x, hi)) in visible_ht.iter().enumerate() {
             for y in wf.y..wf.y + wf.height {
                 // Same graphics-mode exclusion as the marker lane above — see that loop's
-                // comment for why drawing a buffer cell over a rendered image corrupts the
-                // row, and `image_span` for why the gap between panes is excluded too.
-                if image_span(&channel_image_rows).is_some_and(|(top, bottom)| y >= top && y < bottom) {
-                    continue;
+                // comment for why drawing a buffer cell over a rendered image corrupts the row.
+                if images_rendered {
+                    break;
                 }
                 buf[(x, y)]
                     .set_char('\u{254E}')
@@ -13917,11 +13913,6 @@ fn nearest_head_tail_mark(marks: &[usize], pos: usize) -> Option<usize> {
     marks.iter().copied().min_by_key(|m| m.abs_diff(pos))
 }
 
-/// Rows of blank separation allowed between two channel panes, so the leftover height that
-/// [`channel_pane_rects`] can't divide evenly is spent on something legible rather than an
-/// arbitrarily large void. Anything past this stays unused at the bottom.
-const MAX_CHANNEL_GAP: u16 = 2;
-
 /// Splits the waveform area into one pane per channel, all **exactly the same height** and
 /// each an **odd** number of rows.
 ///
@@ -13938,8 +13929,11 @@ const MAX_CHANNEL_GAP: u16 = 2;
 /// middle of the centre row (and, in braille terms, on dot-row 2 of that cell's 4), which is
 /// where a `─` glyph actually draws.
 ///
-/// The leftover rows become blank separation between panes (capped at [`MAX_CHANNEL_GAP`]),
-/// which also reads as a deliberate divider between channels rather than as slack.
+/// Together those two rules leave 0-3 rows over, depending on the terminal height. The panes
+/// are packed against the top and the leftover sits below the last one, where it reads as
+/// ordinary padding above the ruler/status bar. It was originally spent as separation
+/// *between* the panes, which on the heights where it came to two rows read as a gap wide
+/// enough to look like a mistake (user report).
 fn channel_pane_rects(area: Rect, channel_count: usize) -> Vec<Rect> {
     let count = channel_count.max(1);
     let n = count as u16;
@@ -13950,15 +13944,8 @@ fn channel_pane_rects(area: Rect, channel_count: usize) -> Vec<Rect> {
         return Layout::vertical(vec![Constraint::Fill(1); count]).split(area).to_vec();
     }
     let pane = if base % 2 == 1 { base } else { base - 1 };
-    let leftover = area.height - pane * n;
-    let gap = if n > 1 { (leftover / (n - 1)).min(MAX_CHANNEL_GAP) } else { 0 };
     (0..n)
-        .map(|i| Rect {
-            x: area.x,
-            y: area.y + i * (pane + gap),
-            width: area.width,
-            height: pane,
-        })
+        .map(|i| Rect { x: area.x, y: area.y + i * pane, width: area.width, height: pane })
         .collect()
 }
 
@@ -27501,15 +27488,15 @@ mod tests {
         assert!(buffer_text(terminal.backend().buffer()).contains("H/T: 2 pairs +1"));
     }
 
-    /// In graphics mode the marker lines are baked into each channel's bitmap, and the blank
-    /// separation between panes is *not* covered by any bitmap — so the overlay used to draw a
-    /// plain-text dashed segment across that gap, which reads as a glitch next to the
-    /// anti-aliased lines either side of it (user report, with a screenshot of exactly that
-    /// band between the two channels). Uses `Picker::halfblocks()`, whose output is plain
-    /// glyphs `TestBackend` can inspect (unlike kitty, which round-trips through out-of-band
-    /// escapes this harness can't see).
+    /// In graphics mode the marker lines are baked into each channel's bitmap, so none is
+    /// drawn as a buffer cell anywhere in the waveform area — including the rows
+    /// `channel_pane_rects` can't divide evenly, which no bitmap covers. A plain-text dashed
+    /// segment there reads as a glitch next to the anti-aliased lines around it (user report,
+    /// with a screenshot of exactly that band between the two channels). Uses
+    /// `Picker::halfblocks()`, whose output is plain glyphs `TestBackend` can inspect (unlike
+    /// kitty, which round-trips through out-of-band escapes this harness can't see).
     #[test]
-    fn markers_leave_the_gap_between_channel_panes_clean_in_graphics_mode() {
+    fn markers_draw_no_text_lines_anywhere_in_the_waveform_area_in_graphics_mode() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
@@ -27523,17 +27510,14 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
 
-        let panes = channel_pane_rects(Rect { height: app.waveform_area.height, ..app.waveform_area }, 2);
-        let gap_start = panes[0].y + panes[0].height;
-        assert!(gap_start < panes[1].y, "this geometry is meant to leave a gap: {panes:?}");
-
+        let wf = app.waveform_area;
         let buffer = terminal.backend().buffer();
-        for y in gap_start..panes[1].y {
-            for x in app.waveform_area.x..app.waveform_area.x + app.waveform_area.width {
+        for y in wf.y..wf.y + wf.height {
+            for x in wf.x..wf.x + wf.width {
                 let symbol = buffer[(x, y)].symbol();
                 assert!(
                     symbol != "\u{254E}" && symbol != "\u{250A}",
-                    "a marker line was drawn as a text cell in the gap at ({x},{y})"
+                    "a marker line was drawn as a text cell at ({x},{y})"
                 );
             }
         }
@@ -27720,7 +27704,7 @@ mod tests {
     /// vertical scales, with different dB gutter marks beside each ("-30" vs "-24/-24"),
     /// because `Fill(1)` handed the undividable row to one of them.
     #[test]
-    fn channel_panes_are_equal_odd_heights_with_the_slack_as_a_gap() {
+    fn channel_panes_are_equal_odd_heights_packed_against_the_top() {
         for height in 4..40u16 {
             for channels in 1..=4usize {
                 let rects = channel_pane_rects(Rect::new(0, 0, 80, height), channels);
@@ -27728,12 +27712,23 @@ mod tests {
                 let h = rects[0].height;
                 assert!(rects.iter().all(|r| r.height == h), "unequal panes at height {height}/{channels}ch: {rects:?}");
                 assert_eq!(h % 2, 1, "pane height {h} must be odd (height {height}, {channels}ch) so zero has a centre row");
-                // Panes stay inside the area, in order, and never overlap.
+                // Panes touch each other — the leftover rows go below the last one, never
+                // between the channels (user report: on the heights where that came to two
+                // rows it read as a gap wide enough to look like a mistake).
+                assert_eq!(rects[0].y, 0, "the first pane starts at the top: {rects:?}");
                 for pair in rects.windows(2) {
-                    assert!(pair[1].y >= pair[0].y + pair[0].height, "overlapping panes: {rects:?}");
+                    assert_eq!(
+                        pair[1].y,
+                        pair[0].y + pair[0].height,
+                        "panes must be contiguous at height {height}/{channels}ch: {rects:?}"
+                    );
                 }
                 let last = rects.last().unwrap();
                 assert!(last.y + last.height <= height, "panes overflow the area: {rects:?}");
+                assert!(
+                    height - (last.y + last.height) < 2 * channels as u16,
+                    "more slack than one row short of a pane per channel: {rects:?}"
+                );
             }
         }
     }
