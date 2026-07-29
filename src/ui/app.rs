@@ -15578,7 +15578,10 @@ fn render_export_channels_dialog(
         Line::from(""),
         Line::from(Span::styled(format!("  {header}"), label_style)),
         Line::from(""),
-        Line::from(Span::styled(ec_header_line(modes.len()), dim_style)),
+        Line::from(Span::styled(
+            ec_header_line(modes.len()),
+            Style::default().fg(theme::COLUMN_HEADER).bg(theme::SURFACE0),
+        )),
     ];
 
     if hidden_above > 0 {
