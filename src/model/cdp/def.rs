@@ -130,6 +130,31 @@ pub enum NumberScale {
     /// Clamps to `len_samples - 1` for the same reason `CappedAtInputDuration` subtracts a
     /// small margin: a start position exactly at the end leaves no audio to work with.
     CappedAtInputSamples,
+    /// A time step (seconds) bounded at *both* ends by data: at least two analysis frames
+    /// long, and no longer than the input itself.
+    ///
+    /// `focus step`'s own usage text states the floor ("Must be >= duration of 2 analysis
+    /// frames") without saying what a frame is worth; measuring the real binary across
+    /// sample rates, window sizes and overlaps gives one frame = `points / 2^overlap`
+    /// samples, i.e. the pvoc decimation factor:
+    ///
+    /// | points | overlap | rate  | reported floor | 2·points/2^overlap/rate |
+    /// |--------|---------|-------|----------------|-------------------------|
+    /// | 1024   | 3       | 44100 | 0.005805       | 0.005805                |
+    /// | 2048   | 3       | 44100 | 0.011610       | 0.011610                |
+    /// | 1024   | 1       | 48000 | 0.021333       | 0.021333                |
+    /// | 1024   | 4       | 48000 | 0.002667       | 0.002667                |
+    ///
+    /// The ceiling is the input's own duration (measured slightly *above* it — a 4.0s file
+    /// reports 4.025760 — so clamping to just under the duration is safely inside).
+    ///
+    /// Found by a user hitting "Parameter[1] Value (1.000000) out of range (0.002667 to
+    /// 0.852000)" on a short selection: the catalog declared a flat `[0.01 – 1.0]`, so its own
+    /// `max` was unusable on any selection under a second, and its `min` is below CDP's real
+    /// floor at every sample rate under 25.6kHz. Neither bound is expressible as a fixed
+    /// range, and unlike `CappedAtInputDuration` the *floor* moves too — with the analysis
+    /// window, not the file — which is why this can't reuse that scale.
+    AnaFrameStepSeconds,
 }
 
 /// A concrete value for one parameter, as edited in the UI. Also the shape a saved CDP

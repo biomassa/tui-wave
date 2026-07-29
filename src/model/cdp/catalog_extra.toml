@@ -20118,3 +20118,37 @@ step = 0.01
 default = 60.0
 exponential = true
 scale = "plain"
+
+# NOTE: this key deliberately OVERRIDES the SoundThread-derived catalog.toml entry (same
+# key, later merge order wins -- see catalog.rs's module doc), purely to give Clock Speed a
+# scale. The SoundThread data declares a flat [0.01 - 1.0], and `focus step` enforces neither
+# end of that: it rejects anything longer than the input ("Value (1.000000) out of range
+# (0.002667 to 0.852000)" on a 0.85s selection -- the reported case) and anything shorter than
+# two analysis frames, which is 0.0116s at 22.05kHz, above the declared min. Both bounds are
+# data-dependent, so they move to NumberScale::AnaFrameStepSeconds; everything else is copied
+# from catalog.toml verbatim so the next converter run stays a no-op diff against it.
+[[process]]
+key = "focus_step"
+bin = "focus"
+subprog = "step"
+title = "Focus Stepped Freeze"
+category = "pvoc"
+subcategory = "time"
+short_description = "Freezes the spectrum of the sound at regular intervals"
+description = "Moves through the sound from start to end and freezes the spectrum of the sound at a regular interval. With fast clock speeds this produces a granular like effect, with slow clock speeds this freezes the sound in place creating an audible step from freeze to freeze. This process works well with Blur to to smooth out the boundaries between steps. "
+input = "ana"
+output = "ana"
+stereo_native = false
+output_is_stereo = false
+
+[[process.params]]
+name = "Clock Speed"
+description = "How often to freeze the sound in seconds"
+automatable = false
+kind = "number"
+min = 0.01
+max = 1.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "ana_frame_step_seconds"
