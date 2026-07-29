@@ -7,6 +7,7 @@ pub mod head_tail_mark;
 pub mod marker;
 pub mod normalize;
 pub mod paste;
+pub mod remove_channels;
 pub mod resample;
 pub mod reverse;
 pub mod trim;

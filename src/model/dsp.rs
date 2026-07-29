@@ -28,6 +28,34 @@ pub fn peak(channels: &[Vec<f32>]) -> f32 {
         .fold(0.0f32, |p, &s| p.max(s.abs()))
 }
 
+/// Highest absolute sample value in one channel — the per-channel form of [`peak`], which
+/// folds across all of them at once.
+pub fn channel_peak(channel: &[f32]) -> f32 {
+    channel.iter().fold(0.0f32, |p, &s| p.max(s.abs()))
+}
+
+/// Indices of the channels whose peak is *strictly below* `threshold_db`, ascending — the
+/// channels Remove Empty Channels drops.
+///
+/// The comparison happens in the **linear** domain, against `db_to_linear(threshold_db)`,
+/// rather than converting each channel's peak to dB first. A digitally silent channel peaks
+/// at exactly 0.0, and that is precisely the case this exists to find: `linear_to_db` only
+/// avoids returning `-inf` for it by clamping at 1e-6 (-120 dB), which would then silently
+/// *keep* such a channel at any threshold below -120. Comparing linear amplitudes has no such
+/// floor.
+///
+/// Strictly-below means a channel peaking exactly at the threshold is kept — at a boundary,
+/// keeping audio is the recoverable choice.
+pub fn channels_below(channels: &[Vec<f32>], threshold_db: f32) -> Vec<usize> {
+    let threshold = db_to_linear(threshold_db);
+    channels
+        .iter()
+        .enumerate()
+        .filter(|(_, ch)| channel_peak(ch) < threshold)
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// The linear gain that brings `peak` up (or down) to `target_db` dBFS, or `None` when the
 /// material is effectively silent (see [`SILENCE_PEAK`]) and must be left untouched.
 pub fn normalize_gain(peak: f32, target_db: f32) -> Option<f32> {
@@ -41,6 +69,47 @@ pub fn normalize_gain(peak: f32, target_db: f32) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_peak_of_silence_and_of_nothing_is_zero() {
+        assert_eq!(channel_peak(&[0.0; 16]), 0.0);
+        assert_eq!(channel_peak(&[]), 0.0);
+        assert_eq!(channel_peak(&[0.1, -0.7, 0.3]), 0.7);
+    }
+
+    /// The case the linear-domain comparison exists for: a digitally silent channel must be
+    /// found at *any* threshold, including ones below `linear_to_db`'s -120 dB clamp.
+    #[test]
+    fn a_digitally_silent_channel_is_below_every_threshold() {
+        let channels = vec![vec![0.0f32; 8]];
+        for threshold in [-6.0, -48.0, -96.0, -150.0, -300.0] {
+            assert_eq!(
+                channels_below(&channels, threshold),
+                vec![0],
+                "silence must count as below {threshold} dBFS",
+            );
+        }
+    }
+
+    #[test]
+    fn channels_below_finds_the_quiet_ones_in_ascending_order() {
+        let channels = vec![
+            vec![0.0f32; 4],           // silent
+            vec![0.5f32; 4],           // -6 dBFS
+            vec![0.001f32; 4],         // -60 dBFS
+            vec![0.9f32; 4],           // loud
+        ];
+        assert_eq!(channels_below(&channels, -48.0), vec![0, 2]);
+    }
+
+    /// Strictly below: a channel sitting exactly on the threshold is kept, because at a
+    /// boundary keeping audio is the recoverable choice.
+    #[test]
+    fn a_channel_exactly_at_the_threshold_is_kept() {
+        let exact = db_to_linear(-48.0);
+        let channels = vec![vec![exact; 4]];
+        assert!(channels_below(&channels, -48.0).is_empty());
+    }
 
     #[test]
     fn db_to_linear_maps_known_points() {
