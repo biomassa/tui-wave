@@ -14,8 +14,10 @@ use ratatui::widgets::Widget;
 use crate::ui::theme;
 use crate::ui::viewport::Viewport;
 
-/// Tick glyph — a downward stem, pointing at the waveform column above it.
-const TICK_CHAR: char = '┬';
+/// Tick glyph — a plain vertical line, the same stroke the cursor/playhead/marker lines use,
+/// so a tick reads as "this column" rather than as a separate kind of ornament (a T-shaped
+/// `┬` implied a join with something above it that isn't there).
+const TICK_CHAR: char = '│';
 
 /// Minimum columns between two ticks. A `m:ss` label is 4-6 columns wide (up to 9 with
 /// sub-second decimals), so this leaves a clear gap between one label and the next tick
@@ -202,9 +204,9 @@ mod tests {
     fn ruler_labels_the_visible_range_from_the_scroll_offset() {
         // 48kHz, 24000 samples/column = 0.5 s/col => step 10s => a tick every 20 columns.
         let text = render(0, 24_000.0, 80);
-        assert!(text.starts_with("┬0:00"), "expected a 0:00 tick at the left edge; got {text:?}");
-        assert!(text.contains("┬0:10"), "expected a 0:10 tick; got {text:?}");
-        assert!(text.contains("┬0:30"), "expected a 0:30 tick; got {text:?}");
+        assert!(text.starts_with("│0:00"), "expected a 0:00 tick at the left edge; got {text:?}");
+        assert!(text.contains("│0:10"), "expected a 0:10 tick; got {text:?}");
+        assert!(text.contains("│0:30"), "expected a 0:30 tick; got {text:?}");
     }
 
     /// Ticks land on round absolute times, not on offsets from wherever the view is scrolled
@@ -213,7 +215,7 @@ mod tests {
     fn ticks_sit_on_round_times_when_scrolled_to_an_odd_offset() {
         // Scrolled to 7s (336000 samples at 48kHz); step is 10s, so the first tick is 0:10.
         let text = render(336_000, 24_000.0, 80);
-        assert!(text.contains("┬0:10"), "expected the first round tick at 0:10; got {text:?}");
+        assert!(text.contains("│0:10"), "expected the first round tick at 0:10; got {text:?}");
         assert!(!text.contains("0:07"), "ticks must not be measured from the scroll offset; got {text:?}");
     }
 
@@ -238,7 +240,7 @@ mod tests {
         // Every tick column still holds the tick glyph (nothing wrote over it), and the
         // expected number of them are present: 80 columns at 0.5 s/col is 40s, stepping by
         // 10s => 0:00 / 0:10 / 0:20 / 0:30.
-        assert_eq!(text.matches('┬').count(), 4, "got {text:?}");
+        assert_eq!(text.matches('│').count(), 4, "got {text:?}");
     }
 
     #[test]

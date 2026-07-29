@@ -7,6 +7,7 @@ use ratatui::style::Color;
 pub const BASE: Color = Color::Rgb(0x1e, 0x1e, 0x2e);
 pub const SURFACE0: Color = Color::Rgb(0x31, 0x32, 0x44);
 pub const SURFACE1: Color = Color::Rgb(0x45, 0x47, 0x5a);
+pub const SURFACE2: Color = Color::Rgb(0x58, 0x5b, 0x70);
 pub const TEXT: Color = Color::Rgb(0xcd, 0xd6, 0xf4);
 pub const SUBTEXT0: Color = Color::Rgb(0xa6, 0xad, 0xc8);
 pub const SUBTEXT1: Color = Color::Rgb(0xba, 0xc2, 0xde);
@@ -37,7 +38,7 @@ pub const DB_SCALE: Color = SUBTEXT0;
 /// purpose: it's a background reference the waveform draws *on top of* (see
 /// `waveform::WaveformWidget::render` and `waveform_image::rasterize_waveform`), not an
 /// annotation competing with the trace, so it's a step below even `ANNOTATION`/`OVERLAY0`.
-pub const ZERO_LINE: Color = SURFACE1;
+pub const ZERO_LINE: Color = SURFACE2;
 /// The horizontal time ruler's ticks and m:ss labels (`widgets::time_ruler`) — same muted
 /// text as the vertical dB gutter, since the two are the same kind of thing (an axis
 /// annotating the waveform) on perpendicular edges.

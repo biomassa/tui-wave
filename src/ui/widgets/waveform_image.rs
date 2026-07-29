@@ -292,14 +292,21 @@ pub fn rasterize_waveform(
     img
 }
 
-/// Draws the amplitude-zero axis: a 1px `theme::ZERO_LINE` line across the pixel row that
-/// amplitude 0.0 maps to (`mid_y`, floored — the same centreline the trace is drawn around).
-/// The pixel-resolution counterpart of the text renderer's `waveform::zero_row` `─` row.
+/// Draws the amplitude-zero axis, centred *exactly* on `mid_y` — the same centreline the
+/// trace itself is drawn around. The pixel-resolution counterpart of the text renderer's
+/// `waveform::zero_row` `─` row.
+///
+/// Drawn through [`draw_vspan_aa`] as a 1px-tall span rather than by writing one whole pixel
+/// row, because `mid_y` is only rarely an exact pixel boundary: filling row `mid_y as u32`
+/// puts the line's centre at `mid_y + 0.5`, half a pixel below true zero, and which way it
+/// leans then flips with the pane's pixel height. The anti-aliased span instead splits its
+/// coverage across the two rows straddling zero, so the axis reads as centred on zero at any
+/// height — the same treatment the waveform's own sub-pixel edges get.
 fn draw_zero_line(img: &mut RgbaImage) {
-    let row = (img.height() / 2).min(img.height().saturating_sub(1));
+    let mid_y = img.height() as f64 / 2.0;
     let color = color_to_rgba(theme::ZERO_LINE);
     for col in 0..img.width() {
-        img.put_pixel(col, row, color);
+        draw_vspan_aa(img, col, mid_y - 0.5, mid_y + 0.5, |_| color);
     }
 }
 
@@ -503,12 +510,36 @@ mod tests {
     fn empty_samples_renders_background_and_the_zero_axis_only() {
         let img = rasterize_waveform(&[], &viewport(0, 1.0), None, None, 0, None, &[], &[], false, 80, 160, 40, true);
         let bg = color_to_rgba(theme::BASE);
-        let zero = color_to_rgba(theme::ZERO_LINE);
         for (x, y, pixel) in img.enumerate_pixels() {
             // Even with no audio at all, the zero axis draws — it's the reference for where
-            // silence sits, so a blank channel is exactly when it must be visible.
-            let expected = if y == 20 { zero } else { bg };
-            assert_eq!(*pixel, expected, "pixel ({x},{y})");
+            // silence sits, so a blank channel is exactly when it must be visible. At this
+            // pane height (40px) zero falls exactly on the 20/21 pixel boundary, so the
+            // anti-aliased span straddles rows 19 and 20 rather than picking one.
+            if y == 19 || y == 20 {
+                assert_ne!(*pixel, bg, "the zero axis must cover pixel ({x},{y})");
+            } else {
+                assert_eq!(*pixel, bg, "pixel ({x},{y})");
+            }
+        }
+    }
+
+    /// The axis must be centred *on* zero, not half a pixel to one side of it — so the two
+    /// rows straddling the centreline must be covered identically.
+    #[test]
+    fn zero_line_is_centred_on_the_amplitude_midpoint() {
+        for pixel_height in [40u32, 41, 64, 176] {
+            let img = rasterize_waveform(&[], &viewport(0, 1.0), None, None, 0, None, &[], &[], false, 80, 160, pixel_height, true);
+            let bg = color_to_rgba(theme::BASE);
+            let covered: Vec<u32> = (0..pixel_height).filter(|&y| *img.get_pixel(0, y) != bg).collect();
+            let centre = (pixel_height as f64 - 1.0) / 2.0;
+            let mean = covered.iter().map(|&y| y as f64).sum::<f64>() / covered.len() as f64;
+            assert!(
+                (mean - centre).abs() < 0.01,
+                "at {pixel_height}px the axis covers rows {covered:?}, centred at {mean} rather than {centre}"
+            );
+            // An odd pane height puts zero inside a single row; an even one splits it across
+            // the two rows either side. Never more than that — this is a hairline, not a band.
+            assert!(covered.len() <= 2, "the axis must stay a hairline; got {covered:?}");
         }
     }
 
@@ -521,9 +552,12 @@ mod tests {
         let mut samples: Vec<f32> = (0..500).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
         samples.extend(std::iter::repeat(0.5).take(500));
         let img = rasterize_waveform(&samples, &viewport(0, 12.5), None, None, usize::MAX, None, &[], &[], false, 80, 160, 40, true);
-        let zero = color_to_rgba(theme::ZERO_LINE);
-        assert_ne!(*img.get_pixel(10, 20), zero, "the full-scale trace must cover the axis");
-        assert_eq!(*img.get_pixel(150, 20), zero, "the axis shows through where the trace doesn't reach it");
+        let bg = color_to_rgba(theme::BASE);
+        let waveform = dot_matrix_pixel_color(20, 20.0, 20.0, true);
+        assert_eq!(*img.get_pixel(10, 20), waveform, "the full-scale trace must cover the axis");
+        let quiet_side = *img.get_pixel(150, 20);
+        assert_ne!(quiet_side, bg, "the axis shows through where the trace doesn't reach it");
+        assert_ne!(quiet_side, waveform, "and that is the axis, not the trace");
     }
 
     #[test]
