@@ -318,6 +318,35 @@ mod tests {
         }
     }
 
+    /// `description` is shown to the user in the CDP browser and params dialog — it is not a
+    /// place for notes about how the entry was authored. 27 entries had accumulated
+    /// provenance text there instead ("Verified against the real binary's own usage text and
+    /// a live invocation. `distort reverse infile outfile cyclecnt`..."), so the browser
+    /// showed argv shapes and cross-references to internal analysis documents where the
+    /// description of the process should be (user report). Those notes are worth keeping —
+    /// they now live in TOML comments directly above the description they used to occupy.
+    #[test]
+    fn builtin_descriptions_are_not_authoring_notes() {
+        let (catalog, _) = CdpCatalog::load(None);
+        // Phrases that only ever appear in a note *about* an entry, never in a description
+        // of what a process does to a sound.
+        // Deliberately narrow: a description may legitimately explain a catalog-level design
+        // choice to the user ("each is its own process because..."), or cite what CDP's own
+        // usage text says about a bound, and both are context rather than authoring notes.
+        // These three only ever appear in the latter.
+        const TELLS: [&str; 3] = ["Verified against", "live invocation", "CDP-WASM-SUITE"];
+        for proc in &catalog.processes {
+            for tell in TELLS {
+                assert!(
+                    !proc.description.contains(tell),
+                    "{}: description reads as an authoring note, not a description ({tell:?}): {:?}",
+                    proc.key,
+                    proc.description
+                );
+            }
+        }
+    }
+
     /// A `required_list`/`required_envelope` field is unreachable in the UI unless
     /// `automatable` is also true — `App::open_cdp_list_editor`/`open_cdp_envelope_editor`
     /// both gate on `param.automatable` before opening (reusing the existing 'e'-key gate

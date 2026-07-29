@@ -13322,7 +13322,17 @@ title = "Cut/Boost Below Frequency — filter"
 category = "time"
 subcategory = "filter"
 short_description = "Cut or boost all frequencies below a chosen point"
-description = "Verified against the real binary (`filter fixed`, no submode, then a live invocation): `filter fixed MODE infile outfile [bwidth] boost/cut freq [-ttail] [-sprescale]`. See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section -- CDP-WASM-SUITE's \"Boost/cut band\" is mode 3 here; modes 1/2 (cut/boost below or above a frequency, no band) are a bonus this catalog didn't have a name for."
+# Verified against the real binary (`filter fixed`, no submode, then a live invocation): `filter
+# fixed MODE infile outfile [bwidth] boost/cut freq [-ttail] [-sprescale]`. See CDP-WASM-SUITE-
+# gaps.md's Filter & Dynamics section -- CDP-WASM-SUITE's "Boost/cut band" is mode 3 here; modes
+# 1/2 (cut/boost below or above a frequency, no band) are a bonus this catalog didn't have a
+# name for.
+description = """
+Boosts or cuts every frequency below the chosen point by a given number of dB — a fixed- \
+frequency shelving filter. A positive Boost/Cut lifts everything below the frequency, a negative \
+one attenuates it. Prescale scales the input before filtering, which is what keeps a large boost \
+from overloading, and Tail extends the file so the filter's own decay isn't cut off at the end.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -13387,7 +13397,17 @@ title = "Cut/Boost Above Frequency — filter"
 category = "time"
 subcategory = "filter"
 short_description = "Cut or boost all frequencies above a chosen point"
-description = "Verified against the real binary (`filter fixed`, no submode, then a live invocation): `filter fixed MODE infile outfile [bwidth] boost/cut freq [-ttail] [-sprescale]`. See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section -- CDP-WASM-SUITE's \"Boost/cut band\" is mode 3 here; modes 1/2 (cut/boost below or above a frequency, no band) are a bonus this catalog didn't have a name for."
+# Verified against the real binary (`filter fixed`, no submode, then a live invocation): `filter
+# fixed MODE infile outfile [bwidth] boost/cut freq [-ttail] [-sprescale]`. See CDP-WASM-SUITE-
+# gaps.md's Filter & Dynamics section -- CDP-WASM-SUITE's "Boost/cut band" is mode 3 here; modes
+# 1/2 (cut/boost below or above a frequency, no band) are a bonus this catalog didn't have a
+# name for.
+description = """
+Boosts or cuts every frequency above the chosen point by a given number of dB — a fixed- \
+frequency shelving filter. A positive Boost/Cut lifts everything above the frequency, a negative \
+one attenuates it. Prescale scales the input before filtering, which is what keeps a large boost \
+from overloading, and Tail extends the file so the filter's own decay isn't cut off at the end.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -13452,7 +13472,17 @@ title = "Boost/Cut Band — filter"
 category = "time"
 subcategory = "filter"
 short_description = "Cut or boost a band of frequencies centred on a chosen point"
-description = "Verified against the real binary (`filter fixed`, no submode, then a live invocation): `filter fixed MODE infile outfile [bwidth] boost/cut freq [-ttail] [-sprescale]`. See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section -- CDP-WASM-SUITE's \"Boost/cut band\" is mode 3 here; modes 1/2 (cut/boost below or above a frequency, no band) are a bonus this catalog didn't have a name for."
+# Verified against the real binary (`filter fixed`, no submode, then a live invocation): `filter
+# fixed MODE infile outfile [bwidth] boost/cut freq [-ttail] [-sprescale]`. See CDP-WASM-SUITE-
+# gaps.md's Filter & Dynamics section -- CDP-WASM-SUITE's "Boost/cut band" is mode 3 here; modes
+# 1/2 (cut/boost below or above a frequency, no band) are a bonus this catalog didn't have a
+# name for.
+description = """
+Boosts or cuts a band of frequencies centred on the chosen point, by a given number of dB. \
+Bandwidth sets how wide that band is, in Hz. A positive Boost/Cut lifts the band, a negative one \
+notches it out. Prescale scales the input before filtering, which is what keeps a large boost \
+from overloading, and Tail extends the file so the filter's own decay isn't cut off at the end.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -13529,7 +13559,18 @@ title = "Resonant Notch Filter"
 category = "time"
 subcategory = "filter"
 short_description = "A resonant notch (band-reject) filter at a fixed frequency"
-description = "Verified against the real binary (`filter variable`, then a live invocation): `filter variable MODE infile outfile acuity gain frq [-ttail]`. Acuity/Gain ranges copied from the sibling `filter_sweeping_*` entries (same underlying resonant-filter core, confirmed identical bounds against the real binary previously). See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section -- this fills all four \"Resonant ...\" gaps."
+# Verified against the real binary (`filter variable`, then a live invocation): `filter variable
+# MODE infile outfile acuity gain frq [-ttail]`. Acuity/Gain ranges copied from the sibling
+# `filter_sweeping_*` entries (same underlying resonant-filter core, confirmed identical bounds
+# against the real binary previously). See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section --
+# this fills all four "Resonant ..." gaps.
+description = """
+A resonant notch (band-reject) filter, rejecting a narrow region around the chosen frequency. \
+Acuity controls how tight the notch is — smaller values give a sharper, more resonant filter — \
+and Gain compensates for the level change that tightening it causes (CDP's own rule of thumb: \
+for an acuity of (1/3)^n, use a gain of (2/3)^n). Both the frequency and the acuity can vary \
+over time.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -13593,7 +13634,18 @@ title = "Resonant Band-Pass Filter"
 category = "time"
 subcategory = "filter"
 short_description = "A resonant band-pass filter at a fixed frequency"
-description = "Verified against the real binary (`filter variable`, then a live invocation): `filter variable MODE infile outfile acuity gain frq [-ttail]`. Acuity/Gain ranges copied from the sibling `filter_sweeping_*` entries (same underlying resonant-filter core, confirmed identical bounds against the real binary previously). See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section -- this fills all four \"Resonant ...\" gaps."
+# Verified against the real binary (`filter variable`, then a live invocation): `filter variable
+# MODE infile outfile acuity gain frq [-ttail]`. Acuity/Gain ranges copied from the sibling
+# `filter_sweeping_*` entries (same underlying resonant-filter core, confirmed identical bounds
+# against the real binary previously). See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section --
+# this fills all four "Resonant ..." gaps.
+description = """
+A resonant band-pass filter, passing a narrow region around the chosen frequency and rejecting \
+the rest. Acuity controls how tight the band is — smaller values give a sharper, more resonant \
+filter — and Gain compensates for the level change that tightening it causes (CDP's own rule of \
+thumb: for an acuity of (1/3)^n, use a gain of (2/3)^n). Both the frequency and the acuity can \
+vary over time.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -13657,7 +13709,17 @@ title = "Resonant Low-Pass Filter"
 category = "time"
 subcategory = "filter"
 short_description = "A resonant low-pass filter at a fixed cutoff"
-description = "Verified against the real binary (`filter variable`, then a live invocation): `filter variable MODE infile outfile acuity gain frq [-ttail]`. Acuity/Gain ranges copied from the sibling `filter_sweeping_*` entries (same underlying resonant-filter core, confirmed identical bounds against the real binary previously). See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section -- this fills all four \"Resonant ...\" gaps."
+# Verified against the real binary (`filter variable`, then a live invocation): `filter variable
+# MODE infile outfile acuity gain frq [-ttail]`. Acuity/Gain ranges copied from the sibling
+# `filter_sweeping_*` entries (same underlying resonant-filter core, confirmed identical bounds
+# against the real binary previously). See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section --
+# this fills all four "Resonant ..." gaps.
+description = """
+A resonant low-pass filter, passing everything below the chosen cutoff. Acuity controls how \
+sharply it resonates at the cutoff — smaller values give a tighter, more resonant filter — and \
+Gain compensates for the level change that tightening it causes (CDP's own rule of thumb: for an \
+acuity of (1/3)^n, use a gain of (2/3)^n). Both the frequency and the acuity can vary over time.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -13721,7 +13783,17 @@ title = "Resonant High-Pass Filter"
 category = "time"
 subcategory = "filter"
 short_description = "A resonant high-pass filter at a fixed cutoff"
-description = "Verified against the real binary (`filter variable`, then a live invocation): `filter variable MODE infile outfile acuity gain frq [-ttail]`. Acuity/Gain ranges copied from the sibling `filter_sweeping_*` entries (same underlying resonant-filter core, confirmed identical bounds against the real binary previously). See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section -- this fills all four \"Resonant ...\" gaps."
+# Verified against the real binary (`filter variable`, then a live invocation): `filter variable
+# MODE infile outfile acuity gain frq [-ttail]`. Acuity/Gain ranges copied from the sibling
+# `filter_sweeping_*` entries (same underlying resonant-filter core, confirmed identical bounds
+# against the real binary previously). See CDP-WASM-SUITE-gaps.md's Filter & Dynamics section --
+# this fills all four "Resonant ..." gaps.
+description = """
+A resonant high-pass filter, passing everything above the chosen cutoff. Acuity controls how \
+sharply it resonates at the cutoff — smaller values give a tighter, more resonant filter — and \
+Gain compensates for the level change that tightening it causes (CDP's own rule of thumb: for an \
+acuity of (1/3)^n, use a gain of (2/3)^n). Both the frequency and the acuity can vary over time.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -13784,7 +13856,14 @@ title = "Waveset Reverse — distort"
 category = "time"
 subcategory = "distort"
 short_description = "Reverses wavecycles in groups, without reversing the sound as a whole"
-description = "Verified against the real binary's own usage text and a live invocation. `distort reverse infile outfile cyclecnt`. Mono only (CDP's own restriction on the whole `distort` family)."
+# Verified against the real binary's own usage text and a live invocation. `distort reverse
+# infile outfile cyclecnt`. Mono only (CDP's own restriction on the whole `distort` family).
+description = """
+Reverses the sound's individual wavecycles in groups of the chosen size. The sound as a whole \
+still runs forwards — only the detail inside each group is turned around — so the shape and \
+timing survive while the timbre roughens. Cycle Count can vary over time. Mono only, which is \
+CDP's own restriction on the whole distort family.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -13811,7 +13890,15 @@ title = "Waveset Telescope — distort"
 category = "time"
 subcategory = "distort"
 short_description = "Time-contracts the sound by collapsing groups of wavecycles down to one"
-description = "Verified against the real binary's own usage text and a live invocation. `distort telescope infile outfile cyclecnt [-sskipcycles] [-a]`."
+# Verified against the real binary's own usage text and a live invocation. `distort telescope
+# infile outfile cyclecnt [-sskipcycles] [-a]`.
+description = """
+Time-contracts the sound by telescoping each group of wavecycles down to a single cycle, so the \
+result is roughly as many times shorter as the cycle count. By default the surviving cycle takes \
+the length of the longest in its group; the Average option makes it the group's average length \
+instead. Skip Cycles leaves the start of the file untouched. Mono only, which is CDP's own \
+restriction on the whole distort family.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -13860,7 +13947,15 @@ title = "Waveset Pitchwarp — distort"
 category = "time"
 subcategory = "distort"
 short_description = "Randomly varies the pitch of each wavecycle within a chosen range"
-description = "Verified against the real binary's own usage text and a live invocation. `distort pitch infile outfile octvary [-ccyclelen] [-sskipcycles]`."
+# Verified against the real binary's own usage text and a live invocation. `distort pitch infile
+# outfile octvary [-ccyclelen] [-sskipcycles]`.
+description = """
+Pitchwarps the sound by transposing each wavecycle by a random amount, up to Octave Variation \
+octaves either way. A fresh transposition is generated every so many cycles (a random count \
+below Cycle Length), so the warp moves in irregular steps rather than continuously. Skip Cycles \
+leaves the start of the file untouched. Mono only, which is CDP's own restriction on the whole \
+distort family.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -13915,7 +14010,15 @@ title = "Waveset Band-Filter (Below) — distort"
 category = "time"
 subcategory = "distort"
 short_description = "Time-contracts the sound by omitting wavecycles below a chosen frequency"
-description = "Verified against the real binary's own usage text and a live invocation. `distort filter 1-2 infile outfile freq [-sskipcycles]`."
+# Verified against the real binary's own usage text and a live invocation. `distort filter 1-2
+# infile outfile freq [-sskipcycles]`.
+description = """
+Time-contracts the sound by discarding every wavecycle whose own frequency falls below the \
+chosen one — a filter that shortens the file rather than attenuating, since the rejected cycles \
+are removed outright instead of silenced. Frequency can vary over time, and Skip Cycles leaves \
+the start of the file untouched. Mono only, which is CDP's own restriction on the whole distort \
+family.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -13956,7 +14059,15 @@ title = "Waveset Band-Filter (Above) — distort"
 category = "time"
 subcategory = "distort"
 short_description = "Time-contracts the sound by omitting wavecycles above a chosen frequency"
-description = "Verified against the real binary's own usage text and a live invocation. `distort filter 1-2 infile outfile freq [-sskipcycles]`."
+# Verified against the real binary's own usage text and a live invocation. `distort filter 1-2
+# infile outfile freq [-sskipcycles]`.
+description = """
+Time-contracts the sound by discarding every wavecycle whose own frequency falls above the \
+chosen one — a filter that shortens the file rather than attenuating, since the rejected cycles \
+are removed outright instead of silenced. Frequency can vary over time, and Skip Cycles leaves \
+the start of the file untouched. Mono only, which is CDP's own restriction on the whole distort \
+family.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -13997,7 +14108,15 @@ title = "Waveset Band-Filter (Between) — distort"
 category = "time"
 subcategory = "distort"
 short_description = "Time-contracts the sound by omitting wavecycles outside a chosen frequency band"
-description = "Verified against the real binary's own usage text and a live invocation. `distort filter 3 infile outfile freq1 freq2 [-sskipcycles]`."
+# Verified against the real binary's own usage text and a live invocation. `distort filter 3
+# infile outfile freq1 freq2 [-sskipcycles]`.
+description = """
+Time-contracts the sound by keeping only the wavecycles whose own frequency falls between the \
+two chosen ones, discarding everything outside that band — a filter that shortens the file \
+rather than attenuating, since the rejected cycles are removed outright instead of silenced. The \
+two frequencies may vary over time but must never cross or meet. Skip Cycles leaves the start of \
+the file untouched. Mono only, which is CDP's own restriction on the whole distort family.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -14056,7 +14175,14 @@ title = "Waveset Overload (Noise) — distort"
 category = "time"
 subcategory = "distort"
 short_description = "Clips the signal, filling the clipped stretches with noise"
-description = "Verified against the real binary's own usage text and a live invocation. `distort overload 1 infile outfile clip_level depth`."
+# Verified against the real binary's own usage text and a live invocation. `distort overload 1
+# infile outfile clip_level depth`.
+description = """
+Clips the signal at the chosen level and fills the clipped stretches with noise, so overload \
+becomes a texture rather than simple flat-topping. Depth controls how strongly that noise \
+replaces the clipped material. Both values can vary over time. Mono only, which is CDP's own \
+restriction on the whole distort family.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -14095,7 +14221,14 @@ title = "Waveset Overload (Tone) — distort"
 category = "time"
 subcategory = "distort"
 short_description = "Clips the signal, filling the clipped stretches with a tone at a chosen frequency"
-description = "Verified against the real binary's own usage text and a live invocation. `distort overload 2 infile outfile gate depth freq`."
+# Verified against the real binary's own usage text and a live invocation. `distort overload 2
+# infile outfile gate depth freq`.
+description = """
+Clips the signal at the chosen gate level and fills the clipped stretches with a waveform at the \
+chosen frequency, so overload introduces a pitched artefact rather than simple flat-topping. \
+Depth controls how strongly that waveform replaces the clipped material. All three values can \
+vary over time. Mono only, which is CDP's own restriction on the whole distort family.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -14146,7 +14279,18 @@ title = "Waveset Envelope (Rising) — distort"
 category = "time"
 subcategory = "distort"
 short_description = "Imposes a rising envelope over each group of wavecycles"
-description = "Verified against the real binary's own usage text and a live invocation. `distort envel 1-2 infile outfile cyclecnt [-ttroughing] [-eexponent]`. Mode 3 (troughing forced-required rather than optional) is redundant with modes 1/2's own optional Troughing param and isn't separately added; mode 4 (user-defined breakpoint envelope shape) needs `required_envelope` infra not added here."
+# Verified against the real binary's own usage text and a live invocation. `distort envel 1-2
+# infile outfile cyclecnt [-ttroughing] [-eexponent]`. Mode 3 (troughing forced-required rather
+# than optional) is redundant with modes 1/2's own optional Troughing param and isn't separately
+# added; mode 4 (user-defined breakpoint envelope shape) needs `required_envelope` infra not
+# added here.
+description = """
+Imposes a rising envelope over each group of wavecycles, re-articulating the sound at the cycle \
+level: with a small cycle count the result is a rapid granular flutter, with a large one a \
+slower pulsing. Exponent bends the rise away from linear, and Troughing keeps the envelope from \
+falling all the way to zero between groups. Both, and the cycle count itself, can vary over \
+time. Mono only, which is CDP's own restriction on the whole distort family.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -14200,7 +14344,18 @@ title = "Waveset Envelope (Falling) — distort"
 category = "time"
 subcategory = "distort"
 short_description = "Imposes a falling envelope over each group of wavecycles"
-description = "Verified against the real binary's own usage text and a live invocation. `distort envel 1-2 infile outfile cyclecnt [-ttroughing] [-eexponent]`. Mode 3 (troughing forced-required rather than optional) is redundant with modes 1/2's own optional Troughing param and isn't separately added; mode 4 (user-defined breakpoint envelope shape) needs `required_envelope` infra not added here."
+# Verified against the real binary's own usage text and a live invocation. `distort envel 1-2
+# infile outfile cyclecnt [-ttroughing] [-eexponent]`. Mode 3 (troughing forced-required rather
+# than optional) is redundant with modes 1/2's own optional Troughing param and isn't separately
+# added; mode 4 (user-defined breakpoint envelope shape) needs `required_envelope` infra not
+# added here.
+description = """
+Imposes a falling envelope over each group of wavecycles, re-articulating the sound at the cycle \
+level: with a small cycle count the result is a rapid granular flutter, with a large one a \
+slower pulsing. Exponent bends the decay away from linear, and Troughing keeps the envelope from \
+falling all the way to zero between groups. Both, and the cycle count itself, can vary over \
+time. Mono only, which is CDP's own restriction on the whole distort family.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -14253,7 +14408,18 @@ title = "Harmonic Distortion"
 category = "time"
 subcategory = "distort"
 short_description = "Superimposes chosen harmonics onto each wavecycle"
-description = "Verified against the real binary's own usage text and a live invocation. `distort harmonic infile outfile harmonics-file [-ppre_attenuation]`. The harmonics-file is harmonic_no/amplitude pairs (harmonic_no in 2-1024, amplitude relative to the source's own amplitude of 1.0)."
+# Verified against the real binary's own usage text and a live invocation. `distort harmonic
+# infile outfile harmonics-file [-ppre_attenuation]`. The harmonics-file is
+# harmonic_no/amplitude pairs (harmonic_no in 2-1024, amplitude relative to the source's own
+# amplitude of 1.0).
+description = """
+Superimposes a chosen set of harmonics onto each wavecycle of the sound, distorting it \
+harmonically rather than by clipping. The harmonics are given as harmonic-number/amplitude pairs \
+— harmonic numbers from 2 to 1024, amplitudes relative to the source's own level of 1.0 — so the \
+added spectrum tracks whatever pitch each cycle already has. Pre-Attenuation lowers the input \
+first, leaving room for the added harmonics. Mono only, which is CDP's own restriction on the \
+whole distort family.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -14288,7 +14454,20 @@ title = "Clip"
 category = "time"
 subcategory = "distort"
 short_description = "Clips the signal at a specified level"
-description = "Verified against the real binary and a live invocation: `clip clip 1 infile outfile level` (level is linear amplitude 0-1, not dB). Distinct from the existing `clip_clip_2` entry (mode 2, half-waveform clipping by fraction -- see CDP-WASM-SUITE-analysis.md's rename, which retitles that entry \"Clip Half-Waves\" to disambiguate). Default kept at 0.3 rather than 0.5: this catalog's own smoke-test fixture (tests/fixtures/mono_sine.wav) peaks at almost exactly 0.5 (16383/32767), and CDP rejects a Level at or above the actual signal peak with \"None of signal is above the input clipping level\" -- 0.3 leaves headroom against any real signal peaking anywhere near mid-scale, not just this specific fixture."
+# Verified against the real binary and a live invocation: `clip clip 1 infile outfile level`
+# (level is linear amplitude 0-1, not dB). Distinct from the existing `clip_clip_2` entry (mode
+# 2, half-waveform clipping by fraction -- see CDP-WASM-SUITE-analysis.md's rename, which
+# retitles that entry "Clip Half-Waves" to disambiguate). Default kept at 0.3 rather than 0.5:
+# this catalog's own smoke-test fixture (tests/fixtures/mono_sine.wav) peaks at almost exactly
+# 0.5 (16383/32767), and CDP rejects a Level at or above the actual signal peak with "None of
+# signal is above the input clipping level" -- 0.3 leaves headroom against any real signal
+# peaking anywhere near mid-scale, not just this specific fixture.
+description = """
+Clips the signal wherever it exceeds the chosen level, flattening the peaks — the classic hard- \
+clip distortion, and a way to squash dynamic range at the cost of added harmonics. Level is \
+linear amplitude (0-1), not dB, and must sit below the signal's own peak or CDP reports that \
+none of the signal is above the clipping level.
+"""
 input = "wav"
 output = "wav"
 stereo_native = false
@@ -14314,7 +14493,17 @@ title = "Align Grains (2 Sounds)"
 category = "time"
 subcategory = "texture"
 short_description = "Synchronises a second grainy sound's grain onsets with those of the first"
-description = "Verified against the real binary and its sibling `grain_reposition` entry (identical grain-detection flags): `grain align infile1 infile2 outfile offset gate2 [-blen] [-lgate] [-hminhole] [-twinsize] [-x]`. Infile1 provides the grain-onset times; infile2 provides the actual grains retimed to match."
+# Verified against the real binary and its sibling `grain_reposition` entry (identical grain-
+# detection flags): `grain align infile1 infile2 outfile offset gate2 [-blen] [-lgate]
+# [-hminhole] [-twinsize] [-x]`. Infile1 provides the grain-onset times; infile2 provides the
+# actual grains retimed to match.
+description = """
+Retimes the grains of a second grainy sound onto the grain onsets found in this one, so the \
+second sound's material adopts the first's rhythm. The gate levels set how loud a peak has to be \
+to count as a grain in each file, Minimum Hole sets how short a gap between grains can be, and \
+Maximum Grain Length caps how long one may run. Level Tracking makes the gate follow the \
+signal's own level over a window instead of staying fixed.
+"""
 input = "dual_wav"
 output = "wav"
 stereo_native = false
@@ -14405,7 +14594,17 @@ title = "Fold Spectrum — specfold"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Folds groups of spectral channels into each other"
-description = "Verified against the real binary and a live invocation: `specfold specfold MODE inanalfile outanalfile stt len [cnt] [-a]`. STT must be >= 1 (confirmed: value 0 is rejected). Sibling `specfold_specfold_3` (mode 3, already in this catalog as \"Specfold Randomise\") established the STT/LEN range convention reused here."
+# Verified against the real binary and a live invocation: `specfold specfold MODE inanalfile
+# outanalfile stt len [cnt] [-a]`. STT must be >= 1 (confirmed: value 0 is rejected). Sibling
+# `specfold_specfold_3` (mode 3, already in this catalog as "Specfold Randomise") established
+# the STT/LEN range convention reused here.
+description = """
+Folds a range of the spectrum into itself. The channels in each fold group are split into two \
+equal halves: the values in the first half move from channel N up to channel 2N, and those in \
+the second half fill the channels left over, in descending order — so the spectrum is reflected \
+back on itself and partials land at unrelated frequencies. Start Channel and Length set the \
+range (Length must be even), and Fold Count sets how many folds happen inside it.
+"""
 input = "ana"
 output = "ana"
 stereo_native = false
@@ -14467,7 +14666,15 @@ title = "Invert Spectrum (Specfold)"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Inverts a range of the spectrum"
-description = "Verified against the real binary and a live invocation: `specfold specfold MODE inanalfile outanalfile stt len [cnt] [-a]`. STT must be >= 1 (confirmed: value 0 is rejected). Sibling `specfold_specfold_3` (mode 3, already in this catalog as \"Specfold Randomise\") established the STT/LEN range convention reused here."
+# Verified against the real binary and a live invocation: `specfold specfold MODE inanalfile
+# outanalfile stt len [cnt] [-a]`. STT must be >= 1 (confirmed: value 0 is rejected). Sibling
+# `specfold_specfold_3` (mode 3, already in this catalog as "Specfold Randomise") established
+# the STT/LEN range convention reused here.
+description = """
+Inverts a range of the spectrum, turning it upside down within the chosen band: what was at the \
+bottom of the range ends up at the top and vice versa, so harmonic material becomes inharmonic \
+while staying inside its original frequency span. Start Channel and Length set the range.
+"""
 input = "ana"
 output = "ana"
 stereo_native = false
@@ -14515,7 +14722,19 @@ title = "Glisten (Partition)"
 category = "pvoc"
 subcategory = "spectrum"
 short_description = "Randomly partitions the spectrum into sets of channels and plays each set in turn"
-description = "Verified against the real binary and a live invocation: `glisten glisten inf outf grpdiv setdur [-ppitchshift] [-ddurrand] [-vdivrand]`. Channels are split at random into Group Divisions mutually exclusive sets; each set plays for Set Duration windows before the next set takes over, and a fresh random partition is made once every set has played."
+# Verified against the real binary and a live invocation: `glisten glisten inf outf grpdiv
+# setdur [-ppitchshift] [-ddurrand] [-vdivrand]`. Channels are split at random into Group
+# Divisions mutually exclusive sets; each set plays for Set Duration windows before the next set
+# takes over, and a fresh random partition is made once every set has played.
+description = """
+Randomly partitions the analysis channels into a number of mutually exclusive sets, then plays \
+one set at a time — the channels in the current set sound, everything else is zeroed — switching \
+to the next set every so many windows. Once every set in a group has been heard, a fresh random \
+partition is made and the cycle repeats. The file still advances at its own rate throughout; \
+only which channels are audible changes. Pitch Shift transposes each set randomly, Duration \
+Randomisation varies how long a set persists, and Division Randomisation lets the sets differ in \
+size instead of each holding an equal share of the channels.
+"""
 input = "ana"
 output = "ana"
 stereo_native = false
@@ -14595,7 +14814,17 @@ title = "Chaotic (Chirikov Standard Map)"
 category = "time"
 subcategory = "synthesis"
 short_description = "Synthesizes a potentially chaotic tone from the Chirikov Standard map"
-description = "Verified against the real binary and a live invocation: `chirikov chirikov 1-2 outfile dur frq damping srate dovesplice`. Modes 3/4 (breakpoint-file output instead of audio) aren't added -- they produce a MIDI-pitch curve textfile, not a sound, a different output shape this catalog's `curve`/`wav` split doesn't cover for a generator with no audio input at all."
+# Verified against the real binary and a live invocation: `chirikov chirikov 1-2 outfile dur frq
+# damping srate dovesplice`. Modes 3/4 (breakpoint-file output instead of audio) aren't added --
+# they produce a MIDI-pitch curve textfile, not a sound, a different output shape this catalog's
+# `curve`/`wav` split doesn't cover for a generator with no audio input at all.
+description = """
+Synthesizes a tone directly from the Chirikov standard map, a classic chaotic system: the map's \
+output becomes the waveform, so the sound ranges from a stable pitched tone to fully chaotic \
+noise depending on the driving frequency and damping. Both of those can vary over time, which is \
+how the sound is steered across the map's transition into chaos. Dove Splice sets the length of \
+the splice applied at the start and end of the output.
+"""
 input = "none"
 output = "wav"
 stereo_native = false
@@ -14666,7 +14895,17 @@ title = "Chaotic (Circle Map) — chirikov"
 category = "time"
 subcategory = "synthesis"
 short_description = "Synthesizes a potentially chaotic tone from the Circle map"
-description = "Verified against the real binary and a live invocation: `chirikov chirikov 1-2 outfile dur frq damping srate dovesplice`. Modes 3/4 (breakpoint-file output instead of audio) aren't added -- they produce a MIDI-pitch curve textfile, not a sound, a different output shape this catalog's `curve`/`wav` split doesn't cover for a generator with no audio input at all."
+# Verified against the real binary and a live invocation: `chirikov chirikov 1-2 outfile dur frq
+# damping srate dovesplice`. Modes 3/4 (breakpoint-file output instead of audio) aren't added --
+# they produce a MIDI-pitch curve textfile, not a sound, a different output shape this catalog's
+# `curve`/`wav` split doesn't cover for a generator with no audio input at all.
+description = """
+Synthesizes a tone directly from the circle map, a classic chaotic system: the map's output \
+becomes the waveform, so the sound ranges from a stable pitched tone to fully chaotic noise \
+depending on the driving frequency and damping. Both of those can vary over time, which is how \
+the sound is steered across the map's transition into chaos. Dove Splice sets the length of the \
+splice applied at the start and end of the output.
+"""
 input = "none"
 output = "wav"
 stereo_native = false
@@ -14748,7 +14987,17 @@ title = "Sound Packet (Forced)"
 category = "time"
 subcategory = "synthesis"
 short_description = "Creates a sound packet with an enveloped shape at a chosen time"
-description = "Verified against the real binary and a live invocation: `packet packet 2 infile outfile times dur narrowing centring [-n|-f] [-s]`. TIMES is simplified to a single time (CDP's own \"or textfile of times\" alternative isn't representable by this catalog's param shapes)."
+# Verified against the real binary and a live invocation: `packet packet 2 infile outfile times
+# dur narrowing centring [-n|-f] [-s]`. TIMES is simplified to a single time (CDP's own "or
+# textfile of times" alternative isn't representable by this catalog's param shapes).
+description = """
+Creates a sound packet at a chosen time, of a chosen duration, rather than looking for one \
+already present in the source (the duration must be under half the source's). Narrowing sharpens \
+the packet's envelope, with values below 1 broadening it instead; Centring moves the envelope's \
+peak from the centre (0) towards the start (-1) or the end (1). Normalise lifts the packet's \
+level; Force Contour reshapes the wave's own maxima and minima onto the packet contour rather \
+than simply imposing an envelope over the existing signal.
+"""
 input = "wav"
 output = "wav_glob"
 stereo_native = false
@@ -14811,7 +15060,18 @@ title = "Sound Packet (Found)"
 category = "time"
 subcategory = "synthesis"
 short_description = "Isolates an existing sound packet using signal minima as its edges"
-description = "Verified against the real binary's own usage text (argv shape identical to mode 2, with Min Duration replacing Duration): `packet packet 1 infile outfile times mindur narrowing centring [-n|-f] [-s]`. TIMES simplified to a single time, same rationale as `packet_packet_2`."
+# Verified against the real binary's own usage text (argv shape identical to mode 2, with Min
+# Duration replacing Duration): `packet packet 1 infile outfile times mindur narrowing centring
+# [-n|-f] [-s]`. TIMES simplified to a single time, same rationale as `packet_packet_2`.
+description = """
+Isolates a sound packet already present in the source, using signal minima either side of the \
+chosen time as its natural edges — so the extracted packet respects the waveform rather than \
+cutting across it. Minimum Duration sets how short a found packet may be (it must be under half \
+the source's duration). Narrowing sharpens the packet's envelope, with values below 1 broadening \
+it instead; Centring moves the envelope's peak from the centre (0) towards the start (-1) or the \
+end (1). Normalise lifts the packet's level; Force Contour reshapes the wave's own maxima and \
+minima onto the packet contour rather than simply imposing an envelope over the existing signal.
+"""
 input = "wav"
 output = "wav_glob"
 stereo_native = false
