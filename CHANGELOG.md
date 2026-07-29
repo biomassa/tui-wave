@@ -1,5 +1,61 @@
 # Changelog
 
+## 2026-07-29 (1.8.0)
+
+- **A zero line across every channel.** The waveform had no visual reference for where
+  amplitude zero is, so a zero crossing's position had to be inferred from the trace itself.
+  It is a background element by construction — the waveform always draws on top of it, and
+  where the two land in the same character cell the waveform wins outright, digital silence
+  included (silent stretches now draw the trace's own flat line at zero rather than nothing).
+- **An optional time ruler.** A m:ss row between the waveform and the status bar, toggled from
+  the View menu. Its tick interval steps through round values as you zoom — minutes, seconds,
+  milliseconds — and the ticks sit on round absolute times, so scrolling slides the ruler
+  rather than renumbering it.
+- **Fixed: the two channels of a stereo file rendered at different vertical scales**, with
+  different dB gutter marks beside each. The undividable leftover row was going to one pane,
+  and every amplitude-to-row mapping is derived from the pane's height. Every channel now gets
+  the same height, and an odd one, which is also what puts amplitude zero on a real centre row
+  instead of between two rows.
+- **Fixed: zero-crossing snap did nothing at all on stereo.** It required every channel to
+  cross zero at the same sample index and agree on rounding, which two channels even three
+  samples out of phase never satisfy — so the boundary was returned untouched. It now snaps to
+  the nearest point where all channels are simultaneously quietest, and its search window is a
+  span of time rather than a fixed sample count, so it reaches as far into a 96kHz file as into
+  a 44.1kHz one.
+- **Fixed: Convolution Reverb ignored every setting and clipped.** `fastconv` parses its flags
+  before the filenames, unlike every other CDP binary; with them trailing it silently discarded
+  the amplitude scale, the float-output flag and the dry/wet mix all at once, so every
+  configuration produced a byte-identical, clipped result. Losing float output is also what made
+  the clipping unrecoverable.
+- **Fixed: Remove DC Offset invented an offset on files that had none.** It measured the mean,
+  which on material with short positive lobes and long deep negative ones is dominated by the
+  waveform's own asymmetry rather than by any offset — so "removing" it lifted the whole file,
+  silence included, off the zero line. It now measures the level the signal actually sits at.
+- **Remove DC Offset can process each channel separately.** CDP shifts the whole file by a
+  single value, so a stereo file whose channels are offset in different directions had no value
+  that corrected both; with the option on, each channel is measured and corrected on its own.
+- **Fixed: Waveset Thin left one channel of a stereo file ending in silence.** CDP runs that
+  family mono-only, and its output length depends on the audio, so the two channels came back
+  different lengths and the shorter was padded. The padding is still the right answer — it keeps
+  every sample CDP produced — but it is now named in the status bar instead of appearing as a
+  channel that looks broken.
+- **Fixed: markers and head/tail marks were cleared by processes that change length slightly.**
+  Reported for Waveset Repeat In Place, which returns 2-4% longer despite promising no time
+  stretching. Marks now move with the change instead: a mark a given fraction of the way through
+  the processed range stays that fraction of the way through the result.
+- **Scramble's per-segment modes take their cut times from head/tail marks.** The eight modes
+  that split the sound into separately-processed segments needed those times typed into a
+  dialog field; they now come from the marks you place on the waveform with `h`. Both these and
+  the DISTMORE family now say what they are missing the moment the dialog opens, with Preview
+  and Apply dimmed, instead of only when Apply appears to do nothing.
+- **Fixed: Step-Freeze Spectrum rejected its own default.** Its time step is bounded by the
+  analysis window at one end and the selection's duration at the other, and the catalog declared
+  a fixed range that honoured neither.
+- **27 CDP processes had development notes where their descriptions should be**, so the browser
+  showed argument shapes and internal cross-references instead of any account of what the
+  process does. All 27 now carry real descriptions taken from CDP's own documentation.
+- Bumped version to 1.8.0.
+
 ## 2026-07-28 (1.7.1)
 
 - **CDP processes are now grouped the way CDP groups them.** The browser's group list followed
