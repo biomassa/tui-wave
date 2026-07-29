@@ -193,11 +193,20 @@ impl<'a> WaveformWidget<'a> {
                 }
             }
 
+            let zero = zero_row(area.height) as usize;
             for (row, &mask) in masks.iter().enumerate() {
                 if mask == 0 {
                     continue;
                 }
                 let y = area.y + row as u16;
+                // This cell is about to take the waveform's glyph, so the zero axis can't
+                // also draw its `─` here. On the centre row it becomes a background tint
+                // instead, which keeps the axis continuous *under* the trace rather than
+                // being broken by it — see `theme::zero_line_cell_bg`. A selected column
+                // keeps its own inverted background: the selection fill is already a
+                // deliberate departure from the normal background, and layering a second
+                // tint into it would only muddy which of the two is being shown.
+                let bg = if row == zero && !selected { theme::zero_line_cell_bg() } else { bg };
                 let color = if selected {
                     theme::WAVEFORM_SELECTED
                 } else if self.gradient {
@@ -333,6 +342,73 @@ mod tests {
                     continue;
                 }
                 assert_eq!(buf[(x, y)].symbol(), " ", "a silent sample should not draw a mark");
+            }
+        }
+    }
+
+    /// A cell holding waveform dots on the centre row keeps its glyph and takes the axis as a
+    /// *background tint* — one cell can't show both a `─` and a braille glyph, and letting the
+    /// line win there broke the trace (user report: in text mode the line "renders in the
+    /// foreground, whereas it should be UNDER the waveform's line").
+    #[test]
+    fn the_zero_line_becomes_a_background_tint_under_the_waveform() {
+        // A very quiet signal, so the trace sits *on* the centre row rather than spanning
+        // past it — the case where the two genuinely compete for the same cell.
+        let samples: Vec<f32> = (0..400)
+            .map(|i| 0.01 * (i as f32 * 0.05).sin())
+            .collect();
+        let area = Rect::new(0, 0, 20, 11);
+        let mut buf = Buffer::empty(area);
+        let widget = WaveformWidget {
+            samples: &samples,
+            viewport: &viewport(0, 20.0),
+            cache: None,
+            selection: None,
+            cursor: usize::MAX,
+            playhead: None,
+            gradient: true,
+        };
+        widget.render(area, &mut buf);
+
+        let zero_y = zero_row(11);
+        let mut tinted = 0;
+        for x in 0..20u16 {
+            let cell = &buf[(x, zero_y)];
+            if cell.symbol() == ZERO_LINE_CHAR.to_string() {
+                // No dots here, so the axis keeps the glyph and the plain background.
+                assert_eq!(cell.bg, theme::BASE, "an undotted axis cell keeps the plain background");
+            } else {
+                // Dots here: the glyph is the waveform's, and the axis shows as the tint.
+                assert_ne!(cell.symbol(), " ", "column {x} should hold the trace");
+                assert_eq!(cell.bg, theme::zero_line_cell_bg(), "column {x} must carry the axis tint");
+                tinted += 1;
+            }
+        }
+        assert!(tinted > 0, "this signal is meant to put the trace on the centre row");
+    }
+
+    /// Off the centre row nothing is tinted — the axis is one row, not a wash over the pane.
+    #[test]
+    fn only_the_centre_row_carries_the_zero_line_tint() {
+        let samples: Vec<f32> = (0..400).map(|i| if i % 2 == 0 { 0.9 } else { -0.9 }).collect();
+        let area = Rect::new(0, 0, 20, 11);
+        let mut buf = Buffer::empty(area);
+        let widget = WaveformWidget {
+            samples: &samples,
+            viewport: &viewport(0, 20.0),
+            cache: None,
+            selection: None,
+            cursor: usize::MAX,
+            playhead: None,
+            gradient: true,
+        };
+        widget.render(area, &mut buf);
+        for y in 0..11u16 {
+            if y == zero_row(11) {
+                continue;
+            }
+            for x in 0..20u16 {
+                assert_eq!(buf[(x, y)].bg, theme::BASE, "cell ({x},{y}) must not be tinted");
             }
         }
     }
