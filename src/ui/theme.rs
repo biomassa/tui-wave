@@ -39,6 +39,17 @@ pub const DB_SCALE: Color = SUBTEXT0;
 /// `waveform::WaveformWidget::render` and `waveform_image::rasterize_waveform`), not an
 /// annotation competing with the trace, so it's a step below even `ANNOTATION`/`OVERLAY0`.
 pub const ZERO_LINE: Color = SURFACE2;
+
+/// Background tint standing in for the zero axis in the cell-based renderer, where a cell
+/// holds either the `─` or the waveform's braille glyph but never both. Tinting the cell the
+/// dots occupy is what keeps the axis running unbroken *under* the trace instead of the two
+/// fighting for the glyph (user report: in text mode the line "renders in the foreground,
+/// whereas it should be UNDER the waveform's line"). Dimmer than `ZERO_LINE` itself: it fills
+/// a whole cell rather than drawing a hairline through it, so the same colour would read far
+/// heavier — the graphics renderer has real pixels and needs no such substitute.
+pub fn zero_line_cell_bg() -> Color {
+    lerp_color(BASE, ZERO_LINE, 0.55)
+}
 /// The horizontal time ruler's ticks and m:ss labels (`widgets::time_ruler`) — same muted
 /// text as the vertical dB gutter, since the two are the same kind of thing (an axis
 /// annotating the waveform) on perpendicular edges.

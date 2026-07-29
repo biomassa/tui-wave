@@ -6533,7 +6533,7 @@ impl App {
             // Both readings of this field, so an untouched one can be recognised whichever
             // state it was last seeded in.
             let seeded = |split: bool| {
-                let offset = mean_sample_value(doc, start, end, dc_offset_channel(def, i, split));
+                let offset = dc_offset_estimate(doc, start, end, dc_offset_channel(def, i, split));
                 format_cdp_float_for_display(dc_offset_shift(offset, *step).clamp(*min, *max))
             };
             let fresh = seeded(split_on);
@@ -6598,7 +6598,7 @@ impl App {
                     // A freshly-opened dialog always has the split toggle at its default
                     // (off), so "Offset" seeds as the whole-file average exactly as before.
                     let channel = dc_offset_channel(def, i, false);
-                    let offset = mean_sample_value(doc, start, end, channel);
+                    let offset = dc_offset_estimate(doc, start, end, channel);
                     *input = TextInput::new(format_cdp_float_for_display(
                         dc_offset_shift(offset, *step).clamp(*min, *max),
                     ));
@@ -13293,6 +13293,18 @@ impl App {
         // which rows still need the legacy buffer-cell line (text-mode/no-picker/overlay-open
         // channels, and channel 0's reserved top row — see below).
         let mut channel_image_rows: Vec<Option<(u16, u16)>> = vec![None; channel_count];
+        // Rows a marker/head-tail line must not draw a buffer cell on. Every row *between*
+        // the topmost and bottommost rendered image counts, not just the rows an image
+        // actually covers: the blank separation `channel_pane_rects` leaves between channel
+        // panes sits in that span, and a plain-text dashed segment drawn across it reads as a
+        // glitch next to the anti-aliased lines baked into the bitmaps either side of it
+        // (user report, with a screenshot of exactly that band between the two channels).
+        // Skipping it leaves the gap clean, which is what the gap is for.
+        let image_span = |rows: &[Option<(u16, u16)>]| -> Option<(u16, u16)> {
+            let top = rows.iter().flatten().map(|&(start, _)| start).min()?;
+            let bottom = rows.iter().flatten().map(|&(_, end)| end).max()?;
+            Some((top, bottom))
+        };
 
         for (i, channel_full_area) in full_chunks.iter().enumerate() {
             let channel_inner = Rect {
@@ -13424,13 +13436,14 @@ impl App {
                 marker_style
             };
             for y in wf.y..wf.y + wf.height {
-                // Rows actually covered by a rendered graphics image already have this
-                // marker's line baked into the bitmap (see `rasterize_waveform`'s `markers`
-                // param) — drawing it again here as a plain character cell would fight the
-                // kitty unicode-placeholder image for control of that row's escape sequence
-                // and corrupt the terminal's cursor-position bookkeeping for the whole row,
-                // which is what caused markers to glitch the display in graphics mode.
-                if channel_image_rows.iter().flatten().any(|&(start, end)| y >= start && y < end) {
+                // Rows covered by a rendered graphics image already have this marker's line
+                // baked into the bitmap (see `rasterize_waveform`'s `markers` param) —
+                // drawing it again here as a plain character cell would fight the kitty
+                // unicode-placeholder image for control of that row's escape sequence and
+                // corrupt the terminal's cursor-position bookkeeping for the whole row, which
+                // is what caused markers to glitch the display in graphics mode. The gap rows
+                // between panes are skipped too — see `image_span`.
+                if image_span(&channel_image_rows).is_some_and(|(top, bottom)| y >= top && y < bottom) {
                     continue;
                 }
                 buf[(x, y)].set_char('┊').set_style(style).set_diff_option(CellDiffOption::AlwaysUpdate);
@@ -13487,8 +13500,8 @@ impl App {
             for y in wf.y..wf.y + wf.height {
                 // Same graphics-mode exclusion as the marker lane above — see that loop's
                 // comment for why drawing a buffer cell over a rendered image corrupts the
-                // row.
-                if channel_image_rows.iter().flatten().any(|&(start, end)| y >= start && y < end) {
+                // row, and `image_span` for why the gap between panes is excluded too.
+                if image_span(&channel_image_rows).is_some_and(|(top, bottom)| y >= top && y < bottom) {
                     continue;
                 }
                 buf[(x, y)]
@@ -13810,25 +13823,45 @@ fn nearest_marker(markers: &[Marker], pos: usize) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
-/// Mean sample value over `start..end` — the document's DC offset (see
-/// `ParamDef::default_from_dc_offset`). `channel` selects one channel's own offset, or `None`
-/// averages across every channel, which is right when the process shifts the whole file by a
-/// single value. Returns 0.0 for an empty range.
-fn mean_sample_value(doc: &Document, start: usize, end: usize, channel: Option<usize>) -> f64 {
-    let mut sum = 0.0f64;
-    let mut count = 0usize;
+/// The document's DC offset over `start..end` — the level the signal actually sits at (see
+/// `ParamDef::default_from_dc_offset`). `channel` measures one channel on its own, or `None`
+/// pools every channel, which is right when the process shifts the whole file by a single
+/// value. Returns 0.0 for an empty range.
+///
+/// The **median**, not the mean. The mean is the DC component by definition, and subtracting
+/// it does drive the file's average to exactly zero — but on real material it is dominated by
+/// the waveform's own asymmetry rather than by any offset. Reported by a user whose file had
+/// no DC offset at all: short positive lobes with long, deep negative ones (a shape plainly
+/// visible in the waveform) made the mean read -0.045, and "removing" that lifted the whole
+/// file — silence included — off the zero line. Reproduced on synthetic audio of the same
+/// shape with exactly zero offset: mean -0.163, median 0.000; add a real +0.03 offset and the
+/// median reports +0.030 while the mean reports -0.133. The median asks "what level is this
+/// signal centred on", which is the question the process exists to answer.
+fn dc_offset_estimate(doc: &Document, start: usize, end: usize, channel: Option<usize>) -> f64 {
+    let mut values: Vec<f32> = Vec::new();
     for (i, samples) in doc.channels.iter().enumerate() {
         if channel.is_some_and(|c| c != i) {
             continue;
         }
         let end = end.min(samples.len());
         let start = start.min(end);
-        for &sample in &samples[start..end] {
-            sum += sample as f64;
-            count += 1;
-        }
+        values.extend_from_slice(&samples[start..end]);
     }
-    if count == 0 { 0.0 } else { sum / count as f64 }
+    if values.is_empty() {
+        return 0.0;
+    }
+    // `select_nth_unstable` is O(n) and needs no full sort — this runs over every sample in
+    // the selection, which for a long file is tens of millions of them.
+    let mid = values.len() / 2;
+    values.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
+    let upper = values[mid];
+    if values.len() % 2 == 1 {
+        return upper as f64;
+    }
+    // Even count: the median is the mean of the two central values. The lower one is the
+    // largest of the partition `select_nth_unstable_by` already left below `mid`.
+    let lower = values[..mid].iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    (lower as f64 + upper as f64) / 2.0
 }
 
 /// Which channel's DC offset param `index` should be pre-filled from: `None` (average of all
@@ -27466,6 +27499,99 @@ mod tests {
         app.documents[0].head_tail_marks.push(50);
         terminal.draw(|frame| app.render(frame)).unwrap();
         assert!(buffer_text(terminal.backend().buffer()).contains("H/T: 2 pairs +1"));
+    }
+
+    /// In graphics mode the marker lines are baked into each channel's bitmap, and the blank
+    /// separation between panes is *not* covered by any bitmap — so the overlay used to draw a
+    /// plain-text dashed segment across that gap, which reads as a glitch next to the
+    /// anti-aliased lines either side of it (user report, with a screenshot of exactly that
+    /// band between the two channels). Uses `Picker::halfblocks()`, whose output is plain
+    /// glyphs `TestBackend` can inspect (unlike kitty, which round-trips through out-of-band
+    /// escapes this harness can't see).
+    #[test]
+    fn markers_leave_the_gap_between_channel_panes_clean_in_graphics_mode() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(stereo_doc(0.5, 0.5, 44_100)), None);
+        app.documents[0].markers = vec![crate::model::document::Marker { position: 20_000, label: "M1".into() }];
+        app.documents[0].head_tail_marks = vec![25_000];
+        app.graphics_mode = true;
+        app.set_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+
+        // An even height, so `channel_pane_rects` has slack to spend on a gap.
+        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let panes = channel_pane_rects(Rect { height: app.waveform_area.height, ..app.waveform_area }, 2);
+        let gap_start = panes[0].y + panes[0].height;
+        assert!(gap_start < panes[1].y, "this geometry is meant to leave a gap: {panes:?}");
+
+        let buffer = terminal.backend().buffer();
+        for y in gap_start..panes[1].y {
+            for x in app.waveform_area.x..app.waveform_area.x + app.waveform_area.width {
+                let symbol = buffer[(x, y)].symbol();
+                assert!(
+                    symbol != "\u{254E}" && symbol != "\u{250A}",
+                    "a marker line was drawn as a text cell in the gap at ({x},{y})"
+                );
+            }
+        }
+    }
+
+    /// The DC-offset seed is the level the signal sits at, not its mean — reported by a user
+    /// whose file had no offset at all: short positive lobes with long deep negative ones made
+    /// the mean read -0.045, and "removing" that lifted the whole file, silence included, off
+    /// the zero line.
+    #[test]
+    fn dc_offset_is_measured_as_the_level_the_signal_sits_at() {
+        // Material shaped like the report: silence, then a wave with a brief positive lobe and
+        // a long deep negative one. No DC offset anywhere in it.
+        let mut samples: Vec<f32> = Vec::new();
+        for _ in 0..4 {
+            samples.extend(std::iter::repeat(0.0).take(4_000));
+            let n = 6_000;
+            for i in 0..n {
+                let t = i as f32 / n as f32;
+                samples.push(if t < 0.25 {
+                    0.5 * (2.0 * std::f32::consts::PI * t).sin()
+                } else {
+                    -0.85 * (2.0 * std::f32::consts::PI * (t - 0.25) / 1.5).sin()
+                });
+            }
+        }
+        let len = samples.len();
+        let doc = Document { channels: vec![samples.clone()], sample_rate: 96_000, ..Default::default() };
+        let plain_mean = samples.iter().map(|s| *s as f64).sum::<f64>() / len as f64;
+        assert!(plain_mean < -0.05, "the premise: this material's mean is far from zero ({plain_mean})");
+        assert!(
+            dc_offset_estimate(&doc, 0, len, None).abs() < 0.001,
+            "a file with no DC offset must measure as having none, got {}",
+            dc_offset_estimate(&doc, 0, len, None)
+        );
+
+        // And a real offset is still reported exactly.
+        let shifted: Vec<f32> = samples.iter().map(|s| s + 0.03).collect();
+        let doc = Document { channels: vec![shifted], sample_rate: 96_000, ..Default::default() };
+        assert!(
+            (dc_offset_estimate(&doc, 0, len, None) - 0.03).abs() < 0.001,
+            "got {}",
+            dc_offset_estimate(&doc, 0, len, None)
+        );
+    }
+
+    /// Each channel is measured on its own when asked for, and pooled when not.
+    #[test]
+    fn dc_offset_can_be_measured_per_channel_or_across_all() {
+        let doc = Document {
+            channels: vec![vec![0.02; 1_000], vec![-0.03; 1_000]],
+            sample_rate: 44_100,
+            ..Default::default()
+        };
+        assert!((dc_offset_estimate(&doc, 0, 1_000, Some(0)) - 0.02).abs() < 1e-6);
+        assert!((dc_offset_estimate(&doc, 0, 1_000, Some(1)) + 0.03).abs() < 1e-6);
+        // Pooled: the two constants are the two central values, so the median is their mean.
+        assert!((dc_offset_estimate(&doc, 0, 1_000, None) + 0.005).abs() < 1e-6);
     }
 
     /// The DC-offset field means the whole file's average with "process channels separately"
