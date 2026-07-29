@@ -7,6 +7,17 @@ mod ui;
 
 use std::path::Path;
 
+/// The directory the Files panel should start in, given the file path the app was launched
+/// with.
+///
+/// `Path::parent` returns `Some("")` — not `Some(".")` — for a bare filename with no directory
+/// component, so `tui-wave take.wav` used to start the Files panel on an empty path and show
+/// nothing at all, while `tui-wave ./take.wav` and `tui-wave /abs/take.wav` both worked.
+fn containing_directory(path: &str) -> Option<std::path::PathBuf> {
+    let parent = Path::new(path).parent()?;
+    Some(if parent.as_os_str().is_empty() { Path::new(".").to_path_buf() } else { parent.to_path_buf() })
+}
+
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     ui::terminal::install_panic_hook();
@@ -18,14 +29,12 @@ fn main() -> color_eyre::Result<()> {
         }
         Some(ref p) if Path::new(p).is_file() => {
             let doc = Some(model::io::load_audio(p)?);
-            let dir = Path::new(p).parent().map(|d| d.to_path_buf());
-            (doc, dir)
+            (doc, containing_directory(p))
         }
         Some(p) => {
             // Try as file anyway; load_audio will report the error
             let doc = Some(model::io::load_audio(&p)?);
-            let dir = Path::new(&p).parent().map(|d| d.to_path_buf());
-            (doc, dir)
+            (doc, containing_directory(&p))
         }
         None => (None, None),
     };
