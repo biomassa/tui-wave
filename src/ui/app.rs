@@ -4145,7 +4145,7 @@ impl App {
                     if self.documents.get(idx).is_some_and(|d| d.path.is_none()) {
                         // Never saved — needs a filename before it can actually be saved,
                         // so defer closing until that Save As prompt is done.
-                        self.queue_save_as(vec![idx], SaveAsQueueThen::CloseBuffer(idx));
+                        self.queue_save_as(vec![idx], Some(SaveAsQueueThen::CloseBuffer(idx)));
                         return;
                     }
                     self.save_buffer(idx);
@@ -8269,22 +8269,22 @@ impl App {
         let Some(CdpField::FilePath { path, extension }) = fields.get(field_index) else {
             return false;
         };
-        let extension: &'static str = match extension.as_str() {
-            "matrix" => "matrix",
+        let extensions: &'static [&'static str] = match extension.as_str() {
+            "matrix" => &["matrix"],
             // Every `FilePath` param this catalog declares today uses "matrix" (see
             // `ParamKind::FilePath`'s doc comment) — this arm exists so a future
             // differently-extensioned param fails loudly (falls back to "wav", clearly
             // wrong) instead of silently misbehaving, rather than to handle a real case.
-            _ => "wav",
+            _ => &["wav"],
         };
         let start_dir = self
             .last_matrix_path
             .as_ref()
-            .filter(|_| extension == "matrix")
+            .filter(|_| extensions == ["matrix"])
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| self.file_panel.directory.clone());
-        let mut panel = FilePanel::new_with_extension(start_dir, extension, "Pick File");
+        let mut panel = FilePanel::new_with_extension(start_dir, extensions, "Pick File");
         // Preselect the field's current pick (if any), else the last matrix generated —
         // same "don't silently switch the pick on reopen" care as the formant picker.
         let preselect = path.clone().or_else(|| {
@@ -10809,9 +10809,34 @@ impl App {
     }
 
     /// Saves buffer `idx` to its existing path (no-op if it has none).
+    /// The path an in-place Save may write to: `doc.path` when it is a `.wav`, otherwise
+    /// `None`.
+    ///
+    /// Every save path in this app writes WAV bytes (`save_wav`/`save_wav_with`), but a buffer
+    /// can now be *loaded* from a `.flac` or `.aif` (`io::load_audio`). Saving such a buffer in
+    /// place would silently overwrite the source with WAV bytes under a misleading extension —
+    /// corrupting a file that was only ever meant to be read. Callers redirect to Save As
+    /// instead, prefilled with a `.wav` name.
+    fn wav_save_path(doc: &Document) -> Option<PathBuf> {
+        let path = doc.path.as_ref()?;
+        let is_wav =
+            path.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav"));
+        is_wav.then(|| path.clone())
+    }
+
     fn save_buffer(&mut self, idx: usize) {
+        // A non-WAV-backed buffer routes through Save As, the same as a never-saved one —
+        // both are "this buffer has no file we may write to in place".
+        let redirect = self
+            .documents
+            .get(idx)
+            .is_some_and(|d| d.path.is_some() && Self::wav_save_path(d).is_none());
+        if redirect {
+            self.queue_save_as(vec![idx], None);
+            return;
+        }
         if let Some(doc) = self.documents.get_mut(idx) {
-            if let Some(path) = doc.path.clone() {
+            if let Some(path) = Self::wav_save_path(doc) {
                 if save_wav(doc, &path).is_ok() {
                     doc.dirty = false;
                     self.file_panel.mark_dirty(&path, false);
@@ -10844,7 +10869,7 @@ impl App {
     /// in-memory buffer over it.
     fn reload_buffer_from_disk(&mut self, idx: usize) {
         let Some(path) = self.documents.get(idx).and_then(|d| d.path.clone()) else { return };
-        let Ok(document) = crate::model::io::load_wav(&path) else { return };
+        let Ok(document) = crate::model::io::load_audio(&path) else { return };
         self.documents[idx] = document;
         self.histories[idx] = crate::model::history::History::new();
         self.file_panel.mark_dirty(&path, false);
@@ -11189,7 +11214,7 @@ impl App {
         if let Some((path, started)) = self.audition_pending.clone() {
             if Instant::now().duration_since(started) >= AUDITION_DEBOUNCE {
                 self.audition_pending = None;
-                if let Ok(document) = crate::model::io::load_wav(&path) {
+                if let Ok(document) = crate::model::io::load_audio(&path) {
                     self.audition_audio = AudioEngine::try_new(document.channels, document.sample_rate);
                     if let Some(engine) = &self.audition_audio {
                         engine.play(0);
@@ -11578,7 +11603,7 @@ impl App {
         if let Some(audio) = self.audio.take() {
             drop(audio);
         }
-        match crate::model::io::load_wav(&path) {
+        match crate::model::io::load_audio(&path) {
             Ok(mut document) => {
                 self.file_panel.focused = false;
                 self.file_panel.filtering = false;
@@ -11623,7 +11648,10 @@ impl App {
             if !document.dirty {
                 continue;
             }
-            if let Some(path) = document.path.clone() {
+            // A buffer loaded from a FLAC/AIFF has no path we may write WAV bytes to (see
+            // `wav_save_path`). It is skipped and stays dirty rather than interrupting the
+            // batch with a modal — the same treatment an unnamed curve already gets below.
+            if let Some(path) = Self::wav_save_path(document) {
                 if save_wav(document, &path).is_ok() {
                     document.dirty = false;
                     self.file_panel.mark_dirty(&path, false);
@@ -11659,15 +11687,18 @@ impl App {
             self.should_quit = true;
             return;
         }
-        self.queue_save_as(unnamed, SaveAsQueueThen::Quit);
+        self.queue_save_as(unnamed, Some(SaveAsQueueThen::Quit));
     }
 
     /// Starts (or continues) a queued Save-As sequence: `indices` in the order they should
     /// be prompted, `then` run once they're all done.
-    fn queue_save_as(&mut self, mut indices: Vec<usize>, then: SaveAsQueueThen) {
+    /// `then` is what to do once every queued prompt is answered — `None` when the Save As is
+    /// an end in itself (saving one buffer that has no writable path of its own), which
+    /// `save_as_queue_then` already represented but the parameter didn't allow expressing.
+    fn queue_save_as(&mut self, mut indices: Vec<usize>, then: Option<SaveAsQueueThen>) {
         indices.reverse(); // popped from the back, so store back-to-front for prompt order
         self.save_as_queue = indices;
-        self.save_as_queue_then = Some(then);
+        self.save_as_queue_then = then;
         self.advance_save_as_queue();
     }
 
@@ -12931,7 +12962,7 @@ impl App {
         if action == Action::LoadPitchCurve {
             let mut picker = FilePanel::new_with_extension(
                 self.file_panel.directory.clone(),
-                crate::model::curve::CURVE_EXTENSION,
+                &[crate::model::curve::CURVE_EXTENSION],
                 "Load Pitch Curve",
             );
             picker.focused = true;
@@ -13250,9 +13281,10 @@ impl App {
         match action {
             Action::Save => {
                 let doc = &self.documents[idx];
-                if doc.path.is_some() {
-                    // Has a path — saved through the mutable path below.
-                } else {
+                // Never saved, or loaded from a format this app can't write back (FLAC/AIFF —
+                // see `wav_save_path`): both need a filename, so both go to Save As, which
+                // prefills a `.wav` name from the stem.
+                if Self::wav_save_path(doc).is_none() {
                     return self.handle_action(Action::SaveAs);
                 }
             }
@@ -13319,7 +13351,7 @@ impl App {
                 self.histories[idx].redo(document);
             }
             Action::Save => {
-                if let Some(path) = document.path.clone() {
+                if let Some(path) = Self::wav_save_path(document) {
                     if save_wav(document, &path).is_ok() {
                         document.dirty = false;
                         self.file_panel.mark_dirty(&path, false);
@@ -13327,13 +13359,22 @@ impl App {
                 }
             }
             Action::SaveAs => {
+                // Built from the *stem*, not the file name: a buffer loaded from `beta.flac`
+                // must prefill `beta.wav`, since Save As only ever writes WAV and
+                // `ensure_wav_extension` on the full name would produce `beta.flac.wav`.
+                // Identical to the file name for a `.wav`-backed buffer.
                 let name = document
                     .path
                     .as_ref()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().to_string())
+                    .and_then(|p| p.file_stem())
+                    .map(|n| format!("{}.wav", n.to_string_lossy()))
                     .unwrap_or_else(|| "untitled.wav".to_string());
                 self.save_as_input = TextInput::fresh(name);
+                // Default to the source's own depth, matching what `advance_save_as_queue`
+                // does for the queued path — without this, Save As opened directly showed
+                // whatever depth was last used rather than the document's.
+                self.save_as_depth = BitDepth::from_bits(document.bits_per_sample);
+                self.save_as_dither = false;
                 self.save_as_focused = 0;
                 self.save_as_active = true;
             }
@@ -28454,6 +28495,71 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A buffer loaded from a FLAC has no path this app may write to: every save path emits
+    /// WAV bytes, so saving in place would overwrite the source under a misleading extension.
+    #[test]
+    fn a_non_wav_backed_buffer_has_no_in_place_save_path() {
+        let mut doc = doc_with_channels(vec![vec![0.1f32; 8]]);
+        doc.path = Some(PathBuf::from("/tmp/take.flac"));
+        assert!(App::wav_save_path(&doc).is_none());
+
+        doc.path = Some(PathBuf::from("/tmp/take.aif"));
+        assert!(App::wav_save_path(&doc).is_none());
+
+        doc.path = Some(PathBuf::from("/tmp/take.WAV"));
+        assert!(App::wav_save_path(&doc).is_some(), "the extension check is case-insensitive");
+
+        doc.path = None;
+        assert!(App::wav_save_path(&doc).is_none());
+    }
+
+    /// Quick Save on such a buffer must open Save As — prefilled with a `.wav` name — rather
+    /// than failing silently or corrupting the FLAC.
+    #[test]
+    fn quick_save_on_a_flac_backed_buffer_redirects_to_save_as() {
+        let dir = std::env::temp_dir().join(format!("tui_wave_flac_save_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let flac = dir.join("take.flac");
+        std::fs::copy("tests/fixtures/stereo_sine.flac", &flac).unwrap();
+        let before = std::fs::read(&flac).unwrap();
+
+        let mut doc = crate::model::io::load_audio(&flac).unwrap();
+        doc.dirty = true;
+        let mut app = new_app(Some(doc), Some(dir.clone()));
+        app.handle_action(Action::Save);
+
+        assert!(app.save_as_active, "Save must open the Save As prompt");
+        assert_eq!(
+            app.save_as_input.value(),
+            "take.wav",
+            "prefilled from the stem — 'take.flac' would become 'take.flac.wav' on submit",
+        );
+        assert_eq!(
+            app.save_as_depth,
+            BitDepth::Int16,
+            "the prompt defaults to the source's own depth, not whatever was last used",
+        );
+        assert_eq!(
+            std::fs::read(&flac).unwrap(),
+            before,
+            "the source FLAC must be byte-identical — no WAV bytes written over it",
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Save All must skip such a buffer rather than interrupting the batch with a modal, and
+    /// leave it dirty so the user still knows it is unsaved.
+    #[test]
+    fn save_all_skips_a_non_wav_backed_buffer_and_leaves_it_dirty() {
+        let mut doc = doc_with_channels(vec![vec![0.1f32; 8]]);
+        doc.path = Some(PathBuf::from("/nonexistent/take.flac"));
+        doc.dirty = true;
+        let mut app = new_app(Some(doc), None);
+        app.save_all();
+        assert!(app.documents[0].dirty, "skipped, so it stays dirty");
+        assert!(!app.save_as_active, "and no modal interrupts the batch");
     }
 
     /// Builds a 6-channel document saved to a temp dir, exports it, and reads back what

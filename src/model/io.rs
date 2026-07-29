@@ -4,6 +4,157 @@ use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 
 use super::document::Document;
 
+/// Extensions the Files panel lists and [`load_audio`] can open, lowercase, no leading dot.
+///
+/// MP3 is deliberately absent: it is an export-only delivery format here (see
+/// `model::export`), never something a session's working buffer is decoded from.
+pub const IMPORT_EXTENSIONS: &[&str] = &["wav", "flac", "aif", "aiff"];
+
+/// Opens any supported audio file, dispatching on extension.
+///
+/// `.wav` goes to [`load_wav`] rather than through symphonia, and that routing is
+/// load-bearing: `load_wav` is the only reader that picks up the BWF `cue `/`adtl` markers and
+/// the `bext` chunk (`model::bwf`), which symphonia would silently drop. Everything else goes
+/// to [`load_symphonia`].
+///
+/// CDP's runner keeps calling `load_wav` directly — its outputs are always WAV, so a probe
+/// there would buy nothing.
+pub fn load_audio(path: impl AsRef<Path>) -> color_eyre::Result<Document> {
+    let path: PathBuf = path.as_ref().to_path_buf();
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "wav" => load_wav(&path),
+        "flac" | "aif" | "aiff" => load_symphonia(&path),
+        // Named rather than generic: the Files panel only ever offers `IMPORT_EXTENSIONS`, so
+        // reaching this means a path typed or passed on the command line.
+        other => Err(color_eyre::eyre::eyre!(
+            "unsupported audio format '{other}' — this build opens {}",
+            IMPORT_EXTENSIONS.join(", "),
+        )),
+    }
+}
+
+/// Decodes a non-WAV file (FLAC, AIFF) into the same deinterleaved f32 `Document` every other
+/// path produces.
+///
+/// `markers` and `bext` come back empty — both are RIFF chunks with no equivalent here.
+/// (FLAC's CUESHEET block and AIFF's `MARK` chunk could carry markers; reading them is a
+/// deliberate follow-up, not part of this.) The `.headstails` sidecar *is* read, because it
+/// sits next to the audio file rather than inside it and so is format-agnostic by
+/// construction.
+fn load_symphonia(path: &Path) -> color_eyre::Result<Document> {
+    use symphonia::core::audio::Signal;
+    use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::errors::Error as SymphoniaError;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let file = std::fs::File::open(path)?;
+    let stream = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let probed = symphonia::default::get_probe().format(
+        &hint,
+        stream,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    )?;
+    let mut format = probed.format;
+    let track = format
+        .default_track()
+        .ok_or_else(|| color_eyre::eyre::eyre!("no audio track in {}", path.display()))?;
+    let track_id = track.id;
+    let params = track.codec_params.clone();
+    let sample_rate = params
+        .sample_rate
+        .ok_or_else(|| color_eyre::eyre::eyre!("{} declares no sample rate", path.display()))?;
+    let channel_count = params
+        .channels
+        .map(|c| c.count())
+        .ok_or_else(|| color_eyre::eyre::eyre!("{} declares no channels", path.display()))?;
+    // 32 matches `Document::bits_per_sample`'s "synthesized buffer" default — a format that
+    // declares no source depth is closer to that than to a guess.
+    let bits_per_sample = params.bits_per_sample.unwrap_or(32) as u16;
+
+    let mut decoder =
+        symphonia::default::get_codecs().make(&params, &DecoderOptions::default())?;
+    let mut channels: Vec<Vec<f32>> = vec![Vec::new(); channel_count];
+    if let Some(frames) = params.n_frames {
+        for ch in &mut channels {
+            ch.reserve(frames as usize);
+        }
+    }
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            // The reader signals a clean end of stream as an I/O EOF rather than a dedicated
+            // variant, so this is the normal way out of the loop, not an error path.
+            Err(SymphoniaError::IoError(e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        match decoder.decode(&packet) {
+            Ok(decoded) => {
+                // Convert whatever the codec produced into planar f32 in one step; every
+                // `AudioBufferRef` variant knows how to do this for itself.
+                let spec = *decoded.spec();
+                let mut buf = symphonia::core::audio::AudioBuffer::<f32>::new(
+                    decoded.capacity() as u64,
+                    spec,
+                );
+                decoded.convert(&mut buf);
+                for (ch, out) in channels.iter_mut().enumerate().take(buf.spec().channels.count()) {
+                    out.extend_from_slice(buf.chan(ch));
+                }
+            }
+            // A corrupt packet mid-file is recoverable: symphonia's own guidance is to skip
+            // it and keep decoding rather than discard everything read so far.
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    // Channels must be equal length — `Document::len_samples` reads channel 0 and the playback
+    // source assumes the rest match it (see `Document::insert_range`'s doc comment for the
+    // panic that invariant exists to prevent). A truncated final packet can leave them ragged.
+    let len = channels.iter().map(|c| c.len()).min().unwrap_or(0);
+    for ch in &mut channels {
+        ch.truncate(len);
+    }
+
+    let head_tail_marks: Vec<usize> = super::headstails::load(path, sample_rate)
+        .into_iter()
+        .map(|m| m.min(len))
+        .collect();
+
+    Ok(Document {
+        head_tail_marks,
+        channels,
+        sample_rate,
+        bits_per_sample,
+        selection: None,
+        cursor: 0,
+        dirty: false,
+        path: Some(path.to_path_buf()),
+        markers: Vec::new(),
+        bext: None,
+    })
+}
+
 pub fn load_wav(path: impl AsRef<Path>) -> color_eyre::Result<Document> {
     let path: PathBuf = path.as_ref().to_path_buf();
     let mut reader = WavReader::open(&path)?;
@@ -213,6 +364,87 @@ pub fn save_wav_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FLAC is lossless, so a strong assertion is available: the decoded samples must match
+    /// the WAV they were made from to within one 16-bit quantization step.
+    #[test]
+    fn load_audio_decodes_flac_losslessly() {
+        let wav = load_audio("tests/fixtures/stereo_sine.wav").unwrap();
+        let flac = load_audio("tests/fixtures/stereo_sine.flac").unwrap();
+        assert_eq!(flac.channel_count(), wav.channel_count());
+        assert_eq!(flac.sample_rate, wav.sample_rate);
+        assert_eq!(flac.len_samples(), wav.len_samples());
+        assert_eq!(flac.bits_per_sample, 16);
+        let step = 1.0 / 32768.0;
+        for (ch, (a, b)) in flac.channels.iter().zip(&wav.channels).enumerate() {
+            for (i, (x, y)) in a.iter().zip(b).enumerate() {
+                assert!((x - y).abs() <= step, "flac ch{ch}[{i}]: {x} vs {y}");
+            }
+        }
+    }
+
+    #[test]
+    fn load_audio_decodes_aiff() {
+        let wav = load_audio("tests/fixtures/stereo_sine.wav").unwrap();
+        let aiff = load_audio("tests/fixtures/stereo_sine.aif").unwrap();
+        assert_eq!(aiff.channel_count(), 2);
+        assert_eq!(aiff.sample_rate, wav.sample_rate);
+        assert_eq!(aiff.len_samples(), wav.len_samples());
+        let step = 1.0 / 32768.0;
+        for (a, b) in aiff.channels.iter().zip(&wav.channels) {
+            for (x, y) in a.iter().zip(b) {
+                assert!((x - y).abs() <= step);
+            }
+        }
+    }
+
+    /// MP3 is export-only. A fixture exists so this can assert the refusal is real rather than
+    /// incidental — the Files panel never offers one, but a command-line path can reach here.
+    #[test]
+    fn load_audio_refuses_mp3_and_other_unsupported_extensions() {
+        let err = match load_audio("tests/fixtures/stereo_sine.mp3") {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("mp3 must not be importable"),
+        };
+        assert!(err.contains("mp3"), "the message must name the extension: {err}");
+
+        let err = match load_audio("tests/fixtures/whatever.xyz") {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("an unknown extension must not load"),
+        };
+        assert!(err.contains("xyz"), "{err}");
+    }
+
+    /// `.wav` must route to `load_wav`, not symphonia — it is the only reader that picks up
+    /// BWF markers, so their survival is the proof the routing happened.
+    #[test]
+    fn load_audio_keeps_bwf_markers_by_routing_wav_to_load_wav() {
+        let tmp = std::env::temp_dir().join(format!("tui_wave_load_audio_wav_{}.wav", std::process::id()));
+        let mut doc = load_wav("tests/fixtures/stereo_sine.wav").unwrap();
+        doc.markers = vec![super::super::document::Marker { position: 1234, label: "here".into() }];
+        save_wav(&doc, &tmp).unwrap();
+
+        let reloaded = load_audio(&tmp).unwrap();
+        assert_eq!(reloaded.markers.len(), 1);
+        assert_eq!(reloaded.markers[0].position, 1234);
+        assert_eq!(reloaded.markers[0].label, "here");
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    /// The `.headstails` sidecar sits next to the audio rather than inside it, so it works for
+    /// every importable format — including the ones symphonia decodes.
+    #[test]
+    fn load_audio_reads_the_headstails_sidecar_beside_a_flac() {
+        let dir = std::env::temp_dir().join(format!("tui_wave_ht_flac_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let flac = dir.join("take.flac");
+        std::fs::copy("tests/fixtures/stereo_sine.flac", &flac).unwrap();
+        super::super::headstails::save(&flac, &[4410, 8820], 44100);
+
+        let doc = load_audio(&flac).unwrap();
+        assert_eq!(doc.head_tail_marks, vec![4410, 8820]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn loads_mono_wav() {

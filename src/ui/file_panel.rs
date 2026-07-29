@@ -42,10 +42,12 @@ pub struct FilePanel {
     /// and as the page size for `move_page_up`/`move_page_down`. Updated every render, so
     /// PgUp/PgDn always moves by exactly one screenful regardless of terminal size.
     visible_rows: usize,
-    /// The file extension this panel lists (case-insensitive, no leading dot) — `"wav"` for
-    /// the main Files panel, `"pc"` for the "Load Pitch Curve..." picker
-    /// (`Dialog::LoadCurve`), CDP's own pitch-curve save format.
-    extension: &'static str,
+    /// The file extensions this panel lists (case-insensitive, no leading dot) —
+    /// `io::IMPORT_EXTENSIONS` for the main Files panel, `["pc"]` for the "Load Pitch
+    /// Curve..." picker (`Dialog::LoadCurve`), CDP's own pitch-curve save format. A slice
+    /// rather than one extension because the main panel now lists every importable audio
+    /// format intermixed, sorted by name like any other listing.
+    extensions: &'static [&'static str],
     /// Title shown in the panel's own border (`" {label} (N) "`) — "Files" for the main
     /// panel, something more specific (e.g. "Load Pitch Curve") for a picker reusing this
     /// widget inside a modal dialog.
@@ -54,16 +56,20 @@ pub struct FilePanel {
 
 impl FilePanel {
     pub fn new(directory: PathBuf) -> Self {
-        Self::new_with(directory, "wav", "Files")
+        Self::new_with(directory, crate::model::io::IMPORT_EXTENSIONS, "Files")
     }
 
-    /// A picker variant filtered to a different extension than the main panel's `.wav` —
-    /// see `extension`'s doc comment.
-    pub fn new_with_extension(directory: PathBuf, extension: &'static str, label: &'static str) -> Self {
-        Self::new_with(directory, extension, label)
+    /// A picker variant filtered to different extensions than the main panel's importable
+    /// audio formats — see `extensions`'s doc comment.
+    pub fn new_with_extension(
+        directory: PathBuf,
+        extensions: &'static [&'static str],
+        label: &'static str,
+    ) -> Self {
+        Self::new_with(directory, extensions, label)
     }
 
-    fn new_with(directory: PathBuf, extension: &'static str, label: &'static str) -> Self {
+    fn new_with(directory: PathBuf, extensions: &'static [&'static str], label: &'static str) -> Self {
         let mut panel = Self {
             directory,
             entries: Vec::new(),
@@ -75,7 +81,7 @@ impl FilePanel {
             dirty_paths: HashSet::new(),
             rects: Vec::new(),
             visible_rows: 10,
-            extension,
+            extensions,
             label,
         };
         panel.scan();
@@ -83,16 +89,16 @@ impl FilePanel {
     }
 
     pub fn scan(&mut self) {
-        self.entries = Self::scan_dir(&self.directory, self.extension);
+        self.entries = Self::scan_dir(&self.directory, self.extensions);
         let count = self.entries.len();
         self.selected = self.selected.min(count.saturating_sub(1));
         self.clamp_scroll();
     }
 
     /// Lists `..` (unless at the filesystem root), then subdirectories, then files whose
-    /// extension matches `extension` (case-insensitive) — dirs and files each sorted
-    /// case-insensitively.
-    pub fn scan_dir(dir: &Path, extension: &str) -> Vec<FileEntry> {
+    /// extension matches any of `extensions` (case-insensitive) — dirs and files each sorted
+    /// case-insensitively, so the accepted formats intermix in one alphabetical list.
+    pub fn scan_dir(dir: &Path, extensions: &[&str]) -> Vec<FileEntry> {
         let mut dirs = Vec::new();
         let mut files = Vec::new();
         if let Ok(readdir) = std::fs::read_dir(dir) {
@@ -103,7 +109,10 @@ impl FilePanel {
                 };
                 if path.is_dir() {
                     dirs.push(FileEntry { name, path, kind: EntryKind::Dir });
-                } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case(extension)) {
+                } else if path
+                    .extension()
+                    .is_some_and(|e| extensions.iter().any(|x| e.eq_ignore_ascii_case(x)))
+                {
                     files.push(FileEntry { name, path, kind: EntryKind::File });
                 }
             }
@@ -371,11 +380,39 @@ mod tests {
     #[test]
     fn scan_finds_wav_files() {
         let dir = Path::new("tests/fixtures");
-        let entries = FilePanel::scan_dir(dir, "wav");
+        let entries = FilePanel::scan_dir(dir, &["wav"]);
         assert!(entries.len() >= 2, "expected at least 2 .wav files in tests/fixtures, found {}", entries.len());
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"mono_sine.wav"));
         assert!(names.contains(&"stereo_sine.wav"));
+    }
+
+    /// The main panel lists every importable audio format intermixed in one alphabetical
+    /// list — and the `.mp3` fixture proves export-only formats stay out of it.
+    #[test]
+    fn scan_lists_every_importable_format_and_excludes_the_rest() {
+        use std::fs;
+        let base = std::env::temp_dir().join(format!("tui_wave_multiformat_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        // `scan_dir` only looks at extensions, so the contents don't matter here.
+        for name in ["b.wav", "a.flac", "d.AIFF", "c.aif", "e.mp3", "f.txt"] {
+            fs::write(base.join(name), b"x").unwrap();
+        }
+
+        let entries = FilePanel::scan_dir(&base, crate::model::io::IMPORT_EXTENSIONS);
+        let names: Vec<&str> = entries
+            .iter()
+            .filter(|e| matches!(e.kind, EntryKind::File))
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["a.flac", "b.wav", "c.aif", "d.AIFF"],
+            "importable formats intermix and sort by name; .mp3 and .txt are excluded",
+        );
+
+        fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -385,7 +422,7 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("subdir")).unwrap();
         fs::write(base.join("a.wav"), b"x").unwrap(); // scan only checks the extension
-        let entries = FilePanel::scan_dir(&base, "wav");
+        let entries = FilePanel::scan_dir(&base, &["wav"]);
 
         assert_eq!(entries[0].name, "..");
         assert!(matches!(entries[0].kind, EntryKind::Parent));

@@ -17,13 +17,13 @@ fn main() -> color_eyre::Result<()> {
             (None, Some(Path::new(p).to_path_buf()))
         }
         Some(ref p) if Path::new(p).is_file() => {
-            let doc = Some(model::io::load_wav(p)?);
+            let doc = Some(model::io::load_audio(p)?);
             let dir = Path::new(p).parent().map(|d| d.to_path_buf());
             (doc, dir)
         }
         Some(p) => {
-            // Try as file anyway; load_wav will report the error
-            let doc = Some(model::io::load_wav(&p)?);
+            // Try as file anyway; load_audio will report the error
+            let doc = Some(model::io::load_audio(&p)?);
             let dir = Path::new(&p).parent().map(|d| d.to_path_buf());
             (doc, dir)
         }
