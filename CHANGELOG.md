@@ -15,7 +15,8 @@
   different dB gutter marks beside each. The undividable leftover row was going to one pane,
   and every amplitude-to-row mapping is derived from the pane's height. Every channel now gets
   the same height, and an odd one, which is also what puts amplitude zero on a real centre row
-  instead of between two rows.
+  instead of between two rows. The rows that leaves over sit below the last channel, so the
+  panes themselves stay flush against each other.
 - **Fixed: zero-crossing snap did nothing at all on stereo.** It required every channel to
   cross zero at the same sample index and agree on rounding, which two channels even three
   samples out of phase never satisfy — so the boundary was returned untouched. It now snaps to
