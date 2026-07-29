@@ -1,8 +1,15 @@
 use std::ops::Range;
 use std::path::PathBuf;
 
-/// Search window for zero-crossing snapping, in samples on each side of the boundary.
-const ZERO_CROSSING_MAX_OFFSET: usize = 256;
+/// Search window for zero-crossing snapping, in seconds on each side of the boundary — see
+/// `Document::zero_crossing_window`.
+const ZERO_CROSSING_WINDOW_SECS: f64 = 0.005;
+
+/// Amplitude at or below which a boundary counts as click-free outright (-40 dBFS) — the
+/// floor under `snap_to_zero_crossing`'s "as good as the best nearby" tolerance, so that a
+/// window whose best candidate is essentially zero still accepts the ordinary crossings
+/// around it instead of demanding one just as perfect.
+const ZERO_CROSSING_NEAR_ZERO: f32 = 0.01;
 
 use super::selection::Selection;
 
@@ -134,82 +141,68 @@ impl Document {
         }
     }
 
-    /// Adjust `pos` to the nearest zero crossing (sign change or near-zero sample)
-    /// within a search window. Returns the original position if no crossing is found
-    /// within the window or if the channel data is empty/insufficient.
-    /// Check if ALL channels are satisfied at position `i` (zero, near-zero, or
-    /// crossing) and whether they agree on snapping to `i` or `i+1`. Returns the
-    /// consensus snapped position and whether all channels pass.
-    fn channel_agreement(&self, i: usize) -> (usize, bool) {
-        if self.channels.is_empty() {
-            return (i, false);
-        }
-        // All channels must agree on the same snap target (i or i+1).
-        // None: position is unusable.
-        // Some(true): snap to i+1.
-        // Some(false): snap to i.
-        let mut consensus: Option<bool> = None;
-        for ch in &self.channels {
-            if i >= ch.len() {
-                return (i, false);
-            }
-            if ch[i] == 0.0 {
-                // True zero — always snaps to i regardless of other channels.
-                consensus = Some(false);
-                continue;
-            }
-            let near_zero = ch[i].abs() < 0.001;
-            let is_crossing = i + 1 < ch.len()
-                && (ch[i] > 0.0 && ch[i + 1] <= 0.0
-                    || ch[i] < 0.0 && ch[i + 1] >= 0.0);
-            if is_crossing && !near_zero {
-                // This channel wants i+1. If another channel already said i, fail.
-                if consensus == Some(false) {
-                    return (i, false);
-                }
-                consensus = Some(true);
-            } else if near_zero {
-                // Snaps to i. If another channel already said i+1, fail.
-                if consensus == Some(true) {
-                    return (i, false);
-                }
-                consensus = Some(false);
-            } else {
-                return (i, false);
-            }
-        }
-        match consensus {
-            Some(true) => (i + 1, true),
-            Some(false) => (i, true),
-            None => (i, false),
-        }
-    }
-
+    /// Adjusts `pos` to the nearby point of **least discontinuity** — the sample at which
+    /// every channel is simultaneously closest to zero — so a cut, paste or loop boundary
+    /// there produces no click.
+    ///
+    /// Scored, not matched: each candidate's cost is the loudest channel at that sample
+    /// (`max |ch[i]|`), and the smallest cost in the window wins, ties going to the candidate
+    /// nearest `pos`. The previous rule instead required *every* channel to be near-zero or
+    /// sign-changing at the exact same index and to agree on rounding to `i` or `i+1`, which
+    /// two channels even three samples out of phase never satisfy — so on any real stereo
+    /// file the search found no valid candidate and returned `pos` untouched, i.e. zero-snap
+    /// silently did nothing at all (user report: "i can't see it working", with a screenshot
+    /// of a stereo selection whose edges sat mid-slope). Measured on a 220Hz tone at 96kHz:
+    /// mono snapped 5000 to 5019, stereo returned 5000 unchanged.
+    ///
+    /// A candidate always exists, so this always lands somewhere; in a loud passage that is
+    /// the quietest nearby sample rather than a true crossing, which is still the least
+    /// clicking place to cut in that window.
+    ///
+    /// Among *equally serviceable* candidates the nearest one wins, which is what keeps the
+    /// snap from wandering: at 96kHz a 220Hz tone crosses zero roughly every 220 samples, so
+    /// a ±480-sample window holds several crossings that are all click-free, and taking the
+    /// numerically smallest sample among them moved the edge by 200 samples for no audible
+    /// gain. "Serviceable" is twice the window's best cost, floored at
+    /// [`ZERO_CROSSING_NEAR_ZERO`] so a near-perfect best doesn't make the tolerance
+    /// vanishingly tight.
     pub fn snap_to_zero_crossing(&self, pos: usize) -> usize {
         if self.channels.is_empty() || self.channels[0].is_empty()
             || pos >= self.channels[0].len()
         {
             return pos;
         }
-        let search_start = pos.saturating_sub(ZERO_CROSSING_MAX_OFFSET);
-        let search_end = (pos + ZERO_CROSSING_MAX_OFFSET).min(self.channels[0].len());
+        let window = self.zero_crossing_window();
+        let search_start = pos.saturating_sub(window);
+        let search_end = (pos + window).min(self.channels[0].len());
 
-        let mut best = pos;
-        let mut best_dist = usize::MAX;
-        for i in search_start..search_end {
-            let (snap_i, valid) = self.channel_agreement(i);
-            if valid {
-                let dist = snap_i.abs_diff(pos);
-                if dist < best_dist {
-                    best_dist = dist;
-                    best = snap_i;
-                }
-                if self.channels.iter().all(|ch| ch[i] == 0.0) {
-                    return i;
-                }
-            }
+        // The worst channel at a sample: a boundary is only click-free if *all* of them are
+        // quiet there, so the loudest one is what decides.
+        let cost = |i: usize| -> f32 {
+            self.channels
+                .iter()
+                .map(|ch| ch.get(i).map_or(f32::INFINITY, |s| s.abs()))
+                .fold(0.0f32, f32::max)
+        };
+
+        let best_cost = (search_start..search_end).map(cost).fold(f32::INFINITY, f32::min);
+        if !best_cost.is_finite() {
+            return pos;
         }
-        best
+        let tolerance = (best_cost * 2.0).max(ZERO_CROSSING_NEAR_ZERO);
+        (search_start..search_end)
+            .filter(|&i| cost(i) <= tolerance)
+            .min_by_key(|&i| i.abs_diff(pos))
+            .unwrap_or(pos)
+    }
+
+    /// How far either side of a boundary [`snap_to_zero_crossing`] looks, in samples.
+    ///
+    /// Defined as a span of *time* rather than a sample count so it covers the same amount of
+    /// audio at any rate: a fixed 256 samples was 5.8ms at 44.1kHz but only 2.7ms at 96kHz,
+    /// narrow enough there to miss the crossings of anything low-frequency.
+    fn zero_crossing_window(&self) -> usize {
+        ((self.sample_rate as f64 * ZERO_CROSSING_WINDOW_SECS) as usize).max(1)
     }
 
     /// Snap both ends of a normalized (start <= end) range to zero crossings.
@@ -558,10 +551,72 @@ mod tests {
     #[test]
     fn snap_to_zero_crossing_finds_sign_change() {
         let d = doc(vec![0.5, 0.3, 0.1, -0.1, -0.3, -0.5]);
-        // Pos 2 (value 0.1) is just before the crossing at 2→3.
-        // Snapping should find the zero crossing between 2 and 3.
-        let snapped = d.snap_to_zero_crossing(2);
-        assert_eq!(snapped, 3);
+        // The crossing lies between samples 2 and 3, which are equally close to zero (±0.1)
+        // and therefore equally click-free. The nearer of the two to the requested position
+        // wins, so asking at 2 stays at 2 and asking at 3 stays at 3 — either is "the"
+        // crossing, and moving the boundary a sample for no gain is what the distance
+        // tie-break exists to prevent.
+        assert_eq!(d.snap_to_zero_crossing(2), 2);
+        assert_eq!(d.snap_to_zero_crossing(3), 3);
+        // From further out, it lands on the near side of the crossing.
+        assert_eq!(d.snap_to_zero_crossing(0), 2);
+        assert_eq!(d.snap_to_zero_crossing(5), 3);
+    }
+
+    /// The bug this scoring replaced: `channel_agreement` required every channel to be
+    /// near-zero or sign-changing at the *same* sample index and to agree on rounding, which
+    /// two channels even a few samples out of phase never satisfy — so on a real stereo file
+    /// the snap silently did nothing at all (user report: "i can't see it working").
+    #[test]
+    fn snap_to_zero_crossing_works_on_stereo_channels_that_are_out_of_phase() {
+        let sr = 96_000.0f32;
+        let tone = |phase: f32| -> Vec<f32> {
+            (0..20_000)
+                .map(|i| 0.4 * (2.0 * std::f32::consts::PI * 220.0 * (i as f32 + phase) / sr).sin())
+                .collect()
+        };
+        let stereo = Document {
+            channels: vec![tone(0.0), tone(3.0)],
+            sample_rate: 96_000,
+            ..Default::default()
+        };
+        let mono = Document { channels: vec![tone(0.0)], sample_rate: 96_000, ..Default::default() };
+
+        for pos in [5_000usize, 5_100, 5_200, 5_300] {
+            let snapped = stereo.snap_to_zero_crossing(pos);
+            assert_ne!(snapped, pos, "stereo snapping must actually move the boundary at {pos}");
+            // And it lands essentially where the mono file's own snap does — within a few
+            // samples, since that is all the two channels are apart.
+            assert!(
+                snapped.abs_diff(mono.snap_to_zero_crossing(pos)) <= 8,
+                "stereo snapped to {snapped}, mono to {}",
+                mono.snap_to_zero_crossing(pos)
+            );
+            // Both channels really are quiet there — that is the whole point.
+            for ch in &stereo.channels {
+                assert!(ch[snapped].abs() < 0.05, "channel is at {} at the snapped point", ch[snapped]);
+            }
+        }
+    }
+
+    /// The snap must not wander: several crossings inside the window are all click-free, so
+    /// the nearest one wins rather than whichever sample is numerically smallest.
+    #[test]
+    fn snap_to_zero_crossing_prefers_the_nearest_serviceable_point() {
+        let sr = 96_000.0f32;
+        let samples: Vec<f32> = (0..20_000)
+            .map(|i| 0.4 * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / sr).sin())
+            .collect();
+        let d = Document { channels: vec![samples], sample_rate: 96_000, ..Default::default() };
+        // A 220Hz tone at 96kHz crosses zero every ~218 samples, so a ±480-sample window
+        // holds four of them; the snap must pick one within about half a period.
+        for pos in [5_000usize, 5_100, 5_200, 5_300] {
+            let snapped = d.snap_to_zero_crossing(pos);
+            assert!(
+                snapped.abs_diff(pos) < 120,
+                "snapped from {pos} to {snapped} — further than the nearest crossing"
+            );
+        }
     }
 
     #[test]
