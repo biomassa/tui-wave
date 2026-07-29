@@ -26,6 +26,7 @@ use crate::commands::marker::{
 use crate::commands::paste::paste_command;
 use crate::commands::remove_channels::remove_channels_command;
 use crate::model::channel_export::{self, ChannelExportMode};
+use crate::model::export::{self as audio_export, ExportFormat, ExportSettings};
 use crate::commands::normalize::normalize_command;
 use crate::commands::resample::resample_command;
 use crate::commands::reverse::reverse_command;
@@ -97,6 +98,17 @@ mod er_focus {
     /// `"   [X] "` (7 chars) + the padded label + one space. Clicks left of this toggle
     /// the checkbox; clicks on/after it focus the value field for editing.
     pub const VALUE_COL: u16 = (3 + 3 + 1 + ROW_LABEL_WIDTH + 1) as u16;
+}
+
+/// Focus indices for `Dialog::Export`. The third row swaps between Depth (FLAC) and Bitrate
+/// (MP3) rather than appearing and disappearing, so the focus indices and the rect list stay
+/// the same whichever format is selected — the contract `render_cdp_params_dialog` documents
+/// for its own click targets.
+mod ex_focus {
+    pub const NAME: usize = 0;
+    pub const FORMAT: usize = 1;
+    pub const SETTING: usize = 2;
+    pub const COUNT: usize = 3;
 }
 
 /// Focus indices for `Dialog::ExportChannels`. Only two stops: the channel list (with its own
@@ -810,6 +822,16 @@ enum Dialog {
     /// silence). `focused` is the index of the currently-active field; Tab cycles through.
     /// `tanh_clip` enables a tanh soft-limiter on the mixed output (same as Gain's option).
     MixToMono { inputs: Vec<TextInput>, focused: usize, tanh_clip: bool },
+    /// File ▸ Export: writes the active buffer as FLAC or MP3. Separate from Save/Save As,
+    /// which own the WAV working file. Both the FLAC depth and the MP3 bitrate are kept
+    /// across format switches, so flipping to compare and back doesn't lose the setting.
+    Export {
+        name_input: TextInput,
+        format: ExportFormat,
+        flac_depth: BitDepth,
+        mp3_bitrate: u16,
+        focused: usize,
+    },
     /// Export Channels: one row per source channel, each Mono / Skip / paired with the row
     /// below it (`ChannelExportMode`), written as WAVs into `folder_input`. `selected` is the
     /// highlighted channel row — the list scrolls, because arbitrary channel counts are in
@@ -4305,6 +4327,9 @@ impl App {
             Dialog::ExportChannels { folder_input, focused, .. } => {
                 (*focused == ec_focus::SUBFOLDER).then_some(folder_input)
             }
+            Dialog::Export { name_input, focused, .. } => {
+                (*focused == ex_focus::NAME).then_some(name_input)
+            }
             Dialog::RemoveEmptyChannels { input }
             | Dialog::Normalize { input }
             | Dialog::Resample { input, .. }
@@ -4506,6 +4531,22 @@ impl App {
                 Some(Dialog::Normalize { input }) => {
                     let db = input.value().parse::<f32>().unwrap_or(-1.0).min(0.0);
                     self.apply_normalize(db);
+                }
+                Some(Dialog::Export { name_input, format, flac_depth, mp3_bitrate, focused: _ }) => {
+                    let name = ensure_extension(name_input.value().trim(), format.extension());
+                    if name_input.value().trim().is_empty() {
+                        self.dialog = Some(Dialog::Export {
+                            name_input, format, flac_depth, mp3_bitrate, focused: ex_focus::NAME,
+                        });
+                        return;
+                    }
+                    let settings = match format {
+                        ExportFormat::Flac => {
+                            ExportSettings::Flac { depth: flac_depth, dither: false }
+                        }
+                        ExportFormat::Mp3 => ExportSettings::Mp3 { bitrate_kbps: mp3_bitrate },
+                    };
+                    self.run_export(&name, settings);
                 }
                 Some(Dialog::ExportChannels { modes, folder_input, selected, focused: _, header, stem }) => {
                     let folder = folder_input.value().trim().to_string();
@@ -4743,6 +4784,16 @@ impl App {
                     self.stop_cdp_preview_audio();
                     self.dialog = None;
                 }
+            }
+            KeyCode::Left | KeyCode::Right
+                if matches!(self.dialog, Some(Dialog::Export { .. }))
+                    && !matches!(
+                        self.dialog,
+                        Some(Dialog::Export { focused: ex_focus::NAME, .. })
+                    ) =>
+            {
+                let forward = key.code == KeyCode::Right;
+                self.cycle_export_setting(forward);
             }
             KeyCode::Left => {
                 if let Some(Dialog::ExportRegions { focused, depth, .. }) = self.dialog.as_mut() {
@@ -5202,6 +5253,7 @@ impl App {
             }
             Some(Dialog::ExportRegions { focused, .. }) => *focused = step(*focused, er_focus::COUNT),
             Some(Dialog::ExportChannels { focused, .. }) => *focused = step(*focused, ec_focus::COUNT),
+            Some(Dialog::Export { focused, .. }) => *focused = step(*focused, ex_focus::COUNT),
             // Only two columns receive keyboard focus (Groups, Processes — the description
             // column is display-only), so Tab and Shift+Tab both just flip it.
             Some(Dialog::CdpBrowser { focus, groups, .. }) => {
@@ -5375,6 +5427,17 @@ impl App {
             // The channel rows come first, then Subfolder. `ec_scroll_top` is recomputed from
             // the same `selected` the renderer used, so a click can't land on a different
             // channel than the one drawn there.
+            // Three fixed rows: filename, format, and the format-dependent setting. A click
+            // on the format or setting row also cycles it forward, matching how a mouse user
+            // commits a choice everywhere else in this dialog family.
+            Some(Dialog::Export { focused, .. }) => {
+                if row < ex_focus::COUNT {
+                    *focused = row;
+                    if row != ex_focus::NAME {
+                        self.cycle_export_setting(true);
+                    }
+                }
+            }
             Some(Dialog::ExportChannels { modes, selected, focused, .. }) => {
                 let visible = ec_visible_rows(self.last_frame_area, modes.len());
                 let top = ec_scroll_top(*selected, visible, modes.len());
@@ -11509,6 +11572,89 @@ impl App {
         }
     }
 
+    /// ←/→ on `Dialog::Export`'s Format or setting row. Changing the format rewrites the
+    /// filename's extension in place, so what is typed always matches what will be written.
+    fn cycle_export_setting(&mut self, forward: bool) {
+        let Some(Dialog::Export { name_input, format, flac_depth, mp3_bitrate, focused }) =
+            self.dialog.as_mut()
+        else {
+            return;
+        };
+        match *focused {
+            ex_focus::FORMAT => {
+                *format = if forward { format.next() } else { format.prev() };
+                let stem = std::path::Path::new(name_input.value())
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                *name_input = TextInput::new(format!("{stem}.{}", format.extension()));
+            }
+            ex_focus::SETTING => match *format {
+                // FLAC has no float format, so only the two integer depths are offered —
+                // unlike Save As, where 32-bit float is the lossless default.
+                ExportFormat::Flac => {
+                    *flac_depth = if *flac_depth == BitDepth::Int16 {
+                        BitDepth::Int24
+                    } else {
+                        BitDepth::Int16
+                    };
+                }
+                ExportFormat::Mp3 => {
+                    let rates = audio_export::MP3_BITRATES;
+                    let at = rates.iter().position(|r| r == mp3_bitrate).unwrap_or(0);
+                    let next = if forward {
+                        (at + 1) % rates.len()
+                    } else {
+                        (at + rates.len() - 1) % rates.len()
+                    };
+                    *mp3_bitrate = rates[next];
+                }
+            },
+            _ => {}
+        }
+    }
+
+    /// Why the open `Dialog::Export` can't run yet, or `None` when it can — computed in
+    /// `render_overlays` and passed to the renderer, which dims Enter and shows it inline.
+    /// Mirrors `cdp_params_blocker`: state the shortfall the moment the dialog opens rather
+    /// than failing after the user commits.
+    fn export_blocker(&self) -> Option<String> {
+        let Some(Dialog::Export { format, flac_depth, mp3_bitrate, .. }) = &self.dialog else {
+            return None;
+        };
+        let doc = self.active_doc()?;
+        let settings = match format {
+            ExportFormat::Flac => ExportSettings::Flac { depth: *flac_depth, dither: false },
+            ExportFormat::Mp3 => ExportSettings::Mp3 { bitrate_kbps: *mp3_bitrate },
+        };
+        audio_export::blocker(doc, settings)
+    }
+
+    /// Writes the active buffer to `file_name` (File ▸ Export), beside the source file or in
+    /// the Files panel's directory for a never-saved buffer — the same output-directory rule
+    /// `export_regions` and `export_channels` use.
+    ///
+    /// The buffer's own `path` and `dirty` flag are left alone: this produces a delivery copy,
+    /// not a new working file, so it must not make the app think the buffer is now saved.
+    fn run_export(&mut self, file_name: &str, settings: ExportSettings) {
+        let idx = self.active_document;
+        let Some(doc) = self.documents.get(idx) else { return };
+        let dir = doc
+            .path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.file_panel.directory.clone());
+        let path = dir.join(file_name);
+        self.dialog = Some(match audio_export::export(doc, &path, settings) {
+            Ok(()) => {
+                self.file_panel.scan();
+                Dialog::Info { message: format!("Exported {file_name}") }
+            }
+            Err(e) => Dialog::Info { message: format!("Export failed: {e}") },
+        });
+    }
+
     /// Writes one WAV per planned output file into `subfolder`, next to the source file.
     ///
     /// Always WAV, at the source buffer's own sample rate and bit depth — this dialog has no
@@ -12867,6 +13013,32 @@ impl App {
             return;
         }
 
+        if action == Action::Export {
+            if let Some(doc) = self.active_doc() {
+                let stem = doc
+                    .path
+                    .as_ref()
+                    .and_then(|p| p.file_stem())
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "untitled".to_string());
+                let format = ExportFormat::Flac;
+                self.dialog = Some(Dialog::Export {
+                    name_input: TextInput::fresh(format!("{stem}.{}", format.extension())),
+                    format,
+                    // FLAC is integer-only, so the source's own depth is used when it is one
+                    // FLAC can store and 24-bit otherwise (a 32-bit float working buffer has
+                    // no lossless integer equivalent, and 24 loses least).
+                    flac_depth: match BitDepth::from_bits(doc.bits_per_sample) {
+                        BitDepth::Int16 => BitDepth::Int16,
+                        _ => BitDepth::Int24,
+                    },
+                    mp3_bitrate: 320,
+                    focused: ex_focus::NAME,
+                });
+            }
+            return;
+        }
+
         if action == Action::ExportChannels {
             if let Some(doc) = self.active_doc() {
                 let channels = doc.channel_count();
@@ -13089,6 +13261,7 @@ impl App {
             | Action::ToggleDotMatrixGradient
             | Action::ToggleTimeRuler
             | Action::ExportChannels
+            | Action::Export
             | Action::RemoveEmptyChannels
             | Action::ScrollChannelsUp
             | Action::ScrollChannelsDown
@@ -14126,7 +14299,9 @@ impl App {
 
         // Why the open CDP process can't run yet, if anything — computed here rather than in
         // the renderer because it depends on the document and the range the run would use.
-        let blocked = self.cdp_params_blocker();
+        // Both blockers feed the same `blocked` argument — only one dialog can be open, so
+        // at most one of them ever returns Some.
+        let blocked = self.cdp_params_blocker().or_else(|| self.export_blocker());
         let dialog_rects = self
             .dialog
             .as_ref()
@@ -14294,18 +14469,25 @@ fn dirs_home() -> Option<String> {
     std::env::var("HOME").ok().filter(|h| !h.is_empty())
 }
 
-/// Ensures a save/rename target ends in `.wav` (case-insensitive), appending it otherwise.
-/// Empty input is returned unchanged (callers treat empty as "don't save").
-fn ensure_wav_extension(name: &str) -> String {
+/// Ensures a save target ends in `ext` (case-insensitive), appending it otherwise. Empty
+/// input is returned unchanged — every caller treats empty as "don't save".
+///
+/// The one implementation behind `ensure_wav_extension`, `ensure_curve_extension`,
+/// `ensure_matrix_extension` and File ▸ Export's `.flac`/`.mp3`, which were four copies of
+/// this three-line rule.
+fn ensure_extension(name: &str, ext: &str) -> String {
     if name.is_empty()
-        || std::path::Path::new(name)
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+        || std::path::Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))
     {
         name.to_string()
     } else {
-        format!("{name}.wav")
+        format!("{name}.{ext}")
     }
+}
+
+/// Ensures a save/rename target ends in `.wav`.
+fn ensure_wav_extension(name: &str) -> String {
+    ensure_extension(name, "wav")
 }
 
 /// Ensures a curve save target ends in `.pc` (case-insensitive, `model::curve::CURVE_EXTENSION`),
@@ -14313,15 +14495,7 @@ fn ensure_wav_extension(name: &str) -> String {
 /// under a name with no extension (or a stale `.txt` typed by habit) still lands as `.pc`
 /// and shows up in `Dialog::LoadCurve`'s extension-filtered picker.
 fn ensure_curve_extension(name: &str) -> String {
-    if name.is_empty()
-        || std::path::Path::new(name)
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case(crate::model::curve::CURVE_EXTENSION))
-    {
-        name.to_string()
-    } else {
-        format!("{name}.{}", crate::model::curve::CURVE_EXTENSION)
-    }
+    ensure_extension(name, crate::model::curve::CURVE_EXTENSION)
 }
 
 /// File extension a saved matrix-data file (`matrix matrix 1`'s sidecar output) is written
@@ -14332,13 +14506,7 @@ const MATRIX_EXTENSION: &str = "matrix";
 /// Ensures a matrix-data save target ends in `.matrix` (case-insensitive), appending it
 /// otherwise — same convention as `ensure_curve_extension`.
 fn ensure_matrix_extension(name: &str) -> String {
-    if name.is_empty()
-        || std::path::Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case(MATRIX_EXTENSION))
-    {
-        name.to_string()
-    } else {
-        format!("{name}.{MATRIX_EXTENSION}")
-    }
+    ensure_extension(name, MATRIX_EXTENSION)
 }
 
 /// Index of the marker closest to `pos`, or `None` if there are no markers.
@@ -14993,6 +15161,11 @@ fn render_dialog(
                 *fade_in, fade_in_input, *fade_out, fade_out_input, *focused,
             );
         }
+        Dialog::Export { name_input, format, flac_depth, mp3_bitrate, focused } => {
+            return render_export_dialog(
+                frame, area, name_input, *format, *flac_depth, *mp3_bitrate, *focused, blocked,
+            );
+        }
         Dialog::ExportChannels { modes, selected, folder_input, focused, header, stem } => {
             return render_export_channels_dialog(
                 frame, area, modes, *selected, folder_input, *focused, header, stem,
@@ -15103,6 +15276,7 @@ fn render_dialog(
         | Dialog::FormantInfo { .. }
         | Dialog::CdpChainEditor
         | Dialog::ExportChannels { .. }
+        | Dialog::Export { .. }
         | Dialog::LoadCurve { .. } => {
             unreachable!("handled by match arms above")
         }
@@ -15192,6 +15366,120 @@ fn block_inner(popup: Rect) -> Rect {
         width: popup.width.saturating_sub(2),
         height: popup.height.saturating_sub(2),
     }
+}
+
+/// File ▸ Export. Three fixed rows — filename, format, and a setting row that *swaps meaning*
+/// with the format (FLAC depth / MP3 bitrate) rather than appearing and disappearing, so the
+/// focus indices and rect list are the same whichever format is selected.
+///
+/// `blocked` is why the buffer can't be exported (`App::export_blocker`); when set, it replaces
+/// the hints line's Enter with the reason and dims it.
+#[allow(clippy::too_many_arguments)]
+fn render_export_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    name_input: &TextInput,
+    format: ExportFormat,
+    flac_depth: BitDepth,
+    mp3_bitrate: u16,
+    focused: usize,
+    blocked: Option<&str>,
+) -> Vec<Rect> {
+    let width = 58u16.min(area.width);
+    // 2 borders + filename + format + setting + blank + hints, plus up to 3 wrapped rows of
+    // blocker text when there is one.
+    let blocked_rows = blocked.map_or(0, |b| (b.len() as u16).div_ceil(width.saturating_sub(4).max(1)) + 1);
+    let height = (7 + blocked_rows).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+
+    let value_row = |label: &str, value: String, is_focused: bool| {
+        if is_focused {
+            Line::from(vec![
+                Span::styled(format!("{label}◄ "), label_style),
+                Span::styled(value, cursor_style),
+                Span::styled(" ►", label_style),
+            ])
+        } else {
+            Line::from(vec![Span::styled(label.to_string(), label_style), Span::styled(value, base)])
+        }
+    };
+
+    let name_line = if focused == ex_focus::NAME {
+        let (before, under, after) = name_input.split_at_cursor();
+        Line::from(vec![
+            Span::styled(" File name: ", label_style),
+            Span::styled(before, base),
+            Span::styled(under, cursor_style),
+            Span::styled(after, base),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" File name: ", label_style),
+            Span::styled(name_input.value().to_string(), base),
+        ])
+    };
+
+    let (setting_label, setting_value) = match format {
+        ExportFormat::Flac => ("      Depth: ", flac_depth.label().to_string()),
+        ExportFormat::Mp3 => ("    Bitrate: ", format!("{mp3_bitrate} kbps")),
+    };
+
+    let mut lines = vec![
+        name_line,
+        value_row("     Format: ", format.label().to_string(), focused == ex_focus::FORMAT),
+        value_row(setting_label, setting_value, focused == ex_focus::SETTING),
+        Line::from(""),
+    ];
+    if let Some(reason) = blocked {
+        lines.push(Line::from(Span::styled(format!(" {reason}"), dim_style)));
+        lines.push(Line::from(""));
+    }
+
+    let go_style = if blocked.is_none() { hint_style } else { dim_style };
+    lines.push(Line::from(vec![
+        Span::styled(" Tab", hint_style),
+        Span::styled(":next  ", label_style),
+        Span::styled("←→", hint_style),
+        Span::styled(":change  ", label_style),
+        Span::styled("Enter", go_style),
+        Span::styled(":Export  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
+    ]));
+
+    let block = Block::default()
+        .title("Export")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(Style::default().bg(theme::SURFACE0));
+    // `trim: false` — the label column is right-aligned with leading spaces, which `trim: true`
+    // would strip. Wrapping is only really needed for a long blocker message.
+    frame.render_widget(
+        Paragraph::new(lines).block(block).wrap(ratatui::widgets::Wrap { trim: false }),
+        popup,
+    );
+
+    // One rect per interactive row, then the hints bar (always last = submit).
+    (0..=ex_focus::COUNT as u16)
+        .map(|i| Rect {
+            x: popup.x + 1,
+            y: popup.y + 1 + if i as usize == ex_focus::COUNT { height - 3 } else { i },
+            width: popup.width.saturating_sub(2),
+            height: 1,
+        })
+        .collect()
 }
 
 /// Export Channels. Unlike every other dialog in the app this one is *not* a fixed-height
@@ -28495,6 +28783,81 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Export is a delivery copy, not a new working file: the buffer's own path and dirty
+    /// flag must survive it untouched, or the app would think an edited buffer is saved.
+    #[test]
+    fn export_writes_a_file_without_claiming_the_buffer_is_saved() {
+        let dir = std::env::temp_dir().join(format!("tui_wave_export_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("take.wav");
+        let mut doc = doc_with_channels(vec![vec![0.3f32; 4410], vec![-0.3f32; 4410]]);
+        crate::model::io::save_wav(&doc, &src).unwrap();
+        doc.path = Some(src.clone());
+        doc.dirty = true;
+
+        let mut app = new_app(Some(doc), Some(dir.clone()));
+        app.run_export("take.flac", ExportSettings::Flac { depth: BitDepth::Int16, dither: false });
+
+        assert!(dir.join("take.flac").exists(), "the FLAC must be written beside the source");
+        assert_eq!(app.documents[0].path.as_ref(), Some(&src), "the buffer still points at its WAV");
+        assert!(app.documents[0].dirty, "exporting is not saving — the buffer stays dirty");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Changing the format must rewrite the filename's extension, so what is typed always
+    /// matches what will be written — and the third row must swap Depth for Bitrate.
+    #[test]
+    fn cycling_the_export_format_rewrites_the_extension() {
+        let mut app = new_app(Some(doc_with_channels(vec![vec![0.1f32; 4410]; 2])), None);
+        app.handle_action(Action::Export);
+        match &app.dialog {
+            Some(Dialog::Export { name_input, format, flac_depth, .. }) => {
+                assert_eq!(*format, ExportFormat::Flac);
+                assert!(name_input.value().ends_with(".flac"), "{}", name_input.value());
+                assert_eq!(*flac_depth, BitDepth::Int24, "a 32-bit float buffer opens at 24-bit");
+            }
+            _ => panic!("expected the Export dialog"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        match &app.dialog {
+            Some(Dialog::Export { name_input, format, .. }) => {
+                assert_eq!(*format, ExportFormat::Mp3);
+                assert!(name_input.value().ends_with(".mp3"), "{}", name_input.value());
+            }
+            _ => panic!("expected the Export dialog"),
+        }
+
+        // Tab to the setting row: it now cycles bitrate, not depth.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        match &app.dialog {
+            Some(Dialog::Export { mp3_bitrate, flac_depth, .. }) => {
+                assert_ne!(*mp3_bitrate, 320, "the bitrate moved");
+                // Int24 is what the opener picks for a 32-bit float buffer (float has no
+                // lossless integer equivalent in FLAC, and 24 loses least), and it survives
+                // the trip through MP3 unchanged.
+                assert_eq!(*flac_depth, BitDepth::Int24, "the FLAC depth is kept across the switch");
+            }
+            _ => panic!("expected the Export dialog"),
+        }
+    }
+
+    /// The blocker must be live in the dialog, not just in the model — a 6-channel buffer
+    /// shows the reason and dims Enter rather than failing after the user commits.
+    #[test]
+    fn the_export_dialog_blocks_a_multichannel_buffer() {
+        let mut app = new_app(Some(doc_with_channels(vec![vec![0.1f32; 4410]; 6])), None);
+        app.handle_action(Action::Export);
+        let msg = app.export_blocker().expect("6 channels must block");
+        assert!(msg.contains("Export Channels"), "{msg}");
+
+        let mut stereo = new_app(Some(doc_with_channels(vec![vec![0.1f32; 4410]; 2])), None);
+        stereo.handle_action(Action::Export);
+        assert!(stereo.export_blocker().is_none(), "a stereo buffer exports fine");
     }
 
     /// A buffer loaded from a FLAC has no path this app may write to: every save path emits

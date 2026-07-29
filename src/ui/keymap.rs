@@ -95,6 +95,9 @@ pub enum Action {
     /// Split a multichannel buffer into per-channel WAVs (File menu). Menu-only: `Shift+E` is
     /// already Export Regions, and this is a once-per-file step, not a mid-edit reach.
     ExportChannels,
+    /// Write the buffer as FLAC or MP3 (File menu). Menu-only, like the other two exports —
+    /// it's a delivery step at the end of a session, not something reached for mid-edit.
+    Export,
     CdpProcess,
     CdpChain,
     ConfigureCdpDirectory,
@@ -474,6 +477,7 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "ResetConfig" => Some(Action::ResetConfig),
         "ExportRegions" => Some(Action::ExportRegions),
         "ExportChannels" => Some(Action::ExportChannels),
+        "Export" => Some(Action::Export),
         "CdpProcess" => Some(Action::CdpProcess),
         "CdpChain" => Some(Action::CdpChain),
         "ConfigureCdpDirectory" => Some(Action::ConfigureCdpDirectory),
