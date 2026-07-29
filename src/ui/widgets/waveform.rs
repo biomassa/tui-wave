@@ -160,15 +160,20 @@ impl<'a> WaveformWidget<'a> {
             for (sub_col, &(s, e)) in sub_ranges.iter().enumerate() {
                 // A degenerate half (e.g. a 1-sample column split in two) falls back to the
                 // full column's range so it still reflects real data instead of going blank.
+                //
+                // Digital silence is *drawn*, not skipped: a min/max of exactly (0, 0) falls
+                // through to the degenerate-span branch below and puts a dot on the centre
+                // row, which is the waveform's own flat trace at zero. Skipping it left the
+                // zero-line axis showing through instead — and on a file that is 29.5% exact
+                // zeros (the one this was reported on) that is most of the quiet stretches,
+                // where the axis then reads as being drawn over the waveform (user report).
+                // The graphics renderer never had the skip, which is why it looked right.
                 let (min, max) = match self.cache {
                     Some(cache) if s < e => cache.min_max(self.samples, s, e),
                     Some(cache) => cache.min_max(self.samples, start, end),
                     None if s < e => raw_min_max(&self.samples[s..e]),
                     None => raw_min_max(&self.samples[start..end]),
                 };
-                if min == 0.0 && max == 0.0 {
-                    continue;
-                }
 
                 let scaled_min = (min * self.viewport.amplitude_scale).clamp(-1.0, 1.0) as f64;
                 let scaled_max = (max * self.viewport.amplitude_scale).clamp(-1.0, 1.0) as f64;
@@ -306,12 +311,12 @@ mod tests {
         }
     }
 
-    /// A literally silent (all-zero) single-sample column is the one case that should
-    /// legitimately render no *waveform* — there's no amplitude to show a dot for. The
-    /// zero-line axis still draws through it (that's the whole point of the axis: silence is
-    /// exactly where the reference matters).
+    /// Digital silence draws the waveform's own flat trace at zero, not the axis: the two
+    /// coincide there, and it's the waveform that should win the cell. Silence used to be
+    /// skipped outright, which let the axis show through — on a file that is 29.5% exact
+    /// zeros that is most of its quiet stretches (user report).
     #[test]
-    fn single_sample_silent_column_renders_nothing() {
+    fn silence_draws_the_waveform_trace_at_zero_rather_than_the_axis() {
         let samples = vec![0.0f32; 5];
         let area = Rect::new(0, 0, 5, 10);
         let mut buf = Buffer::empty(area);
@@ -329,10 +334,13 @@ mod tests {
         for x in 0..5u16 {
             for y in 0..10u16 {
                 if y == zero_row(10) {
-                    assert_eq!(buf[(x, y)].symbol(), ZERO_LINE_CHAR.to_string(), "the zero axis must still be drawn through silence");
+                    assert!(
+                        is_waveform_cell(&buf, x, y),
+                        "silence must render as the waveform's own trace at zero, not the axis"
+                    );
                     continue;
                 }
-                assert_eq!(buf[(x, y)].symbol(), " ", "a silent sample should not draw a mark");
+                assert_eq!(buf[(x, y)].symbol(), " ", "silence draws nothing away from the centre");
             }
         }
     }
@@ -374,14 +382,15 @@ mod tests {
         assert!(with_trace > 0, "this signal is meant to put the trace on the centre row");
     }
 
-    /// The zero line is a *background* reference: it must be drawn under the waveform, so a
-    /// column whose trace passes through the centre row shows the trace there, not the axis.
+    /// The axis fills the centre row of any column the waveform doesn't reach at all — past
+    /// end-of-file — and the waveform wins every column it does reach, silence included.
     #[test]
-    fn zero_line_spans_the_pane_but_the_waveform_draws_over_it() {
-        // Column 0 is silent (no dots anywhere), columns 1+ are full-scale (dots everywhere).
+    fn the_axis_fills_only_the_columns_the_waveform_does_not_reach() {
+        // 40 samples over a 20-column pane at 4 samples/column: the waveform covers the left
+        // half (starting with a silent column), and there is no data at all for the right.
         let mut samples = vec![0.0f32; 4];
-        samples.extend((0..76).map(|i| if i % 2 == 0 { 0.95 } else { -0.95 }));
-        let area = Rect::new(0, 0, 20, 10);
+        samples.extend((0..36).map(|i| if i % 2 == 0 { 0.95 } else { -0.95 }));
+        let area = Rect::new(0, 0, 20, 11);
         let mut buf = Buffer::empty(area);
         let widget = WaveformWidget {
             samples: &samples,
@@ -394,11 +403,17 @@ mod tests {
         };
         widget.render(area, &mut buf);
 
-        let zero_y = zero_row(10);
-        assert_eq!(buf[(0, zero_y)].symbol(), ZERO_LINE_CHAR.to_string(), "the axis shows through a silent column");
-        assert_eq!(buf[(0, zero_y)].fg, theme::ZERO_LINE);
-        for x in 1..20u16 {
-            assert!(is_waveform_cell(&buf, x, zero_y), "the waveform must draw over the axis at column {x}");
+        let zero_y = zero_row(11);
+        for x in 0..10u16 {
+            assert!(is_waveform_cell(&buf, x, zero_y), "column {x} has audio, so the waveform draws it");
+        }
+        for x in 10..20u16 {
+            assert_eq!(
+                buf[(x, zero_y)].symbol(),
+                ZERO_LINE_CHAR.to_string(),
+                "column {x} is past end-of-file, so the axis is all there is to draw"
+            );
+            assert_eq!(buf[(x, zero_y)].fg, theme::ZERO_LINE);
         }
     }
 
