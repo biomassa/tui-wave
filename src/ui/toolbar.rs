@@ -99,6 +99,7 @@ impl Toolbar {
                     ("Resamp",    sc(Action::Resample,       "^e"),   Action::Resample),
                     ("bothFades", sc(Action::TechnicalFades, "^b"),   Action::TechnicalFades),
                     ("mixToMono", sc(Action::MixToMono,     "^m"),   Action::MixToMono),
+                    ("rmEmptyCh", sc(Action::RemoveEmptyChannels, ""), Action::RemoveEmptyChannels),
                 ],
             },
             ToolGroup {

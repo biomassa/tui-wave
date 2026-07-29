@@ -30,6 +30,10 @@ pub enum Action {
     ToggleAutoVerticalZoom,
     Reverse,
     Normalize,
+    /// Drops every channel whose peak is below a threshold (default -48 dBFS). Menu-only, no
+    /// default key: it's a once-per-file cleanup step on a freshly opened multichannel
+    /// capture, not something reached for mid-edit.
+    RemoveEmptyChannels,
     Resample,
     Delete,
     ClearSelection,
@@ -434,6 +438,7 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "NewFromRight" => Some(Action::NewFromRight),
         "Reverse" => Some(Action::Reverse),
         "Normalize" => Some(Action::Normalize),
+        "RemoveEmptyChannels" => Some(Action::RemoveEmptyChannels),
         "Resample" => Some(Action::Resample),
         "Gain" => Some(Action::Gain),
         "FadeIn" => Some(Action::FadeIn),

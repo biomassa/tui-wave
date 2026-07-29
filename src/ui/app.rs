@@ -24,6 +24,7 @@ use crate::commands::marker::{
     auto_insert_markers_command, delete_marker_command, insert_marker_command, move_marker_command, rename_marker_command,
 };
 use crate::commands::paste::paste_command;
+use crate::commands::remove_channels::remove_channels_command;
 use crate::commands::normalize::normalize_command;
 use crate::commands::resample::resample_command;
 use crate::commands::reverse::reverse_command;
@@ -766,6 +767,11 @@ enum Dialog {
     /// silence). `focused` is the index of the currently-active field; Tab cycles through.
     /// `tanh_clip` enables a tanh soft-limiter on the mixed output (same as Gain's option).
     MixToMono { inputs: Vec<TextInput>, focused: usize, tanh_clip: bool },
+    /// Remove Empty Channels: drops every channel whose peak is below `input` dBFS. One
+    /// field and no preview — the effect is visible in the waveform the moment it applies,
+    /// and Ctrl+Z puts the channels back (`RemoveChannelsCommand`), so there is nothing a
+    /// preview would protect against. `-48.0` is the default.
+    RemoveEmptyChannels { input: TextInput },
     /// Export Regions to Subfolder — chops file at markers and saves each region.
     /// `focused` is one of the [`er_focus`] indices (subfolder, base name, format, dither,
     /// then a checkbox + value-field pair for each of limit length/normalize/fade in/fade
@@ -4186,7 +4192,8 @@ impl App {
     /// `&mut TextInput` for the active dialog, if it's a text-bearing one.
     fn dialog_input(&mut self) -> Option<&mut TextInput> {
         match self.dialog.as_mut()? {
-            Dialog::Normalize { input }
+            Dialog::RemoveEmptyChannels { input }
+            | Dialog::Normalize { input }
             | Dialog::Resample { input, .. }
             | Dialog::RenameMarker { input, .. }
             | Dialog::OpenDirectory { input }
@@ -4256,9 +4263,9 @@ impl App {
     /// Whether a typed `c` is accepted by the active dialog (numeric dialogs restrict input).
     fn dialog_accepts(&self, c: char) -> bool {
         match &self.dialog {
-            Some(Dialog::Normalize { .. }) | Some(Dialog::Gain { .. }) => {
-                c.is_ascii_digit() || c == '-' || c == '.'
-            }
+            Some(Dialog::Normalize { .. })
+            | Some(Dialog::Gain { .. })
+            | Some(Dialog::RemoveEmptyChannels { .. }) => c.is_ascii_digit() || c == '-' || c == '.',
             Some(Dialog::Resample { .. }) => c.is_ascii_digit(),
             Some(Dialog::MixToMono { .. }) => {
                 c.is_ascii_digit() || matches!(c, '-' | '.' | 'i' | 'n' | 'f')
@@ -4377,6 +4384,15 @@ impl App {
                 Some(Dialog::Normalize { input }) => {
                     let db = input.value().parse::<f32>().unwrap_or(-1.0).min(0.0);
                     self.apply_normalize(db);
+                }
+                Some(Dialog::RemoveEmptyChannels { input }) => {
+                    match input.value().trim().parse::<f32>() {
+                        Ok(threshold_db) => self.apply_remove_empty_channels(threshold_db),
+                        // An unparseable threshold re-opens the dialog with what was typed
+                        // still in it, rather than silently falling back to a default that
+                        // would delete channels the user never asked to lose.
+                        Err(_) => self.dialog = Some(Dialog::RemoveEmptyChannels { input }),
+                    }
                 }
                 Some(Dialog::Gain { input, right_input, tanh_clip, per_channel, is_stereo, .. }) => {
                     let gains = if is_stereo && per_channel {
@@ -5478,6 +5494,7 @@ impl App {
             // focusing a field that was already focused (these dialogs have one field).
             Some(
                 Dialog::CdpSetup { input, .. }
+                | Dialog::RemoveEmptyChannels { input }
                 | Dialog::Normalize { input }
                 | Dialog::Resample { input, .. }
                 | Dialog::RenameMarker { input, .. }
@@ -10892,6 +10909,59 @@ impl App {
         self.after_sample_mutation(idx);
     }
 
+    /// Drops every channel of the active document whose peak is below `threshold_db`.
+    ///
+    /// Measured over the **whole file**, never the selection: a channel is empty or it isn't,
+    /// and measuring a selection would let a channel that happens to be silent *there* be
+    /// removed along its entire length. This is the one place in the app where an operation
+    /// deliberately ignores `operation_range`.
+    ///
+    /// Both refusals report through `Dialog::Info` and push nothing onto the undo stack —
+    /// a no-op history entry would make a later Ctrl+Z appear to do nothing.
+    fn apply_remove_empty_channels(&mut self, threshold_db: f32) {
+        let idx = self.active_document;
+        let Some(doc) = self.documents.get(idx) else { return };
+        let total = doc.channel_count();
+        let below = dsp::channels_below(&doc.channels, threshold_db);
+
+        if below.len() == total {
+            // Removing every channel would leave a zero-channel document, which
+            // `Document::len_samples` (it reads channel 0) and the whole render path assume
+            // cannot happen. Note a threshold above 0 dBFS lands here too, correctly: no peak
+            // can exceed full scale, so every channel really is below it.
+            self.dialog = Some(Dialog::Info {
+                message: format!(
+                    "All {total} channel{} below {threshold_db} dBFS — nothing removed.",
+                    if total == 1 { " is" } else { "s are" },
+                ),
+            });
+            return;
+        }
+        if below.is_empty() {
+            self.dialog = Some(Dialog::Info {
+                message: format!("No channels below {threshold_db} dBFS."),
+            });
+            return;
+        }
+
+        let removed = below.len();
+        self.histories[idx].apply(remove_channels_command(below), &mut self.documents[idx]);
+        // Channel count changed. Three of the four consumers already cope: the audio engine
+        // rebuilds its `DocumentSource` (and with it the channel count) on every Play/Seek, so
+        // `after_sample_mutation`'s reload is enough; `rebuild_waveform_caches` rebuilds one
+        // cache per channel from scratch; and `render` re-truncates `graphics_protocols` every
+        // frame. The fourth is the channel window, which `render`'s own
+        // `clamp_channel_scroll` pulls back into range on the next frame.
+        self.after_sample_mutation(idx);
+        self.dialog = Some(Dialog::Info {
+            message: format!(
+                "Removed {removed} channel{} below {threshold_db} dBFS — {} left.",
+                if removed == 1 { "" } else { "s" },
+                total - removed,
+            ),
+        });
+    }
+
     /// Resamples the whole active document to `target_rate`. The sample count changes
     /// drastically, so the viewport is dropped to refit; `after_sample_mutation` notices the
     /// rate change and rebuilds the audio engine.
@@ -12504,6 +12574,21 @@ impl App {
             return;
         }
 
+        if action == Action::RemoveEmptyChannels {
+            // Refused on mono for the same reason the guards in `apply_remove_empty_channels`
+            // exist: there is no channel it could remove and still leave a document behind.
+            let channels = self.active_doc().map(|d| d.channel_count()).unwrap_or(0);
+            if channels < 2 {
+                self.dialog = Some(Dialog::Info {
+                    message: "Only one channel — nothing to remove.".to_string(),
+                });
+            } else {
+                self.dialog =
+                    Some(Dialog::RemoveEmptyChannels { input: TextInput::fresh("-48.0") });
+            }
+            return;
+        }
+
         if action == Action::ExportRegions {
             if let Some(doc) = self.active_doc() {
                 if doc.markers.is_empty() {
@@ -12687,6 +12772,7 @@ impl App {
             | Action::ToggleGraphicsMode
             | Action::ToggleDotMatrixGradient
             | Action::ToggleTimeRuler
+            | Action::RemoveEmptyChannels
             | Action::ScrollChannelsUp
             | Action::ScrollChannelsDown
             | Action::ScrollChannelsPageUp
@@ -14657,6 +14743,9 @@ fn render_dialog(
     let (title, prefix, input, suffix): (&str, String, Option<&TextInput>, String) = match dialog {
         Dialog::Normalize { input } => {
             ("Normalize", " Target peak (dBFS): ".into(), Some(input), " ".into())
+        }
+        Dialog::RemoveEmptyChannels { input } => {
+            ("Remove Empty Channels", " Threshold: ".into(), Some(input), " dBFS ".into())
         }
         Dialog::Resample { input, current_rate } => {
             ("Resample", format!(" New rate (current {current_rate} Hz): "), Some(input), " ".into())
@@ -27892,6 +27981,120 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A 30-channel document with real audio on four channels collapses to those four, and
+    /// Ctrl+Z brings all thirty back with their samples intact.
+    #[test]
+    fn remove_empty_channels_keeps_only_the_channels_above_the_threshold() {
+        let loud = [2usize, 6, 11, 17];
+        let channels: Vec<Vec<f32>> = (0..30)
+            .map(|c| if loud.contains(&c) { vec![0.5f32; 64] } else { vec![0.0f32; 64] })
+            .collect();
+        let mut app = new_app(Some(doc_with_channels(channels.clone())), None);
+
+        app.apply_remove_empty_channels(-48.0);
+
+        assert_eq!(app.documents[0].channel_count(), 4);
+        for (i, &src) in loud.iter().enumerate() {
+            assert_eq!(app.documents[0].channels[i], channels[src], "kept channel {i} is source {src}");
+        }
+        // The caches are rebuilt per channel, so their count is the proof that
+        // `after_sample_mutation` really ran on the shorter document.
+        assert_eq!(app.waveform_caches.len(), 4);
+
+        app.handle_action(Action::Undo);
+        assert_eq!(app.documents[0].channel_count(), 30);
+        assert_eq!(app.documents[0].channels, channels);
+    }
+
+    /// A near-silent channel is still removed: -60 dBFS content is below a -48 threshold even
+    /// though it isn't digital silence.
+    #[test]
+    fn remove_empty_channels_uses_peak_not_exact_silence() {
+        let channels = vec![vec![0.9f32; 32], vec![0.001f32; 32]];
+        let mut app = new_app(Some(doc_with_channels(channels)), None);
+        app.apply_remove_empty_channels(-48.0);
+        assert_eq!(app.documents[0].channel_count(), 1);
+        assert_eq!(app.documents[0].channels[0][0], 0.9);
+    }
+
+    /// A channel that is silent for most of its length but has one real event is kept — the
+    /// whole reason the measure is peak rather than RMS.
+    #[test]
+    fn a_channel_with_one_loud_event_survives() {
+        let mut sparse = vec![0.0f32; 1_000];
+        sparse[500] = 0.8;
+        let mut app = new_app(Some(doc_with_channels(vec![vec![0.5f32; 1_000], sparse])), None);
+        app.apply_remove_empty_channels(-48.0);
+        assert_eq!(app.documents[0].channel_count(), 2, "a sparse channel is not an empty one");
+    }
+
+    /// Both guards report through `Dialog::Info` and must push nothing onto the undo stack —
+    /// a no-op history entry would make a later Ctrl+Z appear to do nothing.
+    #[test]
+    fn remove_empty_channels_refuses_at_both_extremes_without_touching_history() {
+        // Nothing below the threshold.
+        let mut app = new_app(Some(doc_with_channels(vec![vec![0.9f32; 8], vec![0.8f32; 8]])), None);
+        app.apply_remove_empty_channels(-48.0);
+        assert_eq!(app.documents[0].channel_count(), 2);
+        assert!(!app.histories[0].can_undo(), "a refusal must not push a history entry");
+        match &app.dialog {
+            Some(Dialog::Info { message }) => assert!(message.contains("No channels below")),
+            _ => panic!("expected the none-below Info dialog"),
+        }
+
+        // Everything below the threshold — removing all of them would leave a zero-channel
+        // document, which the render path and `len_samples` both assume is impossible.
+        let mut app = new_app(Some(doc_with_channels(vec![vec![0.0f32; 8], vec![0.0f32; 8]])), None);
+        app.apply_remove_empty_channels(-48.0);
+        assert_eq!(app.documents[0].channel_count(), 2);
+        assert!(!app.histories[0].can_undo());
+        match &app.dialog {
+            Some(Dialog::Info { message }) => assert!(message.contains("All 2 channels are below")),
+            _ => panic!("expected the all-below Info dialog"),
+        }
+    }
+
+    /// A threshold above full scale lands in the all-below guard rather than wiping the
+    /// document: no peak can exceed 0 dBFS, so every channel really is below it.
+    #[test]
+    fn a_threshold_above_full_scale_refuses_instead_of_removing_everything() {
+        let mut app = new_app(Some(doc_with_channels(vec![vec![0.9f32; 8], vec![0.8f32; 8]])), None);
+        app.apply_remove_empty_channels(3.0);
+        assert_eq!(app.documents[0].channel_count(), 2);
+    }
+
+    /// Removing channels while the channel window is scrolled to the end must not leave the
+    /// window pointing past the new count — the one consumer that needed the per-frame clamp.
+    #[test]
+    fn removing_channels_pulls_a_scrolled_channel_window_back_into_range() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let loud = [0usize, 1, 2, 3];
+        let channels: Vec<Vec<f32>> = (0..30)
+            .map(|c| if loud.contains(&c) { vec![0.5f32; 64] } else { vec![0.0f32; 64] })
+            .collect();
+        let mut app = new_app(Some(doc_with_channels(channels)), None);
+        let mut terminal = Terminal::new(TestBackend::new(120, 44)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        app.handle_action(Action::ScrollChannelsPageDown);
+        app.handle_action(Action::ScrollChannelsPageDown);
+        app.handle_action(Action::ScrollChannelsPageDown);
+        app.handle_action(Action::ScrollChannelsPageDown);
+        app.handle_action(Action::ScrollChannelsPageDown);
+        assert_eq!(app.viewport.as_ref().unwrap().channel_scroll, 24);
+
+        app.apply_remove_empty_channels(-48.0);
+        assert_eq!(app.documents[0].channel_count(), 4);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(
+            app.viewport.as_ref().unwrap().channel_scroll,
+            0,
+            "four channels all fit, so there is nothing left to scroll",
+        );
     }
 
     /// The regression guard for "inert below the threshold": a 6-channel file must produce
