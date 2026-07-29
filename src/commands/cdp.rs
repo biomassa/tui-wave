@@ -14,8 +14,8 @@ use crate::model::command::Command;
 use crate::model::document::{Document, Marker};
 
 /// How many samples the result's length may differ from the replaced range's before the
-/// process counts as having *changed timing* (which collapses in-range markers — see
-/// `CdpProcessCommand::execute`). A time-domain process that preserves timing usually
+/// process counts as having *changed timing* (which remaps in-range markers proportionally
+/// rather than keeping them on their exact samples — see `CdpProcessCommand::execute`). A time-domain process that preserves timing usually
 /// matches exactly, but wavecycle-aligned families (distort etc.) can trim a fraction of a
 /// cycle off the end — hence a small nonzero allowance rather than strict equality. A
 /// spectral process is `pvoc anal`/`synth`-wrapped, and `pvoc synth` pads its output to
@@ -102,24 +102,43 @@ impl Command for CdpProcessCommand {
         }
         self.removed = Some(doc.remove_range(start..end));
         doc.insert_range(start, self.new_data.clone());
-        // `remove_range` collapses markers inside the replaced range to its start (then
-        // `insert_range` shifts them past the result) — right for a process that *changed*
-        // timing, where the marked moments no longer exist at any knowable position. But
-        // when the result's length matches the replaced range's (within the per-category
-        // tolerance — see `timing_tolerance`), the process was time-aligned: the same
-        // musical moments still sit at the same offsets, so those markers are restored to
-        // their original positions instead of being destroyed. Markers *outside* the range
-        // keep the shift the primitives already applied (for a sub-tolerance length delta
-        // the result is padded/trimmed at its end, so later audio genuinely moves by the
-        // delta). Positional zip is safe: neither primitive reorders or removes markers.
+        // `remove_range` collapses every marker inside the replaced range onto its start
+        // (then `insert_range` shifts them past the result), which would destroy the whole
+        // set — they all end up on one sample. Both mark systems are instead repositioned
+        // against the pre-edit snapshot below: exactly when the process preserved timing,
+        // proportionally when it changed it. Markers *outside* the range keep the shift the
+        // primitives already applied (later audio genuinely moves by the length delta).
+        // Positional zip is safe: neither primitive reorders or removes markers.
         let removed_len = end - start;
         let delta = self.inserted_len.abs_diff(removed_len);
-        if removed_len > 0 && delta <= self.timing_tolerance {
+        if removed_len > 0 {
             let result_end = start + self.inserted_len;
+            // Past the tolerance the process genuinely changed the range's duration, and the
+            // marked moments move with it: a mark 40% of the way through the input is 40% of
+            // the way through the output. Scaling them is exactly right for the stretch,
+            // repeat and delete families — including the case that reported this
+            // (`distort repeat2`, "Waveset Repeat In Place", which promises no time
+            // stretching in its own usage text and still returns 2-4% longer, far past the
+            // 256-sample allowance, so every mark inside the range used to collapse onto the
+            // cut point). For a process that *reorders* rather than rescales (Scramble), no
+            // mapping is meaningful, but spreading the marks across the result is no worse
+            // than stacking every one of them on a single sample.
+            //
+            // Within the tolerance, positions are restored *exactly* rather than scaled: a
+            // time-aligned process leaves the same moments at the same offsets, and a scale
+            // factor of 1.0009 would nudge every mark off the sample it was placed on.
+            let scale = self.inserted_len as f64 / removed_len as f64;
+            let exact = delta <= self.timing_tolerance;
             let restore = |position: usize, original: usize| -> usize {
                 if (start..end).contains(&original) {
-                    // Clamp inside the result for the (sub-tolerance) shorter case.
-                    original.min(result_end.saturating_sub(1).max(start))
+                    let mapped = if exact {
+                        original
+                    } else {
+                        start + ((original - start) as f64 * scale).round() as usize
+                    };
+                    // Clamp inside the result — for the sub-tolerance shorter case, and for
+                    // a mark landing exactly on the far edge after scaling.
+                    mapped.min(result_end.saturating_sub(1).max(start))
                 } else {
                     position
                 }
@@ -368,19 +387,47 @@ mod tests {
         assert_eq!(doc.markers[0].position, 5);
     }
 
-    /// A genuinely timing-changing result (length delta beyond the tolerance, e.g. a time
-    /// stretch) keeps the existing collapse behavior: the marked moments no longer exist at
-    /// any knowable position.
+    /// A genuinely timing-changing result (length delta beyond the tolerance) moves the
+    /// marked moments with the change rather than destroying them: a mark a given fraction of
+    /// the way through the processed range stays that fraction of the way through the result.
+    /// Reported against "Waveset Repeat In Place", which comes back 2-4% longer despite
+    /// promising no time stretching, which was enough to collapse every mark in the range onto
+    /// the cut point.
     #[test]
-    fn timing_changing_result_still_collapses_inside_markers() {
+    fn timing_changing_result_remaps_inside_markers_proportionally() {
         let mut doc = doc_with(vec![(0..10).map(|i| i as f32).collect()]);
-        doc.markers = vec![Marker { position: 5, label: "inside".into() }];
-        let mut cmd =
-            CdpProcessCommand::new("CDP: Stretch".into(), (2, 6), vec![vec![9.0; 1]], 0);
+        // Marks at 25% and 75% of the replaced range (2..6).
+        doc.markers = vec![
+            Marker { position: 3, label: "quarter".into() },
+            Marker { position: 5, label: "three-quarters".into() },
+        ];
+        doc.head_tail_marks = vec![3, 5];
+        // The range doubles in length, so both should land at the same fractions of 2..10.
+        let mut cmd = CdpProcessCommand::new("CDP: Stretch".into(), (2, 6), vec![vec![9.0; 8]], 0);
         cmd.execute(&mut doc);
-        assert_ne!(doc.markers[0].position, 5, "beyond-tolerance delta must not pretend timing was preserved");
+        assert_eq!(doc.markers[0].position, 4, "25% of the range stays at 25% of the result");
+        assert_eq!(doc.markers[1].position, 8, "75% of the range stays at 75% of the result");
+        assert_eq!(doc.head_tail_marks, vec![4, 8], "head/tail marks get the identical treatment");
         cmd.undo(&mut doc);
-        assert_eq!(doc.markers[0].position, 5, "undo restores the original marker");
+        assert_eq!(doc.markers[0].position, 3, "undo restores the originals");
+        assert_eq!(doc.markers[1].position, 5);
+        assert_eq!(doc.head_tail_marks, vec![3, 5]);
+    }
+
+    /// The reported case at its real proportions: a 2% length increase over a range with
+    /// marks spread through it. Every mark must stay near where it was and, crucially, they
+    /// must stay *distinct* — collapsing them onto one sample is what
+    /// `dedup_head_tail_marks` then reduced to a single mark, losing the set entirely.
+    #[test]
+    fn a_two_percent_length_change_keeps_head_tail_marks_distinct() {
+        let mut doc = doc_with(vec![vec![0.0; 100_000]]);
+        doc.head_tail_marks = vec![10_000, 20_000, 30_000, 40_000];
+        let inserted = 102_000;
+        let mut cmd =
+            CdpProcessCommand::new("CDP: Waveset Repeat".into(), (0, 100_000), vec![vec![0.5; inserted]], 256);
+        cmd.execute(&mut doc);
+        assert_eq!(doc.head_tail_marks, vec![10_200, 20_400, 30_600, 40_800]);
+        assert_eq!(doc.head_tail_marks.len(), 4, "two complete pairs must survive, not collapse to one mark");
     }
 
     #[test]
