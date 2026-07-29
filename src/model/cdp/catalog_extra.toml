@@ -8470,6 +8470,12 @@ input = "dual_wav"
 output = "wav"
 stereo_native = false
 output_is_stereo = false
+# `fastconv` is one of RWD's standalone programs, not a CDP-framework one: it parses its
+# flags getopt-style ahead of the filenames (`fastconv [-aX][-f] infile impulsefile outfile
+# [dry]`). With the flags trailing, as every other process in this catalog wants them, it
+# silently ignores -a AND -f AND the positional dry value, so every setting produced a
+# byte-identical clipped result. See ProcessDef::flags_before_infile.
+flags_before_infile = true
 
 [[process.params]]
 name = "Dry/Wet Mix"
@@ -8477,7 +8483,11 @@ description = "Balance between the dry (unconvolved) and wet (convolved) signal"
 automatable = false
 kind = "number"
 min = 0.0
-max = 1.0
+# 0.99, not the 1.0 fastconv's own usage text advertises: at exactly 1.0 it prints
+# "Warning: dry=1 copies input!" and then writes a full-length but entirely SILENT file
+# (verified -- 57330 frames, peak 0.0, where 0.99 gives peak 0.5005). That's a bug in the
+# binary, and a slider whose last step produces silence is worse than one that stops short.
+max = 0.99
 step = 0.01
 default = 0.0
 exponential = false

@@ -1057,6 +1057,90 @@ mod tests {
         assert!(!output.results[0][0].is_empty(), "output should contain audio");
     }
 
+    /// `fastconv`'s settings must actually reach the binary. Its flags are parsed
+    /// getopt-style *before* the filenames (`ProcessDef.flags_before_infile`), and with them
+    /// trailing it silently ignored `-a`, `-f` **and** the positional dry/wet value all at
+    /// once -- so every combination of settings produced a byte-identical, clipped, integer
+    /// result. That is exactly what the user reported ("still heavily clips and sounds the
+    /// same no matter what the settings are"), and nothing errored, so only running the real
+    /// binary and comparing two differently-configured outputs catches it.
+    #[test]
+    fn fastconv_settings_actually_change_the_convolved_output() {
+        let cdp_dir = require_cdp!();
+        let (channels, sample_rate) = mono_sine_channels();
+        let len_samples = channels[0].len();
+        // A decaying noise burst -- a plausible reverb IR, and deliberately *not* derived
+        // from the sine: convolving a sine with a sine-shaped impulse just returns a sine, so
+        // the wet and dry signals would have nearly the same shape and the comparison below
+        // could not tell a working dry/wet mix from a broken one. Seeded LCG, so the test is
+        // deterministic.
+        let mut rng: u32 = 0x1234_5678;
+        let impulse: Vec<Vec<f32>> = vec![(0..len_samples / 4)
+            .map(|i| {
+                rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = (rng >> 8) as f32 / (1 << 23) as f32 - 1.0;
+                noise * (-6.0 * i as f32 / (len_samples / 4) as f32).exp() * 0.5
+            })
+            .collect()];
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("fastconv_fastconv").expect("fastconv in catalog");
+        let input = crate::model::cdp::InputSpec { channels: 1, sample_rate, len_samples, ..Default::default() };
+
+        let run = |dry: f64, amp: f64, id: u64| -> Vec<f32> {
+            let mut values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+            values[0] = crate::model::cdp::ParamValue::Number(dry);
+            values[1] = crate::model::cdp::ParamValue::Number(amp);
+            let planned = crate::model::cdp::plan_job(
+                def,
+                &values,
+                &[input.clone(), input.clone()],
+                &crate::model::cdp::PvocSettings::default(),
+            )
+            .expect("plans");
+            let first_file = planned.steps[0].args.iter().position(|a| a.ends_with(".wav")).unwrap();
+            assert!(
+                planned.steps[0].args[..first_file].iter().all(|a| a.starts_with('-')),
+                "flags must precede the filenames: {:?}",
+                planned.steps[0].args
+            );
+            let runner = CdpRunner::new();
+            runner.submit(Job {
+                id,
+                cdp_dir: cdp_dir.clone(),
+                planned,
+                inputs: vec![channels.clone(), impulse.clone()],
+                input_sample_rate: sample_rate,
+                purpose: JobPurpose::Apply,
+            });
+            let CdpEvent::Finished { result, .. } = recv_finished(&runner, Duration::from_secs(60))
+            else {
+                unreachable!()
+            };
+            result.expect("fastconv should run").results[0][0].clone()
+        };
+
+        let wet = run(0.0, 1.0, 310);
+        let half = run(0.9, 1.0, 311);
+        assert!(!wet.is_empty() && !half.is_empty(), "both runs produce audio");
+
+        // Mixing in nearly all dry signal has to change the result. Compared on the
+        // normalized shape rather than raw level, so the assertion can't be satisfied by the
+        // headroom stage's own gain scaling alone.
+        let normalize = |v: &[f32]| -> Vec<f32> {
+            let peak = v.iter().fold(0.0f32, |m, s| m.max(s.abs())).max(f32::MIN_POSITIVE);
+            v.iter().map(|s| s / peak).collect()
+        };
+        let (a, b) = (normalize(&wet), normalize(&half));
+        let n = a.len().min(b.len());
+        let worst = (0..n).fold(0.0f32, |m, i| m.max((a[i] - b[i]).abs()));
+        assert!(worst > 0.05, "the dry/wet mix must change the output shape (worst diff {worst})");
+
+        // And the result stays inside full scale -- the clipping half of the same report.
+        let peak = wet.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(peak <= 1.0001, "convolution output must not exceed full scale (peak {peak})");
+    }
+
     /// Real end-to-end coverage for `tesselate` -- the one process needing a `transposed`
     /// table (`ParamKind::Table.transposed`). Its datafile must have exactly two lines with
     /// one entry per input file; getting that wrong is silent in a fake job and a hard
