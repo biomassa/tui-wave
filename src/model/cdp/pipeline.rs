@@ -405,6 +405,10 @@ pub enum PlanError {
     /// every other error here this isn't about the *parameters* at all — the marks live on the
     /// document, so the fix is to place more of them (`h`), not to change a field.
     MissingHeadTailMarks { pairs: usize },
+    /// A `head_tail_marks_unpaired` process (scramble's per-segment modes) with no usable cut
+    /// time inside the range — every mark counts on its own here, so one is enough and zero
+    /// is the only failing case.
+    MissingCutTimes { found: usize },
 }
 
 /// Complete Head/Tail pairs a DISTMORE process needs before it will run. CDP's own
@@ -909,17 +913,30 @@ fn build_process_args(
     // to the selection), not from a form field, so it's emitted here rather than by
     // `plan_param`. See `ProcessDef::needs_head_tail_marks` for why.
     if def.needs_head_tail_marks {
-        let pairs = head_tail_marks.len() / 2;
-        if pairs < MIN_HEAD_TAIL_PAIRS {
-            return Err(PlanError::MissingHeadTailMarks { pairs });
-        }
-        // Truncated to whole pairs: CDP reads the list strictly two at a time, and a trailing
-        // unpaired Head would leave it reading past the end of the segment list.
-        let paired = &head_tail_marks[..pairs * 2];
+        // `scramble`'s cuts file reads the same marks as a plain list of boundaries rather
+        // than as Head/Tail pairs — see `ProcessDef::head_tail_marks_unpaired`.
+        let used: Vec<usize> = if def.head_tail_marks_unpaired {
+            // A mark at the very start of the range rebases to time 0.0, which CDP rejects
+            // outright ("Invalid time (0.000000) ... Must be greater than zero"), and it would
+            // describe a cut with nothing before it anyway.
+            let times: Vec<usize> = head_tail_marks.iter().copied().filter(|&m| m > 0).collect();
+            if times.is_empty() {
+                return Err(PlanError::MissingCutTimes { found: 0 });
+            }
+            times
+        } else {
+            let pairs = head_tail_marks.len() / 2;
+            if pairs < MIN_HEAD_TAIL_PAIRS {
+                return Err(PlanError::MissingHeadTailMarks { pairs });
+            }
+            // Truncated to whole pairs: CDP reads the list strictly two at a time, and a
+            // trailing unpaired Head would leave it reading past the end of the segment list.
+            head_tail_marks[..pairs * 2].to_vec()
+        };
         let relative_name = "headstails.txt".to_string();
         brk_files.push((
             relative_name.clone(),
-            crate::model::headstails::marks_to_text(paired, sample_rate),
+            crate::model::headstails::marks_to_text(&used, sample_rate),
         ));
         args.push(relative_name);
     }
@@ -2565,6 +2582,7 @@ mod tests {
     fn base_def(input: IoKind, output: IoKind) -> ProcessDef {
         ProcessDef {
             needs_head_tail_marks: false,
+            head_tail_marks_unpaired: false,
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
@@ -2654,6 +2672,69 @@ mod tests {
         let job = plan_job(def, &on, &[input], &PvocSettings::default()).unwrap();
         assert_eq!(job.steps.len(), 1);
         assert_eq!(job.steps[0].args, vec!["extract", "4", "in.wav", "out.wav", "-0.004"]);
+    }
+
+    /// `scramble`'s per-segment modes take their cuts datafile from the Head/Tail marks, in
+    /// the same argv slot the DISTMORE marklist uses (`scramble scramble 5 infile outfile
+    /// cuts seed …`) — but every mark counts on its own, so a single one is a usable run
+    /// where DISTMORE demands two complete pairs.
+    #[test]
+    fn scramble_per_segment_takes_its_cut_times_from_head_tail_marks() {
+        let (catalog, _) = crate::model::cdp::catalog::CdpCatalog::load(None);
+        let def = catalog
+            .processes
+            .iter()
+            .find(|p| p.key == "scramble_scramble_5")
+            .expect("scramble mode 5 is in the built-in catalog");
+        assert!(def.needs_head_tail_marks && def.head_tail_marks_unpaired);
+        assert!(
+            !def.params.iter().any(|p| p.name == "Cut Times"),
+            "the times come from the marks, not a form field"
+        );
+
+        let values: Vec<ParamValue> = def.params.iter().map(|p| p.kind.default_value()).collect();
+        let input = InputSpec {
+            channels: 1,
+            sample_rate: 10_000,
+            len_samples: 40_000,
+            head_tail_marks: vec![10_000, 25_000, 30_000],
+        };
+        let job = plan_job(def, &values, std::slice::from_ref(&input), &PvocSettings::default()).unwrap();
+        let cuts_at = job.steps[0].args.iter().position(|a| a == "headstails.txt").expect("a cuts datafile");
+        assert_eq!(
+            job.steps[0].args[cuts_at - 1],
+            "out.wav",
+            "the cuts file sits directly after the outfile: {:?}",
+            job.steps[0].args
+        );
+        let (_, contents) = job.brk_files.iter().find(|(n, _)| n == "headstails.txt").unwrap();
+        let secs: Vec<f64> = contents.lines().map(|l| l.parse().unwrap()).collect();
+        assert_eq!(secs, vec![1.0, 2.5, 3.0], "every mark is its own cut time, odd count and all");
+    }
+
+    /// A single mark is enough — the "two complete pairs" floor is DISTMORE's, and applying it
+    /// here would reject a perfectly good one-cut run. Zero marks is the only failing case.
+    #[test]
+    fn scramble_per_segment_accepts_one_mark_and_rejects_none() {
+        let (catalog, _) = crate::model::cdp::catalog::CdpCatalog::load(None);
+        let def = catalog.processes.iter().find(|p| p.key == "scramble_scramble_5").unwrap();
+        let values: Vec<ParamValue> = def.params.iter().map(|p| p.kind.default_value()).collect();
+        let with_one = InputSpec { channels: 1, sample_rate: 10_000, len_samples: 40_000, head_tail_marks: vec![10_000] };
+        assert!(plan_job(def, &values, &[with_one], &PvocSettings::default()).is_ok());
+
+        // A mark rebased to exactly 0 is dropped (CDP rejects a cut time of 0), which for a
+        // lone mark leaves nothing to cut at.
+        let at_zero = InputSpec { channels: 1, sample_rate: 10_000, len_samples: 40_000, head_tail_marks: vec![0] };
+        assert!(matches!(
+            plan_job(def, &values, &[at_zero], &PvocSettings::default()),
+            Err(PlanError::MissingCutTimes { found: 0 })
+        ));
+
+        let none = InputSpec { channels: 1, sample_rate: 10_000, len_samples: 40_000, head_tail_marks: vec![] };
+        assert!(matches!(
+            plan_job(def, &values, &[none], &PvocSettings::default()),
+            Err(PlanError::MissingCutTimes { found: 0 })
+        ));
     }
 
     /// `focus step`'s time step is bounded at both ends by data — see
