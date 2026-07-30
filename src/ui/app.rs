@@ -12113,6 +12113,13 @@ impl App {
             let done_bytes = at.saturating_mul(bytes_per_frame);
             if done_bytes - last_painted >= PAINT_EVERY_BYTES {
                 last_painted = done_bytes;
+                // Input is polled here and nowhere else during the build, which is why Esc is the
+                // only key the panel offers: a minute of reading with no way out is not something
+                // to make the user sit through because they opened the wrong file.
+                if Self::escape_pressed() {
+                    self.cancel_streamed_load(&name);
+                    return;
+                }
                 let _ = terminal.draw(|frame| {
                     render_loading_panel(
                         frame,
@@ -12126,6 +12133,39 @@ impl App {
         }
 
         self.waveform_caches = builders.into_iter().map(|b| b.finish()).collect();
+    }
+
+    /// Drains pending input and reports whether Esc was among it.
+    ///
+    /// Everything else queued is discarded rather than left to land on whatever comes next — a
+    /// keypress aimed at a progress panel means nothing to the buffer that appears after it.
+    fn escape_pressed() -> bool {
+        let mut escaped = false;
+        while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+            match event::read() {
+                Ok(Event::Key(key)) if key.code == KeyCode::Esc => escaped = true,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        escaped
+    }
+
+    /// Abandons a streamed buffer whose overview the user cancelled part-way through.
+    ///
+    /// The buffer is closed rather than kept: a partial pyramid would draw a waveform that is
+    /// blank past wherever the reading stopped, which reads as data loss rather than as a
+    /// cancelled load.
+    fn cancel_streamed_load(&mut self, name: &str) {
+        self.waveform_caches.clear();
+        let idx = self.active_document;
+        if self.documents.get(idx).is_some_and(|d| d.is_streaming()) {
+            self.close_buffer(idx);
+        }
+        self.viewport = None;
+        self.dialog = Some(Dialog::Info {
+            message: format!("Stopped loading {name}."),
+        });
     }
 
     /// Saves every dirty document that already has a path. Documents that were never
@@ -15802,17 +15842,28 @@ fn render_dialog(
     spans.push(Span::styled(suffix.clone(), base));
     content_len += suffix.chars().count();
 
-    // Only `SaveMatrixAs` gets a hint line: it's the one dialog in this shared group where
-    // Esc discarding has a real, distinct cost worth calling out explicitly -- mode 1's
-    // matrix is randomly regenerated every run, so a discarded-then-reopened prompt can
-    // never get the exact same data back (unlike e.g. Rename Marker, where Esc losing a
-    // typed-in label is trivially redone).
-    let hint = matches!(dialog, Dialog::SaveMatrixAs { .. }).then_some(" Enter:save  Esc:discard");
-    let content_len = content_len.max(hint.map(str::len).unwrap_or(0));
+    // Every dialog in this shared group gets a hint line, like every other dialog in the app.
+    // They used to be the exception — only `SaveMatrixAs` had one — which left prompts such as
+    // Remove Empty Channels showing a bare input box with no indication of how to commit or back
+    // out (user report). The verb differs per dialog because "Enter:apply" and "Enter:rename" say
+    // more than a generic OK, and `SaveMatrixAs` keeps "discard" rather than "cancel": mode 1's
+    // matrix is randomly regenerated every run, so a discarded prompt can never be reopened onto
+    // the same data, unlike a re-typed label.
+    let (commit, cancel) = match dialog {
+        Dialog::SaveMatrixAs { .. } => ("save", "discard"),
+        Dialog::SaveCurveAs { .. } => ("save", "cancel"),
+        Dialog::RenameMarker { .. } | Dialog::RenameBuffer { .. } | Dialog::RenameFile { .. } => {
+            ("rename", "cancel")
+        }
+        Dialog::OpenDirectory { .. } => ("open", "cancel"),
+        _ => ("apply", "cancel"),
+    };
+    let hint_len = 1 + 5 + 1 + commit.len() + 2 + 3 + 1 + cancel.len();
+    let content_len = content_len.max(hint_len);
 
     let width = (content_len as u16 + 2).min(area.width);
-    // Border + blank spacer row + content row + (optional hint row) + border.
-    let height = (if hint.is_some() { 5 } else { 4 }).min(area.height);
+    // Border + blank spacer row + content row + hint row + border.
+    let height = 5u16.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -15825,10 +15876,19 @@ fn render_dialog(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
-    let mut lines = vec![Line::raw(""), Line::from(spans)];
-    if let Some(hint) = hint {
-        lines.push(Line::styled(hint, hint_style));
-    }
+    // Keys in `SHORTCUT`, their labels in `CHROME_FG` — the same pairing the menus and toolbar
+    // use, so a key never blends into the word attached to it.
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let lines = vec![
+        Line::raw(""),
+        Line::from(spans),
+        Line::from(vec![
+            Span::styled(" Enter", hint_style),
+            Span::styled(format!(":{commit}  "), label_style),
+            Span::styled("Esc", hint_style),
+            Span::styled(format!(":{cancel}"), label_style),
+        ]),
+    ];
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 
     // Click targets. Exactly two, in `handle_dialog_row_click`'s convention: the interactive
@@ -15854,10 +15914,9 @@ fn render_dialog(
         width: text_width.min((inner.x + inner.width).saturating_sub(text_x)),
         height: 1,
     };
-    let submit_rect = match hint {
-        Some(_) => Rect { x: inner.x, y: inner.y + 2, width: inner.width, height: 1 },
-        None => Rect { x: 0, y: 0, width: 0, height: 0 },
-    };
+    // The hint row is the submit target, as in every other dialog — and now that every dialog in
+    // this group has one, all of them are clickable rather than only `SaveMatrixAs`.
+    let submit_rect = Rect { x: inner.x, y: inner.y + 2, width: inner.width, height: 1 };
     vec![input_rect, submit_rect]
 }
 
@@ -19541,18 +19600,28 @@ fn render_loading_panel(
         gb(total_bytes),
     );
     let explain = " Too large to hold in memory — building the waveform overview.";
+    // Esc is the only key offered because it is the only one the build loop polls for; see
+    // `App::escape_pressed`. A minute of reading with no way out is not something to make someone
+    // sit through because they opened the wrong file.
+    let hint_key = " Esc";
+    let hint_label = ":stop loading";
 
     // Sized to the longest line rather than a fixed 60, which truncated the explanation (it needs
     // 62 columns and the popup gave 58). Every line is measured in `chars`, not bytes: the em dash
     // and the file name are both multi-byte, so a byte length would over-estimate the width and
     // leave the panel needlessly wide.
-    let longest = [counts.chars().count(), explain.chars().count(), name.chars().count() + 1]
-        .into_iter()
-        .max()
-        .unwrap_or(0) as u16;
+    let longest = [
+        counts.chars().count(),
+        explain.chars().count(),
+        name.chars().count() + 1,
+        hint_key.chars().count() + hint_label.chars().count(),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0) as u16;
     // +3: one column of padding on the right, plus the two borders.
     let width = (longest + 3).clamp(24, area.width.max(1));
-    let height = 8u16.min(area.height);
+    let height = 9u16.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -19581,6 +19650,10 @@ fn render_loading_panel(
             Line::raw(""),
             Line::from(Span::styled(format!(" [{bar}]"), accent)),
             Line::from(Span::styled(explain, label_style)),
+            Line::from(vec![
+                Span::styled(hint_key, Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0)),
+                Span::styled(hint_label, label_style),
+            ]),
         ])
         .block(block),
         popup,
@@ -30394,6 +30467,101 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Every dialog must tell you how to commit and how to back out.
+    ///
+    /// The shared single-row text renderer used to hint only `SaveMatrixAs`, so Remove Empty
+    /// Channels, Normalize, Resample, the three renames, Open Directory and Save Curve all showed a
+    /// bare input box with no indication that Enter applies and Esc cancels (user report). Driven
+    /// through the real render path rather than by inspecting the source, so a dialog added later
+    /// without a hint fails here.
+    #[test]
+    fn every_dialog_shows_how_to_commit_and_cancel() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        // One representative of every arm of the shared renderer, plus the dialogs that reach it
+        // through their own actions.
+        let dialogs: Vec<(&str, Dialog)> = vec![
+            ("Normalize", Dialog::Normalize { input: TextInput::fresh("-1.0") }),
+            (
+                "RemoveEmptyChannels",
+                Dialog::RemoveEmptyChannels { input: TextInput::fresh("-48.0") },
+            ),
+            (
+                "Resample",
+                Dialog::Resample { input: TextInput::fresh("48000"), current_rate: 44100 },
+            ),
+            (
+                "RenameMarker",
+                Dialog::RenameMarker { position: 0, input: TextInput::fresh("x") },
+            ),
+            ("OpenDirectory", Dialog::OpenDirectory { input: TextInput::fresh("/tmp") }),
+            (
+                "RenameBuffer",
+                Dialog::RenameBuffer { index: 0, input: TextInput::fresh("b") },
+            ),
+            ("Info", Dialog::Info { message: "hello".into() }),
+        ];
+
+        for (name, dialog) in dialogs {
+            let mut app = new_app(Some(doc(0.4, 4_410)), None);
+            app.dialog = Some(dialog);
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .chunks(120)
+                .map(|r| {
+                    r.iter().map(|c| c.symbol().chars().next().unwrap_or(' ')).collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            assert!(screen.contains("Enter"), "{name}: no Enter hint\n{screen}");
+            // `Info` is dismiss-only, so Esc has nothing distinct to offer there.
+            if name != "Info" {
+                assert!(screen.contains("Esc"), "{name}: no Esc hint\n{screen}");
+            }
+
+            // The key names must be peach, and their labels must not be — the pairing the menus
+            // and toolbar use, so a key never blends into the word attached to it.
+            let buf = terminal.backend().buffer();
+            // Column, not byte offset: the screen is full of multi-byte box-drawing and braille
+            // glyphs, so `str::find` would point at the wrong cell entirely. And searched from the
+            // bottom, because the hint row sits below the toolbar — which also renders the word
+            // "Enter" (as the Files panel's Open shortcut) and would otherwise be found first.
+            let find = |needle: &str| -> (u16, u16) {
+                let want: Vec<char> = needle.chars().collect();
+                let rows: Vec<&str> = screen.lines().collect();
+                for (row, line) in rows.iter().enumerate().rev() {
+                    let chars: Vec<char> = line.chars().collect();
+                    if let Some(col) = chars.windows(want.len()).position(|w| w == want.as_slice()) {
+                        return (col as u16, row as u16);
+                    }
+                }
+                panic!("{name}: {needle:?} not on screen\n{screen}");
+            };
+            for key in if name == "Info" { &["Enter"][..] } else { &["Enter", "Esc"][..] } {
+                let (x, y) = find(key);
+                assert_eq!(
+                    buf[(x, y)].style().fg,
+                    Some(theme::SHORTCUT),
+                    "{name}: the {key:?} key must be peach ({:?})",
+                    theme::SHORTCUT
+                );
+                // The character just past the key is its label's colon, which must not be.
+                let after = buf[(x + key.len() as u16, y)].style().fg;
+                assert_ne!(
+                    after,
+                    Some(theme::SHORTCUT),
+                    "{name}: the label after {key:?} must not be peach too"
+                );
+            }
+        }
     }
 
     /// The loading panel must show its text in full. It was a hardcoded 60 columns wide, giving 58
