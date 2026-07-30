@@ -12,4 +12,5 @@ pub mod formant;
 pub mod headstails;
 pub mod history;
 pub mod io;
+pub mod riff;
 pub mod selection;

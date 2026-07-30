@@ -10966,12 +10966,21 @@ impl App {
     /// (samples, markers, bext, bit depth) wholesale and clearing undo history — the old
     /// undo stack's commands store sample data from the buffer *before* the reload, replaying
     /// them against the freshly-loaded one would corrupt it, same reasoning as why history is
-    /// per-document in the first place. No-ops silently on a missing `path` or a read/parse
-    /// failure (e.g. the file was deleted or is no longer valid WAV) rather than losing the
-    /// in-memory buffer over it.
+    /// per-document in the first place. No-ops on a missing `path`, and keeps the in-memory
+    /// buffer rather than losing it if the file is gone or no longer parses — but *reports*
+    /// that failure. A reload the user explicitly asked for doing nothing at all, with no
+    /// message, is the same trap `load_file`'s discarded error was.
     fn reload_buffer_from_disk(&mut self, idx: usize) {
         let Some(path) = self.documents.get(idx).and_then(|d| d.path.clone()) else { return };
-        let Ok(document) = crate::model::io::load_audio(&path) else { return };
+        let document = match crate::model::io::load_audio(&path) {
+            Ok(document) => document,
+            Err(e) => {
+                self.dialog = Some(Dialog::Info {
+                    message: format!("Could not reload {}: {e}", path.display()),
+                });
+                return;
+            }
+        };
         self.documents[idx] = document;
         self.histories[idx] = crate::model::history::History::new();
         self.file_panel.mark_dirty(&path, false);
@@ -11316,6 +11325,11 @@ impl App {
         if let Some((path, started)) = self.audition_pending.clone() {
             if Instant::now().duration_since(started) >= AUDITION_DEBOUNCE {
                 self.audition_pending = None;
+                // The one load path that stays silent on failure, deliberately: this fires
+                // off a debounce timer as the user skims the file list, so an unreadable
+                // entry must simply not play. A dialog per unplayable file — which
+                // `load_file` and `reload_buffer_from_disk` both correctly show — would pop
+                // up under the user's own Up/Down and make the list unusable.
                 if let Ok(document) = crate::model::io::load_audio(&path) {
                     self.audition_audio = AudioEngine::try_new(document.channels, document.sample_rate);
                     if let Some(engine) = &self.audition_audio {
@@ -11805,8 +11819,14 @@ impl App {
                 self.rebuild_audio();
                 self.rebuild_waveform_caches();
             }
+            // Reported, never swallowed. A discarded error here is indistinguishable from
+            // Enter doing nothing at all, which is exactly how an unreadable file (an RF64
+            // WAV, say — see `model::wavread`) presented itself: instant, silent, no clue
+            // that a read had even been attempted.
             Err(e) => {
-                let _ = e;
+                self.dialog = Some(Dialog::Info {
+                    message: format!("Could not open {}: {e}", path.display()),
+                });
             }
         }
     }
@@ -28081,6 +28101,60 @@ mod tests {
         assert!(!app.histories[0].can_undo(), "undo history must be cleared -- it referenced the discarded in-memory state");
 
         std::fs::remove_file(&path).ok();
+    }
+
+    /// The regression test for the reported bug: pressing Enter on a file this build cannot
+    /// read must *say so*. `load_file` used to discard the error (`Err(e) => { let _ = e; }`),
+    /// which made an unreadable file — an RF64 WAV, a truncated header, a permission error —
+    /// indistinguishable from the keypress never having registered at all.
+    #[test]
+    fn load_file_reports_an_unreadable_file_instead_of_doing_nothing() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_load_err_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A `.wav` by extension, so it routes to `load_wav` rather than being refused for its
+        // extension, but with a header no reader can make sense of.
+        let bogus = dir.join("not-really.wav");
+        std::fs::write(&bogus, b"this is not a RIFF file at all").unwrap();
+
+        let mut app = new_app(None, None);
+        let before = app.documents.len();
+        app.load_file(bogus.clone());
+
+        let message = match &app.dialog {
+            Some(Dialog::Info { message }) => message.clone(),
+            _ => panic!("an unreadable file must surface an Info dialog"),
+        };
+        assert!(
+            message.contains("not-really.wav"),
+            "the message must name the file that failed: {message}"
+        );
+        assert_eq!(app.documents.len(), before, "nothing should have been opened");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A reload the user explicitly asked for must report failure too — and must keep the
+    /// in-memory buffer rather than losing it to a file that has gone away.
+    #[test]
+    fn reload_buffer_from_disk_reports_failure_and_keeps_the_buffer() {
+        let path = std::env::temp_dir().join(format!("tuiwave_reload_gone_{}.wav", std::process::id()));
+        save_wav(&doc(0.25, 10), &path).unwrap();
+        let mut app = new_app(Some(crate::model::io::load_wav(&path).unwrap()), None);
+        std::fs::remove_file(&path).unwrap();
+
+        app.reload_buffer_from_disk(0);
+
+        match &app.dialog {
+            Some(Dialog::Info { message }) => {
+                assert!(message.contains("reload"), "the message should say what failed: {message}")
+            }
+            _ => panic!("a failed reload must surface an Info dialog"),
+        }
+        assert_eq!(
+            app.documents[0].channels[0],
+            vec![0.25f32; 10],
+            "the in-memory buffer must survive a failed reload"
+        );
     }
 
     /// `Ctrl+L` in the Buffers panel on a *clean* (non-dirty) document reloads immediately,
