@@ -47,11 +47,23 @@ pub fn channel_peak(channel: &[f32]) -> f32 {
 /// Strictly-below means a channel peaking exactly at the threshold is kept — at a boundary,
 /// keeping audio is the recoverable choice.
 pub fn channels_below(channels: &[Vec<f32>], threshold_db: f32) -> Vec<usize> {
+    let peaks: Vec<f32> = channels.iter().map(|ch| channel_peak(ch)).collect();
+    channels_below_peaks(&peaks, threshold_db)
+}
+
+/// [`channels_below`] from peaks that have already been measured.
+///
+/// The waveform pyramid (`ui::waveform_cache::WaveformCache`) records each channel's peak as a
+/// by-product of being built, so a streamed document — which has no resident `Vec<Vec<f32>>` to
+/// hand to `channels_below` — can answer this for a 20GB file with **no additional I/O at all**.
+/// Both entry points share this body so the linear-domain comparison and the strictly-below
+/// boundary rule documented above can only ever be defined once.
+pub fn channels_below_peaks(peaks: &[f32], threshold_db: f32) -> Vec<usize> {
     let threshold = db_to_linear(threshold_db);
-    channels
+    peaks
         .iter()
         .enumerate()
-        .filter(|(_, ch)| channel_peak(ch) < threshold)
+        .filter(|&(_, &peak)| peak < threshold)
         .map(|(i, _)| i)
         .collect()
 }

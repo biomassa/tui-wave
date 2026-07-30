@@ -11237,7 +11237,23 @@ impl App {
         let idx = self.active_document;
         let Some(doc) = self.documents.get(idx) else { return };
         let total = doc.channel_count();
-        let below = dsp::channels_below(&doc.channels, threshold_db);
+        // A streamed document has no resident samples to scan, but the pyramid already recorded
+        // each channel's peak while it was built, so this costs no I/O at all — see
+        // `dsp::channels_below_peaks`. Guarded on having a cache per channel: mid-build (or if
+        // the build failed) the peaks would be missing and every channel would read as empty.
+        let below = if doc.is_streaming() {
+            if self.waveform_caches.len() != total {
+                self.dialog = Some(Dialog::Info {
+                    message: "The waveform overview is still being built — try again in a moment."
+                        .to_string(),
+                });
+                return;
+            }
+            let peaks: Vec<f32> = self.waveform_caches.iter().map(|c| c.peak()).collect();
+            dsp::channels_below_peaks(&peaks, threshold_db)
+        } else {
+            dsp::channels_below(&doc.channels, threshold_db)
+        };
 
         if below.len() == total {
             // Removing every channel would leave a zero-channel document, which
@@ -11260,6 +11276,43 @@ impl App {
         }
 
         let removed = below.len();
+
+        // A streamed document cannot go through `RemoveChannelsCommand`: that stashes every
+        // removed channel's samples so `undo` can put them back, which at these sizes is most
+        // of the file. Instead the stream's channel map is edited — a `Vec<usize>` — and the
+        // operation is simply not undoable. Said plainly in the dialog rather than left for the
+        // user to discover by pressing Ctrl+Z and watching nothing happen.
+        if self.documents[idx].is_streaming() {
+            let drop_set: std::collections::HashSet<usize> = below.iter().copied().collect();
+            // Through `&self` (the channel map is interior-mutable), so this cannot be defeated
+            // by another `Arc` handle happening to be alive — which `Arc::get_mut` would turn
+            // into a silent no-op right when the user asked for something.
+            if let Some(stream) = self.documents[idx].stream.as_ref() {
+                stream.retain_channels(|i| !drop_set.contains(&i));
+            }
+            // The pyramid is per logical channel, so it has to follow the same edit rather than
+            // be rebuilt — rebuilding would re-read the entire file for a channel-list change.
+            let mut kept = 0usize;
+            self.waveform_caches.retain(|_| {
+                let keep = !drop_set.contains(&kept);
+                kept += 1;
+                keep
+            });
+            // Per-channel graphics image state is keyed by channel index too, and `render`
+            // re-truncates it each frame; dropping it here keeps one frame from painting a
+            // removed channel's bitmap into a surviving channel's pane.
+            self.graphics_protocols.clear();
+            self.dialog = Some(Dialog::Info {
+                message: format!(
+                    "Removed {removed} channel{} below {threshold_db} dBFS — {} left. \
+                     Not undoable on a streamed buffer; re-open the file to restore them.",
+                    if removed == 1 { "" } else { "s" },
+                    total - removed,
+                ),
+            });
+            return;
+        }
+
         self.histories[idx].apply(remove_channels_command(below), &mut self.documents[idx]);
         // Channel count changed. Three of the four consumers already cope: the audio engine
         // rebuilds its `DocumentSource` (and with it the channel count) on every Play/Seek, so
@@ -11346,6 +11399,13 @@ impl App {
         if let Some((path, started)) = self.audition_pending.clone() {
             if Instant::now().duration_since(started) >= AUDITION_DEBOUNCE {
                 self.audition_pending = None;
+                // Never audition a file too large to hold: this decodes fully into RAM and
+                // hands the engine an owned copy on top, so landing on a 20GB take while
+                // skimming the list would freeze the app for minutes and then run it out of
+                // memory. `streaming_info` only probes the header, so the check is free.
+                if self.streaming_info(&path).is_some() {
+                    return;
+                }
                 // The one load path that stays silent on failure, deliberately: this fires
                 // off a debounce timer as the user skims the file list, so an unreadable
                 // entry must simply not play. A dialog per unplayable file — which
@@ -28679,6 +28739,101 @@ mod tests {
             }
         }
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Remove Empty Channels on a streamed buffer must find the same channels as on a resident
+    /// one, edit the channel map rather than the samples, keep the pyramid in step, and say that
+    /// it isn't undoable.
+    ///
+    /// The "in step" part is the one that would go wrong silently: the pyramid is indexed by
+    /// *logical* channel, so if it isn't filtered by the same predicate, every surviving channel
+    /// afterwards draws a different channel's waveform.
+    #[test]
+    fn remove_empty_channels_on_a_streamed_buffer_edits_the_map_and_keeps_the_pyramid_aligned() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_stream_rec_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("many.wav");
+        // `multichannel_float_wav` makes channel 1 digitally silent and scales the rest by
+        // 0.9/(c+1), so with 6 channels the peaks are 0.9, 0.0, 0.3, 0.225, 0.18, 0.15.
+        multichannel_float_wav(&path, 6, 20_000);
+
+        let mut app = streaming_app();
+        app.load_file(path.clone());
+        // Stand in for the main loop's build, which needs a terminal.
+        let stream = app.documents[0].stream.clone().unwrap();
+        app.waveform_caches = (0..6)
+            .map(|ch| {
+                let mut b = crate::ui::waveform_cache::Builder::new();
+                stream.for_each_block(ch, |blk| b.push(blk)).unwrap();
+                b.finish()
+            })
+            .collect();
+        app.pending_cache_build = false;
+
+        // -48 dBFS catches only the digitally silent channel 1.
+        app.apply_remove_empty_channels(-48.0);
+
+        assert_eq!(app.documents[0].channel_count(), 5, "one channel removed");
+        assert_eq!(
+            app.documents[0].stream.as_ref().unwrap().channel_map(),
+            vec![0, 2, 3, 4, 5],
+            "the map skips the removed source channel"
+        );
+        assert_eq!(app.waveform_caches.len(), 5, "the pyramid follows the same edit");
+        // Logical channel 1 is now source channel 2 (peak 0.3). If the pyramid had not been
+        // filtered alongside, this would still hold source channel 1's peak of 0.0.
+        assert!(
+            (app.waveform_caches[1].peak() - 0.3).abs() < 0.01,
+            "pyramid entry 1 must describe source channel 2, got peak {}",
+            app.waveform_caches[1].peak()
+        );
+        // And the samples agree with the pyramid.
+        let src = app.documents[0].sample_source(1);
+        let (mn, mx) = src.with_slice(0, 20_000, crate::ui::waveform_cache::raw_min_max);
+        assert!(mn.abs().max(mx.abs()) > 0.29, "logical channel 1 reads real audio");
+
+        match &app.dialog {
+            Some(Dialog::Info { message }) => {
+                assert!(message.contains("Removed 1 channel"), "{message}");
+                assert!(
+                    message.contains("Not undoable"),
+                    "the message must say it can't be undone: {message}"
+                );
+            }
+            _ => panic!("expected a result dialog"),
+        }
+        assert!(!app.histories[0].can_undo(), "nothing was pushed onto the undo stack");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Streamed and resident must agree on *which* channels are empty — the operation is the
+    /// same question asked of two different storage layouts.
+    #[test]
+    fn streamed_and_resident_agree_on_which_channels_are_empty() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_stream_agree_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cmp.wav");
+        multichannel_float_wav(&path, 6, 20_000);
+
+        let resident = crate::model::io::load_wav(&path).unwrap();
+        let stream = crate::model::stream::StreamedSamples::open(&path).unwrap();
+        let peaks: Vec<f32> = (0..6)
+            .map(|ch| {
+                let mut b = crate::ui::waveform_cache::Builder::new();
+                stream.for_each_block(ch, |blk| b.push(blk)).unwrap();
+                b.finish().peak()
+            })
+            .collect();
+
+        for threshold in [-48.0f32, -20.0, -12.0, -6.0] {
+            assert_eq!(
+                dsp::channels_below_peaks(&peaks, threshold),
+                dsp::channels_below(&resident.channels, threshold),
+                "threshold {threshold} dBFS"
+            );
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

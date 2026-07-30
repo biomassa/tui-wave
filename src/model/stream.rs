@@ -14,7 +14,7 @@
 //! edit at this scale would hold most of the file in the undo stack; `App::handle_action` gates
 //! streamed documents to an allowlist rather than letting those paths near one.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use super::wavread::{WavFrames, WavInfo};
 
@@ -45,12 +45,18 @@ impl Window {
 /// `channel_map[i]`. Storing the indirection rather than rewriting anything means dropping 48
 /// of 58 channels costs a `Vec<usize>` edit, not a 20GB rewrite — at the price of not being
 /// undoable through `History`, which stores sample data it cannot have here.
+///
+/// Every field is interior-mutable so that all of this works through `&self`. That is not
+/// incidental: `Document` holds an `Arc` of this, the render path borrows it while the document
+/// is also consulted elsewhere, and requiring `&mut` would mean `Arc::get_mut` — which returns
+/// `None` whenever any other handle happens to exist, turning "a clone is alive somewhere" into
+/// a silent no-op at the exact moment the user asked for something.
 pub struct StreamedSamples {
     /// `Mutex` purely because the render path holds `&Document` while reading, and reading
     /// needs to seek. Never contended — the UI is single-threaded.
     frames: Mutex<WavFrames>,
     info: WavInfo,
-    channel_map: Vec<usize>,
+    channel_map: RwLock<Vec<usize>>,
     windows: Mutex<Vec<Option<Window>>>,
     /// Scratch for reads too large to cache, kept alive so a per-frame read doesn't reallocate.
     scratch: Mutex<Vec<f32>>,
@@ -63,7 +69,7 @@ impl StreamedSamples {
         Ok(StreamedSamples {
             frames: Mutex::new(frames),
             info,
-            channel_map: (0..info.channels).collect(),
+            channel_map: RwLock::new((0..info.channels).collect()),
             windows: Mutex::new(Vec::new()),
             scratch: Mutex::new(Vec::new()),
         })
@@ -75,7 +81,12 @@ impl StreamedSamples {
 
     /// Channels currently presented, i.e. after any Remove Empty Channels.
     pub fn channel_count(&self) -> usize {
-        self.channel_map.len()
+        self.channel_map.read().map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// The source channel logical channel `channel` reads from.
+    fn source_channel(&self, channel: usize) -> Option<usize> {
+        self.channel_map.read().ok()?.get(channel).copied()
     }
 
     pub fn len_samples(&self) -> usize {
@@ -84,20 +95,26 @@ impl StreamedSamples {
         usize::try_from(self.info.frame_count).unwrap_or(usize::MAX)
     }
 
-    pub fn channel_map(&self) -> &[usize] {
-        &self.channel_map
+    /// Source channel per logical channel, in order.
+    pub fn channel_map(&self) -> Vec<usize> {
+        self.channel_map.read().map(|m| m.clone()).unwrap_or_default()
     }
 
     /// Drops logical channels by index, keeping the rest in order. The streaming counterpart of
     /// `RemoveChannelsCommand`, which cannot be used here — it stashes every removed channel's
     /// samples so `undo` can put them back, which at these sizes is most of the file.
-    pub fn retain_channels(&mut self, keep: impl Fn(usize) -> bool) {
-        let mut i = 0;
-        self.channel_map.retain(|_| {
-            let k = keep(i);
-            i += 1;
-            k
-        });
+    ///
+    /// `keep` is called with the *logical* index, matching what the caller was just shown and
+    /// what `dsp::channels_below_peaks` returns.
+    pub fn retain_channels(&self, keep: impl Fn(usize) -> bool) {
+        if let Ok(mut map) = self.channel_map.write() {
+            let mut i = 0;
+            map.retain(|_| {
+                let k = keep(i);
+                i += 1;
+                k
+            });
+        }
         // Window indices are logical, so they no longer mean what they did.
         self.windows.lock().map(|mut w| w.clear()).ok();
     }
@@ -117,7 +134,7 @@ impl StreamedSamples {
         let total = self.len_samples();
         let end = end.min(total);
         let start = start.min(end);
-        let Some(&source_channel) = self.channel_map.get(channel) else {
+        let Some(source_channel) = self.source_channel(channel) else {
             return f(&[]);
         };
         if start >= end {
@@ -138,8 +155,9 @@ impl StreamedSamples {
         }
 
         let mut windows = self.windows.lock().unwrap();
-        if windows.len() < self.channel_map.len() {
-            windows.resize_with(self.channel_map.len(), || None);
+        let channel_count = self.channel_count();
+        if windows.len() < channel_count {
+            windows.resize_with(channel_count, || None);
         }
         let needs_load = !windows[channel].as_ref().is_some_and(|w| w.covers(start, end));
         if needs_load {
@@ -168,7 +186,7 @@ impl StreamedSamples {
         channel: usize,
         mut f: impl FnMut(&[f32]),
     ) -> std::io::Result<()> {
-        let Some(&source_channel) = self.channel_map.get(channel) else {
+        let Some(source_channel) = self.source_channel(channel) else {
             return Ok(());
         };
         let total = self.info.frame_count;
@@ -372,11 +390,11 @@ mod tests {
     #[test]
     fn retain_channels_remaps_logical_indices_to_source_channels() {
         let dir = tmp("retain");
-        let mut s = StreamedSamples::open(indexed_wav(&dir, 5, 1_000)).unwrap();
+        let s = StreamedSamples::open(indexed_wav(&dir, 5, 1_000)).unwrap();
         // Keep source channels 2 and 4.
         s.retain_channels(|i| i == 2 || i == 4);
         assert_eq!(s.channel_count(), 2);
-        assert_eq!(s.channel_map(), &[2, 4]);
+        assert_eq!(s.channel_map(), vec![2, 4]);
 
         let first = SampleSource::Streamed { stream: &s, channel: 0 };
         first.with_slice(7, 8, |got| assert_eq!(got, &[2007.0], "logical 0 is source 2"));
@@ -390,10 +408,10 @@ mod tests {
     #[test]
     fn retain_channels_composes() {
         let dir = tmp("twice");
-        let mut s = StreamedSamples::open(indexed_wav(&dir, 6, 100)).unwrap();
+        let s = StreamedSamples::open(indexed_wav(&dir, 6, 100)).unwrap();
         s.retain_channels(|i| i % 2 == 1); // sources 1,3,5
         s.retain_channels(|i| i == 2); // of those, the last -> source 5
-        assert_eq!(s.channel_map(), &[5]);
+        assert_eq!(s.channel_map(), vec![5]);
         let only = SampleSource::Streamed { stream: &s, channel: 0 };
         only.with_slice(3, 4, |got| assert_eq!(got, &[5003.0]));
         std::fs::remove_dir_all(&dir).ok();
