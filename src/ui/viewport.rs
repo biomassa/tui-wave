@@ -27,26 +27,50 @@ const VERTICAL_ZOOM_FACTOR: f32 = 1.25;
 const MIN_AMPLITUDE_SCALE: f32 = 0.1;
 const MAX_AMPLITUDE_SCALE: f32 = 10.0;
 
-/// Channel panes drawn at once. Beyond this the waveform area scrolls vertically
-/// (`Viewport::channel_scroll`) instead of subdividing further: `channel_pane_rects` splits
-/// the waveform area evenly, so at 30 channels every pane gets a single row — no centre row
-/// for the zero line, and a dB gutter that can show one mark — and past ~42 channels the
-/// split degenerates to zero-height panes entirely.
+/// Fewest channel panes a high-channel-count file is ever windowed down to.
+///
+/// Beyond this the waveform area scrolls vertically (`Viewport::channel_scroll`) instead of
+/// subdividing further: `channel_pane_rects` splits the waveform area evenly, so at 30 channels
+/// every pane gets a single row — no centre row for the zero line, and a dB gutter that can show
+/// one mark — and past ~42 channels the split degenerates to zero-height panes entirely.
+///
+/// A floor rather than a cap: see [`visible_channels`], which shows *more* than this when the
+/// terminal is tall enough to give each pane a usable height.
 pub const VISIBLE_CHANNELS: usize = 6;
+
+/// Rows a pane needs before another pane is worth adding.
+///
+/// Six panes of this is 42 rows, which is about the waveform height of a maximised terminal at a
+/// typical font size — i.e. the size [`VISIBLE_CHANNELS`] was chosen against. Sized so a pane keeps
+/// an odd height with a real centre row for the zero line (`channel_pane_rects` rounds down to
+/// odd), plus room for a few dB gutter marks either side of it.
+pub const MIN_PANE_ROWS: usize = 7;
 
 /// How many channel panes actually get drawn.
 ///
-/// At or below [`VISIBLE_CHANNELS`] this is simply the channel count — every channel is drawn
-/// and nothing scrolls, including on a terminal too short to give each pane a row, where
-/// `channel_pane_rects`'s own degrade path takes over exactly as it did before channel
-/// scrolling existed. Only past the cap does `height` come into it, and only to avoid asking
-/// for more panes than there are rows. Returns at least 1 so callers can divide by it.
+/// At or below [`VISIBLE_CHANNELS`] this is simply the channel count — every channel is drawn and
+/// nothing scrolls, including on a terminal too short to give each pane a row, where
+/// `channel_pane_rects`'s own degrade path takes over exactly as it did before channel scrolling
+/// existed.
+///
+/// Above it, the count **grows with the available height** rather than staying at six. Panes are
+/// forced to an odd height so amplitude zero lands on a real centre row, so six panes can only ever
+/// occupy `6 * odd` rows — on a tall display that left up to eleven unused rows below the last pane
+/// and a conspicuous empty band under the waveform (user report, on a higher-resolution screen).
+/// Fitting as many panes as [`MIN_PANE_ROWS`] allows both closes that gap and shows more of a
+/// 58-channel file at once, which is the more useful answer anyway.
+///
+/// Never fewer than [`VISIBLE_CHANNELS`], so no terminal that worked before shows less than it did;
+/// never more than the channel count, and never more than there are rows. Returns at least 1 so
+/// callers can divide by it.
 pub fn visible_channels(height: u16, channel_count: usize) -> usize {
     let count = channel_count.max(1);
     if count <= VISIBLE_CHANNELS {
         return count;
     }
-    VISIBLE_CHANNELS.min((height as usize).max(1)).max(1)
+    let height = (height as usize).max(1);
+    let fits = height / MIN_PANE_ROWS;
+    fits.max(VISIBLE_CHANNELS).min(count).min(height).max(1)
 }
 
 impl Viewport {
@@ -204,10 +228,64 @@ mod tests {
         }
     }
 
+    /// On the height `VISIBLE_CHANNELS` was chosen against, the window is exactly that — so no
+    /// terminal that worked before this became height-dependent shows a different number of panes.
     #[test]
-    fn the_window_caps_at_visible_channels() {
+    fn the_window_is_the_floor_on_an_ordinary_height() {
         assert_eq!(visible_channels(40, 30), VISIBLE_CHANNELS);
         assert_eq!(visible_channels(40, 120), VISIBLE_CHANNELS);
+        // Anything below `VISIBLE_CHANNELS * MIN_PANE_ROWS` stays at the floor.
+        for height in 8..=(VISIBLE_CHANNELS * MIN_PANE_ROWS) as u16 {
+            assert_eq!(
+                visible_channels(height, 30),
+                VISIBLE_CHANNELS,
+                "height {height} must not drop below the floor"
+            );
+        }
+    }
+
+    /// On a taller display the window *grows*, which is what stops six odd-height panes leaving a
+    /// conspicuous empty band under the waveform — and shows more of a high-channel file at once.
+    #[test]
+    fn the_window_grows_with_the_available_height() {
+        assert_eq!(visible_channels(63, 30), 9, "63 rows fits nine 7-row panes");
+        assert_eq!(visible_channels(70, 30), 10);
+        assert_eq!(visible_channels(140, 30), 20);
+        // Never more channels than exist, however tall the terminal.
+        assert_eq!(visible_channels(400, 30), 30);
+        assert_eq!(visible_channels(400, 8), 8);
+    }
+
+    /// Whatever the height, a grown window's panes still get at least `MIN_PANE_ROWS` rows — which
+    /// is the whole point of sizing by it, since a pane needs an odd height with a real centre row
+    /// for the zero line plus room for dB marks.
+    #[test]
+    fn a_grown_window_never_starves_its_panes() {
+        for height in (VISIBLE_CHANNELS * MIN_PANE_ROWS) as u16..300 {
+            let n = visible_channels(height, 200);
+            let pane = height as usize / n;
+            assert!(
+                pane >= MIN_PANE_ROWS,
+                "height {height} -> {n} panes of {pane} rows, below the {MIN_PANE_ROWS} minimum"
+            );
+        }
+    }
+
+    /// The gap under the last pane is what prompted this: panes are forced to an odd height, so
+    /// `n * pane` can fall short of the area. Growing the count keeps that shortfall small
+    /// relative to the area instead of letting it reach eleven rows on a tall screen.
+    #[test]
+    fn the_unused_band_below_the_panes_stays_small() {
+        for height in 42u16..200 {
+            let n = visible_channels(height, 200) as u16;
+            let base = height / n;
+            let pane = if base % 2 == 1 { base } else { base - 1 };
+            let leftover = height - n * pane;
+            assert!(
+                leftover * 5 <= height,
+                "height {height}: {leftover} rows unused below {n} panes of {pane} — over a fifth"
+            );
+        }
     }
 
     /// Past the cap, a terminal too short to give each pane a row shrinks the window rather

@@ -2185,7 +2185,20 @@ pub struct App {
     /// essentially every redraw during scrolling/zooming/playback. Cleared whenever the
     /// channel count changes (e.g. switching to a document with a different channel
     /// count), so stale per-channel state from a previous document is never reused.
-    graphics_protocols: Vec<ratatui_image::protocol::StatefulProtocol>,
+    /// Per-channel graphics image state, keyed by **absolute channel index**.
+    ///
+    /// A map rather than a `Vec` because the keys are sparse: with a channel window open only the
+    /// six-or-so channels currently on screen have entries, and their indices are wherever
+    /// `channel_scroll` happens to be. As a `Vec` this was indexed by absolute channel but only
+    /// ever grown by `push`, so scrolling to channel 10 with six entries appended the new one at
+    /// index 6 and then indexed `[10]` — an out-of-bounds panic on any file with more than
+    /// `visible_channels` channels, reachable by one scroll in graphics mode.
+    ///
+    /// Keying by *pane position* instead would avoid the sparseness but is wrong for a different
+    /// reason: pane 0 is whichever channel `channel_scroll` puts there, so a scroll would hand
+    /// one channel the image state cached for another and repaint its waveform.
+    graphics_protocols:
+        std::collections::HashMap<usize, ratatui_image::protocol::StatefulProtocol>,
     /// The CDP envelope editor's own graphics-mode protocol slot — deliberately separate
     /// from `graphics_protocols` (the per-channel waveform ones): the waveform's own
     /// graphics rendering is skipped entirely while any dialog is open (`overlay_active`,
@@ -2979,7 +2992,7 @@ impl App {
             time_ruler: config.time_ruler,
             pending_cache_build: false,
             pending_open: None,
-            graphics_protocols: Vec::new(),
+            graphics_protocols: std::collections::HashMap::new(),
             cdp_envelope_graphics_protocol: None,
             cdp_formant_graphics_protocol: None,
             documents,
@@ -11340,7 +11353,7 @@ impl App {
         // Channel count changed. Three of the four consumers already cope: the audio engine
         // rebuilds its `DocumentSource` (and with it the channel count) on every Play/Seek, so
         // `after_sample_mutation`'s reload is enough; `rebuild_waveform_caches` rebuilds one
-        // cache per channel from scratch; and `render` re-truncates `graphics_protocols` every
+        // cache per channel from scratch; and `render` re-prunes `graphics_protocols` every
         // frame. The fourth is the channel window, which `render`'s own
         // `clamp_channel_scroll` pulls back into range on the next frame.
         self.after_sample_mutation(idx);
@@ -14347,7 +14360,7 @@ impl App {
         let channel_count = self.documents[doc_idx].channel_count().max(1);
         // Drop stale per-channel image state from a previous document with more channels
         // — never reuse it for a channel index that no longer exists.
-        self.graphics_protocols.truncate(channel_count);
+        self.graphics_protocols.retain(|&channel, _| channel < channel_count);
         // Same backstop as `clamp_zoom_to_content` above, for the vertical axis: a terminal
         // resize, a buffer switch, or an edit that removes channels (Remove Empty Channels)
         // can all leave the channel window pointing past the end.
@@ -14539,12 +14552,17 @@ impl App {
                         self.dot_matrix_gradient,
                     );
                     let protocol = picker.new_resize_protocol(image::DynamicImage::ImageRgba8(img));
-                    if i < self.graphics_protocols.len() {
-                        self.graphics_protocols[i] = protocol;
-                    } else {
-                        self.graphics_protocols.push(protocol);
+                    // Replaced, not inserted-if-absent: the waveform's pixel content changes on
+                    // essentially every redraw (see the comment above), so keeping an existing
+                    // entry would freeze each channel on the first frame it was drawn.
+                    self.graphics_protocols.insert(i, protocol);
+                    if let Some(state) = self.graphics_protocols.get_mut(&i) {
+                        frame.render_stateful_widget(
+                            ratatui_image::StatefulImage::default(),
+                            channel_inner,
+                            state,
+                        );
                     }
-                    frame.render_stateful_widget(ratatui_image::StatefulImage::default(), channel_inner, &mut self.graphics_protocols[i]);
                 }
             }
 
@@ -15862,6 +15880,57 @@ fn block_inner(popup: Rect) -> Rect {
 /// `blocked` is why the buffer can't be exported (`App::export_blocker`); when set, it replaces
 /// the hints line's Enter with the reason and dims it.
 #[allow(clippy::too_many_arguments)]
+/// Word-wraps `text` to `width` columns, returning **exactly** `rows` lines — padded with empty
+/// strings when it is shorter, and with the last line ellipsized when it would not fit.
+///
+/// Exists so a dialog can reserve a fixed number of rows for a variable-length message. Letting
+/// `Paragraph`'s own `Wrap` do it means the height depends on the text, which is what made the
+/// Export dialog resize as its blocker appeared and vanished.
+fn wrap_to_rows(text: &str, width: usize, rows: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let candidate = if current.is_empty() { word.chars().count() } else { current.chars().count() + 1 + word.chars().count() };
+        if candidate <= width {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+            continue;
+        }
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+        // A single word longer than the line is broken rather than allowed to overflow.
+        if word.chars().count() > width {
+            let mut rest: Vec<char> = word.chars().collect();
+            while rest.len() > width {
+                lines.push(rest.drain(..width).collect());
+            }
+            current = rest.into_iter().collect();
+        } else {
+            current = word.to_string();
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    if lines.len() > rows {
+        lines.truncate(rows.max(1));
+        if let Some(last) = lines.last_mut() {
+            // Make room for the ellipsis rather than exceeding the width.
+            while last.chars().count() + 1 > width {
+                last.pop();
+            }
+            last.push('…');
+        }
+    }
+    lines.resize(rows, String::new());
+    lines
+}
+
 fn render_export_dialog(
     frame: &mut Frame,
     area: Rect,
@@ -15872,11 +15941,19 @@ fn render_export_dialog(
     focused: usize,
     blocked: Option<&str>,
 ) -> Vec<Rect> {
-    let width = 58u16.min(area.width);
-    // 2 borders + filename + format + setting + blank + hints, plus up to 3 wrapped rows of
-    // blocker text when there is one.
-    let blocked_rows = blocked.map_or(0, |b| (b.len() as u16).div_ceil(width.saturating_sub(4).max(1)) + 1);
-    let height = (7 + blocked_rows).min(area.height);
+    // Fixed size, always. The height used to be `7 + blocked_rows`, so the popup grew and shrank
+    // as you cycled Format — FLAC has no blocker, MP3 at 96 kHz has a two-line one — and the whole
+    // dialog jumped under the cursor. It is now sized for the worst case and simply leaves the
+    // blocker rows blank when there is nothing to say.
+    //
+    // 68 is wide enough for the longest blocker (`export::blocker`'s mono/stereo message, ~102
+    // chars) to wrap into `EXPORT_BLOCKER_ROWS`.
+    const EXPORT_BLOCKER_ROWS: usize = 2;
+    let width = 68u16.min(area.width);
+    let inner_width = width.saturating_sub(2).max(1) as usize;
+    // Content rows: filename, format, setting, blank, the blocker block, blank, hints.
+    let content_rows = 6 + EXPORT_BLOCKER_ROWS as u16;
+    let height = (content_rows + 2).min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -15891,48 +15968,66 @@ fn render_export_dialog(
     let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
     let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
 
+    // Labels are **left-aligned and padded to a common width**, so every label starts in the same
+    // column and every value starts in the same column. They used to be right-aligned on the colon
+    // with hand-counted leading spaces (`"     Format: "`, `"      Depth: "`, `"    Bitrate: "`),
+    // which put "Format", "Depth" and "Bitrate" each in a different column — and shifted as you
+    // cycled Format, since the label changes with it.
+    const LABEL_WIDTH: usize = 10; // "File name:", the longest
+    let label_cell = |text: &str| format!(" {text:<LABEL_WIDTH$} ");
+
     let value_row = |label: &str, value: String, is_focused: bool| {
         if is_focused {
             Line::from(vec![
-                Span::styled(format!("{label}◄ "), label_style),
+                Span::styled(format!("{}◄ ", label_cell(label)), label_style),
                 Span::styled(value, cursor_style),
                 Span::styled(" ►", label_style),
             ])
         } else {
-            Line::from(vec![Span::styled(label.to_string(), label_style), Span::styled(value, base)])
+            // Indented by the width of "◄ " so the value doesn't shift when focus moves onto it.
+            Line::from(vec![
+                Span::styled(format!("{}  ", label_cell(label)), label_style),
+                Span::styled(value, base),
+            ])
         }
     };
 
+    // The name gets the same indent as an unfocused value, so all three values line up.
+    let name_prefix = format!("{}  ", label_cell("File name:"));
     let name_line = if focused == ex_focus::NAME {
         let (before, under, after) = name_input.split_at_cursor();
         Line::from(vec![
-            Span::styled(" File name: ", label_style),
+            Span::styled(name_prefix.clone(), label_style),
             Span::styled(before, base),
             Span::styled(under, cursor_style),
             Span::styled(after, base),
         ])
     } else {
         Line::from(vec![
-            Span::styled(" File name: ", label_style),
+            Span::styled(name_prefix.clone(), label_style),
             Span::styled(name_input.value().to_string(), base),
         ])
     };
 
     let (setting_label, setting_value) = match format {
-        ExportFormat::Flac => ("      Depth: ", flac_depth.label().to_string()),
-        ExportFormat::Mp3 => ("    Bitrate: ", format!("{mp3_bitrate} kbps")),
+        ExportFormat::Flac => ("Depth:", flac_depth.label().to_string()),
+        ExportFormat::Mp3 => ("Bitrate:", format!("{mp3_bitrate} kbps")),
     };
 
     let mut lines = vec![
         name_line,
-        value_row("     Format: ", format.label().to_string(), focused == ex_focus::FORMAT),
+        value_row("Format:", format.label().to_string(), focused == ex_focus::FORMAT),
         value_row(setting_label, setting_value, focused == ex_focus::SETTING),
         Line::from(""),
     ];
-    if let Some(reason) = blocked {
-        lines.push(Line::from(Span::styled(format!(" {reason}"), dim_style)));
-        lines.push(Line::from(""));
+    // Always `EXPORT_BLOCKER_ROWS` rows, blank when unblocked, so the dialog never changes size.
+    // Wrapped here rather than by `Paragraph` so the row count is known and bounded — letting the
+    // paragraph reflow is what made the height depend on the text in the first place.
+    let blocker_lines = wrap_to_rows(blocked.unwrap_or(""), inner_width.saturating_sub(1), EXPORT_BLOCKER_ROWS);
+    for line in blocker_lines {
+        lines.push(Line::from(Span::styled(format!(" {line}"), dim_style)));
     }
+    lines.push(Line::from(""));
 
     let go_style = if blocked.is_none() { hint_style } else { dim_style };
     lines.push(Line::from(vec![
@@ -15951,12 +16046,10 @@ fn render_export_dialog(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(Style::default().bg(theme::SURFACE0));
-    // `trim: false` — the label column is right-aligned with leading spaces, which `trim: true`
-    // would strip. Wrapping is only really needed for a long blocker message.
-    frame.render_widget(
-        Paragraph::new(lines).block(block).wrap(ratatui::widgets::Wrap { trim: false }),
-        popup,
-    );
+    // Deliberately **not** wrapped: every line is already sized to fit, and reflowing is what made
+    // this dialog resize. It also means a very long file name is clipped at the border rather than
+    // spilling onto a second row and pushing everything below it down.
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
 
     // One rect per interactive row, then the hints bar (always last = submit).
     (0..=ex_focus::COUNT as u16)
@@ -19430,15 +19523,6 @@ fn render_loading_panel(
     channel_count: usize,
 ) {
     let area = frame.area();
-    let width = 60u16.min(area.width);
-    let height = 8u16.min(area.height);
-    let popup = Rect {
-        x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    };
-    frame.render_widget(ratatui::widgets::Clear, popup);
 
     let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
     let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
@@ -19450,6 +19534,33 @@ fn render_loading_panel(
         done_bytes as f64 / total_bytes as f64
     };
     let gb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+
+    let counts = format!(
+        " {channel_count} channels — {:.1} / {:.1} GB scanned",
+        gb(done_bytes),
+        gb(total_bytes),
+    );
+    let explain = " Too large to hold in memory — building the waveform overview.";
+
+    // Sized to the longest line rather than a fixed 60, which truncated the explanation (it needs
+    // 62 columns and the popup gave 58). Every line is measured in `chars`, not bytes: the em dash
+    // and the file name are both multi-byte, so a byte length would over-estimate the width and
+    // leave the panel needlessly wide.
+    let longest = [counts.chars().count(), explain.chars().count(), name.chars().count() + 1]
+        .into_iter()
+        .max()
+        .unwrap_or(0) as u16;
+    // +3: one column of padding on the right, plus the two borders.
+    let width = (longest + 3).clamp(24, area.width.max(1));
+    let height = 8u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
     // Inner width less the leading space and the two brackets.
     let bar_width = width.saturating_sub(2).saturating_sub(4) as usize;
     let filled = ((bar_width as f64) * fraction).round() as usize;
@@ -19466,20 +19577,10 @@ fn render_loading_panel(
         Paragraph::new(vec![
             Line::raw(""),
             Line::from(Span::styled(format!(" {name}"), base)),
-            Line::from(Span::styled(
-                format!(
-                    " {channel_count} channels — {:.1} / {:.1} GB scanned",
-                    gb(done_bytes),
-                    gb(total_bytes),
-                ),
-                label_style,
-            )),
+            Line::from(Span::styled(counts, label_style)),
             Line::raw(""),
             Line::from(Span::styled(format!(" [{bar}]"), accent)),
-            Line::from(Span::styled(
-                " Too large to hold in memory — building the waveform overview.",
-                label_style,
-            )),
+            Line::from(Span::styled(explain, label_style)),
         ])
         .block(block),
         popup,
@@ -19838,6 +19939,145 @@ mod tests {
             bext: None,
             stream: None,
         }
+    }
+
+    /// A regression test for a crash: scrolling the channel window in graphics mode panicked with
+    /// "index out of bounds: the len is 8 but the index is 10".
+    ///
+    /// `graphics_protocols` is keyed by *absolute* channel index — it has to be, since pane 0 is
+    /// whichever channel `channel_scroll` puts there — but it was a `Vec` only ever grown by
+    /// `push`. Scrolling to channel 10 with six entries appended the new one at index 6 and then
+    /// indexed `[10]`. One scroll on any file with more channels than fit on screen did it.
+    ///
+    /// `Picker::halfblocks` is what makes this testable: it builds a picker without the terminal
+    /// capability query `from_query_stdio` performs, so the graphics path runs under
+    /// `TestBackend`. The protocol is forced to Kitty to match the report, though the bug was in
+    /// this app's own image-state keying and so is protocol-independent.
+    #[test]
+    fn scrolling_the_channel_window_in_graphics_mode_does_not_panic() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        // More channels than any window shows, so scrolling produces absolute indices past the
+        // number of panes drawn — the precondition the old keying mishandled.
+        let channels = 30usize;
+        let mut app = new_app(
+            Some(Document {
+                channels: (0..channels).map(|c| vec![0.4 - c as f32 * 0.01; 5_000]).collect(),
+                ..Document::default()
+            }),
+            None,
+        );
+        let mut picker = ratatui_image::picker::Picker::halfblocks();
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+        app.set_picker(Some(picker));
+        app.graphics_mode = true;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        // The trigger: **jump further than one window in a single step, with no draw in between.**
+        //
+        // That is what the real app does — `App::run` drains every queued event before redrawing,
+        // so one spin of the mouse wheel or a held key moves the window many channels and only
+        // then draws. It matters that the jump is bigger than the pane count: the old keying
+        // appended at `len`, and because the drawn indices were always a contiguous `0..len`
+        // prefix, `len` *happened* to equal the next needed index for any smaller step. Scrolling
+        // one pane at a time therefore never broke it, which is exactly why this needs to jump.
+        for _ in 0..channels {
+            app.handle_action(Action::ScrollChannelsDown);
+        }
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(
+            app.viewport.as_ref().is_some_and(|v| v.channel_scroll > 6),
+            "sanity: the window must really have jumped past the first screenful"
+        );
+
+        // Then walk back and forth in smaller batches, which is the ordinary case.
+        for _ in 0..channels {
+            for _ in 0..4 {
+                app.handle_action(Action::ScrollChannelsUp);
+            }
+            terminal.draw(|frame| app.render(frame)).unwrap();
+        }
+        for _ in 0..channels {
+            for _ in 0..4 {
+                app.handle_action(Action::ScrollChannelsDown);
+            }
+            terminal.draw(|frame| app.render(frame)).unwrap();
+        }
+        for _ in 0..channels {
+            for _ in 0..4 {
+                app.handle_action(Action::ScrollChannelsUp);
+            }
+            terminal.draw(|frame| app.render(frame)).unwrap();
+        }
+        // Whole-window jumps, which move by a full pane count at a time.
+        for _ in 0..8 {
+            app.handle_action(Action::ScrollChannelsPageDown);
+            terminal.draw(|frame| app.render(frame)).unwrap();
+        }
+        for _ in 0..8 {
+            app.handle_action(Action::ScrollChannelsPageUp);
+            terminal.draw(|frame| app.render(frame)).unwrap();
+        }
+        // And a jump straight from the top to the bottom of the list with no draw in between.
+        for _ in 0..channels {
+            app.handle_action(Action::ScrollChannelsDown);
+        }
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        // Only on-screen channels keep image state, and every key must be a real channel.
+        assert!(
+            app.graphics_protocols.keys().all(|&c| c < channels),
+            "image state must never be keyed by a channel that doesn't exist"
+        );
+    }
+
+    /// Switching to a document with fewer channels must drop the image state for channels that no
+    /// longer exist, rather than leaving it to be reused for an unrelated channel.
+    #[test]
+    fn graphics_image_state_is_pruned_when_the_channel_count_shrinks() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(
+            Some(Document {
+                channels: (0..20).map(|_| vec![0.3f32; 4_000]).collect(),
+                ..Document::default()
+            }),
+            None,
+        );
+        let mut picker = ratatui_image::picker::Picker::halfblocks();
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+        app.set_picker(Some(picker));
+        app.graphics_mode = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+
+        // A first draw, because `channel_scroll` lives on the viewport and `render` is what
+        // creates it — scrolling before any frame is drawn does nothing at all.
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        // Scroll well down so entries exist for high channel indices.
+        for _ in 0..12 {
+            app.handle_action(Action::ScrollChannelsDown);
+            terminal.draw(|frame| app.render(frame)).unwrap();
+        }
+        assert!(
+            app.graphics_protocols.keys().any(|&c| c >= 6),
+            "sanity: scrolling must have produced high-numbered entries"
+        );
+
+        // Now a two-channel document in the same slot.
+        app.documents[0] = Document { channels: vec![vec![0.2f32; 4_000]; 2], ..Document::default() };
+        app.viewport = None;
+        app.rebuild_waveform_caches();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert!(
+            app.graphics_protocols.keys().all(|&c| c < 2),
+            "state for channels 2.. must be dropped, got keys {:?}",
+            app.graphics_protocols.keys().collect::<Vec<_>>()
+        );
     }
 
     /// A regression test for a real bug: the menu used to render *before* the waveform
@@ -29986,6 +30226,216 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Renders the Export dialog and returns the screen rows the popup occupies.
+    fn export_dialog_rows(sample_rate: u32, to_mp3: bool) -> Vec<String> {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(
+            Some(Document {
+                channels: vec![vec![0.3f32; 4410]; 2],
+                sample_rate,
+                path: Some(PathBuf::from("/tmp/achla-clean.wav")),
+                ..Document::default()
+            }),
+            None,
+        );
+        app.handle_action(Action::Export);
+        if to_mp3 {
+            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+            app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(110)
+            .map(|row| row.iter().map(|c| c.symbol().chars().next().unwrap_or(' ')).collect::<String>())
+            .filter(|row| row.contains('┌') || row.contains('└') || row.contains('│'))
+            .collect()
+    }
+
+    /// The loading panel must show its text in full. It was a hardcoded 60 columns wide, giving 58
+    /// of content — one short of the 62 the explanation line needs — so it rendered as
+    /// "building the waveform overv" with the rest cut off (user report).
+    #[test]
+    fn the_loading_panel_is_wide_enough_for_its_text() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        // A long name too, since the panel is sized to whichever line is longest.
+        for name in ["t.wav", "test56ch_30gb.wav", "a-really-quite-long-recording-name-2026-07-30.wav"] {
+            let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_loading_panel(frame, name, 4_700_000_000, 32_200_000_000, 56)
+                })
+                .unwrap();
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .chunks(160)
+                .map(|row| {
+                    row.iter().map(|c| c.symbol().chars().next().unwrap_or(' ')).collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            for needed in [
+                "Too large to hold in memory — building the waveform overview.",
+                "56 channels — 4.4 / 30.0 GB scanned",
+                name,
+            ] {
+                assert!(
+                    screen.contains(needed),
+                    "{name:?}: {needed:?} was truncated or missing:\n{screen}"
+                );
+            }
+        }
+    }
+
+    /// The dialog must be the **same size** whether or not there is a blocker, and its labels must
+    /// all start in the same column.
+    ///
+    /// Both were reported: cycling Format resized the popup (the height was `7 + blocked_rows`, and
+    /// MP3 at 96 kHz has a two-line blocker where FLAC has none) so it jumped under the cursor; and
+    /// the labels were right-aligned on the colon with hand-counted leading spaces, which put
+    /// "Format", "Depth" and "Bitrate" each in a different column.
+    #[test]
+    fn the_export_dialog_keeps_one_size_and_one_label_column() {
+        // 44.1k FLAC: no blocker. 96k MP3: a blocker MP3 can't store that rate.
+        let unblocked = export_dialog_rows(44_100, false);
+        let blocked = export_dialog_rows(96_000, true);
+
+        assert_eq!(
+            unblocked.len(),
+            blocked.len(),
+            "the dialog must not change height when a blocker appears\n--- unblocked ---\n{}\n--- blocked ---\n{}",
+            unblocked.join("\n"),
+            blocked.join("\n"),
+        );
+        // And the same width, so it cannot shift sideways either.
+        let border_span = |rows: &[String]| {
+            let top = rows.iter().find(|r| r.contains('┌')).cloned().unwrap_or_default();
+            (top.find('┌'), top.find('┐'))
+        };
+        assert_eq!(border_span(&unblocked), border_span(&blocked), "width must be fixed too");
+
+        // The blocker really is present in one case and not the other — otherwise the assertions
+        // above would pass trivially.
+        assert!(
+            blocked.iter().any(|r| r.contains("MP3 can't store")),
+            "expected the MP3 rate blocker:\n{}",
+            blocked.join("\n")
+        );
+        assert!(!unblocked.iter().any(|r| r.contains("can't store")));
+
+        // Reserving rows for the blocker must not push the hints row off the bottom — which is
+        // exactly what happened when the reserved height was miscounted by one.
+        for (label, rows) in [("unblocked", &unblocked), ("blocked", &blocked)] {
+            assert!(
+                rows.iter().any(|r| r.contains("Enter") && r.contains("Esc")),
+                "the {label} dialog lost its hints row:\n{}",
+                rows.join("\n")
+            );
+        }
+
+        // Every label starts in the same column, in both states.
+        for rows in [&unblocked, &blocked] {
+            let column_of = |needle: &str| {
+                rows.iter().find_map(|r| r.find(needle)).unwrap_or_else(|| {
+                    panic!("{needle:?} not found in:\n{}", rows.join("\n"))
+                })
+            };
+            let name_col = column_of("File name:");
+            let format_col = column_of("Format:");
+            let setting_col = rows
+                .iter()
+                .find_map(|r| r.find("Depth:").or_else(|| r.find("Bitrate:")))
+                .expect("a Depth or Bitrate label");
+            assert_eq!(name_col, format_col, "File name and Format must start in one column");
+            assert_eq!(format_col, setting_col, "Format and Depth/Bitrate must start in one column");
+        }
+
+        // The values line up too, which is what the label padding is for. "◄ " precedes a focused
+        // value, so compare the unfocused rows: Format is unfocused while the name has focus.
+        let value_col = |rows: &[String], label: &str| {
+            let row = rows.iter().find(|r| r.contains(label)).expect("row");
+            let after = row.find(label).unwrap() + label.len();
+            row[after..].find(|c: char| !c.is_whitespace()).map(|o| after + o).expect("a value")
+        };
+        assert_eq!(
+            value_col(&unblocked, "File name:"),
+            value_col(&unblocked, "Depth:"),
+            "values must share a column:\n{}",
+            unblocked.join("\n")
+        );
+    }
+
+
+    /// Every menu entry that opens an **input-gathering** dialog must end with an ellipsis, and no
+    /// other entry may — the standard convention that a command needs something from you before it
+    /// acts. Checked by driving each entry's own action, so a new dialog-opening command cannot be
+    /// added without its label following suit.
+    ///
+    /// Three dialog kinds are deliberately not "input": `Info` is a message, `CdpSetup` appears
+    /// only when CDP is missing (so it says nothing about the command itself), and `CdpRunning` is
+    /// progress — by then the command has already started.
+    ///
+    /// `ConfigureCdpDirectory` is the one exception: `CdpSetup` *is* its prompt rather than a
+    /// fallback. Excluding `CdpSetup` is also what keeps this test independent of whether CDP
+    /// happens to be installed — the pitch/formant commands open `CdpRunning` when it is and
+    /// `CdpSetup` when it isn't, and neither counts.
+    #[test]
+    fn menu_entries_that_prompt_for_input_end_with_an_ellipsis() {
+        let entries: Vec<(String, Action)> = crate::ui::menu::MenuBar::new(&std::collections::HashMap::new())
+            .items
+            .iter()
+            .flat_map(|m| m.entries.iter().map(|e| (e.label.to_string(), e.action)))
+            .collect();
+        assert!(entries.len() > 40, "sanity: the menu should be fully populated");
+
+        let mut wrong: Vec<String> = Vec::new();
+        for (label, action) in entries {
+            let mut app = new_app(
+                Some(Document {
+                    channels: vec![vec![0.3f32; 44_100]; 2],
+                    sample_rate: 44_100,
+                    path: Some(PathBuf::from("/tmp/probe.wav")),
+                    markers: vec![
+                        Marker { position: 10_000, label: "a".into() },
+                        Marker { position: 20_000, label: "b".into() },
+                    ],
+                    selection: Some(crate::model::selection::Selection { start: 1_000, end: 30_000 }),
+                    ..Document::default()
+                }),
+                None,
+            );
+            app.handle_action(action);
+            let prompts = app.save_as_active
+                || matches!(&app.dialog, Some(Dialog::CdpSetup { .. }))
+                    && action == Action::ConfigureCdpDirectory
+                || !matches!(
+                    &app.dialog,
+                    None
+                        | Some(Dialog::Info { .. })
+                        | Some(Dialog::CdpSetup { .. })
+                        | Some(Dialog::CdpRunning { .. })
+                );
+            let has_ellipsis = label.ends_with("...");
+            if prompts != has_ellipsis {
+                wrong.push(format!(
+                    "  {label:40} {action:?}: {}",
+                    if prompts { "prompts but has no ellipsis" } else { "has an ellipsis but never prompts" }
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "menu ellipsis convention broken:\n{}", wrong.join("\n"));
+    }
+
     /// Changing the format must rewrite the filename's extension, so what is typed always
     /// matches what will be written — and the third row must swap Depth for Bitrate.
     #[test]
@@ -32308,3 +32758,5 @@ mod tests {
         assert!(text.contains("section 2 of 2"));
     }
 }
+
+
