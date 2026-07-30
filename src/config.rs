@@ -43,6 +43,21 @@ pub struct Config {
     /// the menu entry being conditionally disabled, matching this file's "never block startup
     /// on a missing/invalid setting" philosophy. See `cdp::validate_cdp_dir`.
     pub cdp_dir: String,
+    /// Largest decoded footprint, in MB, that a file may have and still be opened fully into
+    /// RAM. Anything above it opens read-only and disk-backed instead (`model::stream`).
+    ///
+    /// Compared against `wavread::WavInfo::resident_bytes` — the *decoded* size, not the file
+    /// size, since the working format is f32 regardless of source depth: 24-bit inflates by
+    /// 4/3, and 32-bit float is 1:1. A fully-resident document also costs a second copy of
+    /// that again for playback (`AudioEngine::try_new` takes an owned `Vec<Vec<f32>>`) plus
+    /// ~1/30 for the waveform pyramid, so the real peak is a little over twice this.
+    ///
+    /// 1536MB by default: comfortably above any file that worked before this existed (so no
+    /// previously-editable file silently becomes read-only), and far below where a 20GB take
+    /// would have to try. A fixed number rather than a fraction of free memory on purpose —
+    /// the same file behaving differently on different days makes a bug report unreasonable
+    /// to act on.
+    pub max_resident_mb: u64,
     /// Key bindings as `ActionName → [key-string, ...]`. Empty on first launch; the UI layer
     /// fills in all defaults (via `keymap::fill_missing_keybindings`) before building the
     /// dispatch map, and writes the completed set back on the first save. Key strings use the
@@ -67,6 +82,7 @@ impl Default for Config {
             dot_matrix_gradient: true,
             time_ruler: true,
             cdp_dir: default_cdp_dir(),
+            max_resident_mb: 1536,
             keybindings: HashMap::new(),
         }
     }
@@ -167,6 +183,7 @@ mod tests {
             dot_matrix_gradient: true,
             time_ruler: false,
             cdp_dir: "/opt/cdp/bin".into(),
+            max_resident_mb: 1536,
             keybindings: HashMap::new(),
         };
         let toml_string = toml::to_string_pretty(&config).unwrap();
@@ -228,6 +245,7 @@ mod tests {
             dot_matrix_gradient: true,
             time_ruler: false,
             cdp_dir: String::new(),
+            max_resident_mb: 1536,
             keybindings: HashMap::new(),
         };
         config.save();
