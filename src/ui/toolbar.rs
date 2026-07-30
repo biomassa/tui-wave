@@ -61,8 +61,6 @@ impl Toolbar {
                     ("Save",         sc(Action::Save,          "^s"),    Action::Save),
                     ("Quit",         sc(Action::Quit,          "q"),     Action::Quit),
                     ("regToFolder",  sc(Action::ExportRegions, "S+E"),   Action::ExportRegions),
-                    ("expChannels",  sc(Action::ExportChannels, ""),     Action::ExportChannels),
-                    ("export",       sc(Action::Export, ""),             Action::Export),
                     ("newFromLeft",  sc(Action::NewFromLeft,   "L"),     Action::NewFromLeft),
                     ("newFromRight", sc(Action::NewFromRight,  "R"),     Action::NewFromRight),
                 ],
@@ -101,7 +99,6 @@ impl Toolbar {
                     ("Resamp",    sc(Action::Resample,       "^e"),   Action::Resample),
                     ("bothFades", sc(Action::TechnicalFades, "^b"),   Action::TechnicalFades),
                     ("mixToMono", sc(Action::MixToMono,     "^m"),   Action::MixToMono),
-                    ("rmEmptyCh", sc(Action::RemoveEmptyChannels, ""), Action::RemoveEmptyChannels),
                 ],
             },
             ToolGroup {
@@ -326,5 +323,37 @@ impl Toolbar {
             .iter()
             .find(|(r, _)| r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height)
             .map(|(_, action)| *action)
+    }
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every toolbar button must have a shortcut to show.
+    ///
+    /// The toolbar exists so that every *bound* command is visible at a glance, so a button with an
+    /// empty shortcut renders as a bare label with nothing to press — it reads as broken (user
+    /// report, of `rmEmptyCh`). Such commands belong in the menus only. Asserted across all three
+    /// focus sets so a new one cannot be added without noticing.
+    #[test]
+    fn every_toolbar_button_shows_a_shortcut() {
+        let bar = Toolbar::new(&HashMap::new());
+        let mut bare: Vec<String> = Vec::new();
+        for (set, groups) in [
+            ("waveform", &bar.waveform),
+            ("files", &bar.files),
+            ("buffers", &bar.buffers),
+        ] {
+            for group in groups.iter() {
+                for (label, shortcut, action) in &group.buttons {
+                    if shortcut.trim().is_empty() {
+                        bare.push(format!("  {set}/{}: {label} ({action:?})", group.label));
+                    }
+                }
+            }
+        }
+        assert!(bare.is_empty(), "toolbar buttons with no shortcut to show:\n{}", bare.join("\n"));
     }
 }
