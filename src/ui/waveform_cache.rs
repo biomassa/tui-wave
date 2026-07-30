@@ -130,8 +130,9 @@ impl WaveformCache {
 
     /// Highest absolute sample value in the channel — used to auto-fit the initial
     /// vertical zoom so a quiet file doesn't render using only a sliver of the available
-    /// height.
-    #[allow(dead_code)]
+    /// height, and by Remove Empty Channels (via `dsp::channels_below_peaks`) to decide which
+    /// channels are empty. The latter is what makes that operation free on a streamed
+    /// document: the peak already fell out of building the pyramid, so no extra pass is needed.
     pub fn peak(&self) -> f32 {
         self.peak
     }
