@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+use hound::{SampleFormat, WavSpec, WavWriter};
 
 use super::document::Document;
 
@@ -155,29 +155,46 @@ fn load_symphonia(path: &Path) -> color_eyre::Result<Document> {
     })
 }
 
+/// Loads a WAV fully into memory.
+///
+/// Decoding goes through `model::wavread` rather than `hound`, which is what makes `RF64`/`BW64`
+/// (and so any file over 4GB) readable at all — see that module for why hound cannot be made to
+/// do it. `hound` still writes.
+///
+/// Whether a file *should* be loaded this way is a separate question, decided by the caller from
+/// `wavread::probe`'s `resident_bytes` before it gets here (`App::load_file`). This function
+/// makes the attempt fail cleanly rather than fatally if that gate is bypassed: the per-channel
+/// capacity is claimed with `try_reserve`, so a file too large to hold returns an error instead
+/// of aborting the process the way an ordinary allocation failure would. Reserving up front also
+/// avoids `Vec` growth doubling the peak — pushing a 20GB channel set without it would transiently
+/// need about 30GB.
 pub fn load_wav(path: impl AsRef<Path>) -> color_eyre::Result<Document> {
     let path: PathBuf = path.as_ref().to_path_buf();
-    let mut reader = WavReader::open(&path)?;
-    let spec = reader.spec();
-    let channel_count = spec.channels as usize;
+    let mut frames = super::wavread::WavFrames::open(&path)?;
+    let info = frames.info();
 
-    let mut channels: Vec<Vec<f32>> = vec![Vec::new(); channel_count];
+    let frame_count = usize::try_from(info.frame_count)
+        .map_err(|_| color_eyre::eyre::eyre!("{} has more frames than fit in memory", path.display()))?;
+    let mut channels: Vec<Vec<f32>> = vec![Vec::new(); info.channels];
+    for ch in &mut channels {
+        ch.try_reserve_exact(frame_count).map_err(|_| {
+            color_eyre::eyre::eyre!(
+                "{} needs {:.1} GB of memory to open ({} channels x {} frames)",
+                path.display(),
+                info.resident_bytes() as f64 / (1024.0 * 1024.0 * 1024.0),
+                info.channels,
+                info.frame_count,
+            )
+        })?;
+    }
 
-    match spec.sample_format {
-        SampleFormat::Int => {
-            // Normalize integer PCM to f32 in [-1.0, 1.0] based on bit depth.
-            let max_amplitude = (1i64 << (spec.bits_per_sample - 1)) as f32;
-            for (i, sample) in reader.samples::<i32>().enumerate() {
-                let sample = sample?;
-                channels[i % channel_count].push(sample as f32 / max_amplitude);
-            }
+    let mut at = 0u64;
+    while at < info.frame_count {
+        let n = frames.read_into(at, super::wavread::READ_BLOCK_FRAMES, &mut channels)?;
+        if n == 0 {
+            break;
         }
-        SampleFormat::Float => {
-            for (i, sample) in reader.samples::<f32>().enumerate() {
-                let sample = sample?;
-                channels[i % channel_count].push(sample);
-            }
-        }
+        at += n as u64;
     }
 
     let (mut markers, bext) = super::bwf::read_markers_and_bext(&path);
@@ -189,7 +206,7 @@ pub fn load_wav(path: impl AsRef<Path>) -> color_eyre::Result<Document> {
 
     // Head/tail marks live in a `.headstails` sidecar next to the audio, not in the WAV's own
     // chunks — see `model::headstails`. Absent or unreadable simply means "no marks".
-    let head_tail_marks: Vec<usize> = super::headstails::load(&path, spec.sample_rate)
+    let head_tail_marks: Vec<usize> = super::headstails::load(&path, info.sample_rate)
         .into_iter()
         .map(|m| m.min(len))
         .collect();
@@ -197,8 +214,8 @@ pub fn load_wav(path: impl AsRef<Path>) -> color_eyre::Result<Document> {
     Ok(Document {
         head_tail_marks,
         channels,
-        sample_rate: spec.sample_rate,
-        bits_per_sample: spec.bits_per_sample,
+        sample_rate: info.sample_rate,
+        bits_per_sample: info.bits_per_sample,
         selection: None,
         cursor: 0,
         dirty: false,
