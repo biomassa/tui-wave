@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (1.9.0)
+## 2026-07-30 (1.9.0)
 
 Multichannel support, other audio formats, and files too large to hold in memory.
 
@@ -65,6 +65,37 @@ Multichannel support, other audio formats, and files too large to hold in memory
 - **Fixed: Save As showed the last-used bit depth rather than the document's own**, and prefilled
   the whole file name — so a buffer opened from `beta.flac` offered `beta.flac.wav`. Only the
   queued Save As path had been setting the depth.
+- **Fixed: scrolling the channel window in graphics mode crashed the app.** Any file with more
+  channels than fit on screen, on one fast scroll of the wheel or a held key — the per-channel
+  image state was addressed by channel number but only ever appended to, so a jump bigger than
+  the number of visible panes ran off the end of it. Scrolling one pane at a time never showed
+  it, which is why it survived this long.
+- **The waveform fills a tall terminal.** Six channel panes were drawn however much height
+  there was, and since each pane needs an odd number of rows to put amplitude zero on a real
+  centre row, up to eleven rows were left empty below the last one — a conspicuous band on a
+  high-resolution screen. The pane count now grows with the available height, so a taller
+  window shows more of a 58-channel file instead of more emptiness. Nothing changes at the
+  heights that were already full.
+- **Waveform drawing on a streamed file is no longer sluggish.** Scrolling or zooming a 30GB
+  file was reading half a gigabyte off disk *per redraw*: a disk read carries every channel
+  whether or not it is wanted, each channel was caching its own copy of the same bytes, and the
+  fine correction applied at each column's edges stopped sharing that cache as you zoomed out.
+  A redraw now reads one window at most when the view moves, and nothing at all once it settles,
+  while still drawing exactly what a fully-loaded file draws.
+- **Every dialog says how to commit and how to cancel.** Eight prompts — Normalize, Resample,
+  Remove Empty Channels, the three renames, Open Directory and Save Curve — showed a bare input
+  box with no `Enter`/`Esc` hint, which also meant they had no clickable submit row. The hint is
+  set off by a blank line, and its keys are peach like everywhere else.
+- **A long load can be stopped.** Building the waveform overview for a very large file takes
+  the best part of a minute and was uninterruptible; Esc now abandons it and closes the buffer.
+  The panel's own text was also being cut off mid-sentence.
+- **Menu entries that ask for something before acting now end in `...`**, per the usual
+  convention, and toolbar buttons with no keyboard shortcut to show — which rendered as a bare
+  label with nothing to press — were removed; they remain in the menus.
+- **Fixed: File ▸ Export resized and jumped** as you cycled the format, because its height
+  depended on whether a blocker message was showing. Its labels were also each starting in a
+  different column.
+- Bumped version to 1.9.0.
 
 ## 2026-07-29 (1.8.0)
 
