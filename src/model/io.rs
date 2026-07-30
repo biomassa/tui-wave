@@ -152,6 +152,7 @@ fn load_symphonia(path: &Path) -> color_eyre::Result<Document> {
         path: Some(path.to_path_buf()),
         markers: Vec::new(),
         bext: None,
+        stream: None,
     })
 }
 
@@ -222,6 +223,7 @@ pub fn load_wav(path: impl AsRef<Path>) -> color_eyre::Result<Document> {
         path: Some(path),
         markers,
         bext,
+        stream: None,
     })
 }
 
@@ -516,6 +518,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         }
     }
 

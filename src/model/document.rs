@@ -26,7 +26,22 @@ pub struct Marker {
 /// without a terminal or audio backend.
 pub struct Document {
     /// Deinterleaved samples, one Vec per channel, normalized to f32 in [-1.0, 1.0].
+    ///
+    /// **Empty when `stream` is set** — see that field. Nothing that reads this needs a
+    /// `stream` branch added to it: an empty channel list is the safe reading, so a code path
+    /// that was never taught about streaming operates on nothing rather than on wrong data.
     pub channels: Vec<Vec<f32>>,
+    /// Set instead of `channels` for a file too large to hold in RAM, which is then
+    /// **read-only** — see `model::stream`.
+    ///
+    /// `Arc` because the render path, the pyramid build and the export walk all want a
+    /// borrow at times the document is also being consulted mutably elsewhere; the contents
+    /// are immutable apart from the channel map, so sharing costs nothing.
+    ///
+    /// Which documents get this is decided by `App::load_file` from
+    /// `wavread::WavInfo::resident_bytes` against `Config.max_resident_mb`, and which
+    /// *actions* a streamed document permits is gated in one place, `App::handle_action`.
+    pub stream: Option<std::sync::Arc<super::stream::StreamedSamples>>,
     pub sample_rate: u32,
     /// Bit depth from the source WAV header (16, 24, or 32). Always 32 for synthesized
     /// buffers (CopyToNew, MixToMono, etc.) since the working format is f32. Does not
@@ -69,6 +84,7 @@ impl Default for Document {
             markers: Vec::new(),
             head_tail_marks: Vec::new(),
             bext: None,
+            stream: None,
         }
     }
 }
@@ -209,12 +225,39 @@ impl Document {
     pub fn snap_range_to_zero_crossing(&self, start: usize, end: usize) -> (usize, usize) {
         (self.snap_to_zero_crossing(start), self.snap_to_zero_crossing(end))
     }
+    /// Whether this document's samples live on disk rather than in `channels`, which also
+    /// makes it read-only — see the `stream` field and `App::handle_action`'s gate.
+    pub fn is_streaming(&self) -> bool {
+        self.stream.is_some()
+    }
+
     pub fn channel_count(&self) -> usize {
-        self.channels.len()
+        match &self.stream {
+            Some(stream) => stream.channel_count(),
+            None => self.channels.len(),
+        }
     }
 
     pub fn len_samples(&self) -> usize {
-        self.channels.first().map(|c| c.len()).unwrap_or(0)
+        match &self.stream {
+            Some(stream) => stream.len_samples(),
+            None => self.channels.first().map(|c| c.len()).unwrap_or(0),
+        }
+    }
+
+    /// How to read logical channel `channel`'s samples, whichever storage this document uses.
+    ///
+    /// The single seam between the render path and the two storage kinds. `Resident` hands back
+    /// a plain subslice, so a fully-loaded document renders through exactly the code it always
+    /// did.
+    pub fn sample_source(&self, channel: usize) -> super::stream::SampleSource<'_> {
+        match &self.stream {
+            Some(stream) => super::stream::SampleSource::Streamed { stream, channel },
+            None => match self.channels.get(channel) {
+                Some(samples) => super::stream::SampleSource::Resident(samples),
+                None => super::stream::SampleSource::EMPTY,
+            },
+        }
     }
 
     /// Finds the next transient at or after `from` and returns the position to stop right
@@ -438,6 +481,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         }
     }
 

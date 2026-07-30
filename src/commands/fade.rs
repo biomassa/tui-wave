@@ -220,6 +220,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         };
         let mut cmd = FadeCommand::new(0, 100, true, FadeCurve::Linear);
         cmd.execute(&mut doc);
@@ -241,6 +242,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         };
         let mut cmd = FadeCommand::new(0, 100, false, FadeCurve::Linear);
         cmd.execute(&mut doc);
@@ -261,6 +263,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         };
         let original = doc.channels.clone();
         let mut cmd = FadeCommand::new(0, 50, true, FadeCurve::Linear);
@@ -282,6 +285,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         };
         let mut cmd = FadeCommand::new(0, 50, true, FadeCurve::Exp);
         cmd.execute(&mut doc);
@@ -303,6 +307,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         };
         let mut cmd = FadeCommand::new(0, 30, false, FadeCurve::Log);
         cmd.execute(&mut doc);
@@ -324,6 +329,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         };
         // start + 1 >= end → early return, no change
         let mut cmd = FadeCommand::new(0, 1, true, FadeCurve::Linear);
@@ -343,6 +349,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         }
     }
 

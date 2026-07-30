@@ -218,6 +218,7 @@ mod tests {
             markers,
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         }
     }
 

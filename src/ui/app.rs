@@ -10646,6 +10646,7 @@ impl App {
                                         path: None,
                                         markers: Vec::new(),
                                         bext: None,
+                                        stream: None,
                                     });
                                 }
                                 self.viewport = None;
@@ -11460,6 +11461,7 @@ impl App {
             path: None,
             markers: new_markers,
             bext: None,
+            stream: None,
         };
         self.dialog = None;
         self.push_document(new_doc);
@@ -11605,6 +11607,7 @@ impl App {
                 path: None,
                 markers: region_markers,
                 bext: None,
+                stream: None,
             };
             if let Err(e) = crate::model::io::save_wav_with(&region_doc, &path, depth, dither) {
                 error = Some(format!("Save failed: {e}"));
@@ -11774,6 +11777,7 @@ impl App {
                 path: None,
                 markers: markers.clone(),
                 bext: None,
+                stream: None,
             };
             let path = out_dir.join(format!("{stem}_{}.wav", file.suffix));
             if let Err(e) = crate::model::io::save_wav_with(&out_doc, &path, depth, false) {
@@ -13035,6 +13039,7 @@ impl App {
                     path: None,
                     markers,
                     bext: None,
+                    stream: None,
                 };
                 self.push_document(new_doc);
                 self.histories.last_mut().unwrap().created_by_copy_to_new = true;
@@ -13242,6 +13247,7 @@ impl App {
                     path: None,
                     markers,
                     bext: None,
+                    stream: None,
                 };
                 self.push_document(new_doc);
                 self.histories.last_mut().unwrap().created_by_copy_to_new = true;
@@ -14057,11 +14063,12 @@ impl App {
                 height: channel_full_area.height,
             };
 
-            let samples = self.documents[doc_idx]
-                .channels
-                .get(i)
-                .map(|c| c.as_slice())
-                .unwrap_or(&[]);
+            // The one seam between rendering and how a document stores its samples. For a
+            // resident document this is the same subslice the render path has always used; for
+            // a streamed one it reads windows off disk on demand (`model::stream`). `i` is the
+            // *absolute* channel index, which is what makes this correct while the channel
+            // window is scrolled.
+            let samples = self.documents[doc_idx].sample_source(i);
             let widget = WaveformWidget {
                 samples,
                 viewport,
@@ -14506,14 +14513,16 @@ impl App {
                 continue;
             }
             let mut column_peak = 0.0f32;
-            for (ch_i, channel) in doc.channels.iter().enumerate() {
+            for ch_i in 0..doc.channel_count() {
+                let channel = doc.sample_source(ch_i);
                 let ch_end = col_end.min(channel.len());
                 if col_start >= ch_end {
                     continue;
                 }
                 let (mn, mx) = match self.waveform_caches.get(ch_i) {
                     Some(cache) => cache.min_max(channel, col_start, ch_end),
-                    None => crate::ui::waveform_cache::raw_min_max(&channel[col_start..ch_end]),
+                    None => channel
+                        .with_slice(col_start, ch_end, crate::ui::waveform_cache::raw_min_max),
                 };
                 column_peak = column_peak.max(mn.abs()).max(mx.abs());
             }
@@ -14746,11 +14755,17 @@ fn visible_peak_raw(
     if viewport.scroll_offset >= visible_end || content_width == 0 {
         return 0.0;
     }
-    waveform_caches
-        .iter()
-        .zip(document.channels.iter())
-        .fold(0.0f32, |peak, (cache, samples)| {
-            let (mn, mx) = cache.min_max(samples, viewport.scroll_offset, visible_end);
+    // Indexed rather than zipped against `document.channels`: a streamed document's `channels`
+    // is empty, so zipping it would silently report a peak of zero and auto vertical zoom would
+    // do nothing at all on exactly the files that most need it.
+    (0..document.channel_count())
+        .filter_map(|ch| waveform_caches.get(ch).map(|cache| (ch, cache)))
+        .fold(0.0f32, |peak, (ch, cache)| {
+            let (mn, mx) = cache.min_max(
+                document.sample_source(ch),
+                viewport.scroll_offset,
+                visible_end,
+            );
             peak.max(mn.abs()).max(mx.abs())
         })
 }
@@ -19304,6 +19319,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         }
     }
 
@@ -19319,6 +19335,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         }
     }
 
@@ -19336,6 +19353,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         }
     }
 
@@ -19539,6 +19557,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         }
     }
 
@@ -19651,6 +19670,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         }
     }
 
@@ -22931,6 +22951,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         };
         let app = new_app(Some(document), None);
         let peaks = app.cdp_envelope_waveform_ref((0, 1000), 10);
@@ -27696,6 +27717,7 @@ mod tests {
             markers: vec![Marker { position: 50, label: "m".into() }],
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         };
         let mut app = new_app(Some(document), None);
         app.export_regions(
@@ -27744,6 +27766,7 @@ mod tests {
             markers: vec![Marker { position: 100, label: "m".into() }], // single region [0,100)
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         };
         let mut app = new_app(Some(document), None);
         app.export_regions(
@@ -27789,6 +27812,7 @@ mod tests {
             markers: vec![Marker { position: 30, label: "m".into() }],
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         };
         let mut app = new_app(Some(document), None);
         app.export_regions(
@@ -27933,6 +27957,7 @@ mod tests {
             markers: vec![Marker { position: 50, label: "m".into() }],
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         };
         let mut app = new_app(Some(document), None);
         app.export_regions(
@@ -30463,6 +30488,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         };
         let mut app = new_app(Some(document), None);
         // Before the fade all selected samples are 0.5.
@@ -30494,6 +30520,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         };
         let mut app = new_app(Some(document), None);
         app.handle_action(Action::FadeOut);

@@ -6,6 +6,7 @@ use ratatui::widgets::Widget;
 use crate::model::dsp;
 use crate::ui::theme;
 use crate::ui::viewport::Viewport;
+use crate::model::stream::SampleSource;
 use crate::ui::waveform_cache::{raw_min_max, WaveformCache};
 use crate::ui::widgets::braille::{braille_char, DOT_BITS};
 
@@ -22,7 +23,7 @@ use crate::ui::widgets::braille::{braille_char, DOT_BITS};
 /// unless `gradient` is off (flat `WAVEFORM_DOT_LOW`). Selected columns skip the gradient
 /// entirely (flat `WAVEFORM_SELECTED`).
 pub struct WaveformWidget<'a> {
-    pub samples: &'a [f32],
+    pub samples: SampleSource<'a>,
     pub viewport: &'a Viewport,
     pub cache: Option<&'a WaveformCache>,
     /// Normalized (start, end) sample range to highlight, if any.
@@ -171,8 +172,8 @@ impl<'a> WaveformWidget<'a> {
                 let (min, max) = match self.cache {
                     Some(cache) if s < e => cache.min_max(self.samples, s, e),
                     Some(cache) => cache.min_max(self.samples, start, end),
-                    None if s < e => raw_min_max(&self.samples[s..e]),
-                    None => raw_min_max(&self.samples[start..end]),
+                    None if s < e => self.samples.with_slice(s, e, raw_min_max),
+                    None => self.samples.with_slice(start, end, raw_min_max),
                 };
 
                 let scaled_min = (min * self.viewport.amplitude_scale).clamp(-1.0, 1.0) as f64;
@@ -271,7 +272,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(area);
         let widget = WaveformWidget {
-            samples: &samples,
+            samples: SampleSource::Resident(&samples),
             viewport: &viewport(0, 1.0),
             cache: None,
             selection: None,
@@ -296,7 +297,7 @@ mod tests {
         let area = Rect::new(0, 0, 26, 10);
         let mut buf = Buffer::empty(area);
         let widget = WaveformWidget {
-            samples: &samples,
+            samples: SampleSource::Resident(&samples),
             viewport: &viewport(0, 1.5),
             cache: None,
             selection: None,
@@ -322,7 +323,7 @@ mod tests {
         let area = Rect::new(0, 0, 5, 10);
         let mut buf = Buffer::empty(area);
         let widget = WaveformWidget {
-            samples: &samples,
+            samples: SampleSource::Resident(&samples),
             viewport: &viewport(0, 1.0),
             cache: None,
             selection: None,
@@ -358,7 +359,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 11);
         let mut buf = Buffer::empty(area);
         let widget = WaveformWidget {
-            samples: &samples,
+            samples: SampleSource::Resident(&samples),
             viewport: &viewport(0, 20.0),
             cache: None,
             selection: None,
@@ -394,7 +395,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 11);
         let mut buf = Buffer::empty(area);
         let widget = WaveformWidget {
-            samples: &samples,
+            samples: SampleSource::Resident(&samples),
             viewport: &viewport(0, 4.0),
             cache: None,
             selection: None,
@@ -424,7 +425,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(area);
         let widget = WaveformWidget {
-            samples: &samples,
+            samples: SampleSource::Resident(&samples),
             viewport: &viewport(0, 1.0),
             cache: None,
             selection: None,
@@ -451,7 +452,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(area);
         let widget = WaveformWidget {
-            samples: &samples,
+            samples: SampleSource::Resident(&samples),
             viewport: &viewport(0, 4.0),
             cache: None,
             selection: None,
