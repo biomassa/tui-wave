@@ -2167,6 +2167,14 @@ pub struct App {
     /// progress, and `load_file` is reached from key and mouse handlers that don't have one.
     /// `App::run` owns the terminal, so it is the one place that can hand it over.
     pending_cache_build: bool,
+    /// A command-line file argument, opened on the main loop's first turn.
+    ///
+    /// `main` used to decode it itself and hand `App::new` a finished `Document`, which meant the
+    /// command line — the primary way a large file gets opened — bypassed the resident-size gate
+    /// in `load_file` entirely and always loaded fully into RAM. Deferring the open to here
+    /// routes it through exactly the same decision, progress panel and error dialog as opening
+    /// from the Files panel, instead of failing before the terminal is even initialized.
+    pending_open: Option<PathBuf>,
     /// Per-channel graphics-mode image state, index-parallel to the active document's
     /// channels. Rebuilt fresh every frame from the live `viewport`/`selection`/`cursor`/
     /// `playhead` (via `Picker::new_resize_protocol`, the crate's intended way to swap in
@@ -2968,6 +2976,7 @@ impl App {
             dot_matrix_gradient: config.dot_matrix_gradient,
             time_ruler: config.time_ruler,
             pending_cache_build: false,
+            pending_open: None,
             graphics_protocols: Vec::new(),
             cdp_envelope_graphics_protocol: None,
             cdp_formant_graphics_protocol: None,
@@ -3062,6 +3071,11 @@ impl App {
 
     /// Pushes a freshly-opened document and its (empty) history, keeping the two vecs
     /// index-parallel, and makes it the active buffer.
+    /// Asks the main loop to open `path` on its first turn — see `pending_open`.
+    pub fn queue_open(&mut self, path: PathBuf) {
+        self.pending_open = Some(path);
+    }
+
     fn push_document(&mut self, document: Document) {
         self.documents.push(document);
         self.histories.push(History::new());
@@ -3905,6 +3919,12 @@ impl App {
         // off-screen audio state and so deliberately does not request a redraw.
         let mut needs_redraw = true;
         while !self.should_quit {
+            // A command-line file argument, opened here rather than in `main` so it goes through
+            // the same size gate, progress panel and error reporting as any other open.
+            if let Some(path) = self.pending_open.take() {
+                self.load_file(path);
+                needs_redraw = true;
+            }
             // Before the ordinary draw, since a streamed buffer has no pyramid until this runs
             // and would otherwise render one blank frame first. `run` is where this lives
             // because it owns the `Tui` the progress panel needs — see `pending_cache_build`.
@@ -12033,8 +12053,8 @@ impl App {
         };
 
         let channel_count = stream.channel_count();
-        let frames_per_channel = stream.len_samples() as u64;
-        let total_samples = frames_per_channel.saturating_mul(channel_count as u64);
+        let total_frames = stream.len_samples() as u64;
+        let bytes_per_frame = stream.info().bytes_per_frame as u64;
         let name = self
             .documents
             .get(self.active_document)
@@ -12043,30 +12063,52 @@ impl App {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "audio".to_string());
 
-        let mut caches: Vec<WaveformCache> = Vec::with_capacity(channel_count);
-        let mut done_samples = 0u64;
+        // One pass over the interleaved data feeding every channel's builder, exactly as Export
+        // Channels does. Per-channel reads would be the obvious shape and are catastrophically
+        // wrong here: a read still fetches whole frames off disk and discards the other channels,
+        // so 58 channels means reading the file 58 times — 29GB of I/O for a 508MB file.
+        let mut builders: Vec<crate::ui::waveform_cache::Builder> =
+            (0..channel_count).map(|_| crate::ui::waveform_cache::Builder::new()).collect();
+        let mut block: Vec<Vec<f32>> = Vec::new();
+        let mut at = 0u64;
         let mut last_painted = 0u64;
-        // Repaint roughly every 64Mi samples read. Frequent enough that the bar visibly moves
-        // on any file large enough to get here, rare enough that redraw cost is noise against
-        // the I/O.
-        const PAINT_EVERY: u64 = 64 * 1024 * 1024;
+        // Repaint roughly every 64MB read. Frequent enough that the bar visibly moves on any file
+        // large enough to get here, rare enough that redraw cost is noise against the I/O.
+        const PAINT_EVERY_BYTES: u64 = 64 * 1024 * 1024;
 
-        for channel in 0..channel_count {
-            let mut builder = crate::ui::waveform_cache::Builder::new();
-            let _ = stream.for_each_block(channel, |block| {
-                builder.push(block);
-                done_samples += block.len() as u64;
-                if done_samples - last_painted >= PAINT_EVERY {
-                    last_painted = done_samples;
-                    let _ = terminal.draw(|frame| {
-                        render_loading_panel(frame, &name, done_samples, total_samples, channel_count);
-                    });
-                }
-            });
-            caches.push(builder.finish());
+        while at < total_frames {
+            let n = match stream.read_all_channels(
+                at,
+                crate::model::wavread::READ_BLOCK_FRAMES,
+                &mut block,
+            ) {
+                Ok(0) => break,
+                Ok(n) => n,
+                // A read failing mid-build leaves the pyramid describing only what was read. The
+                // waveform is then partly blank, which is visible and honest; the alternative is
+                // discarding the whole overview because the tail of the file was unreadable.
+                Err(_) => break,
+            };
+            for (builder, channel) in builders.iter_mut().zip(block.iter()) {
+                builder.push(channel);
+            }
+            at += n as u64;
+            let done_bytes = at.saturating_mul(bytes_per_frame);
+            if done_bytes - last_painted >= PAINT_EVERY_BYTES {
+                last_painted = done_bytes;
+                let _ = terminal.draw(|frame| {
+                    render_loading_panel(
+                        frame,
+                        &name,
+                        done_bytes,
+                        total_frames.saturating_mul(bytes_per_frame),
+                        channel_count,
+                    );
+                });
+            }
         }
 
-        self.waveform_caches = caches;
+        self.waveform_caches = builders.into_iter().map(|b| b.finish()).collect();
     }
 
     /// Saves every dirty document that already has a path. Documents that were never
@@ -19367,8 +19409,8 @@ fn render_load_curve_dialog(frame: &mut Frame, area: Rect, picker: &mut FilePane
 fn render_loading_panel(
     frame: &mut Frame,
     name: &str,
-    done_samples: u64,
-    total_samples: u64,
+    done_bytes: u64,
+    total_bytes: u64,
     channel_count: usize,
 ) {
     let area = frame.area();
@@ -19386,12 +19428,12 @@ fn render_loading_panel(
     let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
     let accent = Style::default().fg(theme::FOCUS).bg(theme::SURFACE0);
 
-    let fraction = if total_samples == 0 {
+    let fraction = if total_bytes == 0 {
         0.0
     } else {
-        done_samples as f64 / total_samples as f64
+        done_bytes as f64 / total_bytes as f64
     };
-    let gb = |samples: u64| samples as f64 * 4.0 / (1024.0 * 1024.0 * 1024.0);
+    let gb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     // Inner width less the leading space and the two brackets.
     let bar_width = width.saturating_sub(2).saturating_sub(4) as usize;
     let filled = ((bar_width as f64) * fraction).round() as usize;
@@ -19411,8 +19453,8 @@ fn render_loading_panel(
             Line::from(Span::styled(
                 format!(
                     " {channel_count} channels — {:.1} / {:.1} GB scanned",
-                    gb(done_samples),
-                    gb(total_samples),
+                    gb(done_bytes),
+                    gb(total_bytes),
                 ),
                 label_style,
             )),
@@ -28583,6 +28625,32 @@ mod tests {
         std::fs::write(path, &out).unwrap();
     }
 
+    /// Builds every channel's pyramid from a streamed source the same way
+    /// `App::build_streaming_caches` does — one pass over the interleaved data feeding all the
+    /// builders. Tests use this rather than a per-channel loop so they exercise the shape
+    /// production actually uses.
+    fn build_caches(stream: &crate::model::stream::StreamedSamples) -> Vec<WaveformCache> {
+        let channel_count = stream.channel_count();
+        let mut builders: Vec<crate::ui::waveform_cache::Builder> =
+            (0..channel_count).map(|_| crate::ui::waveform_cache::Builder::new()).collect();
+        let mut block: Vec<Vec<f32>> = Vec::new();
+        let mut at = 0u64;
+        let total = stream.len_samples() as u64;
+        while at < total {
+            let n = stream
+                .read_all_channels(at, crate::model::wavread::READ_BLOCK_FRAMES, &mut block)
+                .unwrap();
+            if n == 0 {
+                break;
+            }
+            for (b, ch) in builders.iter_mut().zip(block.iter()) {
+                b.push(ch);
+            }
+            at += n as u64;
+        }
+        builders.into_iter().map(|b| b.finish()).collect()
+    }
+
     /// An `App` whose resident budget is 0MB, so every WAV takes the streaming path. Lets the
     /// streamed mode be exercised end-to-end on a small fixture instead of needing a 20GB file.
     fn streaming_app() -> App {
@@ -28646,10 +28714,9 @@ mod tests {
         let resident = crate::model::io::load_wav(&path).unwrap();
         let stream = crate::model::stream::StreamedSamples::open(&path).unwrap();
 
+        let streamed_caches = build_caches(&stream);
         for ch in 0..3 {
-            let mut builder = crate::ui::waveform_cache::Builder::new();
-            stream.for_each_block(ch, |b| builder.push(b)).unwrap();
-            let streamed_cache = builder.finish();
+            let streamed_cache = &streamed_caches[ch];
             let resident_cache = WaveformCache::build(&resident.channels[ch]);
             assert!(
                 (streamed_cache.peak() - resident_cache.peak()).abs() < 1e-9,
@@ -28771,13 +28838,7 @@ mod tests {
         app.load_file(path.clone());
         // Stand in for the main loop's build, which needs a terminal.
         let stream = app.documents[0].stream.clone().unwrap();
-        app.waveform_caches = (0..6)
-            .map(|ch| {
-                let mut b = crate::ui::waveform_cache::Builder::new();
-                stream.for_each_block(ch, |blk| b.push(blk)).unwrap();
-                b.finish()
-            })
-            .collect();
+        app.waveform_caches = build_caches(&stream);
         app.pending_cache_build = false;
 
         // -48 dBFS catches only the digitally silent channel 1.
@@ -28828,13 +28889,7 @@ mod tests {
 
         let resident = crate::model::io::load_wav(&path).unwrap();
         let stream = crate::model::stream::StreamedSamples::open(&path).unwrap();
-        let peaks: Vec<f32> = (0..6)
-            .map(|ch| {
-                let mut b = crate::ui::waveform_cache::Builder::new();
-                stream.for_each_block(ch, |blk| b.push(blk)).unwrap();
-                b.finish().peak()
-            })
-            .collect();
+        let peaks: Vec<f32> = build_caches(&stream).iter().map(|c| c.peak()).collect();
 
         for threshold in [-48.0f32, -20.0, -12.0, -6.0] {
             assert_eq!(

@@ -22,26 +22,30 @@ fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     ui::terminal::install_panic_hook();
 
+    // A file argument is *queued*, not decoded here: `App::load_file` is what decides whether a
+    // file fits in RAM or has to open streamed and read-only (`model::stream`), and decoding
+    // eagerly at startup bypassed that entirely — so the command line, the primary way a large
+    // take gets opened, always tried to load it fully. It also means an unreadable path now
+    // surfaces as a dialog inside the running app rather than aborting before the terminal is
+    // even initialized.
     let arg = std::env::args().nth(1);
-    let (document, directory) = match arg {
-        Some(ref p) if Path::new(p).is_dir() => {
-            (None, Some(Path::new(p).to_path_buf()))
-        }
-        Some(ref p) if Path::new(p).is_file() => {
-            let doc = Some(model::io::load_audio(p)?);
-            (doc, containing_directory(p))
-        }
+    let (open_path, directory) = match arg {
+        Some(ref p) if Path::new(p).is_dir() => (None, Some(Path::new(p).to_path_buf())),
+        // A non-existent path is still queued: `load_file` reports why it could not be opened,
+        // which is more useful than exiting with nothing on screen.
         Some(p) => {
-            // Try as file anyway; load_audio will report the error
-            let doc = Some(model::io::load_audio(&p)?);
-            (doc, containing_directory(&p))
+            let dir = containing_directory(&p);
+            (Some(Path::new(&p).to_path_buf()), dir)
         }
         None => (None, None),
     };
 
     let (mut terminal, picker) = ui::terminal::init()?;
-    let mut app = ui::app::App::new(document, directory);
+    let mut app = ui::app::App::new(None, directory);
     app.set_picker(picker);
+    if let Some(path) = open_path {
+        app.queue_open(path);
+    }
     let result = app.run(&mut terminal);
 
     ui::terminal::restore()?;
