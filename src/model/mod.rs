@@ -14,3 +14,4 @@ pub mod history;
 pub mod io;
 pub mod riff;
 pub mod selection;
+pub mod wavread;
