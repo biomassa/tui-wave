@@ -18,24 +18,44 @@ use std::sync::{Mutex, RwLock};
 
 use super::wavread::{WavFrames, WavInfo};
 
-/// Samples a single cached window holds, when the request is small enough to cache at all.
+/// Frames one cached window covers.
 ///
-/// Sized for the zoomed-in case, where consecutive columns (and the graphics renderer's
-/// per-pixel polyline path) read overlapping or adjacent ranges: one block then serves a whole
-/// screen's worth of lookups. 8192 f32 is 32KB per channel, so even all 58 channels resident
-/// at once is under 2MB.
-const WINDOW_SAMPLES: usize = 8192;
+/// Sized so a *whole visible range* fits in one window at any zoom where raw samples are read at
+/// all. That is the property that matters, not the size itself: the render loop walks pane by pane
+/// and each pane re-reads the same frame range, so a window too small to span the view is reloaded
+/// once per pane. With six panes on screen that was 52MB per redraw of the same bytes.
+///
+/// 65536 frames of a 56-channel float file is 14.7MB of raw bytes, read once per scroll position
+/// and then reused by every pane and every column.
+pub const WINDOW_FRAMES: usize = 65_536;
 
-/// One channel's most recently read window.
-struct Window {
-    /// Absolute index of `data[0]`.
+/// How many windows are kept.
+///
+/// More than one because a visible range can straddle a window boundary, and the render walks that
+/// range once per pane: with a single window the two halves would evict each other on every pane,
+/// turning the boundary into a cliff far worse than the case it was meant to fix. Three covers
+/// ~196k frames — any visible range at a zoom where raw samples are read at all — for ~44MB of raw
+/// bytes on a 56-channel file.
+const WINDOW_COUNT: usize = 3;
+
+/// One cached window: the raw interleaved bytes, plus whichever channels have been decoded out of
+/// them so far.
+///
+/// Raw bytes are cached rather than decoded samples because a read carries every channel whether
+/// or not it is wanted, while *decoding* all 56 to draw six would cost more than the read. So the
+/// transfer is shared and the decode is lazy — a window load decodes only the panes on screen.
+struct WindowSet {
+    /// Absolute frame index of the first frame in `raw`.
     base: usize,
-    data: Vec<f32>,
+    frames: usize,
+    raw: Vec<u8>,
+    /// Per *logical* channel, in channel-map order; `None` until that channel is first asked for.
+    decoded: Vec<Option<Vec<f32>>>,
 }
 
-impl Window {
+impl WindowSet {
     fn covers(&self, start: usize, end: usize) -> bool {
-        start >= self.base && end <= self.base + self.data.len()
+        start >= self.base && end <= self.base + self.frames
     }
 }
 
@@ -57,7 +77,8 @@ pub struct StreamedSamples {
     frames: Mutex<WavFrames>,
     info: WavInfo,
     channel_map: RwLock<Vec<usize>>,
-    windows: Mutex<Vec<Option<Window>>>,
+    /// Most-recently-used first; at most [`WINDOW_COUNT`].
+    windows: Mutex<Vec<WindowSet>>,
     /// Scratch for reads too large to cache, kept alive so a per-frame read doesn't reallocate.
     scratch: Mutex<Vec<f32>>,
     /// Deinterleave target for [`Self::read_all_channels`], kept between calls. A 58-channel
@@ -82,6 +103,14 @@ impl StreamedSamples {
 
     pub fn info(&self) -> WavInfo {
         self.info
+    }
+
+    /// Bytes this document has pulled off disk so far. See `WavFrames::bytes_read` — a read costs
+    /// the whole interleaved frame however few channels are wanted, so this is the number that
+    /// governs whether scrolling feels instant.
+    #[cfg(test)]
+    pub fn bytes_read(&self) -> u64 {
+        self.frames.lock().map(|f| f.bytes_read()).unwrap_or(0)
     }
 
     /// Channels currently presented, i.e. after any Remove Empty Channels.
@@ -125,7 +154,7 @@ impl StreamedSamples {
                 k
             });
         }
-        // Window indices are logical, so they no longer mean what they did.
+        // Decoded channels are indexed logically, so they no longer mean what they did.
         self.windows.lock().map(|mut w| w.clear()).ok();
     }
 
@@ -165,10 +194,11 @@ impl StreamedSamples {
         }
         let want = end - start;
 
-        if want > WINDOW_SAMPLES {
-            // Too large to be worth caching; read straight into scratch. Only the deliberately
-            // bounded paths reach here (see `SampleSource::exact_edge_budget`), so this is not
-            // the hot case it would be if the whole visible span came through it.
+        if want > WINDOW_FRAMES {
+            // Larger than a window; read straight into scratch without caching. Nothing in the
+            // render path asks for this — `affords_exact_edges` and the raw-scan threshold both
+            // keep requests far below a window — but a caller that did would get a correct answer
+            // rather than a truncated one.
             let mut scratch = self.scratch.lock().unwrap();
             scratch.clear();
             if let Ok(mut frames) = self.frames.lock() {
@@ -178,27 +208,55 @@ impl StreamedSamples {
         }
 
         let mut windows = self.windows.lock().unwrap();
-        let channel_count = self.channel_count();
-        if windows.len() < channel_count {
-            windows.resize_with(channel_count, || None);
-        }
-        let needs_load = !windows[channel].as_ref().is_some_and(|w| w.covers(start, end));
-        if needs_load {
-            // Anchor the window at `start` rather than on a fixed grid: reads walk forward
-            // (column by column, pixel by pixel), so starting here means the following
-            // requests fall inside it. A grid would split half of them across two blocks.
-            let base = start;
-            let len = WINDOW_SAMPLES.min(total - base);
-            let mut data = Vec::with_capacity(len);
-            if let Ok(mut frames) = self.frames.lock() {
-                let _ = frames.read_channel_into(source_channel, base as u64, len, &mut data);
+        match windows.iter().position(|w| w.covers(start, end)) {
+            // Move the hit to the front so the least recently used is the one evicted.
+            Some(0) => {}
+            Some(i) => {
+                let hit = windows.remove(i);
+                windows.insert(0, hit);
             }
-            windows[channel] = Some(Window { base, data });
+            None => {
+                // Anchored at `start` and running forward: requests walk that way, so the columns
+                // and panes that follow land inside this window rather than re-reading its bytes.
+                let base = start;
+                let len = WINDOW_FRAMES.min(total - base);
+                let mut set = if windows.len() >= WINDOW_COUNT {
+                    // Reuse the evicted window's allocations rather than freeing and re-growing
+                    // ~15MB every time the view moves past a boundary.
+                    windows.pop().unwrap()
+                } else {
+                    WindowSet { base: 0, frames: 0, raw: Vec::new(), decoded: Vec::new() }
+                };
+                let read = self
+                    .frames
+                    .lock()
+                    .ok()
+                    .and_then(|mut f| f.read_raw(base as u64, len, &mut set.raw).ok())
+                    .unwrap_or(0);
+                set.base = base;
+                set.frames = read;
+                // Every decoded channel now describes different frames.
+                set.decoded.clear();
+                windows.insert(0, set);
+            }
         }
-        let window = windows[channel].as_ref().expect("just populated");
-        let from = start - window.base;
-        let to = (end - window.base).min(window.data.len());
-        f(&window.data[from..to.max(from)])
+
+        let map = self.channel_map();
+        let set = &mut windows[0];
+        if set.decoded.len() < map.len() {
+            set.decoded.resize_with(map.len(), || None);
+        }
+        if set.decoded.get(channel).is_some_and(Option::is_none) {
+            let mut out = Vec::new();
+            if let Ok(frames) = self.frames.lock() {
+                frames.decode_channel_from(&set.raw, source_channel, &mut out);
+            }
+            set.decoded[channel] = Some(out);
+        }
+        let Some(Some(data)) = set.decoded.get(channel) else { return f(&[]) };
+        let from = (start - set.base).min(data.len());
+        let to = (end - set.base).min(data.len());
+        f(&data[from..to.max(from)])
     }
 
     /// Reads `[first_frame, first_frame + frames)` of every logical channel at once, into
@@ -248,17 +306,26 @@ pub enum SampleSource<'a> {
     Streamed { stream: &'a StreamedSamples, channel: usize },
 }
 
-/// Most raw samples a single `min_max` call will read from disk to make its answer *exact*
-/// rather than bin-approximate.
+/// Widest query span for which a streamed source reads raw samples to make a `min_max` answer
+/// *exact* rather than bin-approximate.
 ///
-/// Every cache query raw-scans the partial bin at each edge of its range, which is what makes
-/// the result exact instead of the union of every bin the range merely touches. Resident
-/// samples make that free. Over a 20GB file on disk it is not: a screen of 200 columns across
-/// 6 visible channels is 2400 such scans per redraw, and at extreme zoom-out each edge is most
-/// of a bin. Past this budget the edges are skipped and the bins alone answer, which costs at
-/// most one bin of bleed — sub-pixel at the zoom levels where the budget actually binds, and
-/// invisible next to the alternative of a redraw that takes hundreds of milliseconds.
-const STREAMED_EXACT_EDGE_SAMPLES: usize = 4096;
+/// A cache query raw-scans the partial bin at each edge of its range; that is what makes the answer
+/// exact instead of the union of every bin the range merely touches. Resident samples make it free.
+/// Disk-backed ones do not, and the cost is not what the sample counts suggest: the edges of
+/// adjacent columns sit `span` apart, so once `span` outgrows the cached window they stop sharing
+/// one and a redraw transfers the entire visible range — **505MB per frame** as measured on a
+/// 56-channel file (user report: scrolling a 30GB file "feels VERY sluggish").
+///
+/// The fix is a limit, not an abolition. Dropping the scans altogether was tried and changed the
+/// picture too much: at ~360 samples per column, 11% of screen cells differed from the same audio
+/// loaded resident, because a bin is a third of a column there and the bleed is plainly visible.
+/// The bleed shrinks as the span grows — a bin stays ~64 samples while a column grows to thousands
+/// — so exactness is bought where it shows and skipped where it does not.
+///
+/// The value is bounded by what the window cache can hold: `span` x screen columns must fit within
+/// [`WINDOW_COUNT`] x [`WINDOW_FRAMES`], or the reads stop sharing windows and the original problem
+/// returns. 512 leaves room for a very wide terminal.
+const STREAMED_EXACT_SPAN: usize = 512;
 
 impl<'a> SampleSource<'a> {
     pub const EMPTY: SampleSource<'static> = SampleSource::Resident(&[]);
@@ -300,12 +367,14 @@ impl<'a> SampleSource<'a> {
         }
     }
 
-    /// Whether reading `edge_samples` raw samples to make a query exact is worth it here.
-    /// Always yes when they are already in memory — see [`STREAMED_EXACT_EDGE_SAMPLES`].
-    pub fn affords_exact_edges(&self, edge_samples: usize) -> bool {
+    /// Whether reading raw samples to make a query over `span` *exact* is worth it here.
+    ///
+    /// Always yes when they are already in memory, so a resident file's rendering is untouched by
+    /// any of this. For a streamed one it turns on the span — see [`STREAMED_EXACT_SPAN`].
+    pub fn affords_exact_edges(&self, span: usize) -> bool {
         match self {
             SampleSource::Resident(_) => true,
-            SampleSource::Streamed { .. } => edge_samples <= STREAMED_EXACT_EDGE_SAMPLES,
+            SampleSource::Streamed { .. } => span <= STREAMED_EXACT_SPAN,
         }
     }
 }
@@ -372,9 +441,10 @@ mod tests {
     #[test]
     fn serves_a_range_larger_than_one_window() {
         let dir = tmp("big");
-        let s = StreamedSamples::open(indexed_wav(&dir, 2, 30_000)).unwrap();
+        // Deliberately longer than a window, so the uncached straight-to-scratch path is taken.
+        let s = StreamedSamples::open(indexed_wav(&dir, 2, WINDOW_FRAMES + 5_000)).unwrap();
         let src = SampleSource::Streamed { stream: &s, channel: 1 };
-        let len = WINDOW_SAMPLES + 500;
+        let len = WINDOW_FRAMES + 500;
         src.with_slice(10, 10 + len, |got| {
             assert_eq!(got.len(), len);
             assert_eq!(got[0], 1010.0);
@@ -504,9 +574,12 @@ mod tests {
         let streamed = SampleSource::Streamed { stream: &s, channel: 0 };
         let resident = SampleSource::Resident(&[0.0; 4]);
 
-        assert!(resident.affords_exact_edges(usize::MAX));
-        assert!(streamed.affords_exact_edges(STREAMED_EXACT_EDGE_SAMPLES));
-        assert!(!streamed.affords_exact_edges(STREAMED_EXACT_EDGE_SAMPLES + 1));
+        assert!(resident.affords_exact_edges(usize::MAX), "resident samples are always free to scan");
+        assert!(streamed.affords_exact_edges(STREAMED_EXACT_SPAN));
+        assert!(
+            !streamed.affords_exact_edges(STREAMED_EXACT_SPAN + 1),
+            "past the span limit a streamed query must answer from bins alone"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

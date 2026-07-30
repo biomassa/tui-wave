@@ -30257,6 +30257,145 @@ mod tests {
             .collect()
     }
 
+    /// Renders one frame of a streamed multichannel document and returns the bytes it read.
+    fn bytes_read_for_one_frame(channels: usize, frames: usize, zoom: i32) -> (u64, usize) {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let dir = std::env::temp_dir()
+            .join(format!("tuiwave_perf_{channels}_{frames}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("perf.wav");
+        multichannel_float_wav(&path, channels, frames);
+
+        let mut app = streaming_app();
+        app.load_file(path.clone());
+        let stream = app.documents[0].stream.clone().unwrap();
+        app.waveform_caches = build_caches(&stream);
+        app.pending_cache_build = false;
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 50)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        for _ in 0..zoom.unsigned_abs() {
+            app.handle_action(if zoom < 0 { Action::ZoomIn } else { Action::ZoomOut });
+        }
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        // Measure a frame *after moving the view*, which is the case the report is about — a
+        // steady redraw of an unchanged view trivially reads nothing once the window is warm.
+        let before = stream.bytes_read();
+        for _ in 0..8 {
+            app.handle_action(Action::PageForward);
+        }
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let per_frame = stream.bytes_read() - before;
+        let panes = app.visible_channel_range.len();
+
+        std::fs::remove_dir_all(&dir).ok();
+        (per_frame, panes)
+    }
+
+    /// A redraw of a streamed document must not read an unreasonable amount off disk.
+    ///
+    /// This is a real user report — scrolling and zooming a 30GB file "feels VERY sluggish" — and it
+    /// is invisible in sample counts, because a read fetches the whole *interleaved* frame: pulling
+    /// 1024 samples of one channel from a 56-channel float file transfers 229KB, not 4KB. Multiply
+    /// by two exact edge scans per column, ~180 columns and 9 visible panes and a single frame can
+    /// ask for gigabytes.
+    ///
+    /// The bound is generous — a frame is allowed a few MB — because the point is to catch the
+    /// order-of-magnitude regression, not to pin an exact number.
+    #[test]
+    fn one_streamed_frame_does_not_read_an_absurd_amount() {
+        // Expressed in window loads rather than megabytes, because that is the unit the design
+        // works in: moving the view into unread territory legitimately costs one window, and a
+        // straddled boundary two. Anything beyond that means the same bytes are being fetched more
+        // than once — which is exactly the regression this guards (it was **thirty-four**).
+        let budget = |bpf: usize| (2 * crate::model::stream::WINDOW_FRAMES * bpf) as u64;
+        // Negative = zoom in, positive = zoom out. Both directions matter: zoomed out the frame
+        // should read nothing at all, and zoomed in it reads real samples but only the visible
+        // ones, shared between every pane by a single interleaved read.
+        for zoom in [-30i32, -20, -12, -6, 0, 6, 12, 20, 40] {
+            let (per_frame, panes) = bytes_read_for_one_frame(56, 400_000, zoom);
+            let budget = budget(56 * 4);
+            assert!(
+                per_frame <= budget,
+                "zoom {zoom:+}, {panes} panes: one frame read {:.1} MB, over the {:.0} MB \
+                 two-window budget — the same bytes are being read more than once",
+                per_frame as f64 / (1024.0 * 1024.0),
+                budget as f64 / (1024.0 * 1024.0),
+            );
+        }
+    }
+
+    /// A streamed document must *look* like the same audio loaded resident.
+    ///
+    /// This is the check on the speed work: streamed rendering no longer raw-scans the partial bin
+    /// at each column edge, so its answers can be wider than exact by up to one bin. That is a
+    /// deliberate trade (see `SampleSource::affords_exact_edges`) and this bounds what it cost —
+    /// the two renders must agree on the overwhelming majority of cells, at every zoom.
+    #[test]
+    fn a_streamed_document_renders_essentially_the_same_as_a_resident_one() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let dir = std::env::temp_dir().join(format!("tuiwave_look_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("look.wav");
+        multichannel_float_wav(&path, 4, 200_000);
+
+        let render = |streamed: bool, zoom: i32| -> Vec<String> {
+            let mut app = if streamed { streaming_app() } else { new_app(None, None) };
+            app.load_file(path.clone());
+            assert_eq!(app.documents[0].is_streaming(), streamed);
+            if streamed {
+                let stream = app.documents[0].stream.clone().unwrap();
+                app.waveform_caches = build_caches(&stream);
+                app.pending_cache_build = false;
+            }
+            let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            for _ in 0..zoom.unsigned_abs() {
+                app.handle_action(if zoom < 0 { Action::ZoomIn } else { Action::ZoomOut });
+            }
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .chunks(160)
+                .map(|r| r.iter().map(|c| c.symbol().chars().next().unwrap_or(' ')).collect())
+                .collect()
+        };
+
+        for zoom in [-20i32, -10, -4, 0, 4, 10, 20] {
+            let resident = render(false, zoom);
+            let streamed = render(true, zoom);
+            assert_eq!(resident.len(), streamed.len());
+
+            let (mut differing, mut total) = (0usize, 0usize);
+            // The streamed title carries a "[streamed, read-only]" marker the resident one does
+            // not, so that row is expected to differ and says nothing about the waveform.
+            for (a, b) in resident.iter().zip(&streamed).filter(|(_, b)| !b.contains("read-only]")) {
+                for (ca, cb) in a.chars().zip(b.chars()) {
+                    total += 1;
+                    if ca != cb {
+                        differing += 1;
+                    }
+                }
+            }
+            assert!(total > 1000, "sanity: something was rendered");
+            assert_eq!(
+                differing, 0,
+                "zoom {zoom:+}: {differing} of {total} waveform cells differ between streamed and \
+                 resident\n--- resident ---\n{}\n--- streamed ---\n{}",
+                resident.join("\n"),
+                streamed.join("\n"),
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The loading panel must show its text in full. It was a hardcoded 60 columns wide, giving 58
     /// of content — one short of the 62 the explanation line needs — so it rendered as
     /// "building the waveform overv" with the rest cut off (user report).

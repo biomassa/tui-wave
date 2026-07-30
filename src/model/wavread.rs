@@ -209,6 +209,13 @@ pub struct WavFrames {
     file: File,
     pub info: WavInfo,
     scratch: Vec<u8>,
+    /// Bytes pulled off disk over this reader's lifetime.
+    ///
+    /// Not diagnostics for their own sake: a read fetches whole *interleaved* frames, so asking
+    /// for one channel of a 56-channel file still transfers all 56. That makes bytes-per-frame the
+    /// number that governs whether scrolling feels instant or sluggish, and it is not visible from
+    /// the sample counts any caller deals in. `ui::app` has a test asserting a bound on it.
+    bytes_read: u64,
 }
 
 /// Frames per block for whole-file reads. 64Ki frames of a 58-channel float file is ~15MB of
@@ -220,11 +227,17 @@ impl WavFrames {
     pub fn open(path: impl AsRef<Path>) -> io::Result<WavFrames> {
         let info = probe(&path)?;
         let file = File::open(&path)?;
-        Ok(WavFrames { file, info, scratch: Vec::new() })
+        Ok(WavFrames { file, info, scratch: Vec::new(), bytes_read: 0 })
     }
 
     pub fn info(&self) -> WavInfo {
         self.info
+    }
+
+    /// Bytes read off disk so far — see the field.
+    #[cfg(test)]
+    pub fn bytes_read(&self) -> u64 {
+        self.bytes_read
     }
 
     /// Decodes `[first_frame, first_frame + frames)` into `out`, one `Vec` per channel,
@@ -256,6 +269,7 @@ impl WavFrames {
         // `read_exact` rather than `read`: the frame count is already clamped to what the data
         // chunk holds, so a short read here means the file changed under us, not EOF.
         self.file.read_exact(&mut self.scratch)?;
+        self.bytes_read += byte_len as u64;
 
         let format = self.info.format;
         let sample_bytes = format.bytes_per_sample();
@@ -301,6 +315,75 @@ impl WavFrames {
         Ok(frames)
     }
 
+
+    /// Reads `frames` frames of raw interleaved bytes starting at `first_frame` into `out`.
+    ///
+    /// Split from decoding because the bytes are what the disk transfer costs and they carry
+    /// *every* channel: `model::stream` caches these once and decodes only the handful of channels
+    /// actually on screen, instead of paying a 56-channel decode to draw six.
+    pub fn read_raw(
+        &mut self,
+        first_frame: u64,
+        frames: usize,
+        out: &mut Vec<u8>,
+    ) -> io::Result<usize> {
+        let available = self.info.frame_count.saturating_sub(first_frame);
+        let frames = (frames as u64).min(available) as usize;
+        out.clear();
+        if frames == 0 {
+            return Ok(0);
+        }
+        let bpf = self.info.bytes_per_frame;
+        out.resize(frames * bpf, 0);
+        let offset = self.info.data_offset + first_frame * bpf as u64;
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.read_exact(out)?;
+        self.bytes_read += (frames * bpf) as u64;
+        Ok(frames)
+    }
+
+    /// Decodes one channel out of raw interleaved bytes produced by [`Self::read_raw`].
+    pub fn decode_channel_from(&self, raw: &[u8], channel: usize, out: &mut Vec<f32>) {
+        out.clear();
+        if channel >= self.info.channels {
+            return;
+        }
+        let bpf = self.info.bytes_per_frame;
+        let format = self.info.format;
+        let sample_bytes = format.bytes_per_sample();
+        let base = channel * sample_bytes;
+        let frames = raw.len() / bpf;
+        out.reserve(frames);
+        // Same specialization as `read_into`, and for the same reason: with the match inside the
+        // loop this ran at an eighth of disk speed.
+        match format {
+            SourceFormat::Float32 => {
+                for fr in raw.chunks_exact(bpf) {
+                    let s = &fr[base..base + 4];
+                    out.push(f32::from_le_bytes([s[0], s[1], s[2], s[3]]));
+                }
+            }
+            SourceFormat::IntPcm { bits: 16 } => {
+                let scale = 1.0 / 32768.0;
+                for fr in raw.chunks_exact(bpf) {
+                    out.push(i16::from_le_bytes([fr[base], fr[base + 1]]) as f32 * scale);
+                }
+            }
+            SourceFormat::IntPcm { bits: 24 } => {
+                let scale = 1.0 / (1i64 << 23) as f32;
+                for fr in raw.chunks_exact(bpf) {
+                    let v = i32::from_le_bytes([0, fr[base], fr[base + 1], fr[base + 2]]) >> 8;
+                    out.push(v as f32 * scale);
+                }
+            }
+            other => {
+                for fr in raw.chunks_exact(bpf) {
+                    out.push(other.decode(&fr[base..base + sample_bytes]));
+                }
+            }
+        }
+    }
+
     /// Decodes `[first_frame, first_frame + frames)` of a **single** channel, appending to
     /// `out`. The windowed-read primitive for `model::stream`, where only the handful of
     /// channels currently on screen are ever wanted and decoding all 58 to show 6 would be
@@ -326,6 +409,8 @@ impl WavFrames {
         let offset = self.info.data_offset + first_frame * bpf as u64;
         self.file.seek(SeekFrom::Start(offset))?;
         self.file.read_exact(&mut self.scratch)?;
+        // Note the cost this records: one channel's samples still cost a full interleaved read.
+        self.bytes_read += (frames * bpf) as u64;
 
         let format = self.info.format;
         let sample_bytes = format.bytes_per_sample();
