@@ -11834,42 +11834,51 @@ impl App {
             .unwrap_or_else(|| "untitled".to_string());
         let depth = BitDepth::from_bits(doc.bits_per_sample);
         let sample_rate = doc.sample_rate;
-        let bits = doc.bits_per_sample;
         let markers = doc.markers.clone();
         let head_tail_marks = doc.head_tail_marks.clone();
+        let total_frames = doc.len_samples() as u64;
+        let stream = doc.stream.clone();
+        // Cloned per block from the resident case, rather than borrowing `doc`, because the
+        // exporter's closure has to outlive the immutable borrow this function's `self.dialog`
+        // write ends. Only the block is copied, not the file.
+        let resident: Vec<Vec<f32>> = if stream.is_some() { Vec::new() } else { doc.channels.clone() };
 
-        let mut error: Option<String> = None;
-        let mut written = 0usize;
-        for file in &files {
-            let channels: Vec<Vec<f32>> = file
-                .channels
-                .iter()
-                .map(|&c| doc.channels.get(c).cloned().unwrap_or_default())
-                .collect();
-            let out_doc = Document {
-                head_tail_marks: head_tail_marks.clone(),
-                channels,
-                sample_rate,
-                bits_per_sample: bits,
-                selection: None,
-                cursor: 0,
-                dirty: false,
-                path: None,
-                markers: markers.clone(),
-                bext: None,
-                stream: None,
-            };
-            let path = out_dir.join(format!("{stem}_{}.wav", file.suffix));
-            if let Err(e) = crate::model::io::save_wav_with(&out_doc, &path, depth, false) {
-                error = Some(format!("Save failed: {e}"));
-                break;
-            }
-            written += 1;
-        }
+        // One pass over the source, all writers open at once — see `export_streaming`. Both
+        // storage modes go through it, differing only in this closure, so the streaming path is
+        // covered by the ordinary Export Channels tests rather than only by a large file.
+        let result = crate::model::channel_export::export_streaming(
+            total_frames,
+            |first, want, out| match &stream {
+                Some(stream) => stream.read_all_channels(first, want, out),
+                None => {
+                    out.resize_with(resident.len(), Vec::new);
+                    let start = first as usize;
+                    let end = (start + want).min(total_frames as usize);
+                    for (ch, dst) in out.iter_mut().enumerate() {
+                        dst.clear();
+                        if let Some(src) = resident.get(ch) {
+                            let e = end.min(src.len());
+                            if start < e {
+                                dst.extend_from_slice(&src[start..e]);
+                            }
+                        }
+                    }
+                    Ok(end.saturating_sub(start))
+                }
+            },
+            &files,
+            &out_dir,
+            &stem,
+            depth,
+            sample_rate,
+            &markers,
+            &head_tail_marks,
+            |_, _| true,
+        );
 
-        self.dialog = Some(match error {
-            Some(msg) => Dialog::Info { message: msg },
-            None => {
+        self.dialog = Some(match result {
+            Err(e) => Dialog::Info { message: format!("Save failed: {e}") },
+            Ok(written) => {
                 self.file_panel.scan();
                 Dialog::Info {
                     message: format!(
@@ -28834,6 +28843,142 @@ mod tests {
                 "threshold {threshold} dBFS"
             );
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Export Channels from a streamed buffer must produce byte-identical output to exporting the
+    /// same audio resident. Both go through `export_streaming`, so this is really asserting that
+    /// the two block-reader closures agree — which is where a channel-indexing mistake would hide.
+    #[test]
+    fn streamed_export_channels_matches_a_resident_export() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_stream_exp_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Separate directories so the two runs write the same file names side by side.
+        let a = dir.join("a");
+        let b = dir.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let src_a = a.join("take.wav");
+        let src_b = b.join("take.wav");
+        multichannel_float_wav(&src_a, 6, 30_000);
+        std::fs::copy(&src_a, &src_b).unwrap();
+
+        let modes = channel_export::default_modes(6); // three stereo pairs
+        let mut resident_app = new_app(None, None);
+        resident_app.load_file(src_a.clone());
+        assert!(!resident_app.documents[0].is_streaming(), "control must be resident");
+        resident_app.export_channels("out", &modes);
+
+        let mut streamed_app = streaming_app();
+        streamed_app.load_file(src_b.clone());
+        assert!(streamed_app.documents[0].is_streaming(), "subject must be streamed");
+        streamed_app.export_channels("out", &modes);
+
+        for suffix in ["ch1-2", "ch3-4", "ch5-6"] {
+            let name = format!("take_{suffix}.wav");
+            let want = std::fs::read(a.join("out").join(&name))
+                .unwrap_or_else(|e| panic!("resident {name}: {e}"));
+            let got = std::fs::read(b.join("out").join(&name))
+                .unwrap_or_else(|e| panic!("streamed {name}: {e}"));
+            assert_eq!(got, want, "{name} must be byte-identical between the two paths");
+
+            // And it is real, readable audio matching the source channels.
+            let out = crate::model::io::load_wav(b.join("out").join(&name)).unwrap();
+            assert_eq!(out.channel_count(), 2);
+            assert_eq!(out.len_samples(), 30_000);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Export Channels must read the source **once**, not once per output file. On a 20GB take
+    /// split into stereo pairs the difference is 20GB of reads versus 580GB, so this is the
+    /// property that makes the feature usable rather than merely correct.
+    #[test]
+    fn export_channels_reads_the_source_only_once() {
+        use std::cell::Cell;
+        let dir = std::env::temp_dir().join(format!("tuiwave_exp_pass_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let frames = 200_000u64;
+        let channels = 8usize;
+        let data: Vec<Vec<f32>> = (0..channels)
+            .map(|c| (0..frames as usize).map(|f| (c * 1000 + f) as f32).collect())
+            .collect();
+
+        // Four stereo pairs: a per-file implementation would read the source four times.
+        let modes = channel_export::default_modes(channels);
+        let files = channel_export::plan(&modes);
+        assert_eq!(files.len(), 4);
+
+        let frames_read = Cell::new(0u64);
+        let written = channel_export::export_streaming(
+            frames,
+            |first, want, out| {
+                out.resize_with(channels, Vec::new);
+                let start = first as usize;
+                let end = (start + want).min(frames as usize);
+                for (ch, dst) in out.iter_mut().enumerate() {
+                    dst.clear();
+                    dst.extend_from_slice(&data[ch][start..end]);
+                }
+                frames_read.set(frames_read.get() + (end - start) as u64);
+                Ok(end - start)
+            },
+            &files,
+            &dir,
+            "src",
+            BitDepth::Float32,
+            48000,
+            &[],
+            &[],
+            |_, _| true,
+        )
+        .unwrap();
+
+        assert_eq!(written, 4);
+        assert_eq!(
+            frames_read.get(),
+            frames,
+            "the source must be read exactly once, not once per output file"
+        );
+
+        // Spot-check that the demultiplexing actually landed the right channels.
+        let pair = crate::model::io::load_wav(dir.join("src_ch5-6.wav")).unwrap();
+        assert_eq!(pair.channels[0][7], 4007.0, "left half is source channel 4");
+        assert_eq!(pair.channels[1][7], 5007.0, "right half is source channel 5");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A failed export must not leave partial files that look like finished ones.
+    #[test]
+    fn a_failed_export_removes_its_partial_files() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_exp_fail_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let modes = channel_export::default_modes(4);
+        let files = channel_export::plan(&modes);
+
+        let result = channel_export::export_streaming(
+            10_000,
+            |_, _, _| Err(std::io::Error::other("disk went away")),
+            &files,
+            &dir,
+            "boom",
+            BitDepth::Float32,
+            48000,
+            &[],
+            &[],
+            |_, _| true,
+        );
+        assert!(result.is_err(), "the error must surface");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(leftovers.is_empty(), "no partial files may remain, found {leftovers:?}");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

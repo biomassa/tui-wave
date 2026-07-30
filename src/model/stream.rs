@@ -178,6 +178,36 @@ impl StreamedSamples {
         f(&window.data[from..to.max(from)])
     }
 
+    /// Reads `[first_frame, first_frame + frames)` of every logical channel at once, into
+    /// `out[logical]`. Clears `out` first. Returns frames actually read.
+    ///
+    /// One pass over the interleaved data serving every channel, which is what makes Export
+    /// Channels a single read of the source rather than one per output file. Splitting a 20GB
+    /// 58-channel take into stereo pairs is 29 outputs — re-reading per output would be 580GB.
+    pub fn read_all_channels(
+        &self,
+        first_frame: u64,
+        frames: usize,
+        out: &mut Vec<Vec<f32>>,
+    ) -> std::io::Result<usize> {
+        let map = self.channel_map();
+        out.resize_with(map.len(), Vec::new);
+        for ch in out.iter_mut() {
+            ch.clear();
+        }
+        let mut source_buf: Vec<Vec<f32>> = vec![Vec::new(); self.info.channels];
+        let frames_read = {
+            let mut wav = self.frames.lock().unwrap();
+            wav.read_into(first_frame, frames, &mut source_buf)?
+        };
+        for (logical, &source) in map.iter().enumerate() {
+            if let Some(src) = source_buf.get(source) {
+                out[logical].extend_from_slice(src);
+            }
+        }
+        Ok(frames_read)
+    }
+
     /// Reads a whole channel in blocks, handing each block to `f`. Used to build the pyramid at
     /// open time and to write channels back out on export, neither of which wants the file
     /// resident.

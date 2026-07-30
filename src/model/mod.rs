@@ -16,3 +16,4 @@ pub mod riff;
 pub mod selection;
 pub mod stream;
 pub mod wavread;
+pub mod wavwrite;
