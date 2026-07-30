@@ -119,6 +119,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         };
         let mut cmd = TrimCommand::new(1, 4);
         cmd.execute(&mut doc);
@@ -140,6 +141,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         };
         let original = doc.channels.clone();
         let mut cmd = TrimCommand::new(1, 4);
@@ -161,6 +163,7 @@ mod tests {
             markers: Vec::new(),
             bits_per_sample: 32,
             bext: None,
+            stream: None,
         };
         let original = doc.channels.clone();
         let mut cmd = TrimCommand::new(0, 3);
