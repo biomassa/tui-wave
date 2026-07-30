@@ -15862,8 +15862,10 @@ fn render_dialog(
     let content_len = content_len.max(hint_len);
 
     let width = (content_len as u16 + 2).min(area.width);
-    // Border + blank spacer row + content row + hint row + border.
-    let height = 5u16.min(area.height);
+    // Border + blank + content + blank + hint + border. The blank *below* the content matters as
+    // much as the one above it: without it the hint reads as a third line of the prompt rather
+    // than as a legend for it (user report, on the Normalize and threshold prompts).
+    let height = 6u16.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -15882,6 +15884,7 @@ fn render_dialog(
     let lines = vec![
         Line::raw(""),
         Line::from(spans),
+        Line::raw(""),
         Line::from(vec![
             Span::styled(" Enter", hint_style),
             Span::styled(format!(":{commit}  "), label_style),
@@ -15916,7 +15919,7 @@ fn render_dialog(
     };
     // The hint row is the submit target, as in every other dialog — and now that every dialog in
     // this group has one, all of them are clickable rather than only `SaveMatrixAs`.
-    let submit_rect = Rect { x: inner.x, y: inner.y + 2, width: inner.width, height: 1 };
+    let submit_rect = Rect { x: inner.x, y: inner.y + 3, width: inner.width, height: 1 };
     vec![input_rect, submit_rect]
 }
 
@@ -19621,7 +19624,7 @@ fn render_loading_panel(
     .unwrap_or(0) as u16;
     // +3: one column of padding on the right, plus the two borders.
     let width = (longest + 3).clamp(24, area.width.max(1));
-    let height = 9u16.min(area.height);
+    let height = 10u16.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -19650,6 +19653,7 @@ fn render_loading_panel(
             Line::raw(""),
             Line::from(Span::styled(format!(" [{bar}]"), accent)),
             Line::from(Span::styled(explain, label_style)),
+            Line::raw(""),
             Line::from(vec![
                 Span::styled(hint_key, Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0)),
                 Span::styled(hint_label, label_style),
@@ -30564,6 +30568,118 @@ mod tests {
         }
     }
 
+    /// Renders `app`'s dialog and returns its hint row plus the row directly above it, as the text
+    /// between the popup's own left and right borders.
+    ///
+    /// The popup is located from the hint row outwards — scan left and right to the nearest box
+    /// character — rather than by its background colour, which the menu bar and toolbar share.
+    fn dialog_hint_and_row_above(app: &mut App) -> Option<(String, String)> {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (w, h) = (150u16, 44u16);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let rows: Vec<Vec<char>> = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(w as usize)
+            .map(|r| r.iter().map(|c| c.symbol().chars().next().unwrap_or(' ')).collect())
+            .collect();
+
+        // Searched from the bottom: the toolbar renders the word "Enter" too, and a dialog is
+        // always below it.
+        let y = rows.iter().rposition(|r| {
+            let s: String = r.iter().collect();
+            s.contains("Enter:") || s.contains("Esc:")
+        })?;
+        if y == 0 {
+            return None;
+        }
+        let row = &rows[y];
+        let anchor = row
+            .windows(6)
+            .position(|wnd| {
+                let s: String = wnd.iter().collect();
+                s.starts_with("Enter:") || s.starts_with("Esc:")
+            })
+            .unwrap_or(0);
+        let left = (0..anchor).rev().find(|&x| row[x] == '\u{2502}')? + 1;
+        let right = (anchor..row.len()).find(|&x| row[x] == '\u{2502}')?;
+        let slice = |r: &Vec<char>| r[left..right].iter().collect::<String>();
+        Some((slice(row), slice(&rows[y - 1])))
+    }
+
+    /// A dialog's hint row must be set off from its content by a blank line.
+    ///
+    /// Reported on the Normalize prompt and the loading panel, where the hint sat directly under
+    /// the last line of content and read as part of it. Checked by rendering rather than by reading
+    /// the source, so it covers every dialog reachable here and keeps covering them.
+    #[test]
+    fn every_dialog_separates_its_hint_row_with_a_blank_line() {
+        let open = |action: Action| -> App {
+            let mut app = new_app(
+                Some(Document {
+                    channels: vec![vec![0.3f32; 44_100]; 2],
+                    sample_rate: 44_100,
+                    path: Some(PathBuf::from("/tmp/probe.wav")),
+                    markers: vec![Marker { position: 1_000, label: "a".into() }],
+                    selection: Some(crate::model::selection::Selection { start: 0, end: 40_000 }),
+                    ..Document::default()
+                }),
+                None,
+            );
+            app.handle_action(action);
+            app
+        };
+
+        let mut cases: Vec<(String, App)> = vec![
+            ("Normalize", Action::Normalize),
+            ("Gain", Action::Gain),
+            ("FadeIn", Action::FadeIn),
+            ("FadeOut", Action::FadeOut),
+            ("Resample", Action::Resample),
+            ("MixToMono", Action::MixToMono),
+            ("RemoveEmptyChannels", Action::RemoveEmptyChannels),
+            ("Export", Action::Export),
+            ("ExportRegions", Action::ExportRegions),
+            ("SaveAs", Action::SaveAs),
+            ("OpenDirectory", Action::OpenDirectory),
+        ]
+        .into_iter()
+        .map(|(n, a)| (n.to_string(), open(a)))
+        .collect();
+
+        // Dialogs with no single action that opens them.
+        for (name, dialog) in [
+            ("Info", Dialog::Info { message: "hello".into() }),
+            ("RenameMarker", Dialog::RenameMarker { position: 0, input: TextInput::fresh("x") }),
+            ("RenameBuffer", Dialog::RenameBuffer { index: 0, input: TextInput::fresh("b") }),
+            ("SaveCurveAs", Dialog::SaveCurveAs { input: TextInput::fresh("c"), curve_index: 0 }),
+        ] {
+            let mut app = new_app(Some(doc(0.3, 4_410)), None);
+            app.dialog = Some(dialog);
+            cases.push((name.to_string(), app));
+        }
+
+        let mut wrong: Vec<String> = Vec::new();
+        for (name, app) in cases.iter_mut() {
+            let Some((hint, above)) = dialog_hint_and_row_above(app) else {
+                wrong.push(format!("  {name}: no hint row found"));
+                continue;
+            };
+            if !above.trim().is_empty() {
+                wrong.push(format!(
+                    "  {name}: hint |{}| sits directly under |{}|",
+                    hint.trim_end(),
+                    above.trim_end()
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "dialogs whose hint row is not set off:\n{}", wrong.join("\n"));
+    }
+
     /// The loading panel must show its text in full. It was a hardcoded 60 columns wide, giving 58
     /// of content — one short of the 62 the explanation line needs — so it rendered as
     /// "building the waveform overv" with the rest cut off (user report).
@@ -30601,6 +30717,19 @@ mod tests {
                     "{name:?}: {needed:?} was truncated or missing:\n{screen}"
                 );
             }
+
+            // The panel is not a `Dialog`, so `every_dialog_separates_its_hint_row_with_a_blank_line`
+            // cannot reach it — the same rule is checked here instead.
+            let rows: Vec<&str> = screen.lines().collect();
+            let hint = rows
+                .iter()
+                .rposition(|r| r.contains("Esc:"))
+                .unwrap_or_else(|| panic!("{name:?}: no Esc hint:\n{screen}"));
+            assert!(
+                rows[hint - 1].trim_matches(|c: char| c.is_whitespace() || c == '│').is_empty(),
+                "{name:?}: the hint row sits directly under |{}|:\n{screen}",
+                rows[hint - 1].trim_end()
+            );
         }
     }
 
