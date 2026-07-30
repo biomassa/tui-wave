@@ -2836,7 +2836,7 @@ dependencies = [
 
 [[package]]
 name = "tui-wave"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "color-eyre",
  "cpal 0.18.1",
