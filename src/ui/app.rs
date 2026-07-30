@@ -2160,6 +2160,13 @@ pub struct App {
     /// `Config.time_ruler`. Toggled with `Action::ToggleTimeRuler` (View menu, no default
     /// keybinding).
     pub time_ruler: bool,
+    /// Set by `load_file_streaming` to ask the main loop to build the waveform pyramid on its
+    /// next turn (`build_streaming_caches`).
+    ///
+    /// A flag rather than a direct call because building it wants the `Tui` in order to paint
+    /// progress, and `load_file` is reached from key and mouse handlers that don't have one.
+    /// `App::run` owns the terminal, so it is the one place that can hand it over.
+    pending_cache_build: bool,
     /// Per-channel graphics-mode image state, index-parallel to the active document's
     /// channels. Rebuilt fresh every frame from the live `viewport`/`selection`/`cursor`/
     /// `playhead` (via `Picker::new_resize_protocol`, the crate's intended way to swap in
@@ -2960,6 +2967,7 @@ impl App {
             graphics_mode: config.graphics_mode,
             dot_matrix_gradient: config.dot_matrix_gradient,
             time_ruler: config.time_ruler,
+            pending_cache_build: false,
             graphics_protocols: Vec::new(),
             cdp_envelope_graphics_protocol: None,
             cdp_formant_graphics_protocol: None,
@@ -3897,6 +3905,13 @@ impl App {
         // off-screen audio state and so deliberately does not request a redraw.
         let mut needs_redraw = true;
         while !self.should_quit {
+            // Before the ordinary draw, since a streamed buffer has no pyramid until this runs
+            // and would otherwise render one blank frame first. `run` is where this lives
+            // because it owns the `Tui` the progress panel needs — see `pending_cache_build`.
+            if self.pending_cache_build {
+                self.build_streaming_caches(terminal);
+                needs_redraw = true;
+            }
             if needs_redraw {
                 terminal.draw(|frame| self.render(frame))?;
                 needs_redraw = false;
@@ -10830,6 +10845,10 @@ impl App {
     fn save_config(&mut self) {
         let keybindings = self.config.keybindings.clone();
         let cdp_dir = self.config.cdp_dir.clone();
+        // Carried through rather than re-derived: this has no in-app toggle, so `self` holds no
+        // live copy to rebuild it from and reconstructing the struct would reset a hand-edited
+        // value to the default on the next toggle of anything at all.
+        let max_resident_mb = self.config.max_resident_mb;
         self.config = Config {
             snap_to_zero: self.snap_to_zero,
             auto_vertical_zoom: self.viewport.as_ref().is_some_and(|v| v.auto_vertical_zoom),
@@ -10843,6 +10862,7 @@ impl App {
             dot_matrix_gradient: self.dot_matrix_gradient,
             time_ruler: self.time_ruler,
             cdp_dir,
+            max_resident_mb,
             keybindings,
         };
         self.config.save();
@@ -11801,10 +11821,35 @@ impl App {
         });
     }
 
+    /// Whether `path` is too large to open fully into RAM, and so must open read-only and
+    /// disk-backed. `None` means "load normally" — including for every non-WAV format, which
+    /// has no streaming reader.
+    ///
+    /// The probe reads only the header (`wavread::probe` seeks; it touches no audio), so this
+    /// costs microseconds and can be asked before committing to anything. It compares the
+    /// *decoded* footprint rather than the file size, because the working format is f32
+    /// whatever the source depth is: 24-bit inflates by 4/3 on the way in.
+    fn streaming_info(&self, path: &Path) -> Option<crate::model::wavread::WavInfo> {
+        let is_wav = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .is_some_and(|e| e == "wav");
+        if !is_wav {
+            return None;
+        }
+        let info = crate::model::wavread::probe(path).ok()?;
+        let budget = self.config.max_resident_mb.saturating_mul(1024 * 1024);
+        (info.resident_bytes() > budget).then_some(info)
+    }
+
     fn load_file(&mut self, path: PathBuf) {
         self.stop_audition();
         if let Some(audio) = self.audio.take() {
             drop(audio);
+        }
+        if let Some(info) = self.streaming_info(&path) {
+            self.load_file_streaming(path, info);
+            return;
         }
         match crate::model::io::load_audio(&path) {
             Ok(mut document) => {
@@ -11833,6 +11878,126 @@ impl App {
                 });
             }
         }
+    }
+
+    /// Opens `path` as a read-only, disk-backed buffer, building its waveform pyramid up front.
+    ///
+    /// The pyramid is the whole reason this is viable — ~1/30 the size of the samples, so under
+    /// 1GB for a 20GB file — but building it means reading every byte of the file once, which is
+    /// tens of seconds even at full disk speed. `build_streaming_caches` takes the terminal so it
+    /// can repaint a progress bar as it goes, since a silent multi-minute freeze is
+    /// indistinguishable from the hang this whole change set exists to fix.
+    fn load_file_streaming(&mut self, path: PathBuf, info: crate::model::wavread::WavInfo) {
+        let stream = match crate::model::stream::StreamedSamples::open(&path) {
+            Ok(stream) => std::sync::Arc::new(stream),
+            Err(e) => {
+                self.dialog = Some(Dialog::Info {
+                    message: format!("Could not open {}: {e}", path.display()),
+                });
+                return;
+            }
+        };
+
+        self.file_panel.focused = false;
+        self.file_panel.filtering = false;
+        self.file_panel.filter.clear();
+
+        // Head/tail marks and BWF markers still come from where they always did — the sidecar
+        // and the RIFF chunks — since neither needs the audio. `read_markers_and_bext` seeks
+        // rather than reading the file whole (see `model::riff`), so this is cheap even here.
+        let len = info.frame_count.min(usize::MAX as u64) as usize;
+        let (mut markers, bext) = crate::model::bwf::read_markers_and_bext(&path);
+        for m in &mut markers {
+            m.position = m.position.min(len);
+        }
+        let head_tail_marks: Vec<usize> =
+            crate::model::headstails::load(&path, info.sample_rate)
+                .into_iter()
+                .map(|m| m.min(len))
+                .collect();
+
+        let document = Document {
+            channels: Vec::new(),
+            stream: Some(stream),
+            sample_rate: info.sample_rate,
+            bits_per_sample: info.bits_per_sample,
+            selection: None,
+            cursor: 0,
+            dirty: false,
+            path: Some(path.clone()),
+            markers,
+            head_tail_marks,
+            bext,
+        };
+
+        if let Some(pos) = self.documents.iter().position(|d| d.path == Some(path.clone())) {
+            self.active_document = pos;
+            self.documents[pos] = document;
+            self.histories[pos] = History::new();
+        } else {
+            self.push_document(document);
+        }
+        self.viewport = None;
+        // No audio engine: it takes an owned `Vec<Vec<f32>>`, so giving it this file would mean
+        // a second full copy — the single largest RAM multiplier, and the reason playback is out
+        // of scope for a streamed buffer rather than merely unimplemented.
+        self.audio = None;
+        self.audio_sample_rate = None;
+        self.pending_cache_build = true;
+    }
+
+    /// Builds every channel's pyramid for the active streamed document, repainting a progress
+    /// panel as it reads.
+    ///
+    /// Deliberately synchronous. Terminal input is not polled while this runs, so keystrokes
+    /// queue up and land afterwards; what matters is that the screen keeps saying what is
+    /// happening. Splitting this onto a worker thread is an additive change to this function
+    /// alone if the coarseness ever becomes a problem.
+    fn build_streaming_caches(&mut self, terminal: &mut Tui) {
+        self.pending_cache_build = false;
+        let Some(stream) = self
+            .documents
+            .get(self.active_document)
+            .and_then(|d| d.stream.clone())
+        else {
+            return;
+        };
+
+        let channel_count = stream.channel_count();
+        let frames_per_channel = stream.len_samples() as u64;
+        let total_samples = frames_per_channel.saturating_mul(channel_count as u64);
+        let name = self
+            .documents
+            .get(self.active_document)
+            .and_then(|d| d.path.as_ref())
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "audio".to_string());
+
+        let mut caches: Vec<WaveformCache> = Vec::with_capacity(channel_count);
+        let mut done_samples = 0u64;
+        let mut last_painted = 0u64;
+        // Repaint roughly every 64Mi samples read. Frequent enough that the bar visibly moves
+        // on any file large enough to get here, rare enough that redraw cost is noise against
+        // the I/O.
+        const PAINT_EVERY: u64 = 64 * 1024 * 1024;
+
+        for channel in 0..channel_count {
+            let mut builder = crate::ui::waveform_cache::Builder::new();
+            let _ = stream.for_each_block(channel, |block| {
+                builder.push(block);
+                done_samples += block.len() as u64;
+                if done_samples - last_painted >= PAINT_EVERY {
+                    last_painted = done_samples;
+                    let _ = terminal.draw(|frame| {
+                        render_loading_panel(frame, &name, done_samples, total_samples, channel_count);
+                    });
+                }
+            });
+            caches.push(builder.finish());
+        }
+
+        self.waveform_caches = caches;
     }
 
     /// Saves every dirty document that already has a path. Documents that were never
@@ -12655,6 +12820,97 @@ impl App {
         }
     }
 
+    /// Whether `action` may run against the active buffer. Always true unless that buffer is
+    /// streamed (`Document::is_streaming`), which makes it read-only.
+    ///
+    /// An **allowlist**, deliberately, so an action added later is refused until someone has
+    /// thought about it — the failure mode of a blocklist here is a new editing command reaching
+    /// a document whose `channels` is empty, which looks like it worked and silently does
+    /// nothing, or worse becomes a save path that writes an empty file.
+    ///
+    /// What is refused, and why it cannot simply be made to work:
+    /// - **Editing** (cut/paste/gain/fade/normalize/reverse/trim/resample, CDP, Mix to Mono,
+    ///   Copy to New): every `Command` impl stores whole sample copies for undo, so a single
+    ///   edit would hold most of a 20GB file in the undo stack.
+    /// - **Saving** (Save/Save As/Save All, Export, Export Regions): all of them build or walk a
+    ///   resident `Vec<Vec<f32>>`.
+    /// - **Playback**: `AudioEngine::try_new` takes an owned `Vec<Vec<f32>>` — a second full copy.
+    /// - **Markers and head/tail marks**: they would load and edit fine, but with no save path
+    ///   the work is silently lost on close, which is worse than not offering it.
+    /// - **Transient navigation**: `Document::find_next_rising_edge` reads `channels` directly, so
+    ///   on a streamed buffer it would find nothing and the key would appear dead.
+    /// - **Reload**: nothing to discard on a read-only buffer, and the reload path loads resident.
+    fn action_allowed_on_streamed_buffer(&self, action: Action) -> bool {
+        if !self
+            .documents
+            .get(self.active_document)
+            .is_some_and(|d| d.is_streaming())
+        {
+            return true;
+        }
+        matches!(
+            action,
+            // Navigation and selection — read-only by nature.
+            Action::MoveCursorLeft
+                | Action::MoveCursorRight
+                | Action::ExtendSelectionLeft
+                | Action::ExtendSelectionRight
+                | Action::ExtendSelectionToStart
+                | Action::ExtendSelectionToEnd
+                | Action::ExtendSelectionPageBack
+                | Action::ExtendSelectionPageForward
+                | Action::ExtendSelectionToPrevMarker
+                | Action::ExtendSelectionToNextMarker
+                | Action::ClearSelection
+                | Action::SelectAll
+                | Action::JumpStart
+                | Action::JumpEnd
+                | Action::PageBack
+                | Action::PageForward
+                | Action::JumpPrevMarker
+                | Action::JumpNextMarker
+                // Zoom, including the channel window a high-channel-count file needs most.
+                | Action::ZoomIn
+                | Action::ZoomOut
+                | Action::ZoomInVertical
+                | Action::ZoomOutVertical
+                | Action::ToggleAutoVerticalZoom
+                | Action::ScrollChannelsUp
+                | Action::ScrollChannelsDown
+                | Action::ScrollChannelsPageUp
+                | Action::ScrollChannelsPageDown
+                // View and preference toggles — none of them touch the document.
+                | Action::ToggleFineMode
+                | Action::ToggleGraphicsMode
+                | Action::ToggleDotMatrixGradient
+                | Action::ToggleTimeRuler
+                | Action::ToggleZeroSnap
+                | Action::ToggleLoop
+                | Action::ToggleAudition
+                | Action::ToggleCursorFollowsPlayback
+                | Action::ToggleViewportFollowsPlayback
+                | Action::IncreaseTransientThreshold
+                | Action::DecreaseTransientThreshold
+                | Action::ResetConfig
+                | Action::ConfigureCdpDirectory
+                // The two operations this mode exists to support.
+                | Action::RemoveEmptyChannels
+                | Action::ExportChannels
+                // Panels, buffers, and getting out.
+                | Action::Noop
+                | Action::Quit
+                | Action::OpenSelected
+                | Action::OpenDirectory
+                | Action::SearchFiles
+                | Action::RenameFile
+                | Action::DeleteFile
+                | Action::FocusNext
+                | Action::CloseBuffer
+                | Action::SwitchBuffer
+                | Action::SearchBuffers
+        )
+    }
+
     fn handle_action(&mut self, action: Action) {
         if action == Action::Quit {
             // Warn if *any* open buffer is dirty, not just the active one. Curves count too
@@ -12688,6 +12944,26 @@ impl App {
                 }
                 return;
             }
+        }
+
+        // A streamed buffer is read-only. Gated here, after the curve-undo case above (a curve
+        // is not a document and is unaffected) and before every document action below, because
+        // this is the one place every menu entry, toolbar button and keybinding converges — so
+        // one check covers all three input routes rather than three that can drift.
+        if !self.action_allowed_on_streamed_buffer(action) {
+            let doc = self.documents.get(self.active_document);
+            let gb = doc
+                .and_then(|d| d.stream.as_ref())
+                .map(|s| s.info().resident_bytes() as f64 / (1024.0 * 1024.0 * 1024.0))
+                .unwrap_or(0.0);
+            self.dialog = Some(Dialog::Info {
+                message: format!(
+                    "{action:?} is unavailable: this buffer is {gb:.1} GB and is open read-only, \
+                     streamed from disk. Remove Empty Channels and Export Channels work; editing, \
+                     saving and playback do not."
+                ),
+            });
+            return;
         }
 
         // Panel/modal commands — work regardless of focus (e.g. a toolbar click).
@@ -13971,12 +14247,22 @@ impl App {
         } else {
             String::new()
         };
+        // A streamed buffer is read-only and most commands refuse on it, so the title says so
+        // outright. Discovering the mode only by having an action rejected would make the
+        // refusal read as a bug rather than as the state the buffer is in. Styled as the
+        // read-only counterpart of the dirty marker, in the same slot.
+        let stream_indicator = if self.documents[doc_idx].is_streaming() {
+            "[streamed, read-only] "
+        } else {
+            ""
+        };
         let title = Line::from(vec![
             Span::styled(buffer_title, Style::default().fg(border_color)),
             Span::styled(
                 if self.documents[doc_idx].dirty { "* " } else { "" },
                 Style::default().fg(theme::DIRTY),
             ),
+            Span::styled(stream_indicator, Style::default().fg(theme::HEAD_TAIL_MARKER)),
             Span::styled(channel_indicator, Style::default().fg(theme::CHROME_FG)),
         ]);
         frame.render_widget(
@@ -19000,6 +19286,76 @@ fn render_load_curve_dialog(frame: &mut Frame, area: Rect, picker: &mut FilePane
         ]))
         .style(Style::default().bg(theme::SURFACE0)),
         hints_area,
+    );
+}
+
+/// Progress panel painted while a streamed buffer's waveform pyramid is being built.
+///
+/// Reading every byte of a 20GB file takes tens of seconds even at full disk speed, and the
+/// build is synchronous, so without this the app looks hung for the whole duration — which is
+/// precisely the failure mode (`load_file` silently discarding an error) that started this work.
+/// It states the file, how far along it is, and why it is taking a while.
+fn render_loading_panel(
+    frame: &mut Frame,
+    name: &str,
+    done_samples: u64,
+    total_samples: u64,
+    channel_count: usize,
+) {
+    let area = frame.area();
+    let width = 60u16.min(area.width);
+    let height = 8u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let accent = Style::default().fg(theme::FOCUS).bg(theme::SURFACE0);
+
+    let fraction = if total_samples == 0 {
+        0.0
+    } else {
+        done_samples as f64 / total_samples as f64
+    };
+    let gb = |samples: u64| samples as f64 * 4.0 / (1024.0 * 1024.0 * 1024.0);
+    // Inner width less the leading space and the two brackets.
+    let bar_width = width.saturating_sub(2).saturating_sub(4) as usize;
+    let filled = ((bar_width as f64) * fraction).round() as usize;
+    let bar: String = std::iter::repeat_n('█', filled.min(bar_width))
+        .chain(std::iter::repeat_n('░', bar_width.saturating_sub(filled)))
+        .collect();
+
+    let block = Block::default()
+        .title("Reading")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::raw(""),
+            Line::from(Span::styled(format!(" {name}"), base)),
+            Line::from(Span::styled(
+                format!(
+                    " {channel_count} channels — {:.1} / {:.1} GB scanned",
+                    gb(done_samples),
+                    gb(total_samples),
+                ),
+                label_style,
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(format!(" [{bar}]"), accent)),
+            Line::from(Span::styled(
+                " Too large to hold in memory — building the waveform overview.",
+                label_style,
+            )),
+        ])
+        .block(block),
+        popup,
     );
 }
 
@@ -28126,6 +28482,204 @@ mod tests {
         assert!(!app.histories[0].can_undo(), "undo history must be cleared -- it referenced the discarded in-memory state");
 
         std::fs::remove_file(&path).ok();
+    }
+
+    /// Writes a multichannel float WAV whose channel `c`, frame `f` sample is a distinct known
+    /// value, so a mis-indexed read shows up as a wrong number rather than merely wrong-looking
+    /// audio. Channel 0 is loud, channel 1 is silent, the rest scale down — enough structure for
+    /// the peak and channel-removal tests to have something to find.
+    fn multichannel_float_wav(path: &Path, channels: usize, frames: usize) {
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(b"WAVE");
+        body.extend_from_slice(b"fmt ");
+        body.extend_from_slice(&16u32.to_le_bytes());
+        body.extend_from_slice(&3u16.to_le_bytes());
+        body.extend_from_slice(&(channels as u16).to_le_bytes());
+        body.extend_from_slice(&48000u32.to_le_bytes());
+        body.extend_from_slice(&((48000 * channels * 4) as u32).to_le_bytes());
+        body.extend_from_slice(&((channels * 4) as u16).to_le_bytes());
+        body.extend_from_slice(&32u16.to_le_bytes());
+        body.extend_from_slice(b"data");
+        body.extend_from_slice(&((frames * channels * 4) as u32).to_le_bytes());
+        for f in 0..frames {
+            for c in 0..channels {
+                let amp = if c == 1 { 0.0 } else { 0.9 / (c + 1) as f32 };
+                body.extend_from_slice(&(amp * ((f as f32) * 0.01).sin()).to_le_bytes());
+            }
+        }
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        std::fs::write(path, &out).unwrap();
+    }
+
+    /// An `App` whose resident budget is 0MB, so every WAV takes the streaming path. Lets the
+    /// streamed mode be exercised end-to-end on a small fixture instead of needing a 20GB file.
+    fn streaming_app() -> App {
+        let mut config = Config::default();
+        config.max_resident_mb = 0;
+        App::new_with_config(None, None, config)
+    }
+
+    #[test]
+    fn a_file_over_the_resident_budget_opens_streamed_and_read_only() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_stream_open_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.wav");
+        multichannel_float_wav(&path, 8, 20_000);
+
+        let mut app = streaming_app();
+        app.load_file(path.clone());
+
+        assert_eq!(app.documents.len(), 1, "the buffer must actually open");
+        let doc = &app.documents[0];
+        assert!(doc.is_streaming(), "over budget must open streamed");
+        assert!(doc.channels.is_empty(), "a streamed document holds no resident samples");
+        assert_eq!(doc.channel_count(), 8, "but still reports its channels");
+        assert_eq!(doc.len_samples(), 20_000, "and its length");
+        assert!(app.audio.is_none(), "no audio engine — that would be a second full copy");
+        assert!(app.pending_cache_build, "the pyramid build must be queued");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The same file under the default budget must behave exactly as it always did. This is the
+    /// guard against the streaming path capturing ordinary files.
+    #[test]
+    fn a_file_under_the_resident_budget_opens_fully_resident() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_stream_small_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("small.wav");
+        multichannel_float_wav(&path, 4, 5_000);
+
+        let mut app = new_app(None, None);
+        app.load_file(path.clone());
+
+        let doc = &app.documents[0];
+        assert!(!doc.is_streaming(), "a small file must not be streamed");
+        assert_eq!(doc.channels.len(), 4);
+        assert_eq!(doc.channels[0].len(), 5_000);
+        assert!(!app.pending_cache_build, "no streaming build for a resident buffer");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The streamed pyramid must describe the same audio as the resident one. If these disagree
+    /// the waveform is simply drawn wrong, and nothing else in the mode can be trusted either.
+    #[test]
+    fn the_streamed_pyramid_matches_the_resident_one() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_stream_pyr_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cmp.wav");
+        multichannel_float_wav(&path, 3, 40_000);
+
+        let resident = crate::model::io::load_wav(&path).unwrap();
+        let stream = crate::model::stream::StreamedSamples::open(&path).unwrap();
+
+        for ch in 0..3 {
+            let mut builder = crate::ui::waveform_cache::Builder::new();
+            stream.for_each_block(ch, |b| builder.push(b)).unwrap();
+            let streamed_cache = builder.finish();
+            let resident_cache = WaveformCache::build(&resident.channels[ch]);
+            assert!(
+                (streamed_cache.peak() - resident_cache.peak()).abs() < 1e-9,
+                "ch{ch}: peak differs"
+            );
+
+            let src = crate::model::stream::SampleSource::Resident(&resident.channels[ch]);
+            for &(start, end) in &[(0usize, 40_000usize), (137, 39_871), (10_000, 10_500)] {
+                assert_eq!(
+                    streamed_cache.min_max(src, start, end),
+                    resident_cache.min_max(src, start, end),
+                    "ch{ch} [{start},{end})"
+                );
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Editing must be refused with an explanation, not silently do nothing. `channels` is empty
+    /// on a streamed buffer, so an ungated edit command would look like it worked and change
+    /// nothing — which is exactly what the allowlist exists to prevent.
+    #[test]
+    fn editing_a_streamed_buffer_is_refused_with_a_reason() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_stream_gate_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ro.wav");
+        multichannel_float_wav(&path, 2, 10_000);
+
+        let mut app = streaming_app();
+        app.load_file(path.clone());
+        assert!(app.documents[0].is_streaming());
+
+        for action in [
+            Action::Cut,
+            Action::Paste,
+            Action::Normalize,
+            Action::Reverse,
+            Action::Save,
+            Action::SaveAs,
+            Action::Export,
+            Action::ExportRegions,
+            Action::TogglePlayback,
+            Action::InsertMarker,
+            Action::InsertHeadTailMark,
+            Action::MixToMono,
+            Action::CdpProcess,
+            Action::ReloadBuffer,
+        ] {
+            app.dialog = None;
+            app.handle_action(action);
+            match &app.dialog {
+                Some(Dialog::Info { message }) => assert!(
+                    message.contains("read-only"),
+                    "{action:?}: message should explain why: {message}"
+                ),
+                _ => panic!("{action:?} must be refused with an Info dialog on a streamed buffer"),
+            }
+            assert!(!app.documents[0].dirty, "{action:?} must not have modified anything");
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The other side of the gate: everything the mode is *for* must go through untouched.
+    #[test]
+    fn navigating_and_zooming_a_streamed_buffer_is_allowed() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_stream_nav_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nav.wav");
+        multichannel_float_wav(&path, 12, 10_000);
+
+        let mut app = streaming_app();
+        app.load_file(path.clone());
+
+        for action in [
+            Action::MoveCursorRight,
+            Action::JumpEnd,
+            Action::JumpStart,
+            Action::ZoomIn,
+            Action::ZoomOut,
+            Action::SelectAll,
+            Action::ClearSelection,
+            Action::ScrollChannelsDown,
+            Action::ScrollChannelsUp,
+            Action::ToggleTimeRuler,
+            Action::RemoveEmptyChannels,
+            Action::ExportChannels,
+        ] {
+            app.dialog = None;
+            app.handle_action(action);
+            if let Some(Dialog::Info { message }) = &app.dialog {
+                assert!(
+                    !message.contains("read-only"),
+                    "{action:?} must not be refused by the streamed gate: {message}"
+                );
+            }
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The regression test for the reported bug: pressing Enter on a file this build cannot
