@@ -259,12 +259,43 @@ impl WavFrames {
 
         let format = self.info.format;
         let sample_bytes = format.bytes_per_sample();
+        // The format match is hoisted out of the per-sample loop. It looks like a trivial
+        // branch the optimizer would sink, and it is not: with it inside, building the pyramid
+        // for a 30GB file ran at ~320 MB/s on a disk that does 2.5 GB/s — CPU-bound at an
+        // eighth of the hardware. `chunks_exact` also gives the compiler a fixed-size window to
+        // elide bounds checks against, which per-sample `scratch[at..at + n]` indexing does not.
         for (ch, out_ch) in out.iter_mut().enumerate().take(self.info.channels) {
             out_ch.reserve(frames);
             let base = ch * sample_bytes;
-            for f in 0..frames {
-                let at = f * bpf + base;
-                out_ch.push(format.decode(&self.scratch[at..at + sample_bytes]));
+            let bytes = &self.scratch[..frames * bpf];
+            match format {
+                SourceFormat::Float32 => {
+                    for fr in bytes.chunks_exact(bpf) {
+                        let s = &fr[base..base + 4];
+                        out_ch.push(f32::from_le_bytes([s[0], s[1], s[2], s[3]]));
+                    }
+                }
+                SourceFormat::IntPcm { bits: 16 } => {
+                    let scale = 1.0 / 32768.0;
+                    for fr in bytes.chunks_exact(bpf) {
+                        let v = i16::from_le_bytes([fr[base], fr[base + 1]]);
+                        out_ch.push(v as f32 * scale);
+                    }
+                }
+                SourceFormat::IntPcm { bits: 24 } => {
+                    let scale = 1.0 / (1i64 << 23) as f32;
+                    for fr in bytes.chunks_exact(bpf) {
+                        // Sign-extend by placing the three bytes in the *top* of an i32 and
+                        // shifting back down — no `i24` exists to do it for us.
+                        let v = i32::from_le_bytes([0, fr[base], fr[base + 1], fr[base + 2]]) >> 8;
+                        out_ch.push(v as f32 * scale);
+                    }
+                }
+                other => {
+                    for fr in bytes.chunks_exact(bpf) {
+                        out_ch.push(other.decode(&fr[base..base + sample_bytes]));
+                    }
+                }
             }
         }
         Ok(frames)

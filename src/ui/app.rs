@@ -12067,8 +12067,9 @@ impl App {
         // Channels does. Per-channel reads would be the obvious shape and are catastrophically
         // wrong here: a read still fetches whole frames off disk and discards the other channels,
         // so 58 channels means reading the file 58 times — 29GB of I/O for a 508MB file.
-        let mut builders: Vec<crate::ui::waveform_cache::Builder> =
-            (0..channel_count).map(|_| crate::ui::waveform_cache::Builder::new()).collect();
+        let mut builders: Vec<crate::ui::waveform_cache::Builder> = (0..channel_count)
+            .map(|_| crate::ui::waveform_cache::Builder::with_capacity(total_frames as usize))
+            .collect();
         let mut block: Vec<Vec<f32>> = Vec::new();
         let mut at = 0u64;
         let mut last_painted = 0u64;
@@ -28631,11 +28632,12 @@ mod tests {
     /// production actually uses.
     fn build_caches(stream: &crate::model::stream::StreamedSamples) -> Vec<WaveformCache> {
         let channel_count = stream.channel_count();
-        let mut builders: Vec<crate::ui::waveform_cache::Builder> =
-            (0..channel_count).map(|_| crate::ui::waveform_cache::Builder::new()).collect();
+        let total = stream.len_samples() as u64;
+        let mut builders: Vec<crate::ui::waveform_cache::Builder> = (0..channel_count)
+            .map(|_| crate::ui::waveform_cache::Builder::with_capacity(total as usize))
+            .collect();
         let mut block: Vec<Vec<f32>> = Vec::new();
         let mut at = 0u64;
-        let total = stream.len_samples() as u64;
         while at < total {
             let n = stream
                 .read_all_channels(at, crate::model::wavread::READ_BLOCK_FRAMES, &mut block)

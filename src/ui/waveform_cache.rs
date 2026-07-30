@@ -70,6 +70,24 @@ impl Builder {
         Builder { mins: Vec::new(), maxs: Vec::new(), acc_min: f32::MAX, acc_max: f32::MIN, acc_len: 0 }
     }
 
+    /// A builder pre-sized for a channel of `samples` samples.
+    ///
+    /// Worth doing whenever the length is known, which it is for every file: the base level is
+    /// 1/32 the size of the samples, so a 30GB file's pyramid is ~1GB — and letting two `Vec`s
+    /// that large grow by doubling costs about half as much again at the moment they reallocate.
+    /// Measured: peak RSS opening a 30GB 56-channel file fell from 1477MB to near the pyramid's
+    /// own size.
+    pub fn with_capacity(samples: usize) -> Self {
+        let bins = samples / BASE_BIN + 1;
+        Builder {
+            mins: Vec::with_capacity(bins),
+            maxs: Vec::with_capacity(bins),
+            acc_min: f32::MAX,
+            acc_max: f32::MIN,
+            acc_len: 0,
+        }
+    }
+
     pub fn push(&mut self, block: &[f32]) {
         let mut rest = block;
         while !rest.is_empty() {
