@@ -113,6 +113,111 @@ pub fn cycle_mode(modes: &mut [ChannelExportMode], i: usize, forward: bool) {
     modes[i] = order[next];
 }
 
+/// Writes every planned output file in **one pass** over the source.
+///
+/// The obvious implementation loops over `files` and reads the channels each one needs, which
+/// re-reads the whole source once per output: splitting a 20GB take into 29 stereo pairs would be
+/// 580GB of reads. Instead every writer is opened up front and the source is walked once,
+/// demultiplexing each block into whichever outputs want it. 29 open handles and their write
+/// buffers is a few MB — nothing against the alternative.
+///
+/// `progress` is called with `(frames_done, frames_total)` after each block and returning `false`
+/// aborts; partial files are removed on abort or error so a failed export leaves nothing that
+/// looks complete.
+///
+/// Markers and head/tail marks are carried over **verbatim** — unlike Export Regions, the timeline
+/// is unchanged here, so every position is still valid and rebasing them would be wrong. `bext` is
+/// dropped, matching every other new-file path.
+/// `read_block(first_frame, frames, out)` must fill `out[logical_channel]` with that block and
+/// return the frames actually read, 0 at end of input. Taking the reader as a closure is what
+/// lets a resident and a streamed document share this one implementation, so the streaming path
+/// is exercised by every existing Export Channels test rather than being a parallel code path
+/// that only a large file ever reaches.
+#[allow(clippy::too_many_arguments)]
+pub fn export_streaming(
+    total_frames: u64,
+    mut read_block: impl FnMut(u64, usize, &mut Vec<Vec<f32>>) -> std::io::Result<usize>,
+    files: &[ChannelExportFile],
+    out_dir: &std::path::Path,
+    stem: &str,
+    depth: crate::model::io::BitDepth,
+    sample_rate: u32,
+    markers: &[crate::model::document::Marker],
+    head_tail_marks: &[usize],
+    mut progress: impl FnMut(u64, u64) -> bool,
+) -> std::io::Result<usize> {
+    use crate::model::wavwrite::WavWriter;
+
+    let paths: Vec<std::path::PathBuf> = files
+        .iter()
+        .map(|f| out_dir.join(format!("{stem}_{}.wav", f.suffix)))
+        .collect();
+    let mut writers: Vec<WavWriter> = Vec::with_capacity(files.len());
+    let cleanup = |paths: &[std::path::PathBuf]| {
+        for p in paths {
+            let _ = std::fs::remove_file(p);
+        }
+    };
+    for (file, path) in files.iter().zip(&paths) {
+        match WavWriter::create(path, file.channels.len(), sample_rate, depth, false) {
+            Ok(w) => writers.push(w),
+            Err(e) => {
+                // Drop the writers already open before deleting, so the files are closed.
+                drop(writers);
+                cleanup(&paths);
+                return Err(e);
+            }
+        }
+    }
+
+    let mut block: Vec<Vec<f32>> = Vec::new();
+    let mut at = 0u64;
+    while at < total_frames {
+        let n = match read_block(at, crate::model::wavread::READ_BLOCK_FRAMES, &mut block) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                drop(writers);
+                cleanup(&paths);
+                return Err(e);
+            }
+        };
+        for (file, writer) in files.iter().zip(writers.iter_mut()) {
+            // One borrow per source channel this output wants, in the order it wants them.
+            let planes: Vec<&[f32]> = file
+                .channels
+                .iter()
+                .map(|&c| block.get(c).map(|v| v.as_slice()).unwrap_or(&[]))
+                .collect();
+            if let Err(e) = writer.write_planes(&planes, n) {
+                drop(writers);
+                cleanup(&paths);
+                return Err(e);
+            }
+        }
+        at += n as u64;
+        if !progress(at, total_frames) {
+            drop(writers);
+            cleanup(&paths);
+            return Ok(0);
+        }
+    }
+
+    for writer in writers {
+        if let Err(e) = writer.finalize() {
+            cleanup(&paths);
+            return Err(e);
+        }
+    }
+    // After the audio is safely on disk, so a failed write never leaves metadata describing a
+    // file that wasn't finished — the same ordering `save_wav_with` uses.
+    for path in &paths {
+        let _ = crate::model::bwf::append_aux_chunks(path, markers, &None);
+        crate::model::headstails::save(path, head_tail_marks, sample_rate);
+    }
+    Ok(paths.len())
+}
+
 /// Opening state: stereo pairs from the top, with a trailing odd channel as its own mono
 /// file. Pairs are the overwhelmingly common intent for a multichannel capture, and an odd
 /// channel left over has nothing to pair with.

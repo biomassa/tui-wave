@@ -63,17 +63,16 @@ impl Form {
     }
 }
 
-/// The 64-bit sizes an `RF64`/`BW64` file keeps in its `ds64` chunk.
+/// The size an `RF64`/`BW64` file's `ds64` chunk gives for the audio.
 ///
-/// `sample_count` is a *frame* count (per the spec's `sampleCount` field, which counts
-/// sample frames, not interleaved samples). It is advisory here: the frame count is derived
-/// from the data chunk's byte size instead, since that is what actually bounds the reads, and
-/// a file still being written can easily have a stale `sampleCount`.
+/// Only `data_size` is kept. The chunk also carries `riffSize` and `sampleCount`, and neither is
+/// read: the total file length is known from the filesystem, and the frame count is derived from
+/// the data chunk's byte size, which is what actually bounds the reads. A file still being written
+/// — or one whose writer died mid-take — routinely has a stale `sampleCount`, so preferring it
+/// would mean trusting a number the file itself contradicts.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Ds64 {
-    pub riff_size: u64,
     pub data_size: u64,
-    pub sample_count: u64,
 }
 
 /// One chunk's identity and where its body sits in the file.
@@ -205,14 +204,11 @@ impl Riff {
         if size < 28 {
             return Ok(None);
         }
-        self.file.seek(SeekFrom::Start(body_offset))?;
-        let mut b = [0u8; 24];
+        // Skip `riffSize`; `dataSize` is the second u64.
+        self.file.seek(SeekFrom::Start(body_offset + 8))?;
+        let mut b = [0u8; 8];
         self.file.read_exact(&mut b)?;
-        Ok(Some(Ds64 {
-            riff_size: u64_at(&b, 0),
-            data_size: u64_at(&b, 8),
-            sample_count: u64_at(&b, 16),
-        }))
+        Ok(Some(Ds64 { data_size: u64_at(&b, 0) }))
     }
 
     /// The first chunk with this id, if present.
@@ -243,10 +239,6 @@ impl Riff {
         self.find(b"data").map(|c| (c.body_offset, c.size))
     }
 
-    /// The open handle, for callers that read the audio themselves rather than by chunk body.
-    pub fn into_file(self) -> File {
-        self.file
-    }
 }
 
 #[cfg(test)]
@@ -365,7 +357,6 @@ mod tests {
         let riff = Riff::open(write(&dir, "big.wav", &bytes)).unwrap();
         assert_eq!(riff.form, Form::Rf64);
         assert_eq!(riff.ds64.unwrap().data_size, data_len as u64);
-        assert_eq!(riff.ds64.unwrap().sample_count, 50);
         assert_eq!(riff.data_chunk().unwrap().1, data_len as u64);
         std::fs::remove_dir_all(&dir).ok();
     }
