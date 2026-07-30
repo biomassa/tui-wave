@@ -2,7 +2,35 @@
 
 ## Unreleased (1.9.0)
 
-Multichannel support and other audio formats.
+Multichannel support, other audio formats, and files too large to hold in memory.
+
+- **Files over 4GB open at all.** A plain WAV cannot exceed 4GB — its size field is 32-bit — so
+  recorders switch to the `RF64` form once a take passes that, and the reader this app used could
+  not read one: it rejected any file not starting with the literal bytes `RIFF`. A 20GB take
+  therefore failed on its first four bytes, in milliseconds, with the error thrown away — so
+  pressing Enter on it looked exactly like the keypress never registering. Both halves are fixed:
+  `RF64` and `BW64` now load, and a load that fails says why instead of doing nothing visible.
+- **A file too large for memory opens read-only, streamed from disk.** Samples are held as 32-bit
+  float whatever the source depth, so a 30GB recording needs 30GB of memory — plus another copy
+  for playback. Above a configurable budget (`max_resident_mb`, 1.5GB by default) the audio stays
+  on disk and only the waveform overview is held, which is about a thirtieth of the size: a 30GB
+  56-channel file opens in under a minute using ~1.1GB. Such a buffer is marked
+  `[streamed, read-only]` in the title, and displaying, scrolling, zooming, Remove Empty Channels
+  and Export Channels all work on it. Editing, saving and playback are refused with a message
+  naming the action and the buffer's size, rather than appearing to work and doing nothing.
+  Anything that fitted before still opens fully editable, unchanged.
+- **Remove Empty Channels and Export Channels work at that scale.** Remove Empty Channels needs no
+  extra reading at all — the peaks it compares are already measured while the overview is built —
+  but on a streamed buffer it is **not** undoable, and says so, because storing the removed
+  channels for undo would mean holding most of the file. Export Channels reads the source exactly
+  once no matter how many files it writes, and writes `RF64` itself if an output would exceed 4GB.
+- **Waveform drawing got roughly 100x cheaper at wide zoom levels**, on ordinary files as much as
+  large ones. Each column's min/max was read from the coarsest cached resolution that fitted,
+  which minimized one cost and maximized a much larger one; picking the cheapest resolution
+  instead gives the identical answer for a small fraction of the work.
+- **Fixed: opening a file no longer reads it twice.** Finding a file's markers meant loading the
+  entire file into memory a second time, after the audio had already been decoded, purely to
+  locate a few bytes of metadata near the end of it.
 
 - **The waveform shows six channel panes at a time, scrolled with the mouse wheel.** The pane
   layout divided the whole waveform area by the channel count, so a 30-channel file got one row
