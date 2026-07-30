@@ -60,6 +60,10 @@ pub struct StreamedSamples {
     windows: Mutex<Vec<Option<Window>>>,
     /// Scratch for reads too large to cache, kept alive so a per-frame read doesn't reallocate.
     scratch: Mutex<Vec<f32>>,
+    /// Deinterleave target for [`Self::read_all_channels`], kept between calls. A 58-channel
+    /// 64Ki-frame block is ~15MB; reallocating it per block over a 20GB file is ~1400 rounds of
+    /// churn for no reason.
+    demux: Mutex<Vec<Vec<f32>>>,
 }
 
 impl StreamedSamples {
@@ -72,6 +76,7 @@ impl StreamedSamples {
             channel_map: RwLock::new((0..info.channels).collect()),
             windows: Mutex::new(Vec::new()),
             scratch: Mutex::new(Vec::new()),
+            demux: Mutex::new(Vec::new()),
         })
     }
 
@@ -195,7 +200,11 @@ impl StreamedSamples {
         for ch in out.iter_mut() {
             ch.clear();
         }
-        let mut source_buf: Vec<Vec<f32>> = vec![Vec::new(); self.info.channels];
+        let mut source_buf = self.demux.lock().unwrap();
+        source_buf.resize_with(self.info.channels, Vec::new);
+        for ch in source_buf.iter_mut() {
+            ch.clear();
+        }
         let frames_read = {
             let mut wav = self.frames.lock().unwrap();
             wav.read_into(first_frame, frames, &mut source_buf)?
@@ -208,37 +217,6 @@ impl StreamedSamples {
         Ok(frames_read)
     }
 
-    /// Reads a whole channel in blocks, handing each block to `f`. Used to build the pyramid at
-    /// open time and to write channels back out on export, neither of which wants the file
-    /// resident.
-    pub fn for_each_block(
-        &self,
-        channel: usize,
-        mut f: impl FnMut(&[f32]),
-    ) -> std::io::Result<()> {
-        let Some(source_channel) = self.source_channel(channel) else {
-            return Ok(());
-        };
-        let total = self.info.frame_count;
-        let mut frames = self.frames.lock().unwrap();
-        let mut buf: Vec<f32> = Vec::new();
-        let mut at = 0u64;
-        while at < total {
-            buf.clear();
-            let n = frames.read_channel_into(
-                source_channel,
-                at,
-                super::wavread::READ_BLOCK_FRAMES,
-                &mut buf,
-            )?;
-            if n == 0 {
-                break;
-            }
-            f(&buf);
-            at += n as u64;
-        }
-        Ok(())
-    }
 }
 
 /// How the render path reads samples, over either storage.
@@ -447,23 +425,33 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// `read_all_channels` must walk the file in order and serve *every* channel from one read.
+    /// Reading per channel would be the obvious shape and is catastrophic: a read fetches whole
+    /// interleaved frames regardless, so N channels would mean N passes over the file.
     #[test]
-    fn for_each_block_walks_a_whole_channel_in_order() {
+    fn read_all_channels_walks_the_file_once_and_serves_every_channel() {
         let dir = tmp("blocks");
-        let s = StreamedSamples::open(indexed_wav(&dir, 2, 200_000)).unwrap();
+        let channels = 4usize;
+        let frames = 200_000usize;
+        let s = StreamedSamples::open(indexed_wav(&dir, channels, frames)).unwrap();
+
+        let mut block: Vec<Vec<f32>> = Vec::new();
         let mut seen = 0usize;
-        let mut ok = true;
-        s.for_each_block(1, |block| {
-            for (i, &v) in block.iter().enumerate() {
-                if v != (1000 + seen + i) as f32 {
-                    ok = false;
+        let mut at = 0u64;
+        while at < frames as u64 {
+            let n = s.read_all_channels(at, 7_000, &mut block).unwrap();
+            assert!(n > 0, "must make progress");
+            assert_eq!(block.len(), channels, "every channel arrives from one read");
+            for (c, data) in block.iter().enumerate() {
+                assert_eq!(data.len(), n, "channel {c} block length");
+                for (i, &v) in data.iter().enumerate() {
+                    assert_eq!(v, (c * 1000 + seen + i) as f32, "ch{c} frame {}", seen + i);
                 }
             }
-            seen += block.len();
-        })
-        .unwrap();
-        assert!(ok, "blocks must arrive in order with the right values");
-        assert_eq!(seen, 200_000);
+            seen += n;
+            at += n as u64;
+        }
+        assert_eq!(seen, frames);
         std::fs::remove_dir_all(&dir).ok();
     }
 
