@@ -21,9 +21,10 @@ Multichannel support, other audio formats, and files too large to hold in memory
   Anything that fitted before still opens fully editable, unchanged.
 - **Remove Empty Channels and Export Channels work at that scale.** Remove Empty Channels needs no
   extra reading at all — the peaks it compares are already measured while the overview is built —
-  but on a streamed buffer it is **not** undoable, and says so, because storing the removed
-  channels for undo would mean holding most of the file. Export Channels reads the source exactly
-  once no matter how many files it writes, and writes `RF64` itself if an output would exceed 4GB.
+  and it is undoable with Ctrl+Z like anything else: the audio never moves, so removing channels
+  is a change to which channels the file *presents* and undo simply puts the old list back — no
+  copy of a 30GB file is involved. Export Channels reads the source exactly once no matter how many
+  files it writes, and writes `RF64` itself if an output would exceed 4GB.
 - **Waveform drawing got roughly 100x cheaper at wide zoom levels**, on ordinary files as much as
   large ones. Each column's min/max was read from the coarsest cached resolution that fitted,
   which minimized one cost and maximized a much larger one; picking the cheapest resolution
@@ -31,7 +32,6 @@ Multichannel support, other audio formats, and files too large to hold in memory
 - **Fixed: opening a file no longer reads it twice.** Finding a file's markers meant loading the
   entire file into memory a second time, after the audio had already been decoded, purely to
   locate a few bytes of metadata near the end of it.
-
 - **The waveform shows six channel panes at a time, scrolled with the mouse wheel.** The pane
   layout divided the whole waveform area by the channel count, so a 30-channel file got one row
   per channel — no centre row for the zero line, room for a single dB gutter mark — and past
