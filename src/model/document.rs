@@ -245,6 +245,22 @@ impl Document {
         }
     }
 
+    /// The *source* channel that logical channel `channel` reads from.
+    ///
+    /// These differ only on a streamed document that has had channels removed — that operation
+    /// edits a logical → source map rather than moving any audio (see `model::stream`). Anything
+    /// keyed by source channel rather than by position on screen must go through this; in practice
+    /// that means the waveform pyramid, which covers every source channel and is deliberately
+    /// never filtered so that removing channels stays a `Vec<usize>` edit and stays undoable.
+    ///
+    /// The identity for a resident document, so a caller does not need to know which it has.
+    pub fn source_channel(&self, channel: usize) -> usize {
+        match &self.stream {
+            Some(stream) => stream.channel_map().get(channel).copied().unwrap_or(channel),
+            None => channel,
+        }
+    }
+
     /// How to read logical channel `channel`'s samples, whichever storage this document uses.
     ///
     /// The single seam between the render path and the two storage kinds. `Resident` hands back

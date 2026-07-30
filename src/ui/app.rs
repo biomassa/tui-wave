@@ -24,7 +24,9 @@ use crate::commands::marker::{
     auto_insert_markers_command, delete_marker_command, insert_marker_command, move_marker_command, rename_marker_command,
 };
 use crate::commands::paste::paste_command;
-use crate::commands::remove_channels::remove_channels_command;
+use crate::commands::remove_channels::{
+    remove_channels_command, remove_streamed_channels_command,
+};
 use crate::model::channel_export::{self, ChannelExportMode};
 use crate::model::export::{self as audio_export, ExportFormat, ExportSettings};
 use crate::commands::normalize::normalize_command;
@@ -3898,7 +3900,18 @@ impl App {
         )
     }
 
+    /// Rebuilds the per-channel min/max pyramids from the active document's resident samples.
+    ///
+    /// **A no-op on a streamed document**, and that guard is load-bearing rather than defensive:
+    /// a streamed document's `channels` is empty, so rebuilding would replace a pyramid that cost
+    /// 53 seconds of disk reads with an empty one and blank the waveform. The streamed pyramid is
+    /// built once by `build_streaming_caches` and is immutable thereafter — it covers every
+    /// *source* channel and is indexed through `Document::source_channel`, so even removing
+    /// channels doesn't invalidate it.
     fn rebuild_waveform_caches(&mut self) {
+        if self.active_doc().is_some_and(|doc| doc.is_streaming()) {
+            return;
+        }
         self.waveform_caches = self
             .active_doc()
             .map(|doc| doc.channels.iter().map(|c| WaveformCache::build(c)).collect())
@@ -11262,14 +11275,19 @@ impl App {
         // `dsp::channels_below_peaks`. Guarded on having a cache per channel: mid-build (or if
         // the build failed) the peaks would be missing and every channel would read as empty.
         let below = if doc.is_streaming() {
-            if self.waveform_caches.len() != total {
+            // The pyramid covers every *source* channel and is never filtered, so a logical
+            // channel's peak is looked up through the map rather than by position.
+            let peaks: Vec<Option<f32>> = (0..total)
+                .map(|i| self.waveform_caches.get(doc.source_channel(i)).map(|c| c.peak()))
+                .collect();
+            if peaks.iter().any(Option::is_none) {
                 self.dialog = Some(Dialog::Info {
                     message: "The waveform overview is still being built — try again in a moment."
                         .to_string(),
                 });
                 return;
             }
-            let peaks: Vec<f32> = self.waveform_caches.iter().map(|c| c.peak()).collect();
+            let peaks: Vec<f32> = peaks.into_iter().flatten().collect();
             dsp::channels_below_peaks(&peaks, threshold_db)
         } else {
             dsp::channels_below(&doc.channels, threshold_db)
@@ -11297,35 +11315,20 @@ impl App {
 
         let removed = below.len();
 
-        // A streamed document cannot go through `RemoveChannelsCommand`: that stashes every
-        // removed channel's samples so `undo` can put them back, which at these sizes is most
-        // of the file. Instead the stream's channel map is edited — a `Vec<usize>` — and the
-        // operation is simply not undoable. Said plainly in the dialog rather than left for the
-        // user to discover by pressing Ctrl+Z and watching nothing happen.
+        // A streamed document uses its own command: the samples stay on disk in a read-only file,
+        // so removal is an edit to the logical → source channel map and undo is putting the old
+        // map back — no sample data copied either way. `RemoveChannelsCommand` would instead stash
+        // every removed channel's samples, which at these sizes is most of the file.
         if self.documents[idx].is_streaming() {
-            let drop_set: std::collections::HashSet<usize> = below.iter().copied().collect();
-            // Through `&self` (the channel map is interior-mutable), so this cannot be defeated
-            // by another `Arc` handle happening to be alive — which `Arc::get_mut` would turn
-            // into a silent no-op right when the user asked for something.
-            if let Some(stream) = self.documents[idx].stream.as_ref() {
-                stream.retain_channels(|i| !drop_set.contains(&i));
-            }
-            // The pyramid is per logical channel, so it has to follow the same edit rather than
-            // be rebuilt — rebuilding would re-read the entire file for a channel-list change.
-            let mut kept = 0usize;
-            self.waveform_caches.retain(|_| {
-                let keep = !drop_set.contains(&kept);
-                kept += 1;
-                keep
-            });
-            // Per-channel graphics image state is keyed by channel index too, and `render`
-            // re-truncates it each frame; dropping it here keeps one frame from painting a
-            // removed channel's bitmap into a surviving channel's pane.
+            self.histories[idx]
+                .apply(remove_streamed_channels_command(below), &mut self.documents[idx]);
+            // Per-channel graphics image state is keyed by channel index, so after the map changes
+            // index *i* means a different source channel than the cached bitmap at *i* holds.
+            // `render` only truncates, which cannot fix an index whose meaning changed.
             self.graphics_protocols.clear();
             self.dialog = Some(Dialog::Info {
                 message: format!(
-                    "Removed {removed} channel{} below {threshold_db} dBFS — {} left. \
-                     Not undoable on a streamed buffer; re-open the file to restore them.",
+                    "Removed {removed} channel{} below {threshold_db} dBFS — {} left.",
                     if removed == 1 { "" } else { "s" },
                     total - removed,
                 ),
@@ -13008,6 +13011,13 @@ impl App {
                 // The two operations this mode exists to support.
                 | Action::RemoveEmptyChannels
                 | Action::ExportChannels
+                // Undo/Redo are safe here even though editing is not: a streamed document's
+                // history can only ever hold `RemoveStreamedChannelsCommand`, because every
+                // other command is refused by this very list and `load_file_streaming` starts
+                // the buffer with a fresh `History`. So there is no resident-era command that
+                // undo could replay against a document whose `channels` is empty.
+                | Action::Undo
+                | Action::Redo
                 // Panels, buffers, and getting out.
                 | Action::Noop
                 | Action::Quit
@@ -14467,10 +14477,15 @@ impl App {
             // *absolute* channel index, which is what makes this correct while the channel
             // window is scrolled.
             let samples = self.documents[doc_idx].sample_source(i);
+            // The pyramid is keyed by *source* channel, not by position on screen: a streamed
+            // document that has had channels removed maps logical -> source, and the pyramid is
+            // deliberately never filtered so that removal stays undoable. Identity for a
+            // resident document.
+            let cache = self.waveform_caches.get(self.documents[doc_idx].source_channel(i));
             let widget = WaveformWidget {
                 samples,
                 viewport,
-                cache: self.waveform_caches.get(i),
+                cache,
                 selection,
                 cursor: self.documents[doc_idx].cursor,
                 playhead: self.playhead_position,
@@ -14508,7 +14523,7 @@ impl App {
                     let img = waveform_image::rasterize_waveform(
                         samples,
                         viewport,
-                        self.waveform_caches.get(i),
+                        cache,
                         selection,
                         self.documents[doc_idx].cursor,
                         self.playhead_position,
@@ -14917,7 +14932,7 @@ impl App {
                 if col_start >= ch_end {
                     continue;
                 }
-                let (mn, mx) = match self.waveform_caches.get(ch_i) {
+                let (mn, mx) = match self.waveform_caches.get(doc.source_channel(ch_i)) {
                     Some(cache) => cache.min_max(channel, col_start, ch_end),
                     None => channel
                         .with_slice(col_start, ch_end, crate::ui::waveform_cache::raw_min_max),
@@ -15157,7 +15172,7 @@ fn visible_peak_raw(
     // is empty, so zipping it would silently report a peak of zero and auto vertical zoom would
     // do nothing at all on exactly the files that most need it.
     (0..document.channel_count())
-        .filter_map(|ch| waveform_caches.get(ch).map(|cache| (ch, cache)))
+        .filter_map(|ch| waveform_caches.get(document.source_channel(ch)).map(|cache| (ch, cache)))
         .fold(0.0f32, |peak, (ch, cache)| {
             let (mn, mx) = cache.min_max(
                 document.sample_source(ch),
@@ -28663,7 +28678,7 @@ mod tests {
 
     #[test]
     fn a_file_over_the_resident_budget_opens_streamed_and_read_only() {
-        let dir = std::env::temp_dir().join(format!("tuiwave_stream_open_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tuiwave_appstream_open_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("big.wav");
         multichannel_float_wav(&path, 8, 20_000);
@@ -28687,7 +28702,7 @@ mod tests {
     /// guard against the streaming path capturing ordinary files.
     #[test]
     fn a_file_under_the_resident_budget_opens_fully_resident() {
-        let dir = std::env::temp_dir().join(format!("tuiwave_stream_small_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tuiwave_appstream_small_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("small.wav");
         multichannel_float_wav(&path, 4, 5_000);
@@ -28708,7 +28723,7 @@ mod tests {
     /// the waveform is simply drawn wrong, and nothing else in the mode can be trusted either.
     #[test]
     fn the_streamed_pyramid_matches_the_resident_one() {
-        let dir = std::env::temp_dir().join(format!("tuiwave_stream_pyr_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tuiwave_appstream_pyr_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("cmp.wav");
         multichannel_float_wav(&path, 3, 40_000);
@@ -28742,7 +28757,7 @@ mod tests {
     /// nothing — which is exactly what the allowlist exists to prevent.
     #[test]
     fn editing_a_streamed_buffer_is_refused_with_a_reason() {
-        let dir = std::env::temp_dir().join(format!("tuiwave_stream_gate_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tuiwave_appstream_gate_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("ro.wav");
         multichannel_float_wav(&path, 2, 10_000);
@@ -28785,7 +28800,7 @@ mod tests {
     /// The other side of the gate: everything the mode is *for* must go through untouched.
     #[test]
     fn navigating_and_zooming_a_streamed_buffer_is_allowed() {
-        let dir = std::env::temp_dir().join(format!("tuiwave_stream_nav_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tuiwave_appstream_nav_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("nav.wav");
         multichannel_float_wav(&path, 12, 10_000);
@@ -28820,16 +28835,15 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Remove Empty Channels on a streamed buffer must find the same channels as on a resident
-    /// one, edit the channel map rather than the samples, keep the pyramid in step, and say that
-    /// it isn't undoable.
+    /// Remove Empty Channels on a streamed buffer edits the logical → source channel map, and the
+    /// pyramid — keyed by *source* channel — is deliberately **not** filtered alongside it.
     ///
-    /// The "in step" part is the one that would go wrong silently: the pyramid is indexed by
-    /// *logical* channel, so if it isn't filtered by the same predicate, every surviving channel
-    /// afterwards draws a different channel's waveform.
+    /// That is what keeps the operation undoable for free: no sample data moves, so undo is just
+    /// putting the old map back. The invariant to hold is that a logical channel's waveform is
+    /// looked up through the map, so `source_channel` and the pyramid must agree.
     #[test]
-    fn remove_empty_channels_on_a_streamed_buffer_edits_the_map_and_keeps_the_pyramid_aligned() {
-        let dir = std::env::temp_dir().join(format!("tuiwave_stream_rec_{}", std::process::id()));
+    fn remove_empty_channels_on_a_streamed_buffer_edits_the_map_and_leaves_the_pyramid_whole() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_appstream_rec_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("many.wav");
         // `multichannel_float_wav` makes channel 1 digitally silent and scales the rest by
@@ -28852,30 +28866,136 @@ mod tests {
             vec![0, 2, 3, 4, 5],
             "the map skips the removed source channel"
         );
-        assert_eq!(app.waveform_caches.len(), 5, "the pyramid follows the same edit");
-        // Logical channel 1 is now source channel 2 (peak 0.3). If the pyramid had not been
-        // filtered alongside, this would still hold source channel 1's peak of 0.0.
-        assert!(
-            (app.waveform_caches[1].peak() - 0.3).abs() < 0.01,
-            "pyramid entry 1 must describe source channel 2, got peak {}",
-            app.waveform_caches[1].peak()
+        assert_eq!(
+            app.waveform_caches.len(),
+            6,
+            "the pyramid still covers every source channel — filtering it is what would make \
+             this operation cost sample data to undo"
         );
-        // And the samples agree with the pyramid.
-        let src = app.documents[0].sample_source(1);
-        let (mn, mx) = src.with_slice(0, 20_000, crate::ui::waveform_cache::raw_min_max);
-        assert!(mn.abs().max(mx.abs()) > 0.29, "logical channel 1 reads real audio");
+
+        // Logical channel 1 is source channel 2 (peak 0.3). Looked up through the map, which is
+        // exactly what the render path does; indexing the pyramid by position would find source
+        // channel 1's peak of 0.0 and draw a blank pane.
+        let doc = &app.documents[0];
+        for (logical, expected_peak) in [(0usize, 0.9f32), (1, 0.3), (2, 0.225)] {
+            let cache = &app.waveform_caches[doc.source_channel(logical)];
+            assert!(
+                (cache.peak() - expected_peak).abs() < 0.01,
+                "logical {logical} -> source {} should peak near {expected_peak}, got {}",
+                doc.source_channel(logical),
+                cache.peak()
+            );
+            // And the samples the same lookup yields agree with that peak.
+            let (mn, mx) = doc
+                .sample_source(logical)
+                .with_slice(0, 20_000, crate::ui::waveform_cache::raw_min_max);
+            assert!(
+                (mn.abs().max(mx.abs()) - expected_peak).abs() < 0.01,
+                "logical {logical}: samples and pyramid must describe the same channel"
+            );
+        }
 
         match &app.dialog {
             Some(Dialog::Info { message }) => {
                 assert!(message.contains("Removed 1 channel"), "{message}");
                 assert!(
-                    message.contains("Not undoable"),
-                    "the message must say it can't be undone: {message}"
+                    !message.contains("ndoable"),
+                    "it *is* undoable now, so the message must not say otherwise: {message}"
                 );
             }
             _ => panic!("expected a result dialog"),
         }
-        assert!(!app.histories[0].can_undo(), "nothing was pushed onto the undo stack");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The point of the map indirection: Ctrl+Z puts the channels back, and Ctrl+Y takes them away
+    /// again, without any sample data having been copied or held.
+    #[test]
+    fn removing_channels_on_a_streamed_buffer_undoes_and_redoes() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_appstream_undo_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("undo.wav");
+        multichannel_float_wav(&path, 6, 20_000);
+
+        let mut app = streaming_app();
+        app.load_file(path.clone());
+        let stream = app.documents[0].stream.clone().unwrap();
+        app.waveform_caches = build_caches(&stream);
+        app.pending_cache_build = false;
+
+        let original_map = app.documents[0].stream.as_ref().unwrap().channel_map();
+        assert_eq!(original_map, vec![0, 1, 2, 3, 4, 5]);
+
+        app.apply_remove_empty_channels(-48.0);
+        app.dialog = None;
+        assert!(app.histories[0].can_undo(), "the removal must be on the undo stack");
+        assert_eq!(app.documents[0].channel_count(), 5);
+
+        // Through `handle_action`, so this also proves the read-only gate permits Undo/Redo.
+        app.handle_action(Action::Undo);
+        assert!(
+            !matches!(&app.dialog, Some(Dialog::Info { message }) if message.contains("read-only")),
+            "Undo must not be refused on a streamed buffer"
+        );
+        assert_eq!(app.documents[0].channel_count(), 6, "undo restores the channel count");
+        assert_eq!(
+            app.documents[0].stream.as_ref().unwrap().channel_map(),
+            original_map,
+            "and the exact original mapping"
+        );
+        // The restored channel must read its own audio again, not a neighbour's.
+        let doc = &app.documents[0];
+        let (mn, mx) = doc
+            .sample_source(1)
+            .with_slice(0, 20_000, crate::ui::waveform_cache::raw_min_max);
+        assert_eq!(
+            (mn, mx),
+            (0.0, 0.0),
+            "logical 1 is source 1 again, which is the silent channel"
+        );
+
+        app.handle_action(Action::Redo);
+        assert_eq!(app.documents[0].channel_count(), 5, "redo removes them again");
+        assert_eq!(
+            app.documents[0].stream.as_ref().unwrap().channel_map(),
+            vec![0, 2, 3, 4, 5]
+        );
+
+        // And a second round trip, since `execute` re-snapshots the map each time.
+        app.handle_action(Action::Undo);
+        assert_eq!(app.documents[0].channel_count(), 6);
+        app.handle_action(Action::Redo);
+        assert_eq!(app.documents[0].channel_count(), 5);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The pyramid must survive an undo. It cost a full read of the file to build and a streamed
+    /// document's `channels` is empty, so a `rebuild_waveform_caches` reaching it would replace it
+    /// with nothing and blank the waveform — which is why that function no-ops on a streamed doc.
+    #[test]
+    fn undo_on_a_streamed_buffer_does_not_destroy_the_pyramid() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_appstream_keep_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keep.wav");
+        multichannel_float_wav(&path, 4, 20_000);
+
+        let mut app = streaming_app();
+        app.load_file(path.clone());
+        let stream = app.documents[0].stream.clone().unwrap();
+        app.waveform_caches = build_caches(&stream);
+        app.pending_cache_build = false;
+        let peaks_before: Vec<f32> = app.waveform_caches.iter().map(|c| c.peak()).collect();
+
+        app.apply_remove_empty_channels(-48.0);
+        app.handle_action(Action::Undo);
+        // Also call it directly — anything that reaches it must be harmless here.
+        app.rebuild_waveform_caches();
+
+        let peaks_after: Vec<f32> = app.waveform_caches.iter().map(|c| c.peak()).collect();
+        assert_eq!(peaks_after, peaks_before, "the pyramid must be untouched");
+        assert!(peaks_after.iter().any(|&p| p > 0.5), "sanity: it holds real peaks");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -28884,7 +29004,7 @@ mod tests {
     /// same question asked of two different storage layouts.
     #[test]
     fn streamed_and_resident_agree_on_which_channels_are_empty() {
-        let dir = std::env::temp_dir().join(format!("tuiwave_stream_agree_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tuiwave_appstream_agree_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("cmp.wav");
         multichannel_float_wav(&path, 6, 20_000);
@@ -28908,7 +29028,7 @@ mod tests {
     /// the two block-reader closures agree — which is where a channel-indexing mistake would hide.
     #[test]
     fn streamed_export_channels_matches_a_resident_export() {
-        let dir = std::env::temp_dir().join(format!("tuiwave_stream_exp_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tuiwave_appstream_exp_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // Separate directories so the two runs write the same file names side by side.
         let a = dir.join("a");

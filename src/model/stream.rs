@@ -105,12 +105,17 @@ impl StreamedSamples {
         self.channel_map.read().map(|m| m.clone()).unwrap_or_default()
     }
 
-    /// Drops logical channels by index, keeping the rest in order. The streaming counterpart of
-    /// `RemoveChannelsCommand`, which cannot be used here — it stashes every removed channel's
-    /// samples so `undo` can put them back, which at these sizes is most of the file.
+    /// Drops logical channels by index, keeping the rest in order.
     ///
-    /// `keep` is called with the *logical* index, matching what the caller was just shown and
-    /// what `dsp::channels_below_peaks` returns.
+    /// `keep` is called with the *logical* index, matching what the caller was just shown and what
+    /// `dsp::channels_below_peaks` returns.
+    ///
+    /// Nothing about the audio changes — the file is open read-only and is never written. That is
+    /// what makes this cheap to undo: the whole operation is an edit to a `Vec<usize>`, so
+    /// `RemoveStreamedChannelsCommand` restores it by handing the old map back to
+    /// [`Self::set_channel_map`]. (`RemoveChannelsCommand`, the resident equivalent, has to stash
+    /// every removed channel's *samples* instead, which at these sizes would be most of the file —
+    /// that constraint simply doesn't exist here.)
     pub fn retain_channels(&self, keep: impl Fn(usize) -> bool) {
         if let Ok(mut map) = self.channel_map.write() {
             let mut i = 0;
@@ -121,6 +126,19 @@ impl StreamedSamples {
             });
         }
         // Window indices are logical, so they no longer mean what they did.
+        self.windows.lock().map(|mut w| w.clear()).ok();
+    }
+
+    /// Replaces the whole logical → source channel mapping. The undo half of
+    /// [`Self::retain_channels`].
+    ///
+    /// Entries are clamped to channels the file actually has, so a stale map (from a command
+    /// replayed against a different file) can only ever narrow the view, never point past the end
+    /// of the data and read garbage.
+    pub fn set_channel_map(&self, map: Vec<usize>) {
+        if let Ok(mut current) = self.channel_map.write() {
+            *current = map.into_iter().filter(|&c| c < self.info.channels).collect();
+        }
         self.windows.lock().map(|mut w| w.clear()).ok();
     }
 
