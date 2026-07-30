@@ -224,14 +224,13 @@ impl WaveformCache {
 
         let covered_start = (first_full_bin * bin_size).min(end);
         let covered_end = ((last_full_bin_excl * bin_size).max(covered_start)).min(end);
-        let edge_samples =
-            covered_start.saturating_sub(start) + end.saturating_sub(covered_end);
+
         // With no whole bin inside the range there is nothing else to answer from, so the edges
         // must be read whatever they cost. That only arises for spans under `2 * bin_size`,
         // i.e. when zoomed in and the read is small anyway.
         let no_bins = first_full_bin >= last_full_bin_excl;
 
-        if no_bins || samples.affords_exact_edges(edge_samples) {
+        if no_bins || samples.affords_exact_edges(span) {
             // Raw-scan whatever's left over at each edge — at most `bin_size` samples per side,
             // regardless of how large the query itself is.
             if start < covered_start {
