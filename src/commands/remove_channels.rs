@@ -68,6 +68,63 @@ pub fn remove_channels_command(indices: Vec<usize>) -> Box<dyn Command> {
     Box::new(RemoveChannelsCommand::new(indices))
 }
 
+/// Removes channels from a *streamed* document, which costs nothing to undo.
+///
+/// The counterpart to [`RemoveChannelsCommand`], and much cheaper: a streamed document's samples
+/// stay on disk in a file opened read-only, and which channels it presents is a `Vec<usize>` map
+/// from logical to source channel (`model::stream::StreamedSamples`). So removing channels is an
+/// edit to that list, and undoing it is putting the old list back — no sample data is copied, held,
+/// or moved either way. The resident version has to stash every removed channel's samples so `undo`
+/// can re-insert them, which at 20-30GB would be most of the file; that constraint is an artefact
+/// of the storage, not of the operation.
+///
+/// `indices` are *logical* channel indices in the pre-removal view, which is what
+/// `dsp::channels_below_peaks` returns. On redo they mean the same thing again, because undo has by
+/// then restored the map they were computed against.
+///
+/// The document is deliberately **not** marked dirty: a streamed buffer has no save path at all, so
+/// a dirty flag would only produce a quit-confirmation the user cannot act on.
+#[derive(Debug)]
+pub struct RemoveStreamedChannelsCommand {
+    indices: Vec<usize>,
+    /// The map as it was before `execute`, or `None` before it has run.
+    previous_map: Option<Vec<usize>>,
+}
+
+impl RemoveStreamedChannelsCommand {
+    pub fn new(indices: Vec<usize>) -> Self {
+        let mut indices = indices;
+        indices.sort_unstable();
+        indices.dedup();
+        Self { indices, previous_map: None }
+    }
+}
+
+impl Command for RemoveStreamedChannelsCommand {
+    fn execute(&mut self, doc: &mut Document) {
+        let Some(stream) = doc.stream.as_ref() else { return };
+        self.previous_map = Some(stream.channel_map());
+        let drop: std::collections::HashSet<usize> = self.indices.iter().copied().collect();
+        stream.retain_channels(|i| !drop.contains(&i));
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        let Some(stream) = doc.stream.as_ref() else { return };
+        // Cloned rather than taken, so a redo→undo→redo cycle keeps working.
+        if let Some(map) = self.previous_map.clone() {
+            stream.set_channel_map(map);
+        }
+    }
+
+    fn label(&self) -> &str {
+        "Remove Empty Channels"
+    }
+}
+
+pub fn remove_streamed_channels_command(indices: Vec<usize>) -> Box<dyn Command> {
+    Box::new(RemoveStreamedChannelsCommand::new(indices))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +206,103 @@ mod tests {
         assert_eq!(d.channel_count(), 1);
         cmd.undo(&mut d);
         assert_eq!(d.channel_count(), 2);
+    }
+
+    /// A streamed document's channels live behind a logical -> source map, so this command must
+    /// leave the audio alone entirely and restore the exact prior mapping on undo. Written against
+    /// `StreamedSamples` directly, so it holds regardless of how `App` drives it.
+    #[test]
+    fn streamed_removal_round_trips_through_the_channel_map() {
+        let dir = std::env::temp_dir()
+            .join(format!("tuiwave_rmstream_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("six.wav");
+        // Six channels of float32; channel c holds the constant value c, so a mis-mapped read is
+        // unmistakable rather than merely wrong-looking.
+        let channels = 6usize;
+        let frames = 64usize;
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(b"WAVE");
+        body.extend_from_slice(b"fmt ");
+        body.extend_from_slice(&16u32.to_le_bytes());
+        body.extend_from_slice(&3u16.to_le_bytes());
+        body.extend_from_slice(&(channels as u16).to_le_bytes());
+        body.extend_from_slice(&48000u32.to_le_bytes());
+        body.extend_from_slice(&((48000 * channels * 4) as u32).to_le_bytes());
+        body.extend_from_slice(&((channels * 4) as u16).to_le_bytes());
+        body.extend_from_slice(&32u16.to_le_bytes());
+        body.extend_from_slice(b"data");
+        body.extend_from_slice(&((frames * channels * 4) as u32).to_le_bytes());
+        for _ in 0..frames {
+            for c in 0..channels {
+                body.extend_from_slice(&(c as f32).to_le_bytes());
+            }
+        }
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        std::fs::write(&path, &out).unwrap();
+
+        let stream = crate::model::stream::StreamedSamples::open(&path).unwrap();
+        let mut d = Document { stream: Some(std::sync::Arc::new(stream)), ..Document::default() };
+        assert_eq!(d.channel_count(), 6);
+
+        let mut cmd = RemoveStreamedChannelsCommand::new(vec![1, 3, 4]);
+        cmd.execute(&mut d);
+        assert_eq!(d.channel_count(), 3);
+        assert_eq!(d.stream.as_ref().unwrap().channel_map(), vec![0, 2, 5]);
+        // Logical 1 now reads source 2, which holds the constant 2.0.
+        d.sample_source(1).with_slice(0, 1, |s| assert_eq!(s, &[2.0]));
+        assert!(!d.dirty, "a streamed buffer has no save path, so it must not be marked dirty");
+
+        cmd.undo(&mut d);
+        assert_eq!(d.channel_count(), 6);
+        assert_eq!(d.stream.as_ref().unwrap().channel_map(), vec![0, 1, 2, 3, 4, 5]);
+        for c in 0..channels {
+            d.sample_source(c).with_slice(0, 1, |s| {
+                assert_eq!(s, &[c as f32], "logical {c} must read source {c} again")
+            });
+        }
+
+        // Redo, then undo again: `execute` re-snapshots, so repeated cycles must be stable.
+        cmd.execute(&mut d);
+        assert_eq!(d.stream.as_ref().unwrap().channel_map(), vec![0, 2, 5]);
+        cmd.undo(&mut d);
+        assert_eq!(d.stream.as_ref().unwrap().channel_map(), vec![0, 1, 2, 3, 4, 5]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A map entry pointing past the file's real channel count must be dropped, not read.
+    #[test]
+    fn set_channel_map_clamps_out_of_range_entries() {
+        let dir = std::env::temp_dir()
+            .join(format!("tuiwave_rmclamp_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("two.wav");
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(b"WAVE");
+        body.extend_from_slice(b"fmt ");
+        body.extend_from_slice(&16u32.to_le_bytes());
+        body.extend_from_slice(&3u16.to_le_bytes());
+        body.extend_from_slice(&2u16.to_le_bytes());
+        body.extend_from_slice(&48000u32.to_le_bytes());
+        body.extend_from_slice(&(48000u32 * 8).to_le_bytes());
+        body.extend_from_slice(&8u16.to_le_bytes());
+        body.extend_from_slice(&32u16.to_le_bytes());
+        body.extend_from_slice(b"data");
+        body.extend_from_slice(&32u32.to_le_bytes());
+        body.extend_from_slice(&[0u8; 32]);
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        std::fs::write(&path, &out).unwrap();
+
+        let stream = crate::model::stream::StreamedSamples::open(&path).unwrap();
+        stream.set_channel_map(vec![0, 7, 1, 99]);
+        assert_eq!(stream.channel_map(), vec![0, 1], "out-of-range entries are dropped");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
