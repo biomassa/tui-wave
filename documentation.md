@@ -1,0 +1,773 @@
+# tui-wave documentation
+
+tui-wave is an audio editor that runs in a terminal. You drive it with the keyboard. It draws
+waveforms, plays audio, and edits samples.
+
+It opens files with one channel, two channels, or more than fifty channels. It also opens files
+of 20GB or more without loading them into memory.
+
+This guide teaches you how to use the program. Read sections 1 to 5 in order. After that, read
+the section you need.
+
+---
+
+## 1. Install
+
+tui-wave has no installer. You build it from source.
+
+1. Install the Rust toolchain from https://rustup.rs.
+2. Clone the repository.
+3. Run `cargo build --release` in the repository directory.
+4. Copy `target/release/tui-wave` to a directory on your `PATH`.
+
+Always build with `--release`. A debug build draws waveforms many times slower.
+
+The program runs on Linux and macOS. Windows may work, but nobody has tested it.
+
+Audio playback needs a working sound device. If the program finds no device, it still opens,
+draws, and edits files. Only playback stops working.
+
+---
+
+## 2. Start the program
+
+Run the program with no argument to get an empty screen:
+
+```sh
+tui-wave
+```
+
+Run it with a file to open that file:
+
+```sh
+tui-wave take.wav
+```
+
+Run it with a directory to start the Files panel there:
+
+```sh
+tui-wave ~/recordings
+```
+
+tui-wave reads WAV, FLAC, AIFF, and RF64 files. It writes WAV, FLAC, and MP3 files.
+
+To leave the program, press `q`. If a file has unsaved changes, tui-wave asks you first.
+
+---
+
+## 3. The screen
+
+The screen has five parts, from top to bottom:
+
+1. The **menu bar**, with the titles File, Edit, View, Process, CDP, Markers, and Transport.
+2. The **toolbar**, a row of clickable commands.
+3. The **Files** panel on the left, which lists the current directory.
+4. The **Buffers** panel in the middle, which lists the open files.
+5. The **Waveform** panel on the right, which draws the audio.
+
+The **status bar** sits along the bottom. It shows the cursor time, the selection length, the
+sample rate, and the state of each toggle.
+
+### Focus
+
+One panel at a time has focus. A peach border marks it. Press `Tab` to move focus forward and
+`Shift+Tab` to move it back. The order runs Waveform, Files, Buffers, and back to Waveform.
+
+Focus matters for two reasons. The toolbar shows a different command set for each panel. Some
+keys also change meaning. For example `Ctrl+o` is Fade Out in the Waveform panel and Open
+Directory in the Files panel.
+
+### The menu bar
+
+Press `F10` to open the first menu. Press `Alt` and the highlighted letter to open one menu
+directly. `Alt+f` opens File, and `Alt+p` opens Process.
+
+Inside a menu, the Left and Right arrows move between menus. The Up and Down arrows move
+between entries. Press `Enter` to run the entry and `Esc` to close the menu.
+
+Three dots after an entry mean that the entry opens a dialog. An entry in grey means that the
+command does not apply to the current file.
+
+### Dialogs
+
+Every dialog works the same way. `Tab` moves between fields. `Enter` accepts the dialog, and
+`Esc` cancels it. A hint row at the bottom of each dialog names the keys, with the key names in
+peach.
+
+---
+
+## 4. Move through the waveform
+
+Give the Waveform panel focus first.
+
+| Key | Action |
+| --- | --- |
+| `Left` / `Right` | Move the cursor one column |
+| `Home` / `End` | Jump to the start or the end |
+| `PageUp` / `PageDown` | Move one screen back or forward |
+| `Up` / `Down` | Zoom in or out along time |
+| `Shift+Up` / `Shift+Down` | Zoom in or out along amplitude |
+| `a` | Fit the amplitude zoom to the loudest sample |
+| `Backtick` | Turn fine step mode on or off |
+
+The zoom keys are the arrows, not `Ctrl+1` and `Ctrl+3`. Terminals take many key combinations
+for themselves before a program sees them, so tui-wave keeps to plain keys.
+
+Zoom along time anchors on the cursor column. The sample under the cursor stays in the same
+column across the zoom change. Your place on the timeline therefore does not jump.
+
+### Fine step mode
+
+The Left and Right arrows normally move the cursor by one screen column. At a wide zoom that is
+thousands of samples.
+
+Press the backtick key to turn on fine step mode. The same arrows then move about one eighth of
+a column. The status bar shows `Fine: on` while the mode is active. Press the backtick key again
+to turn the mode off.
+
+### The vertical scale
+
+Each channel pane carries a decibel scale on both sides. The marks read 0dB, -3, -6, -12, -18,
+and -24. The scale is always absolute, so 0dB means an amplitude of 1.0.
+
+Vertical zoom moves the marks. A quiet file with a peak of -6 dBFS shows -6 at the top of the
+pane after you press `a`. The scale never relabels the peak as 0dB.
+
+A horizontal time ruler sits under the waveform. Turn it off from View if you want the extra
+row for audio.
+
+---
+
+## 5. Select audio
+
+A selection sets what the edit and process commands act on. With no selection, most commands
+act on the whole file.
+
+| Key | Action |
+| --- | --- |
+| `Shift+Left` / `Shift+Right` | Extend the selection one column |
+| `Shift+Home` / `Shift+End` | Extend the selection to the start or the end |
+| `Shift+PgUp` / `Shift+PgDn` | Extend the selection one screen |
+| `Ctrl+a` | Select the whole file |
+| `Ctrl+d` | Clear the selection |
+| `{` / `}` | Extend the selection to the previous or next marker |
+
+You can also drag with the mouse across the waveform.
+
+### Zero-crossing snap
+
+Press `z` to turn zero-crossing snap on or off. With the snap on, the edges of a new selection
+move to the nearest point where the waveform crosses zero. This removes the click that a cut at
+a non-zero amplitude leaves behind.
+
+---
+
+## 6. Play audio
+
+| Key | Action |
+| --- | --- |
+| `Space` | Play or pause |
+| `l` | Turn loop playback on or off |
+| `i` | The cursor follows playback, on or off |
+| `f` | The view follows playback, on or off |
+
+Playback starts at the cursor. With a selection active, playback covers the selection only.
+
+A bold vertical line marks the play position. tui-wave keeps that line on screen. Every command
+that moves the play position also scrolls the view to it.
+
+---
+
+## 7. Edit audio
+
+| Key | Action |
+| --- | --- |
+| `Ctrl+x` | Cut the selection |
+| `Ctrl+c` | Copy the selection |
+| `Ctrl+v` | Paste at the cursor |
+| `Del` | Delete the selection |
+| `C` | Copy the selection into a new buffer |
+| `Ctrl+z` | Undo |
+| `Ctrl+y` or `Ctrl+Shift+z` | Redo |
+
+The clipboard lives outside the open files. You can therefore cut from one buffer and paste
+into another.
+
+Undo history belongs to each buffer. tui-wave keeps a separate stack per open file, so undo in
+one buffer never touches another. Markers move with the audio across a cut or a paste.
+
+---
+
+## 8. Process audio
+
+Open the Process menu, or use the keys below. Each command acts on the selection, or on the
+whole file when you select nothing.
+
+| Key | Command | What it does |
+| --- | --- | --- |
+| `Ctrl+r` | Reverse | Plays the samples backward |
+| `Ctrl+n` | Normalize | Raises the level to a target peak |
+| `Ctrl+g` | Gain | Changes the level by a number of decibels |
+| `Ctrl+f` | Fade In | Raises the level from silence |
+| `Ctrl+o` | Fade Out | Lowers the level to silence |
+| `Ctrl+t` | Trim | Throws away everything outside the selection |
+| `Ctrl+e` | Resample | Changes the sample rate |
+| `Ctrl+b` | Technical Fades | Adds very short fades at both ends |
+| `Ctrl+m` | Mix to Mono | Sums the channels into one |
+
+Technical Fades removes the click at a hard edit point. The fades last a few milliseconds, so
+you do not hear them as a fade.
+
+Resample rewrites the whole file with a windowed-sinc conversion. It also rebuilds the audio
+engine, because the engine reads the sample rate once at startup.
+
+Every command in this table supports undo.
+
+---
+
+## 9. Markers
+
+A marker names one point on the timeline. tui-wave saves markers into the WAV file as cue
+points with labels. Audacity and Sound Forge read the same chunks.
+
+| Key | Action |
+| --- | --- |
+| `m` | Insert a marker at the cursor |
+| `M` | Delete the marker nearest the cursor |
+| `[` / `]` | Jump to the previous or next marker |
+| `{` / `}` | Extend the selection to the previous or next marker |
+
+A new marker gets the name `Marker N`. To rename one, double-click its label. To move one, drag
+its line with the mouse.
+
+### Markers at transients
+
+Press `t` to place a marker at every transient in the selection. A transient here means a sharp
+rise in level.
+
+The `+` and `-` keys raise and lower the threshold that decides what counts as a transient.
+Press `/` to jump to the next rising edge and `?` to jump to the previous one. Use those two
+keys to check the threshold before you place markers with `t`.
+
+---
+
+## 10. Head and tail marks
+
+Head and tail marks form a second, separate list. They exist for the CDP DISTMORE family of
+processes, which cuts audio into segments.
+
+The list alternates. The first mark is a Head, the second is a Tail, the third is a Head, and so
+on. The screen labels them `H1`, `T1`, `H2`, `T2`, and onward. tui-wave draws them in orange
+with a dashed line, one row below the ordinary marker labels.
+
+| Key | Action |
+| --- | --- |
+| `h` | Insert a head or tail mark at the cursor |
+| `H` | Delete the mark nearest the cursor |
+
+The role comes from the position in the list, so a new mark in the middle renumbers everything
+after it. Head and tail marks carry no name and have no jump keys.
+
+tui-wave saves them next to the audio in a file named `<stem>.headstails`, not inside the WAV.
+That file holds one time in seconds per line, which is the format CDP itself reads. You can edit
+it by hand, and you can pass it straight to the `distmore` program.
+
+A save with no marks deletes an existing sidecar file. A save with no marks and no sidecar file
+writes nothing.
+
+---
+
+## 11. Files with many channels
+
+tui-wave treats files with thirty or more channels as a normal case.
+
+The Waveform panel draws six channel panes at a time by default. A taller terminal window shows
+more. Use these keys to move the channel window:
+
+| Key | Action |
+| --- | --- |
+| `,` / `.` | Move the channel window up or down by one |
+| `<` / `>` | Move the channel window up or down by one page |
+
+The mouse wheel over the waveform does the same.
+
+### Remove Empty Channels
+
+Many recording rigs write every input, and most inputs hold nothing. Open Process and choose
+Remove Empty Channels to drop them.
+
+The command drops every channel whose peak sits below a threshold. The default threshold is -48
+dBFS. The command measures the whole file, never the selection. It also supports undo.
+
+### Export Channels
+
+Open File and choose Export Channels to split a multichannel file into separate WAV files.
+
+The dialog lists every channel with three choices: Mono, Skip, and Pair with next. tui-wave
+writes one file per Mono channel and one file per pair.
+
+The names read `<stem>_ch03.wav` and `<stem>_ch03-04.wav`. The channel numbers carry leading
+zeros, so a directory listing sorts in channel order.
+
+Markers and head and tail marks carry over into every output file. The timeline does not change,
+so the times still mean what they meant.
+
+---
+
+## 12. Large files
+
+A long multichannel take can reach 20GB or 30GB. tui-wave opens such a file in **streamed
+read-only mode**.
+
+### What triggers the mode
+
+tui-wave reads the file header first, which takes microseconds. It then works out the decoded
+size in memory. The working format is 32-bit float whatever the source depth, so a 24-bit file
+grows by one third and a 32-bit float file stays the same size.
+
+If that decoded size exceeds `max_resident_mb`, the file opens streamed. The default is 4096, or
+4GB. Section 19 shows how to change it.
+
+Below the threshold nothing changes. The file opens the way it always did.
+
+### What the mode does
+
+tui-wave keeps only a small summary of the audio in memory, not the samples. It reads short
+windows from disk while it draws. A streamed file therefore costs about one thirtieth of its
+size in memory.
+
+The waveform title carries `[streamed, read-only]` so you always know which mode you are in.
+
+Opening takes time, because tui-wave reads the whole file once to build the summary. A 30GB file
+with 56 channels takes about 53 seconds. A progress panel shows how far the read has got. Keys
+you press during the read arrive after it finishes.
+
+### What works in the mode
+
+Only these commands work on a streamed file:
+
+- Every navigation, zoom, and view command.
+- Selection and cursor movement.
+- Remove Empty Channels, with undo.
+- Export Channels.
+- Save As.
+
+tui-wave refuses everything else and names the reason. Editing needs a full copy of the samples
+for undo. Playback needs a second copy for the audio engine. Markers would have no save path,
+so the work would go missing on close.
+
+### The workflow this mode exists for
+
+1. Open the large take.
+2. Run Remove Empty Channels.
+3. Run Save As to write a smaller file, or run Export Channels to split it.
+
+Save As on a streamed file reads the source and writes the output in one pass. It never holds
+the audio in memory.
+
+### RF64
+
+A plain WAV file cannot exceed 4GB, because the size field holds 32 bits. Recorders work around
+that with the RF64 and BW64 formats. Those use the same chunk layout, set the affected size
+fields to a sentinel value, and put the real 64-bit sizes in a `ds64` chunk.
+
+tui-wave reads RF64 and BW64 files. It also writes RF64 when an output grows past 4GB. It
+tolerates a header with a wrong size field, which some recorders write when a take ends without
+a clean stop.
+
+---
+
+## 13. Save your work
+
+| Key | Command | What it writes |
+| --- | --- | --- |
+| `Ctrl+s` | Save | The same path, as 32-bit float WAV |
+| `Ctrl+Shift+S` | Save As | A new path, with a choice of depth |
+| `Ctrl+l` | Save All | Every buffer with changes |
+
+Save As lets you pick the bit depth. Press `Tab` to move between 16-bit, 24-bit, and 32-bit
+float. Press `Ctrl+d` to turn dither on or off. Dither helps at 16-bit and 24-bit, and does
+nothing at 32-bit float.
+
+Every save path writes WAV bytes. A buffer that you loaded from a FLAC or an AIFF file therefore
+has no path that Save may write to. Save redirects to Save As with a `.wav` name. Save All skips
+such a buffer and leaves it marked as changed.
+
+### Export to FLAC and MP3
+
+Open File and choose Export to write a FLAC or an MP3 file. Both formats accept one channel or
+two channels only. MP3 export uses a constant bit rate.
+
+tui-wave states the reason inline if the buffer has too many channels, or if the sample rate is
+illegal for MP3.
+
+### Export Regions
+
+Press `Shift+E` to write the audio between markers into separate files in a subfolder. Use this
+to split one long take at the marks you placed.
+
+---
+
+## 14. CDP processes
+
+CDP is the Composer's Desktop Project, a large set of command-line sound transformation
+programs. tui-wave runs them on your selection and splices the result back in.
+
+| Key | Command |
+| --- | --- |
+| `Ctrl+p` | CDP Process |
+| `Ctrl+h` | CDP Chain |
+
+Point tui-wave at your CDP installation first. Open the CDP menu and choose Configure CDP
+Directory. The default guess is `~/cdp`.
+
+### The browser
+
+The CDP Process dialog opens a browser with three columns:
+
+1. **Domain**: All, Recent, Time-domain, Spectral.
+2. **Groups**: the CDP groups inside that domain, such as DISTORT, BLUR, and FOCUS.
+3. **Description**: the processes themselves.
+
+The group names match CDP's own documentation exactly. Anything written about CDP therefore
+names the same groups you see here.
+
+`Tab` and `Shift+Tab` move between columns and wrap around. Left and Right also move between
+columns and stop at the ends. Focus skips the Groups column when it holds nothing, because All
+and Recent have no groups.
+
+Type to filter the process list. The Up and Down arrows move the selection, and `Enter` opens
+the parameter form. Small badges mark what a process needs, such as `>1 inputs`, `pitch curve`,
+`formants`, and `snapshot`.
+
+### The parameter form
+
+Each process opens a form of fields. Move between them like this:
+
+| Key | Action |
+| --- | --- |
+| `Tab` / `Shift+Tab` | Move between fields, presets, Preview, and Apply |
+| Up / Down | Change a number field |
+| `Space` | Change a toggle field |
+| Left / Right | Change a choice field |
+| `Enter` | Run the process |
+
+Apply runs the process on your selection, or on the whole file, and splices the result back in.
+The edit supports undo.
+
+Move to Preview to hear the result through your speakers first. Preview does not change the
+file. If you then press Apply without changing a field, tui-wave reuses that render instead of
+running CDP again.
+
+Spectral processes need a phase-vocoder analysis pass first. tui-wave does that for you, so you
+never touch an analysis file. A process that takes two inputs grows a second input row. Left and
+Right pick another open buffer, which tui-wave uses whole. The sample rates must match.
+
+If CDP rejects the run, tui-wave shows CDP's own error text in a scrollable viewer.
+
+### Automating a parameter
+
+A field in green accepts a breakpoint envelope, which changes the value over time. Move to the
+field and press `e` to open the envelope editor.
+
+The editor graphs value against time over a dimmed copy of your waveform.
+
+| Key | Action |
+| --- | --- |
+| Left / Right | Select the previous or next point |
+| `Shift`+Left / Right | Move the point along time |
+| Up / Down | Change the value |
+| `Shift`+Up / Down | Change the value finely |
+| `n` | Insert a point |
+| `Del` | Remove a point |
+| `c` | Throw away the envelope and go back to one value |
+| `Enter` | Save and close |
+| `Esc` | Close without saving |
+
+The mouse works too. A click selects the nearest point. A double-click inserts one. A drag moves
+one, and a drag with `Shift` moves it finely. A click with `Shift` deletes one.
+
+### Presets
+
+A preset row sits above the fields. Left and Right load a saved preset for this process. Press
+`s` to save the current values under a name, and `d` to delete one. tui-wave stores presets in
+`~/.config/tui-wave/cdp_presets/`.
+
+### Adding your own processes
+
+Drop a TOML file into `~/.config/tui-wave/cdp/`. The file uses the same schema as the built-in
+catalog. A new `key` adds a process. A `key` that matches a built-in one replaces it, which lets
+you correct a range or a default.
+
+The repository holds a worked example at `docs/cdp-custom-process-example.toml`. Copy it, edit
+it, and restart tui-wave.
+
+### Pitch curves
+
+Some CDP processes take a pitch curve, which is a contour of time against frequency, instead of
+one number.
+
+1. Choose CDP then Extract Pitch Curve. This works best on a clear single-note melody. A `[p]`
+   row appears in the Buffers panel.
+2. Press `Enter` on that row to open a table of times and frequencies. The arrows select a row,
+   and typing overwrites a value. Press `n` to insert a row and `Del` to remove one. Press `t`
+   to apply a CDP curve transform, such as quantise, smooth, vibrato, or pitch shift. Press
+   `Enter` to commit and `Esc` to discard.
+3. Open any process with the `pitch curve` badge, such as Psow Stretch. Move to its pitch field,
+   press `e`, then press `c` to load an open curve into the envelope. tui-wave rescales the
+   curve to your selection.
+4. Press `Ctrl+s` on a curve row to save it to disk. CDP then Load Pitch Curve reads one back.
+
+`Ctrl+z` and `Ctrl+y` inside the curve editor undo and redo the curve, not the audio. A curve
+that you typed or loaded by hand cannot run a transform, because it has no CDP source.
+
+### Formants
+
+Formants describe the timbre of a sound, apart from its pitch.
+
+1. Choose CDP then Extract Formants to capture the spectral envelope of your selection into an
+   `[f]` buffer. This works best on a voice or an instrument with real timbre.
+2. Choose CDP then Freeze Formant Snapshot at Cursor to freeze the timbre at one moment into an
+   `[s]` buffer. If the file has no formants yet, tui-wave extracts them first.
+3. To put either onto other audio, open Formants Put for an `[f]` buffer or Oneform Put for an
+   `[s]` buffer. Press `b` to pick the buffer, then Apply.
+
+### Processes that read the waveform
+
+Thirteen DISTMORE processes read your head and tail marks instead of a typed list of times.
+Eight `scramble` modes read the same marks as cut points. For those, every mark counts on its
+own, and one mark is enough.
+
+A process of this kind has no dialog field to look at, so the dialog states any shortfall
+inline. It also dims Preview and Apply until you have enough marks. DISTMORE needs at least two
+complete head and tail pairs.
+
+A selection that holds fewer than two pairs is almost always an accidental drag. tui-wave
+therefore widens back to the whole file for those processes. Every other process honours a small
+selection.
+
+---
+
+## 15. The Files panel
+
+The Files panel lists the current directory. Give it focus with `Tab`.
+
+| Key | Action |
+| --- | --- |
+| `Up` / `Down` | Move the selection |
+| `Home` / `End` | Jump to the first or last row |
+| `PageUp` / `PageDown` | Move one screen |
+| `Enter` | Enter a directory, or open a file |
+| `/` | Filter the list as you type |
+| `Ctrl+o` | Open a directory by path |
+| `Ctrl+r` | Rename the selected file on disk |
+| `Del` | Delete the selected file from disk |
+| `a` | Turn audition on or off |
+
+The panel marks a parent row, the directories, and the audio files. `Enter` on the parent row
+moves up one level.
+
+With audition on, tui-wave plays the selected file as you move through the list. The playback
+starts after a short pause, so a fast scroll plays nothing.
+
+---
+
+## 16. The Buffers panel
+
+The Buffers panel lists every open file. Give it focus with `Tab` twice.
+
+| Key | Action |
+| --- | --- |
+| `Up` / `Down` | Move the selection |
+| `Enter` | Switch to that buffer |
+| `/` | Search the list |
+| `Ctrl+s` | Save that buffer |
+| `Ctrl+w` | Close that buffer |
+| `Ctrl+r` | Rename that buffer |
+| `Ctrl+a` | Save every buffer |
+| `Ctrl+l` | Reload that buffer from disk |
+
+These `Ctrl` keys mean something else in the Waveform panel. `Ctrl+r` is Reverse there, and
+`Ctrl+a` is Select All. The panel with focus decides.
+
+Reload reads the file from disk again: samples, markers, metadata, and bit depth. It then clears
+the undo history for that buffer, because the old commands hold sample data from before the
+reload. A buffer that you never saved has no path to reload from, so the command does nothing.
+
+tui-wave asks first if the buffer has changes.
+
+---
+
+## 17. Mouse
+
+The mouse works alongside the keyboard.
+
+| Action | Result |
+| --- | --- |
+| Click the waveform | Move the play position |
+| Drag across the waveform | Make a selection |
+| Wheel over the waveform | Move the channel window |
+| Wheel over a panel | Scroll the list |
+| Click a menu title | Open that menu |
+| Click a toolbar button | Run that command |
+| Drag a marker line | Move the marker |
+| Double-click a marker label | Rename the marker |
+
+---
+
+## 18. Display modes
+
+Press `g` to turn graphics mode on or off.
+
+In graphics mode tui-wave draws the waveform as a real image, through the terminal graphics
+protocol. Kitty and other modern terminals support this. The result is much sharper, and it
+draws faster on files with many channels.
+
+Without graphics mode tui-wave draws with braille dots and block glyphs. That works in every
+terminal. The View menu also holds a Gradient toggle for this mode.
+
+Both modes draw an amplitude-zero line across the centre of each pane. A silent channel still
+shows the line, because that is where you most need the reference.
+
+---
+
+## 19. Configuration
+
+tui-wave writes its settings to `~/.config/tui-wave/config.toml`. It saves the file whenever you
+change a toggle, so your settings come back on the next start.
+
+Useful settings:
+
+| Setting | Meaning |
+| --- | --- |
+| `max_resident_mb` | Largest decoded size, in MB, to load into memory. Default 4096 |
+| `cdp_dir` | Path to your CDP installation |
+| `graphics_mode` | Draw with terminal graphics |
+| `time_ruler` | Show the time ruler row |
+| `transient_threshold_db` | Threshold for transient markers |
+| `keybindings` | Your own key assignments |
+
+Raise `max_resident_mb` to edit larger files in memory. Remember that a file open for playback
+costs about twice its decoded size. A 4GB buffer with playback running therefore needs about 8GB.
+
+Lower `max_resident_mb` to send more files to the streamed read-only path.
+
+The value is a fixed number, not a share of free memory. The same file therefore behaves the
+same way every day.
+
+File then Reset Config to Defaults throws away your settings.
+
+---
+
+## 20. Key reference
+
+The Waveform panel must have focus for these keys, unless the table says otherwise.
+
+### Navigation and view
+
+| Key | Action |
+| --- | --- |
+| `Left` / `Right` | Move the cursor |
+| `Home` / `End` | Jump to start or end |
+| `PageUp` / `PageDown` | Move one screen |
+| `Up` / `Down` | Zoom along time |
+| `Shift+Up` / `Shift+Down` | Zoom along amplitude |
+| `a` | Auto vertical zoom |
+| `Backtick` | Fine step mode |
+| `z` | Zero-crossing snap |
+| `g` | Graphics mode |
+| `,` / `.` | Channel window up or down |
+| `<` / `>` | Channel window one page |
+| `Tab` / `Shift+Tab` | Move focus |
+| `F10` / `Alt`+letter | Open the menu bar |
+
+### Selection
+
+| Key | Action |
+| --- | --- |
+| `Shift+Left` / `Shift+Right` | Extend the selection |
+| `Shift+Home` / `Shift+End` | Extend to start or end |
+| `Shift+PgUp` / `Shift+PgDn` | Extend one screen |
+| `Ctrl+a` | Select all |
+| `Ctrl+d` | Clear the selection |
+| `{` / `}` | Extend to the previous or next marker |
+
+### Edit
+
+| Key | Action |
+| --- | --- |
+| `Ctrl+x` | Cut |
+| `Ctrl+c` | Copy |
+| `Ctrl+v` | Paste |
+| `Del` | Delete |
+| `C` | Copy to new buffer |
+| `Ctrl+z` | Undo |
+| `Ctrl+y` | Redo |
+
+### Process
+
+| Key | Action |
+| --- | --- |
+| `Ctrl+r` | Reverse |
+| `Ctrl+n` | Normalize |
+| `Ctrl+g` | Gain |
+| `Ctrl+f` | Fade In |
+| `Ctrl+o` | Fade Out |
+| `Ctrl+t` | Trim |
+| `Ctrl+e` | Resample |
+| `Ctrl+b` | Technical Fades |
+| `Ctrl+m` | Mix to Mono |
+
+### Markers
+
+| Key | Action |
+| --- | --- |
+| `m` / `M` | Insert or delete a marker |
+| `h` / `H` | Insert or delete a head or tail mark |
+| `[` / `]` | Jump to the previous or next marker |
+| `t` | Markers at transients |
+| `+` / `-` | Raise or lower the transient threshold |
+| `/` / `?` | Next or previous rising edge |
+
+### Files and transport
+
+| Key | Action |
+| --- | --- |
+| `Ctrl+s` | Save |
+| `Ctrl+Shift+S` | Save As |
+| `Ctrl+l` | Save All |
+| `Shift+E` | Export Regions |
+| `L` / `R` | New buffer from the left or right channel |
+| `Space` | Play or pause |
+| `l` | Loop playback |
+| `i` | Cursor follows playback |
+| `f` | View follows playback |
+| `Ctrl+p` | CDP Process |
+| `Ctrl+h` | CDP Chain |
+| `q` | Quit |
+
+---
+
+## 21. Problems
+
+**A file will not open, and the program says nothing.** Older versions threw the error away.
+Current versions show a dialog with the reason. Check the version first.
+
+**A large file shows the wrong length.** Some recorders write a size field that stops matching
+the file after a take ends without a clean stop. tui-wave works out the real length from the file
+size instead. Check the version if you still see this.
+
+**The waveform draws slowly.** Build with `cargo build --release`. A debug build takes several
+seconds to draw a long file.
+
+**A command does nothing and shows a dialog about a streamed file.** The file opened read-only,
+because it exceeds `max_resident_mb`. Section 12 lists what works in that mode.
+
+**Save does nothing on a FLAC or AIFF buffer.** Every save path writes WAV bytes, so Save
+redirects to Save As. Section 13 explains this.
+
+**A key does nothing.** Check which panel has focus. Some keys change meaning per panel, and the
+toolbar shows the command set for the panel with focus.
+
+**No sound plays.** tui-wave opens without a sound device and only stops playback. Check that
+another program is not holding the device.
