@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed: large WAVs written by Max/MSP opened as a fraction of their length.** A 14GB,
+  58-channel, 96kHz take showed as 1m34s of an 11m12s recording. Their `RF64` headers are wrong
+  in two ways at once: the `data` chunk's 32-bit size field carries the low 32 bits of the real
+  size instead of the marker that means "the real size is elsewhere", and the header contains a
+  duplicate, so the audio actually starts 24 bytes later than the first `data` chunk says.
+  Correcting only the size would have been worse than the bug — 24 bytes is not a whole number
+  of frames, so every channel would have been read into its neighbour's place. Both are now
+  derived from the file's own length and verified before being used, so correctly-written files
+  are unaffected.
+- **Files up to 4GB now open fully editable, rather than 1.5GB** (`max_resident_mb`). That is
+  about three minutes of 58-channel 96kHz audio, or six at 48kHz. Anything larger still opens
+  read-only and streamed from disk. Note that an editable buffer costs roughly twice its size in
+  memory once playback is running.
+
 ## 2026-07-30 (1.9.0)
 
 Multichannel support, other audio formats, and files too large to hold in memory.
