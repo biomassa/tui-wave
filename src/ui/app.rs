@@ -2250,7 +2250,19 @@ pub struct App {
     /// One precomputed min/max cache per channel, rebuilt whenever the document's sample
     /// data changes. Keeps waveform render cost bounded by screen width instead of file
     /// length — see `ui::waveform_cache`.
-    pub waveform_caches: Vec<WaveformCache>,
+    /// One min/max pyramid set per open document, index-parallel to `documents` — exactly as
+    /// `histories` is, and for a related reason.
+    ///
+    /// It used to be a single set belonging to whichever document was active, rebuilt on every
+    /// switch. That is fine while rebuilding is cheap, and it is not: `rebuild_waveform_caches`
+    /// deliberately no-ops on a streamed document, because rebuilding one means re-reading the
+    /// whole file. So switching to a streamed buffer left the *previous* buffer's caches in place,
+    /// the per-channel lookup missed, and the waveform widget fell back to raw-scanning every
+    /// column's full span straight off disk — which on a 14GB file is hundreds of gigabytes a
+    /// frame, and looked exactly like a hang with no CPU use (user report).
+    ///
+    /// Held per document, switching is free and correct for both kinds.
+    pub waveform_caches: Vec<Vec<WaveformCache>>,
     /// Width/area of the waveform content as of the last render; navigation/zoom/mouse
     /// actions need this and re-reading it from the terminal on every input would require
     /// a redraw, so it's cached here instead.
@@ -2977,9 +2989,10 @@ impl App {
         let audio = documents.first()
             .and_then(|doc| AudioEngine::try_new(doc.channels.clone(), doc.sample_rate));
         let audio_sample_rate = documents.first().map(|doc| doc.sample_rate);
-        let waveform_caches = documents.first()
+        let waveform_caches: Vec<Vec<WaveformCache>> = documents
+            .iter()
             .map(|doc| doc.channels.iter().map(|c| WaveformCache::build(c)).collect())
-            .unwrap_or_default();
+            .collect();
         let histories = documents.iter().map(|_| History::new()).collect();
         let menu_shortcuts = build_action_display_map(&config.keybindings, false);
         let toolbar_shortcuts = build_action_display_map(&config.keybindings, true);
@@ -3098,6 +3111,9 @@ impl App {
     fn push_document(&mut self, document: Document) {
         self.documents.push(document);
         self.histories.push(History::new());
+        // Index-parallel with `documents`, like `histories`: a buffer without its own slot would
+        // render against whichever one happened to be at its index.
+        self.waveform_caches.push(Vec::new());
         self.active_document = self.documents.len() - 1;
     }
 
@@ -3828,7 +3844,23 @@ impl App {
         self.active_document = index;
         if self.active_doc().is_some() {
             self.rebuild_audio();
-            self.rebuild_waveform_caches();
+            // Each document keeps its own overview, so switching is a selection, not a rebuild:
+            // re-reading a streamed file here would take a minute, and re-scanning a large
+            // resident one is wasted work. Built only for a buffer that has never had one, which
+            // covers any document-creating path that forgot to.
+            let missing = self
+                .waveform_caches
+                .get(index)
+                .map_or(true, |caches| caches.is_empty());
+            if missing {
+                self.rebuild_waveform_caches();
+            } else {
+                self.waveform_caches.resize_with(self.documents.len(), Vec::new);
+            }
+            // Per-channel image state is keyed by channel index, which means a different channel
+            // in a different document — `render`'s truncate cannot fix an index whose meaning
+            // changed, only one that no longer exists.
+            self.graphics_protocols.clear();
             self.viewport = None;
         }
     }
@@ -3912,12 +3944,24 @@ impl App {
         visible_peak_raw(
             self.active_doc(),
             self.viewport.as_ref(),
-            &self.waveform_caches,
+            self.active_caches(),
             self.content_width,
         )
     }
 
-    /// Rebuilds the per-channel min/max pyramids from the active document's resident samples.
+    /// The active document's min/max pyramids, one per *source* channel.
+    ///
+    /// Empty when there is no document, or while a streamed one is still being read — callers all
+    /// tolerate a short list by falling back to a raw scan, which is correct for a resident
+    /// document and merely slow for the brief moment a streamed one has no overview yet.
+    fn active_caches(&self) -> &[WaveformCache] {
+        self.waveform_caches
+            .get(self.active_document)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Rebuilds the active document's per-channel min/max pyramids from its resident samples.
     ///
     /// **A no-op on a streamed document**, and that guard is load-bearing rather than defensive:
     /// a streamed document's `channels` is empty, so rebuilding would replace a pyramid that cost
@@ -3925,14 +3969,23 @@ impl App {
     /// built once by `build_streaming_caches` and is immutable thereafter — it covers every
     /// *source* channel and is indexed through `Document::source_channel`, so even removing
     /// channels doesn't invalidate it.
+    ///
+    /// Only the active document's set is touched; the others keep theirs, which is what makes
+    /// switching buffers free rather than a re-read.
     fn rebuild_waveform_caches(&mut self) {
+        // Kept index-parallel to `documents` here rather than at every push/close site, so a new
+        // buffer can never render against another one's overview.
+        self.waveform_caches.resize_with(self.documents.len(), Vec::new);
         if self.active_doc().is_some_and(|doc| doc.is_streaming()) {
             return;
         }
-        self.waveform_caches = self
+        let built: Vec<WaveformCache> = self
             .active_doc()
             .map(|doc| doc.channels.iter().map(|c| WaveformCache::build(c)).collect())
             .unwrap_or_default();
+        if let Some(slot) = self.waveform_caches.get_mut(self.active_document) {
+            *slot = built;
+        }
     }
 
     pub fn run(&mut self, terminal: &mut Tui) -> color_eyre::Result<()> {
@@ -11171,6 +11224,9 @@ impl App {
         }
         self.documents.remove(idx);
         self.histories.remove(idx);
+        if idx < self.waveform_caches.len() {
+            self.waveform_caches.remove(idx);
+        }
         if self.documents.is_empty() {
             self.active_document = 0;
             self.viewport = None;
@@ -11325,7 +11381,7 @@ impl App {
             // The pyramid covers every *source* channel and is never filtered, so a logical
             // channel's peak is looked up through the map rather than by position.
             let peaks: Vec<Option<f32>> = (0..total)
-                .map(|i| self.waveform_caches.get(doc.source_channel(i)).map(|c| c.peak()))
+                .map(|i| self.active_caches().get(doc.source_channel(i)).map(|c| c.peak()))
                 .collect();
             if peaks.iter().any(Option::is_none) {
                 self.dialog = Some(Dialog::Info {
@@ -12166,7 +12222,10 @@ impl App {
             }
         }
 
-        self.waveform_caches = builders.into_iter().map(|b| b.finish()).collect();
+        self.waveform_caches.resize_with(self.documents.len(), Vec::new);
+        if let Some(slot) = self.waveform_caches.get_mut(self.active_document) {
+            *slot = builders.into_iter().map(|b| b.finish()).collect();
+        }
     }
 
     /// Drains pending input and reports whether Esc was among it.
@@ -12191,7 +12250,9 @@ impl App {
     /// blank past wherever the reading stopped, which reads as data loss rather than as a
     /// cancelled load.
     fn cancel_streamed_load(&mut self, name: &str) {
-        self.waveform_caches.clear();
+        if let Some(slot) = self.waveform_caches.get_mut(self.active_document) {
+            slot.clear();
+        }
         let idx = self.active_document;
         if self.documents.get(idx).is_some_and(|d| d.is_streaming()) {
             self.close_buffer(idx);
@@ -14606,7 +14667,7 @@ impl App {
             let vp = visible_peak_raw(
                 self.documents.get(doc_idx),
                 Some(viewport),
-                &self.waveform_caches,
+                self.waveform_caches.get(doc_idx).map(|v| v.as_slice()).unwrap_or(&[]),
                 self.content_width,
             );
             if vp > 0.0001 {
@@ -14675,7 +14736,10 @@ impl App {
             // document that has had channels removed maps logical -> source, and the pyramid is
             // deliberately never filtered so that removal stays undoable. Identity for a
             // resident document.
-            let cache = self.waveform_caches.get(self.documents[doc_idx].source_channel(i));
+            let cache = self
+                .waveform_caches
+                .get(doc_idx)
+                .and_then(|v| v.get(self.documents[doc_idx].source_channel(i)));
             let widget = WaveformWidget {
                 samples,
                 viewport,
@@ -15131,7 +15195,7 @@ impl App {
                 if col_start >= ch_end {
                     continue;
                 }
-                let (mn, mx) = match self.waveform_caches.get(doc.source_channel(ch_i)) {
+                let (mn, mx) = match self.active_caches().get(doc.source_channel(ch_i)) {
                     Some(cache) => cache.min_max(channel, col_start, ch_end),
                     None => channel
                         .with_slice(col_start, ch_end, crate::ui::waveform_cache::raw_min_max),
@@ -29408,7 +29472,7 @@ mod tests {
         app.load_file(path.clone());
         // Stand in for the main loop's build, which needs a terminal.
         let stream = app.documents[0].stream.clone().unwrap();
-        app.waveform_caches = build_caches(&stream);
+        app.waveform_caches[0] = build_caches(&stream);
         app.pending_cache_build = false;
 
         // -48 dBFS catches only the digitally silent channel 1.
@@ -29421,7 +29485,7 @@ mod tests {
             "the map skips the removed source channel"
         );
         assert_eq!(
-            app.waveform_caches.len(),
+            app.waveform_caches[0].len(),
             6,
             "the pyramid still covers every source channel — filtering it is what would make \
              this operation cost sample data to undo"
@@ -29432,7 +29496,7 @@ mod tests {
         // channel 1's peak of 0.0 and draw a blank pane.
         let doc = &app.documents[0];
         for (logical, expected_peak) in [(0usize, 0.9f32), (1, 0.3), (2, 0.225)] {
-            let cache = &app.waveform_caches[doc.source_channel(logical)];
+            let cache = &app.waveform_caches[0][doc.source_channel(logical)];
             assert!(
                 (cache.peak() - expected_peak).abs() < 0.01,
                 "logical {logical} -> source {} should peak near {expected_peak}, got {}",
@@ -29475,7 +29539,7 @@ mod tests {
         let mut app = streaming_app();
         app.load_file(path.clone());
         let stream = app.documents[0].stream.clone().unwrap();
-        app.waveform_caches = build_caches(&stream);
+        app.waveform_caches[0] = build_caches(&stream);
         app.pending_cache_build = false;
 
         let original_map = app.documents[0].stream.as_ref().unwrap().channel_map();
@@ -29538,16 +29602,16 @@ mod tests {
         let mut app = streaming_app();
         app.load_file(path.clone());
         let stream = app.documents[0].stream.clone().unwrap();
-        app.waveform_caches = build_caches(&stream);
+        app.waveform_caches[0] = build_caches(&stream);
         app.pending_cache_build = false;
-        let peaks_before: Vec<f32> = app.waveform_caches.iter().map(|c| c.peak()).collect();
+        let peaks_before: Vec<f32> = app.waveform_caches[0].iter().map(|c| c.peak()).collect();
 
         app.apply_remove_empty_channels(-48.0);
         app.handle_action(Action::Undo);
         // Also call it directly — anything that reaches it must be harmless here.
         app.rebuild_waveform_caches();
 
-        let peaks_after: Vec<f32> = app.waveform_caches.iter().map(|c| c.peak()).collect();
+        let peaks_after: Vec<f32> = app.waveform_caches[0].iter().map(|c| c.peak()).collect();
         assert_eq!(peaks_after, peaks_before, "the pyramid must be untouched");
         assert!(peaks_after.iter().any(|&p| p > 0.5), "sanity: it holds real peaks");
 
@@ -30585,7 +30649,7 @@ mod tests {
         let mut app = streaming_app();
         app.load_file(path.clone());
         let stream = app.documents[0].stream.clone().unwrap();
-        app.waveform_caches = build_caches(&stream);
+        app.waveform_caches[0] = build_caches(&stream);
         app.pending_cache_build = false;
 
         let mut terminal = Terminal::new(TestBackend::new(200, 50)).unwrap();
@@ -30785,6 +30849,126 @@ mod tests {
             plain.menu.disabled_actions
         );
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+
+    /// Switching to a streamed buffer must not send the renderer raw-scanning the file.
+    ///
+    /// `waveform_caches` belongs to the *active* document, and `rebuild_waveform_caches` no-ops on
+    /// a streamed one (rebuilding would re-read the whole file). So after switching from a resident
+    /// buffer to a streamed one, the caches were still the resident buffer's: shorter than the
+    /// streamed document's channel count, so `cache` came out `None` and the widget fell back to
+    /// raw-scanning **the entire visible span** of every column, straight off disk. On a 14GB file
+    /// zoomed out that is hundreds of gigabytes per frame — the app appeared to hang with no CPU
+    /// use, because it was waiting on reads (user report).
+    #[test]
+    fn switching_to_a_streamed_buffer_does_not_raw_scan_the_file() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let dir = std::env::temp_dir().join(format!("tuiwave_switch_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big.wav");
+        let small = dir.join("small.wav");
+        multichannel_float_wav(&big, 8, 300_000);
+        multichannel_float_wav(&small, 2, 4_000);
+
+        let mut app = streaming_app();
+        app.load_file(big.clone());
+        let stream = app.documents[0].stream.clone().unwrap();
+        app.waveform_caches[0] = build_caches(&stream);
+        app.pending_cache_build = false;
+
+        // A second, resident buffer. `streaming_app` has a 0MB budget, so raise it for this one.
+        app.config.max_resident_mb = 4096;
+        app.load_file(small.clone());
+        assert_eq!(app.documents.len(), 2);
+        assert!(!app.documents[1].is_streaming(), "the small file must be resident");
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 50)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        // Now switch back and forth through the path the Buffers panel actually uses.
+        let budget = (4 * crate::model::stream::WINDOW_FRAMES * 8 * 4) as u64;
+        for round in 0..4 {
+            app.switch_to_buffer(0);
+            assert!(app.documents[app.active_document].is_streaming());
+            let before = stream.bytes_read();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let read = stream.bytes_read() - before;
+            assert!(
+                read <= budget,
+                "round {round}: one frame after switching to the streamed buffer read {:.1} MB \
+                 (budget {:.1} MB) — the renderer is scanning the file instead of its overview",
+                read as f64 / 1048576.0,
+                budget as f64 / 1048576.0,
+            );
+            // And it is drawing from a real overview, not an empty one.
+            assert_eq!(
+                app.active_caches().len(),
+                8,
+                "round {round}: the streamed buffer must still have its own pyramid"
+            );
+
+            app.switch_to_buffer(1);
+            assert!(!app.documents[app.active_document].is_streaming());
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            assert_eq!(
+                app.active_caches().len(),
+                2,
+                "round {round}: the resident buffer must have its own, not the streamed one's"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+
+    /// A streamed buffer's toolbar commands must render in peach.
+    ///
+    /// They are the only buttons with no shortcut, and everywhere else the peach belongs to the
+    /// shortcut rather than the label — so without this the only three commands that work on a
+    /// streamed buffer would be the only ones drawn as inert text.
+    #[test]
+    fn the_streamed_toolbar_commands_are_peach() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let dir = std::env::temp_dir().join(format!("tuiwave_peachbar_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.wav");
+        multichannel_float_wav(&path, 4, 20_000);
+
+        let mut app = streaming_app();
+        app.load_file(path.clone());
+        app.pending_cache_build = false;
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let rows: Vec<String> = buf
+            .content()
+            .chunks(200)
+            .map(|r| r.iter().map(|c| c.symbol().chars().next().unwrap_or(' ')).collect())
+            .collect();
+        for name in ["saveAs", "removeEmptyChannels", "exportChannels"] {
+            let want: Vec<char> = name.chars().collect();
+            let (x, y) = rows
+                .iter()
+                .enumerate()
+                .find_map(|(y, r)| {
+                    let cs: Vec<char> = r.chars().collect();
+                    cs.windows(want.len())
+                        .position(|w| w == want.as_slice())
+                        .map(|x| (x as u16, y as u16))
+                })
+                .unwrap_or_else(|| panic!("{name} not on screen:\n{}", rows.join("\n")));
+            assert_eq!(
+                buf[(x, y)].style().fg,
+                Some(theme::SHORTCUT),
+                "{name} must be peach"
+            );
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -31329,7 +31513,7 @@ mod tests {
         }
         // The caches are rebuilt per channel, so their count is the proof that
         // `after_sample_mutation` really ran on the shorter document.
-        assert_eq!(app.waveform_caches.len(), 4);
+        assert_eq!(app.waveform_caches[0].len(), 4);
 
         app.handle_action(Action::Undo);
         assert_eq!(app.documents[0].channel_count(), 30);

@@ -11,6 +11,15 @@
   of frames, so every channel would have been read into its neighbour's place. Both are now
   derived from the file's own length and verified before being used, so correctly-written files
   are unaffected.
+- **Fixed: switching back to a large streamed buffer froze the app.** With two buffers open, going
+  to another one and back left the streamed buffer using the *other* buffer's waveform overview.
+  Finding nothing usable there, the renderer fell back to reading the audio itself — every column,
+  every visible channel, straight off disk, which on a 14GB file is hundreds of gigabytes for a
+  single frame. It looked like a hang with no CPU use because it was waiting on the disk. Each
+  buffer now keeps its own overview, so switching is instant and correct either way.
+- **Fixed: the hint panel changed height and the whole layout jumped.** It now always reserves the
+  height of its tallest state, so nothing below it moves — whichever panel has focus, and whether
+  or not the buffer is streamed.
 - **A streamed buffer can now be saved.** The workflow that makes Remove Empty Channels worth
   having on a huge file: open a 14GB 58-channel take, drop the channels that hold nothing, and
   Save As writes just the ones you kept — as a proper multichannel WAV, `RF64` if it needs to be,
