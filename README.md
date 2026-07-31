@@ -1,23 +1,35 @@
 # tui-wave
 
+A keyboard-driven audio editor that runs in a terminal.
+
 ![tui-wave screenshot](screenshot1.png)
 ![tui-wave screenshot](screenshot2.png)
 
-A keyboard-driven **terminal audio editor** for Linux, macOS, and Windows, written in Rust (mouse works too). It opens WAV files and gives you a zoomable waveform you can navigate,
-play, and edit entirely from the keyboard: selection, cut/copy/paste, undo/redo, normalize, gain, fades, reverse, trim, resample, mix-to-mono, and timeline markers with transient
-detection — plus a menu bar, a context-aware toolbar, fully configurable keyboard shortcuts via .toml config file, a file browser, and multi-buffer editing. Edits are saved back to WAV at 16-bit, 24-bit, or 32-bit float, and BWF cue points / markers are preserved across the round trip. A dedicated command chops a file at its markers and exports each region as a separate WAV.
+tui-wave draws waveforms, plays audio, and edits samples. It handles files with one channel,
+two channels, or more than fifty channels. It also opens files of 20GB or more without loading
+them into memory.
 
-Optionally, tui-wave is also a front-end to the **[Composer's Desktop Project](https://www.composersdesktop.com)** (CDP) — a large, decades-old suite of external command-line
-sound-transformation tools (spectral blurring, granulation, morphing, time-stretching, and much more). Browse the catalog, edit parameters (with breakpoint-envelope automation and
-a graphical curve editor), preview through your speakers, and apply with full undo — see [Optional: CDP support](#optional-cdp-composers-desktop-project-support) below. CDP is not
-bundled; it's free, separately-distributed software you install or build yourself.
+Read [documentation.md](documentation.md) to learn how to use it.
 
-Press `F10` (or `Alt`+a menu letter) to open the menus, `Tab` / `Shift+Tab` to move focus
-between the waveform, the file list, and the open buffers, and `q` to quit.
+## What it does
 
-See [USERGUIDE.md](USERGUIDE.md) for the full keybinding reference and workflow tips.
+- **Waveform display.** Zoom from the whole file down to single samples. Terminals such as
+  Kitty get a real image. Every other terminal gets braille and block glyphs.
+- **Playback.** Play, pause, and loop. The view can follow the play position.
+- **Editing.** Cut, copy, paste, delete, and undo, with a separate undo stack per open file.
+- **Processing.** Reverse, normalize, gain, fade, trim, resample, technical fades, and mix to
+  mono.
+- **Markers.** Insert markers by hand or at transients. tui-wave saves them as WAV cue points,
+  which Audacity and Sound Forge read.
+- **Many channels.** Scroll through the channels of a 58-channel file. Drop the empty ones.
+  Split the rest into mono files or stereo pairs.
+- **Large files.** A file above the memory limit opens read-only and disk-backed. tui-wave
+  reads and writes RF64 and BW64.
+- **Formats.** It reads WAV, FLAC, and AIFF. It writes WAV, FLAC, and MP3.
+- **Configurable.** Every key assignment lives in a TOML config file.
+- **CDP.** An optional front end to the Composer's Desktop Project, with about 130 processes.
 
-CDP process browser, parameter form with automatable (green) fields and presets, and the
+The CDP process browser, the parameter form with automatable green fields and presets, and the
 breakpoint envelope editor:
 
 <p>
@@ -26,94 +38,115 @@ breakpoint envelope editor:
   <img src="CDP3.png" alt="CDP breakpoint envelope editor" width="32%" />
 </p>
 
-## Status and Disclaimer
-This is developed with the assistance of LLM. I am not a Rust developer, however I have certain expertise in working with audio files. I needed this instrument for my own work.
-I am providing release builds for Linux but please build with cargo for the most feature-complete executables (see below).
+## Status
+
+An LLM helped to write this program. I am not a Rust developer. I do know audio files, and I
+needed this tool for my own work.
+
+Release builds for Linux exist. A build from source gives you the most complete program.
 
 ## Prerequisites
 
-- **Rust toolchain** (the `cargo` build tool), version **1.85 or newer** — the project uses
-  the 2024 edition. Install it from <https://rustup.rs>:
+You need the Rust toolchain, version 1.85 or newer. The project uses the 2024 edition. Install
+it from <https://rustup.rs>:
 
-  ```sh
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-  ```
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
-  (On Windows, download and run `rustup-init.exe` from the same site instead.)
+On Windows, download and run `rustup-init.exe` from the same site.
 
-- **An audio output device** is optional — without one you can still view and edit
-  waveforms, you just won't hear playback.
+An audio output device is optional. Without one you can still view and edit waveforms. You just
+hear nothing.
 
-### Platform-specific build dependencies
+### Build dependencies per platform
 
-- **Linux:** the audio backend needs the ALSA development headers.
-  - Debian/Ubuntu: `sudo apt install libasound2-dev pkg-config`
+- **Linux.** The audio backend needs the ALSA development headers.
+  - Debian and Ubuntu: `sudo apt install libasound2-dev pkg-config`
   - Fedora: `sudo dnf install alsa-lib-devel pkg-config`
   - Arch: `sudo pacman -S alsa-lib pkgconf`
-- **macOS:** nothing extra — uses the system CoreAudio framework.
-- **Windows:** nothing extra — uses the system WASAPI backend.
+- **macOS.** Nothing extra. The program uses the system CoreAudio framework.
+- **Windows.** Nothing extra. The program uses the system WASAPI backend.
 
-## Install, compile, and run
+## Build and run
 
-Clone the repository and build with Cargo. The commands are the same on all three
-platforms (use PowerShell or Windows Terminal on Windows).
+Clone the repository, then build with Cargo. The commands work the same on all three platforms.
+On Windows, use PowerShell or Windows Terminal.
 
 ```sh
-git clone <repository-url> tui-wave
+git clone <this repository>
 cd tui-wave
-
-# Build an optimized binary (recommended — debug builds are noticeably slower on
-# large files because of the one-time waveform-cache build).
 cargo build --release
-
-# Run the compiled binary directly:
-#   Linux/macOS:
-./target/release/tui-wave path/to/audio.wav
-#   Windows:
-#   .\target\release\tui-wave.exe path\to\audio.wav
 ```
 
-Running with no file argument opens an empty editor — focus the file panel with `Tab`,
-browse, and press `Enter` on a `.wav` to open it. You can also point it at a directory
-(`tui-wave path/to/folder`) to start browsing there.
+Always build with `--release`. A debug build draws long files many times slower, because
+tui-wave builds a waveform summary once per file.
 
-To install it onto your `PATH` so you can call `tui-wave` from anywhere:
+Run the binary directly:
 
 ```sh
-cargo install --path .
+./target/release/tui-wave path/to/audio.wav
 ```
 
-## Optional: CDP (Composer's Desktop Project) support
+On Windows the path reads `.\target\release\tui-wave.exe`.
 
-tui-wave includes a dialog-driven front-end (`Ctrl+P`, or **Process → CDP Process…**) to
-[CDP](https://www.composersdesktop.com), a large suite of external, offline sound-transformation
-programs — spectral blurring, granulation, morphing, waveset distortion, time-stretching, and
-hundreds more. This is entirely optional: tui-wave works fully without it, and the feature simply
-stays unavailable (a first-use prompt explains why) until you configure a CDP directory. The
-default binaries directory is `~/cdp` — if you unpack CDP there, it's picked up automatically
-with no setup prompt; anywhere else, just point the prompt at the real location.
+Use a terminal window of about 120 by 40 characters or larger. That leaves room for the side
+panels and the decibel gutters.
 
-**About CDP.** Composer's Desktop Project was founded in 1986 in Yorkshire, UK by composers
-Andrew Bentley, Archer Endrich, Richard Orton, and Trevor Wishart, aiming to bring the kind of
-sound-transformation power previously found only on institutional mainframes to a personal
-"desktop." It's been free, open-source software since 2014, licensed under the
-[GNU LGPL 2.1+](https://github.com/ComposersDesktop/CDP8/blob/main/LICENSE), and is still
-actively developed (CDP8, released 2023, added roughly 80 new processes over the prior CDP7).
-tui-wave's built-in catalog of ~130 processes (parameter names, ranges, and descriptions) is
-mostly adapted from [SoundThread](https://github.com/j-p-higgins/SoundThread) by Jonathan
-Higgins (MIT license) — see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the full
-text — plus a growing set of hand-authored additions covering CDP programs SoundThread never
-exposed. All credit for CDP itself, and for the ~250 underlying command-line programs
-tui-wave shells out to, belongs to the Composer's Desktop Project — tui-wave neither bundles
-nor redistributes any CDP binaries.
+## First steps
 
-**Installing CDP.** CDP is not on `PATH` by default, and there's no package-manager install for
-it — download or build it yourself, then tell tui-wave where the binaries live:
+1. Start the program with an audio file, or with a directory to browse.
+2. Press `Tab` to move focus between the Waveform, Files, and Buffers panels.
+3. Press the Up and Down arrows to zoom. Press Left and Right to move the cursor.
+4. Hold `Shift` and press Left or Right to select audio.
+5. Press `Space` to play.
+6. Press `F10` to open the menu bar.
+7. Press `q` to quit.
 
-- **Windows / macOS** — download a prebuilt release from
-  <https://www.unstablesound.net/cdp.html> (CDP's official download mirror) and unzip/mount it
-  anywhere; the binaries end up in a folder such as `_cdprogs` or `NewRelease`.
-- **Linux** (no prebuilt binaries are offered) — clone and build from source:
+[documentation.md](documentation.md) covers the rest.
+
+## Optional: CDP support
+
+CDP is the Composer's Desktop Project, a large set of offline sound transformation programs.
+It covers spectral blurring, granulation, morphing, waveset distortion, time stretching, and
+hundreds more. tui-wave gives you a dialog-driven front end to it, at `Ctrl+p` or through the
+CDP menu. Browse the catalog, edit parameters, draw breakpoint curves, preview through your
+speakers, and apply with full undo.
+
+CDP stays optional. tui-wave works fully without it. The feature waits until you point it at a
+CDP directory, and a first-use prompt explains why.
+
+tui-wave looks in `~/cdp` by default. Unpack or build CDP there and the program finds it with no
+setup. Anywhere else, answer the prompt with the real path. You can change the path later
+through CDP then Configure CDP Directory. tui-wave saves it as `cdp_dir` in your config file.
+
+### About CDP
+
+Four composers founded the Composer's Desktop Project in 1986 in Yorkshire, UK: Andrew Bentley,
+Archer Endrich, Richard Orton, and Trevor Wishart. They wanted to bring sound transformation
+power from institutional mainframes to a personal desktop.
+
+CDP has been free and open-source software since 2014, under the
+[GNU LGPL 2.1+](https://github.com/ComposersDesktop/CDP8/blob/main/LICENSE). Work on it
+continues. CDP8, from 2023, added about 80 processes over CDP7.
+
+All credit for CDP, and for the roughly 250 command-line programs tui-wave calls, belongs to the
+Composer's Desktop Project. tui-wave neither bundles nor redistributes any CDP binary.
+
+The process catalog in tui-wave mostly adapts parameter names, ranges, and descriptions from
+[SoundThread](https://github.com/j-p-higgins/SoundThread) by Jonathan Higgins, under the MIT
+license. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the full text. A growing set
+of hand-written entries covers CDP programs that SoundThread never reached.
+
+### Installing CDP
+
+CDP does not go on your `PATH`, and no package manager carries it. Download it or build it
+yourself, then tell tui-wave where the binaries live.
+
+- **Windows and macOS.** Download a prebuilt release from
+  <https://www.unstablesound.net/cdp.html>, the official CDP download mirror. Unzip or mount it
+  anywhere. The binaries land in a folder such as `_cdprogs` or `NewRelease`.
+- **Linux.** CDP offers no prebuilt Linux binaries. Build from source:
 
   ```sh
   git clone https://github.com/ComposersDesktop/CDP8.git
@@ -123,21 +156,12 @@ it — download or build it yourself, then tell tui-wave where the binaries live
   make
   ```
 
-  This needs `cmake` and a C compiler (`gcc`/`clang`) on `PATH`; see the repo's own
-  [`building.txt`](https://github.com/ComposersDesktop/CDP8/blob/main/building.txt) for
-  platform notes (Windows/macOS instructions are there too, if you'd rather build than use the
-  prebuilt download). The compiled binaries land in a top-level `NewRelease/` directory once
-  the build finishes.
-- The older [CDP7](https://github.com/ComposersDesktop/CDP7) source builds the same way and is
-  also compatible — tui-wave's process catalog doesn't depend on a specific CDP release.
+  This needs `cmake` and a C compiler on your `PATH`. The CDP repository holds its own
+  [building.txt](https://github.com/ComposersDesktop/CDP8/blob/main/building.txt) with notes per
+  platform. The compiled binaries land in a top-level `NewRelease` directory.
 
-Then, in tui-wave, open the CDP dialog (`Ctrl+P`). tui-wave defaults `cdp_dir` to `~/cdp`
-(`~` resolved to your actual home directory at startup), so unpacking or building CDP straight
-into a `cdp` folder in your home directory needs no further setup. Anywhere else, the first-use
-prompt asks for the directory containing the binaries; you can revisit it later via
-**CDP → Configure CDP Directory…**. The path is saved to `cdp_dir` in your `config.toml`. See
-[USERGUIDE.md](USERGUIDE.md#cdp-processes) for the full workflow: browsing, editing parameters,
-breakpoint automation, presets, preview/apply, and adding your own process definitions.
+The older [CDP7](https://github.com/ComposersDesktop/CDP7) source builds the same way and works
+just as well. The tui-wave catalog does not depend on one CDP release.
 
 ## Development
 
@@ -146,26 +170,27 @@ cargo build      # debug build
 cargo test       # run the test suite
 ```
 
-A reasonably large terminal is recommended (≈120×40 or more) so the file and buffer side
-panels and the dB gutters all fit.
+`CHANGELOG.md` records what changed in each version. `MANUAL_TESTING.md` holds the checklist for
+the parts that no test can cover, such as real audio hardware and real terminal quirks.
 
 ## Packaging
 
-Build scripts under `packaging/` produce distributable Linux packages into `dist/`. All
-of them share the same `Terminal=true` desktop entry (it's a terminal app) and 512×512
-icon, and are named with the version and target architecture.
+The scripts under `packaging/` build Linux packages into `dist/`. Each package carries the same
+`Terminal=true` desktop entry and 512 by 512 icon. Each file name carries the version and the
+target architecture.
 
 ```sh
-./packaging/build-appimage.sh   # -> dist/tui-wave-<ver>-<arch>.AppImage      (distro-agnostic)
-./packaging/build-pkg.sh        # -> dist/tui-wave-<ver>-1-<arch>.pkg.tar.zst (Arch: pacman -U)
-./packaging/build-deb.sh        # -> dist/tui-wave_<ver>_amd64.deb            (Debian/Ubuntu)
+./packaging/build-appimage.sh   # -> dist/tui-wave-<ver>-<arch>.AppImage
+./packaging/build-pkg.sh        # -> dist/tui-wave-<ver>-1-<arch>.pkg.tar.zst
+./packaging/build-deb.sh        # -> dist/tui-wave_<ver>_amd64.deb
 ```
 
-- **AppImage** — built with [`cargo-appimage`](https://crates.io/crates/cargo-appimage)
-  (`appimagetool` on `PATH`); bundles `libasound.so.2` so audio works without a system ALSA.
-- **Arch** — `makepkg` packaging the release binary; depends on `gcc-libs` and `alsa-lib`.
-- **Debian** — assembled with `ar`/`tar` (no `dpkg-deb` needed); depends on `libc6`,
-  `libgcc-s1`, `libasound2`.
+- **AppImage.** Built with [cargo-appimage](https://crates.io/crates/cargo-appimage), which
+  needs `appimagetool` on your `PATH`. It bundles `libasound.so.2`, so audio works without a
+  system ALSA.
+- **Arch.** `makepkg` wraps the release binary. It depends on `gcc-libs` and `alsa-lib`.
+- **Debian.** Assembled with `ar` and `tar`, so you do not need `dpkg-deb`. It depends on
+  `libc6`, `libgcc-s1`, and `libasound2`.
 
-The native packages link against the build machine's glibc; for a `.deb`/`.pkg` that runs
-on older targets, build inside a matching container.
+The native packages link against the glibc of the build machine. To target an older system,
+build inside a matching container.

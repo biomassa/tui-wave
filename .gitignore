@@ -12,7 +12,7 @@
 *.md
 !README.md
 !CHANGELOG.md
-!USERGUIDE.md
+!documentation.md
 !THIRD_PARTY_NOTICES.md
 
 # CDP CLI binaries (170+ prebuilt tools, ~200MiB)

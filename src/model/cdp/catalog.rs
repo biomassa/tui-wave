@@ -488,7 +488,7 @@ params = []
     }
 
     /// The documented example custom-process file (`docs/cdp-custom-process-example.toml`,
-    /// referenced from USERGUIDE.md) must always load cleanly through the same path a real
+    /// referenced from documentation.md) must always load cleanly through the same path a real
     /// user directory uses — otherwise the docs would ship an example that doesn't work.
     #[test]
     fn shipped_example_custom_process_loads() {
