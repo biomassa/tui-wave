@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-07-31 (1.9.1)
 
 - **Fixed: large WAVs written by Max/MSP opened as a fraction of their length.** A 14GB,
   58-channel, 96kHz take showed as 1m34s of an 11m12s recording. Their `RF64` headers are wrong
@@ -36,6 +36,7 @@
   about three minutes of 58-channel 96kHz audio, or six at 48kHz. Anything larger still opens
   read-only and streamed from disk. Note that an editable buffer costs roughly twice its size in
   memory once playback is running.
+- Bumped version to 1.9.1.
 
 ## 2026-07-30 (1.9.0)
 
