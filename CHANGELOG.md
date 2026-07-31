@@ -11,6 +11,18 @@
   of frames, so every channel would have been read into its neighbour's place. Both are now
   derived from the file's own length and verified before being used, so correctly-written files
   are unaffected.
+- **A streamed buffer can now be saved.** The workflow that makes Remove Empty Channels worth
+  having on a huge file: open a 14GB 58-channel take, drop the channels that hold nothing, and
+  Save As writes just the ones you kept — as a proper multichannel WAV, `RF64` if it needs to be,
+  at whatever bit depth you choose. One pass over the source, nothing held in memory, progress
+  shown and Esc stops it. Saving over the file being read is refused rather than attempted.
+  Afterwards the buffer becomes the file it wrote, which for a trimmed take is often small enough
+  to open fully editable again. A real example: 14.0GB and 58 channels in, 0.96GB and 4 channels
+  out, same 11m12s length.
+- **A streamed buffer's toolbar now shows what actually works on it** — Save As, Remove Empty
+  Channels and Export Channels, clickable — instead of a panel of commands that only produce
+  refusals. Menu entries that a streamed buffer would refuse are greyed out, driven off the same
+  rule that does the refusing, so the menu cannot say one thing and the app do another.
 - **Files up to 4GB now open fully editable, rather than 1.5GB** (`max_resident_mb`). That is
   about three minutes of 58-channel 96kHz audio, or six at 48kHz. Anything larger still opens
   read-only and streamed from disk. Note that an editable buffer costs roughly twice its size in

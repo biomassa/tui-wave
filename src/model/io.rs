@@ -227,6 +227,75 @@ pub fn load_wav(path: impl AsRef<Path>) -> color_eyre::Result<Document> {
     })
 }
 
+
+/// Writes a **streamed** document to `path` as a single multichannel WAV, one pass over the
+/// source, without ever holding it in memory.
+///
+/// This is what makes "open a 30GB take, drop its empty channels, save the result" possible. The
+/// channel map is already applied by `read_block`, so only the channels the buffer still presents
+/// are written — which is the whole point: a 58-channel capture with real audio on eight becomes a
+/// file an eighth the size.
+///
+/// `depth` re-quantizes on the way out exactly as `save_wav_with` does, sharing [`quantize`] so the
+/// two cannot drift. Output over 4GB becomes `RF64` automatically (`model::wavwrite`), which it very
+/// often will be here.
+///
+/// Markers and head/tail marks carry over **verbatim**: dropping channels leaves the timeline
+/// untouched, so every position is still valid. `bext` is dropped, matching every other new-file
+/// path in the app.
+///
+/// `progress` is called with `(frames_done, frames_total)` and returning `false` aborts; a partial
+/// file is removed rather than left looking finished.
+#[allow(clippy::too_many_arguments)]
+pub fn save_streamed_wav(
+    total_frames: u64,
+    channels: usize,
+    mut read_block: impl FnMut(u64, usize, &mut Vec<Vec<f32>>) -> std::io::Result<usize>,
+    path: &Path,
+    depth: BitDepth,
+    dither: bool,
+    sample_rate: u32,
+    markers: &[super::document::Marker],
+    head_tail_marks: &[usize],
+    mut progress: impl FnMut(u64, u64) -> bool,
+) -> std::io::Result<()> {
+    let mut writer =
+        super::wavwrite::WavWriter::create(path, channels, sample_rate, depth, dither)?;
+    let mut block: Vec<Vec<f32>> = Vec::new();
+    let mut at = 0u64;
+    let fail = |e: std::io::Error, path: &Path| {
+        let _ = std::fs::remove_file(path);
+        e
+    };
+
+    while at < total_frames {
+        let n = match read_block(at, super::wavread::READ_BLOCK_FRAMES, &mut block) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => return Err(fail(e, path)),
+        };
+        let planes: Vec<&[f32]> = block.iter().map(|c| c.as_slice()).collect();
+        if let Err(e) = writer.write_planes(&planes, n) {
+            return Err(fail(e, path));
+        }
+        at += n as u64;
+        if !progress(at, total_frames) {
+            drop(writer);
+            let _ = std::fs::remove_file(path);
+            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
+        }
+    }
+
+    if let Err(e) = writer.finalize() {
+        return Err(fail(e, path));
+    }
+    // After the audio is safely on disk, so a failed write never leaves metadata describing a
+    // file that was not finished — the same ordering `save_wav_with` uses.
+    let _ = super::bwf::append_aux_chunks(path, markers, &None);
+    super::headstails::save(path, head_tail_marks, sample_rate);
+    Ok(())
+}
+
 /// Quantizes one f32 sample to a `bits`-deep signed integer, optionally with TPDF dither.
 ///
 /// Full-scale maps to 2^(bits-1), matching the normalization `load_wav` uses on the way in, so

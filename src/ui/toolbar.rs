@@ -28,6 +28,15 @@ pub struct Toolbar {
     waveform: Vec<ToolGroup>,
     files: Vec<ToolGroup>,
     buffers: Vec<ToolGroup>,
+    /// Shown in place of `waveform` when the active buffer is streamed. Almost everything in the
+    /// ordinary waveform set is refused on such a buffer, so listing it would be a panel of
+    /// commands that only produce refusals; these three are what actually works.
+    ///
+    /// The only set whose buttons carry no shortcut, deliberately. Elsewhere a shortcut-less
+    /// button is redundant with the menus and was removed for that reason — but here, with
+    /// everything else refused, clicking these *is* the discoverable route, and two of them have
+    /// no key to show because they never needed one.
+    streamed: Vec<ToolGroup>,
     /// Per-button clickable rects with the action each triggers, recomputed every render.
     rects: Vec<(Rect, Action)>,
     pub active_actions: HashSet<Action>,
@@ -35,6 +44,9 @@ pub struct Toolbar {
     /// Next Rising Edge's current transient threshold, shown live in place of a static
     /// "Thresh+"/"Thresh-" label pair (see `button_label`).
     pub transient_threshold_db: f32,
+    /// Whether the active buffer is streamed, so `groups_for` can swap in [`Self::streamed`].
+    /// Repopulated every frame by `App::render`, like `active_actions` and `is_playing`.
+    pub streamed_buffer: bool,
 }
 
 /// Spacing constants, shared by layout (`build`) and measurement (`section_width`) so the
@@ -166,19 +178,36 @@ impl Toolbar {
                 ("Reload",  "^l".to_string(),    Action::ReloadBuffer),
             ],
         }];
+        // No shortcut column: Save As has one but the other two have none, and showing a lone
+        // shortcut beside two blanks reads worse than showing none at all.
+        let streamed = vec![ToolGroup {
+            label: "STREAMED (read-only)",
+            buttons: vec![
+                ("Save As...", String::new(), Action::SaveAs),
+                ("Remove Empty Channels...", String::new(), Action::RemoveEmptyChannels),
+                ("Export Channels...", String::new(), Action::ExportChannels),
+            ],
+        }];
+
         Self {
             waveform,
             files,
             buffers,
+            streamed,
             rects: Vec::new(),
             active_actions: HashSet::new(),
             is_playing: false,
             transient_threshold_db: 13.0,
+            streamed_buffer: false,
         }
     }
 
     fn groups_for(&self, focus: Focus) -> &[ToolGroup] {
         match focus {
+            // Only the waveform set is swapped: with the Files or Buffers panel focused the
+            // commands on offer are about files and buffers, not about the streamed document, and
+            // those all work regardless.
+            Focus::Waveform if self.streamed_buffer => &self.streamed,
             Focus::Waveform => &self.waveform,
             Focus::Files => &self.files,
             Focus::Buffers => &self.buffers,
@@ -331,12 +360,16 @@ impl Toolbar {
 mod tests {
     use super::*;
 
-    /// Every toolbar button must have a shortcut to show.
+    /// Every toolbar button must have a shortcut to show — **except** in the streamed set.
     ///
     /// The toolbar exists so that every *bound* command is visible at a glance, so a button with an
     /// empty shortcut renders as a bare label with nothing to press — it reads as broken (user
-    /// report, of `rmEmptyCh`). Such commands belong in the menus only. Asserted across all three
-    /// focus sets so a new one cannot be added without noticing.
+    /// report, of `rmEmptyCh`), and such commands belong in the menus only.
+    ///
+    /// The streamed set is the deliberate exception. Nearly every ordinary command is refused on a
+    /// streamed buffer, so these three are the only ones that do anything, and two of them have no
+    /// key because they never needed one. There, clicking is the discoverable route rather than a
+    /// redundant second one — which is the opposite of the situation the rule exists for.
     #[test]
     fn every_toolbar_button_shows_a_shortcut() {
         let bar = Toolbar::new(&HashMap::new());
@@ -355,5 +388,35 @@ mod tests {
             }
         }
         assert!(bare.is_empty(), "toolbar buttons with no shortcut to show:\n{}", bare.join("\n"));
+    }
+
+    /// The streamed set offers exactly the commands a streamed buffer permits, and it replaces the
+    /// waveform set only when one is active — with the Files or Buffers panel focused those sets
+    /// still apply, since their commands work regardless.
+    #[test]
+    fn the_streamed_set_replaces_only_the_waveform_set() {
+        let mut bar = Toolbar::new(&HashMap::new());
+
+        let actions = |b: &Toolbar, f: Focus| -> Vec<Action> {
+            b.groups_for(f).iter().flat_map(|g| g.buttons.iter().map(|(_, _, a)| *a)).collect()
+        };
+
+        assert_eq!(actions(&bar, Focus::Waveform).len() > 10, true, "the ordinary set is long");
+        bar.streamed_buffer = true;
+        assert_eq!(
+            actions(&bar, Focus::Waveform),
+            vec![Action::SaveAs, Action::RemoveEmptyChannels, Action::ExportChannels],
+            "a streamed buffer shows only what works on it"
+        );
+        assert_eq!(
+            actions(&bar, Focus::Files),
+            actions(&Toolbar::new(&HashMap::new()), Focus::Files),
+            "the Files set is unchanged"
+        );
+        assert_eq!(
+            actions(&bar, Focus::Buffers),
+            actions(&Toolbar::new(&HashMap::new()), Focus::Buffers),
+            "and so is the Buffers set"
+        );
     }
 }

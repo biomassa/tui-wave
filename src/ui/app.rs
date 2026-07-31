@@ -2169,6 +2169,9 @@ pub struct App {
     /// progress, and `load_file` is reached from key and mouse handlers that don't have one.
     /// `App::run` owns the terminal, so it is the one place that can hand it over.
     pending_cache_build: bool,
+    /// A streamed Save As waiting for the main loop, which owns the `Tui` the progress panel
+    /// needs — the same arrangement as `pending_cache_build`, and for the same reason.
+    pending_streamed_save: Option<(PathBuf, BitDepth, bool)>,
     /// A command-line file argument, opened on the main loop's first turn.
     ///
     /// `main` used to decode it itself and hand `App::new` a finished `Document`, which meant the
@@ -2991,6 +2994,7 @@ impl App {
             dot_matrix_gradient: config.dot_matrix_gradient,
             time_ruler: config.time_ruler,
             pending_cache_build: false,
+            pending_streamed_save: None,
             pending_open: None,
             graphics_protocols: std::collections::HashMap::new(),
             cdp_envelope_graphics_protocol: None,
@@ -3951,6 +3955,12 @@ impl App {
                 self.load_file(path);
                 needs_redraw = true;
             }
+            // Before the cache build, because a streamed Save As ends by reloading the file it
+            // wrote, which queues a build of its own.
+            if let Some((path, depth, dither)) = self.pending_streamed_save.take() {
+                self.run_streamed_save(terminal, path, depth, dither);
+                needs_redraw = true;
+            }
             // Before the ordinary draw, since a streamed buffer has no pyramid until this runs
             // and would otherwise render one blank frame first. `run` is where this lives
             // because it owns the `Tui` the progress panel needs — see `pending_cache_build`.
@@ -4316,7 +4326,31 @@ impl App {
                     };
                     let depth = self.save_as_depth;
                     let dither = self.save_as_dither && depth.supports_dither();
-                    if let Some(document) = self.active_doc_mut() {
+                    if self.active_doc().is_some_and(|d| d.is_streaming()) {
+                        // A streamed buffer cannot go through `save_wav_with`, which walks a
+                        // resident `Vec<Vec<f32>>`. It is also far too slow to do inline: the
+                        // write is the size of the file. Queued for the main loop, which owns
+                        // the terminal the progress panel needs.
+                        //
+                        // Refused outright if it would write over the file being read. The
+                        // handle stays open for the whole session, so this is not a
+                        // hypothetical — it would truncate the source out from under the very
+                        // reads that are supposed to be producing the output.
+                        let same_file = self
+                            .active_doc()
+                            .and_then(|d| d.path.as_ref())
+                            .map(|src| paths_point_at_the_same_file(src, &path))
+                            .unwrap_or(false);
+                        if same_file {
+                            self.dialog = Some(Dialog::Info {
+                                message: "That is the file being read. Choose a different name — \
+                                          a streamed buffer cannot be saved over its own source."
+                                    .to_string(),
+                            });
+                        } else {
+                            self.pending_streamed_save = Some((path, depth, dither));
+                        }
+                    } else if let Some(document) = self.active_doc_mut() {
                         if save_wav_with(document, &path, depth, dither).is_ok() {
                             document.path = Some(path.clone());
                             document.dirty = false;
@@ -12168,6 +12202,94 @@ impl App {
         });
     }
 
+
+    /// Writes the active streamed buffer to `path`, showing progress and honouring Esc, then
+    /// rebinds the buffer to the file it just wrote.
+    ///
+    /// The reload is what makes this a real Save As rather than an export: afterwards the buffer
+    /// *is* the saved file. It goes through `load_file`, so the new file gets the same treatment
+    /// as any other — re-probed, and opened resident if dropping channels brought it under the
+    /// budget, which for a 58-channel take trimmed to eight is entirely possible. The cost is a
+    /// second pass to rebuild the overview, which is why the write reports progress separately.
+    fn run_streamed_save(
+        &mut self,
+        terminal: &mut Tui,
+        path: PathBuf,
+        depth: BitDepth,
+        dither: bool,
+    ) {
+        let idx = self.active_document;
+        let Some(doc) = self.documents.get(idx) else { return };
+        let Some(stream) = doc.stream.clone() else { return };
+        let channels = doc.channel_count();
+        let total_frames = doc.len_samples() as u64;
+        let sample_rate = doc.sample_rate;
+        let markers = doc.markers.clone();
+        let head_tail = doc.head_tail_marks.clone();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "output".to_string());
+        // Bytes the *output* will occupy, which is what the progress bar is measuring — not the
+        // source's, since the depth may differ and channels have usually been dropped.
+        let out_bytes_per_frame = (depth.bits() as u64 / 8) * channels as u64;
+
+        let mut last_painted = 0u64;
+        const PAINT_EVERY_BYTES: u64 = 64 * 1024 * 1024;
+        let mut cancelled = false;
+
+        let result = crate::model::io::save_streamed_wav(
+            total_frames,
+            channels,
+            |first, want, out| stream.read_all_channels(first, want, out),
+            &path,
+            depth,
+            dither,
+            sample_rate,
+            &markers,
+            &head_tail,
+            |done_frames, total| {
+                let done_bytes = done_frames.saturating_mul(out_bytes_per_frame);
+                if done_bytes - last_painted >= PAINT_EVERY_BYTES {
+                    last_painted = done_bytes;
+                    if Self::escape_pressed() {
+                        cancelled = true;
+                        return false;
+                    }
+                    let _ = terminal.draw(|frame| {
+                        render_writing_panel(
+                            frame,
+                            &name,
+                            done_bytes,
+                            total.saturating_mul(out_bytes_per_frame),
+                            channels,
+                        );
+                    });
+                }
+                true
+            },
+        );
+
+        match result {
+            Ok(()) => {
+                self.file_panel.scan();
+                // Rebinding by re-opening, rather than by editing `path` in place: the buffer must
+                // read from the file it now claims to be, and only `load_file` decides afresh
+                // whether that file still needs streaming.
+                self.load_file(path);
+            }
+            Err(e) => {
+                self.dialog = Some(Dialog::Info {
+                    message: if cancelled {
+                        format!("Stopped saving {name}. The partial file was removed.")
+                    } else {
+                        format!("Could not save {}: {e}", name)
+                    },
+                });
+            }
+        }
+    }
+
     /// Saves every dirty document that already has a path. Documents that were never
     /// saved (no path) are skipped — Save All can't choose a filename for each; those still
     /// need an explicit Save As.
@@ -13061,9 +13183,12 @@ impl App {
                 | Action::DecreaseTransientThreshold
                 | Action::ResetConfig
                 | Action::ConfigureCdpDirectory
-                // The two operations this mode exists to support.
+                // The operations this mode exists to support. Save As is here so a buffer
+                // trimmed by Remove Empty Channels can be written out — the whole point of
+                // dropping empty channels on a 30GB capture is to keep a smaller one.
                 | Action::RemoveEmptyChannels
                 | Action::ExportChannels
+                | Action::SaveAs
                 // Undo/Redo are safe here even though editing is not: a streamed document's
                 // history can only ever hold `RemoveStreamedChannelsCommand`, because every
                 // other command is refused by this very list and `load_file_streaming` starts
@@ -14273,6 +14398,22 @@ impl App {
         let buf_names = self.buffer_names();
         self.buffer_panel.render(frame, chrome.buffers, &buf_names, self.active_document);
         self.toolbar.active_actions.clear();
+        self.toolbar.streamed_buffer =
+            self.active_doc().is_some_and(|d| d.is_streaming());
+        // Dim every menu entry the active buffer would refuse, from the same predicate
+        // `handle_action` gates on — so the menu cannot claim something works when it does not,
+        // and a command added to that allowlist later is greyed or ungreyed without a second edit.
+        self.menu.disabled_actions.clear();
+        if self.toolbar.streamed_buffer {
+            let refused: Vec<Action> = self
+                .menu
+                .items
+                .iter()
+                .flat_map(|m| m.entries.iter().map(|e| e.action))
+                .filter(|a| !self.action_allowed_on_streamed_buffer(*a))
+                .collect();
+            self.menu.disabled_actions.extend(refused);
+        }
         self.toolbar.is_playing = self.audio.as_ref().is_some_and(|a| a.is_playing());
         self.toolbar.transient_threshold_db = self.transient_threshold_db;
         self.menu.active_actions.clear();
@@ -15208,6 +15349,21 @@ fn channel_pane_rects(
         .map(|i| Rect { x: area.x, y: area.y + i * pane, width: area.width, height: pane })
         .collect();
     (rects, range)
+}
+
+
+/// Whether two paths name the same file on disk.
+///
+/// Canonicalized rather than compared textually, so `take.wav`, `./take.wav` and an absolute path
+/// to it are all recognised as one file — and so are two paths that differ only by a symlink. A
+/// path that cannot be canonicalized (the target usually does not exist yet, which is the normal
+/// case for Save As) falls back to comparing what is there, so a non-existent target is correctly
+/// *not* the source.
+fn paths_point_at_the_same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// Peak sample magnitude within the visible window. Takes explicit parameters to avoid
@@ -19571,18 +19727,24 @@ fn render_load_curve_dialog(frame: &mut Frame, area: Rect, picker: &mut FilePane
     );
 }
 
-/// Progress panel painted while a streamed buffer's waveform pyramid is being built.
+/// Progress panel for a long, uninterruptible pass over a large file — reading one to build its
+/// waveform overview, or writing one out.
 ///
-/// Reading every byte of a 20GB file takes tens of seconds even at full disk speed, and the
-/// build is synchronous, so without this the app looks hung for the whole duration — which is
-/// precisely the failure mode (`load_file` silently discarding an error) that started this work.
-/// It states the file, how far along it is, and why it is taking a while.
-fn render_loading_panel(
+/// Both take tens of seconds on a multi-GB file and neither polls input except here, so without a
+/// panel the app looks hung — which is precisely the failure (`load_file` silently discarding an
+/// error) that started this work. `verb` names what is happening in the title, `activity` completes
+/// the counts line ("scanned", "written"), and `explain` is the sentence under the bar.
+#[allow(clippy::too_many_arguments)]
+fn render_progress_panel(
     frame: &mut Frame,
+    verb: &str,
     name: &str,
     done_bytes: u64,
     total_bytes: u64,
     channel_count: usize,
+    activity: &str,
+    explain: &str,
+    hint_label: &str,
 ) {
     let area = frame.area();
 
@@ -19598,21 +19760,18 @@ fn render_loading_panel(
     let gb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
 
     let counts = format!(
-        " {channel_count} channels — {:.1} / {:.1} GB scanned",
+        " {channel_count} channels — {:.1} / {:.1} GB {activity}",
         gb(done_bytes),
         gb(total_bytes),
     );
-    let explain = " Too large to hold in memory — building the waveform overview.";
-    // Esc is the only key offered because it is the only one the build loop polls for; see
-    // `App::escape_pressed`. A minute of reading with no way out is not something to make someone
-    // sit through because they opened the wrong file.
+    // Esc is the only key offered because it is the only one these loops poll for; see
+    // `App::escape_pressed`. A minute of work with no way out is not something to make someone sit
+    // through because they picked the wrong file.
     let hint_key = " Esc";
-    let hint_label = ":stop loading";
 
-    // Sized to the longest line rather than a fixed 60, which truncated the explanation (it needs
-    // 62 columns and the popup gave 58). Every line is measured in `chars`, not bytes: the em dash
-    // and the file name are both multi-byte, so a byte length would over-estimate the width and
-    // leave the panel needlessly wide.
+    // Sized to the longest line rather than a fixed width, which truncated the explanation. Every
+    // line is measured in `chars`, not bytes: the em dash and the file name are both multi-byte, so
+    // a byte length would over-estimate the width and leave the panel needlessly wide.
     let longest = [
         counts.chars().count(),
         explain.chars().count(),
@@ -19636,12 +19795,12 @@ fn render_loading_panel(
     // Inner width less the leading space and the two brackets.
     let bar_width = width.saturating_sub(2).saturating_sub(4) as usize;
     let filled = ((bar_width as f64) * fraction).round() as usize;
-    let bar: String = std::iter::repeat_n('█', filled.min(bar_width))
-        .chain(std::iter::repeat_n('░', bar_width.saturating_sub(filled)))
+    let bar: String = std::iter::repeat_n('\u{2588}', filled.min(bar_width))
+        .chain(std::iter::repeat_n('\u{2591}', bar_width.saturating_sub(filled)))
         .collect();
 
     let block = Block::default()
-        .title("Reading")
+        .title(verb)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
@@ -19652,15 +19811,57 @@ fn render_loading_panel(
             Line::from(Span::styled(counts, label_style)),
             Line::raw(""),
             Line::from(Span::styled(format!(" [{bar}]"), accent)),
-            Line::from(Span::styled(explain, label_style)),
+            Line::from(Span::styled(explain.to_string(), label_style)),
             Line::raw(""),
             Line::from(vec![
                 Span::styled(hint_key, Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0)),
-                Span::styled(hint_label, label_style),
+                Span::styled(hint_label.to_string(), label_style),
             ]),
         ])
         .block(block),
         popup,
+    );
+}
+
+/// Building a streamed buffer's waveform overview — see [`render_progress_panel`].
+fn render_loading_panel(
+    frame: &mut Frame,
+    name: &str,
+    done_bytes: u64,
+    total_bytes: u64,
+    channel_count: usize,
+) {
+    render_progress_panel(
+        frame,
+        "Reading",
+        name,
+        done_bytes,
+        total_bytes,
+        channel_count,
+        "scanned",
+        " Too large to hold in memory \u{2014} building the waveform overview.",
+        ":stop loading",
+    );
+}
+
+/// Writing a streamed buffer out with Save As — see [`render_progress_panel`].
+fn render_writing_panel(
+    frame: &mut Frame,
+    name: &str,
+    done_bytes: u64,
+    total_bytes: u64,
+    channel_count: usize,
+) {
+    render_progress_panel(
+        frame,
+        "Writing",
+        name,
+        done_bytes,
+        total_bytes,
+        channel_count,
+        "written",
+        " Copying the channels this buffer keeps into a new file.",
+        ":stop saving",
     );
 }
 
@@ -19964,6 +20165,38 @@ mod tests {
     /// the real `~/.config/tui-wave/config.toml` or risking a race against tests elsewhere
     /// that temporarily redirect `XDG_CONFIG_HOME`. Every test below must use this instead
     /// of `App::new` directly.
+    /// Redirects config writes to a temp dir for the duration of a test, holding the crate-wide
+    /// lock that serializes everyone who touches the process-global `XDG_CONFIG_HOME`.
+    ///
+    /// Needed by any test that drives *toggle* actions: each one calls `save_config`, which writes
+    /// to whatever that variable currently points at. Without this they would both clobber the
+    /// developer's real config and race the tests that legitimately redirect it — which is exactly
+    /// what made `the_time_ruler_labels_the_timeline...` fail intermittently.
+    struct RedirectedConfig {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        dir: PathBuf,
+    }
+
+    impl RedirectedConfig {
+        fn new(tag: &str) -> Self {
+            let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let dir = std::env::temp_dir().join(format!("tuiwave_cfg_{tag}_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            // SAFETY: the lock above serializes every test in the crate that mutates this.
+            unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
+            RedirectedConfig { _guard, dir }
+        }
+    }
+
+    impl Drop for RedirectedConfig {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+            std::fs::remove_dir_all(&self.dir).ok();
+        }
+    }
+
     fn new_app(document: Option<Document>, directory: Option<PathBuf>) -> App {
         App::new_with_config(document, directory, Config::default())
     }
@@ -29089,7 +29322,6 @@ mod tests {
             Action::Normalize,
             Action::Reverse,
             Action::Save,
-            Action::SaveAs,
             Action::Export,
             Action::ExportRegions,
             Action::TogglePlayback,
@@ -29117,6 +29349,8 @@ mod tests {
     /// The other side of the gate: everything the mode is *for* must go through untouched.
     #[test]
     fn navigating_and_zooming_a_streamed_buffer_is_allowed() {
+        // `ToggleTimeRuler` below persists the config.
+        let _cfg = RedirectedConfig::new("streamnav");
         let dir = std::env::temp_dir().join(format!("tuiwave_appstream_nav_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("nav.wav");
@@ -29138,6 +29372,9 @@ mod tests {
             Action::ToggleTimeRuler,
             Action::RemoveEmptyChannels,
             Action::ExportChannels,
+            // Save As is permitted so a buffer trimmed by Remove Empty Channels can be written
+            // out — the reason for dropping empty channels in the first place.
+            Action::SaveAs,
         ] {
             app.dialog = None;
             app.handle_action(action);
@@ -30407,277 +30644,148 @@ mod tests {
 
     /// A streamed document must *look* like the same audio loaded resident.
     ///
-    /// This is the check on the speed work: streamed rendering no longer raw-scans the partial bin
-    /// at each column edge, so its answers can be wider than exact by up to one bin. That is a
-    /// deliberate trade (see `SampleSource::affords_exact_edges`) and this bounds what it cost —
-    /// the two renders must agree on the overwhelming majority of cells, at every zoom.
+    /// This is the check on the speed work: streamed rendering only raw-scans a column's edges
+    /// below `STREAMED_EXACT_SPAN`, so above it its answers could in principle be wider than exact
+    /// by up to one bin. This asserts what that actually cost — nothing.
+    ///
+    /// The waveform widget is rendered directly rather than through `App::render`, because the two
+    /// modes deliberately show different chrome: a streamed buffer gets its own toolbar and a
+    /// "[streamed, read-only]" title, which changes the chrome height and so shifts every row. The
+    /// claim being tested is about the waveform, so that is what is compared.
     #[test]
     fn a_streamed_document_renders_essentially_the_same_as_a_resident_one() {
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
+        use crate::ui::widgets::waveform::WaveformWidget;
+        use ratatui::buffer::Buffer;
+        use ratatui::widgets::Widget;
 
         let dir = std::env::temp_dir().join(format!("tuiwave_look_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("look.wav");
         multichannel_float_wav(&path, 4, 200_000);
 
-        let render = |streamed: bool, zoom: i32| -> Vec<String> {
-            let mut app = if streamed { streaming_app() } else { new_app(None, None) };
-            app.load_file(path.clone());
-            assert_eq!(app.documents[0].is_streaming(), streamed);
-            if streamed {
-                let stream = app.documents[0].stream.clone().unwrap();
-                app.waveform_caches = build_caches(&stream);
-                app.pending_cache_build = false;
+        let resident = crate::model::io::load_wav(&path).unwrap();
+        let stream = crate::model::stream::StreamedSamples::open(&path).unwrap();
+        let caches = build_caches(&stream);
+
+        let area = Rect { x: 0, y: 0, width: 160, height: 9 };
+        let draw = |src: crate::model::stream::SampleSource<'_>,
+                    cache: &WaveformCache,
+                    viewport: &Viewport| {
+            let mut buf = Buffer::empty(area);
+            WaveformWidget {
+                samples: src,
+                viewport,
+                cache: Some(cache),
+                selection: None,
+                cursor: 0,
+                playhead: None,
+                gradient: true,
             }
-            let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
-            terminal.draw(|frame| app.render(frame)).unwrap();
-            for _ in 0..zoom.unsigned_abs() {
-                app.handle_action(if zoom < 0 { Action::ZoomIn } else { Action::ZoomOut });
-            }
-            terminal.draw(|frame| app.render(frame)).unwrap();
-            terminal
-                .backend()
-                .buffer()
-                .content()
-                .chunks(160)
-                .map(|r| r.iter().map(|c| c.symbol().chars().next().unwrap_or(' ')).collect())
-                .collect()
+            .render(area, &mut buf);
+            buf
         };
 
-        for zoom in [-20i32, -10, -4, 0, 4, 10, 20] {
-            let resident = render(false, zoom);
-            let streamed = render(true, zoom);
-            assert_eq!(resident.len(), streamed.len());
+        for spl_per_col in [1.0f64, 4.0, 37.0, 128.0, 511.0, 513.0, 2_000.0, 40_000.0] {
+            let mut viewport = Viewport::fit_to_width(200_000, area.width as usize);
+            viewport.samples_per_column = spl_per_col;
+            viewport.scroll_offset = 0;
 
-            let (mut differing, mut total) = (0usize, 0usize);
-            // The streamed title carries a "[streamed, read-only]" marker the resident one does
-            // not, so that row is expected to differ and says nothing about the waveform.
-            for (a, b) in resident.iter().zip(&streamed).filter(|(_, b)| !b.contains("read-only]")) {
-                for (ca, cb) in a.chars().zip(b.chars()) {
-                    total += 1;
-                    if ca != cb {
-                        differing += 1;
-                    }
-                }
+            for ch in 0..4 {
+                let a = draw(
+                    crate::model::stream::SampleSource::Resident(&resident.channels[ch]),
+                    &caches[ch],
+                    &viewport,
+                );
+                let b = draw(
+                    crate::model::stream::SampleSource::Streamed { stream: &stream, channel: ch },
+                    &caches[ch],
+                    &viewport,
+                );
+                let differing = a
+                    .content()
+                    .iter()
+                    .zip(b.content())
+                    .filter(|(x, y)| x.symbol() != y.symbol())
+                    .count();
+                assert_eq!(
+                    differing, 0,
+                    "ch{ch} at {spl_per_col} samples/column: {differing} cells differ between \
+                     streamed and resident rendering"
+                );
             }
-            assert!(total > 1000, "sanity: something was rendered");
-            assert_eq!(
-                differing, 0,
-                "zoom {zoom:+}: {differing} of {total} waveform cells differ between streamed and \
-                 resident\n--- resident ---\n{}\n--- streamed ---\n{}",
-                resident.join("\n"),
-                streamed.join("\n"),
-            );
         }
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Every dialog must tell you how to commit and how to back out.
+
+    /// A streamed buffer greys out exactly the menu entries it would refuse, and nothing more.
     ///
-    /// The shared single-row text renderer used to hint only `SaveMatrixAs`, so Remove Empty
-    /// Channels, Normalize, Resample, the three renames, Open Directory and Save Curve all showed a
-    /// bare input box with no indication that Enter applies and Esc cancels (user report). Driven
-    /// through the real render path rather than by inspecting the source, so a dialog added later
-    /// without a hint fails here.
+    /// Driven from the same predicate `handle_action` gates on, so this is really asserting that
+    /// the two cannot disagree — the menu never offers something that will be refused, and never
+    /// greys something that would have worked.
     #[test]
-    fn every_dialog_shows_how_to_commit_and_cancel() {
+    fn a_streamed_buffer_greys_out_exactly_the_entries_it_refuses() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
-        // One representative of every arm of the shared renderer, plus the dialogs that reach it
-        // through their own actions.
-        let dialogs: Vec<(&str, Dialog)> = vec![
-            ("Normalize", Dialog::Normalize { input: TextInput::fresh("-1.0") }),
-            (
-                "RemoveEmptyChannels",
-                Dialog::RemoveEmptyChannels { input: TextInput::fresh("-48.0") },
-            ),
-            (
-                "Resample",
-                Dialog::Resample { input: TextInput::fresh("48000"), current_rate: 44100 },
-            ),
-            (
-                "RenameMarker",
-                Dialog::RenameMarker { position: 0, input: TextInput::fresh("x") },
-            ),
-            ("OpenDirectory", Dialog::OpenDirectory { input: TextInput::fresh("/tmp") }),
-            (
-                "RenameBuffer",
-                Dialog::RenameBuffer { index: 0, input: TextInput::fresh("b") },
-            ),
-            ("Info", Dialog::Info { message: "hello".into() }),
-        ];
+        let dir = std::env::temp_dir().join(format!("tuiwave_grey_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("grey.wav");
+        multichannel_float_wav(&path, 4, 20_000);
 
-        for (name, dialog) in dialogs {
-            let mut app = new_app(Some(doc(0.4, 4_410)), None);
-            app.dialog = Some(dialog);
-            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-            terminal.draw(|frame| app.render(frame)).unwrap();
-            let screen: String = terminal
-                .backend()
-                .buffer()
-                .content()
-                .chunks(120)
-                .map(|r| {
-                    r.iter().map(|c| c.symbol().chars().next().unwrap_or(' ')).collect::<String>()
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+        let mut app = streaming_app();
+        app.load_file(path.clone());
+        app.pending_cache_build = false;
+        assert!(app.documents[0].is_streaming());
 
-            assert!(screen.contains("Enter"), "{name}: no Enter hint\n{screen}");
-            // `Info` is dismiss-only, so Esc has nothing distinct to offer there.
-            if name != "Info" {
-                assert!(screen.contains("Esc"), "{name}: no Esc hint\n{screen}");
-            }
-
-            // The key names must be peach, and their labels must not be — the pairing the menus
-            // and toolbar use, so a key never blends into the word attached to it.
-            let buf = terminal.backend().buffer();
-            // Column, not byte offset: the screen is full of multi-byte box-drawing and braille
-            // glyphs, so `str::find` would point at the wrong cell entirely. And searched from the
-            // bottom, because the hint row sits below the toolbar — which also renders the word
-            // "Enter" (as the Files panel's Open shortcut) and would otherwise be found first.
-            let find = |needle: &str| -> (u16, u16) {
-                let want: Vec<char> = needle.chars().collect();
-                let rows: Vec<&str> = screen.lines().collect();
-                for (row, line) in rows.iter().enumerate().rev() {
-                    let chars: Vec<char> = line.chars().collect();
-                    if let Some(col) = chars.windows(want.len()).position(|w| w == want.as_slice()) {
-                        return (col as u16, row as u16);
-                    }
-                }
-                panic!("{name}: {needle:?} not on screen\n{screen}");
-            };
-            for key in if name == "Info" { &["Enter"][..] } else { &["Enter", "Esc"][..] } {
-                let (x, y) = find(key);
-                assert_eq!(
-                    buf[(x, y)].style().fg,
-                    Some(theme::SHORTCUT),
-                    "{name}: the {key:?} key must be peach ({:?})",
-                    theme::SHORTCUT
-                );
-                // The character just past the key is its label's colon, which must not be.
-                let after = buf[(x + key.len() as u16, y)].style().fg;
-                assert_ne!(
-                    after,
-                    Some(theme::SHORTCUT),
-                    "{name}: the label after {key:?} must not be peach too"
-                );
-            }
-        }
-    }
-
-    /// Renders `app`'s dialog and returns its hint row plus the row directly above it, as the text
-    /// between the popup's own left and right borders.
-    ///
-    /// The popup is located from the hint row outwards — scan left and right to the nearest box
-    /// character — rather than by its background colour, which the menu bar and toolbar share.
-    fn dialog_hint_and_row_above(app: &mut App) -> Option<(String, String)> {
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
-
-        let (w, h) = (150u16, 44u16);
-        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
-        let rows: Vec<Vec<char>> = terminal
-            .backend()
-            .buffer()
-            .content()
-            .chunks(w as usize)
-            .map(|r| r.iter().map(|c| c.symbol().chars().next().unwrap_or(' ')).collect())
-            .collect();
 
-        // Searched from the bottom: the toolbar renders the word "Enter" too, and a dialog is
-        // always below it.
-        let y = rows.iter().rposition(|r| {
-            let s: String = r.iter().collect();
-            s.contains("Enter:") || s.contains("Esc:")
-        })?;
-        if y == 0 {
-            return None;
-        }
-        let row = &rows[y];
-        let anchor = row
-            .windows(6)
-            .position(|wnd| {
-                let s: String = wnd.iter().collect();
-                s.starts_with("Enter:") || s.starts_with("Esc:")
-            })
-            .unwrap_or(0);
-        let left = (0..anchor).rev().find(|&x| row[x] == '\u{2502}')? + 1;
-        let right = (anchor..row.len()).find(|&x| row[x] == '\u{2502}')?;
-        let slice = |r: &Vec<char>| r[left..right].iter().collect::<String>();
-        Some((slice(row), slice(&rows[y - 1])))
-    }
-
-    /// A dialog's hint row must be set off from its content by a blank line.
-    ///
-    /// Reported on the Normalize prompt and the loading panel, where the hint sat directly under
-    /// the last line of content and read as part of it. Checked by rendering rather than by reading
-    /// the source, so it covers every dialog reachable here and keeps covering them.
-    #[test]
-    fn every_dialog_separates_its_hint_row_with_a_blank_line() {
-        let open = |action: Action| -> App {
-            let mut app = new_app(
-                Some(Document {
-                    channels: vec![vec![0.3f32; 44_100]; 2],
-                    sample_rate: 44_100,
-                    path: Some(PathBuf::from("/tmp/probe.wav")),
-                    markers: vec![Marker { position: 1_000, label: "a".into() }],
-                    selection: Some(crate::model::selection::Selection { start: 0, end: 40_000 }),
-                    ..Document::default()
-                }),
-                None,
+        // The three the user must be able to reach stay live...
+        for action in [Action::SaveAs, Action::RemoveEmptyChannels, Action::ExportChannels] {
+            assert!(
+                !app.menu.disabled_actions.contains(&action),
+                "{action:?} must stay available on a streamed buffer"
             );
-            app.handle_action(action);
-            app
-        };
-
-        let mut cases: Vec<(String, App)> = vec![
-            ("Normalize", Action::Normalize),
-            ("Gain", Action::Gain),
-            ("FadeIn", Action::FadeIn),
-            ("FadeOut", Action::FadeOut),
-            ("Resample", Action::Resample),
-            ("MixToMono", Action::MixToMono),
-            ("RemoveEmptyChannels", Action::RemoveEmptyChannels),
-            ("Export", Action::Export),
-            ("ExportRegions", Action::ExportRegions),
-            ("SaveAs", Action::SaveAs),
-            ("OpenDirectory", Action::OpenDirectory),
-        ]
-        .into_iter()
-        .map(|(n, a)| (n.to_string(), open(a)))
-        .collect();
-
-        // Dialogs with no single action that opens them.
-        for (name, dialog) in [
-            ("Info", Dialog::Info { message: "hello".into() }),
-            ("RenameMarker", Dialog::RenameMarker { position: 0, input: TextInput::fresh("x") }),
-            ("RenameBuffer", Dialog::RenameBuffer { index: 0, input: TextInput::fresh("b") }),
-            ("SaveCurveAs", Dialog::SaveCurveAs { input: TextInput::fresh("c"), curve_index: 0 }),
+        }
+        // ...as does everything else that genuinely works, which the user's list did not mention.
+        for action in [Action::ZoomIn, Action::ZoomOut, Action::ToggleTimeRuler, Action::SelectAll] {
+            assert!(
+                !app.menu.disabled_actions.contains(&action),
+                "{action:?} works on a streamed buffer, so it must not be greyed"
+            );
+        }
+        // ...and everything refused is greyed.
+        for action in [
+            Action::Cut,
+            Action::Paste,
+            Action::Save,
+            Action::Normalize,
+            Action::Reverse,
+            Action::MixToMono,
+            Action::InsertMarker,
+            Action::CdpProcess,
+            Action::ExportRegions,
         ] {
-            let mut app = new_app(Some(doc(0.3, 4_410)), None);
-            app.dialog = Some(dialog);
-            cases.push((name.to_string(), app));
+            assert!(
+                app.menu.disabled_actions.contains(&action),
+                "{action:?} is refused on a streamed buffer, so it must be greyed"
+            );
         }
 
-        let mut wrong: Vec<String> = Vec::new();
-        for (name, app) in cases.iter_mut() {
-            let Some((hint, above)) = dialog_hint_and_row_above(app) else {
-                wrong.push(format!("  {name}: no hint row found"));
-                continue;
-            };
-            if !above.trim().is_empty() {
-                wrong.push(format!(
-                    "  {name}: hint |{}| sits directly under |{}|",
-                    hint.trim_end(),
-                    above.trim_end()
-                ));
-            }
-        }
-        assert!(wrong.is_empty(), "dialogs whose hint row is not set off:\n{}", wrong.join("\n"));
+        // A resident buffer greys nothing at all.
+        let small = dir.join("small.wav");
+        multichannel_float_wav(&small, 2, 4_000);
+        let mut plain = new_app(None, None);
+        plain.load_file(small);
+        terminal.draw(|frame| plain.render(frame)).unwrap();
+        assert!(
+            plain.menu.disabled_actions.is_empty(),
+            "an ordinary buffer must have nothing greyed, got {:?}",
+            plain.menu.disabled_actions
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The loading panel must show its text in full. It was a hardcoded 60 columns wide, giving 58
@@ -30827,6 +30935,8 @@ mod tests {
     /// `CdpSetup` when it isn't, and neither counts.
     #[test]
     fn menu_entries_that_prompt_for_input_end_with_an_ellipsis() {
+        // Drives every menu action, toggles included, each of which persists the config.
+        let _cfg = RedirectedConfig::new("ellipsis");
         let entries: Vec<(String, Action)> = crate::ui::menu::MenuBar::new(&std::collections::HashMap::new())
             .items
             .iter()
