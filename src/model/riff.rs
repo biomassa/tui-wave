@@ -98,7 +98,17 @@ pub struct Riff {
     pub file_len: u64,
     pub ds64: Option<Ds64>,
     pub chunks: Vec<ChunkHeader>,
+    /// The `data` chunk derived from `ds64` and the file length, when that derivation validated
+    /// — see [`Riff::derive_rf64_data`]. Preferred over anything the chunk walk found.
+    rf64_data: Option<(u64, u64)>,
 }
+
+/// Chunks the walk will read before giving up.
+///
+/// A malformed size sends the walk into the audio, where it reads float samples as chunk headers;
+/// a run of zeros there looks like an endless sequence of empty chunks and would advance eight
+/// bytes at a time across the rest of a 15GB file. No real WAV has anything like this many chunks.
+const MAX_CHUNKS: usize = 4096;
 
 fn u32_at(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
@@ -135,8 +145,10 @@ impl Riff {
             return Err(invalid("not a WAVE file"));
         }
 
-        let mut riff = Riff { file, form, file_len, ds64: None, chunks: Vec::new() };
+        let mut riff =
+            Riff { file, form, file_len, ds64: None, chunks: Vec::new(), rf64_data: None };
         riff.walk()?;
+        riff.rf64_data = riff.derive_rf64_data()?;
         Ok(riff)
     }
 
@@ -145,7 +157,7 @@ impl Riff {
         let mut pos: u64 = 12;
         // A `ds64` must be the first chunk in an RF64 file, so it is always parsed before any
         // chunk whose size might refer to it.
-        while pos + 8 <= self.file_len {
+        while pos + 8 <= self.file_len && self.chunks.len() < MAX_CHUNKS {
             self.file.seek(SeekFrom::Start(pos))?;
             let mut head = [0u8; 8];
             if self.file.read_exact(&mut head).is_err() {
@@ -234,9 +246,47 @@ impl Riff {
         Ok(body)
     }
 
+    /// Locates the audio from `ds64` and the file length rather than from the chunk walk, for the
+    /// `RF64`/`BW64` files whose headers the walk cannot be trusted on.
+    ///
+    /// Real files from a Max/MSP rig get this wrong in two compounding ways. The `data` chunk's
+    /// 32-bit size field holds the *low 32 bits* of the true size instead of the `0xFFFFFFFF`
+    /// sentinel that says "read `ds64`" — so a 14GB take reads as its bottom 2GB, 1m34s of an
+    /// 11m12s recording. And the header carries a duplicate: a second copy of the `fmt ` body
+    /// followed by a second `data` chunk, so the audio actually begins 24 bytes later than the
+    /// first `data` chunk claims. Correcting only the size would read from the earlier offset, and
+    /// 24 is not a multiple of the 232-byte frame, so every channel would be shifted into its
+    /// neighbour.
+    ///
+    /// Both fall out of one observation: in these files the audio runs to the end, so its body must
+    /// begin at `file_len - dataSize`. That is a derivation, not a guess, and it is checked rather
+    /// than trusted — the four bytes before the derived offset must be `data`. A well-formed file
+    /// with the audio last derives the same chunk the walk found; one with chunks *after* the audio
+    /// fails the check and keeps the walk's answer.
+    fn derive_rf64_data(&mut self) -> io::Result<Option<(u64, u64)>> {
+        if !self.form.uses_ds64() {
+            return Ok(None);
+        }
+        let Some(ds64) = self.ds64 else { return Ok(None) };
+        let size = ds64.data_size;
+        // 20 is the smallest offset a `data` body could have: 12 bytes of RIFF header, then a
+        // chunk header. Anything less means the arithmetic did not land on a real chunk.
+        if size == 0 || size > self.file_len || self.file_len - size < 20 {
+            return Ok(None);
+        }
+        let offset = self.file_len - size;
+        self.file.seek(SeekFrom::Start(offset - 8))?;
+        let mut tag = [0u8; 4];
+        if self.file.read_exact(&mut tag).is_err() {
+            return Ok(None);
+        }
+        Ok((&tag == b"data").then_some((offset, size)))
+    }
+
     /// The audio chunk's absolute offset and resolved byte length.
     pub fn data_chunk(&self) -> Option<(u64, u64)> {
-        self.find(b"data").map(|c| (c.body_offset, c.size))
+        self.rf64_data
+            .or_else(|| self.find(b"data").map(|c| (c.body_offset, c.size)))
     }
 
 }
@@ -415,5 +465,160 @@ mod tests {
         assert!(!riff.chunks.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
-}
 
+    /// A **well-formed** RF64 whose audio is last must be unaffected by the derivation: it finds the
+    /// same chunk the walk did. This is the guard that the malformed-file handling below cannot
+    /// change what correct files do.
+    #[test]
+    fn a_well_formed_rf64_derives_the_same_data_chunk_the_walk_found() {
+        let dir = tmp_dir("rf64ok");
+        let data_len = 400usize;
+        let mut ds64 = Vec::new();
+        ds64.extend_from_slice(&0u64.to_le_bytes());
+        ds64.extend_from_slice(&(data_len as u64).to_le_bytes());
+        ds64.extend_from_slice(&100u64.to_le_bytes());
+        ds64.extend_from_slice(&0u32.to_le_bytes());
+        let mut bytes = build(
+            b"RF64",
+            &[(b"ds64", ds64), (b"fmt ", vec![1u8; 16]), (b"data", vec![7u8; data_len])],
+        );
+        let at = bytes.len() - data_len - 4;
+        bytes[at..at + 4].copy_from_slice(&SIZE_IN_DS64.to_le_bytes());
+
+        let riff = Riff::open(write(&dir, "ok.wav", &bytes)).unwrap();
+        let walked = riff.find(b"data").unwrap();
+        assert_eq!(riff.data_chunk(), Some((walked.body_offset, walked.size)));
+        assert_eq!(riff.data_chunk().unwrap().1, data_len as u64);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An RF64 with a chunk **after** the audio must keep the walk's answer: `file_len - dataSize`
+    /// lands inside or past the audio there, so the derivation must decline rather than guess.
+    #[test]
+    fn a_chunk_after_the_audio_makes_the_derivation_decline() {
+        let dir = tmp_dir("rf64trailing");
+        let data_len = 400usize;
+        let mut ds64 = Vec::new();
+        ds64.extend_from_slice(&0u64.to_le_bytes());
+        ds64.extend_from_slice(&(data_len as u64).to_le_bytes());
+        ds64.extend_from_slice(&100u64.to_le_bytes());
+        ds64.extend_from_slice(&0u32.to_le_bytes());
+        let mut bytes = build(
+            b"RF64",
+            &[
+                (b"ds64", ds64),
+                (b"fmt ", vec![1u8; 16]),
+                (b"data", vec![7u8; data_len]),
+                (b"cue ", vec![0u8; 40]),
+            ],
+        );
+        // Sentinel on the data chunk, which sits before the trailing `cue `.
+        let at = bytes.len() - 40 - 8 - data_len - 4;
+        bytes[at..at + 4].copy_from_slice(&SIZE_IN_DS64.to_le_bytes());
+
+        let riff = Riff::open(write(&dir, "trail.wav", &bytes)).unwrap();
+        let walked = riff.find(b"data").unwrap();
+        assert_eq!(
+            riff.data_chunk(),
+            Some((walked.body_offset, walked.size)),
+            "the derivation must not hijack a file whose audio is not last"
+        );
+        assert!(riff.find(b"cue ").is_some(), "and the trailing chunk is still reachable");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The real Max/MSP shape: the `data` size field holds the **low 32 bits** of the true size
+    /// rather than the sentinel, *and* the header carries a duplicate `fmt ` body plus a second
+    /// `data` chunk, so the audio begins 24 bytes later than the first `data` chunk claims.
+    ///
+    /// Both must be corrected together. Fixing only the size would read from the earlier offset,
+    /// and the 24-byte shift is not a whole number of frames, so every channel would be read into
+    /// its neighbour's place — audible nonsense that still looks like a plausible waveform.
+    #[test]
+    fn a_truncated_size_and_a_duplicated_header_still_locate_the_whole_audio() {
+        let dir = tmp_dir("maxmsp");
+        let channels = 58usize;
+        let block_align = channels * 4;
+        let frames = 500usize;
+        let data_len = frames * block_align;
+
+        let fmt_body = {
+            let mut v = Vec::new();
+            v.extend_from_slice(&3u16.to_le_bytes());
+            v.extend_from_slice(&(channels as u16).to_le_bytes());
+            v.extend_from_slice(&96_000u32.to_le_bytes());
+            v.extend_from_slice(&((96_000 * block_align) as u32).to_le_bytes());
+            v.extend_from_slice(&(block_align as u16).to_le_bytes());
+            v.extend_from_slice(&32u16.to_le_bytes());
+            v
+        };
+
+        // Hand-assembled to reproduce the exact layout: RF64 / ds64 / fmt / data(bad size) /
+        // duplicated fmt body / data(0) / audio.
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"RF64");
+        b.extend_from_slice(&SIZE_IN_DS64.to_le_bytes());
+        b.extend_from_slice(b"WAVE");
+        b.extend_from_slice(b"ds64");
+        b.extend_from_slice(&28u32.to_le_bytes());
+        let riff_size_at = b.len();
+        b.extend_from_slice(&0u64.to_le_bytes()); // riffSize, patched below
+        b.extend_from_slice(&(data_len as u64).to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes()); // sampleCount: zero, as the real files have
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(b"fmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&fmt_body);
+        b.extend_from_slice(b"data");
+        // The low 32 bits of the true size, exactly as the real files carry.
+        b.extend_from_slice(&((data_len as u64 & 0xFFFF_FFFF) as u32).to_le_bytes());
+        b.extend_from_slice(&fmt_body); // the duplicate
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&0u32.to_le_bytes());
+        let audio_at = b.len();
+        for f in 0..frames {
+            for c in 0..channels {
+                b.extend_from_slice(&((c * 1000 + f) as f32).to_le_bytes());
+            }
+        }
+        let riff_size = b.len() as u64 - 8;
+        b[riff_size_at..riff_size_at + 8].copy_from_slice(&riff_size.to_le_bytes());
+
+        let path = write(&dir, "max.wav", &b);
+        let riff = Riff::open(&path).unwrap();
+        let (offset, size) = riff.data_chunk().expect("a data chunk");
+        assert_eq!(offset, audio_at as u64, "the audio starts after the *second* data header");
+        assert_eq!(size, data_len as u64, "and runs to the end of the file");
+        assert_eq!(
+            (riff.file_len - offset) % block_align as u64,
+            0,
+            "the offset must land on a frame boundary, or every channel shifts"
+        );
+
+        // And it decodes to the right channels, which is what the alignment is really about.
+        let info = crate::model::wavread::probe(&path).unwrap();
+        assert_eq!(info.channels, channels);
+        assert_eq!(info.frame_count, frames as u64);
+        let mut frames_out: Vec<Vec<f32>> = vec![Vec::new(); channels];
+        crate::model::wavread::WavFrames::open(&path)
+            .unwrap()
+            .read_into(0, frames, &mut frames_out)
+            .unwrap();
+        for c in [0usize, 1, 29, 57] {
+            assert_eq!(frames_out[c][0], (c * 1000) as f32, "channel {c} frame 0");
+            assert_eq!(frames_out[c][frames - 1], (c * 1000 + frames - 1) as f32);
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A plain `RIFF` file must be untouched by any of this — no `ds64`, nothing to derive from.
+    #[test]
+    fn a_plain_riff_file_is_unaffected_by_the_rf64_derivation() {
+        let dir = tmp_dir("plainok");
+        let bytes = build(b"RIFF", &[(b"fmt ", vec![1u8; 16]), (b"data", vec![9u8; 64])]);
+        let riff = Riff::open(write(&dir, "p.wav", &bytes)).unwrap();
+        let walked = riff.find(b"data").unwrap();
+        assert_eq!(riff.data_chunk(), Some((walked.body_offset, 64)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
