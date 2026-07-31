@@ -31,6 +31,13 @@ pub struct MenuBar {
     /// checkmark — e.g. dot-matrix mode when it's on. Mirrors `Toolbar::active_actions`:
     /// `App::render` clears and repopulates it every frame from live toggle state.
     pub active_actions: HashSet<Action>,
+    /// Actions the active buffer will refuse, rendered dimmed. Repopulated every frame from
+    /// `App::action_allowed_on_streamed_buffer` — the *same* predicate that decides what
+    /// `handle_action` permits, so what the menu shows and what pressing it does cannot disagree.
+    ///
+    /// Dimmed entries still dispatch. Greying says "this will not work" up front; the refusal
+    /// dialog then says *why*, which is more use than a keypress that silently does nothing.
+    pub disabled_actions: HashSet<Action>,
     open: Option<usize>,
     selected: usize,
     item_rects: Vec<Rect>,
@@ -164,6 +171,7 @@ impl MenuBar {
         Self {
             items,
             active_actions: HashSet::new(),
+            disabled_actions: HashSet::new(),
             open: None,
             selected: 0,
             item_rects: Vec::new(),
@@ -324,11 +332,22 @@ impl MenuBar {
                     .saturating_sub(label.chars().count())
                     .saturating_sub(checkmark.chars().count())
                     .saturating_sub(e.shortcut.chars().count());
+                let disabled = self.disabled_actions.contains(&e.action);
                 let line = if self.selected == i {
                     // Selected: one uniform highlight rather than juggling a third accent
-                    // color against it, which would risk a low-contrast clash.
-                    let style = Style::default().fg(theme::HIGHLIGHT_FG).bg(theme::HIGHLIGHT_BG);
+                    // color against it, which would risk a low-contrast clash. A disabled entry
+                    // keeps the highlight — it is still where the cursor is — but in the dim
+                    // foreground, so "selected" and "unavailable" read at the same time.
+                    let fg = if disabled { theme::BORDER } else { theme::HIGHLIGHT_FG };
+                    let style = Style::default().fg(fg).bg(theme::HIGHLIGHT_BG);
                     Line::styled(format!("{label}{checkmark}{}{}", " ".repeat(pad), e.shortcut), style)
+                } else if disabled {
+                    // One flat dim colour across the whole row, shortcut included: a peach
+                    // shortcut beside a greyed label would advertise a key that does nothing.
+                    Line::styled(
+                        format!("{label}{checkmark}{}{}", " ".repeat(pad), e.shortcut),
+                        Style::default().fg(theme::BORDER),
+                    )
                 } else {
                     Line::from(vec![
                         Span::styled(label, Style::default().fg(theme::CHROME_FG)),
