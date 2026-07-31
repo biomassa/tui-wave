@@ -178,14 +178,16 @@ impl Toolbar {
                 ("Reload",  "^l".to_string(),    Action::ReloadBuffer),
             ],
         }];
-        // No shortcut column: Save As has one but the other two have none, and showing a lone
-        // shortcut beside two blanks reads worse than showing none at all.
+        // Named in the toolbar's own camelCase style rather than the menus' — these read as
+        // commands on a hint panel, not as menu entries, so no trailing ellipsis either. No
+        // shortcut column: Save As has one but the other two have none, and a lone shortcut beside
+        // two blanks reads worse than none at all.
         let streamed = vec![ToolGroup {
             label: "STREAMED (read-only)",
             buttons: vec![
-                ("Save As...", String::new(), Action::SaveAs),
-                ("Remove Empty Channels...", String::new(), Action::RemoveEmptyChannels),
-                ("Export Channels...", String::new(), Action::ExportChannels),
+                ("saveAs", String::new(), Action::SaveAs),
+                ("removeEmptyChannels", String::new(), Action::RemoveEmptyChannels),
+                ("exportChannels", String::new(), Action::ExportChannels),
             ],
         }];
 
@@ -261,6 +263,12 @@ impl Toolbar {
             rects.push((Rect { x, y, width: btn_w, height: 1 }, *action));
             let label_style = if self.active_actions.contains(action) {
                 Style::default().fg(theme::ACTIVE)
+            } else if self.streamed_buffer && shortcut.is_empty() {
+                // Everywhere else the peach belongs to the *shortcut*, and the label stays in
+                // chrome text. These buttons have no shortcut to carry it, so the label takes it
+                // instead — otherwise the only commands that work on a streamed buffer would be
+                // the only ones rendered as inert text.
+                Style::default().fg(theme::SHORTCUT)
             } else {
                 chrome
             };
@@ -274,19 +282,27 @@ impl Toolbar {
     }
 
     /// Number of rows the toolbar needs at `width`. `App` uses this to size the chrome row.
-    pub fn rows_needed(&self, width: u16, focus: Focus) -> u16 {
-        let (_, _, rows) = self.build(self.groups_for(focus), Rect { x: 0, y: 0, width, height: u16::MAX });
-        rows.max(1)
-    }
-
-    /// Rows to reserve for the toolbar regardless of focus — the tallest of the three command
-    /// sets — so the chrome height (and the layout below it) doesn't jump when switching panels.
+    /// Rows to reserve for the toolbar in **every** state — the tallest command set there is — so
+    /// the chrome height, and the whole layout below it, never moves.
+    ///
+    /// Measured over the sets directly rather than through `groups_for`, because that one
+    /// substitutes the short `streamed` set for the waveform one: reserving from it made the panel
+    /// shrink whenever a streamed buffer was active and jump on the frame the substitution took
+    /// effect (user report). The ordinary waveform set is the tallest of them all, so reserving it
+    /// unconditionally is both the fix and the simplest statement of the rule.
     pub fn reserved_rows(&self, width: u16) -> u16 {
-        [Focus::Waveform, Focus::Files, Focus::Buffers]
+        [&self.waveform, &self.files, &self.buffers, &self.streamed]
             .into_iter()
-            .map(|f| self.rows_needed(width, f))
+            .map(|groups| self.rows_for(width, groups))
             .max()
             .unwrap_or(1)
+    }
+
+    /// Rows `groups` needs at `width`.
+    fn rows_for(&self, width: u16, groups: &[ToolGroup]) -> u16 {
+        let (_, _, rows) =
+            self.build(groups, Rect { x: 0, y: 0, width, height: u16::MAX });
+        rows.max(1)
     }
 
     /// Renders the toolbar. The first group (Play) is a row-0 prefix; the remaining sections
@@ -408,6 +424,12 @@ mod tests {
             vec![Action::SaveAs, Action::RemoveEmptyChannels, Action::ExportChannels],
             "a streamed buffer shows only what works on it"
         );
+        let labels: Vec<&str> = bar.streamed[0].buttons.iter().map(|(l, _, _)| *l).collect();
+        assert_eq!(
+            labels,
+            vec!["saveAs", "removeEmptyChannels", "exportChannels"],
+            "named in the toolbar's own style, without the menus' ellipsis"
+        );
         assert_eq!(
             actions(&bar, Focus::Files),
             actions(&Toolbar::new(&HashMap::new()), Focus::Files),
@@ -418,5 +440,36 @@ mod tests {
             actions(&Toolbar::new(&HashMap::new()), Focus::Buffers),
             "and so is the Buffers set"
         );
+    }
+
+    /// The reserved height must not depend on focus *or* on whether a streamed buffer is active.
+    ///
+    /// The chrome sits above everything else, so any change to its height moves the whole layout.
+    /// Reserving from `groups_for` made it shrink in streamed mode — that set is one row where the
+    /// waveform set is four — and the panel visibly jumped (user report, while scrolling).
+    #[test]
+    fn the_reserved_height_is_the_same_in_every_state() {
+        for width in [80u16, 100, 150, 190, 240, 400] {
+            let mut bar = Toolbar::new(&HashMap::new());
+            let ordinary = bar.reserved_rows(width);
+            bar.streamed_buffer = true;
+            assert_eq!(
+                bar.reserved_rows(width),
+                ordinary,
+                "width {width}: a streamed buffer changed the reserved height"
+            );
+            // And it is the tallest set's height, so nothing is ever clipped.
+            let tallest = [&bar.waveform, &bar.files, &bar.buffers, &bar.streamed]
+                .into_iter()
+                .map(|g| bar.rows_for(width, g))
+                .max()
+                .unwrap();
+            assert_eq!(ordinary, tallest, "width {width}: must reserve the tallest set");
+            assert_eq!(
+                ordinary,
+                bar.rows_for(width, &bar.waveform),
+                "width {width}: the ordinary waveform set is expected to be the tallest"
+            );
+        }
     }
 }
