@@ -52,11 +52,14 @@ pub struct Config {
     /// that again for playback (`AudioEngine::try_new` takes an owned `Vec<Vec<f32>>`) plus
     /// ~1/30 for the waveform pyramid, so the real peak is a little over twice this.
     ///
-    /// 1536MB by default: comfortably above any file that worked before this existed (so no
-    /// previously-editable file silently becomes read-only), and far below where a 20GB take
-    /// would have to try. A fixed number rather than a fraction of free memory on purpose —
-    /// the same file behaving differently on different days makes a bug report unreasonable
-    /// to act on.
+    /// 4096MB (4GB) by default. That keeps everything short enough to actually edit on the
+    /// editable path — a 4GB decoded buffer is ~3 minutes of 58-channel 96kHz float, or over
+    /// six of the same at 48kHz — while the multi-hour captures this streaming mode exists for
+    /// are still far above it. Note the doubling above: a 4GB buffer with playback running is
+    /// ~8GB resident, so this is a real commitment on a machine with 16GB.
+    ///
+    /// A fixed number rather than a fraction of free memory on purpose — the same file behaving
+    /// differently on different days makes a bug report unreasonable to act on.
     pub max_resident_mb: u64,
     /// Key bindings as `ActionName → [key-string, ...]`. Empty on first launch; the UI layer
     /// fills in all defaults (via `keymap::fill_missing_keybindings`) before building the
@@ -82,7 +85,7 @@ impl Default for Config {
             dot_matrix_gradient: true,
             time_ruler: true,
             cdp_dir: default_cdp_dir(),
-            max_resident_mb: 1536,
+            max_resident_mb: 4096,
             keybindings: HashMap::new(),
         }
     }
@@ -183,7 +186,7 @@ mod tests {
             dot_matrix_gradient: true,
             time_ruler: false,
             cdp_dir: "/opt/cdp/bin".into(),
-            max_resident_mb: 1536,
+            max_resident_mb: 4096,
             keybindings: HashMap::new(),
         };
         let toml_string = toml::to_string_pretty(&config).unwrap();
@@ -245,7 +248,7 @@ mod tests {
             dot_matrix_gradient: true,
             time_ruler: false,
             cdp_dir: String::new(),
-            max_resident_mb: 1536,
+            max_resident_mb: 4096,
             keybindings: HashMap::new(),
         };
         config.save();
@@ -273,5 +276,15 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&bak).unwrap(), "transient_threshold_db = 7.0\n");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The streaming threshold is a number users are told (it decides whether a file opens
+    /// editable or read-only), so it is pinned rather than left to drift with an edit elsewhere.
+    #[test]
+    fn the_resident_budget_default_is_four_gigabytes() {
+        assert_eq!(Config::default().max_resident_mb, 4096);
+        // And it is what an absent or empty config file yields, not just the struct default.
+        let parsed: Config = toml::from_str("").expect("an empty config must parse");
+        assert_eq!(parsed.max_resident_mb, 4096);
     }
 }
