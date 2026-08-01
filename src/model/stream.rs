@@ -72,8 +72,11 @@ impl WindowSet {
 /// `None` whenever any other handle happens to exist, turning "a clone is alive somewhere" into
 /// a silent no-op at the exact moment the user asked for something.
 pub struct StreamedSamples {
-    /// `Mutex` purely because the render path holds `&Document` while reading, and reading
-    /// needs to seek. Never contended — the UI is single-threaded.
+    /// `Mutex` because the render path holds `&Document` while reading, and reading needs to seek.
+    ///
+    /// Contended only lightly, and only during playback: the streamed playback reader
+    /// (`audio::stream_source`) pulls one block every ~170ms on its own thread, so a redraw can
+    /// queue behind one block read. Everything else that touches this is the single-threaded UI.
     frames: Mutex<WavFrames>,
     info: WavInfo,
     channel_map: RwLock<Vec<usize>>,

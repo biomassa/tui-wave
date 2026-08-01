@@ -133,9 +133,7 @@ impl StreamedSource {
             cancel,
         }
     }
-}
 
-impl StreamedSource {
     /// The flag that stops this source's reader thread, so the engine can cancel it *before*
     /// handing the source to rodio's player and losing its own reference to it.
     ///
@@ -232,10 +230,11 @@ fn spawn_reader(
             _ => None,
         };
         let mut frame = start_frame;
-        // Both reused across blocks: `read_all_channels` refills `decoded` in place, and a
-        // 56-channel block is ~1.8MB that would otherwise be reallocated several times a second.
+        // Reused across blocks: `read_all_channels` refills this in place, and a 56-channel block
+        // is ~1.8MB that would otherwise be reallocated several times a second. The folded output
+        // cannot be reused the same way — it is handed to the ring — but at ~64KB a few times a
+        // second that allocation does not matter.
         let mut decoded: Vec<Vec<f32>> = Vec::new();
-        let mut interleaved: Vec<f32> = Vec::with_capacity(BLOCK_FRAMES * out_channels);
 
         while !cancel.load(Ordering::Relaxed) {
             if frame >= end {
@@ -254,12 +253,9 @@ fn spawn_reader(
             if read == 0 {
                 break;
             }
-            interleaved.clear();
-            fold.block(&decoded, read, out_channels, &mut interleaved);
-            let mut block = PlaybackBlock {
-                start_frame: frame,
-                samples: std::mem::take(&mut interleaved),
-            };
+            let mut samples = Vec::with_capacity(read * out_channels);
+            fold.block(&decoded, read, out_channels, &mut samples);
+            let mut block = PlaybackBlock { start_frame: frame, samples };
             loop {
                 match tx.send_timeout(block, SEND_POLL) {
                     Ok(()) => break,
@@ -272,7 +268,6 @@ fn spawn_reader(
                     Err(SendTimeoutError::Disconnected(_)) => return,
                 }
             }
-            interleaved = Vec::with_capacity(BLOCK_FRAMES * out_channels);
             frame += read;
         }
     });

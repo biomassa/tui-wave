@@ -209,7 +209,21 @@ struct RegionExportOptions {
     fade_out_ms: Option<f32>,
 }
 
-/// Number of samples covered by `ms` milliseconds at `sample_rate` (rounded).
+/// A throwaway engine for previewing loose samples — the Files-panel audition and the CDP
+/// previews — started from the beginning.
+///
+/// These have no `Document` and no waveform pyramid behind them, so the fold-down gains are
+/// measured straight from the samples (one pass, next to a decode or a full clone that dominate
+/// it). Bundling that with construction is what keeps a fifth preview site from quietly getting a
+/// raw multichannel sum: there is no order of calls left to remember.
+fn preview_engine(channels: Vec<Vec<f32>>, sample_rate: u32) -> Option<AudioEngine> {
+    let fold = dsp::Fold::from_channels(&channels);
+    let engine = AudioEngine::try_new(channels, sample_rate)?;
+    engine.set_fold(fold);
+    engine.play(0);
+    Some(engine)
+}
+
 /// The audio engine a document needs, whichever storage it uses.
 ///
 /// The one place the choice is made, so no code path can accidentally hand a streamed
@@ -222,6 +236,7 @@ fn engine_for(document: &Document) -> Option<AudioEngine> {
     }
 }
 
+/// Number of samples covered by `ms` milliseconds at `sample_rate` (rounded).
 fn ms_to_samples(ms: f32, sample_rate: u32) -> usize {
     ((ms / 1000.0) * sample_rate as f32).round() as usize
 }
@@ -3010,7 +3025,7 @@ impl App {
         let user_cdp_dir = crate::model::cdp::CdpCatalog::user_dir();
         let (cdp_catalog, cdp_catalog_warnings) =
             crate::model::cdp::CdpCatalog::load(Some(&user_cdp_dir));
-        Self {
+        let mut app = Self {
             should_quit: false,
             key_map,
             picker: None,
@@ -3101,7 +3116,12 @@ impl App {
             cdp_chain_edit_target: None,
             cdp_chain_edit_suspended: Vec::new(),
             cdp_pending_chain_run: None,
-        }
+        };
+        // The engine above is built before the pyramid that measures the fold gains, so a document
+        // opened through the constructor would otherwise play at unity — a raw multichannel sum
+        // straight into the limiter — until the first edit happened to refresh it.
+        app.refresh_fold_gains();
+        app
     }
 
     fn active_doc(&self) -> Option<&Document> {
@@ -3972,6 +3992,27 @@ impl App {
             .unwrap_or(&[])
     }
 
+    /// Peak level of every *logical* channel of the active document, or `None` if the pyramid
+    /// does not cover them all yet (mid-build, or a build that failed).
+    ///
+    /// Free: `WaveformCache` records each channel's peak as a by-product of being built, so
+    /// nothing here re-reads a sample — which is what lets both callers work on a 30GB streamed
+    /// file with no I/O at all.
+    ///
+    /// Indexed through `Document::source_channel`, because the pyramid covers every *source*
+    /// channel and is deliberately never filtered: on a streamed buffer that has had channels
+    /// removed, a logical channel's peak lives at its source index, not at its position on
+    /// screen. Reading by position would answer with a dropped channel's peak. Both things that
+    /// ask for these peaks — Remove Empty Channels and the playback fold-down — need that same
+    /// indirection, which is why it is stated here once rather than at each of them.
+    fn active_channel_peaks(&self) -> Option<Vec<f32>> {
+        let document = self.active_doc()?;
+        let caches = self.active_caches();
+        (0..document.channel_count())
+            .map(|i| caches.get(document.source_channel(i)).map(|c| c.peak()))
+            .collect()
+    }
+
     /// Rebuilds the active document's per-channel min/max pyramids from its resident samples.
     ///
     /// **A no-op on a streamed document**, and that guard is load-bearing rather than defensive:
@@ -3987,20 +4028,22 @@ impl App {
         // Kept index-parallel to `documents` here rather than at every push/close site, so a new
         // buffer can never render against another one's overview.
         self.waveform_caches.resize_with(self.documents.len(), Vec::new);
-        if self.active_doc().is_some_and(|doc| doc.is_streaming()) {
-            return;
+        // Rebuilding is skipped for a streamed document (its pyramid is read off disk once, by
+        // `build_streaming_caches`), but re-deriving the gains is *not*: undo/redo of Remove
+        // Empty Channels reaches here, and it re-indexes every logical channel, moving channels
+        // between legs. Returning before the refresh left a streamed buffer's gains frozen at
+        // whatever the first build measured.
+        if !self.active_doc().is_some_and(|doc| doc.is_streaming()) {
+            let built: Vec<WaveformCache> = self
+                .active_doc()
+                .map(|doc| doc.channels.iter().map(|c| WaveformCache::build(c)).collect())
+                .unwrap_or_default();
+            if let Some(slot) = self.waveform_caches.get_mut(self.active_document) {
+                *slot = built;
+            }
         }
-        let built: Vec<WaveformCache> = self
-            .active_doc()
-            .map(|doc| doc.channels.iter().map(|c| WaveformCache::build(c)).collect())
-            .unwrap_or_default();
-        if let Some(slot) = self.waveform_caches.get_mut(self.active_document) {
-            *slot = built;
-        }
-        // The peaks the fold-down's gains are derived from have just been re-measured, so this is
-        // where they are re-read. Sited here rather than at each editing command because this is
-        // already the one place every path that can change a peak — load, cut, normalize, gain,
-        // undo — converges on.
+        // Sited here rather than at each editing command because this is already the one place
+        // every path that can change a peak — load, cut, normalize, gain, undo — converges on.
         self.refresh_fold_gains();
     }
 
@@ -10260,23 +10303,14 @@ impl App {
                 self.dialog = None;
             }
             ChainRunFinish::PreviewWholeChain => {
-                let fold = dsp::Fold::from_channels(&final_frame.running_buffer);
-                self.cdp_preview_audio = AudioEngine::try_new(final_frame.running_buffer, final_frame.running_rate);
-                if let Some(audio) = &self.cdp_preview_audio {
-                    audio.set_fold(fold);
-                    audio.play(0);
-                }
+                self.cdp_preview_audio =
+                    preview_engine(final_frame.running_buffer, final_frame.running_rate);
                 self.dialog = Some(Dialog::CdpChainEditor);
             }
             ChainRunFinish::PreviewStepInProgress(resume) => {
                 let channels = final_frame.running_buffer;
                 let sample_rate = final_frame.running_rate;
-                let fold = dsp::Fold::from_channels(&channels);
-                self.cdp_preview_audio = AudioEngine::try_new(channels.clone(), sample_rate);
-                if let Some(audio) = &self.cdp_preview_audio {
-                    audio.set_fold(fold);
-                    audio.play(0);
-                }
+                self.cdp_preview_audio = preview_engine(channels.clone(), sample_rate);
                 let values = resume.fields.iter().map(CdpField::to_value).collect();
                 let second_input_doc = resume.second_input.as_ref().and_then(CdpSecondInput::selected_doc_index);
                 let formant_selections = formant_field_selections(&resume.fields);
@@ -10916,11 +10950,7 @@ impl App {
                                 // first produced segment as a representative sample.
                                 let channels = output.results.into_iter().next().unwrap_or_default();
                                 self.cdp_preview_audio =
-                                    AudioEngine::try_new(channels.clone(), output.sample_rate);
-                                if let Some(audio) = &self.cdp_preview_audio {
-                                    audio.set_fold(dsp::Fold::from_channels(&channels));
-                                    audio.play(0);
-                                }
+                                    preview_engine(channels.clone(), output.sample_rate);
                                 let values = pending.fields.iter().map(CdpField::to_value).collect();
                                 let second_input_doc = pending
                                     .second_input
@@ -11407,19 +11437,13 @@ impl App {
         // `dsp::channels_below_peaks`. Guarded on having a cache per channel: mid-build (or if
         // the build failed) the peaks would be missing and every channel would read as empty.
         let below = if doc.is_streaming() {
-            // The pyramid covers every *source* channel and is never filtered, so a logical
-            // channel's peak is looked up through the map rather than by position.
-            let peaks: Vec<Option<f32>> = (0..total)
-                .map(|i| self.active_caches().get(doc.source_channel(i)).map(|c| c.peak()))
-                .collect();
-            if peaks.iter().any(Option::is_none) {
+            let Some(peaks) = self.active_channel_peaks() else {
                 self.dialog = Some(Dialog::Info {
                     message: "The waveform overview is still being built — try again in a moment."
                         .to_string(),
                 });
                 return;
-            }
-            let peaks: Vec<f32> = peaks.into_iter().flatten().collect();
+            };
             dsp::channels_below_peaks(&peaks, threshold_db)
         } else {
             dsp::channels_below(&doc.channels, threshold_db)
@@ -11458,6 +11482,10 @@ impl App {
             // index *i* means a different source channel than the cached bitmap at *i* holds.
             // `render` only truncates, which cannot fix an index whose meaning changed.
             self.graphics_protocols.clear();
+            // Same reasoning for the fold gains: dropping channels re-indexes the survivors, so
+            // which leg each one feeds changes. This path deliberately skips
+            // `after_sample_mutation` (nothing about the samples moved), so it asks directly.
+            self.refresh_fold_gains();
             self.dialog = Some(Dialog::Info {
                 message: format!(
                     "Removed {removed} channel{} below {threshold_db} dBFS — {} left.",
@@ -11567,14 +11595,8 @@ impl App {
                 // `load_file` and `reload_buffer_from_disk` both correctly show — would pop
                 // up under the user's own Up/Down and make the list unusable.
                 if let Ok(document) = crate::model::io::load_audio(&path) {
-                    let fold = dsp::Fold::from_channels(&document.channels);
-                    self.audition_audio = AudioEngine::try_new(document.channels, document.sample_rate);
-                    if let Some(audio) = &self.audition_audio {
-                        audio.set_fold(fold);
-                    }
-                    if let Some(engine) = &self.audition_audio {
-                        engine.play(0);
-                    }
+                    self.audition_audio =
+                        preview_engine(document.channels, document.sample_rate);
                     self.audition_playing_path = Some(path);
                 }
             }
@@ -12169,9 +12191,10 @@ impl App {
         // A streaming engine: it holds the same `StreamedSamples` handle this document does and
         // reads blocks off disk as it plays (`audio::stream_source`), so playback costs a bounded
         // ring of a few hundred KB rather than the second full copy of every sample that made it
-        // out of scope here originally.
-        self.audio = self.active_doc().and_then(engine_for);
-        self.audio_sample_rate = Some(info.sample_rate);
+        // out of scope here originally. Via `rebuild_audio` rather than by hand, so this cannot
+        // fall behind what building an engine involves — the gains it also refreshes are a no-op
+        // here (no pyramid yet) and arrive when `build_streaming_caches` finishes.
+        self.rebuild_audio();
         self.pending_cache_build = true;
     }
 
@@ -12532,16 +12555,7 @@ impl App {
     /// Separate from [`Self::refresh_fold_gains`] so the derivation can be tested without an
     /// audio device — which the machines this is built on do not always have.
     fn active_document_fold(&self) -> Option<dsp::Fold> {
-        let document = self.active_doc()?;
-        let caches = self.active_caches();
-        // Through `source_channel`, because the pyramid covers every *source* channel and is
-        // deliberately never filtered — on a streamed buffer that has had channels removed, a
-        // logical channel's peak lives at its source index, not its position on screen. Indexing
-        // by position would read a dropped channel's peak and mis-weight the leg.
-        let peaks: Option<Vec<f32>> = (0..document.channel_count())
-            .map(|i| caches.get(document.source_channel(i)).map(|c| c.peak()))
-            .collect();
-        Some(dsp::Fold::from_peaks(&peaks?))
+        Some(dsp::Fold::from_peaks(&self.active_channel_peaks()?))
     }
 
     fn sync_playhead_from_audio(&mut self) {
@@ -13790,8 +13804,12 @@ impl App {
                     message: "Only one channel — nothing to remove.".to_string(),
                 });
             } else {
-                self.dialog =
-                    Some(Dialog::RemoveEmptyChannels { input: TextInput::fresh("-48.0") });
+                // Prefilled from the constant the playback fold-down counts active channels by,
+                // so "empty" means one thing in the app rather than two literals that agree by
+                // habit. Change it there and both move together.
+                self.dialog = Some(Dialog::RemoveEmptyChannels {
+                    input: TextInput::fresh(&format!("{:.1}", dsp::FOLD_ACTIVE_PEAK_DB)),
+                });
             }
             return;
         }
