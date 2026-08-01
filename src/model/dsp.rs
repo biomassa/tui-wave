@@ -59,13 +59,27 @@ pub fn channels_below(channels: &[Vec<f32>], threshold_db: f32) -> Vec<usize> {
 /// Both entry points share this body so the linear-domain comparison and the strictly-below
 /// boundary rule documented above can only ever be defined once.
 pub fn channels_below_peaks(peaks: &[f32], threshold_db: f32) -> Vec<usize> {
-    let threshold = db_to_linear(threshold_db);
     peaks
         .iter()
         .enumerate()
-        .filter(|&(_, &peak)| peak < threshold)
+        .filter(|&(_, &peak)| !channel_carries_signal(peak, threshold_db))
         .map(|(i, _)| i)
         .collect()
+}
+
+/// Whether a channel with this peak counts as carrying signal at `threshold_db`.
+///
+/// The single definition of that boundary, so the two things that ask it can never disagree:
+/// Remove Empty Channels, which *drops* everything this rejects, and the playback fold-down
+/// ([`Fold::from_peaks`]), whose leg divisors count everything it accepts. If they drifted, the
+/// app would drop a channel it was still weighting a leg by, or vice versa.
+///
+/// At-or-above, so a channel sitting exactly on the threshold is kept and counted — at a boundary,
+/// keeping audio is the recoverable choice. Compared in the **linear** domain (see
+/// [`channels_below_peaks`]): digital silence is 0.0, which `linear_to_db` would clamp to -120 dB
+/// and thereby smuggle above any threshold below that.
+pub fn channel_carries_signal(peak: f32, threshold_db: f32) -> bool {
+    peak >= db_to_linear(threshold_db)
 }
 
 /// The linear gain that brings `peak` up (or down) to `target_db` dBFS, or `None` when the
@@ -118,6 +132,18 @@ pub fn playback_channels(source_channels: usize) -> usize {
     }
 }
 
+/// Whether a source of `source_channels` emitting `out_channels` is folding down rather than
+/// passing channels through.
+///
+/// Derived from the counts rather than re-testing [`DOWNMIX_MIN_CHANNELS`], because `out_channels`
+/// is captured when playback starts while the source's own channel count can shrink underneath it
+/// (Remove Empty Channels, mid-playback). Both the per-frame and the per-block path ask this, so
+/// the same audio cannot fold on one and pass through on the other — which would mean a file
+/// sounding different depending on whether it was opened resident or streamed.
+pub fn is_folding(source_channels: usize, out_channels: usize) -> bool {
+    out_channels == 2 && source_channels > out_channels
+}
+
 /// A channel counts toward its leg's divisor only if its peak reaches this.
 ///
 /// The same -48 dBFS Remove Empty Channels defaults to, and deliberately so: a channel the user
@@ -168,16 +194,14 @@ impl Fold {
     ///
     /// `peaks` is indexed by *logical* channel — what the user sees, and what plays.
     pub fn from_peaks(peaks: &[f32]) -> Self {
-        let threshold = db_to_linear(FOLD_ACTIVE_PEAK_DB);
-        // At-or-above counts as active, mirroring `channels_below`'s strictly-below test for
-        // what Remove Empty Channels drops — so a channel sitting exactly on the threshold is
-        // one this app keeps *and* counts, rather than falling between the two rules.
+        // Through the shared predicate, so "carries signal" means exactly what it means to Remove
+        // Empty Channels — the channels that one drops are the channels this one stops counting.
         let active = |leg: usize| {
             peaks
                 .iter()
                 .skip(leg)
                 .step_by(2)
-                .filter(|&&peak| peak >= threshold)
+                .filter(|&&peak| channel_carries_signal(peak, FOLD_ACTIVE_PEAK_DB))
                 .count()
                 .max(1)
         };
@@ -240,7 +264,7 @@ impl Fold {
         out: &mut Vec<f32>,
     ) {
         out.reserve(frames * out_channels);
-        let downmix = channels.len() >= DOWNMIX_MIN_CHANNELS && out_channels == 2;
+        let downmix = is_folding(channels.len(), out_channels);
         for frame in 0..frames {
             if downmix {
                 let (left, right) = self.frame(channels, frame);

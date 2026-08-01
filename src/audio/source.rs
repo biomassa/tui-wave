@@ -16,7 +16,7 @@ use crate::model::dsp;
 /// `loop_start` indefinitely instead of stopping at the end of the data.
 ///
 /// A document with 3 or more channels is **folded down to stereo** as it plays (see
-/// `dsp::downmix_frame`) rather than handed to the device as-is: a 56-channel source on a stereo
+/// `dsp::Fold`) rather than handed to the device as-is: a 56-channel source on a stereo
 /// device is not something the device can render, and what a mixer does with the surplus channels
 /// is its own business — dropping them, wrapping them, or refusing. Folding here means what is
 /// heard is defined by this app and is the same on every device.
@@ -102,21 +102,22 @@ impl Iterator for DocumentSource {
             }
         }
 
-        let value = if self.out_channels < self.data.len() {
-            // Folding down: compute both legs when the left one is asked for, so a frame's sum
-            // is walked once rather than once per leg.
-            let folded = match (self.channel_cursor, self.folded) {
-                (0, _) | (_, None) => {
+        let value = if dsp::is_folding(self.data.len(), self.out_channels) {
+            // Folding down: both legs are computed together on the first one asked for, so a
+            // frame's sum is walked once rather than once per leg. `folded` is cleared on every
+            // frame advance below, which is what makes "already computed" mean "this frame".
+            let (left, right) = match self.folded {
+                Some(pair) => pair,
+                None => {
                     let pair = self.fold.frame(&self.data, self.frame_index);
                     self.folded = Some(pair);
                     pair
                 }
-                (_, Some(pair)) => pair,
             };
             if self.channel_cursor == 0 {
-                folded.0
+                left
             } else {
-                folded.1
+                right
             }
         } else {
             self.data[self.channel_cursor][self.frame_index]
