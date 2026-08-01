@@ -118,55 +118,140 @@ pub fn playback_channels(source_channels: usize) -> usize {
     }
 }
 
-/// One frame folded to stereo: odd-numbered channels (1, 3, 5… — even *indices*) summed into the
-/// left leg, even-numbered ones into the right, each then limited to `ceiling`.
+/// A channel counts toward its leg's divisor only if its peak reaches this.
 ///
-/// The sums are raw, with no 1/N or 1/√N attenuation: what the limiter is for is exactly to
-/// contain them, and dividing by the channel count would make a 30-channel take play far quieter
-/// than the same material as a stereo file.
+/// The same -48 dBFS Remove Empty Channels defaults to, and deliberately so: a channel the user
+/// would call empty is a channel that must not quieten the ones carrying signal. See
+/// [`Fold::from_peaks`] for why that matters so much on these files.
+pub const FOLD_ACTIVE_PEAK_DB: f32 = -48.0;
+
+/// How the stereo fold-down sounds: a gain per leg, and the limiter ceiling they feed.
 ///
-/// Reads defensively (`get`) rather than indexing, since a caller may hand this a block whose
-/// channels are ragged at end of file.
-pub fn downmix_frame(channels: &[Vec<f32>], frame: usize, ceiling: f32) -> (f32, f32) {
-    let mut left = 0.0f32;
-    let mut right = 0.0f32;
-    for (index, channel) in channels.iter().enumerate() {
-        let sample = channel.get(frame).copied().unwrap_or(0.0);
-        if index % 2 == 0 {
-            left += sample;
-        } else {
-            right += sample;
-        }
-    }
-    (tanh_limit(left, ceiling), tanh_limit(right, ceiling))
+/// Bundled rather than passed as three loose floats because these only ever make sense together —
+/// the gains are chosen *relative* to the ceiling they are about to be limited against, and the
+/// source, the streamed reader and the engine each need to carry all of them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fold {
+    pub left_gain: f32,
+    pub right_gain: f32,
+    pub ceiling: f32,
 }
 
-/// Appends `frames` frames of `channels` to `out` as interleaved playback samples — folded to
-/// stereo and limited when there are 3+ channels, passed through verbatim otherwise.
-///
-/// The block form of [`downmix_frame`], for the streamed reader, which has whole blocks in hand
-/// rather than one frame at a time. `out_channels` is captured once when playback starts (the
-/// count already announced to the device) rather than re-derived per block, so a channel map
-/// edited mid-playback can change what is heard but never how many channels arrive.
-pub fn playback_block(
-    channels: &[Vec<f32>],
-    frames: usize,
-    out_channels: usize,
-    ceiling: f32,
-    out: &mut Vec<f32>,
-) {
-    out.reserve(frames * out_channels);
-    let downmix = channels.len() >= DOWNMIX_MIN_CHANNELS && out_channels == 2;
-    for frame in 0..frames {
-        if downmix {
-            let (left, right) = downmix_frame(channels, frame, ceiling);
-            out.push(left);
-            out.push(right);
-        } else {
-            for channel in 0..out_channels {
-                out.push(
-                    channels.get(channel).and_then(|c| c.get(frame)).copied().unwrap_or(0.0),
-                );
+impl Default for Fold {
+    /// Unity gain at the standard ceiling — a raw sum. What a document with no measured peaks
+    /// gets (the pyramid is still building, or there is nothing to measure), and never wrong so
+    /// much as un-tuned: it is exactly the behaviour that existed before gains did.
+    fn default() -> Self {
+        Self {
+            left_gain: 1.0,
+            right_gain: 1.0,
+            ceiling: db_to_linear(PLAYBACK_CEILING_DB),
+        }
+    }
+}
+
+impl Fold {
+    /// Per-leg gains of `1/√n`, where `n` counts only the channels on that leg whose peak reaches
+    /// [`FOLD_ACTIVE_PEAK_DB`].
+    ///
+    /// **Active channels, not channel slots**, and that distinction is the whole design. These
+    /// files are mostly empty by construction — a 56-channel rig commonly runs 48 dead inputs —
+    /// so a divisor counting slots would attenuate a 56-channel take by 14.5 dB whether it holds
+    /// 6 channels of music or 56. The material would come out near-inaudible and the limiter,
+    /// which the divisor exists to unburden, would never engage at all. Counting what is actually
+    /// contributing gives the same protection on a dense take (14 loud channels a leg go from
+    /// ~18 dB into the limiter to ~6) while leaving a sparse one at a sensible monitoring level.
+    ///
+    /// √n rather than n because separately-miked sources are largely uncorrelated: their sum
+    /// grows as √n, so dividing by √n holds the perceived level roughly constant. Correlated
+    /// material still sums faster than that, which is what the limiter is left to catch.
+    ///
+    /// `peaks` is indexed by *logical* channel — what the user sees, and what plays.
+    pub fn from_peaks(peaks: &[f32]) -> Self {
+        let threshold = db_to_linear(FOLD_ACTIVE_PEAK_DB);
+        // At-or-above counts as active, mirroring `channels_below`'s strictly-below test for
+        // what Remove Empty Channels drops — so a channel sitting exactly on the threshold is
+        // one this app keeps *and* counts, rather than falling between the two rules.
+        let active = |leg: usize| {
+            peaks
+                .iter()
+                .skip(leg)
+                .step_by(2)
+                .filter(|&&peak| peak >= threshold)
+                .count()
+                .max(1)
+        };
+        Self {
+            left_gain: 1.0 / (active(0) as f32).sqrt(),
+            right_gain: 1.0 / (active(1) as f32).sqrt(),
+            ..Self::default()
+        }
+    }
+
+    /// [`Self::from_peaks`] for a document whose samples are in hand, measuring the peaks itself.
+    ///
+    /// For the callers with no waveform pyramid to read peaks out of — the Files-panel audition
+    /// preview and the CDP preview, each of which plays a freshly-loaded buffer of its own. Costs
+    /// one pass over the samples, which is why the main engine uses `from_peaks` against the
+    /// pyramid's already-measured peaks instead.
+    pub fn from_channels(channels: &[Vec<f32>]) -> Self {
+        let peaks: Vec<f32> = channels.iter().map(|c| channel_peak(c)).collect();
+        Self::from_peaks(&peaks)
+    }
+
+    /// One frame folded to stereo: odd-numbered channels (1, 3, 5… — even *indices*) summed into
+    /// the left leg, even-numbered ones into the right, each scaled by its leg's gain and then
+    /// limited.
+    ///
+    /// The gain lands *before* the limiter, so it sets both the output level and how hard the
+    /// limiter is driven — which is the point: an under-driven limiter is a transparent one.
+    ///
+    /// Reads defensively (`get`) rather than indexing, since a caller may hand this a block whose
+    /// channels are ragged at end of file.
+    pub fn frame(&self, channels: &[Vec<f32>], frame: usize) -> (f32, f32) {
+        let mut left = 0.0f32;
+        let mut right = 0.0f32;
+        for (index, channel) in channels.iter().enumerate() {
+            let sample = channel.get(frame).copied().unwrap_or(0.0);
+            if index % 2 == 0 {
+                left += sample;
+            } else {
+                right += sample;
+            }
+        }
+        (
+            tanh_limit(left * self.left_gain, self.ceiling),
+            tanh_limit(right * self.right_gain, self.ceiling),
+        )
+    }
+
+    /// Appends `frames` frames of `channels` to `out` as interleaved playback samples — folded to
+    /// stereo when there are 3+ channels, passed through verbatim otherwise.
+    ///
+    /// The block form of [`Self::frame`], for the streamed reader, which has whole blocks in hand
+    /// rather than one frame at a time. `out_channels` is captured once when playback starts (the
+    /// count already announced to the device) rather than re-derived per block, so a channel map
+    /// edited mid-playback can change what is heard but never how many channels arrive.
+    pub fn block(
+        &self,
+        channels: &[Vec<f32>],
+        frames: usize,
+        out_channels: usize,
+        out: &mut Vec<f32>,
+    ) {
+        out.reserve(frames * out_channels);
+        let downmix = channels.len() >= DOWNMIX_MIN_CHANNELS && out_channels == 2;
+        for frame in 0..frames {
+            if downmix {
+                let (left, right) = self.frame(channels, frame);
+                out.push(left);
+                out.push(right);
+            } else {
+                for channel in 0..out_channels {
+                    out.push(
+                        channels.get(channel).and_then(|c| c.get(frame)).copied().unwrap_or(0.0),
+                    );
+                }
             }
         }
     }
@@ -295,54 +380,135 @@ mod tests {
     /// the user use, against the 0-based indices the code uses.
     #[test]
     fn odd_numbered_channels_go_left_and_even_numbered_right() {
-        let ceiling = db_to_linear(PLAYBACK_CEILING_DB);
+        let fold = Fold::default();
+        let ceiling = fold.ceiling;
         // ch1=0.1 ch2=0.2 ch3=0.3 ch4=0.4 ch5=0.5  ->  L = 0.1+0.3+0.5, R = 0.2+0.4
         let channels = vec![vec![0.1f32], vec![0.2], vec![0.3], vec![0.4], vec![0.5]];
-        let (left, right) = downmix_frame(&channels, 0, ceiling);
+        let (left, right) = fold.frame(&channels, 0);
         assert!((left - tanh_limit(0.9, ceiling)).abs() < 1e-6);
         assert!((right - tanh_limit(0.6, ceiling)).abs() < 1e-6);
         // An odd channel count leaves the last channel on the left leg, unpaired.
-        let (left, right) = downmix_frame(&[vec![0.5f32], vec![0.0], vec![0.5]], 0, ceiling);
+        let (left, right) = fold.frame(&[vec![0.5f32], vec![0.0], vec![0.5]], 0);
         assert!((left - tanh_limit(1.0, ceiling)).abs() < 1e-6);
         assert_eq!(right, 0.0);
     }
 
-    /// The sum is raw — no 1/N — which is what makes a many-channel take play at a comparable
-    /// level to a stereo one instead of far quieter, and what the limiter then contains.
+    /// The gain law: 1/√n per leg, counting only channels that carry signal.
     #[test]
-    fn the_fold_down_sums_raw_and_leans_on_the_limiter() {
-        let ceiling = db_to_linear(PLAYBACK_CEILING_DB);
+    fn the_divisor_is_the_square_root_of_the_active_channels_on_each_leg() {
+        // 6 channels, all loud: 3 per leg, so both legs divide by √3.
+        let fold = Fold::from_peaks(&[0.9; 6]);
+        assert!((fold.left_gain - 1.0 / 3.0f32.sqrt()).abs() < 1e-6);
+        assert!((fold.right_gain - 1.0 / 3.0f32.sqrt()).abs() < 1e-6);
+
+        // Legs are counted independently: 4 active on the left, 1 on the right.
+        let fold = Fold::from_peaks(&[0.9, 0.9, 0.9, 0.0, 0.9, 0.0, 0.9, 0.0]);
+        assert!((fold.left_gain - 0.5).abs() < 1e-6, "1/√4");
+        assert!((fold.right_gain - 1.0).abs() < 1e-6, "1/√1");
+
+        // The ceiling is not something `from_peaks` gets to move.
+        assert_eq!(fold.ceiling, Fold::default().ceiling);
+    }
+
+    /// The case the whole design turns on: on these files most channels are empty, and an empty
+    /// channel must not quieten the ones carrying signal.
+    ///
+    /// A 56-channel take with 6 live channels would be attenuated 14.5 dB by a divisor counting
+    /// slots — inaudible, and the limiter it exists to unburden would never engage anyway.
+    #[test]
+    fn silent_channels_do_not_dilute_the_ones_with_signal() {
+        let mut peaks = vec![0.0f32; 56];
+        for ch in [0, 1, 2, 3, 4, 5] {
+            peaks[ch] = 0.25;
+        }
+        let fold = Fold::from_peaks(&peaks);
+        // 3 active per leg, not 28.
+        assert!((fold.left_gain - 1.0 / 3.0f32.sqrt()).abs() < 1e-6);
+        assert!((fold.right_gain - 1.0 / 3.0f32.sqrt()).abs() < 1e-6);
+
+        // Three uncorrelated channels at -12 dBFS peaking together reach 0.75; folded, that must
+        // still land at a usable monitoring level rather than 20 dB down.
+        let frame: Vec<Vec<f32>> = (0..56).map(|c| vec![if c < 6 { 0.25f32 } else { 0.0 }]).collect();
+        let (left, _) = fold.frame(&frame, 0);
+        assert!(
+            linear_to_db(left) > -14.0,
+            "a sparse take must monitor at a usable level, got {} dBFS",
+            linear_to_db(left)
+        );
+    }
+
+    /// A channel below the activity threshold does not count, one at or above it does — the same
+    /// boundary rule Remove Empty Channels uses, so the two can never disagree about which
+    /// channels are "empty".
+    #[test]
+    fn the_activity_threshold_matches_what_remove_empty_channels_keeps() {
+        let exact = db_to_linear(FOLD_ACTIVE_PEAK_DB);
+        // Exactly at the threshold: kept by `channels_below` (strictly-below drops), so counted.
+        assert!(channels_below(&[vec![exact; 4]], FOLD_ACTIVE_PEAK_DB).is_empty());
+        let fold = Fold::from_peaks(&[exact, exact]);
+        assert!((fold.left_gain - 1.0).abs() < 1e-6);
+
+        // Just below it: dropped there, uncounted here. Two active channels become one, so the
+        // divisor falls from √2 to √1.
+        let under = exact * 0.99;
+        let fold = Fold::from_peaks(&[0.9, 0.9, under, under]);
+        assert!((fold.left_gain - 1.0).abs() < 1e-6, "only channel 1 is active on the left");
+        assert!((fold.right_gain - 1.0).abs() < 1e-6, "only channel 2 is active on the right");
+    }
+
+    /// A leg with nothing on it still needs a finite gain — dividing by √0 would be an infinity
+    /// straight into the limiter.
+    #[test]
+    fn a_leg_with_no_active_channels_gets_unity_not_infinity() {
+        let fold = Fold::from_peaks(&[0.0; 8]);
+        assert_eq!(fold.left_gain, 1.0);
+        assert_eq!(fold.right_gain, 1.0);
+        let fold = Fold::from_peaks(&[]);
+        assert!(fold.left_gain.is_finite() && fold.right_gain.is_finite());
+    }
+
+    /// The dense case the law exists to soften: 14 loud channels a leg used to arrive ~18 dB into
+    /// the limiter (a fully saturated square wave); √14 brings that down to a few dB while still
+    /// reaching a healthy level.
+    #[test]
+    fn a_dense_take_is_no_longer_slammed_into_the_limiter() {
+        let peaks = vec![0.5f32; 28];
+        let fold = Fold::from_peaks(&peaks);
         let channels: Vec<Vec<f32>> = (0..28).map(|_| vec![0.5f32]).collect();
-        let (left, right) = downmix_frame(&channels, 0, ceiling);
-        // 14 channels of 0.5 per leg = 7.0 raw, driven hard into the limiter but still bounded.
-        assert!(left > 0.88 && left < ceiling, "left leg sits just under the ceiling: {left}");
+        let (left, right) = fold.frame(&channels, 0);
+
+        // 14 × 0.5 = 7.0 raw, ÷√14 = 1.87 — still over the ceiling, so the limiter does engage,
+        // but by ~6 dB rather than ~18.
+        let drive_db = linear_to_db(7.0 * fold.left_gain / fold.ceiling);
+        assert!((4.0..9.0).contains(&drive_db), "drive should be a few dB, got {drive_db}");
+        assert!(left <= fold.ceiling, "and it is still bounded");
+        assert!(left > 0.7, "while staying at a healthy monitoring level");
         assert!((left - right).abs() < 1e-6, "both legs carry identical material here");
-        // An average would have landed at 0.5; a raw sum plus limiting lands near full scale.
-        assert!(left > 0.5);
     }
 
     /// A frame past the end of a ragged block reads as silence rather than panicking — blocks
     /// run short at end of file, and the reader must not be the thing that notices.
     #[test]
     fn a_frame_past_the_end_of_a_ragged_block_is_silence() {
-        let ceiling = db_to_linear(PLAYBACK_CEILING_DB);
+        let fold = Fold::default();
         let channels = vec![vec![0.5f32, 0.5], vec![0.5], vec![]];
-        let (left, right) = downmix_frame(&channels, 1, ceiling);
-        assert!((left - tanh_limit(0.5, ceiling)).abs() < 1e-6);
+        let (left, right) = fold.frame(&channels, 1);
+        assert!((left - tanh_limit(0.5, fold.ceiling)).abs() < 1e-6);
         assert_eq!(right, 0.0);
     }
 
-    /// One and two channel blocks are copied through the block path verbatim: no fold-down and,
-    /// critically, no limiting.
+    /// One and two channel blocks are copied through the block path verbatim: no fold-down, no
+    /// gain and, critically, no limiting.
     #[test]
     fn one_and_two_channel_blocks_pass_through_untouched() {
-        let ceiling = db_to_linear(PLAYBACK_CEILING_DB);
+        // Gains that would be audible if they were ever applied here.
+        let fold = Fold { left_gain: 0.25, right_gain: 0.25, ..Fold::default() };
         let mut out = Vec::new();
-        playback_block(&[vec![1.0f32, -1.0]], 2, 1, ceiling, &mut out);
+        fold.block(&[vec![1.0f32, -1.0]], 2, 1, &mut out);
         assert_eq!(out, vec![1.0, -1.0], "full-scale mono must not be softened");
 
         out.clear();
-        playback_block(&[vec![0.9f32, 0.8], vec![-0.9, -0.8]], 2, 2, ceiling, &mut out);
+        fold.block(&[vec![0.9f32, 0.8], vec![-0.9, -0.8]], 2, 2, &mut out);
         assert_eq!(out, vec![0.9, -0.9, 0.8, -0.8], "interleaved, verbatim");
     }
 
@@ -351,15 +517,15 @@ mod tests {
     /// audio sounded different depending on how the file happened to be opened.
     #[test]
     fn the_block_path_matches_the_per_frame_path() {
-        let ceiling = db_to_linear(PLAYBACK_CEILING_DB);
+        let fold = Fold::from_peaks(&[0.9, 0.4, 0.0, 0.8, 0.9, 0.0, 0.3]);
         let channels: Vec<Vec<f32>> = (0..7)
             .map(|c| (0..5).map(|f| (c as f32 * 0.13 - f as f32 * 0.07).sin()).collect())
             .collect();
         let mut out = Vec::new();
-        playback_block(&channels, 5, 2, ceiling, &mut out);
+        fold.block(&channels, 5, 2, &mut out);
         assert_eq!(out.len(), 10);
         for frame in 0..5 {
-            let (left, right) = downmix_frame(&channels, frame, ceiling);
+            let (left, right) = fold.frame(&channels, frame);
             assert_eq!(out[frame * 2], left);
             assert_eq!(out[frame * 2 + 1], right);
         }

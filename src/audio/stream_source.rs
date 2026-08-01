@@ -13,7 +13,7 @@
 //! samples out of memory. It is bounded so that playing a 30GB file cannot slowly buffer a 30GB
 //! ring — read-ahead is fixed at a couple of seconds regardless of file length.
 //!
-//! The fold-down itself is shared with the resident path (`dsp::playback_block`), so the same
+//! The fold-down itself is shared with the resident path (`dsp::Fold`), so the same
 //! audio sounds identical whichever way the file was opened.
 
 use std::num::NonZero;
@@ -88,6 +88,7 @@ impl StreamedSource {
     ///
     /// `loop_start`/`loop_end` mean exactly what they do for `DocumentSource`: `Some`/`Some`
     /// wraps indefinitely, a lone `loop_end` stops there, neither plays to end of file.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         stream: Arc<StreamedSamples>,
         sample_rate: u32,
@@ -96,6 +97,7 @@ impl StreamedSource {
         playing: Arc<AtomicBool>,
         loop_start: Option<usize>,
         loop_end: Option<usize>,
+        fold: dsp::Fold,
     ) -> Self {
         // Captured once, here: it is announced to the device and cannot change afterwards, so a
         // channel map edited mid-playback (Remove Empty Channels) alters what is heard on the
@@ -108,7 +110,16 @@ impl StreamedSource {
 
         let (tx, rx) = bounded(RING_BLOCKS);
         let cancel = Arc::new(AtomicBool::new(false));
-        spawn_reader(stream, out_channels, start_frame, loop_start, loop_end, tx, cancel.clone());
+        spawn_reader(
+            stream,
+            out_channels,
+            start_frame,
+            loop_start,
+            loop_end,
+            fold,
+            tx,
+            cancel.clone(),
+        );
 
         Self {
             rx,
@@ -200,17 +211,18 @@ impl Drop for StreamedSource {
 
 /// Reads `stream` block by block from `start_frame`, folds each block to `out_channels`, and
 /// hands it to `tx` until the range is exhausted, the receiver goes away, or `cancel` is set.
+#[allow(clippy::too_many_arguments)]
 fn spawn_reader(
     stream: Arc<StreamedSamples>,
     out_channels: usize,
     start_frame: usize,
     loop_start: Option<usize>,
     loop_end: Option<usize>,
+    fold: dsp::Fold,
     tx: Sender<PlaybackBlock>,
     cancel: Arc<AtomicBool>,
 ) {
     thread::spawn(move || {
-        let ceiling = dsp::db_to_linear(dsp::PLAYBACK_CEILING_DB);
         let total = stream.len_samples();
         let end = loop_end.unwrap_or(total).min(total);
         // A loop is only honoured if it describes a real range; otherwise this falls through to
@@ -243,7 +255,7 @@ fn spawn_reader(
                 break;
             }
             interleaved.clear();
-            dsp::playback_block(&decoded, read, out_channels, ceiling, &mut interleaved);
+            fold.block(&decoded, read, out_channels, &mut interleaved);
             let mut block = PlaybackBlock {
                 start_frame: frame,
                 samples: std::mem::take(&mut interleaved),
@@ -317,6 +329,16 @@ mod tests {
         loop_start: Option<usize>,
         loop_end: Option<usize>,
     ) -> (StreamedSource, Arc<AtomicUsize>, Arc<AtomicBool>) {
+        start_with(path, from, loop_start, loop_end, dsp::Fold::default())
+    }
+
+    fn start_with(
+        path: &std::path::Path,
+        from: usize,
+        loop_start: Option<usize>,
+        loop_end: Option<usize>,
+        fold: dsp::Fold,
+    ) -> (StreamedSource, Arc<AtomicUsize>, Arc<AtomicBool>) {
         let stream = Arc::new(StreamedSamples::open(path).unwrap());
         let position = Arc::new(AtomicUsize::new(0));
         let playing = Arc::new(AtomicBool::new(true));
@@ -328,6 +350,7 @@ mod tests {
             playing.clone(),
             loop_start,
             loop_end,
+            fold,
         );
         (source, position, playing)
     }
@@ -349,10 +372,10 @@ mod tests {
         // The same audio as a resident document, folded by the per-frame path.
         let resident: Vec<Vec<f32>> =
             (0..channels).map(|c| (0..frames).map(|f| sample(c, f)).collect()).collect();
-        let ceiling = dsp::db_to_linear(dsp::PLAYBACK_CEILING_DB);
+        let fold = dsp::Fold::default();
         let mut want: Vec<f32> = Vec::new();
         for f in 0..frames {
-            let (l, r) = dsp::downmix_frame(&resident, f, ceiling);
+            let (l, r) = fold.frame(&resident, f);
             want.push(l);
             want.push(r);
         }
@@ -395,7 +418,7 @@ mod tests {
         let (mut source, position, _) = start(&path, 1_500, None, None);
         assert_eq!(position.load(Ordering::Relaxed), 1_500, "before a single sample is pulled");
 
-        let ceiling = dsp::db_to_linear(dsp::PLAYBACK_CEILING_DB);
+        let ceiling = dsp::Fold::default().ceiling;
         let left = source.next().unwrap();
         let right = source.next().unwrap();
         assert!((left - dsp::tanh_limit(sample(0, 1500) + sample(2, 1500), ceiling)).abs() < 1e-6);
@@ -474,6 +497,7 @@ mod tests {
             playing,
             None,
             None,
+            dsp::Fold::default(),
         );
         source.next();
         drop(source);
