@@ -22,6 +22,12 @@ fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     ui::terminal::install_panic_hook();
 
+    // Before anything can create one: a CDP job directory tagged with this PID can only be the
+    // work of an earlier process that was killed before it could clean up, and leaving it there
+    // lets a job land in it and read its leftovers as its own output. See the function's own
+    // comment for why this belongs here and not in `CdpRunner::new`.
+    cdp::runner::sweep_stale_temp_dirs();
+
     // A file argument is *queued*, not decoded here: `App::load_file` is what decides whether a
     // file fits in RAM or has to open streamed and read-only (`model::stream`), and decoding
     // eagerly at startup bypassed that entirely — so the command line, the primary way a large

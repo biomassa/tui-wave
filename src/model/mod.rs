@@ -1,3 +1,4 @@
+pub mod atomic;
 pub mod bwf;
 pub mod channel_export;
 pub mod cdp;

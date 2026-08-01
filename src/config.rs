@@ -150,7 +150,13 @@ impl Config {
             return;
         }
         if let Ok(toml_string) = toml::to_string_pretty(self) {
-            let _ = std::fs::write(&path, toml_string);
+            // Staged and renamed (`model::atomic`). This runs after *every* toggle, and a plain
+            // write that is interrupted leaves a truncated TOML — which `load` silently treats as
+            // a parse failure and replaces with defaults, so a crash at the wrong moment used to
+            // cost the user every setting and keybinding with no warning.
+            let _ = crate::model::atomic::write_atomically(&path, |staging| {
+                std::fs::write(staging, toml_string)
+            });
         }
     }
 }

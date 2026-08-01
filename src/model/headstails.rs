@@ -103,6 +103,33 @@ pub fn save(audio_path: impl AsRef<Path>, marks: &[usize], sample_rate: u32) {
     let _ = std::fs::write(&path, marks_to_text(marks, sample_rate));
 }
 
+/// Moves the sidecar alongside an audio file that has just been renamed.
+///
+/// Renaming moved only the audio, so `take1.headstails` stayed behind while the file it described
+/// became `take2.wav` — the marks then silently vanished on the next load, and the stale sidecar
+/// sat in the folder forever. Anything that renames audio has to move this too, which is why the
+/// operation lives here beside the naming rule rather than at the call sites.
+///
+/// Best-effort, like [`save`]: a rename that already succeeded must not be reported as failed
+/// over its sidecar. Does nothing when there is no sidecar to move.
+pub fn rename_sidecar(old_audio: impl AsRef<Path>, new_audio: impl AsRef<Path>) {
+    let old = sidecar_path(old_audio);
+    let new = sidecar_path(new_audio);
+    if old == new || !old.exists() {
+        return;
+    }
+    let _ = std::fs::rename(&old, &new);
+}
+
+/// Deletes the sidecar belonging to an audio file that has just been deleted, so it does not
+/// outlive the audio it describes.
+pub fn remove_sidecar(audio_path: impl AsRef<Path>) {
+    let path = sidecar_path(audio_path);
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +152,51 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).ok();
         }
+    }
+
+    /// Renaming the audio must carry the sidecar with it, or the marks are silently lost on the
+    /// next load and a stale sidecar is stranded in the folder.
+    #[test]
+    fn renaming_the_audio_moves_the_sidecar_with_it() {
+        let dir = TempDir::new("rename");
+        let old = dir.wav("take1.wav");
+        let new = dir.wav("take2.wav");
+        save(&old, &[48_000, 96_000], 48_000);
+        assert!(sidecar_path(&old).exists());
+
+        rename_sidecar(&old, &new);
+
+        assert!(!sidecar_path(&old).exists(), "the old sidecar must not be left behind");
+        assert_eq!(
+            load(&new, 48_000),
+            vec![48_000, 96_000],
+            "and the marks must load from the new name"
+        );
+    }
+
+    /// A rename with no sidecar to move is a no-op, not an error — most files have no marks.
+    #[test]
+    fn renaming_without_a_sidecar_does_nothing() {
+        let dir = TempDir::new("rename_none");
+        let old = dir.wav("take1.wav");
+        let new = dir.wav("take2.wav");
+        rename_sidecar(&old, &new);
+        assert!(!sidecar_path(&new).exists());
+    }
+
+    /// Deleting the audio must take the sidecar too, so a later file with the same stem cannot
+    /// inherit marks that were never its own.
+    #[test]
+    fn deleting_the_audio_removes_the_sidecar() {
+        let dir = TempDir::new("delete");
+        let audio = dir.wav("take.wav");
+        save(&audio, &[1_000, 2_000], 48_000);
+        assert!(sidecar_path(&audio).exists());
+
+        remove_sidecar(&audio);
+
+        assert!(!sidecar_path(&audio).exists());
+        assert!(load(&audio, 48_000).is_empty(), "a fresh file of the same name starts clean");
     }
 
     #[test]

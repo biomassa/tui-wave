@@ -259,39 +259,38 @@ pub fn save_streamed_wav(
     head_tail_marks: &[usize],
     mut progress: impl FnMut(u64, u64) -> bool,
 ) -> std::io::Result<()> {
-    let mut writer =
-        super::wavwrite::WavWriter::create(path, channels, sample_rate, depth, dither)?;
-    let mut block: Vec<Vec<f32>> = Vec::new();
-    let mut at = 0u64;
-    let fail = |e: std::io::Error, path: &Path| {
-        let _ = std::fs::remove_file(path);
-        e
-    };
+    // Staged like every other save. Two things fall out of that here beyond crash safety: the
+    // partial file this used to delete by hand on error is now a staging file that
+    // `write_atomically` removes, and — the behaviour change that matters — cancelling no longer
+    // deletes whatever was already at `path`. Aiming a streamed Save As at an existing file and
+    // then pressing Esc used to remove that file.
+    super::atomic::write_atomically(path, |staging| {
+        let mut writer =
+            super::wavwrite::WavWriter::create(staging, channels, sample_rate, depth, dither)?;
+        let mut block: Vec<Vec<f32>> = Vec::new();
+        let mut at = 0u64;
 
-    while at < total_frames {
-        let n = match read_block(at, super::wavread::READ_BLOCK_FRAMES, &mut block) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) => return Err(fail(e, path)),
-        };
-        let planes: Vec<&[f32]> = block.iter().map(|c| c.as_slice()).collect();
-        if let Err(e) = writer.write_planes(&planes, n) {
-            return Err(fail(e, path));
+        while at < total_frames {
+            let n = match read_block(at, super::wavread::READ_BLOCK_FRAMES, &mut block) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => return Err(e),
+            };
+            let planes: Vec<&[f32]> = block.iter().map(|c| c.as_slice()).collect();
+            writer.write_planes(&planes, n)?;
+            at += n as u64;
+            if !progress(at, total_frames) {
+                drop(writer);
+                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
+            }
         }
-        at += n as u64;
-        if !progress(at, total_frames) {
-            drop(writer);
-            let _ = std::fs::remove_file(path);
-            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
-        }
-    }
 
-    if let Err(e) = writer.finalize() {
-        return Err(fail(e, path));
-    }
-    // After the audio is safely on disk, so a failed write never leaves metadata describing a
-    // file that was not finished — the same ordering `save_wav_with` uses.
-    let _ = super::bwf::append_aux_chunks(path, markers, &None);
+        writer.finalize()?;
+        // After the audio is safely written, so a failed write never leaves metadata describing a
+        // file that was not finished — the same ordering `save_wav_with` uses.
+        let _ = super::bwf::append_aux_chunks(staging, markers, &None);
+        Ok(())
+    })?;
     super::headstails::save(path, head_tail_marks, sample_rate);
     Ok(())
 }
@@ -422,29 +421,37 @@ pub fn save_wav_with(
         bits_per_sample: depth.bits(),
         sample_format: depth.sample_format(),
     };
-    let mut writer = WavWriter::create(path, spec)?;
-    match depth {
-        BitDepth::Float32 => {
-            for i in 0..doc.len_samples() {
-                for channel in &doc.channels {
-                    writer.write_sample(channel[i])?;
+    // Staged, then renamed over `path` — see `model::atomic`. This is the path quick Save takes,
+    // where the target is the user's own recording: writing into it directly (as this did) meant
+    // a disk-full or a crash mid-loop left a truncated file where the take had been. The marker
+    // chunks are appended *inside* the staging window too, so what is published is the finished
+    // article rather than a file that gains its metadata a moment after appearing.
+    super::atomic::write_atomically(path, |staging| -> color_eyre::Result<()> {
+        let mut writer = WavWriter::create(staging, spec)?;
+        match depth {
+            BitDepth::Float32 => {
+                for i in 0..doc.len_samples() {
+                    for channel in &doc.channels {
+                        writer.write_sample(channel[i])?;
+                    }
+                }
+            }
+            BitDepth::Int16 | BitDepth::Int24 => {
+                let bits = depth.bits();
+                let mut rng = DitherRng::new();
+                for i in 0..doc.len_samples() {
+                    for channel in &doc.channels {
+                        let q = quantize(channel[i], bits, dither.then_some(&mut rng));
+                        writer.write_sample(q)?;
+                    }
                 }
             }
         }
-        BitDepth::Int16 | BitDepth::Int24 => {
-            let bits = depth.bits();
-            let mut rng = DitherRng::new();
-            for i in 0..doc.len_samples() {
-                for channel in &doc.channels {
-                    let q = quantize(channel[i], bits, dither.then_some(&mut rng));
-                    writer.write_sample(q)?;
-                }
-            }
-        }
-    }
-    writer.finalize()?;
-    // Append cue/adtl marker chunks and any preserved bext after hound's fmt/data.
-    super::bwf::append_aux_chunks(path, &doc.markers, &doc.bext)?;
+        writer.finalize()?;
+        // Append cue/adtl marker chunks and any preserved bext after hound's fmt/data.
+        super::bwf::append_aux_chunks(staging, &doc.markers, &doc.bext)?;
+        Ok(())
+    })?;
     // Head/tail marks go to their own sidecar rather than into the WAV — see
     // `model::headstails`. Done here, in the one function every save path funnels through
     // (quick Save, Save As, Save All, region export, the Buffers panel's own save), so no
@@ -573,6 +580,60 @@ mod tests {
         assert_eq!(reloaded.channels, original.channels);
 
         std::fs::remove_file(&tmp).unwrap();
+    }
+
+    /// Saving over an existing file must publish the new one and leave no staging debris in the
+    /// folder — the visible half of the write-then-rename contract.
+    #[test]
+    fn saving_over_a_file_replaces_it_and_leaves_no_staging_file() {
+        let dir = std::env::temp_dir()
+            .join(format!("tui_wave_io_atomic_{}_{:p}", std::process::id(), &"replace"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("take.wav");
+
+        let first = load_wav("tests/fixtures/stereo_sine.wav").unwrap();
+        save_wav(&first, &target).unwrap();
+        // A visibly different second save, so "the newer one won" is checkable.
+        let mut second = load_wav("tests/fixtures/stereo_sine.wav").unwrap();
+        second.channels = second.channels.iter().map(|c| c[..c.len() / 2].to_vec()).collect();
+        save_wav(&second, &target).unwrap();
+
+        let reloaded = load_wav(&target).unwrap();
+        assert_eq!(reloaded.len_samples(), second.len_samples(), "the newer save must win");
+
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "take.wav")
+            .collect();
+        assert!(leftovers.is_empty(), "staging files must not survive a save: {leftovers:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A save that cannot be written must fail without disturbing anything — no partial file at
+    /// the target, no staging file, and (the case that used to destroy data) no truncation of a
+    /// file that was already there.
+    #[test]
+    fn a_save_that_fails_writes_nothing_at_all() {
+        let dir = std::env::temp_dir()
+            .join(format!("tui_wave_io_atomic_{}_{:p}", std::process::id(), &"fail"));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A target inside a directory that does not exist: hound cannot create the file.
+        let target = dir.join("no_such_subdir").join("take.wav");
+
+        let doc = load_wav("tests/fixtures/stereo_sine.wav").unwrap();
+        assert!(save_wav(&doc, &target).is_err(), "the save must report failure");
+        assert!(!target.exists());
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(leftovers.is_empty(), "a failed save must leave nothing behind: {leftovers:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn approx_doc(samples: Vec<f32>) -> Document {

@@ -11343,6 +11343,9 @@ impl App {
             if old.exists() && std::fs::rename(old, &new_path).is_err() {
                 return; // leave the buffer untouched if the disk rename failed
             }
+            // The head/tail marks live in a sidecar named after the audio, so it has to follow
+            // the rename or the marks are lost on the next load.
+            crate::model::headstails::rename_sidecar(old, &new_path);
             self.file_panel.mark_dirty(old, false);
         }
         let dirty = self.documents[idx].dirty;
@@ -11383,6 +11386,7 @@ impl App {
         if new_path == old_path || std::fs::rename(old_path, &new_path).is_err() {
             return;
         }
+        crate::model::headstails::rename_sidecar(old_path, &new_path);
         // Keep any buffer open on this file pointed at the new name, carrying its dirty flag.
         for doc in &mut self.documents {
             if doc.path.as_deref() == Some(old_path) {
@@ -11401,6 +11405,9 @@ impl App {
         if std::fs::remove_file(path).is_err() {
             return;
         }
+        // Otherwise the sidecar outlives the audio it describes, and a later file with the same
+        // stem silently inherits marks that were never its own.
+        crate::model::headstails::remove_sidecar(path);
         self.file_panel.mark_dirty(path, false);
         self.file_panel.scan();
     }

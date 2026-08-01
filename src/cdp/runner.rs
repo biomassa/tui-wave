@@ -169,8 +169,7 @@ fn run_job(job: &Job, events: &Sender<CdpEvent>, cancel: &AtomicBool) -> Result<
     // `cargo test`, never single-threaded).
     static RUN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = RUN_SEQ.fetch_add(1, Ordering::Relaxed);
-    let temp_dir = std::env::temp_dir()
-        .join(format!("tui-wave-cdp-{}-{}-{seq}", std::process::id(), job.id));
+    let temp_dir = std::env::temp_dir().join(format!("{TEMP_DIR_PREFIX}{}-{}-{seq}", std::process::id(), job.id));
     if std::fs::create_dir_all(&temp_dir).is_err() {
         return Err(CdpError::Spawn {
             step: "setup".into(),
@@ -178,9 +177,57 @@ fn run_job(job: &Job, events: &Sender<CdpEvent>, cancel: &AtomicBool) -> Result<
         });
     }
 
-    let result = run_job_body(job, events, cancel, &temp_dir);
-    let _ = std::fs::remove_dir_all(&temp_dir);
-    result
+    // A guard rather than a call after `run_job_body`, which is what this was. Every ordinary
+    // failure inside the body is a `?`, so the plain call already covered errors and cancellation
+    // — but not a panic, which unwound straight past it, leaked the directory *and* killed the
+    // runner thread, after which `submit` silently no-ops for the rest of the session.
+    let _guard = TempDirGuard(temp_dir.clone());
+    run_job_body(job, events, cancel, &temp_dir)
+}
+
+/// Removes its directory when dropped, including while a panic unwinds.
+struct TempDirGuard(std::path::PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Names every CDP job directory, so the sweep below can recognise one.
+const TEMP_DIR_PREFIX: &str = "tui-wave-cdp-";
+
+/// Deletes CDP job directories left behind by a previous run of *this* PID.
+///
+/// A directory only outlives its job if the process died without unwinding — a kill, a power loss,
+/// a hard crash. `create_dir_all` succeeds on an existing directory, so once the OS recycles that
+/// PID, a fresh run whose `job.id` and sequence counter have both restarted at 0 lands *inside*
+/// the dead run's directory and can read its leftovers as its own output: `load_glob_outputs`
+/// scans `out_0.wav`, `out_1.wav`, … and would happily pick up a stale one.
+///
+/// Matching on our own PID makes the check exact rather than heuristic — no age threshold, and no
+/// chance of deleting a directory belonging to another instance that is still running.
+///
+/// **Call this once, at process startup, before any job can have run.** That precondition is the
+/// whole basis for "anything with our PID is stale", and it is why this is called from `main` and
+/// not from `CdpRunner::new`: the test suite builds many runners in one process, so a runner
+/// sweeping on construction would delete the live job directories of every other runner — the
+/// same PID-collision hazard that `RUN_SEQ` above exists to avoid.
+pub fn sweep_stale_temp_dirs() {
+    sweep_stale_temp_dirs_in(&std::env::temp_dir());
+}
+
+/// [`sweep_stale_temp_dirs`] against an explicit directory, so it can be tested without pointing
+/// it at the real `$TMPDIR` — where it would delete the job directories of CDP tests running
+/// concurrently in this very process. (Mirrors `Config::backup_path`'s split for the same reason.)
+fn sweep_stale_temp_dirs_in(dir: &Path) {
+    let own = format!("{TEMP_DIR_PREFIX}{}-", std::process::id());
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&own) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 fn run_job_body(
@@ -648,6 +695,39 @@ mod tests {
     use super::*;
     use crate::model::cdp::pipeline::{Invocation, OutputWavSpec, TempWavSpec};
     use std::time::Instant;
+
+    /// The startup sweep removes this PID's leftover job directories and nothing else.
+    ///
+    /// Run against a scratch directory rather than the real `$TMPDIR`: the sweep matches on our
+    /// own PID, and the CDP tests in this very process are creating live job directories under
+    /// that same PID as this runs.
+    #[test]
+    fn the_startup_sweep_removes_only_this_processs_own_leftovers() {
+        let scratch = std::env::temp_dir()
+            .join(format!("tui_wave_sweep_test_{}_{:p}", std::process::id(), &"sweep"));
+        std::fs::create_dir_all(&scratch).unwrap();
+
+        // Ours, from a hypothetical earlier run of this PID — must go.
+        let stale = scratch.join(format!("{TEMP_DIR_PREFIX}{}-7-3", std::process::id()));
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("out.wav"), b"leftover").unwrap();
+
+        // Another instance's, still running — must survive, or a sweep on one instance's startup
+        // would pull the floor out from under another's job.
+        let other = scratch.join(format!("{TEMP_DIR_PREFIX}{}-0-0", std::process::id() + 1));
+        std::fs::create_dir_all(&other).unwrap();
+        // And something that simply is not ours.
+        let unrelated = scratch.join("someone-elses-work");
+        std::fs::create_dir_all(&unrelated).unwrap();
+
+        sweep_stale_temp_dirs_in(&scratch);
+
+        assert!(!stale.exists(), "our own leftover job directory must be removed");
+        assert!(other.exists(), "another live instance's directory must be left alone");
+        assert!(unrelated.exists(), "unrelated directories must be left alone");
+
+        std::fs::remove_dir_all(&scratch).ok();
+    }
 
     fn recv_finished(runner: &CdpRunner, timeout: Duration) -> CdpEvent {
         let deadline = Instant::now() + timeout;
