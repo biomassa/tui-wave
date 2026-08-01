@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use rodio::{ChannelCount, SampleRate, Source};
 
+use crate::model::dsp;
+
 /// Plays a `Document`'s sample data directly (no decode step needed — it's already f32),
 /// incrementing a shared atomic frame counter as it yields samples. The counter runs on
 /// rodio's internal mixing thread, which lets the UI thread poll sample-accurate playback
@@ -12,10 +14,25 @@ use rodio::{ChannelCount, SampleRate, Source};
 ///
 /// When `loop_start`/`loop_end` are `Some`, playback wraps from `loop_end` back to
 /// `loop_start` indefinitely instead of stopping at the end of the data.
+///
+/// A document with 3 or more channels is **folded down to stereo** as it plays (see
+/// `dsp::downmix_frame`) rather than handed to the device as-is: a 56-channel source on a stereo
+/// device is not something the device can render, and what a mixer does with the surplus channels
+/// is its own business — dropping them, wrapping them, or refusing. Folding here means what is
+/// heard is defined by this app and is the same on every device.
 pub struct DocumentSource {
     data: Arc<Vec<Vec<f32>>>,
     sample_rate: SampleRate,
     channel_count: ChannelCount,
+    /// Channels actually emitted — 2 when folding down, else the source's own count. Kept beside
+    /// `channel_count` as a `usize` because every index and frame-advance test uses it.
+    out_channels: usize,
+    /// The current frame's fold-down, computed once when its first leg is asked for. `None` when
+    /// this source passes channels through and there is nothing to compute.
+    folded: Option<(f32, f32)>,
+    /// Linear form of `dsp::PLAYBACK_CEILING_DB`, resolved once here rather than per frame —
+    /// `db_to_linear` is a `powf`, and this runs on the mixing thread at the sample rate.
+    ceiling: f32,
     frame_index: usize,
     channel_cursor: usize,
     position: Arc<AtomicUsize>,
@@ -38,14 +55,18 @@ impl DocumentSource {
         loop_start: Option<usize>,
         loop_end: Option<usize>,
     ) -> Self {
+        let out_channels = dsp::playback_channels(data.len());
         let channel_count =
-            NonZero::new(data.len().max(1) as u16).unwrap_or(NonZero::<u16>::MIN);
+            NonZero::new(out_channels as u16).unwrap_or(NonZero::<u16>::MIN);
         let sample_rate = NonZero::new(sample_rate.max(1)).unwrap_or(NonZero::<u32>::MIN);
         position.store(start_frame, Ordering::Relaxed);
         Self {
             data,
             sample_rate,
             channel_count,
+            out_channels,
+            folded: None,
+            ceiling: dsp::db_to_linear(dsp::PLAYBACK_CEILING_DB),
             frame_index: start_frame,
             channel_cursor: 0,
             position,
@@ -78,11 +99,30 @@ impl Iterator for DocumentSource {
             }
         }
 
-        let value = self.data[self.channel_cursor][self.frame_index];
+        let value = if self.out_channels < self.data.len() {
+            // Folding down: compute both legs when the left one is asked for, so a frame's sum
+            // is walked once rather than once per leg.
+            let folded = match (self.channel_cursor, self.folded) {
+                (0, _) | (_, None) => {
+                    let pair = dsp::downmix_frame(&self.data, self.frame_index, self.ceiling);
+                    self.folded = Some(pair);
+                    pair
+                }
+                (_, Some(pair)) => pair,
+            };
+            if self.channel_cursor == 0 {
+                folded.0
+            } else {
+                folded.1
+            }
+        } else {
+            self.data[self.channel_cursor][self.frame_index]
+        };
         self.channel_cursor += 1;
-        if self.channel_cursor >= self.data.len() {
+        if self.channel_cursor >= self.out_channels {
             self.channel_cursor = 0;
             self.frame_index += 1;
+            self.folded = None;
             self.position.store(self.frame_index, Ordering::Relaxed);
         }
         Some(value as rodio::Sample)
@@ -143,6 +183,89 @@ mod tests {
             !playing.load(Ordering::Relaxed),
             "a bounded (non-looping) source must clear `playing` once it hits loop_end"
         );
+    }
+
+    /// A 1- or 2-channel document is handed to the device exactly as it always was: same channel
+    /// count, same samples, no limiter. This is the guarantee that the fold-down cannot change how
+    /// an ordinary file sounds.
+    #[test]
+    fn mono_and_stereo_play_through_unchanged() {
+        for data in [
+            vec![vec![1.0f32, -1.0, 0.5]],
+            vec![vec![1.0f32, 0.5], vec![-1.0, -0.5]],
+        ] {
+            let channels = data.len();
+            let frames = data[0].len();
+            let expected: Vec<f32> =
+                (0..frames).flat_map(|f| (0..channels).map(move |c| (c, f))).map(|(c, f)| data[c][f]).collect();
+            let source = DocumentSource::new_looped(
+                Arc::new(data),
+                44100,
+                0,
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicBool::new(true)),
+                None,
+                None,
+            );
+            assert_eq!(source.channels().get() as usize, channels);
+            let yielded: Vec<f32> = source.collect();
+            assert_eq!(yielded, expected, "{channels}-channel audio must play back verbatim");
+        }
+    }
+
+    /// 3+ channels are announced to the device as stereo and interleave as left, right, left…
+    /// — odd-numbered channels summed left, even-numbered summed right.
+    #[test]
+    fn a_multichannel_document_plays_as_a_limited_stereo_fold_down() {
+        let ceiling = crate::model::dsp::db_to_linear(crate::model::dsp::PLAYBACK_CEILING_DB);
+        // ch1..ch5 constant, two frames each.
+        let data = vec![
+            vec![0.1f32, 0.1],
+            vec![0.2, 0.2],
+            vec![0.3, 0.3],
+            vec![0.4, 0.4],
+            vec![0.5, 0.5],
+        ];
+        let position = Arc::new(AtomicUsize::new(0));
+        let source = DocumentSource::new_looped(
+            Arc::new(data),
+            44100,
+            0,
+            position.clone(),
+            Arc::new(AtomicBool::new(true)),
+            None,
+            None,
+        );
+        assert_eq!(source.channels().get(), 2, "a 5-channel file is announced as stereo");
+        let yielded: Vec<f32> = source.collect();
+
+        let left = crate::model::dsp::tanh_limit(0.1 + 0.3 + 0.5, ceiling);
+        let right = crate::model::dsp::tanh_limit(0.2 + 0.4, ceiling);
+        assert_eq!(yielded.len(), 4, "two frames of stereo, not two frames of five channels");
+        assert!((yielded[0] - left).abs() < 1e-6);
+        assert!((yielded[1] - right).abs() < 1e-6);
+        assert!((yielded[2] - left).abs() < 1e-6);
+        assert!((yielded[3] - right).abs() < 1e-6);
+        // The playhead still counts *frames*, so it stays in step with the waveform rather than
+        // running at 5/2 speed (or 2/5) because the channel count changed under it.
+        assert_eq!(position.load(Ordering::Relaxed), 2);
+    }
+
+    /// The fold-down must not disturb the loop/bounds logic, which is expressed in frames.
+    #[test]
+    fn a_folded_down_source_still_honours_its_bounds() {
+        let data: Vec<Vec<f32>> = (0..6).map(|_| vec![0.1f32; 100]).collect();
+        let mut source = DocumentSource::new_looped(
+            Arc::new(data),
+            44100,
+            10,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicBool::new(true)),
+            None,
+            Some(20),
+        );
+        let yielded = std::iter::from_fn(|| source.next()).count();
+        assert_eq!(yielded, 20, "10 frames (10..20) of stereo = 20 samples");
     }
 
     #[test]

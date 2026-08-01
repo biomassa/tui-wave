@@ -180,16 +180,26 @@ impl Toolbar {
         }];
         // Named in the toolbar's own camelCase style rather than the menus' — these read as
         // commands on a hint panel, not as menu entries, so no trailing ellipsis either. No
-        // shortcut column: Save As has one but the other two have none, and a lone shortcut beside
-        // two blanks reads worse than none at all.
-        let streamed = vec![ToolGroup {
-            label: "STREAMED (read-only)",
-            buttons: vec![
-                ("saveAs", String::new(), Action::SaveAs),
-                ("removeEmptyChannels", String::new(), Action::RemoveEmptyChannels),
-                ("exportChannels", String::new(), Action::ExportChannels),
-            ],
-        }];
+        // shortcut column on the three file commands: Save As has one but the other two have
+        // none, and a lone shortcut beside two blanks reads worse than none at all.
+        //
+        // Play keeps its own, in the same unlabelled transport group the ordinary set opens
+        // with, because it is the one command here whose key a user already knows and would
+        // otherwise assume a read-only buffer had taken away.
+        let streamed = vec![
+            ToolGroup {
+                label: "",
+                buttons: vec![("Play", sc(Action::TogglePlayback, "Spc"), Action::TogglePlayback)],
+            },
+            ToolGroup {
+                label: "STREAMED (read-only)",
+                buttons: vec![
+                    ("saveAs", String::new(), Action::SaveAs),
+                    ("removeEmptyChannels", String::new(), Action::RemoveEmptyChannels),
+                    ("exportChannels", String::new(), Action::ExportChannels),
+                ],
+            },
+        ];
 
         Self {
             waveform,
@@ -421,15 +431,25 @@ mod tests {
         bar.streamed_buffer = true;
         assert_eq!(
             actions(&bar, Focus::Waveform),
-            vec![Action::SaveAs, Action::RemoveEmptyChannels, Action::ExportChannels],
-            "a streamed buffer shows only what works on it"
+            vec![
+                Action::TogglePlayback,
+                Action::SaveAs,
+                Action::RemoveEmptyChannels,
+                Action::ExportChannels
+            ],
+            "a streamed buffer shows only what works on it — including playback, which streams \
+             from disk rather than needing a resident copy"
         );
-        let labels: Vec<&str> = bar.streamed[0].buttons.iter().map(|(l, _, _)| *l).collect();
+        let labels: Vec<&str> =
+            bar.streamed.iter().flat_map(|g| g.buttons.iter().map(|(l, _, _)| *l)).collect();
         assert_eq!(
             labels,
-            vec!["saveAs", "removeEmptyChannels", "exportChannels"],
+            vec!["Play", "saveAs", "removeEmptyChannels", "exportChannels"],
             "named in the toolbar's own style, without the menus' ellipsis"
         );
+        // Play is the one command here a user already has a key for, so it shows it; the other
+        // three are click-only, which is what `every_toolbar_button_shows_a_shortcut` exempts.
+        assert_eq!(bar.streamed[0].buttons[0].1, "Spc");
         assert_eq!(
             actions(&bar, Focus::Files),
             actions(&Toolbar::new(&HashMap::new()), Focus::Files),
