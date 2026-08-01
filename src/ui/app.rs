@@ -3997,6 +3997,11 @@ impl App {
         if let Some(slot) = self.waveform_caches.get_mut(self.active_document) {
             *slot = built;
         }
+        // The peaks the fold-down's gains are derived from have just been re-measured, so this is
+        // where they are re-read. Sited here rather than at each editing command because this is
+        // already the one place every path that can change a peak — load, cut, normalize, gain,
+        // undo — converges on.
+        self.refresh_fold_gains();
     }
 
     pub fn run(&mut self, terminal: &mut Tui) -> color_eyre::Result<()> {
@@ -10255,8 +10260,10 @@ impl App {
                 self.dialog = None;
             }
             ChainRunFinish::PreviewWholeChain => {
+                let fold = dsp::Fold::from_channels(&final_frame.running_buffer);
                 self.cdp_preview_audio = AudioEngine::try_new(final_frame.running_buffer, final_frame.running_rate);
                 if let Some(audio) = &self.cdp_preview_audio {
+                    audio.set_fold(fold);
                     audio.play(0);
                 }
                 self.dialog = Some(Dialog::CdpChainEditor);
@@ -10264,8 +10271,10 @@ impl App {
             ChainRunFinish::PreviewStepInProgress(resume) => {
                 let channels = final_frame.running_buffer;
                 let sample_rate = final_frame.running_rate;
+                let fold = dsp::Fold::from_channels(&channels);
                 self.cdp_preview_audio = AudioEngine::try_new(channels.clone(), sample_rate);
                 if let Some(audio) = &self.cdp_preview_audio {
+                    audio.set_fold(fold);
                     audio.play(0);
                 }
                 let values = resume.fields.iter().map(CdpField::to_value).collect();
@@ -10909,6 +10918,7 @@ impl App {
                                 self.cdp_preview_audio =
                                     AudioEngine::try_new(channels.clone(), output.sample_rate);
                                 if let Some(audio) = &self.cdp_preview_audio {
+                                    audio.set_fold(dsp::Fold::from_channels(&channels));
                                     audio.play(0);
                                 }
                                 let values = pending.fields.iter().map(CdpField::to_value).collect();
@@ -11557,7 +11567,11 @@ impl App {
                 // `load_file` and `reload_buffer_from_disk` both correctly show — would pop
                 // up under the user's own Up/Down and make the list unusable.
                 if let Ok(document) = crate::model::io::load_audio(&path) {
+                    let fold = dsp::Fold::from_channels(&document.channels);
                     self.audition_audio = AudioEngine::try_new(document.channels, document.sample_rate);
+                    if let Some(audio) = &self.audition_audio {
+                        audio.set_fold(fold);
+                    }
                     if let Some(engine) = &self.audition_audio {
                         engine.play(0);
                     }
@@ -12246,6 +12260,10 @@ impl App {
         if let Some(slot) = self.waveform_caches.get_mut(self.active_document) {
             *slot = builders.into_iter().map(|b| b.finish()).collect();
         }
+        // Only now do this buffer's per-channel peaks exist, so only now can the fold-down's
+        // gains be worked out. The engine was built before the read started (playback must not
+        // wait 53 seconds for it) and has been running at unity until this point.
+        self.refresh_fold_gains();
     }
 
     /// Drains pending input and reports whether Esc was among it.
@@ -12487,6 +12505,43 @@ impl App {
             self.audio = None;
             self.audio_sample_rate = None;
         }
+        self.refresh_fold_gains();
+    }
+
+    /// Tells the engine the fold-down gains for the active document, derived from the waveform
+    /// pyramid's per-channel peaks.
+    ///
+    /// Reading the peaks from the pyramid rather than measuring them means this costs **nothing**:
+    /// `WaveformCache` records each channel's peak as a by-product of being built, which is the
+    /// same trick that lets Remove Empty Channels work on a 30GB streamed file with no extra I/O.
+    ///
+    /// A no-op while the pyramid is incomplete (mid-build, or a streamed buffer whose 53-second
+    /// build has not started). The engine then keeps whatever it had — unity at first, i.e. the
+    /// raw sum — rather than being handed gains derived from peaks that read as zero, which would
+    /// call every channel empty and leave every leg at unity anyway. Called again once the build
+    /// finishes.
+    fn refresh_fold_gains(&mut self) {
+        let Some(fold) = self.active_document_fold() else { return };
+        if let Some(audio) = self.audio.as_ref() {
+            audio.set_fold(fold);
+        }
+    }
+
+    /// The fold-down gains for the active document, or `None` if its pyramid is not complete.
+    ///
+    /// Separate from [`Self::refresh_fold_gains`] so the derivation can be tested without an
+    /// audio device — which the machines this is built on do not always have.
+    fn active_document_fold(&self) -> Option<dsp::Fold> {
+        let document = self.active_doc()?;
+        let caches = self.active_caches();
+        // Through `source_channel`, because the pyramid covers every *source* channel and is
+        // deliberately never filtered — on a streamed buffer that has had channels removed, a
+        // logical channel's peak lives at its source index, not its position on screen. Indexing
+        // by position would read a dropped channel's peak and mis-weight the leg.
+        let peaks: Option<Vec<f32>> = (0..document.channel_count())
+            .map(|i| caches.get(document.source_channel(i)).map(|c| c.peak()))
+            .collect();
+        Some(dsp::Fold::from_peaks(&peaks?))
     }
 
     fn sync_playhead_from_audio(&mut self) {
@@ -29486,6 +29541,75 @@ mod tests {
                 );
             }
         }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The fold-down's gains count only channels carrying signal, and — on a streamed buffer whose
+    /// channel map has been edited — must read each logical channel's peak through that map.
+    ///
+    /// The failure this pins is subtle and silent: index the pyramid by screen position instead of
+    /// source channel and the gains come from the wrong channels, so a leg is weighted by peaks
+    /// belonging to channels that are no longer playing.
+    #[test]
+    fn fold_gains_count_only_active_channels_and_follow_the_channel_map() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_fold_gains_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gains.wav");
+        // `multichannel_float_wav` makes source channel index 1 digitally silent and scales the
+        // rest by 0.9/(c+1): peaks are 0.9, 0.0, 0.3, 0.225, 0.18, 0.15.
+        multichannel_float_wav(&path, 6, 20_000);
+
+        let mut app = streaming_app();
+        app.load_file(path.clone());
+        let stream = app.documents[0].stream.clone().unwrap();
+        app.waveform_caches[0] = build_caches(&stream);
+        app.pending_cache_build = false;
+
+        // All six present. Left leg = indices 0/2/4 (0.9, 0.3, 0.18), all three active. Right leg
+        // = indices 1/3/5 (0.0, 0.225, 0.15) — the silent one does not count, so two.
+        let fold = app.active_document_fold().expect("the pyramid is built");
+        assert!((fold.left_gain - 1.0 / 3.0f32.sqrt()).abs() < 1e-6);
+        assert!((fold.right_gain - 1.0 / 2.0f32.sqrt()).abs() < 1e-6, "1/√2, not 1/√3");
+
+        // Drop the silent channel. The five survivors shift one place down, so source channel 2
+        // becomes logical 1 and moves from the left leg to the right. The counts happen to come
+        // out the same (3 and 2) — but only when read through the map. Indexed by position the
+        // right leg would see caches 1 and 3 (0.0 and 0.225), count one active, and hand back
+        // unity: a full 3 dB louder on one side than the other.
+        app.apply_remove_empty_channels(-48.0);
+        assert_eq!(
+            app.documents[0].stream.as_ref().unwrap().channel_map(),
+            vec![0, 2, 3, 4, 5]
+        );
+        let fold = app.active_document_fold().expect("still built");
+        // Logical 0/2/4 = source 0/3/5 (0.9, 0.225, 0.15) left; logical 1/3 = source 2/4
+        // (0.3, 0.18) right. All five clear -48 dBFS.
+        assert!((fold.left_gain - 1.0 / 3.0f32.sqrt()).abs() < 1e-6);
+        assert!(
+            (fold.right_gain - 1.0 / 2.0f32.sqrt()).abs() < 1e-6,
+            "reading peaks by position instead of through the map would give 1.0 here"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Before the pyramid exists there are no peaks to derive gains from, and the engine must be
+    /// left alone rather than handed gains built from peaks that all read as zero.
+    #[test]
+    fn fold_gains_are_withheld_until_the_pyramid_is_built() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_fold_nopyr_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pending.wav");
+        multichannel_float_wav(&path, 6, 20_000);
+
+        let mut app = streaming_app();
+        app.load_file(path.clone());
+        assert!(app.pending_cache_build, "the build is queued, not done");
+        assert!(
+            app.active_document_fold().is_none(),
+            "no pyramid yet, so no gains — the engine keeps unity (a raw sum) until there are"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

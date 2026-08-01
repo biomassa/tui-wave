@@ -30,9 +30,10 @@ pub struct DocumentSource {
     /// The current frame's fold-down, computed once when its first leg is asked for. `None` when
     /// this source passes channels through and there is nothing to compute.
     folded: Option<(f32, f32)>,
-    /// Linear form of `dsp::PLAYBACK_CEILING_DB`, resolved once here rather than per frame —
-    /// `db_to_linear` is a `powf`, and this runs on the mixing thread at the sample rate.
-    ceiling: f32,
+    /// Gains and ceiling for the fold, captured when this source was built. Resolved once rather
+    /// than per frame — deriving it involves a `powf` and a `sqrt`, and this runs on the mixing
+    /// thread at the sample rate.
+    fold: dsp::Fold,
     frame_index: usize,
     channel_cursor: usize,
     position: Arc<AtomicUsize>,
@@ -46,6 +47,7 @@ pub struct DocumentSource {
 }
 
 impl DocumentSource {
+    #[allow(clippy::too_many_arguments)]
     pub fn new_looped(
         data: Arc<Vec<Vec<f32>>>,
         sample_rate: u32,
@@ -54,6 +56,7 @@ impl DocumentSource {
         playing: Arc<AtomicBool>,
         loop_start: Option<usize>,
         loop_end: Option<usize>,
+        fold: dsp::Fold,
     ) -> Self {
         let out_channels = dsp::playback_channels(data.len());
         let channel_count =
@@ -66,7 +69,7 @@ impl DocumentSource {
             channel_count,
             out_channels,
             folded: None,
-            ceiling: dsp::db_to_linear(dsp::PLAYBACK_CEILING_DB),
+            fold,
             frame_index: start_frame,
             channel_cursor: 0,
             position,
@@ -104,7 +107,7 @@ impl Iterator for DocumentSource {
             // is walked once rather than once per leg.
             let folded = match (self.channel_cursor, self.folded) {
                 (0, _) | (_, None) => {
-                    let pair = dsp::downmix_frame(&self.data, self.frame_index, self.ceiling);
+                    let pair = self.fold.frame(&self.data, self.frame_index);
                     self.folded = Some(pair);
                     pair
                 }
@@ -157,7 +160,7 @@ mod tests {
         let position = Arc::new(AtomicUsize::new(0));
         let playing = Arc::new(AtomicBool::new(true));
         let mut source =
-            DocumentSource::new_looped(data, 44100, 0, position, playing.clone(), None, None);
+            DocumentSource::new_looped(data, 44100, 0, position, playing.clone(), None, None, dsp::Fold::default());
         let yielded = std::iter::from_fn(|| source.next()).count();
         assert_eq!(yielded, 3);
         assert!(
@@ -176,7 +179,7 @@ mod tests {
         let position = Arc::new(AtomicUsize::new(0));
         let playing = Arc::new(AtomicBool::new(true));
         let mut source =
-            DocumentSource::new_looped(data, 44100, 0, position, playing.clone(), None, Some(3));
+            DocumentSource::new_looped(data, 44100, 0, position, playing.clone(), None, Some(3), dsp::Fold::default());
         let yielded = std::iter::from_fn(|| source.next()).count();
         assert_eq!(yielded, 3, "must stop at loop_end, not continue to the file's actual end (5 frames)");
         assert!(
@@ -206,6 +209,9 @@ mod tests {
                 Arc::new(AtomicBool::new(true)),
                 None,
                 None,
+                // Gains a quarter of unity: if the fold ever touched 1- or 2-channel audio, this
+                // is what would give it away.
+                dsp::Fold { left_gain: 0.25, right_gain: 0.25, ..dsp::Fold::default() },
             );
             assert_eq!(source.channels().get() as usize, channels);
             let yielded: Vec<f32> = source.collect();
@@ -214,11 +220,12 @@ mod tests {
     }
 
     /// 3+ channels are announced to the device as stereo and interleave as left, right, left…
-    /// — odd-numbered channels summed left, even-numbered summed right.
+    /// — odd-numbered channels summed left, even-numbered summed right, each through its leg's
+    /// own gain.
     #[test]
     fn a_multichannel_document_plays_as_a_limited_stereo_fold_down() {
-        let ceiling = crate::model::dsp::db_to_linear(crate::model::dsp::PLAYBACK_CEILING_DB);
-        // ch1..ch5 constant, two frames each.
+        // ch1..ch5 constant, two frames each. All five clear the activity threshold, so the
+        // left leg divides by √3 (ch1/3/5) and the right by √2 (ch2/4).
         let data = vec![
             vec![0.1f32, 0.1],
             vec![0.2, 0.2],
@@ -226,21 +233,25 @@ mod tests {
             vec![0.4, 0.4],
             vec![0.5, 0.5],
         ];
+        let fold = dsp::Fold::from_peaks(&[0.1, 0.2, 0.3, 0.4, 0.5]);
+        assert!((fold.left_gain - 1.0 / 3.0f32.sqrt()).abs() < 1e-6);
+        assert!((fold.right_gain - 1.0 / 2.0f32.sqrt()).abs() < 1e-6);
         let position = Arc::new(AtomicUsize::new(0));
         let source = DocumentSource::new_looped(
-            Arc::new(data),
+            Arc::new(data.clone()),
             44100,
             0,
             position.clone(),
             Arc::new(AtomicBool::new(true)),
             None,
             None,
+            fold,
         );
         assert_eq!(source.channels().get(), 2, "a 5-channel file is announced as stereo");
         let yielded: Vec<f32> = source.collect();
 
-        let left = crate::model::dsp::tanh_limit(0.1 + 0.3 + 0.5, ceiling);
-        let right = crate::model::dsp::tanh_limit(0.2 + 0.4, ceiling);
+        let left = dsp::tanh_limit((0.1 + 0.3 + 0.5) * fold.left_gain, fold.ceiling);
+        let right = dsp::tanh_limit((0.2 + 0.4) * fold.right_gain, fold.ceiling);
         assert_eq!(yielded.len(), 4, "two frames of stereo, not two frames of five channels");
         assert!((yielded[0] - left).abs() < 1e-6);
         assert!((yielded[1] - right).abs() < 1e-6);
@@ -263,6 +274,7 @@ mod tests {
             Arc::new(AtomicBool::new(true)),
             None,
             Some(20),
+            dsp::Fold::default(),
         );
         let yielded = std::iter::from_fn(|| source.next()).count();
         assert_eq!(yielded, 20, "10 frames (10..20) of stereo = 20 samples");
@@ -274,7 +286,7 @@ mod tests {
         let position = Arc::new(AtomicUsize::new(0));
         let playing = Arc::new(AtomicBool::new(true));
         let mut source =
-            DocumentSource::new_looped(data, 44100, 0, position, playing.clone(), Some(1), Some(3));
+            DocumentSource::new_looped(data, 44100, 0, position, playing.clone(), Some(1), Some(3), dsp::Fold::default());
         // A valid loop never ends; pulling well past the loop region must keep yielding and
         // must never clear `playing` (the natural-end signal must not fire on a loop wrap).
         for _ in 0..1000 {

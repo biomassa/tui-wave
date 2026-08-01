@@ -7,6 +7,7 @@ use rodio::{DeviceSinkBuilder, Player};
 
 use super::source::DocumentSource;
 use super::stream_source::StreamedSource;
+use crate::model::dsp::Fold;
 use crate::model::stream::StreamedSamples;
 
 /// Where the audio thread gets its samples.
@@ -37,6 +38,7 @@ enum AudioCmd {
         loop_end: Option<usize>,
     },
     Reload(Vec<Vec<f32>>),
+    SetFold(Fold),
 }
 
 /// Owns the audio device and playback thread. The UI thread only ever talks to this
@@ -63,6 +65,7 @@ fn append_source(
     playing: &Arc<AtomicBool>,
     loop_start: Option<usize>,
     loop_end: Option<usize>,
+    fold: Fold,
 ) -> Option<Arc<AtomicBool>> {
     match data {
         PlaybackData::Resident(channels) => {
@@ -74,6 +77,7 @@ fn append_source(
                 playing.clone(),
                 loop_start,
                 loop_end,
+                fold,
             ));
             None
         }
@@ -86,6 +90,7 @@ fn append_source(
                 playing.clone(),
                 loop_start,
                 loop_end,
+                fold,
             );
             let stop = source.stop_handle();
             player.append(source);
@@ -138,6 +143,11 @@ impl AudioEngine {
             device_sink.log_on_drop(false);
             let player = Player::connect_new(device_sink.mixer());
             let mut data = data;
+            // Applied to every source built from here on. An already-playing source keeps the
+            // fold it captured, exactly as it keeps the sample data it captured — the same rule
+            // `Reload` has always followed, so a channel-count change never alters the levels of
+            // a pass already underway.
+            let mut fold = Fold::default();
             // The reader thread behind the source currently on the player, if it is a streamed
             // one. Cancelled before every `player.clear()`: rodio decides when a cleared source
             // is actually dropped, and until it is, the outgoing reader would go on pulling
@@ -177,9 +187,13 @@ impl AudioEngine {
                             &playing_for_thread,
                             loop_start,
                             loop_end,
+                            fold,
                         );
                         player.play();
                         playing_for_thread.store(true, Ordering::Relaxed);
+                    }
+                    AudioCmd::SetFold(new_fold) => {
+                        fold = new_fold;
                     }
                     AudioCmd::Pause => {
                         player.pause();
@@ -210,6 +224,7 @@ impl AudioEngine {
                                 &playing_for_thread,
                                 loop_start,
                                 loop_end,
+                                fold,
                             );
                             player.play();
                         }
@@ -278,6 +293,18 @@ impl AudioEngine {
             loop_start: None,
             loop_end: Some(end_frame),
         });
+    }
+
+    /// Sets the gains and ceiling the stereo fold-down uses, for every source built from here on.
+    ///
+    /// Separate from construction because the gains are derived from per-channel peaks, and on a
+    /// streamed buffer those do not exist yet when the engine is built — the pyramid that measures
+    /// them takes ~53s on a 30GB file, and playback must not wait for it. So the engine starts at
+    /// unity (a raw sum, the old behaviour) and is told the real gains when they are known. Also
+    /// how Remove Empty Channels updates them: dropping 48 dead channels does not change any
+    /// gain, but dropping live ones does.
+    pub fn set_fold(&self, fold: crate::model::dsp::Fold) {
+        let _ = self.cmd_tx.send(AudioCmd::SetFold(fold));
     }
 
     /// Refreshes the audio thread's sample data after a document edit (cut/paste/etc).
