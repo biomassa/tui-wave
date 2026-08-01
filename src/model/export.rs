@@ -145,7 +145,10 @@ fn write_flac(doc: &Document, path: &Path, depth: BitDepth, dither: bool) -> col
         .map_err(|e| color_eyre::eyre::eyre!("FLAC serialize failed: {e}"))?;
     let mut bytes = sink.as_slice().to_vec();
     normalize_fixed_blocksize_streaminfo(&mut bytes);
-    std::fs::write(path, bytes)?;
+    // Staged and renamed (`model::atomic`): the payload is built in memory, so the window is
+    // narrower than the WAV writer's per-sample loop, but a full disk still turns a plain write
+    // into a truncated file at the target — and the target may be one the user already had.
+    crate::model::atomic::write_atomically(path, |staging| std::fs::write(staging, bytes))?;
     Ok(())
 }
 
@@ -227,7 +230,7 @@ fn write_mp3(doc: &Document, path: &Path, bitrate_kbps: u16) -> color_eyre::Resu
     encoder
         .flush_to_vec::<FlushNoGap>(&mut out)
         .map_err(|e| color_eyre::eyre::eyre!("MP3 flush failed: {e}"))?;
-    std::fs::write(path, &out)?;
+    crate::model::atomic::write_atomically(path, |staging| std::fs::write(staging, &out))?;
     Ok(())
 }
 
