@@ -1,33 +1,37 @@
 # tui-wave
 
-A keyboard-driven audio editor that runs in a terminal.
+A keyboard-driven audio editor that runs in a terminal (mouse works too!).
 
 ![tui-wave screenshot](screenshot1.png)
 ![tui-wave screenshot](screenshot2.png)
 
-tui-wave draws waveforms, plays audio, and edits samples. It handles files with one channel,
-two channels, or more than fifty channels. It also opens files of 20GB or more without loading
-them into memory.
+tui-wave draws waveforms, plays and edits audio. It handles mono, stereo and multichannel
+files. Multichannel files that exceed the configurable threshold in size (default: 4GB) open in 
+streaming mode without loading into memory. This is needed for processing / auditioning / breaking 
+large session captures made with software like Cycling74's Max, etc.
+tui-wave is also, optionally, a front end for Composer's Desktop Project, a set of command-line
+utilities that exist for decades and provide a lot of unique time and frequency domain 
+processing capabilities.
 
-Read [documentation.md](documentation.md) to learn how to use it.
+Read [DOCUMENTATION.md](DOCUMENTATION.md) to learn how to use it.
 
 ## What it does
 
 - **Waveform display.** Zoom from the whole file down to single samples. Terminals such as
-  Kitty get a real image. Every other terminal gets braille and block glyphs.
+  kitty and ghostty get graphics. Every other terminal gets approximation via braille glyphs.
 - **Playback.** Play, pause, and loop. The view can follow the play position.
 - **Editing.** Cut, copy, paste, delete, and undo, with a separate undo stack per open file.
-- **Processing.** Reverse, normalize, gain, fade, trim, resample, technical fades, and mix to
-  mono.
+- **Processing.** Reverse, normalize, gain, fade, trim, resample, and mix to mono.
 - **Markers.** Insert markers by hand or at transients. tui-wave saves them as WAV cue points,
   which Audacity and Sound Forge read.
-- **Many channels.** Scroll through the channels of a 58-channel file. Drop the empty ones.
+- **Many channels.** Scroll through the channels of a multichannel file. Drop the empty ones.
   Split the rest into mono files or stereo pairs.
 - **Large files.** A file above the memory limit opens read-only and disk-backed. tui-wave
   reads and writes RF64 and BW64.
 - **Formats.** It reads WAV, FLAC, and AIFF. It writes WAV, FLAC, and MP3.
 - **Configurable.** Every key assignment lives in a TOML config file.
-- **CDP.** An optional front end to the Composer's Desktop Project, with about 130 processes.
+- **CDP.** An optional front end to the Composer's Desktop Project, with a growing list 
+(hundreds) of processes implemented.
 
 The CDP process browser, the parameter form with automatable green fields and presets, and the
 breakpoint envelope editor:
@@ -40,10 +44,10 @@ breakpoint envelope editor:
 
 ## Status
 
-An LLM helped to write this program. I am not a Rust developer. I do know audio files, and I
-needed this tool for my own work.
-
-Release builds for Linux exist. A build from source gives you the most complete program.
+An LLM helped to write this program. I am not a Rust developer. I have a lot of experience 
+with digital audio, and I put a lot of effort into tui-wave's architecture, logic and UX / UI.
+I needed this tool for my own work.
+Release builds for Linux exist. A build from source gives you the most current version.
 
 ## Prerequisites
 
@@ -103,7 +107,7 @@ panels and the decibel gutters.
 6. Press `F10` to open the menu bar.
 7. Press `q` to quit.
 
-[documentation.md](documentation.md) covers the rest.
+[DOCUMENTATION.md](DOCUMENTATION.md) covers the rest.
 
 ## Optional: CDP support
 

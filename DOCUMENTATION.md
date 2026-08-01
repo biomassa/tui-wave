@@ -1,19 +1,6 @@
-# tui-wave documentation
-
-tui-wave is an audio editor that runs in a terminal. You drive it with the keyboard. It draws
-waveforms, plays audio, and edits samples.
-
-It opens files with one channel, two channels, or more than fifty channels. It also opens files
-of 20GB or more without loading them into memory.
-
-This guide teaches you how to use the program. Read sections 1 to 5 in order. After that, read
-the section you need.
-
----
-
 ## 1. Install
 
-tui-wave has no installer. You build it from source.
+To build tui-wave from source:
 
 1. Install the Rust toolchain from https://rustup.rs.
 2. Clone the repository.
@@ -21,6 +8,21 @@ tui-wave has no installer. You build it from source.
 4. Copy `target/release/tui-wave` to a directory on your `PATH`.
 
 Always build with `--release`. A debug build draws waveforms many times slower.
+
+Or install in one line, from the repository directory:
+
+```sh
+cargo install --path .
+```
+
+This does steps 3 and 4 together. It builds with `--release` (that is the default; `--debug`
+exists to opt out) and puts the binary in `~/.cargo/bin`, which the Rust installer adds to your
+`PATH`. Everything the program needs at runtime is compiled into the binary, so it works from
+anywhere.
+
+Two things to know. The command builds in a temporary directory rather than `target/`, so it
+compiles from scratch even if you have just built the project. And it installs a copy: after
+pulling new changes, run it again to update.
 
 The program runs on Linux and macOS. Windows may work, but nobody has tested it.
 
@@ -183,14 +185,25 @@ plays:
 
 - Odd-numbered channels (1, 3, 5, …) are summed into the left output.
 - Even-numbered channels (2, 4, 6, …) are summed into the right output.
+- Each side is then divided by the square root of how many of its channels carry signal.
 - The result passes through a limiter that keeps the output at or below -1 dBFS.
 
-The channels are summed at full level, not averaged, so a take with many channels plays at a
-comparable level to a stereo file rather than a much quieter one. The limiter is what keeps that
-sum from clipping; on a loud passage with many active channels you will hear it saturate, which
-is the intended behaviour and does not affect the file.
+The division is what keeps the level sane without making the material quiet. Summing a dozen loud
+channels raw would drive the limiter so hard that it distorts rather than limits, while dividing
+by the plain channel count would make everything far too quiet.
 
-Mono and stereo files are not folded and not limited. They play exactly as they always have.
+Only channels that carry signal are counted, using the same -48 dBFS threshold as Remove Empty
+Channels. This matters on real takes, which are mostly empty: a 56-channel recording with six live
+channels is divided as a six-channel file, not as a fifty-six-channel one. Empty inputs never
+quieten the channels you are trying to hear, and dropping them with Remove Empty Channels does not
+change the playback level.
+
+The limiter then catches what the division does not. Channels carrying the same sound sum faster
+than the division allows for, so on a loud passage you may still hear it saturate gently. That is
+intended.
+
+Mono and stereo files are not folded, not divided and not limited. They play exactly as they
+always have.
 
 Nothing here changes the audio on disk. It applies to monitoring only.
 
@@ -297,7 +310,7 @@ writes nothing.
 
 ## 11. Files with many channels
 
-tui-wave treats files with thirty or more channels as a normal case.
+tui-wave treats multichannel files as a normal case.
 
 The Waveform panel draws six channel panes at a time by default. A taller terminal window shows
 more. Use these keys to move the channel window:
@@ -334,7 +347,7 @@ so the times still mean what they meant.
 
 ## 12. Large files
 
-A long multichannel take can reach 20GB or 30GB. tui-wave opens such a file in **streamed
+A long multichannel take can reach tens of GB. tui-wave opens such a file in **streamed
 read-only mode**.
 
 ### What triggers the mode
@@ -646,10 +659,9 @@ protocol. Kitty and other modern terminals support this. The result is much shar
 draws faster on files with many channels.
 
 Without graphics mode tui-wave draws with braille dots and block glyphs. That works in every
-terminal. The View menu also holds a Gradient toggle for this mode.
+terminal. The View menu also holds a Gradient toggle for both modes.
 
-Both modes draw an amplitude-zero line across the centre of each pane. A silent channel still
-shows the line, because that is where you most need the reference.
+Both modes draw an amplitude-zero line across the centre of each pane.
 
 ---
 
@@ -770,26 +782,3 @@ The Waveform panel must have focus for these keys, unless the table says otherwi
 
 ---
 
-## 21. Problems
-
-**A file will not open, and the program says nothing.** Older versions threw the error away.
-Current versions show a dialog with the reason. Check the version first.
-
-**A large file shows the wrong length.** Some recorders write a size field that stops matching
-the file after a take ends without a clean stop. tui-wave works out the real length from the file
-size instead. Check the version if you still see this.
-
-**The waveform draws slowly.** Build with `cargo build --release`. A debug build takes several
-seconds to draw a long file.
-
-**A command does nothing and shows a dialog about a streamed file.** The file opened read-only,
-because it exceeds `max_resident_mb`. Section 12 lists what works in that mode.
-
-**Save does nothing on a FLAC or AIFF buffer.** Every save path writes WAV bytes, so Save
-redirects to Save As. Section 13 explains this.
-
-**A key does nothing.** Check which panel has focus. Some keys change meaning per panel, and the
-toolbar shows the command set for the panel with focus.
-
-**No sound plays.** tui-wave opens without a sound device and only stops playback. Check that
-another program is not holding the device.
