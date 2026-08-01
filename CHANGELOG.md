@@ -1,5 +1,41 @@
 # Changelog
 
+## 2026-08-01 (2.0.0)
+
+- **Multichannel files now play.** A file with three or more channels was handed to the sound
+  device as-is, and what came out was whatever the device made of channels it could not take.
+  tui-wave now folds them down as it plays: odd-numbered channels (1, 3, 5, …) sum into the left
+  output, even-numbered ones into the right, and each side passes through a limiter that holds the
+  output at or below -1 dBFS. Each side is divided by the square root of how many of its channels
+  *carry signal*, counted at the same -48 dBFS threshold Remove Empty Channels uses — so a
+  56-channel take with six live channels plays at the level of a six-channel file rather than a
+  fifty-six-channel one, and dropping its empty channels does not change the playback level. Mono
+  and stereo files are not folded, not divided and not limited: they play exactly as before.
+  Nothing here alters the audio on disk; it applies to monitoring only.
+- **Large files play too.** Playback was refused on a streamed read-only buffer because the audio
+  engine wanted a second full copy of the file in memory. It now reads blocks off disk as it
+  plays, into a buffer of well under a megabyte, so a 30GB take plays without being loaded.
+  Seeking, looping and playing a selection behave as they do on any other file, and memory stays
+  flat for as long as it plays.
+- **Saving can no longer destroy the file it is replacing.** Every save used to empty the target
+  file and then write into it, so a full disk, a disconnected drive or a crash part-way through
+  left a truncated file where the recording had been, with nothing to recover. Saves now write
+  beside the target and move the finished file into place, leaving the original untouched until a
+  complete replacement exists. Three things follow: a save that fails is now harmless; cancelling
+  a streamed Save As no longer deletes a file that was already at that name; and an interrupted
+  settings write can no longer leave a corrupt config, which the app silently replaced with
+  defaults — losing every setting and every custom keybinding.
+- **Head and tail marks follow their file.** Renaming or deleting audio moved only the audio and
+  left the `.headstails` sidecar behind, so the marks disappeared on the next load and a stale
+  file stayed in the folder. Both now move and delete with the audio.
+- **CDP scratch directories no longer accumulate.** A crash during a CDP run left its working
+  directory in `/tmp`, and a later run could land in one and read its leftovers as its own
+  output. Leftovers are now cleared at startup, and a run that fails cleans up after itself.
+- **Documentation rewritten**, and renamed to `DOCUMENTATION.md`. It covers how multichannel
+  playback folds down, and the install section documents `cargo install --path .` as a one-line
+  alternative to building and copying the binary by hand.
+- Bumped version to 2.0.0.
+
 ## 2026-07-31 (1.9.1)
 
 - **Fixed: large WAVs written by Max/MSP opened as a fraction of their length.** A 14GB,
