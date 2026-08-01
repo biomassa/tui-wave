@@ -210,6 +210,18 @@ struct RegionExportOptions {
 }
 
 /// Number of samples covered by `ms` milliseconds at `sample_rate` (rounded).
+/// The audio engine a document needs, whichever storage it uses.
+///
+/// The one place the choice is made, so no code path can accidentally hand a streamed
+/// document's `channels` — deliberately left empty (see `load_file_streaming`) — to the
+/// resident engine and get a buffer that plays silence.
+fn engine_for(document: &Document) -> Option<AudioEngine> {
+    match &document.stream {
+        Some(stream) => AudioEngine::try_new_streamed(stream.clone(), document.sample_rate),
+        None => AudioEngine::try_new(document.channels.clone(), document.sample_rate),
+    }
+}
+
 fn ms_to_samples(ms: f32, sample_rate: u32) -> usize {
     ((ms / 1000.0) * sample_rate as f32).round() as usize
 }
@@ -2986,8 +2998,7 @@ impl App {
             Some(doc) => vec![doc],
             None => Vec::new(),
         };
-        let audio = documents.first()
-            .and_then(|doc| AudioEngine::try_new(doc.channels.clone(), doc.sample_rate));
+        let audio = documents.first().and_then(engine_for);
         let audio_sample_rate = documents.first().map(|doc| doc.sample_rate);
         let waveform_caches: Vec<Vec<WaveformCache>> = documents
             .iter()
@@ -6122,7 +6133,15 @@ impl App {
         }
         // A rate change (resample, or its undo/redo) needs a fresh engine since the rate is
         // captured at construction; otherwise a cheap data reload is enough.
-        if self.audio_sample_rate != Some(self.documents[idx].sample_rate) {
+        //
+        // A streamed document has neither to do: its rate cannot change (nothing that resamples
+        // is allowed near one) and there is nothing to reload, since the engine reads the same
+        // file rather than a copy — a channel-map edit is simply picked up by the next read. The
+        // guard matters because such a document's `channels` is *empty*, so the reload below
+        // would hand the engine nothing and leave the buffer silent.
+        if self.documents[idx].is_streaming() {
+            // Nothing to do.
+        } else if self.audio_sample_rate != Some(self.documents[idx].sample_rate) {
             self.rebuild_audio();
         } else if let Some(audio) = &self.audio {
             audio.reload(self.documents[idx].channels.clone());
@@ -12133,11 +12152,12 @@ impl App {
             self.push_document(document);
         }
         self.viewport = None;
-        // No audio engine: it takes an owned `Vec<Vec<f32>>`, so giving it this file would mean
-        // a second full copy — the single largest RAM multiplier, and the reason playback is out
-        // of scope for a streamed buffer rather than merely unimplemented.
-        self.audio = None;
-        self.audio_sample_rate = None;
+        // A streaming engine: it holds the same `StreamedSamples` handle this document does and
+        // reads blocks off disk as it plays (`audio::stream_source`), so playback costs a bounded
+        // ring of a few hundred KB rather than the second full copy of every sample that made it
+        // out of scope here originally.
+        self.audio = self.active_doc().and_then(engine_for);
+        self.audio_sample_rate = Some(info.sample_rate);
         self.pending_cache_build = true;
     }
 
@@ -12461,7 +12481,7 @@ impl App {
     fn rebuild_audio(&mut self) {
         if let Some(document) = self.active_doc() {
             let rate = document.sample_rate;
-            self.audio = AudioEngine::try_new(document.channels.clone(), rate);
+            self.audio = engine_for(document);
             self.audio_sample_rate = Some(rate);
         } else {
             self.audio = None;
@@ -13257,6 +13277,13 @@ impl App {
                 // undo could replay against a document whose `channels` is empty.
                 | Action::Undo
                 | Action::Redo
+                // Playback. Also once out of scope for the same reason editing is — the engine
+                // took an owned copy of every sample — but `AudioEngine::try_new_streamed` reads
+                // blocks off disk into a bounded ring instead, so hearing a 30GB take costs under
+                // a megabyte and nothing is copied. Nothing here writes to the document, and the
+                // transport (loop, bounded selection playback, seeking) behaves as it does
+                // anywhere else.
+                | Action::TogglePlayback
                 // Panels, buffers, and getting out.
                 | Action::Noop
                 | Action::Quit
@@ -13320,8 +13347,8 @@ impl App {
             self.dialog = Some(Dialog::Info {
                 message: format!(
                     "{action:?} is unavailable: this buffer is {gb:.1} GB and is open read-only, \
-                     streamed from disk. Remove Empty Channels and Export Channels work; editing, \
-                     saving and playback do not."
+                     streamed from disk. Playback, Remove Empty Channels, Export Channels and \
+                     Save As work; editing does not."
                 ),
             });
             return;
@@ -29306,7 +29333,15 @@ mod tests {
         assert!(doc.channels.is_empty(), "a streamed document holds no resident samples");
         assert_eq!(doc.channel_count(), 8, "but still reports its channels");
         assert_eq!(doc.len_samples(), 20_000, "and its length");
-        assert!(app.audio.is_none(), "no audio engine — that would be a second full copy");
+        // Playback is set up, and set up *streaming*: the engine holds the same file handle the
+        // document does rather than a copy of its samples. Asserted through `audio_sample_rate`
+        // rather than `audio`, because `AudioEngine` is `None` on a machine with no output
+        // device and that has nothing to do with which storage was chosen.
+        assert_eq!(app.audio_sample_rate, Some(48_000), "playback is wired up for a streamed buffer");
+        assert!(
+            app.action_allowed_on_streamed_buffer(Action::TogglePlayback),
+            "and the gate lets the transport through"
+        );
         assert!(app.pending_cache_build, "the pyramid build must be queued");
 
         std::fs::remove_dir_all(&dir).ok();
@@ -29388,7 +29423,6 @@ mod tests {
             Action::Save,
             Action::Export,
             Action::ExportRegions,
-            Action::TogglePlayback,
             Action::InsertMarker,
             Action::InsertHeadTailMark,
             Action::MixToMono,
@@ -29439,6 +29473,9 @@ mod tests {
             // Save As is permitted so a buffer trimmed by Remove Empty Channels can be written
             // out — the reason for dropping empty channels in the first place.
             Action::SaveAs,
+            // Playback streams off disk into a bounded ring rather than needing the second
+            // resident copy that kept it out of this mode originally.
+            Action::TogglePlayback,
         ] {
             app.dialog = None;
             app.handle_action(action);

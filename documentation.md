@@ -176,6 +176,24 @@ Playback starts at the cursor. With a selection active, playback covers the sele
 A bold vertical line marks the play position. tui-wave keeps that line on screen. Every command
 that moves the play position also scrolls the view to it.
 
+### Playing a file with three or more channels
+
+Your output is stereo, and the file may have fifty-six channels. tui-wave folds them down as it
+plays:
+
+- Odd-numbered channels (1, 3, 5, …) are summed into the left output.
+- Even-numbered channels (2, 4, 6, …) are summed into the right output.
+- The result passes through a limiter that keeps the output at or below -1 dBFS.
+
+The channels are summed at full level, not averaged, so a take with many channels plays at a
+comparable level to a stereo file rather than a much quieter one. The limiter is what keeps that
+sum from clipping; on a loud passage with many active channels you will hear it saturate, which
+is the intended behaviour and does not affect the file.
+
+Mono and stereo files are not folded and not limited. They play exactly as they always have.
+
+Nothing here changes the audio on disk. It applies to monitoring only.
+
 ---
 
 ## 7. Edit audio
@@ -348,13 +366,17 @@ Only these commands work on a streamed file:
 
 - Every navigation, zoom, and view command.
 - Selection and cursor movement.
+- Playback, including loop and selection playback.
 - Remove Empty Channels, with undo.
 - Export Channels.
 - Save As.
 
 tui-wave refuses everything else and names the reason. Editing needs a full copy of the samples
-for undo. Playback needs a second copy for the audio engine. Markers would have no save path,
-so the work would go missing on close.
+for undo. Markers would have no save path, so the work would go missing on close.
+
+Playback reads the audio off disk as it plays rather than loading it, so hearing a 30GB take
+costs under a megabyte of buffering. Seeking, looping and playing a selection all behave as they
+do on an ordinary file.
 
 ### The workflow this mode exists for
 
