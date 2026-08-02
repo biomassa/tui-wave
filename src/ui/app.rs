@@ -4794,6 +4794,14 @@ impl App {
         else {
             return;
         };
+        // A preset was just selected. Its fill necessarily rewrote the other fields, and those
+        // writes are emphatically not user edits — treating them as such flipped the row to
+        // Custom the instant any preset was chosen, so only a preset whose values happened to
+        // match the current ones stayed visible, and Left had nothing to step back through
+        // (user report). Short-circuit before looking at anything else.
+        if was_values.get(preset_param) != now_values.get(preset_param) {
+            return;
+        }
         let edited = was_values
             .iter()
             .zip(now_values.iter())
@@ -21976,7 +21984,11 @@ mod tests {
         if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
             *focus = preset_param + 1;
         }
-        app.cdp_params_cycle_left_right(true);
+        // Through the real key path, not `cdp_params_cycle_left_right` directly: the wrapper
+        // that decides whether an edit happened lives in `handle_dialog_key`, and calling the
+        // inner function bypassed it — which is exactly how the flip-on-every-preset bug
+        // shipped with these tests passing.
+        press(&mut app, KeyCode::Right);
 
         assert_eq!(
             preset_selection(&app, preset_param),
@@ -22012,7 +22024,7 @@ mod tests {
         if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
             *focus = preset_param + 1;
         }
-        app.cdp_params_cycle_left_right(true);
+        press(&mut app, KeyCode::Right);
         assert_ne!(
             preset_selection(&app, preset_param),
             def.preset_custom_option,
@@ -22048,7 +22060,7 @@ mod tests {
         if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
             *focus = preset_param + 1;
         }
-        app.cdp_params_cycle_left_right(true);
+        press(&mut app, KeyCode::Right);
         let chosen = preset_selection(&app, preset_param);
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -22075,6 +22087,59 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 100, "expected many processes with script presets, saw {checked}");
+    }
+
+    /// Right must walk *up* through every preset and Left back *down* through them.
+    ///
+    /// The shipped bug: selecting any preset flipped the row straight to Custom, so only one
+    /// preset was ever visible, the rest read "Custom (use settings below)", and Left "almost
+    /// never worked" because the selection was pinned at 0 (user report).
+    #[test]
+    fn the_internal_preset_row_steps_through_every_preset_in_both_directions() {
+        let mut app = new_app(Some(doc(0.25, 100)), None);
+        let index = hysteresis_index(&app);
+        let def = app.cdp_catalog.processes[index].clone();
+        let preset_param = def.preset_param.expect("it has an internal preset row");
+        let CdpKind::Choice(option_count) = choice_len(&def, preset_param) else {
+            panic!("preset param should be a choice")
+        };
+        assert!(option_count >= 4, "fixture should have several presets");
+
+        app.open_cdp_params(index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = preset_param + 1;
+        }
+        for expected in 1..option_count {
+            press(&mut app, KeyCode::Right);
+            assert_eq!(
+                preset_selection(&app, preset_param),
+                expected,
+                "Right should step to preset {expected}, not fall back to Custom"
+            );
+        }
+        for expected in (0..option_count - 1).rev() {
+            press(&mut app, KeyCode::Left);
+            assert_eq!(
+                preset_selection(&app, preset_param),
+                expected,
+                "Left should step back to preset {expected}"
+            );
+        }
+    }
+
+    enum CdpKind {
+        Choice(usize),
+    }
+
+    fn choice_len(def: &crate::model::cdp::ProcessDef, index: usize) -> CdpKind {
+        match &def.params[index].kind {
+            crate::model::cdp::ParamKind::Choice { options, .. } => CdpKind::Choice(options.len()),
+            _ => panic!("not a choice"),
+        }
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.handle_dialog_key(KeyEvent::new(code, KeyModifiers::NONE));
     }
 
     fn hysteresis_index(app: &App) -> usize {
