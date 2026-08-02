@@ -357,7 +357,7 @@ size in memory. The working format is 32-bit float whatever the source depth, so
 grows by one third and a 32-bit float file stays the same size.
 
 If that decoded size exceeds `max_resident_mb`, the file opens streamed. The default is 4096, or
-4GB. Section 19 shows how to change it.
+4GB. Section 20 shows how to change it.
 
 Below the threshold nothing changes. The file opens the way it always did.
 
@@ -583,7 +583,69 @@ selection.
 
 ---
 
-## 15. The Files panel
+## 15. Praat processes
+
+Praat is a speech-analysis program with a scripting language. praatAudioTools is a large
+collection of sound-transformation scripts written for it by Shai Cohen. tui-wave runs those
+scripts on your selection and splices the result back in, exactly as it does with CDP.
+
+They share one browser. Open it with `Ctrl+p` and pick **Praat** in the Domain column.
+
+### Getting it working
+
+You need two things.
+
+**Praat itself.** Install it from your package manager: `pacman -S praat` on Arch,
+`apt install praat` on Debian or Ubuntu, `brew install --cask praat` on macOS. tui-wave finds it
+on your `PATH`, so there is usually nothing to configure. If yours lives somewhere unusual, set
+`praat_bin` in the config to its full path. On macOS that path is inside the app bundle:
+`/Applications/Praat.app/Contents/MacOS/Praat`.
+
+**The scripts.** They ship with tui-wave as a git submodule. If you cloned this repository
+without `--recursive`, fetch them once:
+
+```
+git submodule update --init
+```
+
+If you forget, tui-wave tells you exactly that when you run a Praat process. You can also point
+`praat_audiotools_dir` at your own checkout.
+
+Neither the Praat program nor the scripts are modified or installed into your Praat setup.
+tui-wave never writes to your Praat preferences folder.
+
+### The groups
+
+The Groups column follows the plugin's own folders, so anything written about praatAudioTools
+names the same groups you see here. Four are shortened to fit the column: Generative is
+Generative & Synthesis, Dynamics is Dynamics & Envelope, Spatial is Spatial & Surround, and
+Time/Granular is Time & Granular.
+
+Everything else works as it does for CDP: the parameter form, presets, Preview, Apply and undo.
+
+### Things worth knowing
+
+**Parameter ranges are guesses.** A Praat script declares a starting value for each parameter
+but no minimum or maximum, so tui-wave invents a generous range around the starting value. Push
+a parameter past anything sensible and Praat simply refuses with a clear message. Nothing is
+harmed by trying.
+
+**Some scripts change the sample rate.** A result at a different rate cannot be spliced into an
+existing buffer, so tui-wave refuses and says so rather than playing it back at the wrong speed.
+
+**Markers are not carried through.** Praat discards marker and broadcast metadata, so a Praat
+process returns audio only.
+
+**A run is stopped after two minutes.** Some scripts play their result aloud, which takes as
+long as the audio does, and a few can hang outright. Press `Esc` to stop one early.
+
+**Not every script is listed.** Around a quarter of the collection cannot be driven without a
+window, needs a corpus of other files, or works on things that are not sounds.
+`docs/praat-excluded-scripts.md` names every one and why.
+
+---
+
+## 16. The Files panel
 
 The Files panel lists the current directory. Give it focus with `Tab`.
 
@@ -607,7 +669,7 @@ starts after a short pause, so a fast scroll plays nothing.
 
 ---
 
-## 16. The Buffers panel
+## 17. The Buffers panel
 
 The Buffers panel lists every open file. Give it focus with `Tab` twice.
 
@@ -633,7 +695,7 @@ tui-wave asks first if the buffer has changes.
 
 ---
 
-## 17. Mouse
+## 18. Mouse
 
 The mouse works alongside the keyboard.
 
@@ -650,7 +712,7 @@ The mouse works alongside the keyboard.
 
 ---
 
-## 18. Display modes
+## 19. Display modes
 
 Press `g` to turn graphics mode on or off.
 
@@ -665,7 +727,7 @@ Both modes draw an amplitude-zero line across the centre of each pane.
 
 ---
 
-## 19. Configuration
+## 20. Configuration
 
 tui-wave writes its settings to `~/.config/tui-wave/config.toml`. It saves the file whenever you
 change a toggle, so your settings come back on the next start.
@@ -676,6 +738,8 @@ Useful settings:
 | --- | --- |
 | `max_resident_mb` | Largest decoded size, in MB, to load into memory. Default 4096 |
 | `cdp_dir` | Path to your CDP installation |
+| `praat_bin` | Path to the Praat program. Empty means find it on your `PATH` |
+| `praat_audiotools_dir` | Path to the praatAudioTools scripts. Defaults to the bundled copy |
 | `graphics_mode` | Draw with terminal graphics |
 | `time_ruler` | Show the time ruler row |
 | `transient_threshold_db` | Threshold for transient markers |
@@ -693,7 +757,7 @@ File then Reset Config to Defaults throws away your settings.
 
 ---
 
-## 20. Key reference
+## 21. Key reference
 
 The Waveform panel must have focus for these keys, unless the table says otherwise.
 

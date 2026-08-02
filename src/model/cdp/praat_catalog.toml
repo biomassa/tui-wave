@@ -2352,7 +2352,7 @@ category = "praat"
 subcategory = "AI & Adaptive"
 short_description = "Neural Audio Mosaic"
 description = "Neural Audio Mosaic"
-input = "dual_wav"
+input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
@@ -4167,156 +4167,6 @@ stereo_native = true
 output_is_stereo = false
 
 [[process]]
-key = "praat_analysis_chord_detection"
-bin = "Analysis/CHORD DETECTION.praat"
-title = "CHORD DETECTION"
-category = "praat"
-subcategory = "Analysis"
-short_description = "CHORD DETECTION"
-description = "CHORD DETECTION"
-input = "wav"
-output = "wav"
-stereo_native = true
-output_is_stereo = false
-
-[[process.params]]
-name = "Preset"
-description = ""
-automatable = false
-kind = "choice"
-options = ["Custom", "Quick Scan (fast rough detection)", "Standard Analysis (balanced)", "Fine Detail (slow precise)", "Polyphonic Dense (many notes)", "Monophonic Melody (single line)"]
-default = 0
-
-[[process.params]]
-name = "Window_size_ms"
-description = ""
-automatable = false
-kind = "number"
-min = 0.001
-max = 1100.0
-step = 1.0
-default = 100.0
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Time_step_ms"
-description = ""
-automatable = false
-kind = "number"
-min = 0.001
-max = 550.0
-step = 0.1
-default = 50.0
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Skip_transient_ms"
-description = ""
-automatable = false
-kind = "number"
-min = 0.001
-max = 110.0
-step = 0.1
-default = 10.0
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Min_frequency_Hz"
-description = ""
-automatable = false
-kind = "number"
-min = 0.001
-max = 880.0
-step = 0.1
-default = 80.0
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Max_frequency_Hz"
-description = ""
-automatable = false
-kind = "number"
-min = 0.001
-max = 22000.0
-step = 10.0
-default = 2000.0
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Min_peak_separation_Hz"
-description = ""
-automatable = false
-kind = "number"
-min = 0.001
-max = 440.0
-step = 0.1
-default = 40.0
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Harmonic_tolerance_cents"
-description = ""
-automatable = false
-kind = "number"
-min = 0.001
-max = 825.0
-step = 0.1
-default = 75.0
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Remove_harmonic_duplicates"
-description = ""
-automatable = false
-kind = "toggle"
-default = true
-
-[[process.params]]
-name = "Max_peaks_to_keep"
-description = ""
-automatable = false
-kind = "number"
-min = 0.001
-max = 44.0
-step = 0.01
-default = 4.0
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Min_chord_duration_ms"
-description = ""
-automatable = false
-kind = "number"
-min = 0.001
-max = 2200.0
-step = 1.0
-default = 200.0
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Show_all_detections"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
-name = "Draw_visualization"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process]]
 key = "praat_analysis_climax_profile_matcher"
 bin = "Analysis/Climax_Profile_Matcher.praat"
 title = "Climax Profile Matcher"
@@ -4733,7 +4583,7 @@ category = "praat"
 subcategory = "Analysis"
 short_description = "DTW-Aligned Multi-Feature Audio Analysis (MFCC, Loudness, Pitch)"
 description = "DTW-Aligned Multi-Feature Audio Analysis (MFCC, Loudness, Pitch)"
-input = "dual_wav"
+input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
@@ -6099,125 +5949,6 @@ kind = "toggle"
 default = true
 
 [[process]]
-key = "praat_analysis_pitch_loop_finder"
-bin = "Analysis/Pitch Loop Finder.praat"
-title = "Pitch Loop Finder"
-category = "praat"
-subcategory = "Analysis"
-short_description = "Pitch Loop Finder"
-description = "Pitch Loop Finder"
-input = "wav"
-output = "wav"
-stereo_native = true
-output_is_stereo = false
-
-[[process.params]]
-name = "Preset"
-description = ""
-automatable = false
-kind = "choice"
-options = ["Custom", "Vocal Melody", "Instrumental Riff", "Speech Pattern", "Bass Line", "Full Range"]
-default = 0
-
-[[process.params]]
-name = "Time_step"
-description = ""
-automatable = false
-kind = "number"
-min = 5e-05
-max = 0.55
-step = 0.0001
-default = 0.05
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Pitch_floor"
-description = ""
-automatable = false
-kind = "number"
-min = 0.001
-max = 825.0
-step = 0.1
-default = 75.0
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Pitch_ceiling"
-description = ""
-automatable = false
-kind = "number"
-min = 0.001
-max = 6600.0
-step = 1.0
-default = 600.0
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Tolerance_hz"
-description = ""
-automatable = false
-kind = "number"
-min = 0.001
-max = 550.0
-step = 0.1
-default = 50.0
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Min_loop_duration"
-description = ""
-automatable = false
-kind = "number"
-min = 0.0004
-max = 4.4
-step = 0.001
-default = 0.4
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Max_loop_duration"
-description = ""
-automatable = false
-kind = "number"
-min = 0.001
-max = 110.0
-step = 0.1
-default = 10.0
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Num_loops_to_find"
-description = ""
-automatable = false
-kind = "number"
-min = 0.001
-max = 55.0
-step = 0.01
-default = 5.0
-exponential = false
-scale = "plain"
-
-[[process.params]]
-name = "Show_visualization"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
-name = "Open_textgrid_editor"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process]]
 key = "praat_analysis_pitch_and_loudness_comparison_two_sounds"
 bin = "Analysis/Pitch_and_Loudness_Comparison_Two_Sounds.praat"
 title = "Pitch and Loudness Comparison Two Sounds"
@@ -6225,7 +5956,7 @@ category = "praat"
 subcategory = "Analysis"
 short_description = "Pitch and Loudness Comparison Two Sounds"
 description = "Pitch and Loudness Comparison Two Sounds"
-input = "dual_wav"
+input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
@@ -11433,7 +11164,7 @@ category = "praat"
 subcategory = "Dynamics"
 short_description = "Time-domain RMS envelope follower"
 description = "Time-domain RMS envelope follower"
-input = "dual_wav"
+input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
@@ -12420,7 +12151,7 @@ category = "praat"
 subcategory = "Filter/Color"
 short_description = "Band-Based Concatenative Synthesis"
 description = "Band-Based Concatenative Synthesis"
-input = "dual_wav"
+input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
@@ -13103,7 +12834,7 @@ category = "praat"
 subcategory = "Filter/Color"
 short_description = "Cross Synthesis"
 description = "Cross Synthesis"
-input = "dual_wav"
+input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
@@ -15777,7 +15508,7 @@ category = "praat"
 subcategory = "Filter/Color"
 short_description = "XMod"
 description = "XMod"
-input = "dual_wav"
+input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
@@ -27076,7 +26807,7 @@ category = "praat"
 subcategory = "Pitch"
 short_description = "Pitch Contour Transfer"
 description = "Pitch Contour Transfer"
-input = "dual_wav"
+input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
@@ -44463,7 +44194,7 @@ name = "Preset"
 description = ""
 automatable = false
 kind = "choice"
-options = ["Normal (1.0)", "Slow (1.5)", "Fast (0.67)", "Double speed (0.5)", "Half speed (2.0)"]
+options = ["\"Normal (1.0)\"", "\"Slow (1.5)\"", "\"Fast (0.67)\"", "\"Double speed (0.5)\"", "\"Half speed (2.0)\""]
 default = 0
 
 [[process]]
@@ -45503,7 +45234,7 @@ category = "praat"
 subcategory = "Time/Granular"
 short_description = "Segment Mixer"
 description = "Segment Mixer"
-input = "dual_wav"
+input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
@@ -46488,7 +46219,7 @@ category = "praat"
 subcategory = "Time/Granular"
 short_description = "Stereo Mosaic"
 description = "Stereo Mosaic"
-input = "dual_wav"
+input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
