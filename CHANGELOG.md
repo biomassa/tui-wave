@@ -19,6 +19,11 @@
   after two minutes: some of these scripts play their result aloud, which takes as long as the
   audio does, and a few can hang outright — `Esc` stops one early.
 
+  Chains mix the two freely: a CDP+Praat Chain can put a Praat step after a CDP one and back
+  again, and a chain built only from Praat processes no longer asks for a CDP installation it
+  never invokes. The menu and the process and chain dialogs are renamed CDP+Praat to match;
+  error dialogs still name whichever tool actually failed.
+
   Around a quarter of the collection is not listed, because it cannot be driven without a window,
   needs a corpus of other files, or works on things that are not sounds.
   `docs/praat-excluded-scripts.md` names every one and why.

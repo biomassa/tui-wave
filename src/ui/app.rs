@@ -9929,6 +9929,32 @@ impl App {
                     {
                         continue;
                     }
+                    // A chain step, not a standalone process. Mirrors `tick_cdp`'s branch: the
+                    // frame stack is backend-agnostic, so a Praat step advances it exactly as a
+                    // CDP one does and the next step may belong to either backend.
+                    if let Some(mut run) = self.cdp_pending_chain_run.take() {
+                        let output = match result {
+                            Ok(output) => output,
+                            Err(err) => {
+                                self.dialog = Some(Dialog::CdpOutput {
+                                    title: "CDP+Praat Chain Error".into(),
+                                    lines: praat_error_lines(&err),
+                                    scroll: 0,
+                                });
+                                continue;
+                            }
+                        };
+                        let step_count = run.pending_step_count;
+                        if let Some(frame) = run.frames.last_mut() {
+                            frame.running_buffer = output.result;
+                            frame.running_rate = output.sample_rate;
+                            frame.index += step_count;
+                        }
+                        self.cdp_pending_chain_run = Some(run);
+                        self.submit_current_chain_stage();
+                        continue;
+                    }
+
                     let Some(pending) = self.cdp_pending.take() else { continue };
                     self.stop_cdp_preview_audio();
 
@@ -10094,7 +10120,7 @@ impl App {
             return;
         };
         let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
-        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+        if self.chain_uses_cdp(&state.chain) && crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
             self.dialog = Some(Dialog::CdpSetup {
                 input: TextInput::new(self.config.cdp_dir.clone()),
                 error: Some("CDP directory no longer valid".into()),
@@ -10194,7 +10220,7 @@ impl App {
         };
 
         let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
-        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+        if self.chain_uses_cdp(&temp_chain) && crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
             self.resume_step_edit_with_error(resume, "CDP directory no longer valid".into());
             return;
         }
@@ -10290,7 +10316,7 @@ impl App {
         };
 
         let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
-        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+        if self.chain_uses_cdp(&temp_chain) && crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
             if let Some(state) = self.cdp_chain_editor.as_mut() {
                 state.error = Some("CDP directory no longer valid".into());
             }
@@ -10360,7 +10386,7 @@ impl App {
         let Some(def) = self.cdp_catalog.processes.iter().find(|p| p.key == step.process_key).cloned() else {
             self.cdp_pending_chain_run = None;
             self.dialog = Some(Dialog::CdpOutput {
-                title: "CDP Chain Error".into(),
+                title: "CDP+Praat Chain Error".into(),
                 lines: vec![format!("Process \"{}\" no longer exists in the catalog", step.process_key)],
                 scroll: 0,
             });
@@ -10392,7 +10418,7 @@ impl App {
             let Some((buf, rate)) = self.chain_picked_buffer(&this_path) else {
                 self.cdp_pending_chain_run = None;
                 self.dialog = Some(Dialog::CdpOutput {
-                    title: "CDP Chain Error".into(),
+                    title: "CDP+Praat Chain Error".into(),
                     lines: vec!["A side-chain's source buffer is no longer available".into()],
                     scroll: 0,
                 });
@@ -10418,6 +10444,18 @@ impl App {
             None
         };
 
+        // A Praat step runs through its own runner, but everything around it is unchanged: the
+        // frame stack, the side-chain that produced `secondary`, and the buffer handed to the
+        // next step are all plain audio, so a chain can mix the two backends freely.
+        if def.backend() == crate::model::cdp::def::Backend::Praat {
+            let mut inputs = vec![primary];
+            if let Some(secondary) = secondary {
+                inputs.push(secondary);
+            }
+            self.submit_praat_chain_step(&def, &values, inputs, primary_rate);
+            return;
+        }
+
         let mut input_specs = vec![crate::model::cdp::InputSpec {
             head_tail_marks: Vec::new(),
             channels: primary.len().max(1),
@@ -10441,7 +10479,7 @@ impl App {
             Err(err) => {
                 self.cdp_pending_chain_run = None;
                 self.dialog = Some(Dialog::CdpOutput {
-                    title: "CDP Chain Error".into(),
+                    title: "CDP+Praat Chain Error".into(),
                     lines: vec![cdp_plan_error_message(&err)],
                     scroll: 0,
                 });
@@ -10450,6 +10488,10 @@ impl App {
         };
         if let Some(run) = self.cdp_pending_chain_run.as_mut() {
             run.pending_secondary = None;
+            // Reset explicitly: `submit_merged_ana_run` raises this to the length of a merged
+            // spectral run and nothing lowered it again, so a single step following such a run
+            // advanced the frame by the *previous* run's length and silently skipped steps.
+            run.pending_step_count = 1;
         }
 
         let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
@@ -10466,10 +10508,99 @@ impl App {
         });
         self.dialog = Some(Dialog::CdpRunning {
             job_id,
-            title: format!("CDP Chain: {}", def.title),
+            title: format!("CDP+Praat Chain: {}", def.title),
             step_label: "Starting…".into(),
             step_index: 0,
             step_total,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+    }
+
+    /// Whether any step of `chain` — at any nesting depth — actually runs a CDP binary.
+    ///
+    /// The three chain entry points used to demand a valid `cdp_dir` unconditionally, which was
+    /// right when every step was CDP and wrong now: a chain built entirely from Praat processes
+    /// would be refused for a tool it never invokes. A step whose process is missing from the
+    /// catalog counts as CDP, so an unresolvable chain still fails through the existing path
+    /// rather than being waved past this check.
+    fn chain_uses_cdp(&self, chain: &crate::model::cdp::CdpChain) -> bool {
+        fn any_cdp(
+            steps: &[crate::model::cdp::ChainStep],
+            catalog: &crate::model::cdp::CdpCatalog,
+        ) -> bool {
+            steps.iter().any(|step| {
+                let is_cdp = catalog
+                    .processes
+                    .iter()
+                    .find(|p| p.key == step.process_key)
+                    .is_none_or(|def| def.backend() == crate::model::cdp::def::Backend::Cdp);
+                is_cdp || any_cdp(&step.side_chain, catalog)
+            })
+        }
+        any_cdp(&chain.steps, &self.cdp_catalog)
+    }
+
+    /// Submits one Praat step of a chain, the counterpart of the CDP tail of
+    /// `submit_current_chain_stage`.
+    ///
+    /// Separate only because the two backends build different jobs; everything the *chain*
+    /// cares about is identical, which is why a chain can interleave them. Errors close the run
+    /// with `Dialog::CdpOutput`, exactly as the CDP path does.
+    fn submit_praat_chain_step(
+        &mut self,
+        def: &crate::model::cdp::ProcessDef,
+        values: &[crate::model::cdp::ParamValue],
+        inputs: Vec<Vec<Vec<f32>>>,
+        sample_rate: u32,
+    ) {
+        let fail = |app: &mut Self, message: String| {
+            app.cdp_pending_chain_run = None;
+            app.dialog = Some(Dialog::CdpOutput {
+                title: "CDP+Praat Chain Error".into(),
+                lines: vec![message],
+                scroll: 0,
+            });
+        };
+
+        let audiotools_dir = self.config.praat_audiotools_path();
+        if let Err(message) = crate::praat::validate_audiotools_dir(&audiotools_dir) {
+            return fail(self, message);
+        }
+        if let Err(message) = crate::praat::probe_praat(&self.config.praat_bin) {
+            return fail(self, message);
+        }
+        let planned = match crate::model::praat::plan_praat_job(def, values, &audiotools_dir) {
+            Ok(planned) => planned,
+            Err(err) => return fail(self, err.to_string()),
+        };
+
+        if let Some(run) = self.cdp_pending_chain_run.as_mut() {
+            run.pending_secondary = None;
+            run.pending_step_count = 1;
+        }
+
+        let job_id = self.cdp_next_job_id;
+        self.cdp_next_job_id += 1;
+        self.praat_runner.submit(crate::praat::PraatJob {
+            id: job_id,
+            praat_bin: crate::praat::praat_bin_for(&self.config.praat_bin),
+            prefs_dir: crate::praat::runner::prepare_prefs_dir(
+                &praat_state_dir(),
+                &audiotools_dir,
+            ),
+            planned,
+            inputs,
+            input_sample_rate: sample_rate,
+            purpose: crate::cdp::JobPurpose::Apply,
+            timeout: crate::praat::DEFAULT_TIMEOUT,
+        });
+        self.dialog = Some(Dialog::CdpRunning {
+            job_id,
+            title: format!("CDP+Praat Chain: {}", def.title),
+            step_label: "Starting Praat…".into(),
+            step_index: 0,
+            step_total: 1,
             started: std::time::Instant::now(),
             purpose: crate::cdp::JobPurpose::Apply,
         });
@@ -10495,7 +10626,7 @@ impl App {
         else {
             self.cdp_pending_chain_run = None;
             self.dialog = Some(Dialog::CdpOutput {
-                title: "CDP Chain Error".into(),
+                title: "CDP+Praat Chain Error".into(),
                 lines: vec!["A process in this chain no longer exists in the catalog".into()],
                 scroll: 0,
             });
@@ -10516,7 +10647,7 @@ impl App {
             Err(err) => {
                 self.cdp_pending_chain_run = None;
                 self.dialog = Some(Dialog::CdpOutput {
-                    title: "CDP Chain Error".into(),
+                    title: "CDP+Praat Chain Error".into(),
                     lines: vec![cdp_plan_error_message(&err)],
                     scroll: 0,
                 });
@@ -11098,7 +11229,7 @@ impl App {
                         let Ok(output) = result else {
                             let Err(err) = result else { unreachable!() };
                             self.dialog = Some(Dialog::CdpOutput {
-                                title: "CDP Chain Error".into(),
+                                title: "CDP+Praat Chain Error".into(),
                                 lines: cdp_error_lines(&err),
                                 scroll: 0,
                             });
@@ -19085,7 +19216,7 @@ fn render_cdp_browser_dialog(
     let soft_selected_style = Style::default().fg(theme::FOCUS).bg(theme::SURFACE0);
 
     let block = Block::default()
-        .title("CDP Process")
+        .title("CDP+Praat Process")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
@@ -19339,7 +19470,7 @@ fn truncate_to_width(text: &str, width: usize) -> String {
 /// the picker overlay's title all have to agree on it.
 const VARIADIC_INPUT_LABEL: &str = "input buffers";
 
-fn cdp_params_column_widths(def: &crate::model::cdp::ProcessDef) -> (usize, usize) {
+fn cdp_params_column_widths(def: &crate::model::cdp::ProcessDef) -> (usize, usize, usize) {
     use crate::model::cdp::ParamKind;
     // The floor covers the extra-input row's own label, which is chrome rather than a param
     // and so never appears in `def.params`: "2nd input" (9) for a dual-input process,
@@ -19367,7 +19498,33 @@ fn cdp_params_column_widths(def: &crate::model::cdp::ProcessDef) -> (usize, usiz
         })
         .max()
         .unwrap_or(0);
-    (label_width, range_width)
+    (label_width, range_width, cdp_params_value_width(def))
+}
+
+/// Widest rendered *value* any of `def`'s params can show.
+///
+/// Split out because the value column used to be a flat 24 columns, which was ample for CDP —
+/// its choices are short words like `linear`/`exponential` — and far too narrow for Praat,
+/// whose `optionmenu` labels are whole sentences: `Per-sample coefficient (v0.2/v0.3)`,
+/// `Matched peak (isolates harmonics)`. Those were silently clipped at the right edge, so the
+/// user could not read the setting they were choosing (user report, 2026-08-02).
+///
+/// Only `Choice` can be long. A number renders as a short literal, a toggle as `[X]`, and every
+/// datafile-shaped kind renders a fixed summary rather than its contents.
+fn cdp_params_value_width(def: &crate::model::cdp::ProcessDef) -> usize {
+    use crate::model::cdp::ParamKind;
+    def.params
+        .iter()
+        .map(|p| match &p.kind {
+            ParamKind::Choice { options, .. } => {
+                options.iter().map(|o| o.chars().count()).max().unwrap_or(0)
+            }
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0)
+        // The floor is the old fixed allowance, so no existing CDP dialog narrows.
+        .max(24)
 }
 
 /// The parameter-editing form for one CDP process, opened from `Dialog::CdpBrowser`. Sized
@@ -19394,9 +19551,13 @@ fn render_cdp_params_dialog(
     blocked: Option<&str>,
 ) -> Vec<Rect> {
     let Some(def) = def else { return Vec::new() };
-    let (label_width, range_width) = cdp_params_column_widths(def);
+    let (label_width, range_width, value_width) = cdp_params_column_widths(def);
 
-    let width = (14 + label_width + range_width + 24).clamp(50, 110) as u16;
+    // The ceiling is the terminal itself rather than a fixed 110: a Praat process's option
+    // labels are sentences, and clamping to 110 clipped them off the right edge even when there
+    // was plenty of room. The `min(area.width)` below still keeps the dialog inside the screen,
+    // so a narrow terminal behaves exactly as before.
+    let width = (14 + label_width + range_width + value_width).max(50) as u16;
     let width = width.min(area.width);
     let has_extra_input = cdp_has_extra_input(second_input, variadic_input) as usize;
     // The inline error is the one piece of content that can be far wider than the form —
@@ -19895,7 +20056,7 @@ fn render_cdp_running_dialog(
     ];
 
     let block = Block::default()
-        .title("CDP")
+        .title("CDP+Praat")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
@@ -19934,7 +20095,7 @@ fn render_cdp_chain_editor_dialog(
     let disabled_style = Style::default().fg(theme::ANNOTATION).bg(theme::SURFACE0);
 
     let block = Block::default()
-        .title("CDP Chain")
+        .title("CDP+Praat Chain")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
@@ -21418,6 +21579,135 @@ mod tests {
         assert!(app.histories[0].can_undo(), "apply should be undoable");
     }
 
+    /// Builds a chain of `keys` at their catalog defaults.
+    fn chain_of(app: &App, keys: &[&str]) -> crate::model::cdp::CdpChain {
+        let steps = keys
+            .iter()
+            .map(|key| {
+                let def = app
+                    .cdp_catalog
+                    .processes
+                    .iter()
+                    .find(|p| p.key == *key)
+                    .unwrap_or_else(|| panic!("{key} in catalog"));
+                crate::model::cdp::ChainStep {
+                    process_key: def.key.clone(),
+                    values: def.params.iter().map(|p| p.kind.default_value()).collect(),
+                    side_chain: Vec::new(),
+                }
+            })
+            .collect();
+        crate::model::cdp::CdpChain { name: "test".into(), steps }
+    }
+
+    fn drain_chain_run(app: &mut App) {
+        let started = std::time::Instant::now();
+        while (app.cdp_pending_chain_run.is_some()
+            || matches!(app.dialog, Some(Dialog::CdpRunning { .. })))
+            && started.elapsed() < std::time::Duration::from_secs(120)
+        {
+            app.tick_cdp();
+            app.tick_praat();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if let Some(Dialog::CdpOutput { title, lines, .. }) = &app.dialog {
+            panic!("chain failed ({title}): {}", lines.join("\n"));
+        }
+    }
+
+    /// A chain of two Praat steps runs to completion and splices one undoable result.
+    ///
+    /// This is what the user's report exposed: the chain resolved every step's `bin` against
+    /// `cdp_dir`, so a Praat step failed with `No such file or directory` on a path like
+    /// `~/cdp/Modulation/Karplus-Strong Modulator .praat`.
+    #[test]
+    fn a_chain_of_praat_steps_runs_and_splices_one_result() {
+        let mut app = new_app(Some(doc(0.25, 44_100)), None);
+        if !app.praat_ready() {
+            eprintln!("skipping: praat or the audiotools checkout is unavailable");
+            return;
+        }
+        let chain = chain_of(
+            &app,
+            &["praat_distortion_hard_clip", "praat_distortion_full_wave_rectifier_abs"],
+        );
+        app.start_chain_run(
+            chain,
+            std::collections::HashMap::new(),
+            app.documents[0].channels.clone(),
+            app.documents[0].sample_rate,
+            0,
+            (0, 44_100),
+            ChainRunFinish::Splice,
+        );
+        drain_chain_run(&mut app);
+
+        assert!(app.documents[0].dirty, "the chain should have modified the document");
+        assert!(app.histories[0].can_undo(), "a chain run is one undo step");
+    }
+
+    /// A chain that mixes the two backends. The frame stack passes plain buffers between steps,
+    /// so the handover in either direction must just work.
+    #[test]
+    fn a_chain_can_mix_cdp_and_praat_steps() {
+        // A real tone, not a constant: the wavecycle-based CDP processes refuse a signal with
+        // no zero crossings ("source sound too short to attempt this process").
+        let tone: Vec<f32> = (0..44_100)
+            .map(|i| (i as f32 * 220.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.5)
+            .collect();
+        let mut document = doc(0.0, 44_100);
+        document.channels = vec![tone];
+        let mut app = new_app(Some(document), None);
+        if !app.praat_ready() {
+            eprintln!("skipping: praat unavailable");
+            return;
+        }
+        let cdp_dir = std::path::PathBuf::from(&app.config.cdp_dir);
+        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+            eprintln!("skipping: no real CDP install");
+            return;
+        }
+        let chain = chain_of(&app, &["praat_distortion_hard_clip", "distort_average"]);
+        app.start_chain_run(
+            chain,
+            std::collections::HashMap::new(),
+            app.documents[0].channels.clone(),
+            app.documents[0].sample_rate,
+            0,
+            (0, 44_100),
+            ChainRunFinish::Splice,
+        );
+        drain_chain_run(&mut app);
+        assert!(app.documents[0].dirty, "the mixed chain should have modified the document");
+    }
+
+    /// A Praat-only chain must not demand a CDP installation it never invokes.
+    #[test]
+    fn a_praat_only_chain_does_not_require_a_cdp_directory() {
+        let app = new_app(Some(doc(0.25, 100)), None);
+        let praat_only = chain_of(&app, &["praat_distortion_hard_clip"]);
+        assert!(!app.chain_uses_cdp(&praat_only));
+
+        let mixed = chain_of(&app, &["praat_distortion_hard_clip", "distort_average"]);
+        assert!(app.chain_uses_cdp(&mixed));
+    }
+
+    /// An unresolvable step counts as CDP, so a broken chain still fails through the existing
+    /// path rather than skipping the directory check.
+    #[test]
+    fn a_chain_with_an_unknown_step_still_requires_cdp() {
+        let app = new_app(Some(doc(0.25, 100)), None);
+        let chain = crate::model::cdp::CdpChain {
+            name: "broken".into(),
+            steps: vec![crate::model::cdp::ChainStep {
+                process_key: "no_such_process".into(),
+                values: Vec::new(),
+                side_chain: Vec::new(),
+            }],
+        };
+        assert!(app.chain_uses_cdp(&chain));
+    }
+
     /// A two-Sound Praat script must get the same second-buffer picker a dual-input CDP process
     /// gets. It does so for free by declaring `IoKind::DualWav`, which `cdp_fields_for` already
     /// keys off — this pins that the reuse actually holds rather than being assumed.
@@ -21763,9 +22053,49 @@ mod tests {
     fn cdp_params_column_widths_fit_the_longest_label_and_range() {
         let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
         let def = catalog.find("blur_avrg").expect("blur_avrg in catalog");
-        let (label_width, range_width) = cdp_params_column_widths(def);
+        let (label_width, range_width, _) = cdp_params_column_widths(def);
         assert!(label_width >= "Channels".chars().count());
         assert!(range_width >= format_cdp_range(1.0, 200.0).chars().count());
+    }
+
+    /// The value column must fit the longest option label, not a fixed allowance.
+    ///
+    /// CDP's choices are short words, so a flat 24 columns was ample; Praat's `optionmenu`
+    /// labels are whole sentences ("Per-sample coefficient (v0.2/v0.3)"), and clipping them left
+    /// the user unable to read the setting they were choosing.
+    #[test]
+    fn the_value_column_fits_the_longest_option_label() {
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog
+            .find("praat_distortion_hysteresis_distortion")
+            .expect("hysteresis distortion in catalog");
+        let longest = def
+            .params
+            .iter()
+            .filter_map(|p| match &p.kind {
+                crate::model::cdp::ParamKind::Choice { options, .. } => {
+                    options.iter().map(|o| o.chars().count()).max()
+                }
+                _ => None,
+            })
+            .max()
+            .expect("the process has at least one choice param");
+        assert!(longest > 24, "fixture no longer has a label longer than the old allowance");
+        let (_, _, value_width) = cdp_params_column_widths(def);
+        assert!(
+            value_width >= longest,
+            "value column {value_width} clips a {longest}-character option label"
+        );
+    }
+
+    /// A CDP process with only short choices keeps the previous allowance, so no existing
+    /// dialog narrows.
+    #[test]
+    fn the_value_column_never_narrows_below_the_old_allowance() {
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("blur_avrg").expect("blur_avrg in catalog");
+        let (_, _, value_width) = cdp_params_column_widths(def);
+        assert_eq!(value_width, 24);
     }
 
     /// Opens `Dialog::CdpParams` directly for `blur_avrg` ("Average"), focused on its one

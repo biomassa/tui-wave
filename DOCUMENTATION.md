@@ -61,7 +61,7 @@ To leave the program, press `q`. If a file has unsaved changes, tui-wave asks yo
 
 The screen has five parts, from top to bottom:
 
-1. The **menu bar**, with the titles File, Edit, View, Process, CDP, Markers, and Transport.
+1. The **menu bar**, with the titles File, Edit, View, Process, CDP+Praat, Markers, and Transport.
 2. The **toolbar**, a row of clickable commands.
 3. The **Files** panel on the left, which lists the current directory.
 4. The **Buffers** panel in the middle, which lists the open files.
@@ -450,17 +450,17 @@ programs. tui-wave runs them on your selection and splices the result back in.
 
 | Key | Command |
 | --- | --- |
-| `Ctrl+p` | CDP Process |
-| `Ctrl+h` | CDP Chain |
+| `Ctrl+p` | CDP+Praat Process |
+| `Ctrl+h` | CDP+Praat Chain |
 
-Point tui-wave at your CDP installation first. Open the CDP menu and choose Configure CDP
+Point tui-wave at your CDP installation first. Open the CDP+Praat menu and choose Configure CDP
 Directory. The default guess is `~/cdp`.
 
 ### The browser
 
-The CDP Process dialog opens a browser with three columns:
+The CDP+Praat Process dialog opens a browser with three columns:
 
-1. **Domain**: All, Recent, Time-domain, Spectral.
+1. **Domain**: All, Recent, Time-domain, Spectral, Praat.
 2. **Groups**: the CDP groups inside that domain, such as DISTORT, BLUR, and FOCUS.
 3. **Description**: the processes themselves.
 
@@ -589,7 +589,12 @@ Praat is a speech-analysis program with a scripting language. praatAudioTools is
 collection of sound-transformation scripts written for it by Shai Cohen. tui-wave runs those
 scripts on your selection and splices the result back in, exactly as it does with CDP.
 
-They share one browser. Open it with `Ctrl+p` and pick **Praat** in the Domain column.
+They share one browser. Open it with `Ctrl+p` and pick **Praat** in the Domain column. The menu
+they live under is named CDP+Praat.
+
+Chains mix freely. A CDP+Praat Chain (`Ctrl+h`) can put a Praat step after a CDP one and back
+again; the audio simply passes from each step to the next. A chain made only of Praat processes
+does not need CDP installed at all.
 
 ### Getting it working
 
@@ -840,8 +845,8 @@ The Waveform panel must have focus for these keys, unless the table says otherwi
 | `l` | Loop playback |
 | `i` | Cursor follows playback |
 | `f` | View follows playback |
-| `Ctrl+p` | CDP Process |
-| `Ctrl+h` | CDP Chain |
+| `Ctrl+p` | CDP+Praat Process |
+| `Ctrl+h` | CDP+Praat Chain |
 | `q` | Quit |
 
 ---
