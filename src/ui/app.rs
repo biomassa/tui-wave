@@ -4750,7 +4750,52 @@ impl App {
         }
     }
 
+    /// Dialog key dispatch, wrapped so a Praat script preset is committed when focus *leaves*
+    /// its menu rather than the instant it is selected.
+    ///
+    /// Committing on selection was the first attempt and was unusable: cycling to a preset
+    /// immediately filled the fields and snapped the menu back to Custom, so the preset names
+    /// could never be read and Left/Right appeared to do nothing at all (user report). The menu
+    /// now cycles freely, showing each preset's name, and the fill happens once on the way out.
     fn handle_dialog_key(&mut self, key: KeyEvent) {
+        let before = self.cdp_params_focus_state();
+        self.handle_dialog_key_inner(key);
+        self.commit_script_preset_if_focus_left_it(before);
+    }
+
+    /// `(catalog_index, focus)` while the params dialog is open. Both are needed: focus alone
+    /// would misfire if the dialog were replaced by one for a different process.
+    fn cdp_params_focus_state(&self) -> Option<(usize, usize)> {
+        match &self.dialog {
+            Some(Dialog::CdpParams { catalog_index, focus, .. }) => Some((*catalog_index, *focus)),
+            _ => None,
+        }
+    }
+
+    /// Fills the form from the selected script preset if focus has just moved off the preset
+    /// menu. A no-op when focus did not move, when the dialog changed, or when the process has
+    /// no readable presets.
+    fn commit_script_preset_if_focus_left_it(&mut self, before: Option<(usize, usize)>) {
+        let Some((was_index, was_focus)) = before else { return };
+        let Some((now_index, now_focus)) = self.cdp_params_focus_state() else { return };
+        if now_index != was_index || now_focus == was_focus {
+            return;
+        }
+        let Some(preset_param) =
+            self.cdp_catalog.processes.get(was_index).and_then(|def| def.preset_param)
+        else {
+            return;
+        };
+        // Field rows are offset by one: row 0 is the saved-preset row (`CDP_PRESET_FOCUS`).
+        if was_focus != preset_param + 1 {
+            return;
+        }
+        let Some(Dialog::CdpParams { fields, .. }) = &self.dialog else { return };
+        let Some(CdpField::Choice { selected, .. }) = fields.get(preset_param) else { return };
+        self.apply_script_preset(preset_param, *selected);
+    }
+
+    fn handle_dialog_key_inner(&mut self, key: KeyEvent) {
         if let Some(Dialog::CurveEditor(CurveEditorState {
             picker: Some(CurveTransformPicker { params: Some(CurveTransformParams { list_edit: Some(_), .. }), .. }),
             ..
@@ -5669,7 +5714,15 @@ impl App {
     /// index into `dialog_row_rects` — clicking a row focuses it, and clicking a checkbox
     /// row also toggles it. `x_in_row` is the click's column within that row's Rect, used
     /// by rows that hold both a checkbox and a value field to tell the two targets apart.
+    /// Row-click dispatch, wrapped for the same reason `handle_dialog_key` is: clicking away
+    /// from a Praat preset menu must commit that preset exactly as tabbing away does.
     fn handle_dialog_row_click(&mut self, row: usize, x_in_row: u16) {
+        let before = self.cdp_params_focus_state();
+        self.handle_dialog_row_click_inner(row, x_in_row);
+        self.commit_script_preset_if_focus_left_it(before);
+    }
+
+    fn handle_dialog_row_click_inner(&mut self, row: usize, x_in_row: u16) {
         // The hints/apply bar is appended as the last element of dialog_row_rects.
         // Clicking it (or anything past the interactive rows) submits the dialog.
         if row >= self.dialog_n_interactive {
@@ -9216,9 +9269,6 @@ impl App {
             } else {
                 selected.saturating_sub(1)
             };
-            let chosen = (focus_val - 1, *selected);
-            // Borrow of `fields` ends here so the fill can consult the catalog.
-            self.apply_script_preset(chosen.0, chosen.1);
             return;
         }
         if let Some(input) = self.dialog_input() {
@@ -21872,17 +21922,38 @@ mod tests {
         assert!(!App::praat_opens_new_buffer(cdp));
     }
 
-    /// Picking one of a Praat script's own presets fills the other fields with that preset's
-    /// values and switches the menu back to Custom, so what runs is what the dialog shows.
+    /// Cycling the preset menu must move through the presets and *show* them. The fill happens
+    /// only on the way out.
+    ///
+    /// Committing on selection instead made the menu snap straight back to Custom, so the preset
+    /// names were never visible and Left/Right looked like it did nothing (user report).
     #[test]
-    fn choosing_a_script_preset_fills_the_form_and_returns_to_custom() {
+    fn cycling_the_preset_menu_moves_through_the_presets() {
         let mut app = new_app(Some(doc(0.25, 100)), None);
-        let index = app
-            .cdp_catalog
-            .processes
-            .iter()
-            .position(|p| p.key == "praat_distortion_hysteresis_distortion")
-            .expect("hysteresis distortion in catalog");
+        let index = hysteresis_index(&app);
+        let preset_param =
+            app.cdp_catalog.processes[index].preset_param.expect("it has a preset menu");
+
+        app.open_cdp_params(index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = preset_param + 1;
+        }
+        for expected in 1..=3 {
+            app.cdp_params_cycle_left_right(true);
+            assert_eq!(
+                preset_selection(&app, preset_param),
+                expected,
+                "cycling should land on preset {expected}, not snap back"
+            );
+        }
+    }
+
+    /// Moving focus off the menu is what fills the form and returns it to Custom, so what runs
+    /// is exactly what the dialog shows.
+    #[test]
+    fn leaving_the_preset_menu_fills_the_form_and_returns_to_custom() {
+        let mut app = new_app(Some(doc(0.25, 100)), None);
+        let index = hysteresis_index(&app);
         let def = app.cdp_catalog.processes[index].clone();
         let preset_param = def.preset_param.expect("it has a preset menu");
         let preset = def
@@ -21893,18 +21964,19 @@ mod tests {
             .clone();
 
         app.open_cdp_params(index);
-        // Focus the preset menu, then step onto the preset we are asserting about.
         if let Some(Dialog::CdpParams { focus, fields, .. }) = app.dialog.as_mut() {
             *focus = preset_param + 1;
             if let Some(CdpField::Choice { selected, .. }) = fields.get_mut(preset_param) {
-                *selected = preset.option.saturating_sub(1);
+                *selected = preset.option;
             }
         }
-        app.cdp_params_cycle_left_right(true);
+        // Still showing the preset: nothing has been committed yet.
+        assert_eq!(preset_selection(&app, preset_param), preset.option);
 
-        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else {
-            panic!("expected the params dialog");
-        };
+        // Tab moves focus off the field, which is what commits.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
         for (param, value) in preset.pairs() {
             match &fields[param] {
                 CdpField::Number { input, .. } => {
@@ -21918,51 +21990,59 @@ mod tests {
                 _ => panic!("preset targeted an unexpected field kind"),
             }
         }
-        let CdpField::Choice { selected, .. } = &fields[preset_param] else {
-            panic!("preset param should be a choice");
-        };
         assert_eq!(
-            *selected, def.preset_custom_option,
+            preset_selection(&app, preset_param),
+            def.preset_custom_option,
             "the menu must return to Custom so the script uses the displayed values"
         );
     }
 
-    /// Selecting Custom itself must leave the form alone — that is what makes "pick a preset,
-    /// then tweak it" work.
+    /// Leaving the menu on Custom must not overwrite anything — that is what makes "pick a
+    /// preset, tab away, then tweak" work.
     #[test]
-    fn selecting_custom_does_not_overwrite_the_form() {
+    fn leaving_the_preset_menu_on_custom_does_not_overwrite_the_form() {
         let mut app = new_app(Some(doc(0.25, 100)), None);
-        let index = app
-            .cdp_catalog
+        let index = hysteresis_index(&app);
+        let def = app.cdp_catalog.processes[index].clone();
+        let preset_param = def.preset_param.expect("it has a preset menu");
+
+        app.open_cdp_params(index);
+        let edited_field = if let Some(Dialog::CdpParams { focus, fields, .. }) = app.dialog.as_mut()
+        {
+            *focus = preset_param + 1;
+            if let Some(CdpField::Choice { selected, .. }) = fields.get_mut(preset_param) {
+                *selected = def.preset_custom_option;
+            }
+            let at = fields.iter().position(|f| matches!(f, CdpField::Number { .. })).unwrap();
+            if let Some(CdpField::Number { input, .. }) = fields.get_mut(at) {
+                *input = TextInput::fresh(String::from("7.5"));
+            }
+            at
+        } else {
+            panic!("no dialog")
+        };
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let CdpField::Number { input, .. } = &fields[edited_field] else { panic!("not a number") };
+        assert_eq!(input.value(), "7.5", "Custom must leave an edited field alone");
+    }
+
+    fn hysteresis_index(app: &App) -> usize {
+        app.cdp_catalog
             .processes
             .iter()
             .position(|p| p.key == "praat_distortion_hysteresis_distortion")
-            .expect("hysteresis distortion in catalog");
-        let def = app.cdp_catalog.processes[index].clone();
-        let preset_param = def.preset_param.expect("it has a preset menu");
-        assert_eq!(def.preset_custom_option, 0, "fixture assumes Custom is first");
+            .expect("hysteresis distortion in catalog")
+    }
 
-        app.open_cdp_params(index);
-        if let Some(Dialog::CdpParams { focus, fields, .. }) = app.dialog.as_mut() {
-            *focus = preset_param + 1;
-            if let Some(CdpField::Number { input, .. }) = fields.iter_mut().find(|f| {
-                matches!(f, CdpField::Number { .. })
-            }) {
-                *input = TextInput::fresh(String::from("7.5"));
-            }
-            if let Some(CdpField::Choice { selected, .. }) = fields.get_mut(preset_param) {
-                *selected = 1;
-            }
-        }
-        // Step back onto Custom.
-        app.cdp_params_cycle_left_right(false);
-
+    fn preset_selection(app: &App, preset_param: usize) -> usize {
         let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
-        let edited = fields.iter().find_map(|f| match f {
-            CdpField::Number { input, .. } => Some(input.value().to_string()),
-            _ => None,
-        });
-        assert_eq!(edited.as_deref(), Some("7.5"), "Custom must not overwrite an edited field");
+        let CdpField::Choice { selected, .. } = &fields[preset_param] else {
+            panic!("preset param should be a choice")
+        };
+        *selected
     }
 
     /// A CDP process has no script presets, so cycling one of its choices must not touch the

@@ -689,10 +689,11 @@ and you get a 96kHz buffer.
 different rate cannot be spliced into an existing buffer, so tui-wave refuses and says so rather
 than playing it back at the wrong speed.
 
-**Presets fill in the form.** Many of these processes offer a Preset menu. Choosing one writes
-that preset's values into the other fields and sets the menu back to Custom, so you can see
-exactly what it chose and adjust it from there. Choosing Custom itself changes nothing, which is
-what lets you pick a preset and then tweak it.
+**Presets fill in the form.** Many of these processes offer a Preset menu. Cycle it with Left
+and Right to read through the presets. When you move off the row, the preset you left it on
+writes its values into the other fields and the menu returns to Custom, so you can see exactly
+what it chose and adjust it from there. Leaving the row on Custom changes nothing, which is what
+lets you pick a preset, move away, and then tweak the result.
 
 A few scripts write their presets in a form tui-wave cannot read. Those still work — the preset
 is applied inside the script — but the fields go on showing the manual values.
