@@ -16377,8 +16377,25 @@ fn render_save_as_dialog(
         Rect { x: popup.x + 1, y: popup.y + 2, width: row_w, height: 1 },
         Rect { x: popup.x + 1, y: popup.y + 3, width: row_w, height: 1 },
         Rect { x: popup.x + 1, y: popup.y + 5, width: row_w, height: 1 },
-        Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 },
+        hints_bar_rect(popup, row_w),
     ]
+}
+
+/// The hints-bar row of a dialog popup — the last entry in every dialog's hit-test list,
+/// clicking which submits or closes it.
+///
+/// Exists because `popup.y + popup.height - 2` underflows on a popup under two rows tall,
+/// which a terminal small enough to clamp the popup to nothing produces: a panic in a debug
+/// build, and in release a wrapped `y` placing the rect far off-screen. Returns an
+/// unclickable `Rect::default()` instead — the same sentinel `render_dialog` already uses
+/// for a clamped layout with no room for its hints bar, so a dialog that is too small to
+/// show the row simply has no mouse target for it. Enter still submits either way; this
+/// only ever drops the click target, never the action.
+fn hints_bar_rect(popup: Rect, width: u16) -> Rect {
+    if popup.height < 2 {
+        return Rect::default();
+    }
+    Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width, height: 1 }
 }
 
 fn render_confirm(frame: &mut Frame, area: Rect, text: &str) {
@@ -16484,7 +16501,7 @@ fn render_mix_to_mono_dialog(
         .collect();
     rects.push(Rect { x: popup.x + 1, y: popup.y + 3 + n as u16, width: row_w, height: 1 });
     // Apply (hints bar) rect — last element triggers Enter when clicked.
-    rects.push(Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 });
+    rects.push(hints_bar_rect(popup, row_w));
     rects
 }
 
@@ -16649,7 +16666,7 @@ fn render_gain_dialog(
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 
     // Apply (hints bar) rect — index == dialog_n_interactive triggers Enter.
-    rects.push(Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 });
+    rects.push(hints_bar_rect(popup, row_w));
     rects
 }
 
@@ -16698,7 +16715,7 @@ fn render_fade_dialog(frame: &mut Frame, area: Rect, title: &str, curve: FadeCur
     let row_w = popup.width.saturating_sub(2);
     vec![
         Rect { x: popup.x + 1, y: popup.y + 2, width: row_w, height: 1 },
-        Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 },
+        hints_bar_rect(popup, row_w),
     ]
 }
 
@@ -17534,7 +17551,7 @@ fn render_export_regions_dialog(
         // popup.height - 2 shows a clipped field line, not the hints bar (Enter still
         // submits — this only drops the mouse target, never the action).
         if popup.height == FULL_HEIGHT {
-            Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: inner.width, height: 1 }
+            hints_bar_rect(popup, inner.width)
         } else {
             Rect::default()
         },
@@ -20818,7 +20835,7 @@ fn render_info_dialog(frame: &mut Frame, area: Rect, message: &str) -> Vec<Rect>
     );
     let row_w = popup.width.saturating_sub(2);
     // hints bar is interactive (closes the dialog).
-    vec![Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 }]
+    vec![hints_bar_rect(popup, row_w)]
 }
 
 /// Read-only summary for a `[f]`/`[s]` Buffers-panel row (`App::open_formant_info`)
@@ -21073,7 +21090,7 @@ fn render_formant_info_dialog(
         .style(base);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
     let row_w = popup.width.saturating_sub(2);
-    vec![Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width: row_w, height: 1 }]
+    vec![hints_bar_rect(popup, row_w)]
 }
 
 #[cfg(test)]
@@ -30612,6 +30629,26 @@ mod tests {
             .expect("the hints bar must be rendered somewhere");
         assert_eq!(hints.y, hints_row, "the clickable apply Rect must cover the visible hints bar");
         assert!(hints.width > 0);
+    }
+
+    /// A popup clamped to under two rows has no hints bar to point at, and the arithmetic
+    /// that finds one underflows — a debug-build panic, and in release a wrapped `y` far
+    /// off-screen. Reachable in practice: any dialog opened on a terminal a couple of rows
+    /// tall, which is how the CLI's "could not open that file" info dialog was found to
+    /// panic under a 0-row pty.
+    #[test]
+    fn a_popup_too_short_for_a_hints_bar_yields_an_unclickable_rect() {
+        for height in 0..2 {
+            let popup = Rect { x: 4, y: 7, width: 30, height };
+            assert_eq!(
+                hints_bar_rect(popup, 28),
+                Rect::default(),
+                "a {height}-row popup must not produce a clickable hints bar",
+            );
+        }
+        // Two rows is the first height with a real (if border-only) row to claim.
+        let popup = Rect { x: 4, y: 7, width: 30, height: 2 };
+        assert_eq!(hints_bar_rect(popup, 28), Rect { x: 5, y: 7, width: 28, height: 1 });
     }
 
     /// On a terminal too short for the full dialog, the hints/apply Rect is dropped
