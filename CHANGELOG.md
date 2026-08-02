@@ -22,6 +22,11 @@
   run on a figure that could not be shown. `Play_result` and the other non-drawing toggles are
   unaffected.
 
+- Praat parameter ranges no longer show a wall of decimals. A window length whose default is
+  0.06 advertised a range of `[0.000059999999999999995-0.6599999999999999]` — the bounds are
+  computed from the default, and neither the arithmetic nor its operands land exactly in binary.
+  They now read `[0.00006-0.66]`. Only the printed noise changed; no bound moved.
+
 - Bumped version to 2.2.0.
 
 ## 2026-08-02 (2.1.0)

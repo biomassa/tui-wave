@@ -303,6 +303,53 @@ mod tests {
         }
     }
 
+    /// No catalog bound may carry binary-representation noise.
+    ///
+    /// The parameter form prints a bound with Rust's plain `{}`, which spells every digit an
+    /// `f64` has — so `0.06 * 11`, computed by the Praat converter's range synthesis, reached
+    /// the screen as a maximum of `0.6599999999999999`, and `0.06 / 1000` as a minimum of
+    /// `0.000059999999999999995` (user report). The generator now rounds those off
+    /// (`strip_float_noise` in `scripts/convert_praat_audiotools.py`); this is what keeps a
+    /// future regeneration, or a hand-written entry, from putting them back.
+    ///
+    /// Ten significant digits is the same threshold the generator uses. It is far looser than
+    /// anything a real bound needs, which is the point: the test objects to noise, not to
+    /// precision, so an intentionally exact value like `17.79833` passes untouched.
+    #[test]
+    fn no_number_bound_carries_binary_noise() {
+        use super::super::def::ParamKind;
+        /// Whether `v` still equals itself after being rounded to 10 significant digits.
+        fn is_clean(v: f64) -> bool {
+            if v == 0.0 || !v.is_finite() {
+                return true;
+            }
+            let scale = 10f64.powi(9 - v.abs().log10().floor() as i32);
+            (v * scale).round() / scale == v
+        }
+        // Controls, so a sweep that finds nothing means the catalog is clean rather than that
+        // the check stopped working. The two negatives are the exact values reported.
+        assert!(!is_clean(0.659_999_999_999_999_9), "the check must reject the reported maximum");
+        assert!(!is_clean(0.000_059_999_999_999_999_995), "and the reported minimum");
+        for clean in [0.66, 6e-05, 17.798_33, 88_000.0, -30.0, 0.0, 1.1e-11] {
+            assert!(is_clean(clean), "{clean} is a legitimate bound and must pass");
+        }
+
+        let (catalog, _) = CdpCatalog::load(None);
+        let mut noisy = Vec::new();
+        for proc in &catalog.processes {
+            for param in &proc.params {
+                if let ParamKind::Number { min, max, .. } = &param.kind {
+                    for (which, value) in [("min", *min), ("max", *max)] {
+                        if !is_clean(value) {
+                            noisy.push(format!("{}: {} {which} = {value}", proc.key, param.name));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(noisy.is_empty(), "bounds with float noise:\n  {}", noisy.join("\n  "));
+    }
+
     /// Every process's title must reveal which CDP binary it came from (e.g. "Blur
     /// Average", "Hilite Band"). This began as a workaround: the Groups column used to filter
     /// by a semantic `subcategory` rather than by binary, leaving a process's CDP family
