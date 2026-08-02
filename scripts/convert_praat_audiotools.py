@@ -24,10 +24,12 @@ Two things this cannot get from the source, both handled deliberately below:
 
 from __future__ import annotations
 
+import math
 import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -382,6 +384,8 @@ def make_number(keyword: str, name: str, default: float) -> Param:
         minimum = -span
 
     maximum = max(span, default + span)
+    minimum = strip_float_noise(minimum)
+    maximum = strip_float_noise(maximum)
     if integer:
         minimum = float(int(minimum))
         maximum = float(int(maximum))
@@ -407,13 +411,32 @@ def make_number(keyword: str, name: str, default: float) -> Param:
     )
 
 
+def strip_float_noise(value: float) -> float:
+    """Drop the binary-representation noise from a synthesised bound.
+
+    The bounds are arithmetic on decimal defaults, and neither operand nor result is exactly
+    representable in binary: `0.06 * 11` is `0.6599999999999999` and `0.06 / 1000` is
+    `5.9999999999999995e-05`, so a form field advertised a range of
+    `[0.000059999999999999995-0.6599999999999999]` for a parameter whose default is `0.06`
+    (user report). The digits are real, they are just not information.
+
+    Ten significant digits is deliberately far more than any bound here carries — these are
+    *invented* to begin with (see RANGE_FACTOR) — but the point is to cut only the noise, which
+    starts around the fifteenth digit. Rounding harder would also quietly move bounds that were
+    computed exactly, e.g. an integer maximum of 11264. This is the same fix `round6` applies on
+    the Rust side to values a user nudges.
+    """
+    if value == 0.0 or not math.isfinite(value):
+        return value
+    exact = Decimal(repr(value))
+    return float(round(exact, -exact.adjusted() + 9))
+
+
 def round_step(span: float) -> float:
     """A step roughly 1/1000 of the range, snapped to a power of ten so the UI shows round
     numbers rather than values like 0.0037."""
     if span <= 0:
         return 0.01
-    import math
-
     exponent = math.floor(math.log10(span / 1000.0)) if span > 0 else -2
     return float(10.0 ** min(max(exponent, -6), 3))
 
