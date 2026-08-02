@@ -4750,35 +4750,43 @@ impl App {
         }
     }
 
-    /// Dialog key dispatch, wrapped so a Praat script preset is committed when focus *leaves*
-    /// its menu rather than the instant it is selected.
+    /// Dialog key dispatch, wrapped so editing any parameter moves the Internal Preset row to
+    /// Custom.
     ///
-    /// Committing on selection was the first attempt and was unusable: cycling to a preset
-    /// immediately filled the fields and snapped the menu back to Custom, so the preset names
-    /// could never be read and Left/Right appeared to do nothing at all (user report). The menu
-    /// now cycles freely, showing each preset's name, and the fill happens once on the way out.
+    /// A wrapper rather than a hook at every site that can change a value: those are the text
+    /// inputs, the toggles, the other choice rows and six sub-editors, and missing one would
+    /// leave the row naming a preset the script then re-applies over the user's edit. Comparing
+    /// the form's values before and after catches all of them at one point.
     fn handle_dialog_key(&mut self, key: KeyEvent) {
-        let before = self.cdp_params_focus_state();
+        let before = self.cdp_params_value_snapshot();
         self.handle_dialog_key_inner(key);
-        self.commit_script_preset_if_focus_left_it(before);
+        self.flip_preset_to_custom_if_a_value_changed(before);
     }
 
-    /// `(catalog_index, focus)` while the params dialog is open. Both are needed: focus alone
-    /// would misfire if the dialog were replaced by one for a different process.
-    fn cdp_params_focus_state(&self) -> Option<(usize, usize)> {
+    /// The params form's values, with the process they belong to. `catalog_index` is carried so
+    /// a dialog replaced by one for a *different* process is never mistaken for an edit.
+    fn cdp_params_value_snapshot(&self) -> Option<(usize, Vec<crate::model::cdp::ParamValue>)> {
         match &self.dialog {
-            Some(Dialog::CdpParams { catalog_index, focus, .. }) => Some((*catalog_index, *focus)),
+            Some(Dialog::CdpParams { catalog_index, fields, .. }) => {
+                Some((*catalog_index, fields.iter().map(CdpField::to_value).collect()))
+            }
             _ => None,
         }
     }
 
-    /// Fills the form from the selected script preset if focus has just moved off the preset
-    /// menu. A no-op when focus did not move, when the dialog changed, or when the process has
-    /// no readable presets.
-    fn commit_script_preset_if_focus_left_it(&mut self, before: Option<(usize, usize)>) {
-        let Some((was_index, was_focus)) = before else { return };
-        let Some((now_index, now_focus)) = self.cdp_params_focus_state() else { return };
-        if now_index != was_index || now_focus == was_focus {
+    /// Moves the Internal Preset row to Custom if the user has just changed some *other* value.
+    ///
+    /// A change to the preset row itself is exempt: that is a preset being selected, and
+    /// `apply_script_preset` has already filled the fields from it. Flipping there would undo
+    /// the whole point — it is what made an earlier attempt at this unusable, snapping the row
+    /// back to Custom before the preset's name could even be read.
+    fn flip_preset_to_custom_if_a_value_changed(
+        &mut self,
+        before: Option<(usize, Vec<crate::model::cdp::ParamValue>)>,
+    ) {
+        let Some((was_index, was_values)) = before else { return };
+        let Some((now_index, now_values)) = self.cdp_params_value_snapshot() else { return };
+        if now_index != was_index || now_values.len() != was_values.len() {
             return;
         }
         let Some(preset_param) =
@@ -4786,13 +4794,14 @@ impl App {
         else {
             return;
         };
-        // Field rows are offset by one: row 0 is the saved-preset row (`CDP_PRESET_FOCUS`).
-        if was_focus != preset_param + 1 {
-            return;
+        let edited = was_values
+            .iter()
+            .zip(now_values.iter())
+            .enumerate()
+            .any(|(i, (was, now))| i != preset_param && was != now);
+        if edited {
+            self.cdp_params_flip_preset_to_custom();
         }
-        let Some(Dialog::CdpParams { fields, .. }) = &self.dialog else { return };
-        let Some(CdpField::Choice { selected, .. }) = fields.get(preset_param) else { return };
-        self.apply_script_preset(preset_param, *selected);
     }
 
     fn handle_dialog_key_inner(&mut self, key: KeyEvent) {
@@ -5714,12 +5723,12 @@ impl App {
     /// index into `dialog_row_rects` — clicking a row focuses it, and clicking a checkbox
     /// row also toggles it. `x_in_row` is the click's column within that row's Rect, used
     /// by rows that hold both a checkbox and a value field to tell the two targets apart.
-    /// Row-click dispatch, wrapped for the same reason `handle_dialog_key` is: clicking away
-    /// from a Praat preset menu must commit that preset exactly as tabbing away does.
+    /// Row-click dispatch, wrapped for the same reason `handle_dialog_key` is: a click can flip
+    /// a toggle, which is an edit and must move the Internal Preset row to Custom.
     fn handle_dialog_row_click(&mut self, row: usize, x_in_row: u16) {
-        let before = self.cdp_params_focus_state();
+        let before = self.cdp_params_value_snapshot();
         self.handle_dialog_row_click_inner(row, x_in_row);
-        self.commit_script_preset_if_focus_left_it(before);
+        self.flip_preset_to_custom_if_a_value_changed(before);
     }
 
     fn handle_dialog_row_click_inner(&mut self, row: usize, x_in_row: u16) {
@@ -9269,6 +9278,11 @@ impl App {
             } else {
                 selected.saturating_sub(1)
             };
+            let chosen = (focus_val - 1, *selected);
+            // Borrow of `fields` ends here so the fill can consult the catalog. A no-op unless
+            // this is the Internal Preset row; when it is, cycling shows each preset's values
+            // straight away rather than making the user tab off the row to see them.
+            self.apply_script_preset(chosen.0, chosen.1);
             return;
         }
         if let Some(input) = self.dialog_input() {
@@ -9276,18 +9290,21 @@ impl App {
         }
     }
 
-    /// Fills the form from a Praat script's **own** preset, when `param_index` is the process's
-    /// preset menu and `chosen` is one of its presets.
+    /// Fills the form from a Praat script's **own** preset (the "Internal Preset" row), when
+    /// `param_index` is that row and `chosen` is one of its presets.
     ///
     /// praatAudioTools scripts apply presets internally (see `ProcessDef::preset_param`), so the
     /// sound was always right — but the dialog kept showing the manual values, leaving the user
-    /// unable to see what a preset had chosen or to adjust it. This writes those values into the
-    /// fields and then switches the menu back to the script's own Custom entry, so the script
-    /// leaves them alone and what runs is exactly what is displayed.
+    /// unable to see what a preset had chosen or to adjust it. This writes those values in as
+    /// soon as the preset is selected, so cycling the row shows each preset's settings.
+    ///
+    /// It deliberately leaves the row *on the preset it just applied*. What runs is consistent
+    /// either way — the script re-applies that same preset internally — and the row is then an
+    /// honest label for what the fields contain. `cdp_params_flip_preset_to_custom` is what
+    /// moves it to Custom, and only once the user edits one of those values.
     ///
     /// A no-op for CDP processes, for a Praat script whose preset chain could not be read, and
-    /// for the Custom entry itself — selecting Custom leaves whatever is on screen, which is
-    /// what makes "pick a preset, then tweak it" work.
+    /// for the Custom entry itself, which leaves whatever is on screen alone.
     fn apply_script_preset(&mut self, param_index: usize, chosen: usize) {
         let Some(Dialog::CdpParams { catalog_index, .. }) = &self.dialog else { return };
         let Some(def) = self.cdp_catalog.processes.get(*catalog_index) else { return };
@@ -9296,7 +9313,6 @@ impl App {
         }
         let Some(preset) = def.script_presets.iter().find(|p| p.option == chosen) else { return };
         let updates: Vec<(usize, f64)> = preset.pairs().collect();
-        let custom = def.preset_custom_option;
 
         let Some(Dialog::CdpParams { fields, .. }) = self.dialog.as_mut() else { return };
         for (index, value) in updates {
@@ -9315,6 +9331,21 @@ impl App {
                 _ => {}
             }
         }
+    }
+
+    /// Moves the Internal Preset row to Custom, called once the user has edited one of the
+    /// values a preset set.
+    ///
+    /// Without this the row would keep naming a preset whose values are no longer on screen,
+    /// and — worse — the script would re-apply that preset internally and overwrite the edit.
+    /// Flipping to Custom is what makes the edit take effect.
+    fn cdp_params_flip_preset_to_custom(&mut self) {
+        let Some(Dialog::CdpParams { catalog_index, .. }) = &self.dialog else { return };
+        let Some(def) = self.cdp_catalog.processes.get(*catalog_index) else { return };
+        let (Some(param_index), custom) = (def.preset_param, def.preset_custom_option) else {
+            return;
+        };
+        let Some(Dialog::CdpParams { fields, .. }) = self.dialog.as_mut() else { return };
         if let Some(CdpField::Choice { selected, .. }) = fields.get_mut(param_index) {
             *selected = custom;
         }
@@ -21922,60 +21953,36 @@ mod tests {
         assert!(!App::praat_opens_new_buffer(cdp));
     }
 
-    /// Cycling the preset menu must move through the presets and *show* them. The fill happens
-    /// only on the way out.
+    /// Cycling the Internal Preset row fills the form immediately, and leaves the row naming
+    /// the preset it applied.
     ///
-    /// Committing on selection instead made the menu snap straight back to Custom, so the preset
-    /// names were never visible and Left/Right looked like it did nothing (user report).
+    /// Both halves matter. An earlier attempt filled the fields and snapped the row straight
+    /// back to Custom, so the preset names were never readable; a later one deferred the fill
+    /// until focus left the row, so selecting a preset and pressing Apply showed nothing at all.
     #[test]
-    fn cycling_the_preset_menu_moves_through_the_presets() {
+    fn cycling_the_internal_preset_fills_the_form_immediately() {
         let mut app = new_app(Some(doc(0.25, 100)), None);
         let index = hysteresis_index(&app);
-        let preset_param =
-            app.cdp_catalog.processes[index].preset_param.expect("it has a preset menu");
+        let def = app.cdp_catalog.processes[index].clone();
+        let preset_param = def.preset_param.expect("it has an internal preset row");
+        let preset = def
+            .script_presets
+            .iter()
+            .find(|p| p.option == 1)
+            .expect("option 1 should be a preset")
+            .clone();
 
         app.open_cdp_params(index);
         if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
             *focus = preset_param + 1;
         }
-        for expected in 1..=3 {
-            app.cdp_params_cycle_left_right(true);
-            assert_eq!(
-                preset_selection(&app, preset_param),
-                expected,
-                "cycling should land on preset {expected}, not snap back"
-            );
-        }
-    }
+        app.cdp_params_cycle_left_right(true);
 
-    /// Moving focus off the menu is what fills the form and returns it to Custom, so what runs
-    /// is exactly what the dialog shows.
-    #[test]
-    fn leaving_the_preset_menu_fills_the_form_and_returns_to_custom() {
-        let mut app = new_app(Some(doc(0.25, 100)), None);
-        let index = hysteresis_index(&app);
-        let def = app.cdp_catalog.processes[index].clone();
-        let preset_param = def.preset_param.expect("it has a preset menu");
-        let preset = def
-            .script_presets
-            .iter()
-            .find(|p| p.option != def.preset_custom_option)
-            .expect("it has at least one non-custom preset")
-            .clone();
-
-        app.open_cdp_params(index);
-        if let Some(Dialog::CdpParams { focus, fields, .. }) = app.dialog.as_mut() {
-            *focus = preset_param + 1;
-            if let Some(CdpField::Choice { selected, .. }) = fields.get_mut(preset_param) {
-                *selected = preset.option;
-            }
-        }
-        // Still showing the preset: nothing has been committed yet.
-        assert_eq!(preset_selection(&app, preset_param), preset.option);
-
-        // Tab moves focus off the field, which is what commits.
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-
+        assert_eq!(
+            preset_selection(&app, preset_param),
+            preset.option,
+            "the row must keep naming the preset it applied"
+        );
         let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
         for (param, value) in preset.pairs() {
             match &fields[param] {
@@ -21990,43 +21997,84 @@ mod tests {
                 _ => panic!("preset targeted an unexpected field kind"),
             }
         }
-        assert_eq!(
-            preset_selection(&app, preset_param),
-            def.preset_custom_option,
-            "the menu must return to Custom so the script uses the displayed values"
-        );
     }
 
-    /// Leaving the menu on Custom must not overwrite anything — that is what makes "pick a
-    /// preset, tab away, then tweak" work.
+    /// Editing any other value is what moves the row to Custom — and only then. Otherwise the
+    /// script would re-apply the named preset internally and overwrite the edit.
     #[test]
-    fn leaving_the_preset_menu_on_custom_does_not_overwrite_the_form() {
+    fn editing_a_value_flips_the_internal_preset_to_custom() {
         let mut app = new_app(Some(doc(0.25, 100)), None);
         let index = hysteresis_index(&app);
         let def = app.cdp_catalog.processes[index].clone();
-        let preset_param = def.preset_param.expect("it has a preset menu");
+        let preset_param = def.preset_param.expect("it has an internal preset row");
 
         app.open_cdp_params(index);
-        let edited_field = if let Some(Dialog::CdpParams { focus, fields, .. }) = app.dialog.as_mut()
-        {
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
             *focus = preset_param + 1;
-            if let Some(CdpField::Choice { selected, .. }) = fields.get_mut(preset_param) {
-                *selected = def.preset_custom_option;
-            }
-            let at = fields.iter().position(|f| matches!(f, CdpField::Number { .. })).unwrap();
-            if let Some(CdpField::Number { input, .. }) = fields.get_mut(at) {
-                *input = TextInput::fresh(String::from("7.5"));
-            }
-            at
-        } else {
-            panic!("no dialog")
+        }
+        app.cdp_params_cycle_left_right(true);
+        assert_ne!(
+            preset_selection(&app, preset_param),
+            def.preset_custom_option,
+            "a preset should be selected before the edit"
+        );
+
+        // Focus a number field and type into it.
+        let number_row = {
+            let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+            fields.iter().position(|f| matches!(f, CdpField::Number { .. })).unwrap()
         };
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = number_row + 1;
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
+
+        assert_eq!(
+            preset_selection(&app, preset_param),
+            def.preset_custom_option,
+            "editing a value must move the row to Custom"
+        );
+    }
+
+    /// Merely moving focus is not an edit, so the row keeps naming its preset.
+    #[test]
+    fn moving_focus_alone_does_not_flip_the_internal_preset() {
+        let mut app = new_app(Some(doc(0.25, 100)), None);
+        let index = hysteresis_index(&app);
+        let def = app.cdp_catalog.processes[index].clone();
+        let preset_param = def.preset_param.expect("it has an internal preset row");
+
+        app.open_cdp_params(index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = preset_param + 1;
+        }
+        app.cdp_params_cycle_left_right(true);
+        let chosen = preset_selection(&app, preset_param);
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            preset_selection(&app, preset_param),
+            chosen,
+            "tabbing away is not an edit"
+        );
+    }
 
-        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
-        let CdpField::Number { input, .. } = &fields[edited_field] else { panic!("not a number") };
-        assert_eq!(input.value(), "7.5", "Custom must leave an edited field alone");
+    /// The row is labelled "Internal Preset" so it cannot be confused with tui-wave's own saved
+    /// presets, which occupy their own row directly above the fields.
+    #[test]
+    fn the_script_preset_row_is_labelled_internal_preset() {
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let mut checked = 0;
+        for def in &catalog.processes {
+            let Some(index) = def.preset_param else { continue };
+            assert_eq!(
+                def.params[index].name, "Internal Preset",
+                "{} names its script preset row {:?}",
+                def.key, def.params[index].name
+            );
+            checked += 1;
+        }
+        assert!(checked > 100, "expected many processes with script presets, saw {checked}");
     }
 
     fn hysteresis_index(app: &App) -> usize {
