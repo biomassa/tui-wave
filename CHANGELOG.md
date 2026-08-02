@@ -37,6 +37,21 @@
   needs a corpus of other files, or works on things that are not sounds.
   `docs/praat-excluded-scripts.md` names every one and why.
 
+- **`--version` and `--help`.** `tui-wave --version` (`-V`) and `tui-wave --help` (`-h`) print
+  and exit without starting the editor. Anything else beginning with `-` is now rejected as an
+  unknown option instead of being taken as a filename, so a typo says so rather than opening the
+  editor on a file that cannot exist.
+
+- Fixed the release script hanging after the packages were built. It checked that the AppImage
+  runs by passing it a filename that does not exist, back when that made the program exit with
+  an error. Since large-file support landed, an unreadable path is reported inside the running
+  editor instead — so the check sat in the editor's event loop waiting for a keypress, with its
+  output redirected away and the terminal in raw mode, leaving no way out but closing the
+  terminal. It now asks the AppImage for its version, and checks that the version it reports is
+  the one being released.
+
+- Fixed a crash when a dialog was opened in a terminal window too short to hold it.
+
 - Bumped version to 2.1.0.
 
 ## 2026-08-01 (2.0.0)

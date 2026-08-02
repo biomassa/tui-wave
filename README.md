@@ -96,6 +96,10 @@ Run the binary directly:
 
 On Windows the path reads `.\target\release\tui-wave.exe`.
 
+The argument is optional: pass a file to open it, a directory to start the Files panel there,
+or nothing for an empty screen. `--version` (`-V`) and `--help` (`-h`) print and exit without
+starting the editor.
+
 Use a terminal window of about 120 by 40 characters or larger. That leaves room for the side
 panels and the decibel gutters.
 

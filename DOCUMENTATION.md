@@ -164,6 +164,16 @@ tui-wave ~/recordings
 
 tui-wave reads WAV, FLAC, AIFF, and RF64 files. It writes WAV, FLAC, and MP3 files.
 
+Two options print and exit without starting the editor:
+
+```sh
+tui-wave --version     # or -V
+tui-wave --help        # or -h
+```
+
+Anything else beginning with `-` is rejected as an unknown option rather than treated as a
+filename, so a typo tells you so instead of opening the editor on a file that cannot exist.
+
 To leave the program, press `q`. If a file has unsaved changes, tui-wave asks you first.
 
 ---
