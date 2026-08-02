@@ -28,6 +28,7 @@ fn main() -> color_eyre::Result<()> {
     // lets a job land in it and read its leftovers as its own output. See the function's own
     // comment for why this belongs here and not in `CdpRunner::new`.
     cdp::runner::sweep_stale_temp_dirs();
+    praat::runner::sweep_stale_temp_dirs();
 
     // A file argument is *queued*, not decoded here: `App::load_file` is what decides whether a
     // file fits in RAM or has to open streamed and read-only (`model::stream`), and decoding

@@ -4,6 +4,6 @@
 pub mod runner;
 
 pub use runner::{
-    praat_bin_for, probe_praat, sweep_stale_temp_dirs, validate_audiotools_dir, PraatError,
-    PraatEvent, PraatJob, PraatJobOutput, PraatRunner, DEFAULT_TIMEOUT,
+    praat_bin_for, probe_praat, validate_audiotools_dir, PraatError, PraatEvent, PraatJob,
+    PraatRunner, DEFAULT_TIMEOUT,
 };

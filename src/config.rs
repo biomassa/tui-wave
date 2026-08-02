@@ -43,6 +43,21 @@ pub struct Config {
     /// the menu entry being conditionally disabled, matching this file's "never block startup
     /// on a missing/invalid setting" philosophy. See `cdp::validate_cdp_dir`.
     pub cdp_dir: String,
+    /// Path to the Praat executable. **Empty by default**, which means "look `praat` up on
+    /// `PATH`" — the opposite default to `cdp_dir`, and deliberately so: CDP's ~250 binaries are
+    /// never on anyone's `PATH` and must be pointed at, whereas Praat is a single packaged
+    /// executable (Arch, Debian/Ubuntu, Homebrew all ship it), so the common case needs no
+    /// configuration. Set it only for a Praat installed somewhere unusual — on macOS, that is
+    /// `/Applications/Praat.app/Contents/MacOS/Praat`. See `praat::praat_bin_for`.
+    #[serde(default)]
+    pub praat_bin: String,
+    /// Path to the praatAudioTools checkout. Defaults to the bundled submodule
+    /// (`third_party/praat-audiotools`) resolved against the running binary's repository, and
+    /// can be pointed at a checkout of the user's own. An *empty* directory here means the
+    /// submodule was never initialised, which `praat::validate_audiotools_dir` reports
+    /// specifically — it is the likeliest first-run failure and the fix is one git command.
+    #[serde(default)]
+    pub praat_audiotools_dir: String,
     /// Largest decoded footprint, in MB, that a file may have and still be opened fully into
     /// RAM. Anything above it opens read-only and disk-backed instead (`model::stream`).
     ///
@@ -85,6 +100,8 @@ impl Default for Config {
             dot_matrix_gradient: true,
             time_ruler: true,
             cdp_dir: default_cdp_dir(),
+            praat_bin: String::new(),
+            praat_audiotools_dir: default_praat_audiotools_dir(),
             max_resident_mb: 4096,
             keybindings: HashMap::new(),
         }
@@ -101,6 +118,34 @@ fn default_cdp_dir() -> String {
         .filter(|h| !h.is_empty())
         .map(|home| format!("{home}/cdp"))
         .unwrap_or_default()
+}
+
+/// The bundled `third_party/praat-audiotools` submodule, located relative to the running
+/// executable.
+///
+/// Unlike `default_cdp_dir`'s guess at a user install, this default is usually *correct*: the
+/// checkout ships with the source tree. `CARGO_MANIFEST_DIR` is right for a `cargo run`
+/// development build, and the executable-relative walk covers an installed binary sitting in
+/// `target/release/` or alongside a copied tree. Empty when neither resolves, which leaves the
+/// Praat setup dialog to ask — the same "never block startup" stance as every other path here.
+fn default_praat_audiotools_dir() -> String {
+    const RELATIVE: &str = "third_party/praat-audiotools";
+
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(RELATIVE);
+    if manifest.is_dir() {
+        return manifest.display().to_string();
+    }
+    // Walk up from the executable: `target/debug/tui-wave` and `target/release/tui-wave` both
+    // sit two levels below the repository root.
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors().skip(1).take(4) {
+            let candidate = ancestor.join(RELATIVE);
+            if candidate.is_dir() {
+                return candidate.display().to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 impl Config {
@@ -192,6 +237,8 @@ mod tests {
             dot_matrix_gradient: true,
             time_ruler: false,
             cdp_dir: "/opt/cdp/bin".into(),
+            praat_bin: "/usr/bin/praat".into(),
+            praat_audiotools_dir: "/opt/audiotools".into(),
             max_resident_mb: 4096,
             keybindings: HashMap::new(),
         };
@@ -254,6 +301,8 @@ mod tests {
             dot_matrix_gradient: true,
             time_ruler: false,
             cdp_dir: String::new(),
+            praat_bin: String::new(),
+            praat_audiotools_dir: String::new(),
             max_resident_mb: 4096,
             keybindings: HashMap::new(),
         };
