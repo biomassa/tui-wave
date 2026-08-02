@@ -480,10 +480,20 @@ shared with CDP.
 ### Smoke-test result
 
 `TUI_WAVE_PRAAT_SMOKE=1 cargo test --release praat_catalog_smoke` runs every entry at its
-defaults. First full run: **347 ran, 19 failed (94.5%)** — well above the 82.5% sampled estimate,
-because the static exclusion filter removes the unusable scripts first. Of those 19, five were the
-converter bugs above, six are upstream script bugs, and eight are fixture-dependent (they need
-stereo, speech or loop content that a synthetic tone cannot provide).
+defaults. Final run: **345 ran, 15 failed (95.7%)** — well above the 82.5% sampled estimate,
+because the static exclusion filter removes the unusable scripts first.
+
+It took three runs to get there, and the middle one is the instructive part. The first (347 ran,
+19 failed) exposed the converter bugs above. Fixing the two-Sound detection by requiring an
+*unindented* `numberOfSelected("Sound") <> 2` then over-corrected: seven genuinely dual scripts
+assign the count to a variable first (`nSelected = numberOfSelected("Sound")`) and guard on that,
+so they fell back to one input and failed. The rule now resolves the variable, which separates the
+two cases cleanly — a conditional script writes the same guard *indented*, inside its mode branch.
+
+The 15 that remain are all upstream script bugs or fixture-dependent: three reference undefined
+variables inside their own formulas, one chain script passes an option label its sibling does not
+offer, and the rest need stereo, speech, loop or multichannel content a synthetic mono tone cannot
+provide. None is a catalog defect.
 
 ### Deferred, for future consideration
 

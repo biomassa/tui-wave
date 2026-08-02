@@ -6301,8 +6301,7 @@ impl App {
     /// line), and neither is cached — Praat is optional, and installing it mid-session should
     /// start working without a restart.
     fn praat_ready(&self) -> bool {
-        let dir = std::path::PathBuf::from(&self.config.praat_audiotools_dir);
-        crate::praat::validate_audiotools_dir(&dir).is_ok()
+        crate::praat::validate_audiotools_dir(&self.config.praat_audiotools_path()).is_ok()
             && crate::praat::probe_praat(&self.config.praat_bin).is_ok()
     }
 
@@ -9839,7 +9838,7 @@ impl App {
         preset_selected: Option<usize>,
         custom_values: &Option<Vec<crate::model::cdp::ParamValue>>,
     ) -> Option<String> {
-        let audiotools_dir = std::path::PathBuf::from(&self.config.praat_audiotools_dir);
+        let audiotools_dir = self.config.praat_audiotools_path();
         if let Err(message) = crate::praat::validate_audiotools_dir(&audiotools_dir) {
             return Some(message);
         }
@@ -21377,6 +21376,11 @@ mod tests {
     #[test]
     fn a_praat_process_applies_to_the_document_end_to_end() {
         let mut app = new_app(Some(doc(0.25, 44_100)), None);
+        // Deliberately blanked: an existing config written before this setting existed loads it
+        // as an empty string, and the app must fall back to the bundled submodule rather than
+        // failing with `"" is not a directory` (which is what shipped, briefly). Every other
+        // test builds `Config::default()` in memory and so never exercised a *stored* value.
+        app.config.praat_audiotools_dir = String::new();
         if !app.praat_ready() {
             eprintln!("skipping: praat or the audiotools checkout is unavailable");
             return;

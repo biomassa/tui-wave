@@ -49,14 +49,23 @@ pub struct Config {
     /// executable (Arch, Debian/Ubuntu, Homebrew all ship it), so the common case needs no
     /// configuration. Set it only for a Praat installed somewhere unusual — on macOS, that is
     /// `/Applications/Praat.app/Contents/MacOS/Praat`. See `praat::praat_bin_for`.
-    #[serde(default)]
+    ///
+    /// Note the absence of a field-level `#[serde(default)]`: the *container* already carries
+    /// one, which fills a missing field from `Config::default()`. A field-level attribute
+    /// overrides that with `Default::default()` for the field's own type — an empty `String` —
+    /// which is exactly right here but catastrophically wrong for `praat_audiotools_dir` below,
+    /// so neither carries one and both go through the container.
     pub praat_bin: String,
     /// Path to the praatAudioTools checkout. Defaults to the bundled submodule
     /// (`third_party/praat-audiotools`) resolved against the running binary's repository, and
     /// can be pointed at a checkout of the user's own. An *empty* directory here means the
     /// submodule was never initialised, which `praat::validate_audiotools_dir` reports
     /// specifically — it is the likeliest first-run failure and the fix is one git command.
-    #[serde(default)]
+    ///
+    /// **Read it through [`Config::praat_audiotools_path`], never directly.** An empty value
+    /// falls back to the bundled submodule there, which is what makes an existing config
+    /// written before this setting existed — or by the version that stored an empty string for
+    /// it — keep working instead of reporting `"" is not a directory`.
     pub praat_audiotools_dir: String,
     /// Largest decoded footprint, in MB, that a file may have and still be opened fully into
     /// RAM. Anything above it opens read-only and disk-backed instead (`model::stream`).
@@ -118,6 +127,24 @@ fn default_cdp_dir() -> String {
         .filter(|h| !h.is_empty())
         .map(|home| format!("{home}/cdp"))
         .unwrap_or_default()
+}
+
+impl Config {
+    /// The praatAudioTools checkout to use: the configured path, or the bundled submodule when
+    /// that is empty.
+    ///
+    /// The fallback is not belt-and-braces, it is load-bearing. A config file written before
+    /// this setting existed has no key for it, and one written by a build that stored an empty
+    /// string has the key set to `""`; both must keep working. Without this the app reported
+    /// `"" is not a directory` — an error naming no path at all, for a directory the user never
+    /// chose.
+    pub fn praat_audiotools_path(&self) -> PathBuf {
+        if self.praat_audiotools_dir.trim().is_empty() {
+            PathBuf::from(default_praat_audiotools_dir())
+        } else {
+            PathBuf::from(&self.praat_audiotools_dir)
+        }
+    }
 }
 
 /// The bundled `third_party/praat-audiotools` submodule, located relative to the running
@@ -221,6 +248,38 @@ pub(crate) static XDG_CONFIG_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::M
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A config written before `praat_audiotools_dir` existed, or by a build that stored an
+    /// empty string for it, must still resolve to the bundled submodule.
+    ///
+    /// This is the exact failure the field-level `#[serde(default)]` caused: the container
+    /// already carries one, which fills a missing field from `Config::default()`; the
+    /// field-level attribute overrode that with `String::default()`, so an existing config
+    /// loaded as `""` and `save_config` then wrote the empty string back. Every test passed
+    /// throughout, because they all build `Config::default()` in memory and never load one
+    /// from disk — which is why this test asserts on the *deserialized* value.
+    #[test]
+    fn a_config_without_a_praat_directory_falls_back_to_the_bundled_one() {
+        let without: Config = toml::from_str("snap_to_zero = true").unwrap();
+        assert_eq!(without.praat_audiotools_dir, Config::default().praat_audiotools_dir);
+        assert_eq!(without.praat_audiotools_path(), Config::default().praat_audiotools_path());
+
+        let emptied: Config = toml::from_str("praat_audiotools_dir = \"\"").unwrap();
+        assert_eq!(emptied.praat_audiotools_dir, "");
+        assert_eq!(
+            emptied.praat_audiotools_path(),
+            Config::default().praat_audiotools_path(),
+            "an empty stored value must fall back, not resolve to an empty path"
+        );
+    }
+
+    /// An explicitly configured directory must win over the bundled default.
+    #[test]
+    fn an_explicit_praat_directory_is_honoured() {
+        let config: Config =
+            toml::from_str("praat_audiotools_dir = \"/opt/my-audiotools\"").unwrap();
+        assert_eq!(config.praat_audiotools_path(), PathBuf::from("/opt/my-audiotools"));
+    }
 
     #[test]
     fn round_trips_through_toml() {
