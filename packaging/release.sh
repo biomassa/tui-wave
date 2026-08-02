@@ -75,9 +75,22 @@ for a in "${artifacts[@]}"; do
   [ -f "$a" ] || die "expected artifact missing: $a"
   printf '  %-46s %s\n' "$(basename "$a")" "$(du -h "$a" | cut -f1)"
 done
-# The AppImage is the only one that is directly runnable without unpacking; a non-zero exit
-# on a missing file is the app's own error path, so reaching it proves the binary executes.
-"./${artifacts[0]}" /nonexistent-preflight-check.wav >/dev/null 2>&1 && die "AppImage did not run"
+# The AppImage is the only one that is directly runnable without unpacking, so it is the one
+# artifact whose binary can be executed here. `--version` is the only invocation that returns
+# without touching the terminal (see `parse_args` in src/main.rs) — every other one, including
+# a path that does not exist, enters the event loop and waits for a keypress forever. This
+# check used to pass a nonexistent filename on the theory that the app would exit non-zero,
+# which stopped being true once the file argument became queued rather than decoded in `main`:
+# it hung the release with the tty in raw mode and its output redirected to /dev/null, so there
+# was nothing on screen and Ctrl+C arrived as a keystroke rather than a signal.
+#
+# `timeout` and `</dev/null` are belt-and-braces against that ever recurring, and comparing the
+# output makes this a real check: it proves the binary executes *and* that it is this version,
+# where the old form died only on exit 0 and so passed for a binary that could not exec at all.
+reported="$(timeout 10 "./${artifacts[0]}" --version </dev/null 2>/dev/null)" \
+  || die "AppImage did not run (exit $?) — check its dynamic dependencies"
+[ "$reported" = "tui-wave $version" ] \
+  || die "AppImage reports '$reported', expected 'tui-wave $version' — stale binary in target/?"
 
 # ---- Publish -------------------------------------------------------------------------
 # Release notes are the newest CHANGELOG section: everything between the first two `## `
