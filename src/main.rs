@@ -19,7 +19,82 @@ fn containing_directory(path: &str) -> Option<std::path::PathBuf> {
     Some(if parent.as_os_str().is_empty() { Path::new(".").to_path_buf() } else { parent.to_path_buf() })
 }
 
+/// What the command line asked for.
+///
+/// Split out from `main` so the flag/path decision is testable without a terminal, and so
+/// there is one place that decides whether a run touches the terminal at all.
+#[derive(Debug, PartialEq)]
+enum Invocation {
+    /// Print the version and exit, before anything with a side effect happens.
+    Version,
+    /// Print usage and exit, likewise.
+    Help,
+    /// Start the editor. `Some(path)` is queued for opening; a directory instead sets the
+    /// starting directory of the Files panel.
+    Run(Option<std::path::PathBuf>, Option<std::path::PathBuf>),
+}
+
+/// Anything that starts with `-` is a flag, and an unrecognised one is an error rather than a
+/// filename: a mistyped `--verison` that fell through to the path branch would open the editor
+/// on a file that cannot exist, which looks like the flag was accepted and did nothing.
+fn parse_args(arg: Option<String>, is_dir: impl Fn(&Path) -> bool) -> Result<Invocation, String> {
+    match arg.as_deref() {
+        Some("--version" | "-V") => Ok(Invocation::Version),
+        Some("--help" | "-h") => Ok(Invocation::Help),
+        Some(flag) if flag.starts_with('-') && flag != "-" => {
+            Err(format!("unrecognised option: {flag}"))
+        }
+        Some(p) if is_dir(Path::new(p)) => Ok(Invocation::Run(None, Some(Path::new(p).to_path_buf()))),
+        // A non-existent path is still queued: `load_file` reports why it could not be opened,
+        // which is more useful than exiting with nothing on screen.
+        Some(p) => Ok(Invocation::Run(Some(Path::new(p).to_path_buf()), containing_directory(p))),
+        None => Ok(Invocation::Run(None, None)),
+    }
+}
+
+const USAGE: &str = "\
+tui-wave — a keyboard-driven terminal audio editor
+
+USAGE:
+    tui-wave [FILE|DIRECTORY]
+
+ARGS:
+    FILE         audio file to open (.wav, .flac, .aif, .aiff)
+    DIRECTORY    directory for the Files panel to start in
+
+OPTIONS:
+    -h, --help       print this help and exit
+    -V, --version    print the version and exit
+
+Press F10 or Alt+<mnemonic> for the menu bar, F1 for in-app help.
+See DOCUMENTATION.md for the full guide.";
+
 fn main() -> color_eyre::Result<()> {
+    // Flags are resolved *first*, before the panic hook, the stale-temp-dir sweep and the
+    // terminal init below — `--version` must be a pure read that a packaging script can call
+    // safely. Getting this order wrong is what made release.sh hang: any invocation that
+    // reaches `terminal::init` puts the tty in raw mode and enters the event loop, where it
+    // waits for a keypress forever, and with output redirected there is nothing on screen to
+    // say so.
+    let invocation = match parse_args(std::env::args().nth(1), |p| p.is_dir()) {
+        Ok(invocation) => invocation,
+        Err(message) => {
+            eprintln!("tui-wave: {message}\n\n{USAGE}");
+            std::process::exit(2);
+        }
+    };
+    let (open_path, directory) = match invocation {
+        Invocation::Version => {
+            println!("tui-wave {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Invocation::Help => {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        Invocation::Run(open_path, directory) => (open_path, directory),
+    };
+
     color_eyre::install()?;
     ui::terminal::install_panic_hook();
 
@@ -36,18 +111,6 @@ fn main() -> color_eyre::Result<()> {
     // take gets opened, always tried to load it fully. It also means an unreadable path now
     // surfaces as a dialog inside the running app rather than aborting before the terminal is
     // even initialized.
-    let arg = std::env::args().nth(1);
-    let (open_path, directory) = match arg {
-        Some(ref p) if Path::new(p).is_dir() => (None, Some(Path::new(p).to_path_buf())),
-        // A non-existent path is still queued: `load_file` reports why it could not be opened,
-        // which is more useful than exiting with nothing on screen.
-        Some(p) => {
-            let dir = containing_directory(&p);
-            (Some(Path::new(&p).to_path_buf()), dir)
-        }
-        None => (None, None),
-    };
-
     let (mut terminal, picker) = ui::terminal::init()?;
     let mut app = ui::app::App::new(None, directory);
     app.set_picker(picker);
@@ -58,4 +121,66 @@ fn main() -> color_eyre::Result<()> {
 
     ui::terminal::restore()?;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `parse_args` takes its directory test as a closure so these can run without touching
+    /// the filesystem.
+    fn parse(arg: Option<&str>) -> Result<Invocation, String> {
+        parse_args(arg.map(str::to_string), |_| false)
+    }
+
+    #[test]
+    fn version_and_help_flags_do_not_start_the_editor() {
+        for flag in ["--version", "-V"] {
+            assert_eq!(parse(Some(flag)), Ok(Invocation::Version), "{flag}");
+        }
+        for flag in ["--help", "-h"] {
+            assert_eq!(parse(Some(flag)), Ok(Invocation::Help), "{flag}");
+        }
+    }
+
+    /// The regression behind the release.sh hang: every invocation that is not a
+    /// terminating flag reaches the event loop, so a flag that is silently treated as a
+    /// filename hangs a non-interactive caller instead of failing it.
+    #[test]
+    fn an_unrecognised_flag_is_an_error_not_a_filename() {
+        assert!(parse(Some("--verison")).is_err());
+        assert!(parse(Some("-x")).is_err());
+    }
+
+    #[test]
+    fn a_file_argument_is_queued_with_its_containing_directory() {
+        assert_eq!(
+            parse(Some("take.wav")),
+            Ok(Invocation::Run(Some("take.wav".into()), Some(".".into()))),
+        );
+        assert_eq!(
+            parse(Some("/audio/take.wav")),
+            Ok(Invocation::Run(Some("/audio/take.wav".into()), Some("/audio".into()))),
+        );
+    }
+
+    /// A leading `-` marks a flag, but a bare `-` is a plausible filename and has no flag
+    /// meaning here, so it must not be swallowed by the flag branch.
+    #[test]
+    fn a_bare_dash_is_treated_as_a_path() {
+        assert_eq!(parse(Some("-")), Ok(Invocation::Run(Some("-".into()), Some(".".into()))));
+    }
+
+    #[test]
+    fn a_directory_argument_sets_the_files_panel_and_opens_nothing() {
+        assert_eq!(
+            parse_args(Some("/audio".to_string()), |_| true),
+            Ok(Invocation::Run(None, Some("/audio".into()))),
+        );
+    }
+
+    #[test]
+    fn no_argument_opens_the_placeholder_screen() {
+        assert_eq!(parse(None), Ok(Invocation::Run(None, None)));
+    }
 }
