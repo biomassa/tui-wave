@@ -45,6 +45,16 @@ const POLL_INTERVAL: Duration = Duration::from_millis(30);
 /// the limit exists to catch a script that will *never* return, not to bound slow ones.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Wall-clock limit for a run that also draws its visualization.
+///
+/// Headroom rather than a measured need: across a sample of the plugin's drawing processes the
+/// figure cost about 0.1s on top of a median 0.5s run, and the slowest was 5s end to end. But
+/// those were measured on one second of audio, the drawing code is the least-exercised part of
+/// these scripts (nothing ran it before this feature existed), and a spectrogram panel scales
+/// with the selection. Doubling the budget costs nothing when nothing hangs, and the alternative
+/// — killing a run that was 8s from finishing — throws away the audio too.
+pub const DRAWING_TIMEOUT: Duration = Duration::from_secs(240);
+
 /// The executable name looked up on `PATH` when no explicit path is configured. Unlike CDP —
 /// whose ~250 binaries are not on anyone's `PATH` and which therefore *requires* a configured
 /// directory — Praat is packaged on Arch, Debian/Ubuntu and Homebrew, so the overwhelmingly
@@ -78,6 +88,14 @@ pub struct PraatJobOutput {
     /// Read back from the output file rather than assumed: plenty of the plugin's scripts
     /// resample, and a few synthesise at a fixed rate regardless of the input's.
     pub sample_rate: u32,
+    /// What the script drew into Praat's Picture window, cropped and scaled for display, when
+    /// the run asked for a drawing and produced one.
+    ///
+    /// `None` covers four different things on purpose — the run drew nothing, the save failed,
+    /// the file was unreadable, the canvas came back blank — because the caller does the same
+    /// thing in all four: carries on with the audio and offers no picture. A drawing is a
+    /// bonus, never a result, so none of them is an error.
+    pub picture: Option<image::RgbaImage>,
 }
 
 #[derive(Debug)]
@@ -227,6 +245,7 @@ fn run_job_body(
 ) -> Result<PraatJobOutput, PraatError> {
     let output_path = temp_dir.join(&job.planned.output_name);
     let driver_path = temp_dir.join(&job.planned.driver_name);
+    let picture_path = job.planned.picture_name.as_ref().map(|name| temp_dir.join(name));
 
     // Float32 in: Praat reads IEEE float WAV natively, so the input leg is lossless and the
     // working buffer needs no conversion. (Only the return leg quantizes — Praat's writer
@@ -252,7 +271,15 @@ fn run_job_body(
         message: e.to_string(),
     })?;
 
-    run_praat(job, &driver_path, &input_paths, &output_path, temp_dir, cancel)?;
+    run_praat(
+        job,
+        &driver_path,
+        &input_paths,
+        &output_path,
+        picture_path.as_deref(),
+        temp_dir,
+        cancel,
+    )?;
 
     match std::fs::metadata(&output_path) {
         Ok(meta) if meta.len() > 0 => {}
@@ -263,7 +290,16 @@ fn run_job_body(
         message: e.to_string(),
     })?;
 
-    Ok(PraatJobOutput { sample_rate: out.sample_rate, result: out.channels })
+    // Read *here*, not by handing the path back: the caller's `TempDirGuard` deletes this
+    // directory the moment `run_job` returns. Every step is fallible-and-ignored — the audio is
+    // already in hand, and nothing about a drawing is worth failing it over.
+    let picture = picture_path
+        .as_deref()
+        .filter(|path| path.exists())
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| crate::praat::picture::decode_for_display(&bytes));
+
+    Ok(PraatJobOutput { sample_rate: out.sample_rate, result: out.channels, picture })
 }
 
 fn run_praat(
@@ -271,6 +307,7 @@ fn run_praat(
     driver_path: &Path,
     input_paths: &[PathBuf],
     output_path: &Path,
+    picture_path: Option<&Path>,
     temp_dir: &Path,
     cancel: &AtomicBool,
 ) -> Result<(), PraatError> {
@@ -293,10 +330,13 @@ fn run_praat(
     if let Some(prefs) = &job.prefs_dir {
         command.arg(format!("--pref-dir={}", prefs.display()));
     }
+    command.arg(driver_path).args(input_paths).arg(output_path);
+    // Conditional in lockstep with the driver's own `outfile Picture_file` field: Praat fills a
+    // form strictly by position *and count*, so one without the other is an immediate exit 255.
+    if let Some(path) = picture_path {
+        command.arg(path);
+    }
     let mut child = command
-        .arg(driver_path)
-        .args(input_paths)
-        .arg(output_path)
         .current_dir(temp_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -505,6 +545,7 @@ mod tests {
                 driver_source: driver_source.into(),
                 input_names: vec![input_wav_name(1)],
                 output_name: OUTPUT_WAV.into(),
+                picture_name: None,
                 script_path: PathBuf::from("/unused"),
                 label: "test".into(),
             },
@@ -554,6 +595,64 @@ mod tests {
         assert_eq!(out.sample_rate, 44_100);
         assert_eq!(out.result.len(), 2);
         assert_eq!(out.result[0].len(), 1000);
+    }
+
+    /// A driver that draws is handed a third argv path, and what it painted comes back decoded.
+    /// This is the whole seam end to end: the extra form field, the extra argument, Praat's
+    /// batch-mode Picture window, the PNG, and the crop — anything broken in that chain shows up
+    /// as `picture: None` rather than as a failure, so nothing weaker would catch it.
+    #[test]
+    fn a_driver_that_draws_returns_its_picture() {
+        require_praat!();
+        let mut job = job_with(
+            "form Driver\n    infile Input_file\n    outfile Output_file\n    \
+             outfile Picture_file\nendform\n\
+             snd = Read from file: input_file$\n\
+             selectObject: snd\n\
+             Save as 32-bit WAV file: output_file$\n\
+             Erase all\n\
+             Select outer viewport: 0, 6, 0, 4\n\
+             Axes: 0, 1, 0, 1\n\
+             Paint rectangle: \"Black\", 0.2, 0.8, 0.2, 0.8\n\
+             nocheck Select outer viewport: 0, 12, 0, 12\n\
+             nocheck Save as 300-dpi PNG file: picture_file$\n",
+            DEFAULT_TIMEOUT,
+        );
+        job.planned.picture_name = Some(crate::model::praat::plan::PICTURE_PNG.into());
+        let out = run(&job).expect("run");
+        let picture = out.picture.expect("a picture came back");
+        let (width, height) = picture.dimensions();
+        assert!(width > 0 && height > 0);
+        assert!(
+            width <= crate::praat::picture::MAX_DIMENSION
+                && height <= crate::praat::picture::MAX_DIMENSION,
+            "{width}x{height} was not scaled down"
+        );
+        // The rectangle is 3:2, and the crop keeps that; a full 12x12 canvas would be square,
+        // which is what proves the white margin was actually removed.
+        assert!(width > height, "the canvas was not cropped to the drawing: {width}x{height}");
+    }
+
+    /// The mirror image, and the reason the blank check exists: a run that asks for a picture
+    /// but paints nothing gets a full white canvas back from Praat, which must read as "no
+    /// picture" rather than as a popup full of nothing.
+    #[test]
+    fn a_driver_that_draws_nothing_returns_no_picture() {
+        require_praat!();
+        let mut job = job_with(
+            "form Driver\n    infile Input_file\n    outfile Output_file\n    \
+             outfile Picture_file\nendform\n\
+             snd = Read from file: input_file$\n\
+             selectObject: snd\n\
+             Save as 32-bit WAV file: output_file$\n\
+             nocheck Select outer viewport: 0, 12, 0, 12\n\
+             nocheck Save as 300-dpi PNG file: picture_file$\n",
+            DEFAULT_TIMEOUT,
+        );
+        job.planned.picture_name = Some(crate::model::praat::plan::PICTURE_PNG.into());
+        let out = run(&job).expect("run");
+        assert!(out.picture.is_none(), "a blank canvas was mistaken for a picture");
+        assert_eq!(out.result.len(), 2, "the audio must be unaffected either way");
     }
 
     /// Praat uses 255 for every script error, so the captured stderr is the whole diagnostic —
@@ -745,7 +844,7 @@ mod tests {
         job.planned.driver_source = crate::model::praat::driver::driver_script(
             &script.to_string_lossy(),
             &[],
-            1,
+            crate::model::praat::driver::DriverOptions::default(),
         )
         .unwrap();
 
@@ -858,6 +957,136 @@ mod tests {
             eprintln!("  {failure}");
         }
         assert!(ran > 0, "no Praat entries found in the catalog");
+    }
+
+    /// The same sweep, but with every drawing toggle turned **on** — the number that says
+    /// whether the picture feature is honest.
+    ///
+    /// It exists because the drawing blocks are the least-exercised code in the plugin: nothing
+    /// ever ran them before this feature, `praat_catalog_smoke_test` drives every entry at its
+    /// catalog default (which the converter forces to *off* for exactly these toggles), and
+    /// there are roughly 475 of them. A `Draw:` against an object a script only creates on
+    /// another branch fails here and nowhere else.
+    ///
+    /// Reports three buckets and asserts none of them, because the useful signal is the
+    /// proportion rather than a threshold — and because a script refusing the fixture on its
+    /// merits ("No loops found. Try adjusting parameters." on two seconds of tone) is not a
+    /// defect in this feature. Separately gated from `TUI_WAVE_PRAAT_SMOKE` so the ordinary
+    /// sweep does not double in cost.
+    #[test]
+    fn praat_draw_smoke_test() {
+        if std::env::var("TUI_WAVE_PRAAT_DRAW_SMOKE").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set TUI_WAVE_PRAAT_DRAW_SMOKE=1 to run the Praat drawing sweep");
+            return;
+        }
+        require_praat!();
+        let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/praat-audiotools");
+        if validate_audiotools_dir(&checkout).is_err() {
+            eprintln!("skipping: submodule not initialised");
+            return;
+        }
+        let state = std::env::temp_dir().join(format!("praat-draw-smoke-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        let prefs = prepare_prefs_dir(&state, &checkout);
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let (channels, sample_rate) = smoke_fixture();
+
+        let (mut drew, mut blank) = (0usize, 0usize);
+        let mut failures: Vec<String> = Vec::new();
+        let mut index = 0usize;
+        for def in catalog
+            .processes
+            .iter()
+            .filter(|d| d.backend() == crate::model::cdp::def::Backend::Praat)
+        {
+            // Defaults, except every drawing toggle forced on. `draws_picture` then decides
+            // whether this entry has one at all, so the sweep covers exactly the entries the
+            // feature applies to and nothing else.
+            let values: Vec<_> = def
+                .params
+                .iter()
+                .map(|p| match &p.kind {
+                    crate::model::cdp::def::ParamKind::Toggle { .. } => {
+                        crate::model::cdp::ParamValue::Toggle(true)
+                    }
+                    kind => kind.default_value(),
+                })
+                .collect();
+            // Re-derived rather than assumed: `values` turns *every* toggle on, including
+            // `Play_result`, and only the drawing ones make this a picture run.
+            if !crate::model::praat::plan::draws_picture(def, &values) {
+                continue;
+            }
+            // ...so put the play toggles back, or the sweep spends the fixture's duration in
+            // real time on each of 257 entries.
+            let values: Vec<_> = def
+                .params
+                .iter()
+                .zip(values)
+                .map(|(param, value)| {
+                    if param.name.to_ascii_lowercase().starts_with("play") {
+                        crate::model::cdp::ParamValue::Toggle(false)
+                    } else {
+                        value
+                    }
+                })
+                .collect();
+            let planned = match crate::model::praat::plan_praat_job(def, &values, &checkout) {
+                Ok(planned) => planned,
+                Err(err) => {
+                    failures.push(format!("{}: plan failed: {err}", def.key));
+                    continue;
+                }
+            };
+            let input_count = planned.input_names.len();
+            let job = PraatJob {
+                id: 0,
+                praat_bin: praat_bin_for(""),
+                planned,
+                inputs: vec![channels.clone(); input_count],
+                input_sample_rate: sample_rate,
+                purpose: JobPurpose::Apply,
+                // Not `DRAWING_TIMEOUT`. That figure is headroom for one interactive run the
+                // user is waiting on; here it is 300 of them in a row, where a single script
+                // that never returns would look indistinguishable from a hung sweep for four
+                // minutes. 60s is well past the slowest measured drawing run.
+                timeout: Duration::from_secs(60),
+                prefs_dir: prefs.clone(),
+            };
+            // Printed before the run, not after: this is the line that tells you which entry
+            // the sweep is *currently* on when it stops moving.
+            index += 1;
+            eprintln!("[{index}] {}", def.key);
+            match run(&job) {
+                Ok(out) if out.picture.is_some() => drew += 1,
+                Ok(_) => {
+                    blank += 1;
+                    eprintln!("  no picture: {}", def.key);
+                }
+                Err(err) => {
+                    let detail = match &err {
+                        PraatError::NonZeroExit { output, .. } => output
+                            .lines()
+                            .find(|l| l.starts_with("Error:"))
+                            .unwrap_or("(no Error: line)")
+                            .to_string(),
+                        other => other.to_string(),
+                    };
+                    failures.push(format!("{}: {detail}", def.key));
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&state);
+
+        eprintln!(
+            "praat draw smoke: {drew} drew, {blank} produced nothing, {} failed",
+            failures.len()
+        );
+        for failure in &failures {
+            eprintln!("  {failure}");
+        }
+        assert!(drew + blank + failures.len() > 0, "no drawing entries found in the catalog");
     }
 
     #[test]

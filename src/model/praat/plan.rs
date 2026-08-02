@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::driver::{driver_script, DriverArg, DriverError};
+use super::driver::{driver_script, DriverArg, DriverError, DriverOptions};
 use crate::model::cdp::def::{Backend, IoKind, ParamKind, ParamValue, ProcessDef};
 
 /// Temp-file names inside the job's own directory. Fixed rather than generated: the directory
@@ -18,6 +18,7 @@ use crate::model::cdp::def::{Backend, IoKind, ParamKind, ParamValue, ProcessDef}
 /// failed run's leftovers readable when debugging. Inputs are numbered by `input_wav_name`.
 pub const OUTPUT_WAV: &str = "out.wav";
 pub const DRIVER_SCRIPT: &str = "driver.praat";
+pub const PICTURE_PNG: &str = "picture.png";
 
 /// Everything the runner must materialise and execute for one Praat job.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +33,10 @@ pub struct PraatPlannedJob {
     pub input_names: Vec<String>,
     /// Temp WAV the driver saves its result to, which the runner reads back afterwards.
     pub output_name: String,
+    /// Temp PNG the driver saves Praat's Picture window to, relative to the job's temp
+    /// directory, or `None` when this run draws nothing (see [`draws_picture`]). Doubles as the
+    /// signal to the runner: `Some` means pass a third path on argv and try to read it back.
+    pub picture_name: Option<String>,
     /// Absolute path to the plugin script being run — resolved here so the runner never has to
     /// know how the submodule is laid out.
     pub script_path: PathBuf,
@@ -138,17 +143,63 @@ pub fn plan_praat_job(
 
     let script_path = audiotools_dir.join(&def.bin);
     let input_count = praat_input_count(def);
-    let driver_source = driver_script(&script_path.to_string_lossy(), &args, input_count)
-        .map_err(PraatPlanError::Driver)?;
+    let save_picture = draws_picture(def, values);
+    let driver_source = driver_script(
+        &script_path.to_string_lossy(),
+        &args,
+        DriverOptions { input_count, save_picture },
+    )
+    .map_err(PraatPlanError::Driver)?;
 
     Ok(PraatPlannedJob {
         driver_name: DRIVER_SCRIPT.to_string(),
         driver_source,
         input_names: (1..=input_count).map(input_wav_name).collect(),
         output_name: OUTPUT_WAV.to_string(),
+        picture_name: save_picture.then(|| PICTURE_PNG.to_string()),
         script_path,
         label: def.title.clone(),
     })
+}
+
+/// Whether this run will paint something into Praat's Picture window — i.e. whether the driver
+/// should save it and the app should offer to show it.
+///
+/// True when any **toggle** whose name reads as a drawing switch is on. The names come from the
+/// plugin's own `form` blocks and are wildly inconsistent (`Draw_visualization` on 267 entries,
+/// `Show_visualization` on 14, then `Draw_response`, `Draw_spectrogram`, `Visualize`, …), so a
+/// prefix match is the only thing that covers them without a 300-line table that the next
+/// submodule bump would invalidate.
+///
+/// The prefixes are `scripts/convert_praat_audiotools.py`'s `SILENCE_RE` **minus**
+/// `play|demo|open_|export`, and the exclusions are the interesting part: `play` costs the
+/// selection's duration in real time and draws nothing; `demo` is Praat's Demo window, which
+/// cannot be saved and which only two scripts touch anyway; `open_` never matched a real toggle
+/// (only `Open_phase`, a glottal-source *number*, which cannot match here since the kind is
+/// checked); and `export` writes its own files. Keep the two lists in step — if `SILENCE_RE`
+/// grows a prefix, decide here whether it draws.
+///
+/// **Deliberately over-inclusive**, with no exclusion list for Info-window-only toggles like
+/// `Show_info`. A false positive costs one wasted `Save as PNG` whose all-white result is
+/// discarded by the blank check in `praat::picture`; a false negative silently loses a picture
+/// the user asked for and gives them nothing to look at. Those are not comparable costs.
+///
+/// Checking `ParamKind::Toggle` and not just the name is what keeps `Visualization_delay` and
+/// `Show_every_n_frames` — numbers, not switches — from matching.
+pub fn draws_picture(def: &ProcessDef, values: &[ParamValue]) -> bool {
+    def.params.iter().zip(values).any(|(param, value)| {
+        matches!(param.kind, ParamKind::Toggle { .. })
+            && matches!(value, ParamValue::Toggle(true))
+            && is_picture_toggle_name(&param.name)
+    })
+}
+
+/// Whether a parameter *name* reads as a drawing switch. Public because the UI greys these out
+/// when the terminal cannot show a picture, and must agree exactly with what the planner will
+/// actually act on.
+pub fn is_picture_toggle_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ["draw", "show", "visuali"].iter().any(|prefix| name.starts_with(prefix))
 }
 
 /// How many Sound objects this process expects selected, read off its declared `input`.
@@ -362,6 +413,82 @@ mod tests {
     fn an_ordinary_process_plans_exactly_one_input_file() {
         let job = plan_praat_job(&praat_def(vec![]), &[], Path::new("/p")).unwrap();
         assert_eq!(job.input_names, vec!["in_1.wav"]);
+    }
+
+    fn toggle(name: &str) -> ParamDef {
+        with_kind(name, ParamKind::Toggle { default: false })
+    }
+
+    /// The whole point: the toggle that 267 catalog entries carry now reaches the driver as a
+    /// request for a picture rather than as a switch with no observable effect.
+    #[test]
+    fn a_draw_visualization_toggle_that_is_on_plans_a_picture() {
+        let def = praat_def(vec![toggle("Draw_visualization")]);
+        let job = plan_praat_job(&def, &[ParamValue::Toggle(true)], Path::new("/p")).unwrap();
+        assert_eq!(job.picture_name.as_deref(), Some(PICTURE_PNG));
+        assert!(job.driver_source.contains("Save as 300-dpi PNG file:"));
+    }
+
+    #[test]
+    fn the_same_toggle_turned_off_plans_no_picture() {
+        let def = praat_def(vec![toggle("Draw_visualization")]);
+        let job = plan_praat_job(&def, &[ParamValue::Toggle(false)], Path::new("/p")).unwrap();
+        assert_eq!(job.picture_name, None);
+        assert!(!job.driver_source.contains("PNG"));
+    }
+
+    /// The plugin spells this switch a dozen different ways, so the prefix match has to cover
+    /// all of them — a table of exact names would rot at the next submodule bump.
+    #[test]
+    fn every_spelling_of_the_drawing_switch_counts() {
+        for name in [
+            "Draw_visualization",
+            "Show_visualization",
+            "Draw_response",
+            "Draw_spectrogram",
+            "Visualize",
+            "show_ANALYSIS", // matched case-insensitively
+        ] {
+            let def = praat_def(vec![toggle(name)]);
+            let job = plan_praat_job(&def, &[ParamValue::Toggle(true)], Path::new("/p")).unwrap();
+            assert!(job.picture_name.is_some(), "{name} was not treated as a drawing toggle");
+        }
+    }
+
+    /// `Play_result` is on 257 entries and is the one switch that must *not* count: it draws
+    /// nothing and costs the selection's duration in real time.
+    #[test]
+    fn a_play_toggle_alone_plans_no_picture() {
+        let def = praat_def(vec![toggle("Play_result")]);
+        let job = plan_praat_job(&def, &[ParamValue::Toggle(true)], Path::new("/p")).unwrap();
+        assert_eq!(job.picture_name, None);
+    }
+
+    /// Checking the *kind* and not just the name is what keeps a number like
+    /// `Visualization_delay` from being read as a request to draw.
+    #[test]
+    fn a_number_whose_name_starts_like_a_drawing_switch_is_not_one() {
+        let def = praat_def(vec![number("Visualization_delay", 0.25)]);
+        let job = plan_praat_job(&def, &[ParamValue::Number(0.25)], Path::new("/p")).unwrap();
+        assert_eq!(job.picture_name, None);
+    }
+
+    /// A real entry carries several toggles at once; one drawing switch anywhere in the list is
+    /// enough, whatever its position.
+    #[test]
+    fn one_drawing_toggle_among_many_params_is_enough() {
+        let def = praat_def(vec![
+            number("Threshold", 0.5),
+            toggle("Play_result"),
+            toggle("Draw_visualization"),
+        ]);
+        let job = plan_praat_job(
+            &def,
+            &[ParamValue::Number(0.5), ParamValue::Toggle(false), ParamValue::Toggle(true)],
+            Path::new("/p"),
+        )
+        .unwrap();
+        assert!(job.picture_name.is_some());
     }
 
     /// The two backends must not accept each other's definitions.

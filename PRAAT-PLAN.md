@@ -338,7 +338,8 @@ Mirrors `scripts/convert_soundthread_catalog.py`: run manually, output committed
 
 - **Force `Play`/`Draw`/`Show`/`Visuali*` booleans to `false` and hide them from the UI**
   (name-matched on `^(play|draw|show|visuali)`). The Picture window is unreachable from a TUI and
-  `Play` actively blocks.
+  `Play` actively blocks. *(Both halves of this were revised — see the retrospective: they are
+  visible rather than hidden, and the Picture window turned out to be perfectly reachable.)*
 - Emit the **exclusion filter as a machine-checked report, not silent dropping** — each excluded
   script records a reason (`gui_blocking`, `multi_sound_input`, `non_sound_input`,
   `hardcoded_path`). Keeping reasons in-tree makes the exclusion set reviewable and lets upstream
@@ -461,6 +462,18 @@ the field list and the parameter list to diverge, which breaks the index-paralle
 shared dialog relies on. They are instead emitted as ordinary toggles defaulting to **off**, which
 achieves the actual goal (nothing plays or draws unless asked) without destabilising a dialog
 shared with CDP.
+
+**And `Draw` turned out not to be unreachable after all.** The premise above — "the Picture window
+is unreachable from a TUI" — was wrong, which left ~290 processes carrying a checkbox that cost
+time and produced nothing observable. A headless `praat --run` *does* draw, and the picture is
+still there when `runScript:` returns; the driver now saves it with `Save as 300-dpi PNG file:`
+and the app decodes it and blits it into a popup through the terminal-graphics path the waveform
+already uses. See `model::praat::driver`'s "The picture" section for the three details that make
+it work (pin the viewport first, `nocheck` both lines, save the audio before attempting any of
+it), `model::praat::plan::draws_picture` for which toggles count, and `praat::picture` for the
+crop that turns Praat's 12x12-inch canvas into something worth putting on screen.
+
+`Play` stays exactly as it was: it draws nothing, and it blocks.
 
 ### Real bugs the tests caught
 
