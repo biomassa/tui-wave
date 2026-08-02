@@ -10,8 +10,4 @@
 pub mod driver;
 pub mod plan;
 
-pub use driver::{driver_script, praat_string_literal, DriverArg, DriverError};
-pub use plan::{
-    input_wav_name, plan_praat_job, praat_input_count, PraatPlanError, PraatPlannedJob,
-    DRIVER_SCRIPT, OUTPUT_WAV,
-};
+pub use plan::plan_praat_job;

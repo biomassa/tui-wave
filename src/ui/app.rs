@@ -320,6 +320,60 @@ fn cdp_error_lines(err: &crate::cdp::CdpError) -> Vec<String> {
     }
 }
 
+/// Where the app keeps Praat state it owns — today just the redirected preferences directory
+/// (`praat::runner::prepare_prefs_dir`). Sits beside `cdp_presets/` under the same
+/// `$XDG_CONFIG_HOME/tui-wave/` root that `preset::presets_dir` resolves, so everything this
+/// app writes lives in one place.
+fn praat_state_dir() -> std::path::PathBuf {
+    let config_home = std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            std::path::PathBuf::from(home).join(".config")
+        });
+    config_home.join("tui-wave").join("praat")
+}
+
+/// Renders a `PraatError` for `Dialog::CdpOutput`, mirroring `cdp_error_lines`.
+///
+/// Praat exits **255 for every script error**, so unlike CDP the exit code carries no
+/// information — the captured stderr, which names the failing line and its source text, is the
+/// whole diagnostic, and is therefore never truncated here.
+fn praat_error_lines(err: &crate::praat::PraatError) -> Vec<String> {
+    use crate::praat::PraatError;
+    match err {
+        PraatError::Spawn { bin, message } => vec![
+            format!("Could not start Praat ({bin}): {message}"),
+            String::new(),
+            "Install Praat, or set praat_bin in the config to its full path.".into(),
+        ],
+        PraatError::NonZeroExit { code, output } => {
+            let mut lines = vec![format!(
+                "Praat exited with {}",
+                code.map(|c| c.to_string()).unwrap_or_else(|| "no exit code (killed?)".into())
+            )];
+            lines.extend(output.lines().map(str::to_string));
+            lines
+        }
+        PraatError::NoOutput => vec![
+            "The script finished without producing a Sound.".into(),
+            String::new(),
+            "Some scripts only analyse or draw, and write nothing back.".into(),
+        ],
+        PraatError::OutputRead { path, message } => {
+            vec![format!("Failed to read '{path}': {message}")]
+        }
+        PraatError::Cancelled => vec!["Cancelled.".into()],
+        PraatError::TimedOut { seconds } => vec![
+            format!("The script did not finish within {seconds}s and was stopped."),
+            String::new(),
+            "Scripts that play their result run in real time, so a long selection can \
+             legitimately exceed this."
+                .into(),
+        ],
+    }
+}
+
 /// Which editor/picker a never-configured ("unset") field needs before it can run — Enter
 /// in `Dialog::CdpParams`'s main handler opens this instead of running Apply/Preview when
 /// the focused field is unset (see that handler's doc comment). Only the three field kinds
@@ -2458,6 +2512,11 @@ pub struct App {
     /// (spawning its thread can't fail); only one job is ever in flight at a time in v1
     /// since `Dialog::CdpRunning` is hard-modal.
     cdp_runner: crate::cdp::CdpRunner,
+    /// The Praat backend's worker. A second runner rather than a shared one because the two
+    /// speak different job and event types; both drain into the same `Dialog::CdpRunning` and
+    /// the same `cdp_pending` slot, since only one job is ever in flight (the running dialog is
+    /// hard-modal).
+    praat_runner: crate::praat::PraatRunner,
     /// Monotonic id for the next submitted `cdp::Job`, so a `CdpEvent` can be matched back
     /// to the run that produced it.
     cdp_next_job_id: u64,
@@ -3105,6 +3164,7 @@ impl App {
             cdp_catalog,
             cdp_catalog_warnings,
             cdp_runner: crate::cdp::CdpRunner::new(),
+            praat_runner: crate::praat::PraatRunner::new(),
             cdp_next_job_id: 0,
             cdp_pending: None,
             cdp_preview_audio: None,
@@ -4115,6 +4175,9 @@ impl App {
             if self.tick_cdp() {
                 needs_redraw = true;
             }
+            if self.tick_praat() {
+                needs_redraw = true;
+            }
             self.tick_viewport_follow();
             if self.playhead_position != playhead_before {
                 needs_redraw = true;
@@ -5026,7 +5089,11 @@ impl App {
                     // stays up (and `Esc` stays a no-op beyond re-requesting cancel) until
                     // `tick_cdp` sees the runner's `Finished(Err(Cancelled))` event, so the
                     // dialog never claims a job has stopped before it actually has.
+                    // Both runners are signalled: only one job is ever in flight (this dialog is
+                    // hard-modal), but which backend owns it is not recorded here, and cancelling
+                    // an idle runner is a no-op — its flag is reset when it next picks up a job.
                     self.cdp_runner.cancel();
+                    self.praat_runner.cancel();
                 } else {
                     self.stop_cdp_preview_audio();
                     self.dialog = None;
@@ -6212,14 +6279,31 @@ impl App {
     /// out — an invalid path is discovered here, on demand, instead of silently.
     fn open_cdp_entry(&mut self) {
         let dir = std::path::PathBuf::from(&self.config.cdp_dir);
-        if self.config.cdp_dir.is_empty() || crate::cdp::validate_cdp_dir(&dir).is_err() {
+        let cdp_ready =
+            !self.config.cdp_dir.is_empty() && crate::cdp::validate_cdp_dir(&dir).is_ok();
+        // The browser holds two backends now, so a missing CDP install must not lock it shut:
+        // someone with only Praat would otherwise be sent to a setup dialog for a tool they do
+        // not have and cannot get past. Running a CDP process with an invalid directory still
+        // falls back to this same setup dialog from inside `cdp_run`, so the CDP-only user
+        // loses nothing — the prompt just arrives when it is actually relevant.
+        if cdp_ready || self.praat_ready() {
+            self.open_cdp_browser();
+        } else {
             self.dialog = Some(Dialog::CdpSetup {
                 input: TextInput::new(self.config.cdp_dir.clone()),
                 error: None,
             });
-        } else {
-            self.open_cdp_browser();
         }
+    }
+
+    /// Whether the Praat backend could run something right now: a usable checkout *and* a
+    /// working `praat`. Both are cheap (a directory stat and a `--version` that prints one
+    /// line), and neither is cached — Praat is optional, and installing it mid-session should
+    /// start working without a restart.
+    fn praat_ready(&self) -> bool {
+        let dir = std::path::PathBuf::from(&self.config.praat_audiotools_dir);
+        crate::praat::validate_audiotools_dir(&dir).is_ok()
+            && crate::praat::probe_praat(&self.config.praat_bin).is_ok()
     }
 
     /// Entry point for `Action::CdpChain` (Ctrl+H / CDP menu) — same validate-first shortcut
@@ -6837,6 +6921,11 @@ impl App {
             CdpDomainRow::Recent,
             CdpDomainRow::Domain(Category::Time),
             CdpDomainRow::Domain(Category::Pvoc),
+            // The praatAudioTools backend. Listed unconditionally, like the CDP domains: a
+            // domain whose tool is not installed still shows its processes, and running one
+            // reports what is missing — which is more discoverable than the domain silently
+            // not existing.
+            CdpDomainRow::Domain(Category::Praat),
         ]
     }
 
@@ -9626,6 +9715,30 @@ impl App {
             });
         }
 
+        // Praat diverges here and not before: everything above — validation, the process range,
+        // the second-input pick, the cached-preview fast path — is backend-independent, because
+        // a Praat entry is an ordinary `ProcessDef`. Only the step from "these values" to
+        // "something to execute" differs.
+        if def.backend() == crate::model::cdp::def::Backend::Praat {
+            let mut praat_inputs = vec![doc.slice(range.0..range.1)];
+            if def.input == IoKind::DualWav {
+                let Some(doc_b) = second_doc_index.and_then(|i| self.documents.get(i)) else {
+                    self.dialog = Some(reopen(focus, "no second input buffer".into(), fields, second_input, variadic_input, preview, presets, preset_selected));
+                    return;
+                };
+                praat_inputs.push(doc_b.channels.clone());
+            }
+            let sample_rate = doc.sample_rate;
+            if let Some(error) = self.praat_submit(
+                &def, catalog_index, &values, praat_inputs, sample_rate, range, idx, purpose,
+                &fields, &second_input, &variadic_input, focus, &presets, preset_selected,
+                &custom_values,
+            ) {
+                self.dialog = Some(reopen(focus, error, fields, second_input, variadic_input, preview, presets, preset_selected));
+            }
+            return;
+        }
+
         let planned = crate::model::cdp::plan_job(&def, &values, &input_specs, &crate::model::cdp::PvocSettings::default());
         let mut planned = match planned {
             Ok(p) => p,
@@ -9699,6 +9812,224 @@ impl App {
             started: std::time::Instant::now(),
             purpose,
         });
+    }
+
+    /// Plan and submit a Praat job, returning `Some(message)` if it could not be started — the
+    /// caller reopens the params dialog with that text, exactly as it does for a CDP plan error.
+    ///
+    /// Takes the dialog state by reference and clones what it needs into `cdp_pending`, rather
+    /// than consuming it the way the CDP path does: the caller still needs the originals to
+    /// rebuild the dialog on the failure return.
+    #[allow(clippy::too_many_arguments)]
+    fn praat_submit(
+        &mut self,
+        def: &crate::model::cdp::ProcessDef,
+        catalog_index: usize,
+        values: &[crate::model::cdp::ParamValue],
+        inputs: Vec<Vec<Vec<f32>>>,
+        sample_rate: u32,
+        range: (usize, usize),
+        doc_index: usize,
+        purpose: crate::cdp::JobPurpose,
+        fields: &[CdpField],
+        second_input: &Option<CdpSecondInput>,
+        variadic_input: &Option<CdpVariadicInput>,
+        focus: usize,
+        presets: &[crate::model::cdp::preset::CdpPreset],
+        preset_selected: Option<usize>,
+        custom_values: &Option<Vec<crate::model::cdp::ParamValue>>,
+    ) -> Option<String> {
+        let audiotools_dir = std::path::PathBuf::from(&self.config.praat_audiotools_dir);
+        if let Err(message) = crate::praat::validate_audiotools_dir(&audiotools_dir) {
+            return Some(message);
+        }
+        // Probed per submission rather than at startup: Praat is optional, and a user who
+        // installs it mid-session should not have to restart. `--version` costs milliseconds.
+        if let Err(message) = crate::praat::probe_praat(&self.config.praat_bin) {
+            return Some(message);
+        }
+
+        let planned = match crate::model::praat::plan_praat_job(def, values, &audiotools_dir) {
+            Ok(planned) => planned,
+            Err(err) => return Some(err.to_string()),
+        };
+
+        let job_id = self.cdp_next_job_id;
+        self.cdp_next_job_id += 1;
+
+        if let Some(audio) = self.audio.as_ref() {
+            if audio.is_playing() {
+                audio.pause();
+            }
+        }
+
+        self.cdp_pending = Some(CdpPending {
+            doc_index,
+            range,
+            label: format!("Praat: {}", def.title),
+            catalog_index,
+            fields: fields.to_vec(),
+            second_input: second_input.clone(),
+            variadic_input: variadic_input.clone(),
+            focus,
+            presets: presets.to_vec(),
+            preset_selected,
+            custom_values: custom_values.clone(),
+        });
+        self.praat_runner.submit(crate::praat::PraatJob {
+            id: job_id,
+            praat_bin: crate::praat::praat_bin_for(&self.config.praat_bin),
+            // Only built for the backend that needs it. Best-effort: a failure here costs the
+            // chained Vector Chain processes and nothing else, so it must not fail the job.
+            prefs_dir: crate::praat::runner::prepare_prefs_dir(
+                &praat_state_dir(),
+                &audiotools_dir,
+            ),
+            planned,
+            inputs,
+            input_sample_rate: sample_rate,
+            purpose,
+            timeout: crate::praat::DEFAULT_TIMEOUT,
+        });
+        self.dialog = Some(Dialog::CdpRunning {
+            job_id,
+            title: def.title.clone(),
+            step_label: "Starting Praat…".into(),
+            step_index: 0,
+            // Praat is always a single step: one binary, one driver script, one invocation.
+            step_total: 1,
+            started: std::time::Instant::now(),
+            purpose,
+        });
+        None
+    }
+
+    /// Drains the Praat runner's events, mirroring `tick_cdp`.
+    ///
+    /// Much shorter than its CDP counterpart because a Praat job has exactly one result shape:
+    /// one audio buffer. None of CDP's glob outputs, pitch curves, formant buffers or sidecar
+    /// files can arise, so there is nothing to branch on beyond Apply versus Preview.
+    fn tick_praat(&mut self) -> bool {
+        let mut processed_any = false;
+        while let Ok(event) = self.praat_runner.events.try_recv() {
+            processed_any = true;
+            match event {
+                crate::praat::PraatEvent::Started { job, label } => {
+                    if let Some(Dialog::CdpRunning { job_id, step_label, .. }) = self.dialog.as_mut()
+                    {
+                        if *job_id == job {
+                            *step_label = label;
+                        }
+                    }
+                }
+                crate::praat::PraatEvent::Finished { job, purpose, result } => {
+                    // Same guard as `tick_cdp`: act only on the job the visible dialog waits on,
+                    // checked before `cdp_pending.take()` so a stray event cannot consume a
+                    // pending it does not own and strand the real completion.
+                    if !matches!(self.dialog, Some(Dialog::CdpRunning { job_id, .. }) if job_id == job)
+                    {
+                        continue;
+                    }
+                    let Some(pending) = self.cdp_pending.take() else { continue };
+                    self.stop_cdp_preview_audio();
+
+                    let recent_key =
+                        self.cdp_catalog.processes.get(pending.catalog_index).map(|d| d.key.clone());
+                    let timing_tolerance = crate::commands::cdp::timing_tolerance(
+                        crate::model::cdp::Category::Praat,
+                        crate::model::cdp::PvocSettings::default().points,
+                    );
+
+                    let output = match result {
+                        Ok(output) => output,
+                        Err(err) => {
+                            self.dialog = Some(Dialog::CdpOutput {
+                                title: "Praat Error".into(),
+                                lines: praat_error_lines(&err),
+                                scroll: 0,
+                            });
+                            continue;
+                        }
+                    };
+
+                    match purpose {
+                        crate::cdp::JobPurpose::Apply => {
+                            // Many of these scripts resample or synthesise at a fixed rate;
+                            // splicing raw samples at a different rate would play the result at
+                            // the wrong speed, so it is refused rather than silently wrong.
+                            let doc_rate =
+                                self.documents.get(pending.doc_index).map(|d| d.sample_rate);
+                            if doc_rate != Some(output.sample_rate) {
+                                self.dialog = Some(Dialog::Info {
+                                    message: format!(
+                                        "Praat returned {} Hz but the document is {} Hz — this process changes the sample rate, which cannot be spliced into an existing buffer.",
+                                        output.sample_rate,
+                                        doc_rate.unwrap_or(0)
+                                    ),
+                                });
+                                continue;
+                            }
+                            self.histories[pending.doc_index].apply(
+                                crate::commands::cdp::cdp_process_command(
+                                    pending.label,
+                                    pending.range,
+                                    output.result,
+                                    timing_tolerance,
+                                ),
+                                &mut self.documents[pending.doc_index],
+                            );
+                            self.viewport = None;
+                            self.after_sample_mutation(pending.doc_index);
+                            self.dialog = None;
+                            if let Some(key) = &recent_key {
+                                crate::model::cdp::recent::record_used(key);
+                            }
+                        }
+                        crate::cdp::JobPurpose::Preview => {
+                            self.cdp_preview_audio =
+                                preview_engine(output.result.clone(), output.sample_rate);
+                            let values =
+                                pending.fields.iter().map(CdpField::to_value).collect();
+                            let second_input_doc = pending
+                                .second_input
+                                .as_ref()
+                                .and_then(CdpSecondInput::selected_doc_index);
+                            self.dialog = Some(Dialog::CdpParams {
+                                catalog_index: pending.catalog_index,
+                                fields: pending.fields,
+                                second_input: pending.second_input,
+                                variadic_input: pending.variadic_input,
+                                focus: pending.focus,
+                                error: None,
+                                preview: Some(CdpPreview {
+                                    values,
+                                    range: pending.range,
+                                    channels: output.result,
+                                    sample_rate: output.sample_rate,
+                                    second_input_doc,
+                                    variadic_docs: Vec::new(),
+                                    formant_selections: Vec::new(),
+                                }),
+                                envelope: None,
+                                list_edit: None,
+                                table_edit: None,
+                                marker_time_list_edit: None,
+                                hilite_band_edit: None,
+                                formant_picker: None,
+                                file_picker: None,
+                                variadic_picker: None,
+                                presets: pending.presets,
+                                preset_selected: pending.preset_selected,
+                                custom_values: pending.custom_values,
+                                save_prompt: None,
+                                scroll: 0,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        processed_any
     }
 
     /// A `FormantBufferRef` field's picked buffer never travels through `ParamValue` at all
@@ -11038,10 +11369,12 @@ impl App {
     fn save_config(&mut self) {
         let keybindings = self.config.keybindings.clone();
         let cdp_dir = self.config.cdp_dir.clone();
-        // Carried through rather than re-derived: this has no in-app toggle, so `self` holds no
-        // live copy to rebuild it from and reconstructing the struct would reset a hand-edited
+        // Carried through rather than re-derived: these have no in-app toggle, so `self` holds no
+        // live copy to rebuild them from and reconstructing the struct would reset a hand-edited
         // value to the default on the next toggle of anything at all.
         let max_resident_mb = self.config.max_resident_mb;
+        let praat_bin = self.config.praat_bin.clone();
+        let praat_audiotools_dir = self.config.praat_audiotools_dir.clone();
         self.config = Config {
             snap_to_zero: self.snap_to_zero,
             auto_vertical_zoom: self.viewport.as_ref().is_some_and(|v| v.auto_vertical_zoom),
@@ -11055,6 +11388,8 @@ impl App {
             dot_matrix_gradient: self.dot_matrix_gradient,
             time_ruler: self.time_ruler,
             cdp_dir,
+            praat_bin,
+            praat_audiotools_dir,
             max_resident_mb,
             keybindings,
         };
@@ -21014,17 +21349,108 @@ mod tests {
         assert!(app.confirm.is_none());
     }
 
-    /// `Action::CdpProcess` (Ctrl+p / Process menu) opens the setup prompt when
-    /// `config.cdp_dir` is unset, rather than the browser — there's nothing to browse until
-    /// a valid directory is configured.
+    /// `Action::CdpProcess` (Ctrl+p / Process menu) opens the setup prompt when **neither**
+    /// backend can run — there's nothing to browse until one of them is configured.
+    ///
+    /// Praat has to be disabled explicitly here: the browser now holds both backends, and on a
+    /// machine that has Praat installed an unset `cdp_dir` alone is no longer a reason to
+    /// block the browser.
     #[test]
-    fn cdp_process_action_opens_setup_when_dir_unset() {
+    fn cdp_process_action_opens_setup_when_no_backend_is_available() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
         app.config.cdp_dir = String::new();
+        app.config.praat_audiotools_dir = "/nonexistent/audiotools".into();
         app.handle_action(Action::CdpProcess);
         assert!(
             matches!(app.dialog, Some(Dialog::CdpSetup { .. })),
-            "expected CdpSetup when cdp_dir is unset, got {:?}",
+            "expected CdpSetup when no backend is available, got {:?}",
+            std::mem::discriminant(app.dialog.as_ref().unwrap())
+        );
+    }
+
+    /// The whole Praat path end to end through the app: open the params dialog for a real
+    /// catalog entry, Apply, drain the runner, and confirm the document actually changed.
+    ///
+    /// This is the test that would catch a break anywhere in the chain — catalog entry, field
+    /// construction, planning, driver generation, the subprocess, reading the result back, and
+    /// the history splice — none of which the unit tests exercise together.
+    #[test]
+    fn a_praat_process_applies_to_the_document_end_to_end() {
+        let mut app = new_app(Some(doc(0.25, 44_100)), None);
+        if !app.praat_ready() {
+            eprintln!("skipping: praat or the audiotools checkout is unavailable");
+            return;
+        }
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "praat_distortion_hard_clip")
+            .expect("hard clip should be in the catalog");
+
+        app.open_cdp_params(index);
+        app.cdp_run(crate::cdp::JobPurpose::Apply);
+        assert!(
+            matches!(app.dialog, Some(Dialog::CdpRunning { .. })),
+            "expected the running dialog, got {:?}",
+            app.dialog.as_ref().map(std::mem::discriminant)
+        );
+
+        let started = std::time::Instant::now();
+        while matches!(app.dialog, Some(Dialog::CdpRunning { .. }))
+            && started.elapsed() < std::time::Duration::from_secs(90)
+        {
+            app.tick_praat();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // A leftover CdpOutput means Praat reported an error; surface it rather than failing on
+        // the vaguer "document unchanged" assertion below.
+        if let Some(Dialog::CdpOutput { lines, .. }) = &app.dialog {
+            panic!("praat reported an error: {}", lines.join("\n"));
+        }
+        assert!(app.dialog.is_none(), "dialog should have closed after a successful apply");
+        assert!(app.documents[0].dirty, "apply should have modified the document");
+        assert!(app.histories[0].can_undo(), "apply should be undoable");
+    }
+
+    /// A two-Sound Praat script must get the same second-buffer picker a dual-input CDP process
+    /// gets. It does so for free by declaring `IoKind::DualWav`, which `cdp_fields_for` already
+    /// keys off — this pins that the reuse actually holds rather than being assumed.
+    #[test]
+    fn a_two_sound_praat_process_offers_the_second_buffer_picker() {
+        use crate::model::cdp::IoKind;
+        let mut app = new_app(Some(doc(0.25, 100)), None);
+        let Some(index) = app.cdp_catalog.processes.iter().position(|p| {
+            p.backend() == crate::model::cdp::def::Backend::Praat && p.input == IoKind::DualWav
+        }) else {
+            panic!("the catalog should contain at least one two-Sound Praat process");
+        };
+        app.open_cdp_params(index);
+        let Some(Dialog::CdpParams { second_input, .. }) = &app.dialog else {
+            panic!("expected the params dialog");
+        };
+        assert!(
+            second_input.is_some(),
+            "a dual-input Praat process must offer a second-buffer picker"
+        );
+    }
+
+    /// The counterpart: an unset `cdp_dir` must **not** lock the browser when Praat is usable.
+    /// Getting this wrong sent a Praat-only user to a setup dialog for a tool they do not have
+    /// and could not get past.
+    #[test]
+    fn an_unset_cdp_dir_still_opens_the_browser_when_praat_is_available() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        if !app.praat_ready() {
+            eprintln!("skipping: praat or the audiotools checkout is unavailable");
+            return;
+        }
+        app.config.cdp_dir = String::new();
+        app.handle_action(Action::CdpProcess);
+        assert!(
+            matches!(app.dialog, Some(Dialog::CdpBrowser { .. })),
+            "expected CdpBrowser, got {:?}",
             std::mem::discriminant(app.dialog.as_ref().unwrap())
         );
     }
@@ -27131,11 +27557,11 @@ mod tests {
         assert_eq!(input.value(), "my new name");
     }
 
-    /// The Domain column is exactly All, Recent and the two domains; the Groups column is
-    /// empty for the first two and, for a domain, `All` followed by that domain's CDP groups
-    /// in CDP's own index-page order.
+    /// The Domain column is exactly All, Recent and the three domains — CDP's two plus Praat;
+    /// the Groups column is empty for the first two and, for a domain, `All` followed by that
+    /// domain's own groups in its tool's index order.
     #[test]
-    fn domain_column_lists_all_recent_and_both_domains() {
+    fn domain_column_lists_all_recent_and_every_domain() {
         use crate::model::cdp::Category;
         let app = new_app(Some(doc(0.1, 100)), None);
 
@@ -27146,6 +27572,7 @@ mod tests {
                 CdpDomainRow::Recent,
                 CdpDomainRow::Domain(Category::Time),
                 CdpDomainRow::Domain(Category::Pvoc),
+                CdpDomainRow::Domain(Category::Praat),
             ]
         );
 
