@@ -108,16 +108,32 @@ EXCLUSIONS: list[tuple[str, re.Pattern, str]] = [
 # inputs in order and selecting them together. Catalogued as `input = "dual_wav"`, reusing the
 # CDP kind that already means "this process needs a second buffer".
 #
-# Detected from an **unindented** guard only. A looser prose match ("select 2 sounds", "at
-# least two Sound") caught scripts that take one *or* two depending on a mode, because the
-# phrase appears in a `comment` line or an `option` label -- and those then failed at run time
-# with `Please select exactly ONE Sound object.`, since their default mode wants one. A guard at
-# column zero is unconditional by construction: anything inside an `if` is indented.
-DUAL_SOUND_RE = re.compile(
-    r"^if\s+numberOfSelected\s*\(\s*\"Sound\"\s*\)\s*(<>|!=)\s*2\b|"
-    r"^\s{0,2}numberOfSelected\s*\(\s*\"Sound\"\s*\)\s*(<>|!=)\s*2\b",
-    re.M,
+# Detected from an **unindented** guard, which is what separates a script that always needs two
+# from one that needs two only in a particular mode. Both write the same check; the conditional
+# one writes it inside an `if`, so it is indented:
+#
+#     nSelected = numberOfSelected("Sound")        numSounds = numberOfSelected("Sound")
+#     if nSelected <> 2                            if mod_source = 5
+#         exitScript: "...select exactly 2..."         if numSounds <> 2
+#     endif                                                exitScript: "...exactly 2..."
+#     ^ always needs two                               ^ needs two only in mode 5
+#
+# Matching the prose instead ("select 2 sounds") was wrong in the other direction: that phrase
+# appears in `comment` lines and `option` labels of the conditional ones, which then failed at
+# run time with `Please select exactly ONE Sound object.`
+COUNT_ASSIGN_RE = re.compile(
+    r"^[ \t]*(\w+)\s*=\s*numberOfSelected\s*\(\s*\"Sound\"\s*\)", re.M
 )
+
+
+def needs_two_sounds(source: str) -> bool:
+    # The direct form, with no intermediate variable.
+    if re.search(r"^if\s+numberOfSelected\s*\(\s*\"Sound\"\s*\)\s*(<>|!=|<)\s*2\b", source, re.M):
+        return True
+    for var in set(COUNT_ASSIGN_RE.findall(source)):
+        if re.search(rf"^if\s+{re.escape(var)}\s*(<>|!=|<)\s*2\b", source, re.M):
+            return True
+    return False
 
 NUMERIC_KEYWORDS = {"real", "positive", "integer", "natural"}
 TEXT_KEYWORDS = {"sentence", "word", "text"}
@@ -395,7 +411,7 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
             title=title_for(path.stem),
             group=GROUP_DIRS[top],
             params=params,
-            inputs=2 if DUAL_SOUND_RE.search(source) else 1,
+            inputs=2 if needs_two_sounds(source) else 1,
         ))
 
     return processes, excluded

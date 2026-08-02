@@ -449,6 +449,13 @@ pub fn prepare_prefs_dir(state_dir: &Path, audiotools_dir: &Path) -> Option<Path
 /// to check their path when the fix is one `git submodule` command would send them looking in
 /// the wrong place entirely.
 pub fn validate_audiotools_dir(dir: &Path) -> Result<(), String> {
+    // An empty path renders as nothing at all, so the generic message below became the
+    // unreadable `is not a directory` with no subject. Callers should route through
+    // `Config::praat_audiotools_path`, which substitutes the bundled submodule — but say
+    // something useful rather than nothing if one ever does not.
+    if dir.as_os_str().is_empty() {
+        return Err("no praatAudioTools directory is configured (set praat_audiotools_dir)".into());
+    }
     if !dir.is_dir() {
         return Err(format!("{} is not a directory", dir.display()));
     }
