@@ -499,6 +499,11 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
             processes[-1].preset_param = index
             processes[-1].preset_custom_option = custom
             processes[-1].script_presets = blocks
+            # Renamed *after* extraction, which maps assignments back to fields by their
+            # original label. The dialog already has a Preset row of its own -- tui-wave's saved
+            # parameter sets -- so two rows called "Preset" sat one above the other with no way
+            # to tell which was which. This one is the script's own, hence "Internal".
+            params[index].name = "Internal Preset"
 
     return processes, excluded
 
