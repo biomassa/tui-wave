@@ -11,12 +11,11 @@
 use std::path::{Path, PathBuf};
 
 use super::driver::{driver_script, DriverArg, DriverError};
-use crate::model::cdp::def::{Backend, ParamKind, ParamValue, ProcessDef};
+use crate::model::cdp::def::{Backend, IoKind, ParamKind, ParamValue, ProcessDef};
 
 /// Temp-file names inside the job's own directory. Fixed rather than generated: the directory
 /// is per-job and disposable, so there is nothing to collide with, and a fixed name makes a
-/// failed run's leftovers readable when debugging.
-pub const INPUT_WAV: &str = "in.wav";
+/// failed run's leftovers readable when debugging. Inputs are numbered by `input_wav_name`.
 pub const OUTPUT_WAV: &str = "out.wav";
 pub const DRIVER_SCRIPT: &str = "driver.praat";
 
@@ -27,8 +26,10 @@ pub struct PraatPlannedJob {
     pub driver_name: String,
     /// The generated driver script's full text.
     pub driver_source: String,
-    /// Temp WAV the runner writes the selection to, relative to the job's temp directory.
-    pub input_name: String,
+    /// Temp WAVs the runner writes the inputs to, in order, relative to the job's temp
+    /// directory. One entry for an ordinary process; two for a `DualWav` one, where the script
+    /// reads them as `selected("Sound", 1)` and `selected("Sound", 2)`.
+    pub input_names: Vec<String>,
     /// Temp WAV the driver saves its result to, which the runner reads back afterwards.
     pub output_name: String,
     /// Absolute path to the plugin script being run — resolved here so the runner never has to
@@ -136,23 +137,41 @@ pub fn plan_praat_job(
         .collect::<Result<Vec<_>, _>>()?;
 
     let script_path = audiotools_dir.join(&def.bin);
-    let driver_source = driver_script(&script_path.to_string_lossy(), &args)
+    let input_count = praat_input_count(def);
+    let driver_source = driver_script(&script_path.to_string_lossy(), &args, input_count)
         .map_err(PraatPlanError::Driver)?;
 
     Ok(PraatPlannedJob {
         driver_name: DRIVER_SCRIPT.to_string(),
         driver_source,
-        input_name: INPUT_WAV.to_string(),
+        input_names: (1..=input_count).map(input_wav_name).collect(),
         output_name: OUTPUT_WAV.to_string(),
         script_path,
         label: def.title.clone(),
     })
 }
 
+/// How many Sound objects this process expects selected, read off its declared `input`.
+///
+/// `IoKind::DualWav` is CDP's existing "two input files" kind and carries over unchanged: the
+/// meaning ("this process needs a second buffer, and the UI must offer a picker for it") is the
+/// same on both backends even though the mechanism differs entirely.
+pub fn praat_input_count(def: &ProcessDef) -> usize {
+    match def.input {
+        IoKind::DualWav => 2,
+        _ => 1,
+    }
+}
+
+/// Temp filename for the nth input (1-based), matching the driver's `Input_file_N` form field.
+pub fn input_wav_name(index: usize) -> String {
+    format!("in_{index}.wav")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::cdp::def::{Category, IoKind, NumberScale, ParamDef};
+    use crate::model::cdp::def::{Category, NumberScale, ParamDef};
 
     fn number(name: &str, default: f64) -> ParamDef {
         ParamDef {
@@ -322,6 +341,24 @@ mod tests {
             plan_praat_job(&def, &[ParamValue::Table(vec![])], Path::new("/p")),
             Err(PraatPlanError::UnsupportedParamKind { param: "Taps".into() })
         );
+    }
+
+    /// `IoKind::DualWav` carries over from CDP unchanged: it means "needs a second buffer" on
+    /// both backends, even though CDP passes a second filename on argv while Praat selects a
+    /// second Sound object.
+    #[test]
+    fn a_dual_wav_process_plans_two_input_files() {
+        let mut def = praat_def(vec![]);
+        def.input = IoKind::DualWav;
+        let job = plan_praat_job(&def, &[], Path::new("/p")).unwrap();
+        assert_eq!(job.input_names, vec!["in_1.wav", "in_2.wav"]);
+        assert!(job.driver_source.contains("selectObject: snd1, snd2"));
+    }
+
+    #[test]
+    fn an_ordinary_process_plans_exactly_one_input_file() {
+        let job = plan_praat_job(&praat_def(vec![]), &[], Path::new("/p")).unwrap();
+        assert_eq!(job.input_names, vec!["in_1.wav"]);
     }
 
     /// The two backends must not accept each other's definitions.

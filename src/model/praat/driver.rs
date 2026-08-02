@@ -99,7 +99,19 @@ impl std::fmt::Display for DriverError {
 /// folder for `runScript:` but against the process's working directory for `--run`, and the two
 /// are different places here — the driver lives in the job's temp directory while the plugin
 /// script lives in the submodule.
-pub fn driver_script(script_path: &str, args: &[DriverArg]) -> Result<String, DriverError> {
+///
+/// `input_count` is how many Sound objects the script expects to find selected. Almost always
+/// 1; the handful of morph/concatenate/align scripts want 2, which they read as
+/// `selected("Sound", 1)` and `selected("Sound", 2)` — i.e. by position within the selection.
+/// Praat orders a selection by object number, and the driver reads the inputs in order, so
+/// input 1 is always the first-read file.
+pub fn driver_script(
+    script_path: &str,
+    args: &[DriverArg],
+    input_count: usize,
+) -> Result<String, DriverError> {
+    let input_count = input_count.max(1);
+
     let mut call = format!("runScript: {}", praat_string_literal(script_path));
     for arg in args {
         let rendered = match arg {
@@ -110,17 +122,27 @@ pub fn driver_script(script_path: &str, args: &[DriverArg]) -> Result<String, Dr
         call.push_str(&rendered);
     }
 
+    let mut form = String::from("form Driver\n");
+    for i in 1..=input_count {
+        form.push_str(&format!("    infile Input_file_{i}\n"));
+    }
+    form.push_str("    outfile Output_file\n");
+    form.push_str("endform\n");
+
+    let mut reads = String::new();
+    for i in 1..=input_count {
+        reads.push_str(&format!("snd{i} = Read from file: input_file_{i}$\n"));
+    }
+    let selection = (1..=input_count).map(|i| format!("snd{i}")).collect::<Vec<_>>().join(", ");
+
     // `Save as 32-bit WAV file:` rather than the plain `Save as WAV file:`, which writes 16-bit.
     // Praat cannot write float at all (its WAV writer only ever emits PCM), so int32 is the
     // widest return leg available; `model::wavread` already reads it, including the
     // WAVE_FORMAT_EXTENSIBLE wrapper Praat puts around it.
     Ok(format!(
-        "form Driver\n\
-         \x20   infile Input_file\n\
-         \x20   outfile Output_file\n\
-         endform\n\
-         snd = Read from file: input_file$\n\
-         selectObject: snd\n\
+        "{form}\
+         {reads}\
+         selectObject: {selection}\n\
          {call}\n\
          select all\n\
          n = numberOfSelected(\"Sound\")\n\
@@ -195,7 +217,7 @@ mod tests {
 
     #[test]
     fn a_no_argument_script_emits_a_bare_run_script_call() {
-        let script = driver_script("/plugins/Reverb/Plate.praat", &[]).unwrap();
+        let script = driver_script("/plugins/Reverb/Plate.praat", &[], 1).unwrap();
         assert!(script.contains("runScript: \"/plugins/Reverb/Plate.praat\"\n"));
         assert!(!script.contains("runScript: \"/plugins/Reverb/Plate.praat\", "));
     }
@@ -212,6 +234,7 @@ mod tests {
                 DriverArg::Number(1.0),
                 DriverArg::Number(0.0),
             ],
+            1,
         )
         .unwrap();
         assert!(script.contains(
@@ -222,8 +245,8 @@ mod tests {
 
     #[test]
     fn the_driver_reads_the_input_and_saves_the_output_as_int32() {
-        let script = driver_script("/p/x.praat", &[]).unwrap();
-        assert!(script.contains("snd = Read from file: input_file$"));
+        let script = driver_script("/p/x.praat", &[], 1).unwrap();
+        assert!(script.contains("snd1 = Read from file: input_file_1$"));
         assert!(script.contains("Save as 32-bit WAV file: output_file$"));
         // 16-bit is what the unqualified command would give; make sure we never emit it.
         assert!(!script.contains("Save as WAV file:"));
@@ -233,16 +256,16 @@ mod tests {
     /// the driver text is independent of them.
     #[test]
     fn the_driver_takes_its_paths_from_a_form_not_from_literals() {
-        let script = driver_script("/p/x.praat", &[]).unwrap();
+        let script = driver_script("/p/x.praat", &[], 1).unwrap();
         assert!(script.starts_with("form Driver\n"));
-        assert!(script.contains("    infile Input_file\n"));
+        assert!(script.contains("    infile Input_file_1\n"));
         assert!(script.contains("    outfile Output_file\n"));
     }
 
     /// The result is located by object number, not by trusting the script's final selection.
     #[test]
     fn the_result_is_the_highest_numbered_sound() {
-        let script = driver_script("/p/x.praat", &[]).unwrap();
+        let script = driver_script("/p/x.praat", &[], 1).unwrap();
         assert!(script.contains("select all"));
         assert!(script.contains("n = numberOfSelected(\"Sound\")"));
         assert!(script.contains("last = selected(\"Sound\", n)"));
@@ -252,15 +275,40 @@ mod tests {
     /// through to `Save as` with an arbitrary selection and write something unrelated.
     #[test]
     fn producing_no_sound_at_all_is_an_error() {
-        let script = driver_script("/p/x.praat", &[]).unwrap();
+        let script = driver_script("/p/x.praat", &[], 1).unwrap();
         assert!(script.contains("if n < 1"));
         assert!(script.contains("exitScript:"));
+    }
+
+    /// A two-Sound script reads its inputs as `selected("Sound", 1)` and `("Sound", 2)`, so both
+    /// must be loaded *and selected together* before the call — selecting only the last one read
+    /// would make the script see a single Sound and refuse.
+    #[test]
+    fn two_inputs_are_read_in_order_and_selected_together() {
+        let script = driver_script("/p/Pitch/Contour_Transfer.praat", &[], 2).unwrap();
+        assert!(script.contains("    infile Input_file_1\n"));
+        assert!(script.contains("    infile Input_file_2\n"));
+        assert!(script.contains("snd1 = Read from file: input_file_1$"));
+        assert!(script.contains("snd2 = Read from file: input_file_2$"));
+        assert!(script.contains("selectObject: snd1, snd2\n"));
+        // Read order fixes selection order, since Praat orders a selection by object number.
+        let first = script.find("snd1 = Read").unwrap();
+        let second = script.find("snd2 = Read").unwrap();
+        assert!(first < second, "inputs must be read in declaration order");
+    }
+
+    /// Zero is not a meaningful input count and must not produce a script that selects nothing.
+    #[test]
+    fn an_input_count_of_zero_is_treated_as_one() {
+        let script = driver_script("/p/x.praat", &[], 0).unwrap();
+        assert!(script.contains("selectObject: snd1\n"));
+        assert!(!script.contains("selectObject: \n"));
     }
 
     /// A non-finite value must not reach the script text.
     #[test]
     fn a_non_finite_argument_fails_the_whole_script() {
-        let err = driver_script("/p/x.praat", &[DriverArg::Number(f64::NAN)]);
+        let err = driver_script("/p/x.praat", &[DriverArg::Number(f64::NAN)], 1);
         assert!(err.is_err());
     }
 }
