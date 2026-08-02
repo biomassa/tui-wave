@@ -25,6 +25,9 @@
   at which point it moves to Custom. The presets always changed the sound — that logic lives
   inside each script — but the dialog used to go on showing the manual values.
 
+  A generative process opens its result as a new buffer rather than splicing it over your
+  selection, and undo closes that buffer again.
+
   Chains mix the two freely: a CDP+Praat Chain can put a Praat step after a CDP one and back
   again, and a chain built only from Praat processes no longer asks for a CDP installation it
   never invokes. The menu and the process and chain dialogs are renamed CDP+Praat to match;
