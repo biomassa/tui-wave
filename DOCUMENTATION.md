@@ -635,8 +635,19 @@ but no minimum or maximum, so tui-wave invents a generous range around the start
 a parameter past anything sensible and Praat simply refuses with a clear message. Nothing is
 harmed by trying.
 
-**Some scripts change the sample rate.** A result at a different rate cannot be spliced into an
-existing buffer, so tui-wave refuses and says so rather than playing it back at the wrong speed.
+**Generative processes open a new buffer.** Everything in the Generative group synthesises from
+scratch: its length comes from its own Duration setting and its rate from its own Sample Rate
+setting, neither of which has anything to do with the selection you launched it from. The result
+therefore arrives as a new buffer and your original is left untouched. Set Sample Rate to 96000
+and you get a 96kHz buffer.
+
+**Other processes must keep the document's sample rate.** A transforming process that returns a
+different rate cannot be spliced into an existing buffer, so tui-wave refuses and says so rather
+than playing it back at the wrong speed.
+
+**A script's own presets already work.** Choosing one from a process's Preset menu changes the
+sound: the preset is applied inside the script itself. The other fields in the dialog do not
+update to show the values it chose, so what you see is still the manual setting.
 
 **Markers are not carried through.** Praat discards marker and broadcast metadata, so a Praat
 process returns audio only.
