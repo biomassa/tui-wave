@@ -70,9 +70,14 @@ SKIP_DIRS = {"py", "Max-MSP"}
 # is a legitimate use, while an out-of-range value costs only a clean Praat error.
 RANGE_FACTOR = 10.0
 
-# Parameters whose value must never be left on: `Play` blocks for the audio's real-time
-# duration and cannot be suppressed from outside the process, and the Picture window a `Draw`
-# writes to is unreachable from a TUI. Matched on the parameter name.
+# Parameters whose value must never be left on *by default*: `Play` blocks for the audio's
+# real-time duration and cannot be suppressed from outside the process, and drawing costs time
+# nobody asked for. Matched on the parameter name; the toggle stays visible and the user can
+# turn it back on.
+#
+# Keep in step with `model::praat::plan::is_picture_toggle_name`, which is this pattern minus
+# `play|demo|open_|export` and decides which toggles mean "capture Praat's Picture window and
+# show it". A prefix added here needs a decision there about whether it draws.
 SILENCE_RE = re.compile(r"^(play|draw|show|visuali|demo|open_|export)", re.I)
 
 # --- static exclusion detectors -------------------------------------------------------

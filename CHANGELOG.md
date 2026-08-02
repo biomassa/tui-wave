@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-08-02 (2.2.0)
+
+- **Praat visualizations are now visible.** Most praatAudioTools processes carry a
+  `Draw_visualization` checkbox, and until now it did nothing you could see: the script painted
+  its figure into Praat's Picture window, which a headless run never shows and drops on exit. Tick
+  it and the figure now comes back — a real multi-panel plot of what the process did (transfer
+  curves, before/after waveforms, spectra, envelopes) — in a popup you dismiss with `Enter` or
+  `Esc`.
+
+  Dismissing after a Preview returns you to the parameter form with the preview still fresh, so
+  Apply stays one keystroke away — the picture is usually how you decide. The audition keeps
+  playing while you look at it. Around 290 processes can draw; `Show_visualization`,
+  `Draw_spectrogram` and the other spellings of the switch all count.
+
+  Nothing is written to your disk: the picture lives in the job's temp directory and is gone with
+  it. Leaving the checkbox off costs nothing, exactly as before.
+
+  Terminal graphics are required (kitty or Sixel). Without them the drawing checkboxes are greyed
+  out and will not tick — trying names the parameter and the fix, rather than letting you spend a
+  run on a figure that could not be shown. `Play_result` and the other non-drawing toggles are
+  unaffected.
+
+- Bumped version to 2.2.0.
+
 ## 2026-08-02 (2.1.0)
 
 - **Praat processes.** tui-wave can now run praatAudioTools — a large collection of

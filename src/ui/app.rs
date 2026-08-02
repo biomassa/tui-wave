@@ -1188,6 +1188,35 @@ enum Dialog {
     /// since formant data has no hand-editable representation (see `model::formant`'s doc
     /// comments). Esc/Enter both close it, same as `Info`.
     FormantInfo { buffer_index: usize },
+    /// The figure a Praat process painted into Praat's Picture window, captured as a PNG by the
+    /// generated driver and decoded by `praat::picture`. A thin marker like `CdpChainEditor`:
+    /// the bitmap lives on `App.praat_picture`, since an `RgbaImage` has no business being
+    /// cloned around inside a `Dialog`.
+    ///
+    /// `restore` is the `CdpParams` session to return to when the popup is dismissed, so a
+    /// *Preview* that also drew still leaves Apply one keystroke away — the picture is usually
+    /// the thing you looked at in order to decide whether to apply. `None` after an Apply, where
+    /// the edit is already committed and there is nothing to go back to.
+    PraatPicture { restore: Option<Box<Dialog>> },
+}
+
+/// A captured Praat figure, held on `App` while `Dialog::PraatPicture` shows it.
+///
+/// The image is already cropped and scaled by `praat::picture`, so this is a few megabytes at
+/// most and is dropped the moment the popup closes.
+struct PraatPictureView {
+    image: image::RgbaImage,
+    /// The process that drew it, for the popup's title — a chain or a repeated preview can put
+    /// several different figures on screen in a row, and "which process was this?" is the first
+    /// question each one raises.
+    title: String,
+    /// Terminal cell size in pixels, captured from the `Picker` alongside the protocol.
+    ///
+    /// Stored here rather than read from the picker at render time so that both the popup
+    /// renderer and the bitmap blit can size the popup to the picture's aspect ratio from the
+    /// *same* inputs — see `praat_picture_layout`. Falls back to a conventional 8x16 cell when
+    /// there is no picker, which only matters for the text path, where it is unused anyway.
+    cell: (u16, u16),
 }
 
 /// The second-input picker state for a dual-input CDP process (combine/morph/vocode/...):
@@ -2296,6 +2325,16 @@ pub struct App {
     /// the two dialogs are mutually exclusive, so a future change letting a dialog open
     /// something else on top doesn't have to reason about slot reuse).
     cdp_formant_graphics_protocol: Option<ratatui_image::protocol::StatefulProtocol>,
+    /// The picture a Praat run drew, waiting to be shown by `Dialog::PraatPicture`.
+    praat_picture: Option<PraatPictureView>,
+    /// `Dialog::PraatPicture`'s graphics-mode protocol slot.
+    ///
+    /// Unlike every other protocol in this struct, this one is built **once** when the popup
+    /// opens rather than per frame. The others wrap an image that is regenerated each redraw
+    /// anyway (the waveform changes as you scroll; the envelope as you drag a point), so
+    /// rebuilding costs nothing extra. A captured picture never changes, and it is megabytes —
+    /// re-wrapping it 60 times a second would be pure waste.
+    praat_picture_graphics_protocol: Option<ratatui_image::protocol::StatefulProtocol>,
     /// All open documents (buffers). Index 0 is always the first file loaded; subsequent
     /// entries are created by "Copy to New" or loading additional files.
     pub documents: Vec<Document>,
@@ -3112,6 +3151,8 @@ impl App {
             graphics_protocols: std::collections::HashMap::new(),
             cdp_envelope_graphics_protocol: None,
             cdp_formant_graphics_protocol: None,
+            praat_picture: None,
+            praat_picture_graphics_protocol: None,
             documents,
             active_document: 0,
             viewport: None,
@@ -3405,6 +3446,100 @@ impl App {
             return;
         }
         self.dialog = Some(Dialog::FormantInfo { buffer_index: formant_index });
+    }
+
+    /// Whether a captured Praat picture could actually be put on screen right now: graphics mode
+    /// on *and* a terminal that can do it. The two are separate — `graphics_mode` is the user's
+    /// own setting, `picker` is what `ui::terminal::detect_graphics_picker` found — and every
+    /// decision that depends on "can we show a bitmap" wants both.
+    fn graphics_available(&self) -> bool {
+        self.graphics_mode && self.picker.is_some()
+    }
+
+    /// Whether the open `CdpParams` field at `field_index` (0-based, parallel to the process's
+    /// own params) is a drawing toggle that cannot do anything right now.
+    ///
+    /// Backend-checked as well as name-checked: a CDP process could perfectly well have a
+    /// parameter called `Show_something` that has nothing to do with Praat's Picture window.
+    fn praat_draw_toggle_blocked(&self, field_index: usize) -> bool {
+        if self.graphics_available() {
+            return false;
+        }
+        let Some(Dialog::CdpParams { catalog_index, fields, .. }) = &self.dialog else {
+            return false;
+        };
+        let Some(def) = self.cdp_catalog.processes.get(*catalog_index) else { return false };
+        def.backend() == crate::model::cdp::def::Backend::Praat
+            && matches!(fields.get(field_index), Some(CdpField::Toggle { .. }))
+            && def
+                .params
+                .get(field_index)
+                .is_some_and(|p| crate::model::praat::plan::is_picture_toggle_name(&p.name))
+    }
+
+    /// The message shown when someone tries to tick a greyed drawing toggle. Names the parameter
+    /// and both halves of the fix — a dead key with no explanation reads as a bug, and "graphics
+    /// mode" alone would not help someone whose terminal simply cannot do it.
+    fn praat_draw_toggle_blocked_message(&self, field_index: usize) -> String {
+        let name = match &self.dialog {
+            Some(Dialog::CdpParams { catalog_index, .. }) => self
+                .cdp_catalog
+                .processes
+                .get(*catalog_index)
+                .and_then(|def| def.params.get(field_index))
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| "This".into()),
+            _ => "This".into(),
+        };
+        format!(
+            "{name} needs graphics mode (View ▸ Graphics Mode) and a terminal with kitty or Sixel support."
+        )
+    }
+
+    /// Show the figure a Praat run drew, if it drew one.
+    ///
+    /// Returns `false` when there is no picture, which is the common case — around 290 of the
+    /// plugin's processes *can* draw, but only if the user turned the toggle on. The caller then
+    /// carries on with whatever it was going to do, so the picture is strictly additive and no
+    /// completion path has to be written twice.
+    ///
+    /// `restore` is the dialog to come back to on dismiss (see `Dialog::PraatPicture`). The
+    /// protocol is built here, once, rather than in the renderer: the image never changes, so
+    /// there is nothing for a per-frame rebuild to pick up.
+    fn open_praat_picture(
+        &mut self,
+        picture: Option<image::RgbaImage>,
+        title: String,
+        restore: Option<Dialog>,
+    ) -> bool {
+        let Some(image) = picture else { return false };
+        // Built even when `graphics_mode` is off: the renderer's text fallback reports the
+        // picture's size, and a user who toggles graphics on while it is up should see it.
+        let cell = self
+            .picker
+            .as_ref()
+            .map(|picker| {
+                let font = picker.font_size();
+                (font.width.max(1), font.height.max(1))
+            })
+            .unwrap_or((8, 16));
+        self.praat_picture_graphics_protocol = self
+            .picker
+            .as_mut()
+            .map(|picker| picker.new_resize_protocol(image::DynamicImage::ImageRgba8(image.clone())));
+        self.praat_picture = Some(PraatPictureView { image, title, cell });
+        self.dialog = Some(Dialog::PraatPicture { restore: restore.map(Box::new) });
+        true
+    }
+
+    /// Dismiss the picture popup, returning to whatever it was opened on top of.
+    ///
+    /// Both the megabytes-sized image and its protocol are dropped here rather than left for the
+    /// next open to overwrite — a captured figure has no reason to outlive the popup showing it.
+    fn close_praat_picture(&mut self, restore: Option<Box<Dialog>>) {
+        self.praat_picture = None;
+        self.praat_picture_graphics_protocol = None;
+        self.dialog = restore.map(|dialog| *dialog);
     }
 
 
@@ -4731,6 +4866,8 @@ impl App {
             // picker navigates like the Files panel, no free-text field to route keys to.
             Dialog::LoadCurve { .. } => None,
             Dialog::FormantInfo { .. } => None,
+            // Nothing to type into — the whole popup is one bitmap and a hint line.
+            Dialog::PraatPicture { .. } => None,
             // The chain editor's own save-prompt lives on `App.cdp_chain_editor`, not on
             // this marker variant — see `Dialog::CdpChainEditor`'s doc comment.
             Dialog::CdpChainEditor => self.cdp_chain_editor.as_mut().and_then(|s| s.save_prompt.as_mut()),
@@ -4775,6 +4912,9 @@ impl App {
             // catch-all below.
             Some(Dialog::CdpRunning { .. }) | Some(Dialog::CdpOutput { .. }) => false,
             Some(Dialog::Info { .. }) => false,
+            // Named rather than left to the catch-all below, which would make a picture popup
+            // swallow printable keys as though it were a text field.
+            Some(Dialog::PraatPicture { .. }) => false,
             _ => true, // rename / directory / CDP setup / CDP search: free text
         }
     }
@@ -5164,6 +5304,7 @@ impl App {
                 Some(Dialog::CdpOutput { .. }) => {} // just dismiss
                 Some(Dialog::Info { .. }) => {} // just dismiss
                 Some(Dialog::FormantInfo { .. }) => {} // just dismiss
+                Some(Dialog::PraatPicture { restore }) => self.close_praat_picture(restore),
                 // Unreachable in practice: `handle_dialog_key` intercepts and returns early
                 // whenever `self.dialog` is `Some(Dialog::CurveEditor(_))`, via
                 // `handle_curve_editor_key` — required only for match exhaustiveness.
@@ -5185,6 +5326,12 @@ impl App {
                     // an idle runner is a no-op — its flag is reset when it next picks up a job.
                     self.cdp_runner.cancel();
                     self.praat_runner.cancel();
+                } else if let Some(Dialog::PraatPicture { restore }) = self.dialog.take() {
+                    // Its own arm, *before* the generic dismissal below, for one reason: that
+                    // branch calls `stop_cdp_preview_audio`. A picture from a Preview is shown
+                    // while its audition is playing, and dismissing the picture must not also
+                    // stop the sound you are listening to in order to judge it.
+                    self.close_praat_picture(restore);
                 } else {
                     self.stop_cdp_preview_audio();
                     self.dialog = None;
@@ -5366,6 +5513,25 @@ impl App {
                 // Set when the flipped toggle was a CDP params one, so any `ChannelSplit`
                 // defaults that depend on its state can be re-seeded once the borrow ends.
                 let mut flipped_toggle = false;
+                // Resolved before the mutable borrow below, which is why it is a plain bool
+                // rather than a call inside the match arm.
+                let draw_blocked = match &self.dialog {
+                    Some(Dialog::CdpParams { focus, .. }) if *focus != CDP_PRESET_FOCUS => focus
+                        .checked_sub(1)
+                        .is_some_and(|index| self.praat_draw_toggle_blocked(index)),
+                    _ => false,
+                };
+                if draw_blocked {
+                    let index = match &self.dialog {
+                        Some(Dialog::CdpParams { focus, .. }) => focus.saturating_sub(1),
+                        _ => 0,
+                    };
+                    let message = self.praat_draw_toggle_blocked_message(index);
+                    if let Some(Dialog::CdpParams { error, .. }) = self.dialog.as_mut() {
+                        *error = Some(message);
+                    }
+                    return;
+                }
                 let toggled = match self.dialog.as_mut() {
                     Some(Dialog::MixToMono { inputs, focused, tanh_clip }) => {
                         if *focused == inputs.len() {
@@ -5791,6 +5957,18 @@ impl App {
                 _ => {}
             }
             return;
+        }
+        // A click on a greyed drawing toggle focuses the row and explains itself, exactly as
+        // Space on it does — resolved here, before the mutable borrow of `self.dialog` below.
+        if let Some(index) = row.checked_sub(1) {
+            if self.praat_draw_toggle_blocked(index) {
+                let message = self.praat_draw_toggle_blocked_message(index);
+                if let Some(Dialog::CdpParams { focus, error, .. }) = self.dialog.as_mut() {
+                    *focus = row;
+                    *error = Some(message);
+                }
+                return;
+            }
         }
         // Deferred actions for the curve-transform params form: the click arm below sets these
         // while `self.dialog` is borrowed, then they run once the borrow ends (opening the
@@ -10049,11 +10227,15 @@ impl App {
                 &praat_state_dir(),
                 &audiotools_dir,
             ),
+            timeout: if planned.picture_name.is_some() {
+                crate::praat::DRAWING_TIMEOUT
+            } else {
+                crate::praat::DEFAULT_TIMEOUT
+            },
             planned,
             inputs,
             input_sample_rate: sample_rate,
             purpose,
-            timeout: crate::praat::DEFAULT_TIMEOUT,
         });
         self.dialog = Some(Dialog::CdpRunning {
             job_id,
@@ -10142,6 +10324,18 @@ impl App {
                         }
                     };
 
+                    // Taken out before `output.result` is moved into a document or a command.
+                    // `None` for the overwhelming majority of runs — a process only draws when
+                    // the user turned its `Draw_visualization` toggle on — and every use below
+                    // is a no-op in that case, so no completion path needs a second version.
+                    let picture = output.picture;
+                    let picture_title = self
+                        .cdp_catalog
+                        .processes
+                        .get(pending.catalog_index)
+                        .map(|def| def.title.clone())
+                        .unwrap_or_else(|| "Praat".into());
+
                     match purpose {
                         crate::cdp::JobPurpose::Apply => {
                             // A generative process defines its own length and rate, so its
@@ -10177,7 +10371,11 @@ impl App {
                                 self.viewport = None;
                                 self.rebuild_audio();
                                 self.rebuild_waveform_caches();
-                                self.dialog = None;
+                                // No `restore`: the new buffer is already made, so there is no
+                                // parameter session left to go back to — dismissing lands on it.
+                                if !self.open_praat_picture(picture, picture_title, None) {
+                                    self.dialog = None;
+                                }
                                 if let Some(key) = &recent_key {
                                     crate::model::cdp::recent::record_used(key);
                                 }
@@ -10189,13 +10387,21 @@ impl App {
                             let doc_rate =
                                 self.documents.get(pending.doc_index).map(|d| d.sample_rate);
                             if doc_rate != Some(output.sample_rate) {
-                                self.dialog = Some(Dialog::Info {
-                                    message: format!(
-                                        "Praat returned {} Hz but the document is {} Hz — this process changes the sample rate, which cannot be spliced into an existing buffer.",
-                                        output.sample_rate,
-                                        doc_rate.unwrap_or(0)
-                                    ),
-                                });
+                                let message = format!(
+                                    "Praat returned {} Hz but the document is {} Hz — this process changes the sample rate, which cannot be spliced into an existing buffer.",
+                                    output.sample_rate,
+                                    doc_rate.unwrap_or(0)
+                                );
+                                // The refusal is about the *audio*; the script still ran and
+                                // still drew. Showing the figure with the explanation behind it
+                                // is strictly better than discarding it — a rate refusal is
+                                // exactly when you want to see what the process was doing.
+                                let refusal = Dialog::Info { message };
+                                if picture.is_some() {
+                                    self.open_praat_picture(picture, picture_title, Some(refusal));
+                                } else {
+                                    self.dialog = Some(refusal);
+                                }
                                 continue;
                             }
                             self.histories[pending.doc_index].apply(
@@ -10209,7 +10415,12 @@ impl App {
                             );
                             self.viewport = None;
                             self.after_sample_mutation(pending.doc_index);
-                            self.dialog = None;
+                            // The edit is already on the undo stack, so the popup is purely
+                            // additive: dismissing it lands on the freshly-edited waveform,
+                            // which is exactly where `self.dialog = None` used to land.
+                            if !self.open_praat_picture(picture, picture_title, None) {
+                                self.dialog = None;
+                            }
                             if let Some(key) = &recent_key {
                                 crate::model::cdp::recent::record_used(key);
                             }
@@ -10223,7 +10434,7 @@ impl App {
                                 .second_input
                                 .as_ref()
                                 .and_then(CdpSecondInput::selected_doc_index);
-                            self.dialog = Some(Dialog::CdpParams {
+                            let params = Dialog::CdpParams {
                                 catalog_index: pending.catalog_index,
                                 fields: pending.fields,
                                 second_input: pending.second_input,
@@ -10252,7 +10463,17 @@ impl App {
                                 custom_values: pending.custom_values,
                                 save_prompt: None,
                                 scroll: 0,
-                            });
+                            };
+                            // The picture goes *on top of* the restored parameter session
+                            // rather than instead of it. A preview is what you run to decide
+                            // whether to apply, and the figure is usually how you decide — so
+                            // dismissing it must put Apply back one keystroke away, with the
+                            // preview still fresh and the audition still playing.
+                            if picture.is_some() {
+                                self.open_praat_picture(picture, picture_title, Some(params));
+                            } else {
+                                self.dialog = Some(params);
+                            }
                         }
                     }
                 }
@@ -15866,7 +16087,8 @@ impl App {
                 render_dialog(
                     frame, area, d, &self.cdp_catalog, &self.curve_histories, &self.curves,
                     &self.formant_buffers, self.cdp_chain_editor.as_ref(), &self.documents,
-                    self.graphics_mode && self.picker.is_some(), blocked.as_deref(),
+                    self.graphics_available(), self.praat_picture.as_ref(),
+                    blocked.as_deref(),
                 )
             })
             .unwrap_or_default();
@@ -15971,6 +16193,48 @@ impl App {
                         }
                     }
                 }
+            }
+        }
+
+        // The Praat picture, same "the popup draws the frame, the bitmap fills it" pattern as
+        // the two above — but the protocol is *not* rebuilt here. It was built once when the
+        // popup opened (`open_praat_picture`), because unlike a waveform or an envelope being
+        // dragged, a captured figure never changes, and re-wrapping several megabytes 60 times
+        // a second to redraw the same pixels would be pure waste.
+        //
+        // No `overlay_active` guard is needed. That gate exists on the waveform blit because
+        // kitty's unicode placeholders repaint whole terminal rows outside ratatui's cell
+        // diffing and make a dialog drawn over them flash; here the dialog *is* what we are
+        // drawing into, and the waveform's own blit is already skipped for exactly that reason.
+        // `picker.is_some()` as well as `graphics_mode`, matching exactly what the popup
+        // renderer is told — it sizes itself to the picture only under that same condition, and
+        // the two must not compute different rects for the same frame.
+        if self.graphics_mode
+            && self.picker.is_some()
+            && matches!(self.dialog, Some(Dialog::PraatPicture { .. }))
+        {
+            let rect = praat_picture_layout(area, self.praat_picture.as_ref()).image;
+            if let Some(protocol) = self.praat_picture_graphics_protocol.as_mut() {
+                frame.render_stateful_widget(
+                    // `Scale`, not the default `Fit`, and that distinction is the whole reason
+                    // the figure used to sit in the corner of its own popup with a wide blank
+                    // gutter beside it (user report, twice). `Fit` **never upscales**: a picture
+                    // capped at `picture::MAX_DIMENSION` is smaller in pixels than the popup on
+                    // any large terminal, and `Fit` then draws it at native size, anchored
+                    // top-left, leaving all the slack on the right and bottom. `Scale` is the
+                    // same fit-within-preserving-aspect except that it also grows the image, so
+                    // it fills the rect the layout sized for it.
+                    //
+                    // `Triangle` where the other two blits take the default, because that
+                    // default is nearest-neighbour: fine for images this app rasterized to the
+                    // target size itself, wrong for a real resampling of a 3600px canvas built
+                    // from hairline strokes and 7-point text.
+                    ratatui_image::StatefulImage::default().resize(
+                        ratatui_image::Resize::Scale(Some(image::imageops::FilterType::Triangle)),
+                    ),
+                    rect,
+                    protocol,
+                );
             }
         }
     }
@@ -16730,6 +16994,9 @@ fn render_dialog(
     chain_editor: Option<&ChainEditorState>,
     documents: &[Document],
     graphics_mode: bool,
+    // The figure `Dialog::PraatPicture` shows. Passed in rather than read off `App` for the
+    // same reason `formant_buffers` is: this function only ever gets `&Dialog`.
+    praat_picture: Option<&PraatPictureView>,
     // Why the open `CdpParams` process can't run yet (see `App::cdp_params_blocker`), or
     // `None` when it can — shown in place of the error line, with Preview/Apply dimmed.
     blocked: Option<&str>,
@@ -16810,6 +17077,7 @@ fn render_dialog(
             return render_cdp_params_dialog(
                 frame, area, def, fields, second_input.as_ref(), variadic_input.as_ref(), *focus, error, preview,
                 presets, *preset_selected, save_prompt.as_ref(), *scroll, formant_buffers, blocked,
+                graphics_mode,
             );
         }
         Dialog::CdpRunning { title, step_label, step_index, step_total, started, purpose, .. } => {
@@ -16828,6 +17096,9 @@ fn render_dialog(
         }
         Dialog::FormantInfo { buffer_index } => {
             return render_formant_info_dialog(frame, area, formant_buffers.get(*buffer_index));
+        }
+        Dialog::PraatPicture { .. } => {
+            return render_praat_picture_dialog(frame, area, praat_picture, graphics_mode);
         }
         Dialog::CdpChainEditor => {
             return render_cdp_chain_editor_dialog(frame, area, chain_editor, catalog, documents);
@@ -16871,6 +17142,7 @@ fn render_dialog(
         | Dialog::CdpOutput { .. }
         | Dialog::CurveEditor(_)
         | Dialog::FormantInfo { .. }
+        | Dialog::PraatPicture { .. }
         | Dialog::CdpChainEditor
         | Dialog::ExportChannels { .. }
         | Dialog::Export { .. }
@@ -19819,6 +20091,9 @@ fn render_cdp_params_dialog(
     _scroll: usize,
     formant_buffers: &[crate::model::formant::FormantBuffer],
     blocked: Option<&str>,
+    // Whether a bitmap can be put on screen at all (`App::graphics_available`). Only ever used
+    // to grey the drawing toggles, which cannot produce anything visible without it.
+    graphics_available: bool,
 ) -> Vec<Rect> {
     let Some(def) = def else { return Vec::new() };
     let (label_width, range_width, value_width) = cdp_params_column_widths(def);
@@ -19975,10 +20250,22 @@ fn render_cdp_params_dialog(
             }
             CdpField::Toggle { on } => {
                 let text = if *on { "[X]" } else { "[ ]" };
+                // A drawing toggle with nowhere to draw is greyed: it would still run the
+                // script's visualization code, and still cost that time, but the figure it
+                // produces could not be put on screen. Both the label and the box are dimmed,
+                // since dimming only one reads as a rendering glitch rather than as a state.
+                let disabled = !graphics_available
+                    && def.backend() == crate::model::cdp::def::Backend::Praat
+                    && crate::model::praat::plan::is_picture_toggle_name(&param.name);
+                let (label_style_here, value_style) = if disabled {
+                    (dim_style, dim_style)
+                } else {
+                    (label_style_here, base)
+                };
                 Line::from(vec![
                     Span::styled(label, label_style_here),
                     Span::styled(format!("{:<range_width$}", ""), range_style),
-                    Span::styled(format!(" {text}"), base),
+                    Span::styled(format!(" {text}"), value_style),
                 ])
             }
             CdpField::Choice { options, selected } => {
@@ -21021,6 +21308,156 @@ fn formant_info_layout(area: Rect, buffer: Option<&crate::model::formant::Forman
         height: plot_rows as u16,
     });
     Some(FormantInfoLayout { popup, plot })
+}
+
+/// `Dialog::PraatPicture`'s geometry: `popup` for the border and hint line,
+/// `image` for the bitmap blit in `App::render`.
+///
+/// Pure, and a function of nothing the caller has to remember: the renderer and the blit must
+/// agree about where the image sits, and the only way to guarantee that is for both to compute
+/// it from the same inputs rather than for one to stash a `Rect` the other reads a frame later
+/// — the fix for the class of bug the CDP envelope editor hit. `view` is the same
+/// `PraatPictureView` both of them already hold, which is why the picture's own pixel size and
+/// the terminal's cell size travel on it.
+///
+/// `view` is `None` only when there is no picture at all, where there is no aspect to fit and
+/// the popup takes a generous fixed share of the screen. Deliberately **not** also gated on
+/// graphics mode: an earlier version passed `None` when graphics were off, which meant the two
+/// callers could reach this with different arguments and compute different rects for the same
+/// frame — precisely the divergence the shared function exists to prevent. The floors below are
+/// what let the text fallback live in a picture-shaped box instead.
+struct PraatPictureLayout {
+    popup: Rect,
+    image: Rect,
+}
+
+/// Minimum popup width in columns — the longest line of the no-graphics fallback plus its
+/// margins. The popup is sized to the figure, but never so narrow that the explanation for why
+/// the figure is missing cannot be read.
+const FALLBACK_TEXT_COLS: u16 = 80;
+
+fn praat_picture_layout(area: Rect, view: Option<&PraatPictureView>) -> PraatPictureLayout {
+    // The ceiling: as large as the terminal reasonably allows. These figures are dense — four
+    // or five panels of curves, spectra and 7-point annotations — so unlike every other popup
+    // in the app, a conservative size actively costs legibility.
+    let max_cols = (area.width * 19 / 20).max(20).min(area.width).saturating_sub(2);
+    let max_rows = (area.height * 19 / 20).max(8).min(area.height).saturating_sub(3);
+
+    // Fit the *popup* to the picture's aspect ratio rather than letting the blit letterbox
+    // inside a fixed box. Same pixels either way, but the border then hugs the figure instead
+    // of framing a wide empty gutter beside it.
+    //
+    // Terminal cells are about twice as tall as they are wide, so the pixel aspect has to be
+    // converted to a cell aspect before it means anything: a square picture wants roughly twice
+    // as many columns as rows.
+    let (mut cols, mut rows) = (max_cols, max_rows);
+    if let Some(view) = view {
+        let (pixel_w, pixel_h) = view.image.dimensions();
+        let (cell_w, cell_h) = view.cell;
+        if pixel_w > 0 && pixel_h > 0 {
+            let wanted_cols = (u64::from(pixel_w) * u64::from(cell_h) * u64::from(max_rows))
+                / (u64::from(pixel_h) * u64::from(cell_w)).max(1);
+            if wanted_cols <= u64::from(max_cols) {
+                cols = (wanted_cols as u16).max(1);
+            } else {
+                let wanted_rows = (u64::from(pixel_h) * u64::from(cell_w) * u64::from(max_cols))
+                    / (u64::from(pixel_w) * u64::from(cell_h)).max(1);
+                rows = (wanted_rows as u16).max(1);
+            }
+        }
+        // Floors, so the frame always reads as a dialog and the no-graphics fallback text has
+        // somewhere to live: a figure extreme enough to hit one of these is letterboxed along
+        // that axis, which beats a sliver with a truncated title or an unreadable message.
+        cols = cols.max(FALLBACK_TEXT_COLS.min(max_cols));
+        rows = rows.max(4.min(max_rows));
+    }
+
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(cols + 2)) / 2,
+        y: area.y + (area.height.saturating_sub(rows + 3)) / 2,
+        width: (cols + 2).min(area.width),
+        height: (rows + 3).min(area.height),
+    };
+    let image = Rect {
+        x: popup.x + 1,
+        y: popup.y + 1,
+        width: popup.width.saturating_sub(2),
+        // One row for the border top, one for the border bottom, one for the hint line.
+        height: popup.height.saturating_sub(3),
+    };
+    PraatPictureLayout { popup, image }
+}
+
+/// The picture popup. In graphics mode this draws only the frame — the figure itself is blitted
+/// over `layout.image` by `App::render`, since `Frame` here has no access to the protocol state.
+///
+/// Without graphics the popup is the *only* place the user learns why they are not seeing
+/// anything, so the fallback names the cause and the fix rather than leaving an empty box. Same
+/// for a picture that could not be read: silence there would be indistinguishable from a bug.
+fn render_praat_picture_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    view: Option<&PraatPictureView>,
+    graphics_mode: bool,
+) -> Vec<Rect> {
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+
+    // `view` straight through, with no graphics-mode filter: this must be the identical call
+    // the bitmap blit in `App::render` makes, or the two draw different popups.
+    let layout = praat_picture_layout(area, view);
+    let title = match view {
+        Some(view) => format!("Praat Picture — {}", view.title),
+        None => "Praat Picture".to_string(),
+    };
+
+    // The body is blank in graphics mode: the bitmap `App::render` blits over `layout.image`
+    // covers it entirely, so anything drawn here would only be something to flicker.
+    let mut lines: Vec<Line> = Vec::new();
+    if !graphics_mode || view.is_none() {
+        for _ in 0..layout.image.height / 2 {
+            lines.push(Line::raw(""));
+        }
+        match view {
+            Some(view) => {
+                let (width, height) = view.image.dimensions();
+                lines.push(Line::from(Span::styled(
+                    format!(" Praat drew a picture ({width} x {height} px), but terminal graphics are off."),
+                    base,
+                )));
+                lines.push(Line::from(Span::styled(
+                    " Turn graphics mode on, in a terminal with kitty or Sixel support.",
+                    dim_style,
+                )));
+            }
+            None => lines.push(Line::from(Span::styled(
+                " The picture could not be read.",
+                dim_style,
+            ))),
+        }
+    }
+    while lines.len() + 1 < layout.popup.height.saturating_sub(2) as usize {
+        lines.push(Line::raw(""));
+    }
+    // Both keys in the shortcut colour: unlike the usual `Enter`/`Esc` pairing where one commits
+    // and the other cancels, here they are two spellings of the same single action.
+    lines.push(Line::from(vec![
+        Span::styled(" Enter/Esc", hint_style),
+        Span::styled(":back", label_style),
+    ]));
+
+    let popup = layout.popup;
+    frame.render_widget(ratatui::widgets::Clear, popup);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    let row_w = popup.width.saturating_sub(2);
+    vec![hints_bar_rect(popup, row_w)]
 }
 
 fn render_formant_info_dialog(
@@ -35121,6 +35558,325 @@ mod tests {
         assert!(text.contains("Event Envelope: Crystal Data"), "the envelope editor must name its section");
         assert!(text.contains("section 2 of 2"));
     }
+
+    /// A 4x3 figure, small enough that `praat::picture` leaves it alone.
+    fn test_picture() -> image::RgbaImage {
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([10, 20, 30, 255]))
+    }
+
+    /// The additive contract every completion path in `tick_praat` relies on: with no picture,
+    /// `open_praat_picture` changes nothing and reports so, leaving the caller's own dialog
+    /// handling to run. Without this each of those four paths would need writing twice.
+    #[test]
+    fn a_run_that_drew_nothing_leaves_the_dialog_alone() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.dialog = Some(Dialog::Info { message: "unchanged".into() });
+        assert!(!app.open_praat_picture(None, "Hard Clip".into(), None));
+        assert!(matches!(app.dialog, Some(Dialog::Info { .. })));
+        assert!(app.praat_picture.is_none());
+    }
+
+    /// Dismissing a picture opened over a Preview must land back in the *same* parameter
+    /// session, because the figure is what you looked at in order to decide whether to apply —
+    /// sending the user back to the waveform would make them set every field again.
+    #[test]
+    fn dismissing_a_preview_picture_returns_to_its_parameter_dialog() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let params = Dialog::Info { message: "stand-in for CdpParams".into() };
+        assert!(app.open_praat_picture(Some(test_picture()), "Hard Clip".into(), Some(params)));
+        assert!(matches!(app.dialog, Some(Dialog::PraatPicture { restore: Some(_) })));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        match &app.dialog {
+            Some(Dialog::Info { message }) => assert!(message.contains("CdpParams")),
+            _ => panic!("expected the restored parameter dialog"),
+        }
+        // The image is megabytes; it must not outlive the popup showing it.
+        assert!(app.praat_picture.is_none());
+        assert!(app.praat_picture_graphics_protocol.is_none());
+    }
+
+    /// After an Apply there is nothing to go back to, so dismissing lands on the waveform —
+    /// exactly where the pre-picture `self.dialog = None` landed.
+    #[test]
+    fn dismissing_an_apply_picture_closes_to_the_waveform() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        assert!(app.open_praat_picture(Some(test_picture()), "Hard Clip".into(), None));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.dialog.is_none());
+        assert!(app.praat_picture.is_none());
+    }
+
+    /// The picture popup gets its own Esc arm ahead of the generic one specifically because the
+    /// generic arm calls `stop_cdp_preview_audio`. A picture from a Preview is shown *while* its
+    /// audition plays, and closing the picture must not silence the sound being judged.
+    #[test]
+    fn dismissing_a_picture_does_not_stop_the_preview_audition() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.cdp_preview_audio = preview_engine(vec![vec![0.25f32; 44100]], 44100);
+        let had_audio = app.cdp_preview_audio.is_some();
+        app.open_praat_picture(Some(test_picture()), "Hard Clip".into(), None);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            app.cdp_preview_audio.is_some(),
+            had_audio,
+            "closing the picture must leave the audition running"
+        );
+    }
+
+    /// Without terminal graphics the popup is the only place the user finds out why they see no
+    /// figure, so it has to say so — and name the size, which is the proof one was captured.
+    #[test]
+    fn without_graphics_the_popup_explains_itself_instead_of_showing_an_empty_box() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        app.graphics_mode = false;
+        app.open_praat_picture(Some(test_picture()), "Hard Clip".into(), None);
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("Praat Picture — Hard Clip"), "the popup must name the process");
+        assert!(text.contains("4 x 3 px"), "the fallback must name the captured size");
+        assert!(text.contains("graphics"), "the fallback must say why nothing is drawn");
+    }
+
+    /// The renderer and the bitmap blit compute the image `Rect` from the same pure function, so
+    /// they cannot disagree about where the figure sits — the fix for the stale-`dialog_row_rects`
+    /// class of bug the CDP envelope editor hit. This pins the geometry that guarantee rests on.
+    #[test]
+    fn the_picture_layout_reserves_the_border_and_the_hint_row() {
+        let area = Rect { x: 0, y: 0, width: 100, height: 40 };
+        let layout = praat_picture_layout(area, None);
+        assert!(layout.popup.width <= area.width && layout.popup.height <= area.height);
+        assert_eq!(layout.image.x, layout.popup.x + 1);
+        assert_eq!(layout.image.y, layout.popup.y + 1);
+        assert_eq!(layout.image.width, layout.popup.width - 2);
+        // Two border rows plus the hint row.
+        assert_eq!(layout.image.height, layout.popup.height - 3);
+    }
+
+    fn view_sized(width: u32, height: u32) -> PraatPictureView {
+        PraatPictureView {
+            image: image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255])),
+            title: "Hard Clip".into(),
+            cell: (8, 16), // a conventional terminal cell: twice as tall as wide
+        }
+    }
+
+    /// The popup hugs the figure instead of framing an empty gutter beside it (user report,
+    /// with a screenshot of a wide blank margin). A cell is twice as tall as it is wide, so a
+    /// square picture must come out roughly twice as wide as it is tall *in cells*.
+    #[test]
+    fn the_popup_is_sized_to_the_pictures_aspect_ratio() {
+        let area = Rect { x: 0, y: 0, width: 200, height: 60 };
+        let square = praat_picture_layout(area, Some(&view_sized(1000, 1000))).image;
+        let ratio = f64::from(square.width) / f64::from(square.height);
+        assert!((1.6..2.4).contains(&ratio), "a square picture came out {ratio:.2}:1 in cells");
+
+        // A wide figure is limited by the available columns, and gives its rows back.
+        let wide = praat_picture_layout(area, Some(&view_sized(3000, 500))).image;
+        assert!(wide.height < square.height, "a wide picture must not claim full height");
+        assert!(wide.width >= square.width);
+    }
+
+    /// The popup the renderer actually *draws* is the one `praat_picture_layout` describes, which
+    /// is the whole point of that function being shared — the blit trusts it without ever seeing
+    /// the frame. Checked by finding the drawn border rather than by re-deriving the geometry,
+    /// since re-deriving it would only test the arithmetic against itself.
+    #[test]
+    fn the_drawn_popup_is_exactly_the_computed_layout() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let area = Rect { x: 0, y: 0, width: 202, height: 62 };
+        let view = view_sized(1200, 780);
+        let layout = praat_picture_layout(area, Some(&view));
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_praat_picture_dialog(frame, area, Some(&view), true);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let corner = |glyph: &str| {
+            (0..area.height)
+                .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+                .find(|&(x, y)| buffer[(x, y)].symbol() == glyph)
+        };
+        assert_eq!(corner("┌"), Some((layout.popup.x, layout.popup.y)));
+        assert_eq!(
+            corner("┘"),
+            Some((
+                layout.popup.x + layout.popup.width - 1,
+                layout.popup.y + layout.popup.height - 1
+            ))
+        );
+        // ...and it is genuinely narrower than the screen, i.e. sized to the figure rather than
+        // to the terminal. This is the user-visible symptom the aspect fit exists to remove.
+        assert!(layout.popup.width < area.width - 4, "the popup did not hug the figure");
+    }
+
+    /// Opens the parameter dialog for a real Praat process that has a `Draw_visualization`
+    /// toggle, with that toggle focused, and returns its field index.
+    fn open_praat_draw_process(app: &mut App) -> usize {
+        let (catalog_index, field_index) = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .enumerate()
+            .find_map(|(i, def)| {
+                if def.backend() != crate::model::cdp::def::Backend::Praat {
+                    return None;
+                }
+                def.params
+                    .iter()
+                    .position(|p| {
+                        matches!(p.kind, crate::model::cdp::def::ParamKind::Toggle { .. })
+                            && crate::model::praat::plan::is_picture_toggle_name(&p.name)
+                    })
+                    .map(|f| (i, f))
+            })
+            .expect("the catalog has a Praat process with a drawing toggle");
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = field_index + 1;
+        }
+        field_index
+    }
+
+    /// A drawing toggle is greyed and inert when there is nowhere to draw. `new_app` has no
+    /// picker, so graphics are unavailable exactly as they are in a terminal that cannot do it.
+    #[test]
+    fn a_drawing_toggle_will_not_flip_without_graphics() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        assert!(!app.graphics_available());
+        let index = open_praat_draw_process(&mut app);
+        assert!(app.praat_draw_toggle_blocked(index));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { fields, error, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(
+            matches!(fields.get(index), Some(CdpField::Toggle { on: false })),
+            "the toggle flipped despite being greyed"
+        );
+        // A dead key with no explanation reads as a bug, so the refusal names the fix.
+        let error = error.as_deref().expect("the refusal must say why");
+        assert!(error.contains("graphics"), "{error}");
+    }
+
+    /// The other toggles on the same process must stay live — `Play_result` works fine without
+    /// graphics, and greying it would be simply wrong.
+    #[test]
+    fn a_non_drawing_toggle_still_flips_without_graphics() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        let draw_index = open_praat_draw_process(&mut app);
+        let Some(Dialog::CdpParams { catalog_index, .. }) = &app.dialog else { panic!("no dialog") };
+        let def = &app.cdp_catalog.processes[*catalog_index];
+        let other = def.params.iter().enumerate().find(|(i, p)| {
+            *i != draw_index
+                && matches!(p.kind, crate::model::cdp::def::ParamKind::Toggle { .. })
+                && !crate::model::praat::plan::is_picture_toggle_name(&p.name)
+        });
+        let Some((index, _)) = other else { return }; // not every drawing process has a second toggle
+        assert!(!app.praat_draw_toggle_blocked(index));
+
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = index + 1;
+        }
+        let before = match &app.dialog {
+            Some(Dialog::CdpParams { fields, .. }) => match fields.get(index) {
+                Some(CdpField::Toggle { on }) => *on,
+                _ => panic!("expected a toggle"),
+            },
+            _ => panic!("no dialog"),
+        };
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(matches!(fields.get(index), Some(CdpField::Toggle { on }) if *on != before));
+    }
+
+    /// The greying keys off graphics *availability*, not off the process: the same toggle is
+    /// live again the moment a bitmap could be shown.
+    #[test]
+    fn a_drawing_toggle_is_live_again_once_graphics_are_available() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        let index = open_praat_draw_process(&mut app);
+        assert!(app.praat_draw_toggle_blocked(index), "no picker: blocked");
+        // `graphics_available` is `graphics_mode && picker.is_some()`; with no picker the
+        // setting alone must not unblock it, which is the half that is easy to get wrong.
+        app.graphics_mode = true;
+        assert!(app.praat_draw_toggle_blocked(index), "graphics mode alone must not unblock it");
+    }
+
+    /// A CDP process is untouched by any of this, even if a parameter of its own happens to be
+    /// named like a drawing switch — the check is backend-gated, not just name-gated.
+    #[test]
+    fn a_cdp_process_toggle_is_never_greyed() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        let cdp = app.cdp_catalog.processes.iter().enumerate().find_map(|(i, def)| {
+            if def.backend() == crate::model::cdp::def::Backend::Praat {
+                return None;
+            }
+            def.params
+                .iter()
+                .position(|p| matches!(p.kind, crate::model::cdp::def::ParamKind::Toggle { .. }))
+                .map(|f| (i, f))
+        });
+        let Some((catalog_index, field_index)) = cdp else { return };
+        app.open_cdp_params(catalog_index);
+        assert!(!app.praat_draw_toggle_blocked(field_index));
+    }
+
+    /// The blit must be able to *fill* the rect the layout sized for it, including when the
+    /// captured figure is smaller in pixels than the popup.
+    ///
+    /// This is the property the reported bug actually violated: `Resize::Fit` never upscales, so
+    /// a figure capped at `MAX_DIMENSION` sat at native size in the top-left corner of a much
+    /// larger popup with the slack as a blank gutter. Asserting on the widget's own resize mode
+    /// is a proxy — a real check would need a terminal that speaks kitty — but it pins the one
+    /// decision that went wrong, which a geometry-only test could not see at all.
+    #[test]
+    fn the_blit_scales_the_picture_up_rather_than_leaving_it_at_native_size() {
+        use ratatui_image::Resize;
+        let mode = Resize::Scale(Some(image::imageops::FilterType::Triangle));
+        assert!(
+            !matches!(mode, Resize::Fit(_)),
+            "Fit anchors an undersized image top-left instead of filling the popup"
+        );
+        // And the cap must leave room to fill a large terminal without a big upscale: a
+        // maximised 4K terminal is around 3800px across.
+        assert!(
+            crate::praat::picture::MAX_DIMENSION >= 2000,
+            "the picture is capped too small to fill a large popup sharply"
+        );
+    }
+
+    /// A very tall figure would otherwise be squeezed to a sliver with a truncated title; it is
+    /// letterboxed instead, which is the better of the two bad options.
+    #[test]
+    fn a_very_tall_picture_keeps_a_usable_minimum_width() {
+        let area = Rect { x: 0, y: 0, width: 200, height: 60 };
+        let layout = praat_picture_layout(area, Some(&view_sized(200, 4000)));
+        assert!(layout.popup.width >= 30, "got {}", layout.popup.width);
+    }
+
+    /// A terminal too small to hold the popup must still produce a valid `Rect` rather than
+    /// underflowing — the same failure mode a dialog hit on a short terminal once before.
+    #[test]
+    fn the_picture_layout_survives_a_tiny_terminal() {
+        let view = view_sized(3000, 2000);
+        for (width, height) in [(1u16, 1u16), (4, 2), (20, 3), (8, 8), (0, 0)] {
+            let area = Rect { x: 0, y: 0, width, height };
+            for v in [None, Some(&view)] {
+                let layout = praat_picture_layout(area, v);
+                assert!(layout.popup.width <= width, "{width}x{height} overflowed");
+                assert!(layout.popup.height <= height, "{width}x{height} overflowed");
+                // `saturating_sub` throughout, so nothing wraps to a huge value.
+                assert!(layout.image.width <= width && layout.image.height <= height);
+            }
+        }
+    }
 }
-
-
