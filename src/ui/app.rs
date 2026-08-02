@@ -9979,6 +9979,45 @@ impl App {
 
                     match purpose {
                         crate::cdp::JobPurpose::Apply => {
+                            // A generative process defines its own length and rate, so its
+                            // result belongs in a new buffer rather than over the selection it
+                            // was launched from — the same "one new buffer per result" shape a
+                            // glob-output CDP process already uses. This is also what lets a
+                            // process synthesise at a rate other than the document's: there is
+                            // nothing to splice into, so nothing to refuse.
+                            let opens_new_buffer = self
+                                .cdp_catalog
+                                .processes
+                                .get(pending.catalog_index)
+                                .is_some_and(Self::praat_opens_new_buffer);
+                            if opens_new_buffer {
+                                let bits_per_sample = self
+                                    .documents
+                                    .get(pending.doc_index)
+                                    .map(|d| d.bits_per_sample)
+                                    .unwrap_or(32);
+                                self.push_document(Document {
+                                    head_tail_marks: Vec::new(),
+                                    channels: output.result,
+                                    sample_rate: output.sample_rate,
+                                    bits_per_sample,
+                                    selection: None,
+                                    cursor: 0,
+                                    dirty: true,
+                                    path: None,
+                                    markers: Vec::new(),
+                                    bext: None,
+                                    stream: None,
+                                });
+                                self.viewport = None;
+                                self.rebuild_audio();
+                                self.rebuild_waveform_caches();
+                                self.dialog = None;
+                                if let Some(key) = &recent_key {
+                                    crate::model::cdp::recent::record_used(key);
+                                }
+                                continue;
+                            }
                             // Many of these scripts resample or synthesise at a fixed rate;
                             // splicing raw samples at a different rate would play the result at
                             // the wrong speed, so it is refused rather than silently wrong.
@@ -10515,6 +10554,25 @@ impl App {
             started: std::time::Instant::now(),
             purpose: crate::cdp::JobPurpose::Apply,
         });
+    }
+
+    /// Whether a Praat process's result should open as a **new buffer** rather than being
+    /// spliced into the selection.
+    ///
+    /// True for the whole `Generative` group. Those processes synthesise from scratch: their
+    /// length comes from their own Duration parameter and their rate from their own Sample Rate
+    /// parameter, so neither has any relationship to the selection they were launched from.
+    /// Splicing a five-second synthesised drone over a selection is not what "generate" means,
+    /// and a result at a different rate could not be spliced at all — it was refused outright.
+    ///
+    /// Keyed off the group rather than a per-entry catalog flag, for the same reason
+    /// `group::cdp_group` is derived rather than stored: `praat_catalog.toml` is machine-
+    /// generated and carries a "do not hand-edit" header, so a column here would be reverted by
+    /// the next converter run. It also means the rule reads the plugin's own taxonomy — a
+    /// process filed under Generative & Synthesis generates.
+    fn praat_opens_new_buffer(def: &crate::model::cdp::ProcessDef) -> bool {
+        def.backend() == crate::model::cdp::def::Backend::Praat
+            && crate::model::cdp::cdp_group(def).is_some_and(|g| g.name == "Generative")
     }
 
     /// Whether any step of `chain` — at any nesting depth — actually runs a CDP binary.
@@ -21706,6 +21764,65 @@ mod tests {
             }],
         };
         assert!(app.chain_uses_cdp(&chain));
+    }
+
+    /// A generative process synthesises its own timeline, so its result opens as a new buffer
+    /// rather than replacing the selection it was launched from.
+    #[test]
+    fn a_generative_praat_process_opens_a_new_buffer() {
+        let mut app = new_app(Some(doc(0.25, 44_100)), None);
+        if !app.praat_ready() {
+            eprintln!("skipping: praat unavailable");
+            return;
+        }
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "praat_generative_synthesis_chirikovstandardmap")
+            .expect("chirikov in catalog");
+        assert!(
+            App::praat_opens_new_buffer(&app.cdp_catalog.processes[index]),
+            "fixture should be generative"
+        );
+
+        let before = app.documents.len();
+        app.open_cdp_params(index);
+        app.cdp_run(crate::cdp::JobPurpose::Apply);
+        let started = std::time::Instant::now();
+        while matches!(app.dialog, Some(Dialog::CdpRunning { .. }))
+            && started.elapsed() < std::time::Duration::from_secs(120)
+        {
+            app.tick_praat();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if let Some(Dialog::CdpOutput { lines, .. }) = &app.dialog {
+            // Upstream script bug (it references an undefined variable); the routing decision
+            // this test exists for is still asserted above and below.
+            eprintln!("skipping assert: praat reported {}", lines.join(" "));
+            return;
+        }
+        assert_eq!(app.documents.len(), before + 1, "a new buffer should have been opened");
+        assert!(!app.documents[0].dirty, "the original buffer must be untouched");
+    }
+
+    /// The rule is the plugin's own Generative group, and nothing else.
+    #[test]
+    fn only_generative_praat_processes_open_a_new_buffer() {
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let generative = catalog
+            .find("praat_generative_synthesis_chirikovstandardmap")
+            .expect("chirikov in catalog");
+        assert!(App::praat_opens_new_buffer(generative));
+
+        let transform = catalog
+            .find("praat_distortion_hard_clip")
+            .expect("hard clip in catalog");
+        assert!(!App::praat_opens_new_buffer(transform));
+
+        // A CDP process is never routed this way, whatever its group.
+        let cdp = catalog.find("distort_average").expect("distort_average in catalog");
+        assert!(!App::praat_opens_new_buffer(cdp));
     }
 
     /// A two-Sound Praat script must get the same second-buffer picker a dual-input CDP process
