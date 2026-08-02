@@ -19,10 +19,11 @@
   after two minutes: some of these scripts play their result aloud, which takes as long as the
   audio does, and a few can hang outright — `Esc` stops one early.
 
-  A process's own presets now fill in the form. Choosing one writes its values into the other
-  fields and sets the menu back to Custom, so you can see what it chose and adjust it. The
-  presets always changed the sound — that logic lives inside each script — but the dialog used
-  to go on showing the manual values.
+  A process's own presets now fill in the form. Cycle the Preset row to read through them; when
+  you move off the row, the one you left it on writes its values into the other fields and the
+  menu returns to Custom, so you can see what it chose and adjust it. The presets always changed
+  the sound — that logic lives inside each script — but the dialog used to go on showing the
+  manual values.
 
   Chains mix the two freely: a CDP+Praat Chain can put a Praat step after a CDP one and back
   again, and a chain built only from Praat processes no longer asks for a CDP installation it
