@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-02 (2.1.0)
 
 - **Praat processes.** tui-wave can now run praatAudioTools — a large collection of
   sound-transformation scripts for Praat by Shai Cohen — alongside CDP, in the same browser under
@@ -36,6 +36,8 @@
   Around a quarter of the collection is not listed, because it cannot be driven without a window,
   needs a corpus of other files, or works on things that are not sounds.
   `docs/praat-excluded-scripts.md` names every one and why.
+
+- Bumped version to 2.1.0.
 
 ## 2026-08-01 (2.0.0)
 
