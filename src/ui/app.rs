@@ -19546,13 +19546,24 @@ fn render_cdp_browser_dialog(
     }
     frame.render_widget(Paragraph::new(lines), processes_col);
 
-    // One combined Rect per row spans both columns; see this function's doc comment for why.
-    let click_width = (processes_col.x + processes_col.width).saturating_sub(groups_col.x);
+    // One combined Rect per row spans Domain, Groups and Processes; see this function's doc
+    // comment for why a row is one target rather than three.
+    //
+    // It must start at the **Domain** column. `handle_dialog_row_click` measures `x_in_row`
+    // from the rect's own left edge and compares it against `CDP_DOMAIN_COL_WIDTH` and
+    // `CDP_DOMAIN_COL_WIDTH + CDP_GROUP_COL_WIDTH`, which only means anything if the rect
+    // begins where the Domain column does. Starting it at `groups_col` (which it did, from
+    // when there were only two columns) put every click one column to the left of where the
+    // user aimed: a Groups click read as a Domain pick, a process click as a Groups pick, and
+    // the Domain column itself fell outside every rect, so clicking it did nothing at all
+    // (user report).
+    let click_x = domain_col.x;
+    let click_width = (processes_col.x + processes_col.width).saturating_sub(click_x);
     let mut row_rects = Vec::with_capacity(list_rows + 1);
     for row in 0..list_rows {
         row_rects.push(Rect {
-            x: groups_col.x,
-            y: groups_col.y + HEADER_ROWS + row as u16,
+            x: click_x,
+            y: domain_col.y + HEADER_ROWS + row as u16,
             width: click_width,
             height: 1,
         });
@@ -22100,9 +22111,7 @@ mod tests {
         let index = hysteresis_index(&app);
         let def = app.cdp_catalog.processes[index].clone();
         let preset_param = def.preset_param.expect("it has an internal preset row");
-        let CdpKind::Choice(option_count) = choice_len(&def, preset_param) else {
-            panic!("preset param should be a choice")
-        };
+        let option_count = choice_len(&def, preset_param);
         assert!(option_count >= 4, "fixture should have several presets");
 
         app.open_cdp_params(index);
@@ -22127,13 +22136,9 @@ mod tests {
         }
     }
 
-    enum CdpKind {
-        Choice(usize),
-    }
-
-    fn choice_len(def: &crate::model::cdp::ProcessDef, index: usize) -> CdpKind {
+    fn choice_len(def: &crate::model::cdp::ProcessDef, index: usize) -> usize {
         match &def.params[index].kind {
-            crate::model::cdp::ParamKind::Choice { options, .. } => CdpKind::Choice(options.len()),
+            crate::model::cdp::ParamKind::Choice { options, .. } => options.len(),
             _ => panic!("not a choice"),
         }
     }
@@ -22420,6 +22425,69 @@ mod tests {
             }
             _ => panic!("expected Dialog::CdpParams after Enter"),
         }
+    }
+
+    /// Clicking each of the browser's three list columns must hit that column.
+    ///
+    /// Driven through real screen coordinates and `handle_mouse`, not by calling
+    /// `handle_dialog_row_click` with a hand-computed `x_in_row` — the bug this covers lived in
+    /// the recorded row rects, which a synthetic `x_in_row` bypasses entirely. The rects began
+    /// at the Groups column while the handler measured offsets from the Domain column, so every
+    /// click landed one column left of where it was aimed and the Domain column, being outside
+    /// every rect, could not be clicked at all (user report).
+    #[test]
+    fn clicking_each_browser_column_hits_that_column() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_browser();
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let layout = cdp_browser_layout(app.last_frame_area);
+
+        // Row 1 of the Domain column: the second domain, "Recent".
+        let first_row_y = app.dialog_row_rects[0].y;
+        click_at(&mut app, layout.domain_col.x + 1, first_row_y + 1);
+        match &app.dialog {
+            Some(Dialog::CdpBrowser { focus, domain_selected, .. }) => {
+                assert_eq!(*focus, CdpBrowserColumn::Domain, "a Domain click must focus Domain");
+                assert_eq!(*domain_selected, 1, "it must select the row that was clicked");
+            }
+            _ => panic!("expected the browser"),
+        }
+
+        // Move to a subdivided domain so the Groups column has rows, then click one.
+        click_at(&mut app, layout.domain_col.x + 1, first_row_y + 2);
+        let groups_len = match &app.dialog {
+            Some(Dialog::CdpBrowser { groups, .. }) => groups.len(),
+            _ => panic!("expected the browser"),
+        };
+        assert!(groups_len > 1, "a domain row should subdivide into groups");
+        click_at(&mut app, layout.groups_col.x + 1, first_row_y + 1);
+        match &app.dialog {
+            Some(Dialog::CdpBrowser { focus, group_selected, .. }) => {
+                assert_eq!(*focus, CdpBrowserColumn::Groups, "a Groups click must focus Groups");
+                assert_eq!(*group_selected, 1);
+            }
+            _ => panic!("expected the browser"),
+        }
+
+        // The Processes column opens the params dialog, as the test below also checks.
+        click_at(&mut app, layout.processes_col.x + 2, first_row_y);
+        assert!(
+            matches!(app.dialog, Some(Dialog::CdpParams { .. })),
+            "a Processes click must open the parameter form"
+        );
+    }
+
+    fn click_at(app: &mut App, x: u16, y: u16) {
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        });
     }
 
     /// A mouse click on a process row in the browser selects *and* opens it in one step —
