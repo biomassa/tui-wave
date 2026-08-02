@@ -600,21 +600,65 @@ does not need CDP installed at all.
 
 You need two things.
 
-**Praat itself.** Install it from your package manager: `pacman -S praat` on Arch,
-`apt install praat` on Debian or Ubuntu, `brew install --cask praat` on macOS. tui-wave finds it
-on your `PATH`, so there is usually nothing to configure. If yours lives somewhere unusual, set
-`praat_bin` in the config to its full path. On macOS that path is inside the app bundle:
-`/Applications/Praat.app/Contents/MacOS/Praat`.
+**Praat itself.** Install it from your package manager.
 
-**The scripts.** They ship with tui-wave as a git submodule. If you cloned this repository
-without `--recursive`, fetch them once:
+On Linux:
 
+```sh
+sudo pacman -S praat          # Arch
+sudo apt install praat        # Debian, Ubuntu
 ```
+
+On macOS:
+
+```sh
+brew install --cask praat
+```
+
+Without Homebrew, download the disk image from https://www.praat.org and drag Praat to your
+Applications folder.
+
+tui-wave finds Praat on your `PATH`, so on Linux there is usually nothing to configure. Check it
+with `praat --version`.
+
+macOS installs Praat as an application bundle, and the program inside it is not on your `PATH`.
+Set `praat_bin` in your config file to the program itself:
+
+```toml
+praat_bin = "/Applications/Praat.app/Contents/MacOS/Praat"
+```
+
+Use the same setting on Linux if your Praat lives somewhere your `PATH` does not reach.
+
+**The scripts.** They ship with tui-wave as a git submodule, so a recursive clone already has
+them:
+
+```sh
+git clone --recursive https://github.com/biomassa/tui-wave
+```
+
+If you cloned without `--recursive`, fetch them once from inside the repository:
+
+```sh
 git submodule update --init
 ```
 
-If you forget, tui-wave tells you exactly that when you run a Praat process. You can also point
-`praat_audiotools_dir` at your own checkout.
+That writes them to `third_party/praat-audiotools`, which tui-wave uses by default. If you
+forget the step, tui-wave names this exact command when you run a Praat process.
+
+To use your own copy instead, clone praatAudioTools wherever you like and point the config at
+it:
+
+```sh
+git clone https://github.com/ShaiCohen-ops/Praat-plugin_AudioTools ~/praat-audiotools
+```
+
+```toml
+praat_audiotools_dir = "/home/you/praat-audiotools"
+```
+
+You do **not** need to install the scripts into Praat itself. tui-wave runs them by path and
+never writes to your Praat preferences folder, so an existing Praat setup is left alone.
 
 Neither the Praat program nor the scripts are modified or installed into your Praat setup.
 tui-wave never writes to your Praat preferences folder.
@@ -645,9 +689,13 @@ and you get a 96kHz buffer.
 different rate cannot be spliced into an existing buffer, so tui-wave refuses and says so rather
 than playing it back at the wrong speed.
 
-**A script's own presets already work.** Choosing one from a process's Preset menu changes the
-sound: the preset is applied inside the script itself. The other fields in the dialog do not
-update to show the values it chose, so what you see is still the manual setting.
+**Presets fill in the form.** Many of these processes offer a Preset menu. Choosing one writes
+that preset's values into the other fields and sets the menu back to Custom, so you can see
+exactly what it chose and adjust it from there. Choosing Custom itself changes nothing, which is
+what lets you pick a preset and then tweak it.
+
+A few scripts write their presets in a form tui-wave cannot read. Those still work — the preset
+is applied inside the script — but the fields go on showing the manual values.
 
 **Markers are not carried through.** Praat discards marker and broadcast metadata, so a Praat
 process returns audio only.

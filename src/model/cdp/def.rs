@@ -750,6 +750,32 @@ pub struct ChannelSplit {
     pub extra: Vec<usize>,
 }
 
+/// One preset a Praat script defines for itself: which option of the process's preset menu it
+/// is, and the parameter values that option sets.
+///
+/// `params` and `values` are parallel arrays rather than a list of pairs purely so the
+/// generated TOML stays homogeneous (`params = [1, 3]`, `values = [1.5, 0.25]`) — a mixed
+/// `[[1, 1.5]]` array is legal TOML but needlessly fragile across parsers, and the catalog
+/// carries ten thousand of these. `ScriptPreset::pairs` is the accessor everything reads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptPreset {
+    /// Index into the preset param's `options`.
+    pub option: usize,
+    /// Indices into `ProcessDef::params`.
+    pub params: Vec<usize>,
+    /// One value per entry of `params`.
+    pub values: Vec<f64>,
+}
+
+impl ScriptPreset {
+    /// The (param index, value) pairs this preset sets, ignoring any trailing entry that has
+    /// no counterpart — a defensive truncation so a hand-edited user catalog with mismatched
+    /// array lengths cannot panic the dialog.
+    pub fn pairs(&self) -> impl Iterator<Item = (usize, f64)> + '_ {
+        self.params.iter().copied().zip(self.values.iter().copied())
+    }
+}
+
 /// One CDP process: which binary to invoke, what its parameters are, and how it fits into
 /// the wav/ana pipeline.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -923,6 +949,26 @@ pub struct ProcessDef {
     /// multi-window analysis and freeze internally.
     #[serde(default)]
     pub spec_grab_prepass: bool,
+    /// Index of the `Choice` param that selects one of the script's **own** presets, for a
+    /// Praat process that has one. `None` for every CDP process and for a Praat script whose
+    /// preset chain could not be read.
+    ///
+    /// praatAudioTools scripts implement presets *inside themselves*, as an
+    /// `if preset = 2 … elsif preset = 3 …` chain that overwrites the other form variables. So
+    /// choosing one already changes the sound correctly — but the dialog went on showing the
+    /// manual values, so the user could neither see what a preset had chosen nor adjust it.
+    /// [`ProcessDef::script_presets`] carries those values back out so the form can show them.
+    #[serde(default)]
+    pub preset_param: Option<usize>,
+    /// Which option of `preset_param` means "use the values shown in the form" — the script's
+    /// own Custom/Manual entry. Selecting a preset fills the fields and then switches the
+    /// param back to *this* option, so the script leaves those values alone and what runs is
+    /// exactly what the dialog shows.
+    #[serde(default)]
+    pub preset_custom_option: usize,
+    /// The values each of `preset_param`'s options sets, extracted from the script.
+    #[serde(default)]
+    pub script_presets: Vec<ScriptPreset>,
     /// Ordered — this order is exactly the order these values appear as positional
     /// arguments on the CDP command line (flagged params are still emitted in this order,
     /// just as `-x<value>` tokens instead of bare ones). A process with no parameters emits
@@ -1048,6 +1094,9 @@ mod tests {
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
+            preset_param: None,
+            preset_custom_option: 0,
+            script_presets: Vec::new(),
             params: vec![sample_number()],
         };
 
@@ -1109,6 +1158,9 @@ mod tests {
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
+            preset_param: None,
+            preset_custom_option: 0,
+            script_presets: Vec::new(),
             params: vec![toggle, choice],
         };
 
@@ -1193,6 +1245,9 @@ mod tests {
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
+            preset_param: None,
+            preset_custom_option: 0,
+            script_presets: Vec::new(),
             params: vec![table],
         };
 
@@ -1248,6 +1303,9 @@ mod tests {
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
+            preset_param: None,
+            preset_custom_option: 0,
+            script_presets: Vec::new(),
             params: vec![param],
         };
 
@@ -1311,6 +1369,9 @@ mod tests {
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
+            preset_param: None,
+            preset_custom_option: 0,
+            script_presets: Vec::new(),
             params: vec![param],
         };
 
@@ -1360,6 +1421,9 @@ mod tests {
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
+            preset_param: None,
+            preset_custom_option: 0,
+            script_presets: Vec::new(),
             min_inputs: None,
             params,
         }
