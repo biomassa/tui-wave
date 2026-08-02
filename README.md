@@ -32,6 +32,8 @@ Read [DOCUMENTATION.md](DOCUMENTATION.md) to learn how to use it.
 - **Configurable.** Every key assignment lives in a TOML config file.
 - **CDP.** An optional front end to the Composer's Desktop Project, with a growing list 
 (hundreds) of processes implemented.
+- **Praat.** An optional front end to praatAudioTools, 352 sound-transformation scripts for
+Praat, in the same browser and chainable with CDP.
 
 The CDP process browser, the parameter form with automatable green fields and presets, and the
 breakpoint envelope editor:
@@ -122,7 +124,8 @@ CDP directory, and a first-use prompt explains why.
 
 tui-wave looks in `~/cdp` by default. Unpack or build CDP there and the program finds it with no
 setup. Anywhere else, answer the prompt with the real path. You can change the path later
-through CDP then Configure CDP Directory. tui-wave saves it as `cdp_dir` in your config file.
+through CDP+Praat then Configure CDP Directory. tui-wave saves it as `cdp_dir` in your config
+file.
 
 ### About CDP
 
@@ -166,6 +169,47 @@ yourself, then tell tui-wave where the binaries live.
 
 The older [CDP7](https://github.com/ComposersDesktop/CDP7) source builds the same way and works
 just as well. The tui-wave catalog does not depend on one CDP release.
+
+## Optional: Praat support
+
+praatAudioTools is a collection of sound-transformation scripts for Praat, by Shai Cohen of
+Bar-Ilan University. tui-wave runs 352 of them: granular, spectral, reverb, distortion, spatial,
+generative and more. They share the `Ctrl+p` browser with CDP, under a **Praat** domain, and a
+chain (`Ctrl+h`) can mix the two freely.
+
+Praat support is optional in the same way CDP support is: tui-wave works fully without it.
+
+You need two things.
+
+**Praat**, from your package manager:
+
+```sh
+sudo pacman -S praat          # Arch
+sudo apt install praat        # Debian, Ubuntu
+brew install --cask praat     # macOS
+```
+
+tui-wave finds it on your `PATH`, so there is usually nothing to configure. Set `praat_bin` in
+your config file if yours lives elsewhere — on macOS the executable sits inside the app bundle,
+at `/Applications/Praat.app/Contents/MacOS/Praat`.
+
+**The scripts**, which ship with tui-wave as a git submodule. Clone with them:
+
+```sh
+git clone --recursive https://github.com/biomassa/tui-wave
+```
+
+Or fetch them into an existing clone:
+
+```sh
+git submodule update --init
+```
+
+If you forget, tui-wave says exactly that when you run a Praat process. Point
+`praat_audiotools_dir` at your own checkout if you would rather use one.
+
+Nothing is installed into your Praat setup, and your Praat preferences folder is never written
+to.
 
 ## Development
 

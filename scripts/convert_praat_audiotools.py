@@ -135,6 +135,82 @@ def needs_two_sounds(source: str) -> bool:
             return True
     return False
 
+# A script's own presets live *inside* it, as an `if preset = 2 ... elsif preset = 3 ...` chain
+# that overwrites the other form variables:
+#
+#     elsif preset = 2
+#         presetName$ = "WarmTape"
+#         drive = 1.5
+#         hysteresis_Memory = 0.25
+#
+# So choosing a preset already changes the sound. What it did *not* do is tell the dialog, which
+# went on showing the manual values -- the user could neither see what a preset had chosen nor
+# adjust it. Reading the chain back out lets the form fill those fields in and then switch the
+# preset menu to its own Custom entry, so what runs is exactly what is displayed.
+PRESET_NAME_RE = re.compile(r"^preset", re.I)
+CUSTOM_OPTION_RE = re.compile(r"custom|manual|none|user", re.I)
+ASSIGNMENT_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*=\s*(-?\d+(?:\.\d+)?)\s*$")
+
+
+def praat_variable(label: str) -> str:
+    """The script variable Praat derives from a form label: the label with its first letter
+    lowercased. `Hysteresis_Memory` is read back as `hysteresis_Memory`."""
+    return label[:1].lower() + label[1:] if label else label
+
+
+def extract_script_presets(source: str, params: list[Param]):
+    """Return `(preset_index, custom_option, {option_index: {param_index: value}})`, or None.
+
+    Conservative by construction: a chain that does not parse simply yields nothing and the
+    process keeps today's behaviour, rather than the form being filled with values that might
+    not match what the script actually does.
+    """
+    preset_index = next(
+        (i for i, p in enumerate(params) if p.kind == "choice" and PRESET_NAME_RE.match(p.name)),
+        None,
+    )
+    if preset_index is None:
+        return None
+
+    variable = praat_variable(params[preset_index].name)
+    by_variable = {praat_variable(p.name): i for i, p in enumerate(params)}
+    # Only whole-line `if`/`elsif` comparisons against a literal, so a compound condition
+    # (`if preset = 2 and stereo`) is skipped rather than half-understood.
+    head = re.compile(rf"^(?:els)?if\s+{re.escape(variable)}\s*=\s*(\d+)\s*$")
+
+    blocks: dict[int, dict[int, float]] = {}
+    current: int | None = None
+    for line in source.split("\n"):
+        match = head.match(line)
+        if match:
+            current = int(match.group(1))
+            blocks.setdefault(current, {})
+            continue
+        if current is None:
+            continue
+        stripped = line.strip()
+        if stripped.startswith(("else", "endif")) and not stripped.startswith("elsif"):
+            current = None
+            continue
+        assignment = ASSIGNMENT_RE.match(line)
+        if assignment and assignment.group(1) in by_variable:
+            target = by_variable[assignment.group(1)]
+            # A preset that reassigns the preset menu itself would fight the Custom switch.
+            if target != preset_index:
+                blocks[current][target] = float(assignment.group(2))
+
+    blocks = {option: values for option, values in blocks.items() if values}
+    if not blocks:
+        return None
+
+    options = params[preset_index].options
+    custom = next(
+        (i for i, label in enumerate(options) if CUSTOM_OPTION_RE.search(label)),
+        0,
+    )
+    return preset_index, custom, blocks
+
+
 NUMERIC_KEYWORDS = {"real", "positive", "integer", "natural"}
 TEXT_KEYWORDS = {"sentence", "word", "text"}
 CHOICE_KEYWORDS = {"optionmenu", "choice"}
@@ -162,6 +238,10 @@ class Process:
     group: str
     params: list[Param]
     inputs: int = 1
+    preset_param: int | None = None
+    preset_custom_option: int = 0
+    # option index -> {param index: value}
+    script_presets: dict[int, dict[int, float]] = field(default_factory=dict)
 
 
 def unquote(text: str, colon_form: bool) -> str:
@@ -413,6 +493,12 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
             params=params,
             inputs=2 if needs_two_sounds(source) else 1,
         ))
+        presets = extract_script_presets(source, params)
+        if presets:
+            index, custom, blocks = presets
+            processes[-1].preset_param = index
+            processes[-1].preset_custom_option = custom
+            processes[-1].script_presets = blocks
 
     return processes, excluded
 
@@ -442,7 +528,20 @@ def render_catalog(processes: list[Process], sha: str) -> str:
         # stereo input into per-channel lanes the way a mono-only CDP binary needs.
         out.append("stereo_native = true")
         out.append("output_is_stereo = false")
+        if proc.preset_param is not None:
+            out.append(f"preset_param = {proc.preset_param}")
+            out.append(f"preset_custom_option = {proc.preset_custom_option}")
         out.append("")
+
+        # Praat option indices are 1-based; the catalog's are 0-based.
+        for option in sorted(proc.script_presets):
+            values = proc.script_presets[option]
+            keys = sorted(values)
+            out.append("[[process.script_presets]]")
+            out.append(f"option = {option - 1}")
+            out.append("params = [" + ", ".join(str(k) for k in keys) + "]")
+            out.append("values = [" + ", ".join(toml_number(values[k]) for k in keys) + "]")
+            out.append("")
 
         for param in proc.params:
             out.append("[[process.params]]")

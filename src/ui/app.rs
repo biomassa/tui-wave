@@ -9216,10 +9216,57 @@ impl App {
             } else {
                 selected.saturating_sub(1)
             };
+            let chosen = (focus_val - 1, *selected);
+            // Borrow of `fields` ends here so the fill can consult the catalog.
+            self.apply_script_preset(chosen.0, chosen.1);
             return;
         }
         if let Some(input) = self.dialog_input() {
             if forward { input.right(); } else { input.left(); }
+        }
+    }
+
+    /// Fills the form from a Praat script's **own** preset, when `param_index` is the process's
+    /// preset menu and `chosen` is one of its presets.
+    ///
+    /// praatAudioTools scripts apply presets internally (see `ProcessDef::preset_param`), so the
+    /// sound was always right — but the dialog kept showing the manual values, leaving the user
+    /// unable to see what a preset had chosen or to adjust it. This writes those values into the
+    /// fields and then switches the menu back to the script's own Custom entry, so the script
+    /// leaves them alone and what runs is exactly what is displayed.
+    ///
+    /// A no-op for CDP processes, for a Praat script whose preset chain could not be read, and
+    /// for the Custom entry itself — selecting Custom leaves whatever is on screen, which is
+    /// what makes "pick a preset, then tweak it" work.
+    fn apply_script_preset(&mut self, param_index: usize, chosen: usize) {
+        let Some(Dialog::CdpParams { catalog_index, .. }) = &self.dialog else { return };
+        let Some(def) = self.cdp_catalog.processes.get(*catalog_index) else { return };
+        if def.preset_param != Some(param_index) || chosen == def.preset_custom_option {
+            return;
+        }
+        let Some(preset) = def.script_presets.iter().find(|p| p.option == chosen) else { return };
+        let updates: Vec<(usize, f64)> = preset.pairs().collect();
+        let custom = def.preset_custom_option;
+
+        let Some(Dialog::CdpParams { fields, .. }) = self.dialog.as_mut() else { return };
+        for (index, value) in updates {
+            match fields.get_mut(index) {
+                Some(CdpField::Number { input, integer, .. }) => {
+                    let text = if *integer {
+                        format!("{}", value.round() as i64)
+                    } else {
+                        format!("{value}")
+                    };
+                    *input = TextInput::fresh(text);
+                }
+                Some(CdpField::Toggle { on }) => *on = value != 0.0,
+                // A preset that assigns to a choice or a datafile-shaped field is not something
+                // the extractor emits; ignore rather than guess.
+                _ => {}
+            }
+        }
+        if let Some(CdpField::Choice { selected, .. }) = fields.get_mut(param_index) {
+            *selected = custom;
         }
     }
 
@@ -21825,6 +21872,112 @@ mod tests {
         assert!(!App::praat_opens_new_buffer(cdp));
     }
 
+    /// Picking one of a Praat script's own presets fills the other fields with that preset's
+    /// values and switches the menu back to Custom, so what runs is what the dialog shows.
+    #[test]
+    fn choosing_a_script_preset_fills_the_form_and_returns_to_custom() {
+        let mut app = new_app(Some(doc(0.25, 100)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "praat_distortion_hysteresis_distortion")
+            .expect("hysteresis distortion in catalog");
+        let def = app.cdp_catalog.processes[index].clone();
+        let preset_param = def.preset_param.expect("it has a preset menu");
+        let preset = def
+            .script_presets
+            .iter()
+            .find(|p| p.option != def.preset_custom_option)
+            .expect("it has at least one non-custom preset")
+            .clone();
+
+        app.open_cdp_params(index);
+        // Focus the preset menu, then step onto the preset we are asserting about.
+        if let Some(Dialog::CdpParams { focus, fields, .. }) = app.dialog.as_mut() {
+            *focus = preset_param + 1;
+            if let Some(CdpField::Choice { selected, .. }) = fields.get_mut(preset_param) {
+                *selected = preset.option.saturating_sub(1);
+            }
+        }
+        app.cdp_params_cycle_left_right(true);
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else {
+            panic!("expected the params dialog");
+        };
+        for (param, value) in preset.pairs() {
+            match &fields[param] {
+                CdpField::Number { input, .. } => {
+                    let shown: f64 = input.value().parse().unwrap_or(f64::NAN);
+                    assert!(
+                        (shown - value).abs() < 1e-9,
+                        "field {param} shows {shown}, preset sets {value}"
+                    );
+                }
+                CdpField::Toggle { on } => assert_eq!(*on, value != 0.0),
+                _ => panic!("preset targeted an unexpected field kind"),
+            }
+        }
+        let CdpField::Choice { selected, .. } = &fields[preset_param] else {
+            panic!("preset param should be a choice");
+        };
+        assert_eq!(
+            *selected, def.preset_custom_option,
+            "the menu must return to Custom so the script uses the displayed values"
+        );
+    }
+
+    /// Selecting Custom itself must leave the form alone — that is what makes "pick a preset,
+    /// then tweak it" work.
+    #[test]
+    fn selecting_custom_does_not_overwrite_the_form() {
+        let mut app = new_app(Some(doc(0.25, 100)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "praat_distortion_hysteresis_distortion")
+            .expect("hysteresis distortion in catalog");
+        let def = app.cdp_catalog.processes[index].clone();
+        let preset_param = def.preset_param.expect("it has a preset menu");
+        assert_eq!(def.preset_custom_option, 0, "fixture assumes Custom is first");
+
+        app.open_cdp_params(index);
+        if let Some(Dialog::CdpParams { focus, fields, .. }) = app.dialog.as_mut() {
+            *focus = preset_param + 1;
+            if let Some(CdpField::Number { input, .. }) = fields.iter_mut().find(|f| {
+                matches!(f, CdpField::Number { .. })
+            }) {
+                *input = TextInput::fresh(String::from("7.5"));
+            }
+            if let Some(CdpField::Choice { selected, .. }) = fields.get_mut(preset_param) {
+                *selected = 1;
+            }
+        }
+        // Step back onto Custom.
+        app.cdp_params_cycle_left_right(false);
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let edited = fields.iter().find_map(|f| match f {
+            CdpField::Number { input, .. } => Some(input.value().to_string()),
+            _ => None,
+        });
+        assert_eq!(edited.as_deref(), Some("7.5"), "Custom must not overwrite an edited field");
+    }
+
+    /// A CDP process has no script presets, so cycling one of its choices must not touch the
+    /// rest of the form.
+    #[test]
+    fn a_cdp_choice_never_triggers_a_script_preset_fill() {
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        for def in catalog.processes.iter().filter(|d| {
+            d.backend() == crate::model::cdp::def::Backend::Cdp
+        }) {
+            assert!(def.preset_param.is_none(), "{} declares a preset param", def.key);
+            assert!(def.script_presets.is_empty(), "{} declares script presets", def.key);
+        }
+    }
+
     /// A two-Sound Praat script must get the same second-buffer picker a dual-input CDP process
     /// gets. It does so for free by declaring `IoKind::DualWav`, which `cdp_fields_for` already
     /// keys off — this pins that the reuse actually holds rather than being assumed.
@@ -24518,6 +24671,9 @@ mod tests {
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
+            preset_param: None,
+            preset_custom_option: 0,
+            script_presets: Vec::new(),
             key: "test_integer_number".into(),
             bin: "modify".into(),
             subprog: None,
@@ -27490,6 +27646,9 @@ mod tests {
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
+            preset_param: None,
+            preset_custom_option: 0,
+            script_presets: Vec::new(),
             key: "test_formant_put".into(),
             bin: "formants".into(),
             subprog: Some("put".into()),
@@ -27567,6 +27726,9 @@ mod tests {
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
+            preset_param: None,
+            preset_custom_option: 0,
+            script_presets: Vec::new(),
             key: "test_formant_put".into(),
             bin: "formants".into(),
             subprog: Some("put".into()),
@@ -33900,6 +34062,9 @@ mod tests {
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
+            preset_param: None,
+            preset_custom_option: 0,
+            script_presets: Vec::new(),
             key: "test_formant_ref".into(),
             bin: "formants".into(),
             subprog: Some("put".into()),

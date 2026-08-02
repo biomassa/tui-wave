@@ -225,6 +225,9 @@ mod tests {
             flags_before_infile: false,
             channel_split: None,
             spec_grab_prepass: false,
+            preset_param: None,
+            preset_custom_option: 0,
+            script_presets: Vec::new(),
             params,
         }
     }

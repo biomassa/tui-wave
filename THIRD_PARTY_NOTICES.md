@@ -103,6 +103,11 @@ repository states the MIT License in its README, and essentially every script ca
 `# License: MIT License` header; there is no top-level `LICENSE` file at the pinned commit.
 Source: https://github.com/ShaiCohen-ops/Praat-plugin_AudioTools.
 
+The scripts are executed as-is, by absolute path — they are neither modified nor installed into
+the user's Praat setup, and tui-wave never writes to the Praat preferences folder. The catalog
+additionally carries, per process, the parameter values each script defines for its own presets,
+extracted from the same sources by the converter above.
+
 ```
 MIT License
 
