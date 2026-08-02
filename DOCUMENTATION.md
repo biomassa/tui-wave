@@ -1,9 +1,22 @@
 ## 1. Install
 
+Everything you may want to install lives here: tui-wave itself, and the two optional external
+tool suites it can drive. Only tui-wave is required — it opens, edits, plays and saves files
+with neither of the others present.
+
+### tui-wave
+
 To build tui-wave from source:
 
 1. Install the Rust toolchain from https://rustup.rs.
-2. Clone the repository.
+2. Clone the repository, with its submodules:
+
+   ```sh
+   git clone --recursive https://github.com/biomassa/tui-wave
+   ```
+
+   The submodule holds the praatAudioTools scripts. You can add it later if you skip it now —
+   see the Praat part below.
 3. Run `cargo build --release` in the repository directory.
 4. Copy `target/release/tui-wave` to a directory on your `PATH`.
 
@@ -28,6 +41,104 @@ The program runs on Linux and macOS. Windows may work, but nobody has tested it.
 
 Audio playback needs a working sound device. If the program finds no device, it still opens,
 draws, and edits files. Only playback stops working.
+
+### CDP (optional)
+
+CDP is the Composer's Desktop Project, a large set of offline sound transformation programs.
+Section 14 covers using them.
+
+CDP does not go on your `PATH`, and no package manager carries it. Download or build it, then
+tell tui-wave where the binaries live.
+
+On macOS, download a prebuilt release from <https://www.unstablesound.net/cdp.html>, the
+official download mirror, and unzip it anywhere. The binaries land in a folder such as
+`_cdprogs` or `NewRelease`.
+
+On Linux there are no prebuilt binaries, so build from source:
+
+```sh
+git clone https://github.com/ComposersDesktop/CDP8.git
+cd CDP8
+mkdir build && cd build
+cmake ..
+make
+```
+
+That needs `cmake` and a C compiler on your `PATH`. The compiled binaries land in a top-level
+`NewRelease` directory. The older [CDP7](https://github.com/ComposersDesktop/CDP7) source builds
+the same way and works just as well; the tui-wave catalog does not depend on one CDP release.
+
+tui-wave looks in `~/cdp` by default, so unpacking or building there needs no further setup.
+Anywhere else, answer the first-use prompt with the real path, or set it later through the
+CDP+Praat menu with Configure CDP Directory. tui-wave saves it as `cdp_dir` in your config file.
+
+### Praat and praatAudioTools (optional)
+
+Praat is a speech-analysis program with a scripting language. praatAudioTools is a large
+collection of sound-transformation scripts written for it by Shai Cohen. Section 15 covers using
+them.
+
+You need two things.
+
+**Praat itself.** Install it from your package manager.
+
+On Linux:
+
+```sh
+sudo pacman -S praat          # Arch
+sudo apt install praat        # Debian, Ubuntu
+```
+
+On macOS:
+
+```sh
+brew install --cask praat
+```
+
+Without Homebrew, download the disk image from https://www.praat.org and drag Praat to your
+Applications folder.
+
+tui-wave finds Praat on your `PATH`, so on Linux there is usually nothing to configure. Check it
+with `praat --version`.
+
+macOS installs Praat as an application bundle, and the program inside it is not on your `PATH`.
+Set `praat_bin` in your config file to the program itself:
+
+```toml
+praat_bin = "/Applications/Praat.app/Contents/MacOS/Praat"
+```
+
+Use the same setting on Linux if your Praat lives somewhere your `PATH` does not reach.
+
+**The scripts.** They ship with tui-wave as a git submodule, so a recursive clone already has
+them:
+
+```sh
+git clone --recursive https://github.com/biomassa/tui-wave
+```
+
+If you cloned without `--recursive`, fetch them once from inside the repository:
+
+```sh
+git submodule update --init
+```
+
+That writes them to `third_party/praat-audiotools`, which tui-wave uses by default. If you
+forget the step, tui-wave names this exact command when you run a Praat process.
+
+To use your own copy instead, clone praatAudioTools wherever you like and point the config at
+it:
+
+```sh
+git clone https://github.com/ShaiCohen-ops/Praat-plugin_AudioTools ~/praat-audiotools
+```
+
+```toml
+praat_audiotools_dir = "/home/you/praat-audiotools"
+```
+
+You do **not** need to install the scripts into Praat itself. tui-wave runs them by path and
+never writes to your Praat preferences folder, so an existing Praat setup is left alone.
 
 ---
 
@@ -453,8 +564,8 @@ programs. tui-wave runs them on your selection and splices the result back in.
 | `Ctrl+p` | CDP+Praat Process |
 | `Ctrl+h` | CDP+Praat Chain |
 
-Point tui-wave at your CDP installation first. Open the CDP+Praat menu and choose Configure CDP
-Directory. The default guess is `~/cdp`.
+Install CDP first — section 1 covers it. You can change the path later from the CDP+Praat menu
+with Configure CDP Directory.
 
 ### The browser
 
@@ -592,76 +703,11 @@ scripts on your selection and splices the result back in, exactly as it does wit
 They share one browser. Open it with `Ctrl+p` and pick **Praat** in the Domain column. The menu
 they live under is named CDP+Praat.
 
+Install Praat and the scripts first — section 1 covers both.
+
 Chains mix freely. A CDP+Praat Chain (`Ctrl+h`) can put a Praat step after a CDP one and back
 again; the audio simply passes from each step to the next. A chain made only of Praat processes
 does not need CDP installed at all.
-
-### Getting it working
-
-You need two things.
-
-**Praat itself.** Install it from your package manager.
-
-On Linux:
-
-```sh
-sudo pacman -S praat          # Arch
-sudo apt install praat        # Debian, Ubuntu
-```
-
-On macOS:
-
-```sh
-brew install --cask praat
-```
-
-Without Homebrew, download the disk image from https://www.praat.org and drag Praat to your
-Applications folder.
-
-tui-wave finds Praat on your `PATH`, so on Linux there is usually nothing to configure. Check it
-with `praat --version`.
-
-macOS installs Praat as an application bundle, and the program inside it is not on your `PATH`.
-Set `praat_bin` in your config file to the program itself:
-
-```toml
-praat_bin = "/Applications/Praat.app/Contents/MacOS/Praat"
-```
-
-Use the same setting on Linux if your Praat lives somewhere your `PATH` does not reach.
-
-**The scripts.** They ship with tui-wave as a git submodule, so a recursive clone already has
-them:
-
-```sh
-git clone --recursive https://github.com/biomassa/tui-wave
-```
-
-If you cloned without `--recursive`, fetch them once from inside the repository:
-
-```sh
-git submodule update --init
-```
-
-That writes them to `third_party/praat-audiotools`, which tui-wave uses by default. If you
-forget the step, tui-wave names this exact command when you run a Praat process.
-
-To use your own copy instead, clone praatAudioTools wherever you like and point the config at
-it:
-
-```sh
-git clone https://github.com/ShaiCohen-ops/Praat-plugin_AudioTools ~/praat-audiotools
-```
-
-```toml
-praat_audiotools_dir = "/home/you/praat-audiotools"
-```
-
-You do **not** need to install the scripts into Praat itself. tui-wave runs them by path and
-never writes to your Praat preferences folder, so an existing Praat setup is left alone.
-
-Neither the Praat program nor the scripts are modified or installed into your Praat setup.
-tui-wave never writes to your Praat preferences folder.
 
 ### The groups
 
