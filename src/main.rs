@@ -3,6 +3,7 @@ mod cdp;
 mod commands;
 mod config;
 mod model;
+mod praat;
 mod ui;
 
 use std::path::Path;

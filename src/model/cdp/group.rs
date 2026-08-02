@@ -55,6 +55,59 @@ pub const PVOC_GROUPS: &[&str] = &[
     "SPEC", "SPECFNU", "SPECNU", "STRANGE", "STRETCH",
 ];
 
+/// praatAudioTools groups — the plugin's own top-level directories, which is the same
+/// principle the CDP tables follow: the heading reads as the tool's own material names it, so
+/// someone reading the plugin's README finds the same bucket here.
+///
+/// Four are shortened because `CDP_GROUP_COL_WIDTH` gives a group name 13 usable columns (the
+/// `praat_group_names_fit_the_browser_column` test enforces it), and the upstream directory
+/// names run past that. The mapping from directory to heading is `PRAAT_DIRS`; only these four
+/// differ from their directory verbatim:
+///
+/// | directory | heading |
+/// |---|---|
+/// | `Generative & Synthesis` | `Generative` |
+/// | `Dynamics & Envelope` | `Dynamics` |
+/// | `Spatial & Surround` | `Spatial` |
+/// | `Time & Granular` | `Time/Granular` |
+pub const PRAAT_GROUPS: &[&str] = &[
+    "AI & Adaptive",
+    "Analysis",
+    "Distortion",
+    "Dynamics",
+    "Filter/Color",
+    "Generative",
+    "Modulation",
+    "Pitch",
+    "Reverb",
+    "Spatial",
+    "Spectral",
+    "Time/Granular",
+];
+
+/// praatAudioTools directory → group heading. The directory is the leading path component of a
+/// Praat entry's `bin` (e.g. `Distortion/Wavefolder__Foldback_.praat` → `Distortion`).
+///
+/// `Max-MSP` and `Vector Chain` are deliberately absent: the former is a single Max/MSP helper
+/// rather than a sound process, and every script in the latter calls sibling scripts through
+/// the *installed* Praat preferences path, which this integration deliberately never sets up
+/// (it runs with `--no-plugins`). Both are excluded by the converter, so listing them here
+/// would leave an always-empty group — which `every_listed_praat_group_has_entries` rejects.
+const PRAAT_DIRS: &[(&str, &str)] = &[
+    ("AI & Adaptive", "AI & Adaptive"),
+    ("Analysis", "Analysis"),
+    ("Distortion", "Distortion"),
+    ("Dynamics & Envelope", "Dynamics"),
+    ("Filter & Color", "Filter/Color"),
+    ("Generative & Synthesis", "Generative"),
+    ("Modulation", "Modulation"),
+    ("Pitch", "Pitch"),
+    ("Reverb", "Reverb"),
+    ("Spatial & Surround", "Spatial"),
+    ("Spectral", "Spectral"),
+    ("Time & Granular", "Time/Granular"),
+];
+
 /// Time-domain `bin` → group. Most groups are named after their principal binary; the extra
 /// entries are the smaller programs CDP documents *inside* that group's own page rather than
 /// giving a heading of their own (e.g. everything in the `cdistort.htm` "OTHERS" section lands
@@ -187,15 +240,24 @@ pub fn cdp_group(def: &ProcessDef) -> Option<CdpGroup> {
     // `fractal` is two unrelated programs sharing a name: `fractal wave` (time domain, filed
     // under DISTORT) and `fractal spectrum` (spectral, filed under SPECNU). The domain is what
     // tells them apart — there is no single answer keyed on the binary alone.
+    // A Praat entry's group is its script's directory, not a binary name — there is only one
+    // Praat binary and it tells you nothing about what the script does.
+    if def.category == Category::Praat {
+        let dir = def.bin.split('/').next()?;
+        let name = PRAAT_DIRS.iter().find(|(d, _)| *d == dir).map(|(_, group)| *group)?;
+        return Some(CdpGroup { category: def.category, name });
+    }
     let name = if def.bin == "fractal" {
         match def.category {
             Category::Time => "DISTORT",
             Category::Pvoc => "SPECNU",
+            Category::Praat => unreachable!("handled above"),
         }
     } else {
         let table = match def.category {
             Category::Time => TIME_BINS,
             Category::Pvoc => PVOC_BINS,
+            Category::Praat => unreachable!("handled above"),
         };
         table.iter().find(|(bin, _)| *bin == def.bin).map(|(_, group)| *group)?
     };
@@ -207,6 +269,7 @@ pub fn groups_for(category: Category) -> &'static [&'static str] {
     match category {
         Category::Time => TIME_GROUPS,
         Category::Pvoc => PVOC_GROUPS,
+        Category::Praat => PRAAT_GROUPS,
     }
 }
 
@@ -273,6 +336,7 @@ mod tests {
             let expected = match p.category {
                 Category::Time => "DISTORT",
                 Category::Pvoc => "SPECNU",
+                Category::Praat => unreachable!("no Praat entry has bin `fractal`"),
             };
             assert_eq!(cdp_group(p).unwrap().name, expected, "{}", p.key);
         }

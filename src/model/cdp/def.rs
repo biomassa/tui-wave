@@ -9,11 +9,31 @@ use serde::{Deserialize, Serialize};
 /// Broad process family, mirrors CDP's own split between time-domain and spectral
 /// (phase-vocoder) processing. `pipeline.rs` uses this to decide whether a process needs
 /// wrapping in `pvoc anal`/`pvoc synth`.
+///
+/// `Praat` is not a CDP family at all — it marks an entry that runs through Praat
+/// (`model::praat`) instead of a CDP binary. It lives on this enum rather than in a separate
+/// field because the browser's Domain column is literally `CdpDomainRow::Domain(Category)`, so
+/// a new variant *is* the new domain row; `ProcessDef::backend` then derives the execution
+/// backend from it, keeping one field that cannot disagree with itself (see `backend`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Category {
     Time,
     Pvoc,
+    Praat,
+}
+
+/// Which external program actually runs a `ProcessDef` — derived from `Category`, never
+/// stored (see `ProcessDef::backend`).
+///
+/// The two backends could not be less alike in how they are invoked (CDP: one binary per
+/// process, arguments straight on argv; Praat: one binary for everything, driven by a
+/// generated script), but they are alike in every way the *UI* cares about, which is why a
+/// Praat process can be an ordinary `ProcessDef`. Only planning and running branch on this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Cdp,
+    Praat,
 }
 
 /// What kind of file a process reads/writes on one side. `Dual*` processes take two input
@@ -913,6 +933,16 @@ pub struct ProcessDef {
 }
 
 impl ProcessDef {
+    /// Which external program runs this process. Derived from `category` rather than stored
+    /// alongside it, so the two can never drift apart — the same reasoning that keeps
+    /// `group::cdp_group` derived from `bin` instead of being a catalog column.
+    pub fn backend(&self) -> Backend {
+        match self.category {
+            Category::Praat => Backend::Praat,
+            Category::Time | Category::Pvoc => Backend::Cdp,
+        }
+    }
+
     /// Smallest and largest input-file counts this process accepts, and whether the count
     /// must be even. One place both `pipeline::plan_job`'s arity check and the UI's
     /// "can Apply run yet?" gate read, so the two can never disagree about whether a given

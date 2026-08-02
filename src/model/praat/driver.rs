@@ -1,0 +1,266 @@
+//! Generating the Praat *driver script* — the small program that actually runs a
+//! praatAudioTools process.
+//!
+//! ## Why a driver is needed at all
+//!
+//! CDP binaries take an input filename and an output filename on argv. praatAudioTools scripts
+//! take neither: they operate on **the Sound object currently selected in Praat's object
+//! list**, and leave their result there as another object. Invoking one directly fails with
+//! `Error: Please select exactly one Sound object.` (exit 255). So every run is wrapped in a
+//! generated script that loads the temp WAV, calls the plugin script through `runScript:`, and
+//! saves whatever came back.
+//!
+//! ## Locating the result
+//!
+//! Only about 180 of the plugin's 416 scripts end on an explicit `selectObject: result`; the
+//! rest end on `endproc`, `endif`, `Play` or an `appendInfoLine`, so what is selected when the
+//! script returns is not a contract we can rely on. The driver instead does `select all` and
+//! takes the **highest-numbered** Sound, which is Praat's most recently created one. Verified
+//! across a 120-script sample: this locates the right object wherever the script left the
+//! selection.
+//!
+//! Deliberately *not* an error when that turns out to be the input object itself. A script that
+//! transforms the Sound in place (via `Formula...`) legitimately produces no new object, and
+//! failing those would reject working processes. Catching a genuine silent no-op is the smoke
+//! test's job — it can compare output bytes against input, which this script cannot.
+//!
+//! ## Pure
+//!
+//! Nothing here touches the filesystem or spawns anything; it returns script *text*. The paths
+//! it is given are written into the script as literals, but the input and output paths are not
+//! — those arrive as argv, filled into the driver's own `form` positionally by `--run`.
+
+/// One argument passed through to the plugin script's `form`, in declaration order.
+///
+/// The split matters because Praat is typed at the call site: a `real`/`positive`/`integer`/
+/// `natural` field must receive a bare numeric literal, and a `sentence`/`word`/`text` or
+/// `optionmenu` field must receive a quoted string. Passing a quoted number to a numeric field
+/// is an error, and so is passing a bare word to a text field.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DriverArg {
+    Number(f64),
+    /// Includes every `optionmenu`/`choice` selection: Praat matches those by their **option
+    /// label**, never by index, so the catalog stores the labels verbatim and they travel as
+    /// ordinary strings.
+    Text(String),
+}
+
+/// Render a Rust string as a Praat string literal: wrapped in double quotes, with any embedded
+/// double quote **doubled**. That doubling is Praat's only escape mechanism — there is no
+/// backslash escaping in its string literals, so a `\` needs no special handling and passes
+/// through unchanged (which is what makes Windows paths survive).
+pub fn praat_string_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        if ch == '"' {
+            out.push('"');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
+}
+
+/// Render one numeric argument. Rust's `f64` `Display` never switches to scientific notation,
+/// which matters because Praat's parser does not accept `1e-7`; it also drops a trailing `.0`,
+/// so an integral value reaches an `integer`/`natural` field as `3` rather than `3.0`.
+///
+/// Non-finite values have no Praat spelling at all, so they are rejected rather than emitted as
+/// the literal text `NaN`/`inf` (which Praat would read as an undefined *variable name* and
+/// fail on with a confusing message far from the real cause).
+fn praat_number_literal(value: f64) -> Result<String, DriverError> {
+    if !value.is_finite() {
+        return Err(DriverError::NonFiniteNumber(value));
+    }
+    Ok(format!("{value}"))
+}
+
+/// Why a driver script could not be rendered. Only one failure mode exists: a parameter value
+/// that has no Praat spelling.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DriverError {
+    NonFiniteNumber(f64),
+}
+
+impl std::fmt::Display for DriverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DriverError::NonFiniteNumber(v) => {
+                write!(f, "parameter value {v} cannot be expressed in a Praat script")
+            }
+        }
+    }
+}
+
+/// Build the driver script for one run.
+///
+/// `script_path` must be **absolute**. Relative paths resolve against the *calling script's*
+/// folder for `runScript:` but against the process's working directory for `--run`, and the two
+/// are different places here — the driver lives in the job's temp directory while the plugin
+/// script lives in the submodule.
+pub fn driver_script(script_path: &str, args: &[DriverArg]) -> Result<String, DriverError> {
+    let mut call = format!("runScript: {}", praat_string_literal(script_path));
+    for arg in args {
+        let rendered = match arg {
+            DriverArg::Number(v) => praat_number_literal(*v)?,
+            DriverArg::Text(s) => praat_string_literal(s),
+        };
+        call.push_str(", ");
+        call.push_str(&rendered);
+    }
+
+    // `Save as 32-bit WAV file:` rather than the plain `Save as WAV file:`, which writes 16-bit.
+    // Praat cannot write float at all (its WAV writer only ever emits PCM), so int32 is the
+    // widest return leg available; `model::wavread` already reads it, including the
+    // WAVE_FORMAT_EXTENSIBLE wrapper Praat puts around it.
+    Ok(format!(
+        "form Driver\n\
+         \x20   infile Input_file\n\
+         \x20   outfile Output_file\n\
+         endform\n\
+         snd = Read from file: input_file$\n\
+         selectObject: snd\n\
+         {call}\n\
+         select all\n\
+         n = numberOfSelected(\"Sound\")\n\
+         if n < 1\n\
+         \x20   exitScript: \"praat script produced no Sound object\"\n\
+         endif\n\
+         last = selected(\"Sound\", n)\n\
+         selectObject: last\n\
+         Save as 32-bit WAV file: output_file$\n"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_plain_string_is_wrapped_in_quotes() {
+        assert_eq!(praat_string_literal("Soft Fold"), "\"Soft Fold\"");
+    }
+
+    /// Praat has no backslash escape; a quote is escaped by doubling it. Getting this wrong is
+    /// what produced `Error: Unknown value ""Custom (use values below)""` during the research
+    /// probe — the option label reached Praat with literal quote characters in it.
+    #[test]
+    fn an_embedded_quote_is_doubled_not_backslashed() {
+        assert_eq!(praat_string_literal(r#"a "b" c"#), r#""a ""b"" c""#);
+        assert!(!praat_string_literal(r#"a "b""#).contains('\\'));
+    }
+
+    /// Option labels routinely contain commas and parentheses, which must survive untouched —
+    /// they are data, not argument separators, once inside a literal.
+    #[test]
+    fn punctuation_in_an_option_label_survives() {
+        assert_eq!(
+            praat_string_literal("Custom (use values below), v2"),
+            "\"Custom (use values below), v2\""
+        );
+    }
+
+    /// Backslashes pass through, so a Windows-style path is not mangled.
+    #[test]
+    fn a_backslash_is_not_an_escape() {
+        assert_eq!(praat_string_literal(r"C:\tmp\x.wav"), "\"C:\\tmp\\x.wav\"");
+    }
+
+    #[test]
+    fn an_integral_number_loses_its_trailing_zero() {
+        assert_eq!(praat_number_literal(3.0).unwrap(), "3");
+        assert_eq!(praat_number_literal(-1.0).unwrap(), "-1");
+    }
+
+    /// Praat's parser has no exponent form, so a tiny value must still be spelled out.
+    #[test]
+    fn a_tiny_number_is_not_written_in_scientific_notation() {
+        let rendered = praat_number_literal(0.000_000_1).unwrap();
+        assert!(!rendered.contains('e'), "{rendered} used exponent notation");
+        assert_eq!(rendered, "0.0000001");
+    }
+
+    /// Compared by variant rather than by value: `NaN != NaN`, so an `assert_eq!` on the whole
+    /// `Err` can never hold for the case that matters most here.
+    #[test]
+    fn a_non_finite_number_is_rejected_rather_than_emitted() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                matches!(praat_number_literal(value), Err(DriverError::NonFiniteNumber(_))),
+                "{value} was not rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_no_argument_script_emits_a_bare_run_script_call() {
+        let script = driver_script("/plugins/Reverb/Plate.praat", &[]).unwrap();
+        assert!(script.contains("runScript: \"/plugins/Reverb/Plate.praat\"\n"));
+        assert!(!script.contains("runScript: \"/plugins/Reverb/Plate.praat\", "));
+    }
+
+    /// Numbers bare, strings quoted, in declaration order — the exact shape Praat's positional
+    /// form filling expects.
+    #[test]
+    fn arguments_keep_their_order_and_their_types() {
+        let script = driver_script(
+            "/p/Distortion/Wavefolder.praat",
+            &[
+                DriverArg::Text("Custom (use settings below)".into()),
+                DriverArg::Number(0.5),
+                DriverArg::Number(1.0),
+                DriverArg::Number(0.0),
+            ],
+        )
+        .unwrap();
+        assert!(script.contains(
+            "runScript: \"/p/Distortion/Wavefolder.praat\", \
+             \"Custom (use settings below)\", 0.5, 1, 0\n"
+        ));
+    }
+
+    #[test]
+    fn the_driver_reads_the_input_and_saves_the_output_as_int32() {
+        let script = driver_script("/p/x.praat", &[]).unwrap();
+        assert!(script.contains("snd = Read from file: input_file$"));
+        assert!(script.contains("Save as 32-bit WAV file: output_file$"));
+        // 16-bit is what the unqualified command would give; make sure we never emit it.
+        assert!(!script.contains("Save as WAV file:"));
+    }
+
+    /// The input and output paths ride in on argv rather than being baked into the script, so
+    /// the driver text is independent of them.
+    #[test]
+    fn the_driver_takes_its_paths_from_a_form_not_from_literals() {
+        let script = driver_script("/p/x.praat", &[]).unwrap();
+        assert!(script.starts_with("form Driver\n"));
+        assert!(script.contains("    infile Input_file\n"));
+        assert!(script.contains("    outfile Output_file\n"));
+    }
+
+    /// The result is located by object number, not by trusting the script's final selection.
+    #[test]
+    fn the_result_is_the_highest_numbered_sound() {
+        let script = driver_script("/p/x.praat", &[]).unwrap();
+        assert!(script.contains("select all"));
+        assert!(script.contains("n = numberOfSelected(\"Sound\")"));
+        assert!(script.contains("last = selected(\"Sound\", n)"));
+    }
+
+    /// A script that produced nothing must fail loudly. Without this the driver would fall
+    /// through to `Save as` with an arbitrary selection and write something unrelated.
+    #[test]
+    fn producing_no_sound_at_all_is_an_error() {
+        let script = driver_script("/p/x.praat", &[]).unwrap();
+        assert!(script.contains("if n < 1"));
+        assert!(script.contains("exitScript:"));
+    }
+
+    /// A non-finite value must not reach the script text.
+    #[test]
+    fn a_non_finite_argument_fails_the_whole_script() {
+        let err = driver_script("/p/x.praat", &[DriverArg::Number(f64::NAN)]);
+        assert!(err.is_err());
+    }
+}
