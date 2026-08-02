@@ -58,11 +58,17 @@ pub struct PraatJob {
     /// [`DEFAULT_PRAAT_BIN`], which `Command` resolves against `PATH`.
     pub praat_bin: PathBuf,
     pub planned: PraatPlannedJob,
-    /// The selection being processed, deinterleaved.
-    pub input: Vec<Vec<f32>>,
+    /// One deinterleaved channel set per input, in the order the script expects them selected.
+    /// `inputs[0]` is always the selection being processed; a `DualWav` process adds a second
+    /// whole buffer the user picked.
+    pub inputs: Vec<Vec<Vec<f32>>>,
     pub input_sample_rate: u32,
     pub purpose: JobPurpose,
     pub timeout: Duration,
+    /// A Praat preferences directory this app owns, containing a `plugin_AudioTools` symlink to
+    /// the checkout — see `prepare_prefs_dir`. `None` runs Praat against its own default
+    /// preferences folder, which is fine for every process that does not chain siblings.
+    pub prefs_dir: Option<PathBuf>,
 }
 
 /// The audio a finished Praat job produced.
@@ -219,28 +225,34 @@ fn run_job_body(
     cancel: &AtomicBool,
     temp_dir: &Path,
 ) -> Result<PraatJobOutput, PraatError> {
-    let input_path = temp_dir.join(&job.planned.input_name);
     let output_path = temp_dir.join(&job.planned.output_name);
     let driver_path = temp_dir.join(&job.planned.driver_name);
 
     // Float32 in: Praat reads IEEE float WAV natively, so the input leg is lossless and the
     // working buffer needs no conversion. (Only the return leg quantizes — Praat's writer
     // cannot emit float at all.)
-    let doc = Document {
-        channels: job.input.clone(),
-        sample_rate: job.input_sample_rate,
-        ..Default::default()
-    };
-    save_wav_with(&doc, &input_path, BitDepth::Float32, false).map_err(|e| {
-        PraatError::OutputRead { path: input_path.display().to_string(), message: e.to_string() }
-    })?;
+    let mut input_paths = Vec::with_capacity(job.planned.input_names.len());
+    for (index, name) in job.planned.input_names.iter().enumerate() {
+        let path = temp_dir.join(name);
+        let channels = job.inputs.get(index).cloned().unwrap_or_default();
+        let doc = Document {
+            channels,
+            sample_rate: job.input_sample_rate,
+            ..Default::default()
+        };
+        save_wav_with(&doc, &path, BitDepth::Float32, false).map_err(|e| PraatError::OutputRead {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        })?;
+        input_paths.push(path);
+    }
 
     std::fs::write(&driver_path, &job.planned.driver_source).map_err(|e| PraatError::OutputRead {
         path: driver_path.display().to_string(),
         message: e.to_string(),
     })?;
 
-    run_praat(job, &driver_path, &input_path, &output_path, temp_dir, cancel)?;
+    run_praat(job, &driver_path, &input_paths, &output_path, temp_dir, cancel)?;
 
     match std::fs::metadata(&output_path) {
         Ok(meta) if meta.len() > 0 => {}
@@ -257,7 +269,7 @@ fn run_job_body(
 fn run_praat(
     job: &PraatJob,
     driver_path: &Path,
-    input_path: &Path,
+    input_paths: &[PathBuf],
     output_path: &Path,
     temp_dir: &Path,
     cancel: &AtomicBool,
@@ -270,12 +282,20 @@ fn run_praat(
     // preferences, and `--no-plugins` stops any plugin they have installed from executing its
     // `setup.praat` on every single job — including praatAudioTools itself, which this
     // integration reaches by absolute path rather than by installing.
-    let mut child = StdCommand::new(&job.praat_bin)
-        .arg("--run")
-        .arg("--no-pref-files")
-        .arg("--no-plugins")
+    let mut command = StdCommand::new(&job.praat_bin);
+    command.arg("--run").arg("--no-pref-files").arg("--no-plugins");
+    // Point `preferencesDirectory$` at a directory we own (see `prepare_prefs_dir`). A handful
+    // of scripts — the Vector Chain family, which chain several processes together — locate
+    // their sibling scripts through that variable, and without this they fail with
+    // `Cannot open file ".../.praat-dir/plugin_AudioTools/..."`. Redirecting is what lets those
+    // work *without* installing anything into the user's own Praat preferences folder, where a
+    // `plugin_AudioTools` of their own may already live.
+    if let Some(prefs) = &job.prefs_dir {
+        command.arg(format!("--pref-dir={}", prefs.display()));
+    }
+    let mut child = command
         .arg(driver_path)
-        .arg(input_path)
+        .args(input_paths)
         .arg(output_path)
         .current_dir(temp_dir)
         .stdin(Stdio::null())
@@ -378,6 +398,50 @@ pub fn probe_praat(configured: &str) -> Result<String, String> {
     Ok(banner)
 }
 
+/// The plugin folder name Praat expects inside a preferences directory. Fixed by Praat's own
+/// convention (`plugin_` prefix) and by the scripts, which build sibling paths as
+/// `preferencesDirectory$ + "/plugin_AudioTools/..."`.
+const PLUGIN_DIR_NAME: &str = "plugin_AudioTools";
+
+/// Build an app-owned Praat preferences directory whose `plugin_AudioTools` entry points at
+/// `audiotools_dir`, and return it for `--pref-dir`.
+///
+/// Exists for the Vector Chain scripts, which call sibling scripts through
+/// `preferencesDirectory$` and therefore only work when the plugin is reachable under that
+/// name. The obvious fix is to install a symlink into the user's real preferences folder
+/// (`~/.praat-dir` on Linux); this deliberately does not, because that folder belongs to their
+/// Praat installation and may already hold a `plugin_AudioTools` of their own — a different
+/// version, or one they edited. Redirecting Praat to a directory we own gets the same result
+/// and cannot collide with anything.
+///
+/// Best-effort: on failure the caller runs without `--pref-dir`, which costs only the chained
+/// processes rather than the whole backend. Symlinks are not portable everywhere, so a failure
+/// to create one is not treated as fatal.
+pub fn prepare_prefs_dir(state_dir: &Path, audiotools_dir: &Path) -> Option<PathBuf> {
+    let prefs = state_dir.join("praat-prefs");
+    std::fs::create_dir_all(&prefs).ok()?;
+    let link = prefs.join(PLUGIN_DIR_NAME);
+
+    // Re-point a stale link rather than leaving it: the configured checkout can move between
+    // runs, and a link to a path that no longer exists is worse than none at all.
+    let current = std::fs::read_link(&link).ok();
+    if current.as_deref() == Some(audiotools_dir) {
+        return Some(prefs);
+    }
+    if link.exists() || current.is_some() {
+        let _ = std::fs::remove_file(&link);
+    }
+
+    #[cfg(unix)]
+    let created = std::os::unix::fs::symlink(audiotools_dir, &link).is_ok();
+    #[cfg(windows)]
+    let created = std::os::windows::fs::symlink_dir(audiotools_dir, &link).is_ok();
+    #[cfg(not(any(unix, windows)))]
+    let created = false;
+
+    created.then_some(prefs)
+}
+
 /// Check that `dir` looks like a praatAudioTools checkout.
 ///
 /// Distinguishes "empty" from "wrong", because the overwhelmingly likely first-run failure is a
@@ -412,7 +476,7 @@ pub fn validate_audiotools_dir(dir: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::praat::plan::{DRIVER_SCRIPT, INPUT_WAV, OUTPUT_WAV};
+    use crate::model::praat::plan::{input_wav_name, DRIVER_SCRIPT, OUTPUT_WAV};
 
     /// Skips a test that needs a real Praat rather than failing it, mirroring
     /// `cdp::runner`'s `require_cdp!`.
@@ -432,15 +496,16 @@ mod tests {
             planned: PraatPlannedJob {
                 driver_name: DRIVER_SCRIPT.into(),
                 driver_source: driver_source.into(),
-                input_name: INPUT_WAV.into(),
+                input_names: vec![input_wav_name(1)],
                 output_name: OUTPUT_WAV.into(),
                 script_path: PathBuf::from("/unused"),
                 label: "test".into(),
             },
-            input: vec![vec![0.0f32; 1000], vec![0.0f32; 1000]],
+            inputs: vec![vec![vec![0.0f32; 1000], vec![0.0f32; 1000]]],
             input_sample_rate: 44_100,
             purpose: JobPurpose::Apply,
             timeout,
+            prefs_dir: None,
         }
     }
 
@@ -611,6 +676,77 @@ mod tests {
         let err = validate_audiotools_dir(&dir).unwrap_err();
         assert!(err.contains("does not look like"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The symlink is what makes `preferencesDirectory$ + "/plugin_AudioTools/..."` resolve for
+    /// the Vector Chain scripts, and it must land in a directory we own rather than the user's
+    /// own Praat preferences folder.
+    #[test]
+    fn the_prefs_dir_links_the_plugin_under_the_name_praat_expects() {
+        let state = std::env::temp_dir().join(format!("praat-prefs-{}", std::process::id()));
+        let checkout = state.join("checkout");
+        let _ = std::fs::remove_dir_all(&state);
+        std::fs::create_dir_all(&checkout).unwrap();
+
+        let prefs = prepare_prefs_dir(&state, &checkout).expect("prefs dir");
+        let link = prefs.join(PLUGIN_DIR_NAME);
+        assert!(link.exists(), "no plugin link at {}", link.display());
+        assert_eq!(std::fs::read_link(&link).unwrap(), checkout);
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    /// The configured checkout can move between runs; a link left pointing at the old path
+    /// would silently break every chained process.
+    #[test]
+    fn a_stale_plugin_link_is_repointed() {
+        let state = std::env::temp_dir().join(format!("praat-restale-{}", std::process::id()));
+        let old = state.join("old");
+        let new = state.join("new");
+        let _ = std::fs::remove_dir_all(&state);
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+
+        prepare_prefs_dir(&state, &old).unwrap();
+        let prefs = prepare_prefs_dir(&state, &new).unwrap();
+        assert_eq!(std::fs::read_link(prefs.join(PLUGIN_DIR_NAME)).unwrap(), new);
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    /// End-to-end proof that the redirect actually unlocks the chained scripts: `chain_2` locates
+    /// its siblings through `preferencesDirectory$` and fails outright without this.
+    #[test]
+    fn a_chained_script_finds_its_siblings_through_the_redirected_prefs_dir() {
+        require_praat!();
+        let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/praat-audiotools");
+        let script = checkout.join("Vector Chain/chain_2.praat");
+        if !script.is_file() {
+            eprintln!("skipping: submodule not initialised");
+            return;
+        }
+        let state = std::env::temp_dir().join(format!("praat-chain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        let prefs = prepare_prefs_dir(&state, &checkout).expect("prefs dir");
+
+        let mut job = job_with("", Duration::from_secs(90));
+        job.prefs_dir = Some(prefs);
+        // Two seconds of a real tone, not the tiny silent buffer the other tests use: this chain
+        // runs a pitch analysis, and Praat refuses one on a buffer shorter than a few periods.
+        let tone: Vec<f32> = (0..88_200)
+            .map(|i| (i as f32 * 220.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.5)
+            .collect();
+        job.inputs = vec![vec![tone]];
+        job.planned.driver_source = crate::model::praat::driver::driver_script(
+            &script.to_string_lossy(),
+            &[],
+            1,
+        )
+        .unwrap();
+
+        match run(&job) {
+            Ok(out) => assert!(!out.result.is_empty(), "chained script produced no audio"),
+            Err(err) => panic!("chained script failed: {err}"),
+        }
+        let _ = std::fs::remove_dir_all(&state);
     }
 
     #[test]

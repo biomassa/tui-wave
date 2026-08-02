@@ -83,16 +83,19 @@ pub const PRAAT_GROUPS: &[&str] = &[
     "Spatial",
     "Spectral",
     "Time/Granular",
+    "Vector Chain",
 ];
 
 /// praatAudioTools directory → group heading. The directory is the leading path component of a
 /// Praat entry's `bin` (e.g. `Distortion/Wavefolder__Foldback_.praat` → `Distortion`).
 ///
-/// `Max-MSP` and `Vector Chain` are deliberately absent: the former is a single Max/MSP helper
-/// rather than a sound process, and every script in the latter calls sibling scripts through
-/// the *installed* Praat preferences path, which this integration deliberately never sets up
-/// (it runs with `--no-plugins`). Both are excluded by the converter, so listing them here
-/// would leave an always-empty group — which `every_listed_praat_group_has_entries` rejects.
+/// `Max-MSP` is deliberately absent: it holds a single Max/MSP helper rather than a sound
+/// process, so listing it would leave an always-empty group.
+///
+/// `Vector Chain` *is* here. Its scripts chain sibling scripts located through
+/// `preferencesDirectory$`, which `praat::runner::prepare_prefs_dir` satisfies by pointing
+/// Praat at an app-owned preferences directory holding a `plugin_AudioTools` symlink — so they
+/// run without anything being installed into the user's own Praat preferences folder.
 const PRAAT_DIRS: &[(&str, &str)] = &[
     ("AI & Adaptive", "AI & Adaptive"),
     ("Analysis", "Analysis"),
@@ -106,6 +109,7 @@ const PRAAT_DIRS: &[(&str, &str)] = &[
     ("Spatial & Surround", "Spatial"),
     ("Spectral", "Spectral"),
     ("Time & Granular", "Time/Granular"),
+    ("Vector Chain", "Vector Chain"),
 ];
 
 /// Time-domain `bin` → group. Most groups are named after their principal binary; the extra
