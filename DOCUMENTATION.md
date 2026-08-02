@@ -731,6 +731,10 @@ setting, neither of which has anything to do with the selection you launched it 
 therefore arrives as a new buffer and your original is left untouched. Set Sample Rate to 96000
 and you get a 96kHz buffer.
 
+Undo closes that buffer again. There is nothing else for it to undo — nothing was spliced — so
+`Ctrl+z` removes what the process made. If you have edited the new buffer, undo reverses those
+edits first and closes it on the next press. Once you save it, undo leaves it alone.
+
 **Other processes must keep the document's sample rate.** A transforming process that returns a
 different rate cannot be spliced into an existing buffer, so tui-wave refuses and says so rather
 than playing it back at the wrong speed.

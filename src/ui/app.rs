@@ -2517,6 +2517,19 @@ pub struct App {
     /// the same `cdp_pending` slot, since only one job is ever in flight (the running dialog is
     /// hard-modal).
     praat_runner: crate::praat::PraatRunner,
+    /// Index-parallel with `documents`: whether Undo on this buffer, once its own history is
+    /// exhausted, should close it.
+    ///
+    /// Set only for a buffer a process *generated* (`push_generated_document`) — today the
+    /// Praat Generative group, which synthesises rather than transforming and so splices
+    /// nothing and records no undo entry. Without this, Undo after generating did nothing at
+    /// all, which is not what Undo means.
+    ///
+    /// The flag alone is not the whole condition — `Action::Undo` also requires the buffer's own
+    /// history to be exhausted (so an edit made to it is undone first) and requires it to have
+    /// no path, since closing a file the user has written to disk on a keystroke meaning "step
+    /// back one action" would be a genuine surprise.
+    undo_closes_buffer: Vec<bool>,
     /// Monotonic id for the next submitted `cdp::Job`, so a `CdpEvent` can be matched back
     /// to the run that produced it.
     cdp_next_job_id: u64,
@@ -3073,6 +3086,7 @@ impl App {
             Some(doc) => vec![doc],
             None => Vec::new(),
         };
+        let document_count = documents.len();
         let audio = documents.first().and_then(engine_for);
         let audio_sample_rate = documents.first().map(|doc| doc.sample_rate);
         let waveform_caches: Vec<Vec<WaveformCache>> = documents
@@ -3165,6 +3179,7 @@ impl App {
             cdp_catalog_warnings,
             cdp_runner: crate::cdp::CdpRunner::new(),
             praat_runner: crate::praat::PraatRunner::new(),
+            undo_closes_buffer: vec![false; document_count],
             cdp_next_job_id: 0,
             cdp_pending: None,
             cdp_preview_audio: None,
@@ -3206,7 +3221,21 @@ impl App {
         // Index-parallel with `documents`, like `histories`: a buffer without its own slot would
         // render against whichever one happened to be at its index.
         self.waveform_caches.push(Vec::new());
+        self.undo_closes_buffer.push(false);
         self.active_document = self.documents.len() - 1;
+    }
+
+    /// Pushes a buffer that a process *generated*, so Undo removes it again.
+    ///
+    /// A generative Praat process has nothing to splice into and so leaves no undo entry
+    /// anywhere: the buffer simply appeared, and Undo — the one key that reverses what you just
+    /// did — did nothing at all. Marking the buffer here is what lets `Action::Undo` close it
+    /// (see `undo_closes_buffer`).
+    fn push_generated_document(&mut self, document: Document) {
+        self.push_document(document);
+        if let Some(flag) = self.undo_closes_buffer.last_mut() {
+            *flag = true;
+        }
     }
 
     /// Every open buffer as an `input_buffers::OpenBuffer` — the identity list a saved
@@ -10132,7 +10161,7 @@ impl App {
                                     .get(pending.doc_index)
                                     .map(|d| d.bits_per_sample)
                                     .unwrap_or(32);
-                                self.push_document(Document {
+                                self.push_generated_document(Document {
                                     head_tail_marks: Vec::new(),
                                     channels: output.result,
                                     sample_rate: output.sample_rate,
@@ -11945,6 +11974,9 @@ impl App {
         self.histories.remove(idx);
         if idx < self.waveform_caches.len() {
             self.waveform_caches.remove(idx);
+        }
+        if idx < self.undo_closes_buffer.len() {
+            self.undo_closes_buffer.remove(idx);
         }
         if self.documents.is_empty() {
             self.active_document = 0;
@@ -14929,6 +14961,22 @@ impl App {
                 if Self::wav_save_path(doc).is_none() {
                     return self.handle_action(Action::SaveAs);
                 }
+            }
+            // Undoing a process that *generated* a buffer removes that buffer, because there is
+            // nothing else for it to undo — a generative process splices nothing and so records
+            // no history entry anywhere. Handled here, before the document borrow below, since
+            // closing a buffer touches the whole document list.
+            //
+            // Only once the buffer's own history is exhausted, so an edit made to it is undone
+            // first, and never once it has a path: closing a file the user has written to disk
+            // on a keystroke meaning "step back one action" would be a genuine surprise.
+            Action::Undo
+                if self.undo_closes_buffer.get(idx).copied().unwrap_or(false)
+                    && !self.histories[idx].can_undo()
+                    && self.documents[idx].path.is_none() =>
+            {
+                self.close_buffer(idx);
+                return;
             }
             _ => {}
         }
@@ -21951,6 +21999,64 @@ mod tests {
         }
         assert_eq!(app.documents.len(), before + 1, "a new buffer should have been opened");
         assert!(!app.documents[0].dirty, "the original buffer must be untouched");
+    }
+
+    /// Undo after a generative process removes the buffer it created.
+    ///
+    /// A generative process splices nothing, so it records no history entry anywhere and Undo
+    /// had nothing to act on — the buffer simply appeared and stayed (user report). Undo is the
+    /// one key that means "reverse what I just did", so it removes it.
+    #[test]
+    fn undo_after_a_generated_buffer_closes_it() {
+        let mut app = new_app(Some(doc(0.25, 100)), None);
+        app.push_generated_document(doc(0.5, 100));
+        assert_eq!(app.documents.len(), 2);
+        assert_eq!(app.active_document, 1);
+
+        app.handle_action(Action::Undo);
+
+        assert_eq!(app.documents.len(), 1, "undo should have removed the generated buffer");
+        assert_eq!(app.active_document, 0, "focus should fall back to the original");
+        assert_eq!(app.undo_closes_buffer.len(), 1, "the parallel flags must stay in step");
+    }
+
+    /// An ordinary buffer — one the user opened or created by other means — is never closed by
+    /// Undo, however empty its history.
+    #[test]
+    fn undo_never_closes_an_ordinary_buffer() {
+        let mut app = new_app(Some(doc(0.25, 100)), None);
+        app.push_document(doc(0.5, 100));
+        app.handle_action(Action::Undo);
+        assert_eq!(app.documents.len(), 2, "only a generated buffer is closed by undo");
+    }
+
+    /// An edit to the generated buffer is undone first; only once its own history is empty does
+    /// a further undo remove the buffer.
+    #[test]
+    fn undo_unwinds_edits_before_closing_a_generated_buffer() {
+        let mut app = new_app(Some(doc(0.25, 100)), None);
+        app.push_generated_document(doc(0.5, 100));
+        app.documents[1].selection = Some(crate::model::selection::Selection { start: 0, end: 20 });
+        app.handle_action(Action::Cut);
+        assert!(app.histories[1].can_undo(), "the cut should be undoable");
+
+        app.handle_action(Action::Undo);
+        assert_eq!(app.documents.len(), 2, "the first undo reverses the edit, not the buffer");
+
+        app.handle_action(Action::Undo);
+        assert_eq!(app.documents.len(), 1, "the next undo removes the buffer");
+    }
+
+    /// Once the buffer has been saved it has a path, and closing a file on disk in response to
+    /// "step back one action" would be a surprise.
+    #[test]
+    fn undo_does_not_close_a_generated_buffer_that_has_been_saved() {
+        let mut app = new_app(Some(doc(0.25, 100)), None);
+        app.push_generated_document(doc(0.5, 100));
+        app.documents[1].path = Some(PathBuf::from("/tmp/generated.wav"));
+
+        app.handle_action(Action::Undo);
+        assert_eq!(app.documents.len(), 2, "a saved buffer must survive undo");
     }
 
     /// The rule is the plugin's own Generative group, and nothing else.
