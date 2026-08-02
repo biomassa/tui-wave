@@ -1,6 +1,9 @@
 # Praat / praatAudioTools integration — research and implementation plan
 
-**Status:** research complete, not implemented. No code has been written.
+**Status: IMPLEMENTED (2026-08-02).** The plan below is kept as the record of the research and
+the reasoning; §11 at the end records what was actually built, where it diverged, and what was
+deliberately deferred.
+
 **Date of research:** 2026-08-01. **Verified against:** Praat 6.6.30 (June 30 2026) at `/usr/bin/praat`,
 and a `main`-branch checkout of praatAudioTools.
 
@@ -430,3 +433,69 @@ Sample was 120 scripts, `random.seed(7)`, drawn from the 416 non-`py` scripts, i
 
 **Note:** running the harness plays audio through the system output, because 32 scripts call `Play`
 unconditionally and it cannot be suppressed from outside. Expect noise.
+
+---
+
+## 11. What was actually built (2026-08-02)
+
+Shipped in four commits, phases 1-6 of §7. **352 processes catalogued**, 1135 tests green.
+
+### Divergences from the plan above, and why
+
+**Vector Chain was included, not excluded** (§9 recommended cutting it). Those 19 scripts locate
+sibling scripts through `preferencesDirectory$`. The plan assumed the only fix was symlinking into
+the user's own `~/.praat-dir`, which is why it was recommended against. `praat --pref-dir=<DIR>`
+turns out to redirect `preferencesDirectory$`, so the runner instead builds an app-owned
+preferences directory under `~/.config/tui-wave/praat/` holding a `plugin_AudioTools` symlink.
+Same result, no collision with a plugin the user may already have installed, and nothing written
+to their Praat setup. Verified end to end: `chain_2` locates and runs `Spiral_Pitch_Dance`.
+
+**Two-Sound scripts were included, not cut** (§9 recommended deferring them). They read inputs
+positionally as `selected("Sound", 1)` and `("Sound", 2)`, so the driver reads N files and selects
+them together; Praat orders a selection by object number, so read order fixes selection order.
+They are catalogued as `IoKind::DualWav`, which meant the existing second-buffer picker worked
+with no dialog changes at all — the reuse §6 predicted, holding in practice.
+
+**`Play`/`Draw` parameters are visible, not hidden.** The plan said to hide them. Hiding requires
+the field list and the parameter list to diverge, which breaks the index-parallel mapping the
+shared dialog relies on. They are instead emitted as ordinary toggles defaulting to **off**, which
+achieves the actual goal (nothing plays or draws unless asked) without destabilising a dialog
+shared with CDP.
+
+### Real bugs the tests caught
+
+- A `positive` parameter with a 1.1e-9 default made the hardcoded 0.001 range floor exceed the
+  computed max. Range synthesis now scales the floor with the default and clamps defensively.
+- `option "Normal (1.0)"` (classic syntax) names an option whose text **includes the quotes**,
+  while `option: "Normal (1.0)"` (colon syntax) does not. Unquoting both was wrong in each
+  direction in turn, producing the identical `Unknown value` error from opposite mistakes. Only
+  the keyword's own trailing colon distinguishes them.
+- Prose-matching for two-Sound scripts ("select 2 sounds") caught scripts that take one *or* two
+  depending on a mode, because the phrase appears in `comment` lines and `option` labels. Detection
+  is now an unindented `numberOfSelected("Sound") <> 2` guard, which is unconditional by
+  construction.
+- `open_cdp_entry` refused to open the browser without a valid `cdp_dir`, which would have locked
+  out a Praat-only user entirely.
+
+### Smoke-test result
+
+`TUI_WAVE_PRAAT_SMOKE=1 cargo test --release praat_catalog_smoke` runs every entry at its
+defaults. First full run: **347 ran, 19 failed (94.5%)** — well above the 82.5% sampled estimate,
+because the static exclusion filter removes the unusable scripts first. Of those 19, five were the
+converter bugs above, six are upstream script bugs, and eight are fixture-dependent (they need
+stereo, speech or loop content that a synthetic tone cannot provide).
+
+### Deferred, for future consideration
+
+**Free-text parameters — 28 scripts.** Excluded because a `sentence`/`word`/`text` form field has
+no bounded editor here. Most of those fields are filesystem paths to corpora (`Folder`,
+`Corpus_folder`, `Tools_folder`, `Sofa_file`) that would fail at run time regardless, but a
+minority are genuine musical data (`Target_pitches`, `Rhythm_pattern`, `Rule_D`, `Series_values`)
+and those are worth having. Doing it properly means splitting the rule — reject a script whose
+text field looks like a path, expose the rest — and adding a free-text field type to the parameter
+dialog. Every affected script is named under `unparseable_form` in
+`docs/praat-excluded-scripts.md`.
+
+**The remaining excluded classes** are not worth revisiting: `py/` (64, shells out to Python/VST3),
+`gui_blocking` (22, segfault or hang under `--run`), `non_sound_input`, `not_a_sound_process` and
+`hardcoded_path`.

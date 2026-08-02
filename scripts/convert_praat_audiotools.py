@@ -81,8 +81,12 @@ SILENCE_RE = re.compile(r"^(play|draw|show|visuali|demo|open_|export)", re.I)
 EXCLUSIONS: list[tuple[str, re.Pattern, str]] = [
     (
         "gui_blocking",
+        # `View & Edit` and a bare `Edit` open an editor window, which batch mode refuses
+        # outright ("Cannot edit a TextGrid from batch."). Anchored so the word `Edit` inside a
+        # comment or a longer command name does not match.
         re.compile(r"\b(beginPause|pauseScript|demoShow|demoWaitForInput|chooseReadFile\$|"
-                   r"chooseWriteFile\$|chooseFolder\$)|\bdemo\s"),
+                   r"chooseWriteFile\$|chooseFolder\$)|\bdemo\s|"
+                   r"^\s*(View & Edit|Edit)\s*$", re.M),
         "uses an interactive/GUI construct that segfaults or hangs under --run",
     ),
     (
@@ -103,11 +107,16 @@ EXCLUSIONS: list[tuple[str, re.Pattern, str]] = [
 # `selected("Sound", 1)` and `selected("Sound", 2)`, which the driver satisfies by reading both
 # inputs in order and selecting them together. Catalogued as `input = "dual_wav"`, reusing the
 # CDP kind that already means "this process needs a second buffer".
+#
+# Detected from an **unindented** guard only. A looser prose match ("select 2 sounds", "at
+# least two Sound") caught scripts that take one *or* two depending on a mode, because the
+# phrase appears in a `comment` line or an `option` label -- and those then failed at run time
+# with `Please select exactly ONE Sound object.`, since their default mode wants one. A guard at
+# column zero is unconditional by construction: anything inside an `if` is indented.
 DUAL_SOUND_RE = re.compile(
-    r"select(ed)?\s+(exactly\s+)?(2|two|TWO)\b|"
-    r"numberOfSelected\s*\(\s*\"Sound\"\s*\)\s*[<>!=]+\s*2|"
-    r"at least two Sound",
-    re.I,
+    r"^if\s+numberOfSelected\s*\(\s*\"Sound\"\s*\)\s*(<>|!=)\s*2\b|"
+    r"^\s{0,2}numberOfSelected\s*\(\s*\"Sound\"\s*\)\s*(<>|!=)\s*2\b",
+    re.M,
 )
 
 NUMERIC_KEYWORDS = {"real", "positive", "integer", "natural"}
@@ -139,16 +148,22 @@ class Process:
     inputs: int = 1
 
 
-def unquote(text: str) -> str:
-    """Strip one layer of Praat string quoting.
+def unquote(text: str, colon_form: bool) -> str:
+    """Strip Praat string quoting, but *only* for the colon syntax.
 
-    The plugin mixes the classic syntax (`real Threshold 0.5`) with the colon syntax
-    (`option: "Custom (use values below)"`). Failing to strip the colon form's quotes was the
-    single largest source of failures during the research probe -- the label reached Praat
-    with literal quote characters in it and every optionmenu match failed.
+    The plugin mixes two syntaxes and they differ in exactly this: the modern
+    `option: "Normal (1.0)"` names an option `Normal (1.0)`, while the classic
+    `option "Normal (1.0)"` takes everything after the keyword **literally**, quotes included,
+    and so names an option whose text really is `"Normal (1.0)"`.
+
+    Unquoting both was wrong in each direction in turn. Leaving the colon form quoted was the
+    largest source of failures in the research probe; stripping the classic form's quotes then
+    broke the handful of scripts that write them, with `Unknown value "Normal (1.0)" for option
+    menu "Preset"` -- the same message, from the opposite mistake. The keyword's own trailing
+    colon is the only thing that distinguishes them.
     """
     text = text.strip()
-    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+    if colon_form and len(text) >= 2 and text[0] == '"' and text[-1] == '"':
         text = text[1:-1]
     return text.strip()
 
@@ -174,6 +189,8 @@ def parse_form(source: str) -> list[Param] | str:
         if not line or line.startswith("#"):
             continue
         head, _, rest = line.partition(" ")
+        # A trailing colon on the *keyword* marks the modern syntax, which quotes its operands.
+        colon_form = head.endswith(":")
         keyword = head.rstrip(":").lower()
 
         if keyword in IGNORED_KEYWORDS:
@@ -181,15 +198,15 @@ def parse_form(source: str) -> list[Param] | str:
 
         if keyword in ("option", "button"):
             if pending is not None:
-                pending.options.append(unquote(rest))
+                pending.options.append(unquote(rest, colon_form))
             continue
 
         if keyword in CHOICE_KEYWORDS:
             bits = rest.split()
             if not bits:
                 return f"malformed {keyword} declaration: {line!r}"
-            name = unquote(bits[0].rstrip(",").rstrip(":"))
-            index_text = unquote(bits[1].rstrip(",")) if len(bits) > 1 else "1"
+            name = unquote(bits[0].rstrip(",").rstrip(":"), colon_form)
+            index_text = unquote(bits[1].rstrip(","), colon_form) if len(bits) > 1 else "1"
             try:
                 index = int(float(index_text))
             except ValueError:
@@ -202,8 +219,8 @@ def parse_form(source: str) -> list[Param] | str:
         bits = rest.split(None, 1)
         if not bits:
             return f"malformed declaration: {line!r}"
-        name = unquote(bits[0].rstrip(",").rstrip(":"))
-        value_text = unquote(bits[1].strip().lstrip(",").strip()) if len(bits) > 1 else ""
+        name = unquote(bits[0].rstrip(",").rstrip(":"), colon_form)
+        value_text = unquote(bits[1].strip().lstrip(",").strip(), colon_form) if len(bits) > 1 else ""
 
         if keyword == "boolean":
             on = value_text.strip() in ("1", "yes", "on")

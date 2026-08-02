@@ -749,6 +749,110 @@ mod tests {
         let _ = std::fs::remove_dir_all(&state);
     }
 
+    /// Two seconds of material with real structure — a 220 Hz tone under a slow tremolo, plus a
+    /// deterministic pseudo-noise layer.
+    ///
+    /// A constant full-level sine is the wrong fixture for this collection: many of these
+    /// scripts analyse pitch, envelope or dynamics, and Praat rejects a signal whose loudest
+    /// and softest parts differ by 0.0002 dB outright. The variation here is what makes a
+    /// failure mean "the catalog entry is wrong" rather than "the fixture was degenerate".
+    fn smoke_fixture() -> (Vec<Vec<f32>>, u32) {
+        const RATE: u32 = 44_100;
+        let samples = (0..RATE * 2)
+            .map(|i| {
+                let t = i as f32 / RATE as f32;
+                let tremolo = 0.55 + 0.45 * (t * std::f32::consts::TAU * 1.7).sin();
+                let tone = (t * 220.0 * std::f32::consts::TAU).sin();
+                // Deterministic hash-like jitter: varied enough to look like signal, identical
+                // on every run so a failure is reproducible.
+                let grit = (((i as u32).wrapping_mul(2_654_435_761) >> 9) as f32 / 4_194_304.0
+                    - 1.0)
+                    * 0.05;
+                (tone * tremolo + grit) * 0.7
+            })
+            .collect();
+        (vec![samples], RATE)
+    }
+
+    /// Runs every Praat catalog entry once at its declared defaults and reports which fail.
+    ///
+    /// This is what turns "82.5% of a 120-script sample worked" into a known-good shipped set.
+    /// The catalog is machine-generated from upstream scripts of uneven quality, and a bad
+    /// entry — a form this converter misparsed, a script that needs data we cannot supply —
+    /// only shows up by actually running it.
+    ///
+    /// Env-gated like `cdp::runner::catalog_smoke_test`, and for the same reason: this spawns
+    /// one Praat per entry across 350+ entries, which is minutes of wall clock. Failures are
+    /// collected rather than asserted one at a time, so one bad entry cannot hide the rest.
+    #[test]
+    fn praat_catalog_smoke_test() {
+        if std::env::var("TUI_WAVE_PRAAT_SMOKE").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set TUI_WAVE_PRAAT_SMOKE=1 to run the full Praat smoke test");
+            return;
+        }
+        require_praat!();
+        let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/praat-audiotools");
+        if validate_audiotools_dir(&checkout).is_err() {
+            eprintln!("skipping: submodule not initialised");
+            return;
+        }
+        let state = std::env::temp_dir().join(format!("praat-smoke-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        let prefs = prepare_prefs_dir(&state, &checkout);
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let (channels, sample_rate) = smoke_fixture();
+
+        let mut failures: Vec<String> = Vec::new();
+        let mut ran = 0usize;
+        for def in catalog
+            .processes
+            .iter()
+            .filter(|d| d.backend() == crate::model::cdp::def::Backend::Praat)
+        {
+            let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+            let planned = match crate::model::praat::plan_praat_job(def, &values, &checkout) {
+                Ok(planned) => planned,
+                Err(err) => {
+                    failures.push(format!("{}: plan failed: {err}", def.key));
+                    continue;
+                }
+            };
+            // A two-Sound process gets the same fixture on both sides; self-processing is a
+            // valid shape for everything being checked here.
+            let input_count = planned.input_names.len();
+            let job = PraatJob {
+                id: ran as u64,
+                praat_bin: praat_bin_for(""),
+                planned,
+                inputs: vec![channels.clone(); input_count],
+                input_sample_rate: sample_rate,
+                purpose: JobPurpose::Apply,
+                timeout: Duration::from_secs(60),
+                prefs_dir: prefs.clone(),
+            };
+            ran += 1;
+            if let Err(err) = run(&job) {
+                let detail = match &err {
+                    PraatError::NonZeroExit { output, .. } => output
+                        .lines()
+                        .find(|l| l.starts_with("Error:"))
+                        .unwrap_or("(no Error: line)")
+                        .to_string(),
+                    other => other.to_string(),
+                };
+                failures.push(format!("{}: {detail}", def.key));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&state);
+
+        eprintln!("praat smoke: {} ran, {} failed", ran, failures.len());
+        for failure in &failures {
+            eprintln!("  {failure}");
+        }
+        assert!(ran > 0, "no Praat entries found in the catalog");
+    }
+
     #[test]
     fn a_real_checkout_validates() {
         let dir = std::env::temp_dir().join(format!("praat-ok-{}", std::process::id()));

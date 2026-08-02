@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- **Praat processes.** tui-wave can now run praatAudioTools — a large collection of
+  sound-transformation scripts for Praat by Shai Cohen — alongside CDP, in the same browser under
+  a new **Praat** domain. 352 processes across thirteen groups: granular, spectral, reverb,
+  distortion, spatial, generative and more. Parameter form, presets, Preview, Apply and undo all
+  work exactly as they do for a CDP process.
+
+  Install Praat from your package manager and the scripts come with tui-wave (a git submodule —
+  `git submodule update --init` if you cloned without `--recursive`). Nothing is installed into
+  your own Praat setup, and your Praat preferences folder is never written to.
+
+  Three things behave differently from CDP, all of them inherent to Praat. Parameter ranges are
+  invented, because a Praat script declares a starting value but no bounds — so they are
+  deliberately wide, and an impossible value simply comes back as a clear error. Markers and
+  broadcast metadata are not carried through, because Praat discards them. And a run is stopped
+  after two minutes: some of these scripts play their result aloud, which takes as long as the
+  audio does, and a few can hang outright — `Esc` stops one early.
+
+  Around a quarter of the collection is not listed, because it cannot be driven without a window,
+  needs a corpus of other files, or works on things that are not sounds.
+  `docs/praat-excluded-scripts.md` names every one and why.
+
 ## 2026-08-01 (2.0.0)
 
 - **Multichannel files now play.** A file with three or more channels was handed to the sound
