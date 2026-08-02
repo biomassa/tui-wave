@@ -2034,6 +2034,7 @@ impl CdpDomainRow {
             CdpDomainRow::Recent => "Recent",
             CdpDomainRow::Domain(Category::Time) => "Time-domain",
             CdpDomainRow::Domain(Category::Pvoc) => "Spectral",
+            CdpDomainRow::Domain(Category::Praat) => "Praat",
         }
     }
 }

@@ -25,9 +25,14 @@ use crate::model::document::{Document, Marker};
 /// time-stretching spectral process shifts length proportionally to the input and blows
 /// far past that on anything but sub-second selections (where a sub-2048-sample stretch is
 /// inaudible anyway).
+/// Praat gets the same allowance as a time-domain CDP process: its scripts run entirely in
+/// the time domain (there is no `pvoc` wrapping to pad output to whole analysis windows), so
+/// one that means to preserve timing lands on or very near the exact sample count, and one
+/// that does not — a granular or time-stretching script — misses by far more than any
+/// tolerance would forgive and is correctly treated as timing-changing.
 pub fn timing_tolerance(category: Category, pvoc_points: u32) -> usize {
     match category {
-        Category::Time => 256,
+        Category::Time | Category::Praat => 256,
         Category::Pvoc => pvoc_points as usize * 2,
     }
 }
