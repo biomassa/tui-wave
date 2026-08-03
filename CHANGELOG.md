@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Praat processes now carry a pale `[pr]` tag in the CDP browser, so you can tell at a glance
+  which engine a process runs on. (Searching already found them — every Praat entry's internal
+  key starts with `praat_` — but nothing distinguished them while reading the list.)
+
+- The dual-input tag reads `2 inputs` rather than `>1 inputs`. Those processes take exactly
+  two, and the old wording was easy to confuse with the open-ended `N inputs` tag sitting
+  beside it in the same list.
+
 ## 2026-08-03 (2.3.0)
 
 - **The multichannel CDP processes are in.** Eleven entries that had been held back for one
