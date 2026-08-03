@@ -84,28 +84,107 @@ SILENCE_RE = re.compile(r"^(play|draw|show|visuali|demo|open_|export)", re.I)
 
 # --- static exclusion detectors -------------------------------------------------------
 # Each maps a reason slug to a pattern that, if found anywhere in a script, disqualifies it.
+#
+# They are matched against `code_only(source)`, NOT the raw text -- see that function for why.
 
-EXCLUSIONS: list[tuple[str, re.Pattern, str]] = [
+
+def code_only(source: str) -> str:
+    """Blank out comment bodies and string contents, keeping every other byte in place.
+
+    The exclusion patterns below describe *constructs the script executes*, so matching them
+    against raw text reads prose as code. That was not hypothetical: five scripts were
+    excluded as `gui_blocking` on the strength of a comment or a log message, among them
+    `Dramaturgical_Structure_Composer`, whose matched line reads
+
+        # - FORM: beginPause second-dialog removed. All settings
+
+    -- i.e. it was excluded for saying it had removed the thing it was excluded for. The
+    others matched `demo ` inside strings like "Generating melody demo (major arpeggio)...".
+
+    Replaces with spaces rather than deleting, so offsets, line numbers and the `^`/`$`
+    anchors in the patterns all still mean what they did. Handles Praat's `#` line comments
+    and its double-quoted strings, whose only escape is a doubled quote (there is no
+    backslash escaping), so `""` inside a string is two blanked characters and not a
+    terminator. An unterminated string recovers at the newline instead of swallowing the
+    rest of the file. `;`/`!` comments are deliberately left alone: no script in this
+    plugin uses them, and blanking more than necessary risks letting a genuinely blocking
+    script through, which is the expensive direction to be wrong in.
+    """
+    out: list[str] = []
+    in_string = False
+    i, n = 0, len(source)
+    while i < n:
+        c = source[i]
+        if in_string:
+            if c == '"':
+                if i + 1 < n and source[i + 1] == '"':
+                    out.append("  ")
+                    i += 2
+                    continue
+                in_string = False
+                out.append('"')
+            elif c == "\n":
+                in_string = False
+                out.append(c)
+            else:
+                out.append(" ")
+            i += 1
+        elif c == '"':
+            in_string = True
+            out.append(c)
+            i += 1
+        elif c == "#":
+            end = source.find("\n", i)
+            end = n if end == -1 else end
+            out.append(" " * (end - i))
+            i = end
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+# Whether a detector is matched against `code_only(source)` or the raw text. Not a detail:
+# `gui_blocking` looks for constructs the script *executes*, so it must not read prose --
+# while `hardcoded_path` and `non_sound_input` look for the contents of string *literals*
+# (a path in a `Read from file:` argument, an `exitScript: "Please select a Photo object"`),
+# which is precisely what `code_only` blanks. Running all three over `code_only` silently
+# disarmed those two: the regenerated exclusion list lost `hardcoded_path` and
+# `non_sound_input` entirely, and the seven scripts they had been catching fell through to
+# whatever detector happened to fire next.
+CODE = "code"    # match against code_only(source)
+RAW = "raw"      # match against the source as written
+
+EXCLUSIONS: list[tuple[str, re.Pattern, str, str]] = [
     (
         "gui_blocking",
         # `View & Edit` and a bare `Edit` open an editor window, which batch mode refuses
         # outright ("Cannot edit a TextGrid from batch."). Anchored so the word `Edit` inside a
         # comment or a longer command name does not match.
+        #
+        # `demo` is anchored to *statement position* rather than matched as a bare word.
+        # Praat's `demo` is a command prefix (`demo Erase all`), so it only ever starts a
+        # statement; `\bdemo\s` also matched the English word, which is how three synthesis
+        # generators came to be excluded over their own log messages. `demoShow` and
+        # `demoWaitForInput` are still matched by name, wherever they appear.
         re.compile(r"\b(beginPause|pauseScript|demoShow|demoWaitForInput|chooseReadFile\$|"
-                   r"chooseWriteFile\$|chooseFolder\$)|\bdemo\s|"
+                   r"chooseWriteFile\$|chooseFolder\$)|^\s*demo\s|"
                    r"^\s*(View & Edit|Edit)\s*$", re.M),
         "uses an interactive/GUI construct that segfaults or hangs under --run",
+        CODE,
     ),
     (
         "non_sound_input",
         re.compile(r"select a (Photo|TextGrid|Table|Matrix) object|"
                    r"Please select .*(Photo|TextGrid)", re.I),
         "operates on a non-Sound object",
+        RAW,
     ),
     (
         "hardcoded_path",
         re.compile(r"\"[A-Za-z]:[\\/]|/home/[a-z]+/|\.praat-dir"),
         "contains a hardcoded absolute path that only resolves on its author's machine",
+        RAW,
     ),
 ]
 
@@ -497,7 +576,15 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
 
         source = read_script(path)
 
-        hit = next(((slug, why) for slug, pattern, why in EXCLUSIONS if pattern.search(source)), None)
+        # Each detector says which text it reads (see `CODE`/`RAW` above): a construct
+        # detector must not read prose, and a string-contents detector must not have its
+        # strings blanked out from under it.
+        scannable = {CODE: code_only(source), RAW: source}
+        hit = next(
+            ((slug, why) for slug, pattern, why, over in EXCLUSIONS
+             if pattern.search(scannable[over])),
+            None,
+        )
         if hit:
             excluded.append((str(rel), hit[0], hit[1]))
             continue

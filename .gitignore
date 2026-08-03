@@ -21,3 +21,6 @@
 
 # Reference PDFs from CDP, kept locally alongside the working docs above
 *.pdf
+
+# Python bytecode from the catalog converters
+__pycache__/
