@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-03 (2.3.0)
 
 - **The multichannel CDP processes are in.** Eleven entries that had been held back for one
   reason — "this app's UI/audio path is stereo-focused and untested beyond 2 channels" — now that
@@ -70,6 +70,14 @@
   remaining modes need pan datafiles or channel-group strings; `mchstereo`/`madrid`/`texmchan`
   are variadic-input; `panorama`/`spacedesign` emit mixfiles rather than audio; the `abfpan`
   family is Ambisonic B-format.
+
+- Whole-number parameter fields now behave like whole-number fields: a field shown as `[int]`
+  or `[≥1]` refuses a decimal point as you type it, instead of accepting `3.5` and then quietly
+  disabling Apply with a "value out of range" that was not about the range at all.
+
+- Bumped version to 2.3.0.
+
+## 2026-08-02 (2.2.0)
 
 - **Praat visualizations are now visible.** Most praatAudioTools processes carry a
   `Draw_visualization` checkbox, and until now it did nothing you could see: the script painted
