@@ -905,7 +905,13 @@ fn cdp_process_badges(p: &crate::model::cdp::ProcessDef) -> Vec<&'static str> {
 fn cdp_nudge_number(field: Option<&mut CdpField>, sign: f64, fine: bool) {
     let Some(CdpField::Number { input, min, max, integer, .. }) = field else { return };
     let delta = if fine { 0.1 } else { 1.0 };
-    let current = input.value().trim().parse::<f64>().unwrap_or(*min);
+    // Falling back to `min` on unparseable text is only sane while `min` is a real number. A
+    // Praat parameter whose script declares no floor carries `-inf` (see the converter's
+    // `make_number`), and arrowing an empty field would otherwise jump straight to negative
+    // infinity. Start from zero in that case — the nudge is then a plain ±1 from a value the
+    // user can see, which is what the key is for.
+    let fallback = if min.is_finite() { *min } else { 0.0 };
+    let current = input.value().trim().parse::<f64>().unwrap_or(fallback);
     let next = ((current + sign * delta) * 1e6).round() / 1e6;
     let next = if *integer { next.round() } else { next };
     let next = next.clamp(*min, *max);
@@ -18015,8 +18021,44 @@ fn render_cdp_setup_dialog(
 /// typing an out-of-range value and getting bounced. Uses the same always-a-decimal-point
 /// convention as `format_cdp_float_for_display` (see task: pre-filled float defaults) so a
 /// whole-number bound reads unambiguously as a float range.
-fn format_cdp_range(min: f64, max: f64) -> String {
-    format!("[{}-{}]", format_cdp_float_for_display(min), format_cdp_float_for_display(max))
+///
+/// An **infinite** bound means the parameter genuinely has no limit in that direction, which
+/// is the ordinary case for a Praat process: its `form` declares a default and, in about
+/// twenty cases out of ~2700, a range inside the parameter's own name. It declares nothing
+/// else, so nothing else is shown. What is left is whatever Praat's own form parser enforces
+/// — `positive` rejects a value ≤ 0, `natural` rejects one < 1 — plus integer-ness, and those
+/// are stated rather than an invented span:
+///
+/// ```text
+/// [0.1-100.0]   both bounds real (every CDP param, and the ~20 Praat ones that declare one)
+/// [>0]          `positive`: no ceiling, and the floor is Praat's own
+/// [≥1]          `natural`
+/// [int]         `integer`: no bound at all, but whole numbers only
+/// (empty)       `real`: nothing is declared, so nothing is claimed
+/// ```
+fn format_cdp_range(min: f64, max: f64, integer: bool) -> String {
+    match (min.is_finite(), max.is_finite()) {
+        (true, true) => format!(
+            "[{}-{}]",
+            format_cdp_float_for_display(min),
+            format_cdp_float_for_display(max)
+        ),
+        // `positive`'s floor is *exclusive* — Praat rejects exactly 0 — but `clamp` takes a
+        // closed bound, so the catalog stores 0.0 and the label states the real rule. The one
+        // value that slips through gets Praat's own precise complaint rather than being
+        // silently rounded up to an epsilon nobody chose. See the converter's `make_number`.
+        (true, false) if min == 0.0 && !integer => "[>0]".to_string(),
+        // A whole-number floor on a whole-number field reads better without the `.0` that
+        // `format_cdp_float_for_display` adds to disambiguate float bounds — there is nothing
+        // to disambiguate on a field that will not accept a fraction anyway.
+        (true, false) if integer => format!("[≥{}]", min.round() as i64),
+        (true, false) => format!("[≥{}]", format_cdp_float_for_display(min)),
+        // Unbounded below but capped above: no Praat type produces this, so it can only come
+        // from a name-declared range, and both halves are worth showing.
+        (false, true) => format!("[≤{}]", format_cdp_float_for_display(max)),
+        (false, false) if integer => "[int]".to_string(),
+        (false, false) => String::new(),
+    }
 }
 
 
@@ -18782,10 +18824,10 @@ fn render_cdp_list_editor(
     edit: &CdpListEdit,
     def: Option<&crate::model::cdp::ProcessDef>,
 ) -> Vec<Rect> {
-    let Some(CdpField::List { min, max, .. }) = fields.get(edit.field_index) else {
+    let Some(CdpField::List { min, max, integer, .. }) = fields.get(edit.field_index) else {
         return Vec::new();
     };
-    let (min, max) = (*min, *max);
+    let (min, max, integer) = (*min, *max, *integer);
     let param = def.and_then(|d| d.params.get(edit.field_index));
     let param_name = param.map(|p| p.name.as_str()).unwrap_or("List");
 
@@ -18800,7 +18842,7 @@ fn render_cdp_list_editor(
     // (and would cut off the range text too, for a process whose min/max are wide enough) on
     // any terminal, not just narrow ones, since `Paragraph` here has no wrap set.
     let hint_line_1 = " \u{2190}\u{2192}\u{2191}\u{2193}:select  type:edit value  n:insert  Del:remove";
-    let hint_line_2 = format!(" Enter:save  Esc:cancel  range {}", format_cdp_range(min, max));
+    let hint_line_2 = format!(" Enter:save  Esc:cancel  range {}", format_cdp_range(min, max, integer));
     let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()) as u16;
     let width = (content_width + 2).max(50).min(area.width);
     // header spacer + LIST_ROWS + blank + 2 hint lines, + 2 border.
@@ -18870,7 +18912,7 @@ fn render_cdp_list_editor(
         Span::styled(":save  ", label_style),
         Span::styled("Esc", hint_style),
         Span::styled(":cancel  ", label_style),
-        Span::styled(format!("range {}", format_cdp_range(min, max)), dim_style),
+        Span::styled(format!("range {}", format_cdp_range(min, max, integer)), dim_style),
     ]));
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -19036,7 +19078,7 @@ fn render_curve_editor(
         Span::styled(":cancel  ", label_style),
         Span::styled("t", hint_style),
         Span::styled(":transform", label_style),
-        Span::styled(format!("  {}", format_cdp_range(range_min, range_max)), dim_style),
+        Span::styled(format!("  {}", format_cdp_range(range_min, range_max, false)), dim_style),
     ]));
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -19216,7 +19258,7 @@ fn render_curve_transform_params(
         Span::styled(":edit list", label_style),
     ]));
     let range_text = match params.fields.get(params.focus) {
-        Some(CdpField::Number { min, max, .. }) => format!("  {}", format_cdp_range(*min, *max)),
+        Some(CdpField::Number { min, max, integer, .. }) => format!("  {}", format_cdp_range(*min, *max, *integer)),
         _ => String::new(),
     };
     out.push(Line::from(vec![
@@ -19463,7 +19505,7 @@ fn render_cdp_table_editor(
     closing_hints.push(Span::styled("Esc", hint_style));
     closing_hints.push(Span::styled(":cancel", label_style));
     closing_hints.push(Span::styled(
-        format!("  {}", columns.get(edit.selected_col).map(|c| format_cdp_range(c.min, c.max)).unwrap_or_default()),
+        format!("  {}", columns.get(edit.selected_col).map(|c| format_cdp_range(c.min, c.max, c.integer)).unwrap_or_default()),
         dim_style,
     ));
     lines.push(Line::from(closing_hints));
@@ -19596,7 +19638,7 @@ fn render_cdp_marker_time_list_editor(
         Span::styled(":save  ", label_style),
         Span::styled("Esc", hint_style),
         Span::styled(":cancel", label_style),
-        Span::styled(format!("  time range {}", format_cdp_range(min, max)), dim_style),
+        Span::styled(format!("  time range {}", format_cdp_range(min, max, false)), dim_style),
     ]));
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -20140,7 +20182,7 @@ fn cdp_params_column_widths(def: &crate::model::cdp::ProcessDef) -> (usize, usiz
         .params
         .iter()
         .map(|p| match &p.kind {
-            ParamKind::Number { min, max, .. } => format_cdp_range(*min, *max).chars().count(),
+            ParamKind::Number { min, max, integer, .. } => format_cdp_range(*min, *max, *integer).chars().count(),
             _ => 0,
         })
         .max()
@@ -20329,8 +20371,8 @@ fn render_cdp_params_dialog(
                 Span::styled(format!("{:<range_width$}", ""), range_style),
                 Span::styled(" (not set — e to edit)", dim_style),
             ]),
-            CdpField::Number { input, min, max, .. } => {
-                let range = format!("{:<range_width$}", format_cdp_range(*min, *max));
+            CdpField::Number { input, min, max, integer, .. } => {
+                let range = format!("{:<range_width$}", format_cdp_range(*min, *max, *integer));
                 if is_focused {
                     let (before, under, after) = input.split_at_cursor();
                     let mut spans = vec![
@@ -23244,13 +23286,85 @@ mod tests {
     /// `cdp_params_column_widths` sizes both columns to the *longest* label/range in the
     /// process's own params, not a fixed guess — the fix for labels colliding with their own
     /// range text when a name ran past a fixed-width guess (e.g. "Grain Size Limit").
+    /// A bound the script never declared is shown as no bound, not as an invented span. Praat
+    /// `form`s state a default and (for about 20 of ~2700 params) a range inside the parameter's
+    /// own name; everything else used to be given a made-up range of ten times its default,
+    /// which capped parameters whose useful values ran far higher and offered negative values
+    /// to parameters meaningless below zero.
+    #[test]
+    fn an_undeclared_bound_is_shown_as_no_bound() {
+        // Both real: every CDP param, and the handful of Praat ones that declare a range.
+        assert_eq!(format_cdp_range(0.1, 100.0, false), "[0.1-100.0]");
+        // Praat's own type floors — enforced by its form parser, so not our invention.
+        assert_eq!(format_cdp_range(0.0, f64::INFINITY, false), "[>0]", "`positive`");
+        assert_eq!(format_cdp_range(1.0, f64::INFINITY, true), "[≥1]", "`natural`, no pointless .0");
+        // Nothing declared at all: say nothing, rather than claim a span.
+        assert_eq!(format_cdp_range(f64::NEG_INFINITY, f64::INFINITY, false), "", "`real`");
+        assert_eq!(format_cdp_range(f64::NEG_INFINITY, f64::INFINITY, true), "[int]", "`integer`");
+    }
+
+    /// An unbounded field's arrow keys must nudge from something a user can see. The fallback
+    /// for unparseable text is the field's `min`, which is `-inf` for a Praat parameter whose
+    /// script declares no floor — arrowing an empty field would otherwise land on negative
+    /// infinity.
+    #[test]
+    fn nudging_an_empty_unbounded_field_starts_from_zero() {
+        let mut field = CdpField::Number {
+            input: TextInput::new(""),
+            min: f64::NEG_INFINITY,
+            max: f64::INFINITY,
+            step: 0.01,
+            integer: false,
+            envelope: None,
+        };
+        cdp_nudge_number(Some(&mut field), 1.0, false);
+        let CdpField::Number { input, .. } = &field else { panic!("still a number") };
+        assert_eq!(input.value(), "1.0", "one step up from zero, not from -inf");
+    }
+
+    /// The real generated catalog, not a fixture: the converter must not reintroduce a
+    /// synthesised range. Only a bound a script actually declares may be finite on both sides,
+    /// and there are far more parameters than declarations.
+    #[test]
+    fn praat_params_carry_only_the_bounds_their_scripts_declare() {
+        use crate::model::cdp::def::Backend;
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let (mut declared, mut unbounded) = (0, 0);
+        for def in catalog.processes.iter().filter(|p| p.backend() == Backend::Praat) {
+            for param in &def.params {
+                let crate::model::cdp::ParamKind::Number { min, max, .. } = param.kind else { continue };
+                if max.is_finite() {
+                    declared += 1;
+                    // A finite ceiling can only have come from the parameter's own name, and
+                    // every one of those names carries the range in parentheses.
+                    assert!(
+                        param.name.contains('('),
+                        "{}: {:?} has a finite max {max} but declares no range in its name",
+                        def.key,
+                        param.name
+                    );
+                } else {
+                    unbounded += 1;
+                    assert!(
+                        min == 0.0 || min == 1.0 || min.is_infinite(),
+                        "{}: {:?} has an unexplained floor {min} — the only real ones are \
+                         Praat's own type floors (`positive` > 0, `natural` >= 1)",
+                        def.key,
+                        param.name
+                    );
+                }
+            }
+        }
+        assert!(unbounded > declared * 50, "{unbounded} unbounded vs {declared} declared");
+    }
+
     #[test]
     fn cdp_params_column_widths_fit_the_longest_label_and_range() {
         let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
         let def = catalog.find("blur_avrg").expect("blur_avrg in catalog");
         let (label_width, range_width, _) = cdp_params_column_widths(def);
         assert!(label_width >= "Channels".chars().count());
-        assert!(range_width >= format_cdp_range(1.0, 200.0).chars().count());
+        assert!(range_width >= format_cdp_range(1.0, 200.0, false).chars().count());
     }
 
     /// The value column must fit the longest option label, not a fixed allowance.
@@ -36031,3 +36145,4 @@ mod tests {
         }
     }
 }
+

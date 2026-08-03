@@ -18,6 +18,53 @@
   Apply dimmed, instead of failing partway through a run: `pairex` and `mchshred`'s multichannel
   mode need more than two channels, `spin stereo` needs a stereo selection.
 
+- **Praat parameters no longer advertise ranges nobody declared.** A Praat script states a
+  default and, for about 20 numeric parameters out of ~2700, a range inside the parameter's own
+  name (`Threshold (0-1)`). It states nothing else — but every field was given a made-up range
+  of ten times its default, shown as fact. That capped parameters whose useful values run far
+  higher, and offered negative values to parameters meaningless below zero.
+
+  Declared ranges are now used verbatim and everything else is genuinely unbounded. What
+  remains is only what Praat's own form parser enforces, shown plainly: `[>0]`, `[≥1]`, `[int]`,
+  or nothing at all. Units in a name (`(Hz)`, `(dB)`, `(s)`) and legends that merely look
+  numeric (`(0 = original)`) are not mistaken for ranges.
+
+  CDP process ranges are untouched — those were measured from each binary's own refusals, not
+  guessed, and several prevent known crashes.
+
+- **27 more praatAudioTools processes.** Three separate reasons they had been missing:
+
+  Six were excluded over a *comment or a log message*. The detector that finds interactive
+  constructs scanned raw text, so a script saying `# beginPause second-dialog removed` was
+  excluded for saying it had removed the thing it was excluded for, and three synthesis
+  generators matched on "Generating melody demo..." in their own output. It now reads code
+  only. Adds **AM Additive Synthesis Generator**, **Subtractive Synthesis Generator**,
+  **Vector Synthesis**, **Reich Generator** and **Dramaturgical Structure Composer** (that
+  last one needs at least 20 seconds of audio — it says so).
+
+  Four more genuinely do open a Praat window, but only on a path you need never take.
+  **FM Texture Generator**, **HFD-Driven Time Warping** and **Magnetic Tape Degradation**
+  each hide theirs behind a "show advanced settings" box, which is now greyed and says why if
+  you try it; their advanced values keep the script's own defaults. **Advanced Stereo Panner**
+  hides one behind a single pan mode, so it arrives with the other seven.
+
+  Eleven had a text field the catalog could not represent — which in every case was a *list of
+  numbers* and usually the point of the process: a twelve-tone row, a resonator's frequency
+  bank, a rhythm pattern. These now get the ordinary list editor (`e`), pre-filled with the
+  script's own values: **Sample-and-Hold Processor**, **GRM-Style Resonator**, **Harmonic
+  Remover**, **LPC Excitation Lab**, **Hexaphonic Serial Audio Processor**, **Pitch Morphing
+  Between Targets**, **Rhythmic Pitch Percussion**, **Undertone Field** (both of them),
+  **Mix Multi-Channel to Stereo** and **Total Serialism Machine**.
+
+- **Seven processes that were being silently discarded now appear.** praatAudioTools ships
+  pairs of scripts whose filenames differ only in punctuation — `Whisper Morph.praat` and
+  `Whisper_Morph.praat`, `Stereo_Shimmer.praat` and `stereo_shimmer.praat`. Both halves of
+  each pair were reduced to the same internal name, and the second quietly replaced the first,
+  so one of every pair never reached the browser at all. They are not copies: every pair
+  differs by hundreds of lines. The recovered ones are listed with a `(2)` suffix — including
+  **8-Channel Movements (2)**, **8-Channel Spectral Shift (2)** and **NMF Spectral
+  Resynthesizer (2)**.
+
 - Excluded with reasons rather than silently: `mchiter` writes a valid file and then aborts
   (`double free or corruption`, exit 134) on both its modes — a real binary bug. `mchanpan`'s
   remaining modes need pan datafiles or channel-group strings; `mchstereo`/`madrid`/`texmchan`
