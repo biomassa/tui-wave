@@ -564,7 +564,7 @@ impl CdpField {
             },
             ParamKind::Number { default, min, max, step, integer, .. } => {
                 CdpField::Number {
-                    input: TextInput::fresh(format_cdp_float_for_display(*default)),
+                    input: TextInput::fresh(format_cdp_number_for_display(*default, *integer)),
                     min: *min,
                     max: *max,
                     step: *step,
@@ -637,8 +637,17 @@ impl CdpField {
     fn from_value(param: &crate::model::cdp::ParamDef, value: &crate::model::cdp::ParamValue) -> Self {
         use crate::model::cdp::{ParamKind, ParamValue};
         match (&param.kind, value) {
+            // Rounded on the way in for a whole-number field. A saved preset can still hold a
+            // fractional value there — typing one used to be possible, and `dialog_accepts`
+            // only stops it being typed *now* — and `cdp_validate_fields` would then block
+            // Apply while reporting "value out of range" for a value that is in range and
+            // merely not whole. Recalling a preset must not land the dialog somewhere the user
+            // cannot type their way out of.
             (ParamKind::Number { min, max, step, integer, .. }, ParamValue::Number(v)) => CdpField::Number {
-                input: TextInput::fresh(format_cdp_float_for_display(*v)),
+                input: TextInput::fresh(format_cdp_number_for_display(
+                    if *integer { v.round() } else { *v },
+                    *integer,
+                )),
                 min: *min,
                 max: *max,
                 step: *step,
@@ -646,8 +655,9 @@ impl CdpField {
                 envelope: None,
             },
             (ParamKind::Number { min, max, step, integer, .. }, ParamValue::Breakpoints(points)) => CdpField::Number {
-                input: TextInput::fresh(format_cdp_float_for_display(
+                input: TextInput::fresh(format_cdp_number_for_display(
                     points.first().map(|&(_, v)| v).unwrap_or(0.0),
+                    *integer,
                 )),
                 min: *min,
                 max: *max,
@@ -768,6 +778,23 @@ impl CdpField {
 fn format_cdp_float_for_display(v: f64) -> String {
     let s = format!("{v}");
     if s.contains('.') { s } else { format!("{s}.0") }
+}
+
+/// Renders a `Number` field's value as text to put in its input box, honouring the param's
+/// own `integer` flag.
+///
+/// The trailing `.0` that [`format_cdp_float_for_display`] adds exists to mark a bound as a
+/// float, which is exactly wrong on a whole-number field: it seeds the box with a character
+/// (`.`) that `dialog_accepts` will not let the user type back after clearing it, so a value
+/// could be deleted and not re-entered. An integer field now reads `6`, not `6.0`.
+///
+/// Nothing about the submitted value changes — `"6"` and `"6.0"` both parse to the same
+/// `f64`, and `CdpField::to_value` is what the pipeline reads.
+fn format_cdp_number_for_display(v: f64, integer: bool) -> String {
+    if integer && v.is_finite() && v.fract() == 0.0 {
+        return format!("{}", v as i64);
+    }
+    format_cdp_float_for_display(v)
 }
 
 /// Rounds `v` to 6 decimal places — kills the binary-fraction noise (e.g.
@@ -915,7 +942,7 @@ fn cdp_nudge_number(field: Option<&mut CdpField>, sign: f64, fine: bool) {
     let next = ((current + sign * delta) * 1e6).round() / 1e6;
     let next = if *integer { next.round() } else { next };
     let next = next.clamp(*min, *max);
-    *input = TextInput::new(format_cdp_float_for_display(next));
+    *input = TextInput::new(format_cdp_number_for_display(next, *integer));
 }
 
 /// Resolves which field a "smart" activation key (`b`:pick buffer, `e`:edit list/envelope/
@@ -4981,7 +5008,14 @@ impl App {
             Some(Dialog::CdpParams { save_prompt: Some(_), .. }) => true, // preset name: free text
             Some(Dialog::CdpParams { fields, focus, .. }) if *focus != CDP_PRESET_FOCUS => {
                 match fields.get(*focus - 1) {
-                    Some(CdpField::Number { .. }) => c.is_ascii_digit() || c == '-' || c == '.',
+                    // A whole-number field refuses the decimal point outright, rather than
+                    // taking `3.5` and then quietly disabling Apply — which is what used to
+                    // happen, and which reported it as "value out of range" when the value
+                    // was in range and merely not whole. `-` stays: plenty of these are
+                    // signed (a twelve-tone row's `-8`, a `real` with no floor).
+                    Some(CdpField::Number { integer, .. }) => {
+                        c.is_ascii_digit() || c == '-' || (c == '.' && !*integer)
+                    }
                     // Toggle/Choice fields aren't typed into, and the trailing
                     // second-input/Preview/Apply pseudo-fields accept nothing either.
                     _ => false,
@@ -35979,6 +36013,74 @@ mod tests {
             *focus = field_index + 1;
         }
         field_index
+    }
+
+    /// A drawing toggle is greyed and inert when there is nowhere to draw. `new_app` has no
+    /// picker, so graphics are unavailable exactly as they are in a terminal that cannot do it.
+    /// A field the catalog marks `[int]` behaves as one: the decimal point is refused as it is
+    /// typed, rather than accepted and then silently disabling Apply — which is what used to
+    /// happen, reported as "value out of range" for a value that was in range and merely not
+    /// whole. The minus sign stays, since plenty of these are signed.
+    #[test]
+    fn a_whole_number_field_refuses_a_decimal_point() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        let found = app.cdp_catalog.processes.iter().enumerate().find_map(|(i, def)| {
+            def.params
+                .iter()
+                .position(|p| matches!(p.kind, crate::model::cdp::ParamKind::Number { integer: true, .. }))
+                .map(|f| (i, f))
+        });
+        let (catalog_index, index) = found.expect("the catalog has an integer param");
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = index + 1;
+        }
+        assert!(app.dialog_accepts('7'), "digits must still be typable");
+        assert!(app.dialog_accepts('-'), "a signed whole number is still a whole number");
+        assert!(!app.dialog_accepts('.'), "a whole-number field must refuse the decimal point");
+
+        // ...and a fractional field is unaffected.
+        let frac = app.cdp_catalog.processes.iter().enumerate().find_map(|(i, def)| {
+            def.params
+                .iter()
+                .position(|p| matches!(p.kind, crate::model::cdp::ParamKind::Number { integer: false, .. }))
+                .map(|f| (i, f))
+        });
+        let (catalog_index, index) = frac.expect("the catalog has a fractional param");
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = index + 1;
+        }
+        assert!(app.dialog_accepts('.'), "a fractional field must still take a decimal point");
+    }
+
+    /// The value a whole-number field is seeded with must be one the user could type back after
+    /// clearing it. `format_cdp_float_for_display` appends `.0` to mark a value as a float,
+    /// which on an `[int]` field seeds the box with the one character `dialog_accepts` now
+    /// refuses — so the value could be deleted and never re-entered.
+    #[test]
+    fn a_whole_number_field_is_seeded_with_a_typable_value() {
+        assert_eq!(format_cdp_number_for_display(6.0, true), "6");
+        assert_eq!(format_cdp_number_for_display(-8.0, true), "-8");
+        assert_eq!(format_cdp_number_for_display(6.0, false), "6.0", "floats keep the marker");
+        // Nothing about what gets submitted changes: both spellings parse to the same f64.
+        assert_eq!("6".parse::<f64>().unwrap(), "6.0".parse::<f64>().unwrap());
+    }
+
+    /// Recalling a preset saved before whole-number fields refused a decimal point must not
+    /// land the dialog on a value the user cannot type their way out of.
+    #[test]
+    fn a_stale_fractional_preset_value_is_rounded_into_a_whole_number_field() {
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let param = catalog
+            .processes
+            .iter()
+            .flat_map(|d| d.params.iter())
+            .find(|p| matches!(p.kind, crate::model::cdp::ParamKind::Number { integer: true, .. }))
+            .expect("the catalog has an integer param");
+        let field = CdpField::from_value(param, &crate::model::cdp::ParamValue::Number(3.5));
+        let CdpField::Number { input, .. } = &field else { panic!("expected a Number field") };
+        assert_eq!(input.value(), "4", "a stale fractional value is rounded, not left stuck");
     }
 
     /// A drawing toggle is greyed and inert when there is nowhere to draw. `new_app` has no
