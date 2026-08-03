@@ -865,12 +865,22 @@ fn is_pitch_curve_param(param: &crate::model::cdp::ParamDef) -> bool {
 /// Capability badges shown next to a process's name in the CDP browser (`render_
 /// cdp_browser_dialog`) — a heads-up about mechanics beyond "type some numbers and Apply",
 /// in the order a user would need to act on them: pick a second buffer, pick a curve/
-/// formant/snapshot. Extends the pre-existing ">1 inputs" note (dual-input processes) with
+/// formant/snapshot. Extends the pre-existing input-count note (dual-input processes) with
 /// three more, one per non-obvious param shape a process can require. Shortened to the same
 /// single-bracket-letter convention the Buffers panel uses for its `[p]`/`[f]`/`[s]` row
 /// tags (user report, 2026-07-21: the old full-word badges — "pitch curve", "formants",
 /// "snapshot" — routinely ran the process list's already-narrow column out of width, cutting
 /// off both the badge and the tail of the process title next to it):
+/// - "2 inputs": `IoKind::DualWav`/`DualAna` — exactly two, which is what those kinds mean
+///   (`input_arity` returns `(2, Some(2))`). Read ">1 inputs" until 2026-08-03, which was
+///   true but vaguer than the fact, and easy to mistake for the open-ended "N inputs" badge
+///   sitting right next to it in the same list.
+/// - "[pr]": a praatAudioTools process rather than a CDP one (`Backend::Praat`). Mutually
+///   exclusive with "[pvoc]" — Praat entries are `Category::Praat` and so never `Pvoc` — and
+///   purely a provenance marker: it tells you which engine will run, which is why the two
+///   sit adjacent here rather than among the "you must go and pick something" badges above.
+///   Searching still works without it (every Praat `key` starts with `praat_`, and the
+///   browser filter matches `key`); the badge is for reading the list, not finding in it.
 /// - "[pvoc]": `category == Category::Pvoc` — a spectral (PVOC-domain) process, the same
 ///   classification `commands::cdp::timing_tolerance` and the CDP Chain execution engine's
 ///   `ana_run_length` (which merges a run of these into one shared anal/synth pair instead
@@ -893,7 +903,7 @@ fn cdp_process_badges(p: &crate::model::cdp::ProcessDef) -> Vec<&'static str> {
     use crate::model::formant::FormantBufferKind;
     let mut badges = Vec::new();
     if matches!(p.input, crate::model::cdp::IoKind::DualWav | crate::model::cdp::IoKind::DualAna) {
-        badges.push(">1 inputs");
+        badges.push("2 inputs");
     }
     // Same "needs more than the selection" warning, but open-ended — `input_arity`'s minimum
     // is what actually gates Apply, so the badge distinguishes the two variadic floors rather
@@ -901,6 +911,9 @@ fn cdp_process_badges(p: &crate::model::cdp::ProcessDef) -> Vec<&'static str> {
     // interpret.
     if matches!(p.input, crate::model::cdp::IoKind::VariadicWav | crate::model::cdp::IoKind::GroupedWav) {
         badges.push(if p.input_arity().0 > 1 { "N inputs (2+)" } else { "N inputs" });
+    }
+    if p.backend() == crate::model::cdp::def::Backend::Praat {
+        badges.push("[pr]");
     }
     if p.category == crate::model::cdp::Category::Pvoc {
         badges.push("[pvoc]");
@@ -28904,7 +28917,29 @@ mod tests {
     fn cdp_process_badges_marks_dual_input_processes() {
         let app = new_app(Some(doc(0.1, 100)), None);
         let p = app.cdp_catalog.processes.iter().find(|p| p.key == "fastconv_fastconv").expect("fastconv_fastconv (Convolve) is dual-input");
-        assert!(cdp_process_badges(p).contains(&">1 inputs"));
+        assert!(cdp_process_badges(p).contains(&"2 inputs"));
+    }
+
+    /// Every Praat entry is marked, no CDP entry is, and the marker never collides with the
+    /// spectral one — a process cannot be both, since `Backend::Praat` is derived from
+    /// `Category::Praat` and `[pvoc]` from `Category::Pvoc`.
+    #[test]
+    fn cdp_process_badges_marks_every_praat_process_and_only_those() {
+        use crate::model::cdp::def::Backend;
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let mut praat = 0;
+        for p in &app.cdp_catalog.processes {
+            let badges = cdp_process_badges(p);
+            let marked = badges.contains(&"[pr]");
+            if p.backend() == Backend::Praat {
+                praat += 1;
+                assert!(marked, "{}: a Praat process must carry [pr]", p.key);
+                assert!(!badges.contains(&"[pvoc]"), "{}: [pr] and [pvoc] are exclusive", p.key);
+            } else {
+                assert!(!marked, "{}: a CDP process must not carry [pr]", p.key);
+            }
+        }
+        assert!(praat > 300, "expected the whole Praat catalog, found {praat}");
     }
 
     #[test]
