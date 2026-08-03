@@ -409,6 +409,12 @@ pub enum PlanError {
     /// time inside the range — every mark counts on its own here, so one is enough and zero
     /// is the only failing case.
     MissingCutTimes { found: usize },
+    /// The selection is the wrong width for what this process's binary demands of its input
+    /// (`ProcessDef::input_channels`) — a mono selection into a stereo-only process, or a
+    /// mono/stereo one into a process that needs more than two channels. Like
+    /// `MissingHeadTailMarks` this is not about a *parameter*: no field in the dialog can fix
+    /// it, so `reason` is written as a whole user-facing sentence naming the shortfall.
+    InputChannelCount { reason: String },
 }
 
 /// Complete Head/Tail pairs a DISTMORE process needs before it will run. CDP's own
@@ -1640,8 +1646,22 @@ fn plan_wav(
     let duration = input.duration_secs();
 
     let split_active = def.channel_split_active(values, input.channels);
-    if (input.channels <= 1 || def.stereo_native) && !split_active {
-        let source_channels: Vec<usize> = (0..input.channels.max(1)).collect();
+    // A process that declares `input_channels` states the channel count its binary demands,
+    // and takes precedence over every other branch here: it runs once, on exactly those
+    // channels, whatever the document's width. Lane-splitting a mono→8-channel spatialiser
+    // across a 30-channel take would run it 30 times and then read channel 0 of each result;
+    // handing the binary the whole take instead makes it exit 255 (see
+    // `ProcessDef::input_channels`). `channel_split` is a per-channel-value toggle no process
+    // in this family carries, so the two cannot both be set.
+    let declared_channels = match def.input_source_channels(input.channels) {
+        Some(Ok(channels)) => Some(channels),
+        Some(Err(reason)) => return Err(PlanError::InputChannelCount { reason }),
+        None => None,
+    };
+    if declared_channels.is_some() || ((input.channels <= 1 || def.stereo_native) && !split_active)
+    {
+        let source_channels: Vec<usize> =
+            declared_channels.unwrap_or_else(|| (0..input.channels.max(1)).collect());
         let (args, deferred) = build_process_args(
             def,
             values,
@@ -1666,7 +1686,16 @@ fn plan_wav(
         // only ever reads as many of the real output file's channels as `dest_channels` has
         // entries. For an already-stereo input this is a no-op (`source_channels` is
         // already `[0, 1]`, identical to what this produces).
-        let dest_channels = if def.output_is_stereo { vec![0, 1] } else { source_channels.clone() };
+        //
+        // `output_channels` generalizes that same fix past 2: the multichannel family's real
+        // output width is a parameter of the run (OUTCHANS), so it can be neither the input's
+        // count nor a constant. Under-counting here doesn't error — it silently drops every
+        // channel past the last entry, which for a spatialiser is the entire effect.
+        let dest_channels = match def.output_channel_count(values) {
+            Some(count) => (0..count).collect(),
+            None if def.output_is_stereo => vec![0, 1],
+            None => source_channels.clone(),
+        };
         return Ok(PlannedJob {
             steps: vec![Invocation {
                 bin: def.bin.clone(),
@@ -2602,6 +2631,9 @@ mod tests {
             output,
             stereo_native: false,
             output_is_stereo: false,
+            input_channels: None,
+            output_channels: None,
+            output_new_buffer: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![number_param("Speed", -96.0, 96.0, 0.0, NumberScale::Plain)],
         }
@@ -3295,6 +3327,145 @@ mod tests {
             job.output_files,
             vec![OutputWavSpec { relative_name: "out.wav".into(), dest_channels: vec![0, 1] }]
         );
+    }
+
+    /// A `Mono` process takes channel 0 alone from a wide document and runs **once**, rather
+    /// than lane-splitting. This is the case `stereo_native` could express neither way: `false`
+    /// would run a mono→8-channel spatialiser 30 times over a 30-channel take and then read
+    /// channel 0 of each result, and `true` would hand the binary all 30 channels, which it
+    /// refuses outright ("must be mono").
+    #[test]
+    fn a_mono_input_process_takes_channel_zero_and_runs_once() {
+        let mut def = base_def(IoKind::Wav, IoKind::Wav);
+        def.input_channels = Some(crate::model::cdp::def::InputChannels::Mono);
+        let input =
+            InputSpec { channels: 30, sample_rate: 44100, len_samples: 44100, ..Default::default() };
+        let job =
+            plan_job(&def, &[ParamValue::Number(3.0)], std::slice::from_ref(&input), &PvocSettings::default())
+                .unwrap();
+
+        assert_eq!(job.steps.len(), 1, "one run, not one per channel");
+        assert_eq!(job.input_files[0].source_channels, vec![0]);
+    }
+
+    /// The output width comes from the parameter the process declares, so a spatialiser's
+    /// `dest_channels` covers every channel the real file holds. Under-counting here is silent:
+    /// `read_outputs` reads exactly as many channels as there are entries and drops the rest.
+    #[test]
+    fn output_channel_count_comes_from_the_declared_param() {
+        let mut def = base_def(IoKind::Wav, IoKind::Wav);
+        def.input_channels = Some(crate::model::cdp::def::InputChannels::Mono);
+        def.output_channels = Some(crate::model::cdp::def::OutputChannels::FromParam { param: 0 });
+        def.params = vec![number_param("Output Channels", 2.0, 16.0, 8.0, NumberScale::Plain)];
+        let input =
+            InputSpec { channels: 1, sample_rate: 44100, len_samples: 44100, ..Default::default() };
+
+        for count in [2.0, 8.0, 16.0] {
+            let job = plan_job(
+                &def,
+                &[ParamValue::Number(count)],
+                std::slice::from_ref(&input),
+                &PvocSettings::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                job.output_files[0].dest_channels,
+                (0..count as usize).collect::<Vec<_>>(),
+                "a run asking for {count} channels must read back {count}"
+            );
+        }
+    }
+
+    /// A `Multichannel` process preserves the width it was given: it declares no
+    /// `output_channels`, so `dest_channels` falls back to the source channels. `mchshred`
+    /// mode 2 is the real entry with this shape.
+    #[test]
+    fn a_multichannel_process_reads_back_every_channel_it_was_given() {
+        let mut def = base_def(IoKind::Wav, IoKind::Wav);
+        def.input_channels = Some(crate::model::cdp::def::InputChannels::Multichannel);
+        let input =
+            InputSpec { channels: 6, sample_rate: 44100, len_samples: 44100, ..Default::default() };
+        let job =
+            plan_job(&def, &[ParamValue::Number(3.0)], std::slice::from_ref(&input), &PvocSettings::default())
+                .unwrap();
+
+        assert_eq!(job.input_files[0].source_channels, (0..6).collect::<Vec<_>>());
+        assert_eq!(job.output_files[0].dest_channels, (0..6).collect::<Vec<_>>());
+    }
+
+    /// A selection too narrow for what the binary demands is refused at plan time with a
+    /// sentence, not passed through to CDP to fail as an exit code. `App::cdp_params_blocker`
+    /// shows the same string the moment the dialog opens.
+    #[test]
+    fn too_few_channels_is_refused_before_a_binary_is_spawned() {
+        for (declared, channels, expect) in [
+            (crate::model::cdp::def::InputChannels::Stereo, 1, "stereo source"),
+            (crate::model::cdp::def::InputChannels::Multichannel, 2, "more than 2 channels"),
+        ] {
+            let mut def = base_def(IoKind::Wav, IoKind::Wav);
+            def.input_channels = Some(declared);
+            let input = InputSpec {
+                channels,
+                sample_rate: 44100,
+                len_samples: 44100,
+                ..Default::default()
+            };
+            let err = plan_job(
+                &def,
+                &[ParamValue::Number(3.0)],
+                std::slice::from_ref(&input),
+                &PvocSettings::default(),
+            )
+            .expect_err("must refuse");
+            let PlanError::InputChannelCount { reason } = err else {
+                panic!("wrong error for {declared:?}: {err:?}");
+            };
+            assert!(reason.contains(expect), "{declared:?} said {reason:?}");
+        }
+    }
+
+    /// The real catalog entries, planned through the real planner. A unit test on a synthetic
+    /// def can't catch an entry losing `output_new_buffer` (splicing an 8-channel result over
+    /// the source document) or pointing `output_channels` at the wrong param index — which
+    /// would read back the wrong number of channels with no error at all.
+    #[test]
+    fn the_real_multichannel_entries_declare_a_coherent_channel_shape() {
+        use crate::model::cdp::def::{InputChannels, OutputChannels};
+        let (catalog, _) = crate::model::cdp::catalog::CdpCatalog::load(None);
+        let mut seen = 0;
+        for def in catalog.processes.iter().filter(|p| p.input_channels.is_some()) {
+            seen += 1;
+            assert!(
+                def.output_new_buffer,
+                "{}: a channel-count-changing process must open its result as a new buffer",
+                def.key
+            );
+            // A `FromParam` index pointing at something that isn't a count resolves to `None`
+            // and silently falls back to the input's width — the exact silent-drop this field
+            // exists to prevent.
+            if let Some(OutputChannels::FromParam { param }) = def.output_channels {
+                let values: Vec<ParamValue> =
+                    def.params.iter().map(|p| p.kind.default_value()).collect();
+                let count = def
+                    .output_channel_count(&values)
+                    .unwrap_or_else(|| panic!("{}: param {param} doesn't resolve to a count", def.key));
+                assert!(count >= 2, "{}: resolved to {count} channels", def.key);
+            }
+            // Only a mono input can be narrowed to one channel of a wider document; a stereo-
+            // or multichannel-input process planned against a document too narrow is refused,
+            // which is what `cdp_params_blocker` reports.
+            let width = match def.input_channels {
+                Some(InputChannels::Mono) => 1,
+                Some(InputChannels::Stereo) => 2,
+                _ => 6,
+            };
+            assert!(
+                def.input_source_channels(width).is_some_and(|r| r.is_ok()),
+                "{}: rejects the width it declares",
+                def.key
+            );
+        }
+        assert!(seen >= 11, "expected the multichannel batch to be present, found {seen}");
     }
 
     #[test]
@@ -4441,3 +4612,4 @@ mod tests {
         assert!(reason.contains("unit sphere"), "{reason}");
     }
 }
+

@@ -20160,3 +20160,1432 @@ description = "Measure and correct each channel's DC offset on its own, instead 
 automatable = false
 kind = "toggle"
 default = false
+
+# ---- Multichannel batch 1 (2026-08-03) --------------------------------------------------
+# The MULTICHANNEL family, excluded until now for one reason repeated verbatim across this
+# file, `CDP-Release8-TODO.md` and `group.rs`: "this app's UI/audio path is stereo-focused and
+# untested beyond 2 channels". That premise stopped being true when multichannel documents
+# became first-class (30+ channel display, fold-down playback, Remove Empty Channels, Export
+# Channels), so the exclusion is lifted here rather than re-argued.
+#
+# What had to be built for these, and why the existing fields could not carry them:
+#
+#  * `input_channels` — every binary in this family HARD-REJECTS the wrong input width, so
+#    neither setting of `stereo_native` works: `false` lane-splits (running a mono->8-channel
+#    spatialiser once per input channel, then reading channel 0 of each 8-channel result) and
+#    `true` hands over the whole document, which the binary refuses. Verified, each exiting
+#    255: mchanrev "File stereo.wav is not of correct type (must be mono)"; crumble "is not a
+#    mono soundfile"; mchshred 1 "does not have correct number of channels for this mode";
+#    spin stereo 2 on mono "must be stereo"; pairex on stereo "must have more than two
+#    channels".
+#  * `output_channels` — OUTCHANS is an ordinary parameter of the run, so the width is neither
+#    the input's nor a constant, and `output_is_stereo: bool` could only ever say "2".
+#    Under-counting `dest_channels` does not error; it silently drops every channel past the
+#    last entry, i.e. the whole spatialisation.
+#  * `output_new_buffer` — the result becomes its own buffer instead of being spliced. Every
+#    process here changes the channel count, and splicing would rewrite the SOURCE document's
+#    width: spatialising a mono take would turn the take itself into an 8-channel buffer.
+#
+# Every range below is the real binary's own, read back from its "Parameter[N] Value (x) out
+# of range (lo to hi)" refusal rather than from the usage text (which gives ranges for barely
+# any of them). Ranges confirmed to track the input's duration were re-probed against a 2s and
+# a 4s file and are declared `capped_at_input_duration`; ranges that did NOT move (mchanpan's
+# Min Silence, every CENTRE/SPREAD) are declared literally, static as the binary has them.
+#
+# Deliberately NOT added, with reasons:
+#
+#  * `mchiter` (both modes) — writes a valid output file and then aborts: "double free or
+#    corruption (out)", exit 134 (SIGABRT), reproduced on both modes with plain in-range
+#    parameters. `cdp::runner` reads the exit code, so this would surface as a failed run
+#    every time. A real binary bug, same class as `filter iterated`'s readsamps_with_wrap
+#    crash noted above -- not a cataloging mistake.
+#  * `mchanpan` modes 1, 2, 5, 6, 7, 10 — each needs a datafile (pan-data triples, a switch
+#    list) or an "antiphon" channel-group string like "abcd-efgh"; no `ParamKind` models
+#    either yet. Modes 3/4/9 are the plain-parameter ones and are here.
+#  * `mchstereo`, `madrid`, `texmchan` — variadic-input, so they need the picker plus (for
+#    texmchan) a harmonic-field notedata file. Verified to run and produce 8-channel output;
+#    left for a variadic follow-up rather than mixed into this batch.
+#  * `panorama`, `spacedesign` — emit control/mixfiles, not audio; they would need a second
+#    `newmix multichan` step to render. `abfpan`/`abfpan2`/`abfdcode`/`fmdcode` are Ambisonic
+#    B-format encode/decode pairs, which this app has no notion of. `interlx`/`channelx`/
+#    `njoin` are file-level utilities that duplicate Export Channels and the Buffers panel.
+
+# Writes plain 16-bit PCM input, the `requires_simple_wav_input` route `rmverb` established.
+# Not the extensible header itself: the difference is ONE field. hound stamps a mono
+# WAVE_FORMAT_EXTENSIBLE file with dwChannelMask = 1 (SPEAKER_FRONT_LEFT); a hand-built file
+# identical but for mask = 4 (FRONT_CENTER) runs clean through the same binary with the same
+# argv. Given mask 1, every mono-input member of this family fails at the point it creates its
+# multichannel output -- "ERROR: INVALID DATA / Cannot open output file out.wav" -- which reads
+# as a bad parameter and is nothing of the kind. 16-bit input sidesteps it because that is
+# exactly when hound emits the simple, non-extensible `fmt ` chunk with no mask at all.
+# Confirmed the other way too: the multichannel- and stereo-input members below (pairex,
+# mchshred mode 2, spin stereo 2/3) take hound's float32 files without complaint and so do NOT
+# set this -- the fault is specific to the mono mask, not to the family.
+
+[[process]]
+key = "mchanrev_mchanrev"
+bin = "mchanrev"
+subprog = "mchanrev"
+title = "Mchanrev (Multichannel Reverb)"
+category = "time"
+subcategory = "space"
+short_description = "Scatters echoes of a mono source across a multichannel space"
+description = """
+Builds a reverb from discrete "stadium" echoes and spreads them across an output space of \
+up to 16 channels, centred where you place them. Takes the first channel of the selection \
+as its source; the result opens as a new buffer, leaving the selection unchanged.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+input_channels = "mono"
+output_channels = { from_param = { param = 4 } }
+output_new_buffer = true
+requires_simple_wav_input = true
+
+[[process.params]]
+name = "Gain"
+description = "Gain applied to the input signal before the echoes are built"
+automatable = false
+kind = "number"
+min = 0.001
+max = 1.0
+step = 0.001
+default = 0.645654
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Roll-off"
+description = "Rate at which level is lost across the stadium — lower values carry the echoes further"
+automatable = false
+kind = "number"
+min = 0.001
+max = 1.0
+step = 0.001
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Size"
+description = "Multiplies the average time between echoes (whose base is 0.1 seconds), so larger values give a bigger space"
+automatable = false
+kind = "number"
+min = 0.001
+max = 100.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Echo Count"
+description = "Number of stadium echoes to generate"
+automatable = false
+kind = "number"
+min = 2.0
+max = 1000.0
+step = 1.0
+default = 1000.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Output Channels"
+description = "Number of channels in the result — it opens as a new buffer with this many channels"
+automatable = false
+kind = "number"
+min = 2.0
+max = 16.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Centre"
+description = "Centre position of the reverberated image among the output channels — fractional values sit between two channels, and values below 1 lie between the last channel and the first"
+automatable = false
+kind = "number"
+min = 0.0
+max = 16.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Spread"
+description = "How many output channels the echoes are spread over (may be fractional)"
+automatable = false
+kind = "number"
+min = 2.0
+max = 16.0
+step = 0.1
+default = 4.0
+exponential = false
+scale = "plain"
+
+# `mchanpan` modes 3, 4 and 9 — the three that take plain parameters. Every other mode needs a
+# datafile or an "antiphon" channel-group string (see the batch header). Note the binary's own
+# usage text labels modes 9's STARTCHAN and SPEED as belonging to "mode 8", which does not
+# exist in the mode list it prints directly above; the parameters are mode 9's and the ranges
+# below were read off mode 9 itself.
+#
+# CENTRE, SPREAD and DEPTH are declared exactly as the binary enforces them (0-8, 0-16, 0-8)
+# and NOT scaled to the chosen Output Channels, because they are genuinely static: re-probed at
+# outchans 4, 8 and 16, every one of those bounds was identical.
+
+[[process]]
+key = "mchanpan_mchanpan_4"
+bin = "mchanpan"
+subprog = "mchanpan"
+mode = "4"
+title = "Mchanpan Spread From Centre"
+category = "time"
+subcategory = "space"
+short_description = "Spreads a mono source gradually outward from a centre channel"
+description = """
+Spreads the source out from a centre position across the surrounding channels, the image \
+widening as it goes. Takes the first channel of the selection as its source; the result \
+opens as a new buffer.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+input_channels = "mono"
+output_channels = { from_param = { param = 0 } }
+output_new_buffer = true
+requires_simple_wav_input = true
+
+[[process.params]]
+name = "Output Channels"
+description = "Number of channels in the result — it opens as a new buffer with this many channels"
+automatable = false
+kind = "number"
+min = 3.0
+max = 16.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Centre"
+description = "Output channel the spread starts from — fractional values sit between two channels"
+automatable = true
+kind = "number"
+min = 0.0
+max = 8.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Spread"
+description = "How far the image opens out from the centre"
+automatable = true
+kind = "number"
+min = 0.0
+max = 16.0
+step = 0.1
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Depth"
+description = "Depth of the spread — how strongly the outer channels are driven"
+automatable = true
+kind = "number"
+min = 0.0
+max = 8.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Roll-off"
+description = "Rate at which level falls away toward the edges of the spread"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "mchanpan_mchanpan_3"
+bin = "mchanpan"
+subprog = "mchanpan"
+mode = "3"
+title = "Mchanpan Spread Events Stepwise"
+category = "time"
+subcategory = "space"
+short_description = "Steps silence-separated events from one set of channels to another"
+description = """
+Splits the source into events at its silences and steps them, event by event, from one set \
+of channels to another — so a phrase migrates across the space as it plays rather than \
+gliding. Takes the first channel of the selection; the result opens as a new buffer.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+input_channels = "mono"
+output_channels = { from_param = { param = 0 } }
+output_new_buffer = true
+requires_simple_wav_input = true
+
+[[process.params]]
+name = "Output Channels"
+description = "Number of channels in the result — it opens as a new buffer with this many channels"
+automatable = false
+kind = "number"
+min = 3.0
+max = 16.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Centre"
+description = "Output channel the spread starts from — fractional values sit between two channels"
+automatable = true
+kind = "number"
+min = 0.0
+max = 8.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Spread"
+description = "How far the image opens out from the centre"
+automatable = true
+kind = "number"
+min = 0.0
+max = 16.0
+step = 0.1
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Depth"
+description = "Depth of the spread — how strongly the outer channels are driven"
+automatable = true
+kind = "number"
+min = 0.0
+max = 8.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Roll-off"
+description = "Rate at which level falls away toward the edges of the spread"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+# Not duration-scaled: re-probed against a 2s and a 4s file, this bound was 0.045-743 both
+# times. Declared 0.05-743 to keep the catalog's bounds free of float noise (the binary's own
+# 0.045351 is a sample-count division), which only ever narrows what CDP would have accepted.
+[[process.params]]
+name = "Min Silence"
+description = "Shortest silence (seconds) that counts as a gap between two events"
+automatable = false
+kind = "number"
+min = 0.05
+max = 743.0
+step = 0.01
+default = 0.1
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Keep Events In Place"
+description = "Hold each event at its own start time instead of stepping onward through the channel sets"
+flag = "-s"
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "mchanpan_mchanpan_9"
+bin = "mchanpan"
+subprog = "mchanpan"
+mode = "9"
+title = "Mchanpan Rotate"
+category = "time"
+subcategory = "space"
+short_description = "Rotates a mono source continuously around a multichannel space"
+description = """
+Spins the source around the output channels at a set speed, starting from a channel you \
+choose. Takes the first channel of the selection as its source; the result opens as a new \
+buffer.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+input_channels = "mono"
+output_channels = { from_param = { param = 0 } }
+output_new_buffer = true
+requires_simple_wav_input = true
+
+[[process.params]]
+name = "Output Channels"
+description = "Number of channels in the result — it opens as a new buffer with this many channels"
+automatable = false
+kind = "number"
+min = 3.0
+max = 16.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Start Channel"
+description = "Channel the rotation begins from"
+automatable = false
+kind = "number"
+min = 0.0
+max = 16.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Speed"
+description = "Rotation speed in revolutions per second"
+automatable = true
+kind = "number"
+min = 0.0
+max = 64.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+# CDP's own wording: at focus 1.0 a position lands entirely in one speaker; at 0.9, nine
+# tenths of it does and the rest goes to the two adjacent speakers.
+[[process.params]]
+name = "Focus"
+description = "How tightly the sound sits in one channel — 1.0 puts it entirely in that channel, lower values bleed into the two adjacent ones"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Anticlockwise"
+description = "Rotate anticlockwise instead of clockwise"
+flag = "-a"
+automatable = false
+kind = "toggle"
+default = false
+
+# `mchshred` — the one binary here with a mode on each side of the input-width question, which
+# is exactly why both are cataloged: mode 1 is `input_channels = "mono"` and widens to its own
+# OUTCHANS, mode 2 is `input_channels = "multichannel"` and preserves the width it was given
+# (no `output_channels` at all, so `plan_wav` falls back to the source channels). Between them
+# they exercise both new input arities and both output shapes.
+
+[[process]]
+key = "mchshred_shred_1"
+bin = "mchshred"
+subprog = "shred"
+mode = "1"
+title = "Mchshred to Multichannel"
+category = "time"
+subcategory = "texture"
+short_description = "Cuts a mono source into random segments and scatters them across channels"
+description = """
+Cuts the sound into random chunks and reassembles them in a random order within the \
+original duration, distributing the segments over a random permutation of the output \
+channels. Repeating the process shreds the already-shredded result. Takes the first channel \
+of the selection; the result opens as a new buffer.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+input_channels = "mono"
+output_channels = { from_param = { param = 3 } }
+output_new_buffer = true
+requires_simple_wav_input = true
+
+[[process.params]]
+name = "Repeats"
+description = "How many times to shred — each pass shreds the previous pass's result"
+automatable = false
+kind = "number"
+min = 1.0
+max = 1000.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+integer = true
+
+# The binary's ceiling here is half the source duration (probed at 1.0 on a 2s file and
+# 2.0 on a 4s one), which `capped_at_input_duration` cannot express — it clamps to the whole
+# duration. Left at the wider clamp deliberately: a value between half and full duration is
+# refused by CDP with its own range message naming the real ceiling, which is more useful than
+# a silently halved slider on a process whose whole point is chunk length.
+[[process.params]]
+name = "Chunk Length"
+description = "Average length of the chunks to cut and permute, in seconds (must be under half the selection's duration)"
+automatable = false
+kind = "number"
+min = 0.02
+max = 30.0
+step = 0.01
+default = 0.1
+exponential = true
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Scatter"
+description = "Randomisation of where the cuts fall — 0 reorders the chunks without shredding them"
+automatable = false
+kind = "number"
+min = 0.0
+max = 8.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Output Channels"
+description = "Number of channels in the result — it opens as a new buffer with this many channels"
+automatable = false
+kind = "number"
+min = 2.0
+max = 16.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process]]
+key = "mchshred_shred_2"
+bin = "mchshred"
+subprog = "shred"
+mode = "2"
+title = "Mchshred Multichannel Source"
+category = "time"
+subcategory = "texture"
+short_description = "Shreds an already-multichannel sound, keeping its channel count"
+description = """
+Cuts an already-multichannel sound into random chunks and reassembles them in a random \
+order within the original duration, redistributing the segments across the channels it \
+already has. Needs a selection of more than two channels; the result opens as a new buffer \
+of the same width.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+input_channels = "multichannel"
+output_new_buffer = true
+
+[[process.params]]
+name = "Repeats"
+description = "How many times to shred — each pass shreds the previous pass's result"
+automatable = false
+kind = "number"
+min = 1.0
+max = 1000.0
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Chunk Length"
+description = "Average length of the chunks to cut and permute, in seconds (must be under half the selection's duration)"
+automatable = false
+kind = "number"
+min = 0.02
+max = 30.0
+step = 0.01
+default = 0.1
+exponential = true
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Scatter"
+description = "Randomisation of where the cuts fall — 0 reorders the chunks without shredding them"
+automatable = false
+kind = "number"
+min = 0.0
+max = 8.0
+step = 0.1
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "mchzig_zag_1"
+bin = "mchzig"
+subprog = "zag"
+mode = "1"
+title = "Mchzig Random Zigzag"
+category = "time"
+subcategory = "texture"
+short_description = "Reads a mono source back and forth, panning randomly between channels"
+description = """
+Plays the sound forwards and backwards between randomly chosen timepoints inside a window \
+you set, panning to a different output channel at every turn. Takes the first channel of \
+the selection; the result opens as a new buffer.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+input_channels = "mono"
+output_channels = { from_param = { param = 4 } }
+output_new_buffer = true
+requires_simple_wav_input = true
+
+[[process.params]]
+name = "Zigzag Start"
+description = "Start of the region of the source the zigzagging moves within, in seconds"
+automatable = false
+kind = "number"
+min = 0.0
+max = 3600.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Zigzag End"
+description = "End of the region of the source the zigzagging moves within, in seconds"
+automatable = false
+kind = "number"
+min = 0.05
+max = 3600.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "capped_at_input_duration"
+
+# CDP's floor for this is the *input's own duration* — a shorter output is refused outright.
+# `output_duration_seconds` carries no floor, so a too-short value surfaces as CDP's own range
+# message; the default is generous enough that the usual case never meets it.
+[[process.params]]
+name = "Output Duration"
+description = "Total duration of the result, in seconds — must be at least as long as the selection"
+automatable = false
+kind = "number"
+min = 1.0
+max = 3600.0
+step = 0.1
+default = 8.0
+exponential = true
+scale = "output_duration_seconds"
+
+[[process.params]]
+name = "Min Zigzag"
+description = "Shortest acceptable time between successive turning points, in seconds"
+automatable = false
+kind = "number"
+min = 0.05
+max = 3600.0
+step = 0.01
+default = 0.2
+exponential = true
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Output Channels"
+description = "Number of channels in the result — it opens as a new buffer with this many channels"
+automatable = false
+kind = "number"
+min = 2.0
+max = 16.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Splice Length"
+description = "Length of the splices at each turning point, in milliseconds"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 1.0
+max = 500.0
+step = 1.0
+default = 25.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Seed"
+description = "Same seed gives the same zigzag sequence on a re-run; 0 differs every time"
+flag = "-r"
+automatable = false
+kind = "number"
+min = 0.0
+max = 256.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Avoid Adjacent Channels"
+description = "Never zigzag between neighbouring channels (needs 5 or more output channels)"
+flag = "-a"
+automatable = false
+kind = "toggle"
+default = false
+
+# `crumble`'s Start Time and image-section durations are percentages of the selection, not
+# seconds — the one place in this batch where a scale was chosen for a cross-field reason
+# rather than copied from the binary's own range. CDP enforces that their SUM fits inside the
+# source ("Sum of durations of splitting processes extends beyond end of input file"), and
+# `capped_at_input_duration` clamps each field independently, so three fields each individually
+# legal could still overrun together — which is exactly what the smoke test hit. As percentages
+# the defaults sum to 50% (mode 1) and 70% (mode 2) and cannot overrun whatever the selection's
+# length turns out to be.
+#
+# `crumble` — the only entries here using `output_channels = { fixed = ... }`: the mode itself
+# fixes the width (mode 1 always writes 8 channels, mode 2 always 16), with no parameter to
+# read it from. Mode 2 differs from mode 1 only by a third duration section, so the two entries
+# are otherwise identical.
+
+[[process]]
+key = "crumble_sound_1"
+bin = "crumble"
+subprog = "sound"
+mode = "1"
+title = "Crumble Sound (8 Channels)"
+category = "time"
+subcategory = "texture"
+short_description = "Projects a mono source over 8 channels, then crumbles it into ever-smaller groups"
+description = """
+Starts with the source on every channel, then segments it and distributes the segments over \
+smaller and smaller groups of channels — first two images, then four — so the sound audibly \
+falls apart across the space. Takes the first channel of the selection; the result opens as \
+a new 8-channel buffer.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+input_channels = "mono"
+output_channels = { fixed = { count = 8 } }
+output_new_buffer = true
+requires_simple_wav_input = true
+
+[[process.params]]
+name = "Start Time"
+description = "Time in the source at which the crumbling begins, as a percentage of the selection's duration"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "percent_of_input_duration"
+
+[[process.params]]
+name = "2-Image Duration"
+description = "Duration of the section in which the signal is split into 2 images, as a percentage of the selection's duration"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 25.0
+exponential = false
+scale = "percent_of_input_duration"
+
+[[process.params]]
+name = "4-Image Duration"
+description = "Duration of the section in which the signal is split into 4 images, as a percentage of the selection's duration"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 25.0
+exponential = false
+scale = "percent_of_input_duration"
+
+[[process.params]]
+name = "Orientation"
+description = "Channel the first split block starts from — the image splits into that channel plus its clockwise neighbours, and everything else"
+automatable = false
+kind = "number"
+min = 1.0
+max = 8.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Segment Size"
+description = "Average duration of the cut segments, in seconds"
+automatable = true
+kind = "number"
+min = 0.01
+max = 3600.0
+step = 0.01
+default = 0.1
+exponential = true
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Size Randomisation"
+description = "Randomises segment size — at 1.0 each is between half and one and a half times Segment Size"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Source Scatter"
+description = "Randomises where in the source the next segment is cut from — time always advances"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Output Scatter"
+description = "Randomises where in the result each segment is placed — time always advances"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Output Stretch"
+description = "Multiplies the step to the next segment placement — above 1 this opens silent gaps"
+automatable = true
+kind = "number"
+min = 1.0
+max = 64.0
+step = 0.1
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Scatter"
+description = "Random pitch variation of the segments, in semitones either way"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Seed"
+description = "Same seed gives the same result on a re-run"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Splice Length"
+description = "Length of the splices cutting the segments, in milliseconds"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 1.0
+max = 500.0
+step = 1.0
+default = 15.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Tail Length"
+description = "Length of an exponential tail on each segment, in milliseconds"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 5000.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "crumble_sound_2"
+bin = "crumble"
+subprog = "sound"
+mode = "2"
+title = "Crumble Sound (16 Channels)"
+category = "time"
+subcategory = "texture"
+short_description = "Projects a mono source over 16 channels, then crumbles it into ever-smaller groups"
+description = """
+As the 8-channel mode, with one further stage: the signal splits into 2, then 4, then 8 \
+images before the segments are distributed. Takes the first channel of the selection; the \
+result opens as a new 16-channel buffer.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+input_channels = "mono"
+output_channels = { fixed = { count = 16 } }
+output_new_buffer = true
+requires_simple_wav_input = true
+
+[[process.params]]
+name = "Start Time"
+description = "Time in the source at which the crumbling begins, as a percentage of the selection's duration"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "percent_of_input_duration"
+
+[[process.params]]
+name = "2-Image Duration"
+description = "Duration of the section in which the signal is split into 2 images, as a percentage of the selection's duration"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 25.0
+exponential = false
+scale = "percent_of_input_duration"
+
+[[process.params]]
+name = "4-Image Duration"
+description = "Duration of the section in which the signal is split into 4 images, as a percentage of the selection's duration"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 25.0
+exponential = false
+scale = "percent_of_input_duration"
+
+[[process.params]]
+name = "8-Image Duration"
+description = "Duration of the section in which the signal is split into 8 images, as a percentage of the selection's duration"
+automatable = false
+kind = "number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 20.0
+exponential = false
+scale = "percent_of_input_duration"
+
+[[process.params]]
+name = "Orientation"
+description = "Channel the first split block starts from — the image splits into that channel plus its clockwise neighbours, and everything else"
+automatable = false
+kind = "number"
+min = 1.0
+max = 16.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Segment Size"
+description = "Average duration of the cut segments, in seconds"
+automatable = true
+kind = "number"
+min = 0.01
+max = 3600.0
+step = 0.01
+default = 0.1
+exponential = true
+scale = "capped_at_input_duration"
+
+[[process.params]]
+name = "Size Randomisation"
+description = "Randomises segment size — at 1.0 each is between half and one and a half times Segment Size"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Source Scatter"
+description = "Randomises where in the source the next segment is cut from — time always advances"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Output Scatter"
+description = "Randomises where in the result each segment is placed — time always advances"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Output Stretch"
+description = "Multiplies the step to the next segment placement — above 1 this opens silent gaps"
+automatable = true
+kind = "number"
+min = 1.0
+max = 64.0
+step = 0.1
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Pitch Scatter"
+description = "Random pitch variation of the segments, in semitones either way"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Seed"
+description = "Same seed gives the same result on a re-run"
+automatable = false
+kind = "number"
+min = 1.0
+max = 256.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Splice Length"
+description = "Length of the splices cutting the segments, in milliseconds"
+flag = "-s"
+automatable = false
+kind = "number"
+min = 1.0
+max = 500.0
+step = 1.0
+default = 15.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Tail Length"
+description = "Length of an exponential tail on each segment, in milliseconds"
+flag = "-t"
+automatable = true
+kind = "number"
+min = 0.0
+max = 5000.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+
+# `pairex` is the only entry here that NARROWS — more than two channels in, exactly two out.
+# It is also why `output_new_buffer` had to exist rather than the splice being taught to shrink:
+# `Document::insert_range` fills any channel the incoming data doesn't cover from channel 0, so
+# splicing a 2-channel result over an 8-channel document would copy channel 0 across channels
+# 2-7 rather than narrowing anything. A new buffer sidesteps that entirely.
+#
+# The channel pair is a single two-digit number, not two fields: CDP takes one argv token and
+# reads its digits as the two channel numbers (35 = channels 3 and 5). Its 12-87 range is the
+# binary's own and is only a crude outer bound — a pair naming a channel the file doesn't have
+# is refused by CDP with its own message.
+
+[[process]]
+key = "pairex_pairex"
+bin = "pairex"
+subprog = "pairex"
+title = "Pairex (Extract Channel Pair)"
+category = "time"
+subcategory = "utility"
+short_description = "Extracts any two channels of a multichannel sound as a stereo pair"
+description = """
+Pulls two channels out of a multichannel sound and writes them as a stereo file. The two \
+channels are given as a single two-digit number — 12 for channels 1 and 2, 35 for channels \
+3 and 5. Needs a selection of more than two channels; the result opens as a new stereo \
+buffer, leaving the source untouched.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = true
+input_channels = "multichannel"
+output_new_buffer = true
+
+[[process.params]]
+name = "Channel Pair"
+description = "The two channels to extract, as one two-digit number — 12 is channels 1 and 2, 35 is channels 3 and 5"
+automatable = false
+kind = "number"
+min = 12.0
+max = 87.0
+step = 1.0
+default = 12.0
+exponential = false
+scale = "plain"
+integer = true
+
+# `spin stereo` modes 2 and 3, the two that were excluded when mode 1 shipped ("modes 2/3 and
+# spin quad all produce more than 2 channels, same multichannel-out-of-scope call"). They are
+# the only entries here with `input_channels = "stereo"`: the binary refuses a mono source
+# outright ("File mono.wav is not of correct type (must be stereo)"), which is what
+# `cdp_params_blocker` now says before Apply rather than letting the run fail.
+#
+# Their Output Channels floor is 4, not 2 — the mode projects a three-channel-wide image, so
+# there is no valid stereo output and the mode cannot be squeezed back into mode 1's shape.
+# Buffer Expansion defaults to 4 for the same reason mode 1's does: too small a buffer for a
+# nonzero Doppler Shift makes the real binary report "CANNOT PROCEED".
+
+[[process]]
+key = "spin_stereo_2"
+bin = "spin"
+subprog = "stereo"
+mode = "2"
+title = "Spin Stereo to Multichannel (Outer Centre)"
+category = "time"
+subcategory = "space"
+short_description = "Spins a wide stereo image across a multichannel space, projecting centre through the outer channels"
+description = """
+Rotates a wide stereo image around a multichannel space, with an optional doppler \
+pitch-shift on the moving edges. When the spinning image crosses the centre, the outer \
+channels carry the centred image. Needs a stereo selection; the result opens as a new buffer.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+input_channels = "stereo"
+output_channels = { from_param = { param = 1 } }
+output_new_buffer = true
+
+[[process.params]]
+name = "Spin Rate"
+description = "Spin speed in cycles per second — positive spins clockwise (viewed from above), negative anticlockwise"
+automatable = true
+kind = "number"
+min = -100.0
+max = 100.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Output Channels"
+description = "Number of channels in the result — at least 4, since the mode projects a three-channel-wide image"
+automatable = false
+kind = "number"
+min = 4.0
+max = 16.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Centre Channel"
+description = "Output channel carrying the centre of the spinning image"
+automatable = false
+kind = "number"
+min = 1.0
+max = 16.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Doppler Shift"
+description = "Maximum doppler pitchshift on the moving edges, in semitones"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Buffer Expansion"
+description = "Expands internal buffers by this factor — raise this if a larger Doppler Shift causes a \"CANNOT PROCEED\" memory error"
+automatable = false
+kind = "number"
+min = 1.0
+max = 64.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Boost"
+description = "Multiplicative level change as each edge passes through centre (one edge gets louder as the other gets quieter)"
+flag = "-b"
+automatable = true
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Attenuation"
+description = "Overall level attenuation as both edges pass through centre simultaneously"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Min Centre Level"
+description = "Minimum level on the centre speaker"
+flag = "-k"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max Centre Level"
+description = "Maximum level on the centre speaker"
+flag = "-c"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "spin_stereo_3"
+bin = "spin"
+subprog = "stereo"
+mode = "3"
+title = "Spin Stereo to Multichannel (Central Centre)"
+category = "time"
+subcategory = "space"
+short_description = "Spins a wide stereo image across a multichannel space, projecting centre through the central channel alone"
+description = """
+As the outer-centre mode, but when the spinning image crosses the centre it is projected \
+through the central channel alone rather than through the outer ones. Needs a stereo \
+selection; the result opens as a new buffer.
+"""
+input = "wav"
+output = "wav"
+stereo_native = false
+output_is_stereo = false
+input_channels = "stereo"
+output_channels = { from_param = { param = 1 } }
+output_new_buffer = true
+
+[[process.params]]
+name = "Spin Rate"
+description = "Spin speed in cycles per second — positive spins clockwise (viewed from above), negative anticlockwise"
+automatable = true
+kind = "number"
+min = -100.0
+max = 100.0
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Output Channels"
+description = "Number of channels in the result — at least 4, since the mode projects a three-channel-wide image"
+automatable = false
+kind = "number"
+min = 4.0
+max = 16.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Centre Channel"
+description = "Output channel carrying the centre of the spinning image"
+automatable = false
+kind = "number"
+min = 1.0
+max = 16.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Doppler Shift"
+description = "Maximum doppler pitchshift on the moving edges, in semitones"
+automatable = true
+kind = "number"
+min = 0.0
+max = 12.0
+step = 0.1
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Buffer Expansion"
+description = "Expands internal buffers by this factor — raise this if a larger Doppler Shift causes a \"CANNOT PROCEED\" memory error"
+automatable = false
+kind = "number"
+min = 1.0
+max = 64.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Boost"
+description = "Multiplicative level change as each edge passes through centre (one edge gets louder as the other gets quieter)"
+flag = "-b"
+automatable = true
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Attenuation"
+description = "Overall level attenuation as both edges pass through centre simultaneously"
+flag = "-a"
+automatable = true
+kind = "number"
+min = 0.1
+max = 10.0
+step = 0.01
+default = 1.0
+exponential = true
+scale = "plain"
+
+[[process.params]]
+name = "Min Centre Level"
+description = "Minimum level on the centre speaker"
+flag = "-k"
+automatable = true
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
