@@ -9,5 +9,6 @@
 
 pub mod driver;
 pub mod plan;
+pub mod rewrite;
 
 pub use plan::plan_praat_job;

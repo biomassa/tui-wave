@@ -10,8 +10,11 @@
 
 use std::path::{Path, PathBuf};
 
+use std::collections::BTreeMap;
+
 use super::driver::{driver_script, DriverArg, DriverError, DriverOptions};
-use crate::model::cdp::def::{Backend, IoKind, ParamKind, ParamValue, ProcessDef};
+use super::rewrite::Assignment;
+use crate::model::cdp::def::{Backend, IoKind, ParamDef, ParamKind, ParamValue, ProcessDef};
 
 /// Temp-file names inside the job's own directory. Fixed rather than generated: the directory
 /// is per-job and disposable, so there is nothing to collide with, and a fixed name makes a
@@ -19,6 +22,8 @@ use crate::model::cdp::def::{Backend, IoKind, ParamKind, ParamValue, ProcessDef}
 pub const OUTPUT_WAV: &str = "out.wav";
 pub const DRIVER_SCRIPT: &str = "driver.praat";
 pub const PICTURE_PNG: &str = "picture.png";
+/// Name the pause-rewritten copy of a plugin script is written under. See [`PauseRewrite`].
+pub const REWRITTEN_SCRIPT: &str = "process.praat";
 
 /// Everything the runner must materialise and execute for one Praat job.
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +47,58 @@ pub struct PraatPlannedJob {
     pub script_path: PathBuf,
     /// Short human-readable label for the progress display.
     pub label: String,
+    /// `Some` when this process's settings live in a Praat `beginPause` dialog, which cannot be
+    /// shown under `--run` (it segfaults). The runner writes a rewritten copy of the script into
+    /// the job's temp directory and the driver calls *that* instead. See `praat::rewrite`.
+    pub pause_rewrite: Option<PauseRewrite>,
+}
+
+/// What the runner must do to turn a pause-dialog script into a runnable one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PauseRewrite {
+    /// Name to write the rewritten copy under, inside the job's temp directory. Relative on
+    /// purpose: `runScript:` resolves a relative path against the *calling* script's folder,
+    /// and the generated driver sits in that same directory, so the two always agree however
+    /// the temp directory is named.
+    pub script_name: String,
+    /// Assignments replacing each pause block, keyed by the block's index in the original
+    /// script. A block with no entry is deleted outright — see `rewrite_pause_blocks`.
+    pub blocks: BTreeMap<usize, Vec<Assignment>>,
+}
+
+/// The assignment standing in for one hoisted param, or `None` for a param that travels as an
+/// ordinary `runScript:` argument.
+///
+/// Mirrors `argument_for`'s typing rules, with one addition that `argument_for` never needs: an
+/// `optionmenu` sets a numeric variable *and* a `$` one, because the scripts read both.
+fn assignment_for(param: &ParamDef, value: &ParamValue) -> Result<Assignment, PraatPlanError> {
+    let label = param.name.clone();
+    match (&param.kind, value) {
+        (ParamKind::Number { .. }, ParamValue::Number(v)) => {
+            Ok(Assignment::Number { label, value: *v })
+        }
+        (ParamKind::Toggle { .. }, ParamValue::Toggle(on)) => {
+            Ok(Assignment::Number { label, value: if *on { 1.0 } else { 0.0 } })
+        }
+        (ParamKind::Choice { options, .. }, ParamValue::Choice(i)) => options
+            .get(*i)
+            .map(|text| Assignment::Choice { label, index: *i + 1, text: text.clone() })
+            .ok_or_else(|| PraatPlanError::ChoiceOutOfRange {
+                param: param.name.clone(),
+                index: *i,
+                options: options.len(),
+            }),
+        (ParamKind::NumberList { separator, .. }, ParamValue::List(values)) => {
+            let joined: Vec<String> = values.iter().map(|v| format!("{v}")).collect();
+            Ok(Assignment::Text { label, value: joined.join(separator) })
+        }
+        (ParamKind::Number { .. }, _)
+        | (ParamKind::Toggle { .. }, _)
+        | (ParamKind::Choice { .. }, _) => {
+            Err(PraatPlanError::ParamTypeMismatch { param: param.name.clone() })
+        }
+        _ => Err(PraatPlanError::UnsupportedParamKind { param: param.name.clone() }),
+    }
 }
 
 /// Why a Praat job could not be planned.
@@ -150,17 +207,36 @@ pub fn plan_praat_job(
         });
     }
 
-    let args = values
-        .iter()
-        .enumerate()
-        .map(|(i, value)| argument_for(def, i, value))
-        .collect::<Result<Vec<_>, _>>()?;
+    // A hoisted param has no slot in the script's `form` -- the whole reason it lives in a
+    // pause dialog is that Praat allows only one form -- so it is assigned inside the rewritten
+    // copy instead of being passed positionally. Splitting here keeps the argument list exactly
+    // what the script's own form declares, which is what Praat matches by position and count.
+    let mut args = Vec::new();
+    let mut blocks: BTreeMap<usize, Vec<Assignment>> = BTreeMap::new();
+    for (i, value) in values.iter().enumerate() {
+        match def.params[i].praat_pause_block {
+            Some(block) => {
+                blocks.entry(block).or_default().push(assignment_for(&def.params[i], value)?)
+            }
+            None => args.push(argument_for(def, i, value)?),
+        }
+    }
 
     let script_path = audiotools_dir.join(&def.bin);
+    let pause_rewrite = (!blocks.is_empty()).then(|| PauseRewrite {
+        script_name: REWRITTEN_SCRIPT.to_string(),
+        blocks,
+    });
     let input_count = praat_input_count(def);
     let save_picture = draws_picture(def, values);
+    // The rewritten copy is a sibling of the driver, so a bare filename resolves — see
+    // `PauseRewrite::script_name`.
+    let called_script = match &pause_rewrite {
+        Some(rewrite) => rewrite.script_name.clone(),
+        None => script_path.to_string_lossy().into_owned(),
+    };
     let driver_source = driver_script(
-        &script_path.to_string_lossy(),
+        &called_script,
         &args,
         DriverOptions { input_count, save_picture },
     )
@@ -174,6 +250,7 @@ pub fn plan_praat_job(
         picture_name: save_picture.then(|| PICTURE_PNG.to_string()),
         script_path,
         label: def.title.clone(),
+        pause_rewrite,
     })
 }
 
@@ -277,6 +354,7 @@ mod tests {
             list_is_time_sequence: false,
             before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
             range_scales_with_input_duration: false,
             default_from_dc_offset: false,
             rows_match_input_count: false,
@@ -547,5 +625,120 @@ mod tests {
             plan_praat_job(&def, &[], Path::new("/p")),
             Err(PraatPlanError::NotAPraatProcess)
         );
+    }
+}
+
+#[cfg(test)]
+mod pause_hoist_tests {
+    use super::*;
+    use crate::model::cdp::CdpCatalog;
+
+    fn checkout() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/praat-audiotools")
+    }
+
+    /// The whole point, end to end but without Praat: take a real catalog entry, plan it with
+    /// real values, apply the rewrite to the real script, and check the values are *in* the
+    /// script that would run. A rewrite that dropped them would still exit 0 and still produce
+    /// audio — just the default sound every time — so the smoke test cannot catch this.
+    #[test]
+    fn a_hoisted_value_reaches_the_script_that_will_run() {
+        let Ok(source) =
+            std::fs::read_to_string(checkout().join("Distortion/Sidechain_Feedback_VCA.praat"))
+        else {
+            return; // submodule not initialised
+        };
+        let (catalog, _) = CdpCatalog::load(None);
+        let def = catalog.find("praat_distortion_sidechain_feedback_vca").expect("entry exists");
+
+        // Defaults everywhere, except the two hoisted fields set to something distinctive.
+        let mut values: Vec<ParamValue> =
+            def.params.iter().map(|p| p.kind.default_value()).collect();
+        let gain = def.params.iter().position(|p| p.name == "Output_Gain").expect("Output_Gain");
+        let mode = def.params.iter().position(|p| p.name == "Spatial_Mode").expect("Spatial_Mode");
+        values[gain] = ParamValue::Number(0.375);
+        values[mode] = ParamValue::Choice(3); // "Binaural", the 4th option
+
+        assert!(
+            def.params[gain].praat_pause_block.is_some(),
+            "Output_Gain must be a hoisted param, or this test proves nothing"
+        );
+
+        let job = plan_praat_job(def, &values, &checkout()).expect("plans");
+        let rewrite = job.pause_rewrite.as_ref().expect("this entry rewrites");
+        let script = crate::model::praat::rewrite::rewrite_pause_blocks(&source, &rewrite.blocks)
+            .expect("rewrites");
+
+        // The exact variable names the script reads further down — note `output_Gain` keeps its
+        // capital G, and the optionmenu sets both forms.
+        assert!(script.contains("output_Gain = 0.375"), "the typed gain must reach the script");
+        assert!(script.contains("spatial_Mode = 4"));
+        assert!(script.contains("spatial_Mode$ = \"Binaural\""));
+
+        // A hoisted param must NOT also be passed as a runScript: argument — the script's form
+        // has no slot for it, and Praat matches arguments by position and count.
+        let form_params = def.params.iter().filter(|p| p.praat_pause_block.is_none()).count();
+        assert_eq!(
+            job.driver_source.matches(", ").count() >= form_params,
+            true,
+            "driver should carry the form's params only"
+        );
+        assert!(
+            !job.driver_source.contains("0.375"),
+            "a hoisted value must travel in the script, not on the argument list"
+        );
+    }
+
+    /// The nine split entries differ in exactly the way they should: each pins `algorithm$` to
+    /// its own algorithm, which is what every one of the script's `if algorithm$ = "…"` guards
+    /// tests.
+    #[test]
+    fn each_convolver_variant_pins_its_own_algorithm() {
+        let Ok(source) =
+            std::fs::read_to_string(checkout().join("Reverb/Universal Convolution Generator.praat"))
+        else {
+            return;
+        };
+        let (catalog, _) = CdpCatalog::load(None);
+        let variants: Vec<_> = catalog
+            .processes
+            .iter()
+            .filter(|p| p.key.starts_with("praat_reverb_universal_convolution_generator"))
+            .collect();
+        assert_eq!(variants.len(), 9, "one entry per algorithm");
+
+        for def in variants {
+            let values: Vec<ParamValue> =
+                def.params.iter().map(|p| p.kind.default_value()).collect();
+            let job = plan_praat_job(def, &values, &checkout()).expect("plans");
+            let rewrite = job.pause_rewrite.as_ref().expect("rewrites");
+            let script =
+                crate::model::praat::rewrite::rewrite_pause_blocks(&source, &rewrite.blocks)
+                    .expect("rewrites");
+            // Read from the entry's own locked Algorithm choice, not parsed out of the title:
+            // one of the algorithms is literally "Fibonacci (Mono)", so splitting the title on
+            // its parentheses picks up "Mono".
+            let algorithm = def
+                .params
+                .iter()
+                .find(|p| p.name == "Algorithm")
+                .expect("every variant keeps its Algorithm param");
+            let ParamKind::Choice { options, .. } = &algorithm.kind else {
+                panic!("{}: Algorithm must stay a choice", def.key)
+            };
+            assert_eq!(options.len(), 1, "{}: locked to exactly one algorithm", def.key);
+            let label = &options[0];
+            assert!(
+                script.contains(&format!("algorithm$ = \"{label}\"")),
+                "{}: must pin algorithm$ to {label:?}",
+                def.key
+            );
+            // This script declares no `form`, so nothing travels on the argument list at all.
+            assert!(
+                job.driver_source.contains(&format!("runScript: \"{REWRITTEN_SCRIPT}\"\n")),
+                "{}: must call the rewritten copy with no arguments",
+                def.key
+            );
+        }
     }
 }

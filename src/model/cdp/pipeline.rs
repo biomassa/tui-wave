@@ -2605,6 +2605,7 @@ mod tests {
             list_is_time_sequence: false,
             before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
             kind: ParamKind::Number { min, max, step: 1.0, default, exponential: false, scale, integer: false },
         }
     }
@@ -3085,6 +3086,7 @@ mod tests {
                 list_is_time_sequence: false,
                 before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
                 kind: ParamKind::Toggle { default: auto_gain_default },
             },
             ParamDef {
@@ -3100,6 +3102,7 @@ mod tests {
                 list_is_time_sequence: false,
                 before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
                 kind: ParamKind::Toggle { default: false },
             },
         ];
@@ -3224,6 +3227,7 @@ mod tests {
                 list_is_time_sequence: false,
                 before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
                 kind: ParamKind::FilePath { extension: "matrix".into() },
             },
             ParamDef {
@@ -3239,6 +3243,7 @@ mod tests {
                 list_is_time_sequence: false,
                 before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
                 kind: ParamKind::Toggle { default: auto_gain_default },
             },
             ParamDef {
@@ -3254,6 +3259,7 @@ mod tests {
                 list_is_time_sequence: false,
                 before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
                 kind: ParamKind::Toggle { default: false },
             },
         ];
@@ -3663,6 +3669,7 @@ mod tests {
                 list_is_time_sequence: false,
             before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
                 kind: ParamKind::Toggle { default: false },
             },
             ParamDef {
@@ -3678,6 +3685,7 @@ mod tests {
                 list_is_time_sequence: false,
             before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
                 kind: ParamKind::Choice { options: vec!["44100".into(), "48000".into()], default: 0 },
             },
         ];
@@ -3908,6 +3916,7 @@ mod tests {
             list_is_time_sequence: false,
             before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
             kind: ParamKind::Number {
                 min: 0.0,
                 max: 2.0,
@@ -4519,6 +4528,7 @@ mod tests {
             list_is_time_sequence: false,
             before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
             kind: ParamKind::CrystalVdat,
         }];
         def
