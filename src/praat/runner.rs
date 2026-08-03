@@ -933,14 +933,57 @@ mod tests {
         let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
         let (channels, sample_rate) = smoke_fixture();
 
+        // A folder of real sounds for `ParamKind::FolderPath` params, which have no catalog
+        // default because there is no sensible directory to invent. Leaving one empty is not a
+        // neutral choice: the scripts that take one fall back to Praat's `chooseFolder$`, which
+        // under `--run` opens a window and **segfaults**, so the sweep would take Praat down
+        // three times per run and report it as an unexplained non-zero exit. Seeding is also
+        // the only way these processes get covered at all.
+        let corpus = state.join("corpus");
+        std::fs::create_dir_all(&corpus).expect("corpus dir");
+        for i in 0..6 {
+            let doc = Document {
+                channels: vec![channels[0]
+                    .iter()
+                    .enumerate()
+                    .map(|(n, s)| s * (1.0 + n as f32 * 0.0001 * (i + 1) as f32).sin())
+                    .collect()],
+                sample_rate,
+                ..Default::default()
+            };
+            save_wav_with(&doc, &corpus.join(format!("clip{i}.wav")), BitDepth::Int16, false)
+                .expect("corpus clip");
+        }
+        let corpus_path = corpus.to_string_lossy().into_owned();
+
         let mut failures: Vec<String> = Vec::new();
         let mut ran = 0usize;
-        for def in catalog
+        let total = catalog
             .processes
             .iter()
             .filter(|d| d.backend() == crate::model::cdp::def::Backend::Praat)
+            .count();
+        for (index, def) in catalog
+            .processes
+            .iter()
+            .filter(|d| d.backend() == crate::model::cdp::def::Backend::Praat)
+            .enumerate()
         {
-            let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+            let values: Vec<_> = def
+                .params
+                .iter()
+                .map(|p| match p.kind {
+                    crate::model::cdp::ParamKind::FolderPath => {
+                        crate::model::cdp::ParamValue::Text(corpus_path.clone())
+                    }
+                    _ => p.kind.default_value(),
+                })
+                .collect();
+            // Printed *before* the run, not after, and that ordering is the point: 32 of these
+            // scripts call `Play` unconditionally, so the sweep audibly plays audio and there
+            // was no way to tell which process was responsible. stderr is unbuffered, so the
+            // name is on screen before the sound starts.
+            eprintln!("[{:>3}/{total}] {}", index + 1, def.key);
             let planned = match crate::model::praat::plan_praat_job(def, &values, &checkout) {
                 Ok(planned) => planned,
                 Err(err) => {

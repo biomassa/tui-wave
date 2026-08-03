@@ -16,6 +16,23 @@
   (Accelerando, Euclidean Rhythm, Golden Angle Drift…), each showing only that algorithm's own
   settings rather than all nine sets at once.
 
+- **14 more praatAudioTools processes**, and the last category of exclusions is now empty. These
+  had a text field the catalog could not represent — but most of those fields were never prose:
+
+  Five spatialisation values that were packed into one string (`h0=1.2 v0=6.0 grav=9.8 …`) are
+  now labelled number fields you can nudge, in **Physics-Based Stereo Dynamics** and **DBAP with
+  Movement Control**. Folder fields get a **file browser** (`b` to open; Enter walks into a
+  directory, `u` chooses the one you're in) in **Bayesian Drone Weaver**, **Gesture-Based Hard
+  Quantization**, **KL Divergence Corpus Resynthesis** and **Sound atom composer**. **SPEAR
+  Par-Text-Frame Format Parser** gets a file browser too, replacing a default that pointed at
+  its author's own desktop. The genuinely free-text ones — L-system rules, a logical
+  proposition, a note name, an output prefix, a Praat formula — get a plain typed field.
+
+- **A process built from a folder of sounds now opens a new buffer** instead of overwriting your
+  selection. Its material is that folder, so its length has nothing to do with what you had
+  selected, and splicing destroyed the audio it was launched from to make room for something
+  unrelated.
+
 - Fixed a test that compared byte offsets as though they were screen columns, so it passed or
   failed depending on whether the directory listing beside the dialog happened to contain a
   non-ASCII character.

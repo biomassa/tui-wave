@@ -778,6 +778,11 @@ fn plan_param(
         // write, no bytes to inject, unlike `FormantBufferRef` (see `ParamKind::FilePath`'s
         // doc comment). Just emit the path itself as the argv token.
         ParamValue::FilePath(path) => ParamPlan { arg: format_arg(&param.flag, path), deferred: None },
+        // Praat-only kinds. They reach here only if a hand-written user catalog puts one on a
+        // CDP process; the built-in CDP catalog has none, and a Praat job never comes through
+        // this planner at all (`model::praat::plan` handles those). Emitted as a plain token so
+        // such an entry behaves predictably rather than silently dropping the value.
+        ParamValue::Text(text) => ParamPlan { arg: format_arg(&param.flag, text), deferred: None },
         // `crystal rotate`'s two-section VDAT file (see `ParamKind::CrystalVdat`). Same
         // "extra text file in the temp dir, argv token is its filename" mechanism as every
         // other datafile kind; only the file's own layout is bespoke, and it's the one
@@ -2606,6 +2611,8 @@ mod tests {
             before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
             kind: ParamKind::Number { min, max, step: 1.0, default, exponential: false, scale, integer: false },
         }
     }
@@ -3087,6 +3094,8 @@ mod tests {
                 before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
                 kind: ParamKind::Toggle { default: auto_gain_default },
             },
             ParamDef {
@@ -3103,6 +3112,8 @@ mod tests {
                 before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
                 kind: ParamKind::Toggle { default: false },
             },
         ];
@@ -3228,6 +3239,8 @@ mod tests {
                 before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
                 kind: ParamKind::FilePath { extension: "matrix".into() },
             },
             ParamDef {
@@ -3244,6 +3257,8 @@ mod tests {
                 before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
                 kind: ParamKind::Toggle { default: auto_gain_default },
             },
             ParamDef {
@@ -3260,6 +3275,8 @@ mod tests {
                 before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
                 kind: ParamKind::Toggle { default: false },
             },
         ];
@@ -3670,6 +3687,8 @@ mod tests {
             before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
                 kind: ParamKind::Toggle { default: false },
             },
             ParamDef {
@@ -3686,6 +3705,8 @@ mod tests {
             before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
                 kind: ParamKind::Choice { options: vec!["44100".into(), "48000".into()], default: 0 },
             },
         ];
@@ -3917,6 +3938,8 @@ mod tests {
             before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
             kind: ParamKind::Number {
                 min: 0.0,
                 max: 2.0,
@@ -4529,6 +4552,8 @@ mod tests {
             before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
             kind: ParamKind::CrystalVdat,
         }];
         def

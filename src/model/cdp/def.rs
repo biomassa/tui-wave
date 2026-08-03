@@ -265,6 +265,10 @@ pub enum ParamValue {
     /// as CWD, but an absolute path works regardless of CWD), so there's no bytes-injection
     /// bypass needed: `plan_param` just emits this string as the argv token verbatim.
     FilePath(String),
+    /// Free text, typed by the user — a Praat `sentence`/`word`/`text` field whose content is
+    /// not a number list, a path, or anything else with a bounded editor. See
+    /// [`ParamKind::Text`].
+    Text(String),
     /// `crystal rotate`'s two-section VDAT datafile — see `ParamKind::CrystalVdat` and
     /// `CrystalVdat`'s own doc comments for the shape and why it isn't two separate params.
     CrystalVdat(CrystalVdat),
@@ -542,6 +546,30 @@ pub enum ParamKind {
     /// resolves to a real absolute path, which `ParamValue::FilePath` carries directly.
     /// `extension` (no leading dot) is what the picker filters to.
     FilePath { extension: String },
+    /// A Praat `sentence`/`word`/`text` field that genuinely holds free text.
+    ///
+    /// The converter tries much harder options first — a delimited number list becomes
+    /// [`ParamKind::NumberList`], a folder becomes [`ParamKind::FolderPath`] — because most of
+    /// these fields are not prose at all. What is left really is: an L-system's rewrite rules
+    /// (`Axiom` = `G`, `Rule_G` = `GSUN`), a logical proposition (`psi, phi, theta`), a note
+    /// name like `C#4`, an output filename prefix, and one Praat **formula** (`sin(1/x)`).
+    ///
+    /// That last one is worth knowing about: `Chaotic_Function_Generator` interpolates this
+    /// text into a Praat `Formula...` call, and Praat's formula language can read and write
+    /// files. It is the user's own machine and their own typed input, so this is not a sandbox
+    /// escape — but the param's description says plainly that the text is evaluated, so it is a
+    /// choice rather than a surprise.
+    Text { default: String },
+    /// A directory on disk, picked with the file browser rather than typed.
+    ///
+    /// Distinct from [`FilePath`] because the browser has to stop *at* a directory instead of
+    /// selecting a file inside it. The scripts that need one read a folder of sounds as
+    /// material — a corpus to resynthesize against, a bank of clips to weave — and several of
+    /// them fall back to Praat's own `chooseFolder$` dialog when the field is left blank, which
+    /// is a dialog this app cannot show (it is the same `beginPause`-class problem: it needs a
+    /// window). Supplying a path is therefore not a convenience but the thing that keeps the
+    /// script runnable.
+    FolderPath,
     /// A Praat `sentence` field that really holds a **delimited list of numbers**, edited as a
     /// list and joined back into one string on the way to the script.
     ///
@@ -619,6 +647,10 @@ impl ParamKind {
             // The script's own default list, which is a working configuration — unlike
             // `required_list`, which starts empty on purpose and blocks Apply until filled.
             ParamKind::NumberList { default, .. } => ParamValue::List(default.clone()),
+            ParamKind::Text { default } => ParamValue::Text(default.clone()),
+            // No sensible default directory exists to invent, and `cdp_validate_fields` blocks
+            // Apply until one is picked — same "never set" start as `FilePath`.
+            ParamKind::FolderPath => ParamValue::Text(String::new()),
             // One row, each column at its own default — mirrors how the UI seeds a
             // never-yet-configured table field (`App::open_cdp_table_editor`).
             ParamKind::Table { columns, .. } => {
@@ -792,6 +824,25 @@ pub struct ParamDef {
     /// entry never satisfies.
     #[serde(default)]
     pub praat_pause_block: Option<usize>,
+    /// `Some(field)` for a number split out of a Praat `key=value` field — `field` names the
+    /// script parameter the value rejoins, and [`key_value_key`](Self::key_value_key) is its key
+    /// inside it.
+    ///
+    /// Several spatialisation scripts pack a whole configuration into one `sentence`:
+    /// `h0=1.2 v0=6.0 grav=9.8 rest=0.75 bounces=8`. As one text field that is a string to
+    /// retype without typos, with no ranges, no defaults per value and no way to see what the
+    /// keys even are. Split, it is five labelled numbers.
+    ///
+    /// Rejoining is safe because the scripts read these with `extractNumber(field$, "key=")`,
+    /// which *searches* for the key rather than counting positions — so order and spacing carry
+    /// no meaning and the reassembled string need only contain each key once. Params of one
+    /// group are emitted consecutively by the converter and rejoin, in order, into a single
+    /// `runScript:` argument at the position of the first.
+    #[serde(default)]
+    pub key_value_group: Option<String>,
+    /// The key this value carries inside its [`key_value_group`](Self::key_value_group).
+    #[serde(default)]
+    pub key_value_key: Option<String>,
     /// True for a `Number` param whose real CDP-enforced range is a **multiple of the input's
     /// duration** rather than a fixed span of seconds. `min`/`max`/`default` are then read as
     /// multipliers, and `App::cdp_fields_for` turns them into absolute seconds against the
@@ -1285,6 +1336,8 @@ mod tests {
             before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
             kind: ParamKind::Number {
                 min: 2.0,
                 max: 64.0,
@@ -1349,6 +1402,8 @@ mod tests {
             before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
             kind: ParamKind::Toggle { default: false },
         };
         let choice = ParamDef {
@@ -1365,6 +1420,8 @@ mod tests {
             before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
             kind: ParamKind::Choice {
                 options: vec!["44100".into(), "48000".into()],
                 default: 0,
@@ -1425,6 +1482,8 @@ mod tests {
             before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
             kind: ParamKind::Table {
                 columns: vec![
                     TableColumn {
@@ -1516,6 +1575,8 @@ mod tests {
             before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
             kind: ParamKind::MarkerTimeList {
                 markers: vec!['a', 'b'],
                 min: 0.0,
@@ -1588,6 +1649,8 @@ mod tests {
             before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
             kind: ParamKind::HiliteBand {
                 lofrq: bounds("Lo Freq", 20.0, 20000.0, 200.0),
                 hifrq: bounds("Hi Freq", 20.0, 20000.0, 2000.0),
@@ -1647,6 +1710,8 @@ mod tests {
             before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
             kind: ParamKind::CrystalVdat,
         }
     }

@@ -109,6 +109,17 @@ GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
         "why": "beginPause 'Advanced Tape Physics' is guarded by Show_advanced_settings, "
                "which the script itself defaults to 0",
     },
+    # Both of these call `chooseFolder$` -- but only as a *fallback for a blank field*, and both
+    # say so in the same comment: "use the typed path, or fall back to a dialog when the field is
+    # left blank". The field is now a `ParamKind::FolderPath`, which `cdp_validate_fields` blocks
+    # Apply on until a folder is picked, so it can never arrive blank and the dialog can never be
+    # reached. That is an enforced precondition, not an assumption about user behaviour.
+    "AI & Adaptive/Bayesian_Drone_Weaver.praat": {
+        "why": "chooseFolder$ is a fallback for a blank Folder field, which is now unpickable-empty",
+    },
+    "AI & Adaptive/Gesture-Based_Hard_Quantization.praat": {
+        "why": "chooseFolder$ is a fallback for a blank Folder_path field, which is now unpickable-empty",
+    },
     # The only `View & Edit` here, and it sits under one option of one menu: pan mode 8 is a
     # two-pass "draw the pan curve by hand" workflow that opens a RealTier editor and asks the
     # user to come back. The other seven modes never touch it. Dropping that option leaves a
@@ -555,6 +566,12 @@ class Param:
     # the default entries parsed out of its form declaration.
     list_separator: str = ""
     list_default: list[float] = field(default_factory=list)
+    # kind == "text": the script's own declared default, verbatim.
+    text_default: str = ""
+    # Set for a number split out of a `key=value` field: which field it rejoins, and under which
+    # key. See KEY_VALUE_RE.
+    key_value_group: str = ""
+    key_value_key: str = ""
     # Index of the `beginPause` block this param was hoisted out of, in the *original* script's
     # source order. None for an ordinary `form` param, which travels as a runScript: argument.
     pause_block: int | None = None
@@ -714,6 +731,38 @@ def parse_fields(body: str) -> list[Param] | str:
                 separator, values = recognised
                 params.append(make_number_list(name, separator, values))
                 continue
+            pairs = parse_key_values(value_text)
+            if pairs:
+                for key, value in pairs:
+                    # Deliberately never inferred as integer, unlike a number list: a single
+                    # whole default says nothing about the field. `start_y=0.0` is a coordinate
+                    # that wants fractions, and reading it as an integer would silently forbid
+                    # them.
+                    params.append(Param(
+                        name=f"{name}_{key}",
+                        kind="number",
+                        default=value,
+                        integer=False,
+                        minimum=-math.inf,
+                        maximum=math.inf,
+                        step=0.01,
+                        key_value_group=name,
+                        key_value_key=key,
+                    ))
+                continue
+            if FOLDER_NAME_RE.search(name):
+                params.append(Param(name=name, kind="folder_path", default=0.0))
+                continue
+            if FILE_PATH_NAME_RE.search(name):
+                suffix = value_text.rsplit(".", 1)[-1].lower() if "." in value_text else ""
+                if suffix.isalnum() and 1 <= len(suffix) <= 5:
+                    params.append(Param(name=name, kind="file_path", default=0.0,
+                                        text_default=suffix))
+                    continue
+            # Everything left really is free text: an L-system rule, a note name, an output
+            # prefix, a Praat formula. It gets a plain typed field.
+            params.append(Param(name=name, kind="text", default=0.0, text_default=value_text))
+            continue
             # What is left really is free text -- a folder path, an L-system alphabet, a Praat
             # formula, an output-name prefix -- and has no bounded editor in this app yet.
             return f"parameter {name!r} is a free-text {keyword} field"
@@ -738,6 +787,85 @@ def parse_fields(body: str) -> list[Param] | str:
 # stays excluded until it is worth an explicit per-script override. Guessing there would turn
 # any large integer default into a list of digits.
 LIST_SEPARATORS = (", ", ",", " ", "_")
+
+# A `sentence` field naming a directory rather than holding prose. Matched on the parameter's
+# own name, which is how these scripts consistently label them (`Folder`, `Folder_path`,
+# `Corpus_A_folder`). Deliberately not `*_file`/`*_path` in general: `Reference_filename` names a
+# file *inside* the chosen folder and is ordinary text, and `File_path` on the SPEAR parser is a
+# single .txt whose picker filters by extension.
+FOLDER_NAME_RE = re.compile(r"(^|_)(folder|dir|directory)(_|$)", re.I)
+
+# A `sentence` field holding `key=value` pairs, which the receiving script picks apart with
+# Praat's `extractNumber(field$, "key=")`. Because `extractNumber` searches for the key rather
+# than counting positions, the pairs can be rebuilt in any order with any spacing -- so each key
+# can become its own numeric field in the dialog and be rejoined on the way out. That turns
+# `h0=1.2 v0=6.0 grav=9.8 rest=0.75 bounces=8` into five labelled numbers instead of one string
+# to retype without typos.
+#
+# Detection needs no per-script table: the default *is* the schema. Every token must be
+# `key=<number>`, which rejects `sin(1/x)`, `psi, phi, theta` and every other free-text field.
+KEY_VALUE_RE = re.compile(r"^[A-Za-z_]\w*=-?\d+(?:\.\d+)?$")
+
+# Below two pairs it is not worth splitting a field into its own row per key.
+MIN_KEY_VALUE_PAIRS = 2
+
+
+def parse_key_values(default: str) -> list[tuple[str, float]] | None:
+    """Recognise a `key=value key=value` field, or None."""
+    tokens = default.split()
+    if len(tokens) < MIN_KEY_VALUE_PAIRS or not all(KEY_VALUE_RE.match(t) for t in tokens):
+        return None
+    pairs = []
+    for token in tokens:
+        key, _, value = token.partition("=")
+        pairs.append((key, float(value)))
+    # A repeated key would collapse two dialog rows onto one argv value.
+    if len({k for k, _ in pairs}) != len(pairs):
+        return None
+    return pairs
+
+
+# A `sentence` field naming one file to read. Narrow on purpose: `Reference_filename` names a
+# file *inside* an already-chosen folder and is ordinary text, so only the explicit
+# "file path" spelling counts. The extension to filter the browser by is read off the field's
+# own default -- the one script with this shape defaults to
+# `C:/Users/User/Desktop/sounds/Cello.txt`, an author's own machine, which is exactly the value
+# a picker should replace.
+FILE_PATH_NAME_RE = re.compile(r"(^|_)file_?path(_|$)", re.I)
+
+# Scripts whose only remaining blocker is a free-text field naming somewhere to *write*, or an
+# external asset library this app does not manage. Kept out deliberately rather than by
+# accident: a process whose output never comes back into the editor does not belong in it --
+# the same call `ts oscil` got on the CDP side. Listed with reasons so the decision is
+# reviewable rather than invisible.
+# Scripts that legitimately never read the selected Sound because they *build* one from other
+# material, and are wanted anyway. The generic detector below rejects anything that does not
+# mention `selected` and `"Sound"`, which is the right default -- a script that ignores the
+# selection is usually a utility, a report, or a folder walker, none of which belong in a
+# waveform editor.
+#
+# An entry here is a claim that the process is a generator whose result is worth having, and
+# that its output can actually be found: this app's driver takes the highest-numbered Sound
+# left when the script returns, so a script leaving a pile of intermediates would hand back the
+# wrong one. Both halves were checked by running it.
+GENERATORS: dict[str, str] = {
+    # Weaves a drone out of a folder of clips. Verified by running it against six test clips:
+    # it ends with `selectObject: final_sound` after removing every clip it read, leaving
+    # exactly one Sound object, so the driver cannot pick up the wrong thing. Its trailing
+    # unconditional `Play` -- the hazard that costs 32 other scripts real time -- returns
+    # immediately here, so the whole run took 5.6s wall clock.
+    "AI & Adaptive/Bayesian_Drone_Weaver.praat":
+        "builds a drone from a folder of clips; the selection is not its material",
+}
+
+OUT_OF_SCOPE: dict[str, str] = {
+    "Analysis/Batch_Channel_Format_Exporter.praat":
+        "writes a folder of files elsewhere; nothing returns to the editor",
+    "Spatial & Surround/22_2_Stem_Renderer.praat":
+        "needs an external HRIR library on disk, which this app does not manage",
+    "Spatial & Surround/Higher-Order_Ambisonic_Encoder.praat":
+        "reads a folder of B-format WAVs and writes another; neither is the open selection",
+}
 
 # Below this many entries, a "list" is more likely a word that happens to be numeric ("8") or
 # a filename fragment. Every real one in this plugin has at least three.
@@ -1039,6 +1167,11 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
 
         source = read_script(path)
 
+        out_of_scope = OUT_OF_SCOPE.get(str(rel).replace("\\", "/"))
+        if out_of_scope:
+            excluded.append((str(rel), "out_of_scope", out_of_scope))
+            continue
+
         # Each detector says which text it reads (see `CODE`/`RAW` above): a construct
         # detector must not read prose, and a string-contents detector must not have its
         # strings blanked out from under it.
@@ -1061,8 +1194,9 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
             excluded.append((str(rel), hit[0], hit[1]))
             continue
 
-        # A script that never mentions the selected Sound is not a process on our input.
-        if "selected" not in source or '"Sound"' not in source:
+        # A script that never mentions the selected Sound is not a process on our input --
+        # unless it is a listed generator, which builds one from material of its own.
+        if rel_key not in GENERATORS and ("selected" not in source or '"Sound"' not in source):
             excluded.append((str(rel), "not_a_sound_process",
                              "never reads the selected Sound object"))
             continue
@@ -1158,6 +1292,9 @@ def render_catalog(processes: list[Process], sha: str) -> str:
             out.append(f"name = {toml_string(param.name)}")
             if param.pause_block is not None:
                 out.append(f"praat_pause_block = {param.pause_block}")
+            if param.key_value_group:
+                out.append(f"key_value_group = {toml_string(param.key_value_group)}")
+                out.append(f"key_value_key = {toml_string(param.key_value_key)}")
             out.append('description = ""')
             out.append("automatable = false")
             if param.kind == "number":
@@ -1170,6 +1307,14 @@ def render_catalog(processes: list[Process], sha: str) -> str:
                 out.append('scale = "plain"')
                 if param.integer:
                     out.append("integer = true")
+            elif param.kind == "text":
+                out.append('kind = "text"')
+                out.append(f"default = {toml_string(param.text_default)}")
+            elif param.kind == "folder_path":
+                out.append('kind = "folder_path"')
+            elif param.kind == "file_path":
+                out.append('kind = "file_path"')
+                out.append(f"extension = {toml_string(param.text_default)}")
             elif param.kind == "number_list":
                 out.append('kind = "number_list"')
                 # The delimiter is written as a TOML string so a leading/trailing space

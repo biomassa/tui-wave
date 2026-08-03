@@ -355,10 +355,14 @@ mod tests {
                             );
                         }
                     }
+                    // No numeric bounds to check: free text, and a directory chosen with the
+                    // browser.
                     ParamKind::Toggle { .. }
                     | ParamKind::Choice { .. }
                     | ParamKind::FormantBufferRef { .. }
                     | ParamKind::FilePath { .. }
+                    | ParamKind::Text { .. }
+                    | ParamKind::FolderPath
                     | ParamKind::CrystalVdat => {}
                 }
             }
