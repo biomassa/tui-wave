@@ -15,8 +15,11 @@ upstream is a moving target.
 
 Two things this cannot get from the source, both handled deliberately below:
 
-* **Ranges.** A Praat `form` declares a default and nothing else -- only 19 of 3286 numeric
-  parameters carry a `(0-1)`-style hint. Bounds are therefore synthesised (see RANGE_FACTOR).
+* **Ranges.** A Praat `form` declares a default and nothing else, except for the ~20 numeric
+  parameters (of ~2700) that state a range inside their own name, e.g. `Threshold_(0-1)`.
+  Those are read verbatim (see `range_from_name`); everything else is left genuinely
+  unbounded, keeping only the floor Praat's own form parser enforces. Bounds used to be
+  synthesised at ten times the default, which was invention presented as fact.
 * **Which scripts work.** Roughly one in six cannot be driven headlessly at all. They are
   detected statically here (see EXCLUSIONS) rather than being discovered at runtime by the
   user.
@@ -117,11 +120,6 @@ GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
         "why": "View & Edit is reached only under pan_mode = 8 (the hand-drawn trajectory pass)",
     },
 }
-
-# How much wider than its declared default a synthesised range runs. Deliberately generous:
-# these are experimental-music processes and pushing a parameter well past its intended value
-# is a legitimate use, while an out-of-range value costs only a clean Praat error.
-RANGE_FACTOR = 10.0
 
 # Parameters whose value must never be left on *by default*: `Play` blocks for the audio's
 # real-time duration and cannot be suppressed from outside the process, and drawing costs time
@@ -592,31 +590,22 @@ def parse_number_list(default: str) -> tuple[str, list[float]] | None:
 
 
 def make_number_list(name: str, separator: str, values: list[float]) -> Param:
-    """Synthesise bounds for a number list, wide enough to hold every declared entry.
+    """Build a number-list param from the entries its script declares.
 
-    Same spirit as `make_number` -- the script declares values and nothing about their range --
-    but the range has to contain the whole default list, not one value, or the catalog's own
-    `builtin_number_params_have_sane_ranges` check would reject a default the script itself
-    ships. Integer-ness is inferred: a twelve-tone row and a rhythm pattern are whole numbers
-    and are much nicer to edit as such, while a ratio list is not.
+    Unbounded, for exactly the reason `make_number` is: the script states these values and
+    nothing about their permitted range, so there is nothing to state. The list editor clamps
+    to `min`/`max`, and clamping to an infinity is a no-op.
+
+    Integer-ness *is* inferred, because it is not a guess about range: a twelve-tone row and a
+    rhythm pattern are whole numbers and edit far better as such, while a ratio list is not.
+    It also cannot silently reject anything the script ships, since it is read off those very
+    values.
     """
     integer = all(float(v).is_integer() for v in values)
-    low, high = min(values), max(values)
-    span = max(abs(low), abs(high)) * RANGE_FACTOR
-    if span == 0.0:
-        span = 10.0 if integer else 1.0
-    minimum = min(low, -span if low < 0 else 0.0)
-    maximum = max(high, span)
-    minimum = strip_float_noise(minimum)
-    maximum = strip_float_noise(maximum)
-    if integer:
-        minimum = float(int(minimum))
-        maximum = float(int(maximum))
-        step = 1.0
-    else:
-        step = round_step(maximum - minimum)
-    if maximum <= minimum:
-        maximum = minimum + (1.0 if integer else max(abs(minimum), 1.0))
+    minimum, maximum = -math.inf, math.inf
+    # Only feeds the envelope editor, which no Praat param can open (`automatable` is always
+    # false); the arrow keys nudge by a whole unit regardless. See `make_number`.
+    step = 1.0 if integer else 0.01
 
     return Param(
         name=name,
@@ -631,53 +620,100 @@ def make_number_list(name: str, separator: str, values: list[float]) -> Param:
     )
 
 
-def make_number(keyword: str, name: str, default: float) -> Param:
-    """Synthesise a range around a declared default.
+# A range stated in the parameter's own name, which is the only range these scripts ever
+# actually declare. Praat form names carry underscores where the author typed spaces, so
+# `Elevation (degrees -90 to 90)` arrives as `Elevation_(degrees_-90_to_90)`.
+#
+# Deliberately strict, and anchored to the whole parenthesised group. Most parentheses in
+# these names are *units*, not ranges -- (s), (Hz), (dB), (BPM), (degrees), (grains/sec) --
+# and two are legends that look numeric but are not: `Duration_(0_=_original)` and
+# `Symmetry_(0_off_1_palindrome)`. Reading either of those as a range would clamp the field to
+# a span its author never meant.
+NAME_RANGE_RE = re.compile(
+    r"\("
+    r"(?:[A-Za-z]+_)?"                      # optional unit prefix: (degrees_0-360)
+    r"(-?\d+(?:\.\d+)?)"                    # low
+    r"(?:_to_|-)"                           # separator: `_to_` or a bare hyphen
+    r"(-?\d+(?:\.\d+)?)"                    # high
+    r"\)$"
+)
 
-    Praat itself enforces only the type's floor -- `positive` is > 0 and `natural` is >= 1 --
-    so those become the minimum. Everything else is invention, and is kept wide on purpose.
-    A symmetric range around zero is used when the default is zero or negative, since such a
-    parameter is almost always a bipolar offset (asymmetry, detune, pan) rather than a
-    magnitude.
+
+def range_from_name(name: str) -> tuple[float, float] | None:
+    """The (low, high) a parameter's own name declares, or None if it declares none.
+
+    Only about 20 of this plugin's ~3300 numeric parameters carry one. Everything else states
+    a default and nothing more, which is why `make_number` no longer invents bounds for them.
+    """
+    match = NAME_RANGE_RE.search(name)
+    if not match:
+        return None
+    low, high = float(match.group(1)), float(match.group(2))
+    return (low, high) if low < high else None
+
+
+def make_number(keyword: str, name: str, default: float) -> Param:
+    """Build a numeric param, taking bounds ONLY from what is actually declared.
+
+    A Praat `form` states a default and, in about twenty cases out of ~3300, a range inside
+    the parameter's own name. It states nothing else. This used to synthesise a range anyway --
+    ten times the default, straddling zero when the default was zero or negative -- which was
+    invention presented to the user as fact, and wrong in both directions: it capped
+    parameters whose useful values ran far higher, and it offered negative values to
+    parameters that are meaningless below zero.
+
+    So there are now exactly two sources of a bound:
+
+      * the name, via `range_from_name` -- a real declaration, used verbatim; and
+      * the Praat *type*, whose floor the form parser itself enforces (`positive` rejects <= 0,
+        `natural` rejects < 1). That is not our guess either, so it stays.
+
+    Everything else is unbounded, spelled `inf` / `-inf`. Those survive TOML, keep `min <= max`
+    true, make `clamp` a no-op, and pass the catalog's own float-noise check, so no new field
+    or special case is needed anywhere to carry "no limit".
+
+    The one thing an open interval cannot be: `positive` means strictly greater than zero, and
+    `clamp` takes a closed bound. The floor is therefore 0.0 and exactly zero can reach Praat,
+    which rejects it by name ("Value must be greater than 0"). One value passes through to a
+    precise error rather than being silently rounded up to an epsilon nobody chose.
     """
     integer = keyword in ("integer", "natural")
-    magnitude = abs(default)
-    span = magnitude * RANGE_FACTOR
-    if span == 0.0:
-        # A zero default says nothing about scale. 1.0 covers the normalised 0-1 parameters
-        # that dominate this collection, and stays sane for the rest.
-        span = 10.0 if integer else 1.0
 
-    if keyword == "positive":
-        # Praat rejects anything <= 0 outright, so the floor must stay above it -- but it also
-        # has to stay *below the default*, and some of these defaults are tiny (a silence floor
-        # of 1.1e-9). A fixed 0.001 floor put min above max for those.
-        minimum = min(0.001, magnitude / 1000.0) if magnitude > 0 else 1e-6
+    declared = range_from_name(name)
+    if declared:
+        minimum, maximum = declared
+    elif keyword == "positive":
+        minimum, maximum = 0.0, math.inf
     elif keyword == "natural":
-        minimum = 1.0
-    elif integer and default >= 0:
-        minimum = 0.0
+        minimum, maximum = 1.0, math.inf
     else:
-        # A zero or negative default almost always marks a bipolar control (asymmetry, detune,
-        # pan) rather than a magnitude, so the range straddles zero.
-        minimum = -span
+        minimum, maximum = -math.inf, math.inf
 
-    maximum = max(span, default + span)
     minimum = strip_float_noise(minimum)
     maximum = strip_float_noise(maximum)
-    if integer:
-        minimum = float(int(minimum))
-        maximum = float(int(maximum))
-        step = 1.0
-    else:
-        step = round_step(maximum - minimum)
 
-    # Enforce what `builtin_number_params_have_sane_ranges` checks, whatever the heuristic
-    # above produced. The heuristic is invention; this invariant is not negotiable, and a
-    # generated catalog must not be able to violate it for some input nobody anticipated.
-    if maximum <= minimum:
-        maximum = minimum + (1.0 if integer else max(abs(minimum), 1.0))
-    default = min(max(default, minimum), maximum)
+    if integer:
+        # `int()` on an infinity raises, so only finite bounds are squared off.
+        if math.isfinite(minimum):
+            minimum = float(int(minimum))
+        if math.isfinite(maximum):
+            maximum = float(int(maximum))
+        step = 1.0
+    elif math.isfinite(maximum - minimum):
+        step = round_step(maximum - minimum)
+    else:
+        # No span to derive a step from. The arrow keys nudge by a whole unit (0.1 with the
+        # fine modifier) regardless of `step` -- see `cdp_nudge_number` -- so this only feeds
+        # the envelope editor, which no Praat param can open (`automatable` is always false).
+        step = 0.01
+
+    # A declared range that does not contain the script's own default means one of the two was
+    # misread, and clamping would silently change what the script ships with. Trust the
+    # default -- it is unambiguous -- and widen to admit it.
+    if default < minimum:
+        minimum = default
+    if default > maximum:
+        maximum = default
 
     return Param(
         name=name,
@@ -691,17 +727,20 @@ def make_number(keyword: str, name: str, default: float) -> Param:
 
 
 def strip_float_noise(value: float) -> float:
-    """Drop the binary-representation noise from a synthesised bound.
+    """Drop the binary-representation noise from a bound.
 
-    The bounds are arithmetic on decimal defaults, and neither operand nor result is exactly
+    Bounds used to be arithmetic on decimal defaults, and neither operand nor result is exactly
     representable in binary: `0.06 * 11` is `0.6599999999999999` and `0.06 / 1000` is
     `5.9999999999999995e-05`, so a form field advertised a range of
     `[0.000059999999999999995-0.6599999999999999]` for a parameter whose default is `0.06`
     (user report). The digits are real, they are just not information.
 
-    Ten significant digits is deliberately far more than any bound here carries — these are
-    *invented* to begin with (see RANGE_FACTOR) — but the point is to cut only the noise, which
-    starts around the fifteenth digit. Rounding harder would also quietly move bounds that were
+    Mostly moot now that bounds are read from a parameter's own name rather than synthesised
+    (see `make_number`) -- a declared `(0-1)` has no noise to strip. Kept because a declared
+    bound still passes through here, and because `math.inf` must survive it untouched.
+
+    Ten significant digits is deliberately far more than any bound here carries, but the point
+    is to cut only the noise, which starts around the fifteenth digit. Rounding harder would also quietly move bounds that were
     computed exactly, e.g. an integer maximum of 11264. This is the same fix `round6` applies on
     the Rust side to values a user nudges.
     """
@@ -770,9 +809,15 @@ def toml_string(value: str) -> str:
 
 
 def toml_number(value: float) -> str:
+    # TOML spells infinity `inf` / `-inf`, with no decimal point -- and it must not get one,
+    # since `inf.0` is not a float to any parser. An unbounded parameter (see `make_number`)
+    # carries exactly this.
+    value = float(value)
+    if math.isinf(value):
+        return "-inf" if value < 0 else "inf"
     # Every numeric field on the Rust side is f64; emitting a bare `1` would deserialize as an
     # integer and fail. Always carry a decimal point.
-    text = repr(float(value))
+    text = repr(value)
     return text if ("." in text or "e" in text or "E" in text) else text + ".0"
 
 
