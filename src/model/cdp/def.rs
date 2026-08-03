@@ -89,6 +89,45 @@ pub enum IoKind {
     GroupedWav,
 }
 
+/// The channel count a process's binary demands of its input file, and which of the
+/// document's channels `pipeline::plan_wav` therefore writes into the temp WAV. See
+/// [`ProcessDef::input_channels`] for why `stereo_native: bool` couldn't express this and for
+/// the real binaries' own refusals.
+///
+/// `Mono` deliberately takes **channel 0 alone** from a wider document rather than running a
+/// lane per channel. A spatialiser turns one source into a room; running it 30 times over a
+/// 30-channel take would produce 30 unrelated 8-channel renderings, not one. Same call, and
+/// the same wording, as `plan_curve`'s "only ever takes the first channel of a multi-channel
+/// selection" — and each such process says so in its own catalog description, since the
+/// choice is invisible in the dialog otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputChannels {
+    /// Exactly one channel — channel 0 of the selection, whatever its width.
+    Mono,
+    /// Exactly two — channels 0 and 1. Unsatisfiable by a mono document, which is what
+    /// `App::cdp_params_blocker` says before Apply can be pressed.
+    Stereo,
+    /// Every channel of the selection, and at least three of them (`pairex`'s "must have more
+    /// than two channels", `mchshred` mode 2's "correct number of channels for this mode").
+    Multichannel,
+}
+
+/// Where a process's output channel count comes from, when it is neither the input's count
+/// nor a flat 2. See [`ProcessDef::output_channels`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputChannels {
+    /// Read from the param at this index — the OUTCHANS the user picked. A `Number` param
+    /// reads as itself; a `Choice` param reads its selected option's text as a number, so a
+    /// count locked to one value can stay the locked-`Choice` shape the catalog already uses
+    /// for `repair`/`tesselate`'s channel counts.
+    FromParam { param: usize },
+    /// A count the binary always writes regardless of parameters — `crumble sound 1` is
+    /// always 8 channels and mode 2 always 16, `crystal rotate` modes 3-9 always 8.
+    Fixed { count: usize },
+}
+
 /// How a `Number` parameter's raw slider value (0-100 for percentage-based scales) maps to
 /// the value actually passed on the CDP command line. Resolved at pipeline-planning time,
 /// except `PercentOfAnaWindowCount` — see CDP-PLAN.md Phase 0 spike finding S5: CDP
@@ -812,6 +851,59 @@ pub struct ProcessDef {
     /// once per channel.
     pub stereo_native: bool,
     pub output_is_stereo: bool,
+    /// `Some` for a process whose binary *hard-rejects* an input that isn't the channel count
+    /// it wants — the multichannel-spatialisation family (`mchanpan`, `mchanrev`, `mchiter`,
+    /// `mchzig`, `mchshred`, `crumble`, `madrid`, `spin`, `pairex`). `None` (every process
+    /// before this existed) keeps the old behaviour exactly: `stereo_native` decides between
+    /// one whole-document run and one mono lane per channel.
+    ///
+    /// The pair `stereo_native: bool` could not express these. `false` lane-splits, which
+    /// runs a mono→8-channel spatialiser once per input channel and then reads only channel
+    /// 0 of each 8-channel result; `true` hands the binary the whole document, which it
+    /// refuses outright. Verified against the real binaries — each states its own demand and
+    /// exits 255:
+    ///
+    /// ```text
+    /// mchanrev   stereo in → "File stereo.wav is not of correct type (must be mono)"
+    /// crumble    stereo in → "File stereo.wav is not a mono soundfile"
+    /// mchshred 1 stereo in → "does not have correct number of channels for this mode"
+    /// spin stereo 2, mono in → "File mono.wav is not of correct type (must be stereo)"
+    /// pairex     stereo in → "must have more than two channels"
+    /// ```
+    ///
+    /// So this is what the *binary* demands, and `pipeline::plan_wav` selects the channels to
+    /// satisfy it (see [`InputChannels`] for what each variant takes from the document, and
+    /// `App::cdp_params_blocker` for the case where the document can't satisfy it at all).
+    #[serde(default)]
+    pub input_channels: Option<InputChannels>,
+    /// `Some` for a process whose output channel count is neither the input's nor a flat 2 —
+    /// again the multichannel family, whose OUTCHANS is an ordinary parameter of the process.
+    /// `None` (every process before this existed) keeps `output_is_stereo`'s meaning
+    /// unchanged: stereo when set, same-as-input otherwise.
+    ///
+    /// Needed because `output_is_stereo: bool` can only say "2", and `dest_channels` has to
+    /// carry one entry per channel the real output file holds — `cdp::runner`'s `read_outputs`
+    /// reads exactly as many channels as there are entries, so an under-count silently
+    /// discards the rest of the spatialisation, the same failure `output_is_stereo` was itself
+    /// introduced to fix for `rmverb` (see `plan_wav`'s comment on that).
+    #[serde(default)]
+    pub output_channels: Option<OutputChannels>,
+    /// True for a process whose result becomes its **own new buffer** rather than being
+    /// spliced over the selection.
+    ///
+    /// Every multichannel process changes the channel count, and splicing an 8-channel result
+    /// into the document would rewrite the document's own width — `CdpProcessCommand` widens
+    /// for that case, but the result is that spatialising a mono take silently turns the take
+    /// itself into an 8-channel buffer. A new buffer leaves the source alone, which is what
+    /// these processes are for: the input is material, the output is a new spatial rendering
+    /// of it. It is also what makes the *narrowing* direction safe (`pairex`, 8 channels in
+    /// and 2 out) — `Document::insert_range` fills any channel the data doesn't cover from
+    /// channel 0, so an in-place narrowing splice would smear channel 0 across the rest.
+    ///
+    /// Same shape a glob-output process (`distcut`, `envcut`) already uses for its numbered
+    /// results, just reached by declaration rather than by result count.
+    #[serde(default)]
+    pub output_new_buffer: bool,
     /// True for a process whose binary can't correctly read the `WAVE_FORMAT_EXTENSIBLE`
     /// WAV header `hound` (this project's WAV library) writes for any file with
     /// `bits_per_sample > 16` — which is every input file this app ever sends CDP, since
@@ -1030,6 +1122,53 @@ impl ProcessDef {
         channels > 1 && self.channel_split_value_index(values, 0).is_some()
     }
 
+    /// Which of a `channels`-wide selection's channels go into this process's input file, or
+    /// `None` for a process that declares no [`InputChannels`] and so keeps the old
+    /// `stereo_native`-driven behaviour.
+    ///
+    /// `Err` when the selection cannot satisfy the binary at all — too narrow for `Stereo`,
+    /// or not wide enough for `Multichannel`. The message is user-facing: it is what
+    /// `App::cdp_params_blocker` shows under the dialog, so it names the shortfall rather
+    /// than the enum variant.
+    pub fn input_source_channels(&self, channels: usize) -> Option<Result<Vec<usize>, String>> {
+        Some(match self.input_channels? {
+            // Never a shortfall: every document has a channel 0.
+            InputChannels::Mono => Ok(vec![0]),
+            InputChannels::Stereo if channels >= 2 => Ok(vec![0, 1]),
+            InputChannels::Stereo => {
+                Err("this process needs a stereo source; the selection is mono".to_string())
+            }
+            InputChannels::Multichannel if channels > 2 => Ok((0..channels).collect()),
+            InputChannels::Multichannel => Err(format!(
+                "this process needs more than 2 channels; the selection has {channels}"
+            )),
+        })
+    }
+
+    /// How many channels this process's output file holds, given the parameter values a run
+    /// is about to use — `None` for a process that declares no [`OutputChannels`], leaving
+    /// `output_is_stereo`'s existing meaning in force.
+    ///
+    /// A count that doesn't resolve to a sane positive number (a hand-edited user catalog
+    /// pointing `FromParam` at a param that isn't a count) falls back to `None` rather than
+    /// planning a job with zero destination channels, which would read nothing back at all.
+    pub fn output_channel_count(&self, values: &[ParamValue]) -> Option<usize> {
+        let count = match self.output_channels? {
+            OutputChannels::Fixed { count } => count,
+            OutputChannels::FromParam { param } => match values.get(param)? {
+                ParamValue::Number(n) => n.round() as usize,
+                // A `Choice` holds an index; the option's own text is the count, which is what
+                // a channel count locked to a single value already looks like in the catalog.
+                ParamValue::Choice(i) => match &self.params.get(param)?.kind {
+                    ParamKind::Choice { options, .. } => options.get(*i)?.trim().parse().ok()?,
+                    _ => return None,
+                },
+                _ => return None,
+            },
+        };
+        (count > 0).then_some(count)
+    }
+
     pub fn input_arity(&self) -> (usize, Option<usize>, bool) {
         match self.input {
             IoKind::None | IoKind::Curve => (0, Some(0), false),
@@ -1088,6 +1227,9 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: false,
+            input_channels: None,
+            output_channels: None,
+            output_new_buffer: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1152,6 +1294,9 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: false,
+            input_channels: None,
+            output_channels: None,
+            output_new_buffer: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1239,6 +1384,9 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: true,
+            input_channels: None,
+            output_channels: None,
+            output_new_buffer: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1297,6 +1445,9 @@ mod tests {
             output: IoKind::Ana,
             stereo_native: false,
             output_is_stereo: false,
+            input_channels: None,
+            output_channels: None,
+            output_new_buffer: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1363,6 +1514,9 @@ mod tests {
             output: IoKind::Ana,
             stereo_native: false,
             output_is_stereo: false,
+            input_channels: None,
+            output_channels: None,
+            output_new_buffer: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1414,6 +1568,9 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: false,
+            input_channels: None,
+            output_channels: None,
+            output_new_buffer: false,
             requires_simple_wav_input: false,
             sidecar_extension: None,
             needs_head_tail_marks: false,
@@ -1493,3 +1650,4 @@ mod tests {
         assert!(vdat.validate().unwrap_err().contains("at least one crystal vertex"));
     }
 }
+

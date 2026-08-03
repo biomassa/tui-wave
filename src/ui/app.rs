@@ -292,6 +292,12 @@ fn cdp_plan_error_message(err: &crate::model::cdp::PlanError) -> String {
         // row/point (see `CrystalVdat::validate`), so this only has to attach the field it
         // came from.
         PlanError::InvalidParamData { param, reason } => format!("{param}: {reason}"),
+        // Already a whole user-facing sentence naming the shortfall (see
+        // `ProcessDef::input_source_channels`) — nothing here can usefully add to it, since
+        // the fix is to select different audio, not to change a field. Normally unreachable
+        // from the dialog: `cdp_params_blocker` states the same thing the moment it opens and
+        // dims Apply, and this is the backstop for a selection changed underneath it.
+        PlanError::InputChannelCount { reason } => reason.clone(),
     }
 }
 
@@ -7358,6 +7364,17 @@ impl App {
     fn cdp_params_blocker(&self) -> Option<String> {
         let Some(Dialog::CdpParams { catalog_index, .. }) = &self.dialog else { return None };
         let def = self.cdp_catalog.processes.get(*catalog_index)?;
+        // A channel-count demand is the same kind of blocker as a missing marklist and belongs
+        // here for the same reason: it's a property of the *selection*, not of any field, so
+        // the dialog offers nothing to look at and see is wrong. Checked before the marklist
+        // branch because it applies to processes that have no marks at all.
+        // `channel_count()` and not `channels.len()`, so this reads the same width the
+        // `InputSpec` the planner will see is built from.
+        if let Some(Err(reason)) =
+            def.input_source_channels(self.active_doc().map_or(0, |d| d.channel_count()))
+        {
+            return Some(reason);
+        }
         if !def.needs_head_tail_marks {
             return None;
         }
@@ -11716,6 +11733,9 @@ impl App {
                     // marker-preserving timing tolerance of the splice command.
                     let process_def = self.cdp_catalog.processes.get(pending.catalog_index);
                     let recent_key = process_def.map(|d| d.key.clone());
+                    // Read here rather than in the arm below, which needs `&mut self` and so
+                    // can't still be holding the catalog borrow `process_def` is.
+                    let output_new_buffer = process_def.is_some_and(|d| d.output_new_buffer);
                     let timing_tolerance = crate::commands::cdp::timing_tolerance(
                         process_def.map(|d| d.category).unwrap_or(crate::model::cdp::Category::Time),
                         crate::model::cdp::PvocSettings::default().points,
@@ -11739,12 +11759,21 @@ impl App {
 
                     match result {
                         Ok(mut output) => match purpose {
-                            crate::cdp::JobPurpose::Apply if output.results.len() > 1 => {
+                            crate::cdp::JobPurpose::Apply
+                                if output.results.len() > 1 || output_new_buffer =>
+                            {
                                 // A glob-output process (e.g. distcut/envcut): each numbered
                                 // file it produced becomes its own new buffer, the same "one
                                 // new buffer per result" shape Action::NewFromLeft/NewFromRight
                                 // already use, rather than being spliced into the selection —
                                 // there's no single "the result" to splice.
+                                //
+                                // A process declaring `output_new_buffer` (the multichannel
+                                // spatialisers) lands here too, with exactly one result: it has
+                                // a single "the result", but splicing it would rewrite the
+                                // source document's own channel count — see that field's doc
+                                // comment. Same destination, different reason, so the two share
+                                // an arm rather than duplicating the buffer-building below.
                                 let bits_per_sample = self
                                     .documents
                                     .get(pending.doc_index)
@@ -25508,6 +25537,9 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: false,
+            input_channels: None,
+            output_channels: None,
+            output_new_buffer: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
@@ -28483,6 +28515,9 @@ mod tests {
             output: IoKind::Ana,
             stereo_native: false,
             output_is_stereo: false,
+            input_channels: None,
+            output_channels: None,
+            output_new_buffer: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
@@ -28563,6 +28598,9 @@ mod tests {
             output: IoKind::Ana,
             stereo_native: false,
             output_is_stereo: false,
+            input_channels: None,
+            output_channels: None,
+            output_new_buffer: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
@@ -34919,6 +34957,9 @@ mod tests {
             output: IoKind::Wav,
             stereo_native: false,
             output_is_stereo: false,
+            input_channels: None,
+            output_channels: None,
+            output_new_buffer: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,

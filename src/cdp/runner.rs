@@ -3459,6 +3459,25 @@ mod tests {
             // fixture-content issue, not a catalog bug (found while cataloging the psow
             // family, 2026-07-15).
             "psow_interp",
+            // The multichannel batch (2026-08-03). This fixture is one mono channel, and
+            // `ProcessDef.input_channels` is a hard demand of the real binary rather than a
+            // preference, so these four are refused by `plan_job` before a binary is ever
+            // spawned — the same "needs real stereo input" situation `spin_stereo_1` and
+            // `tostereo_tostereo` are listed above for, just reported as a clean
+            // `InputChannelCount` plan error instead of a CDP exit code. Each was confirmed by
+            // hand against the real binary and a file of the right width, all from float32
+            // input written by this app's own writer: pairex 8ch -> a 2ch file, mchshred mode 2
+            // 6ch -> a 6ch file, spin stereo modes 2/3 stereo -> 8ch files.
+            "mchshred_shred_2",
+            "pairex_pairex",
+            "spin_stereo_2",
+            "spin_stereo_3",
+            // Needs audio with real silences between events to find any ("NO SILENCES FOUND IN
+            // FILE") — a constant-level tone has none, exactly the `envspeak_*` situation
+            // above. Its two siblings (`mchanpan_mchanpan_4`/`_9`) take the same input and pass
+            // here, which is what shows this to be the fixture's content and not the entry's
+            // argv shape.
+            "mchanpan_mchanpan_3",
         ];
 
         let (catalog, warnings) = crate::model::cdp::CdpCatalog::load(None);
@@ -3661,3 +3680,4 @@ mod tests {
         );
     }
 }
+

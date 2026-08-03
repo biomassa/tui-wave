@@ -169,12 +169,20 @@ const TIME_BINS: &[(&str, &str)] = &[
     ("phase", "MODIFY"),
     ("sfecho", "MODIFY"),
     ("verges", "MODIFY"),
-    // MULTICHANNEL — CDP files these here; this app is stereo-only, so only the members whose
-    // stereo modes are usable ever reached the catalog in the first place.
+    // MULTICHANNEL — CDP files these here. Until multichannel documents were first-class this
+    // group held only the members whose *stereo* modes were usable; the `mch*` family and
+    // `crumble`/`pairex` joined it once a document could actually hold and play their output.
     ("brownian", "MULTICHANNEL"),
     ("cascade", "MULTICHANNEL"),
     ("chirikov", "MULTICHANNEL"),
+    ("crumble", "MULTICHANNEL"),
     ("crystal", "MULTICHANNEL"),
+    ("mchanpan", "MULTICHANNEL"),
+    ("mchanrev", "MULTICHANNEL"),
+    ("mchiter", "MULTICHANNEL"),
+    ("mchshred", "MULTICHANNEL"),
+    ("mchzig", "MULTICHANNEL"),
+    ("pairex", "MULTICHANNEL"),
     ("spin", "MULTICHANNEL"),
     ("strans", "MULTICHANNEL"),
     // PSOW

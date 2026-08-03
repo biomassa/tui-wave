@@ -1,6 +1,28 @@
 # Changelog
 
-## 2026-08-02 (2.2.0)
+## Unreleased
+
+- **The multichannel CDP processes are in.** Eleven entries that had been held back for one
+  reason — "this app's UI/audio path is stereo-focused and untested beyond 2 channels" — now that
+  multichannel documents are first-class: `mchanrev` (multichannel reverb), `mchanpan` spread
+  from centre / spread events stepwise / rotate, `mchshred` to multichannel and its
+  multichannel-source mode, `mchzig` random zigzag, `crumble` at 8 and 16 channels, `pairex`
+  (extract any channel pair as stereo), and `spin stereo` modes 2 and 3. They live under
+  MULTICHANNEL in the browser, where CDP files them.
+
+  A result opens as its **own new buffer** rather than being spliced over the selection — every
+  one of these changes the channel count, and splicing would rewrite the source document's own
+  width, turning a mono take into an 8-channel one.
+
+  A process that needs a particular input width now says so the moment its dialog opens, with
+  Apply dimmed, instead of failing partway through a run: `pairex` and `mchshred`'s multichannel
+  mode need more than two channels, `spin stereo` needs a stereo selection.
+
+- Excluded with reasons rather than silently: `mchiter` writes a valid file and then aborts
+  (`double free or corruption`, exit 134) on both its modes — a real binary bug. `mchanpan`'s
+  remaining modes need pan datafiles or channel-group strings; `mchstereo`/`madrid`/`texmchan`
+  are variadic-input; `panorama`/`spacedesign` emit mixfiles rather than audio; the `abfpan`
+  family is Ambisonic B-format.
 
 - **Praat visualizations are now visible.** Most praatAudioTools processes carry a
   `Draw_visualization` checkbox, and until now it did nothing you could see: the script painted
