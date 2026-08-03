@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Three praatAudioTools processes that could never run before now do**, as 11 entries.
+  Praat allows only one settings window per script, so an author needing a second page has to
+  use a pop-up dialog — which, run headlessly, takes Praat down with it. tui-wave now runs a
+  rewritten copy of those scripts with the dialog replaced by the values from its own parameter
+  form, so the second page is simply more fields in the same dialog. Your copy of the plugin is
+  never modified.
+
+  **Sidechain Feedback VCA** gains its Spatial/Output/Debug page. **Polyphonic Improviser**
+  gains its Voice Details page, which also makes its Custom preset usable — it was the default,
+  and previously the one setting that could not run. **Universal Convolution Generator**, whose
+  entire interface was a two-step wizard, arrives as nine entries, one per algorithm
+  (Accelerando, Euclidean Rhythm, Golden Angle Drift…), each showing only that algorithm's own
+  settings rather than all nine sets at once.
+
+- Fixed a test that compared byte offsets as though they were screen columns, so it passed or
+  failed depending on whether the directory listing beside the dialog happened to contain a
+  non-ASCII character.
+
 - Praat processes now carry a pale `[pr]` tag in the CDP browser, so you can tell at a glance
   which engine a process runs on. (Searching already found them — every Praat entry's internal
   key starts with `praat_` — but nothing distinguished them while reading the list.)

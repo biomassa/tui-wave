@@ -31,7 +31,7 @@ import math
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -121,6 +121,54 @@ GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
     },
 }
 
+# Scripts whose second (or only) settings page is a `beginPause` dialog, hoisted into the
+# catalog as ordinary parameters. Keyed by path relative to the plugin root.
+#
+# An allowlist, not a rule applied wherever a pause is found: most of the remaining
+# `gui_blocking` scripts have a *different* problem (an editor window, a folder chooser) that
+# hoisting would not fix, and shipping an entry that still segfaults is worse than shipping
+# none. Each entry here has been read.
+#
+# `praat::runner` rewrites a copy of the script per run, replacing each block with assignments
+# to the variables it would have set. `split_on` additionally turns one script into several
+# catalog entries, one per option of a hoisted `optionmenu`:
+#
+#   split_on  -- the hoisted optionmenu whose value selects which further block applies.
+#   variants  -- option label -> the `beginPause` title of the block belonging to it. An
+#                explicit map because the two do NOT match: the option reads "Bursts and Taps"
+#                and its block is titled "Settings: Bursts & Taps".
+PAUSE_HOISTS: dict[str, dict] = {
+    # One unconditional block, and the author's own changelog explains exactly why it exists:
+    # "an attempt to split the long form into two `form...endform` blocks failed ('Unknown
+    # variable: random_seed') because Praat only supports one `form` per script run."
+    "Distortion/Sidechain_Feedback_VCA.praat": {
+        "why": "second settings page (Spatial/Output/Debug); Praat allows one form per script",
+    },
+    # Guarded by `if preset = 1` (Custom). Its `else` branch already assigns the same variables
+    # to the same defaults, which is what makes the rewrite verifiable by inspection: the
+    # hoisted assignments and the script's own placeholder block must agree.
+    "Time & Granular/Polyphonic_Improviser.praat": {
+        "why": "Voice Details page, reached on the Custom preset (option 1, the default)",
+    },
+    # No `form` at all -- the whole UI is a two-stage wizard. Step 1 picks an algorithm, then
+    # exactly one of nine settings blocks runs, each behind `if algorithm$ = "..."`.
+    "Reverb/Universal Convolution Generator.praat": {
+        "why": "two-stage pause wizard; the script declares no form at all",
+        "split_on": "Algorithm",
+        "variants": {
+            "Accelerando": "Settings: Accelerando",
+            "Bouncing Ball": "Settings: Bouncing Ball",
+            "Bursts and Taps": "Settings: Bursts & Taps",
+            "Euclidean Rhythm": "Settings: Euclidean",
+            "Fibonacci (Mono)": "Settings: Fibonacci",
+            "Golden Angle Drift": "Settings: Golden Angle",
+            "Random Walk": "Settings: Random Walk",
+            "Stereo Fibonacci": "Settings: Stereo Fibonacci",
+            "Swing": "Settings: Swing",
+        },
+    },
+}
+
 # Parameters whose value must never be left on *by default*: `Play` blocks for the audio's
 # real-time duration and cannot be suppressed from outside the process, and drawing costs time
 # nobody asked for. Matched on the parameter name; the toggle stays visible and the user can
@@ -203,6 +251,102 @@ def code_only(source: str) -> str:
 # whatever detector happened to fire next.
 CODE = "code"    # match against code_only(source)
 RAW = "raw"      # match against the source as written
+
+def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: list,
+                            hoist: dict, inputs: int):
+    """Turn one pause-hoisted script into the catalog entries it should become.
+
+    Returns a list of `Process`, or a problem string. Every name in the hoist config must
+    resolve: a stale one means upstream moved the thing the config points at, and shipping the
+    entry anyway would ship a script that still opens a dialog and segfaults.
+
+    Hoisted params are appended *after* the form's own, so the dialog reads in the order the
+    two Praat windows would have: everything the first asked, then everything the second did.
+    """
+    blocks = find_pause_blocks(source)
+    if not blocks:
+        return "no beginPause block found (upstream may have removed it)"
+    for i, block in enumerate(blocks):
+        if isinstance(block["fields"], str):
+            return f"block {i} ({block['title']!r}): {block['fields']}"
+
+    def tag(fields, index):
+        out = []
+        for param in fields:
+            copied = replace(param)
+            copied.pause_block = index
+            # A hoisted `Play`/`Draw` toggle is the same hazard as a form one -- `Play` blocks
+            # for the audio's real duration -- so it gets the same forced-off default.
+            if copied.kind == "toggle" and SILENCE_RE.match(copied.name):
+                copied.default = False
+            out.append(copied)
+        return out
+
+    split_on = hoist.get("split_on")
+    if not split_on:
+        params = list(form_params)
+        for i, block in enumerate(blocks):
+            params.extend(tag(block["fields"], i))
+        return [Process(key=key_for(top, stem), bin=str(rel).replace("\\", "/"),
+                        title=title_for(stem), group=GROUP_DIRS[top], params=params,
+                        inputs=inputs)]
+
+    # --- split: one entry per option of a hoisted optionmenu ------------------------------
+    variants = hoist.get("variants", {})
+    by_title = {b["title"]: (i, b) for i, b in enumerate(blocks)}
+    selector = None
+    selector_block = None
+    for i, block in enumerate(blocks):
+        for param in block["fields"]:
+            if param.name == split_on:
+                selector, selector_block = param, i
+    if selector is None:
+        return f"no hoisted parameter named {split_on!r} to split on"
+    if selector.kind != "choice":
+        return f"{split_on!r} is a {selector.kind}, not an optionmenu"
+    for label in variants:
+        if label not in selector.options:
+            return f"{split_on!r} has no option {label!r} (upstream reworded it?)"
+    for label, title in variants.items():
+        if title not in by_title:
+            return f"no pause block titled {title!r} for option {label!r}"
+    missing = [o for o in selector.options if o not in variants]
+    if missing:
+        return f"{split_on!r} options with no block mapped: {missing}"
+
+    # Blocks that belong to no variant are shared by every entry -- the wizard's first page.
+    variant_block_indices = {by_title[t][0] for t in variants.values()}
+    built = []
+    for label in selector.options:
+        params = list(form_params)
+        for i, block in enumerate(blocks):
+            if i in variant_block_indices and i != by_title[variants[label]][0]:
+                continue
+            tagged = tag(block["fields"], i)
+            if i == selector_block:
+                # The selector survives as a one-option choice rather than being dropped: the
+                # rewrite reads it to assign `algorithm$`, which is what every one of the
+                # script's own `if algorithm$ = "..."` guards tests. A locked field also says
+                # plainly that this entry *is* that algorithm.
+                for param in tagged:
+                    if param.name == split_on:
+                        param.options = [label]
+                        param.default = 0
+            params.extend(tagged)
+        built.append(Process(
+            key=f"{key_for(top, stem)}_{slugify(label)}",
+            bin=str(rel).replace("\\", "/"),
+            title=f"{title_for(stem)} ({label})",
+            group=GROUP_DIRS[top],
+            params=params,
+            inputs=inputs,
+        ))
+    return built
+
+
+def slugify(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
 
 def apply_gui_override(params: list, override: dict) -> str | None:
     """Apply one `GUI_BLOCKING_OVERRIDES` entry to a parsed form. Returns a problem, or None.
@@ -411,6 +555,9 @@ class Param:
     # the default entries parsed out of its form declaration.
     list_separator: str = ""
     list_default: list[float] = field(default_factory=list)
+    # Index of the `beginPause` block this param was hoisted out of, in the *original* script's
+    # source order. None for an ordinary `form` param, which travels as a runScript: argument.
+    pause_block: int | None = None
 
 
 @dataclass
@@ -455,15 +602,58 @@ def read_script(path: Path) -> str:
 FORM_RE = re.compile(r"^[ \t]*form\b[^\n]*\n(.*?)^[ \t]*endform", re.S | re.M)
 
 
+# A `beginPause` block. Praat allows only ONE `form` per script run, so an author needing a
+# second page of settings has to use a pause dialog instead -- which is precisely why these
+# scripts were unusable headlessly (`beginPause` under `--run` segfaults). The fields inside
+# are declared with the same syntax as a form's, which is why `parse_fields` serves both.
+#
+# The `endPause:` line's first *numeric* argument is the dialog's default button, captured so
+# a rewrite can behave as though the user pressed it. That matters: `Polyphonic_Improviser`
+# ends `endPause: "Cancel", "OK", 2, 1` and then exits the script on `clicked = 1`, so
+# assuming button 1 would silently turn every run into a no-op.
+PAUSE_RE = re.compile(
+    r"^[ \t]*beginPause:[ \t]*(?P<title>\"[^\"]*\"|[^\n]*)\n"
+    r"(?P<body>.*?)"
+    r"^[ \t]*(?:\w+[ \t]*=[ \t]*)?endPause:(?P<tail>[^\n]*)$",
+    re.S | re.M,
+)
+
+
+def find_pause_blocks(source: str) -> list[dict]:
+    """Every `beginPause` ... `endPause` block, in source order.
+
+    Each entry carries the span to replace, the dialog title (used to attach a block to a
+    catalog entry -- see PAUSE_SPLITS), its parsed fields, and the default button number.
+    """
+    blocks = []
+    for m in PAUSE_RE.finditer(source):
+        tail = m.group("tail")
+        numbers = re.findall(r"(?<![\w.])(\d+)(?![\w.])", tail)
+        blocks.append({
+            "title": m.group("title").strip().strip('"'),
+            "fields": parse_fields(m.group("body")),
+            # No number at all would be a malformed endPause; 1 is the only sane guess and the
+            # commonest real value.
+            "default_button": int(numbers[0]) if numbers else 1,
+            "span": (m.start(), m.end()),
+        })
+    return blocks
+
+
 def parse_form(source: str) -> list[Param] | str:
     """Parse a script's form block into parameters, or return a reason string on failure."""
     match = FORM_RE.search(source)
     if not match:
         return []
+    return parse_fields(match.group(1))
+
+
+def parse_fields(body: str) -> list[Param] | str:
+    """Parse a run of Praat field declarations -- a `form` body or a `beginPause` body."""
     params: list[Param] = []
     pending: Param | None = None
 
-    for raw in match.group(1).splitlines():
+    for raw in body.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -853,13 +1043,18 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
         # detector must not read prose, and a string-contents detector must not have its
         # strings blanked out from under it.
         scannable = {CODE: code_only(source), RAW: source}
-        override = GUI_BLOCKING_OVERRIDES.get(str(rel).replace("\\", "/"))
+        rel_key = str(rel).replace("\\", "/")
+        override = GUI_BLOCKING_OVERRIDES.get(rel_key)
+        # A pause hoist answers `gui_blocking` the same way an override does, by removing the
+        # construct rather than by arguing it is unreachable -- the block is rewritten out of
+        # the copy that actually runs. See PAUSE_HOISTS.
+        hoist = PAUSE_HOISTS.get(rel_key)
         hit = next(
             ((slug, why) for slug, pattern, why, over in EXCLUSIONS
              if pattern.search(scannable[over])
              # An override answers `gui_blocking` only. A script that also trips
              # `hardcoded_path` or `non_sound_input` is still excluded for that.
-             and not (slug == "gui_blocking" and override)),
+             and not (slug == "gui_blocking" and (override or hoist))),
             None,
         )
         if hit:
@@ -887,14 +1082,22 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
                                  f"override is stale: {problem}"))
                 continue
 
-        processes.append(Process(
-            key=key_for(top, path.stem),
-            bin=str(rel).replace("\\", "/"),
-            title=title_for(path.stem),
-            group=GROUP_DIRS[top],
-            params=params,
-            inputs=2 if needs_two_sounds(source) else 1,
-        ))
+        if hoist:
+            built = build_hoisted_processes(rel, top, path.stem, source, params, hoist,
+                                            2 if needs_two_sounds(source) else 1)
+            if isinstance(built, str):
+                excluded.append((str(rel), "gui_blocking", f"pause hoist failed: {built}"))
+                continue
+            processes.extend(built)
+        else:
+            processes.append(Process(
+                key=key_for(top, path.stem),
+                bin=str(rel).replace("\\", "/"),
+                title=title_for(path.stem),
+                group=GROUP_DIRS[top],
+                params=params,
+                inputs=2 if needs_two_sounds(source) else 1,
+            ))
         presets = extract_script_presets(source, params)
         if presets:
             index, custom, blocks = presets
@@ -953,6 +1156,8 @@ def render_catalog(processes: list[Process], sha: str) -> str:
         for param in proc.params:
             out.append("[[process.params]]")
             out.append(f"name = {toml_string(param.name)}")
+            if param.pause_block is not None:
+                out.append(f"praat_pause_block = {param.pause_block}")
             out.append('description = ""')
             out.append("automatable = false")
             if param.kind == "number":

@@ -25790,6 +25790,7 @@ mod tests {
                 list_is_time_sequence: false,
                 before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
                 kind: ParamKind::Number {
                     min: 1.0,
                     max: 10.0,
@@ -28769,6 +28770,7 @@ mod tests {
                 list_is_time_sequence: false,
                 before_outfile: true,
             opens_praat_dialog: false,
+            praat_pause_block: None,
                 kind: ParamKind::FormantBufferRef {
                     buffer_kind: crate::model::formant::FormantBufferKind::Formant,
                     relative_name: "fmnt.for".into(),
@@ -28853,6 +28855,7 @@ mod tests {
                 list_is_time_sequence: false,
                 before_outfile: true,
             opens_praat_dialog: false,
+            praat_pause_block: None,
                 kind: ParamKind::FormantBufferRef {
                     buffer_kind: crate::model::formant::FormantBufferKind::Formant,
                     relative_name: "fmnt.for".into(),
@@ -33413,9 +33416,11 @@ mod tests {
             blocked.join("\n"),
         );
         // And the same width, so it cannot shift sideways either.
+        // Character columns here too, for the same reason as `column_of` below.
         let border_span = |rows: &[String]| {
             let top = rows.iter().find(|r| r.contains('┌')).cloned().unwrap_or_default();
-            (top.find('┌'), top.find('┐'))
+            let col = |needle: char| top.find(needle).map(|byte| top[..byte].chars().count());
+            (col('┌'), col('┐'))
         };
         assert_eq!(border_span(&unblocked), border_span(&blocked), "width must be fixed too");
 
@@ -33440,16 +33445,28 @@ mod tests {
 
         // Every label starts in the same column, in both states.
         for rows in [&unblocked, &blocked] {
+            // Character columns, not byte offsets. `str::find` returns the latter, and these
+            // rows span the whole screen: the Files panel to the left of the dialog lists the
+            // user's real working directory, so one row can carry a multi-byte character
+            // (a `…` where a long name was truncated, a box-drawing glyph) that another does
+            // not. That made the assertion pass or fail according to what happened to be in
+            // that directory — the test was reliable only by luck, and this is what it was
+            // always trying to compare.
             let column_of = |needle: &str| {
-                rows.iter().find_map(|r| r.find(needle)).unwrap_or_else(|| {
-                    panic!("{needle:?} not found in:\n{}", rows.join("\n"))
-                })
+                rows.iter()
+                    .find_map(|r| r.find(needle).map(|byte| r[..byte].chars().count()))
+                    .unwrap_or_else(|| panic!("{needle:?} not found in:\n{}", rows.join("\n")))
             };
             let name_col = column_of("File name:");
             let format_col = column_of("Format:");
+            // Whichever of the two this format shows — same character-column rule.
             let setting_col = rows
                 .iter()
-                .find_map(|r| r.find("Depth:").or_else(|| r.find("Bitrate:")))
+                .find_map(|r| {
+                    r.find("Depth:")
+                        .or_else(|| r.find("Bitrate:"))
+                        .map(|byte| r[..byte].chars().count())
+                })
                 .expect("a Depth or Bitrate label");
             assert_eq!(name_col, format_col, "File name and Format must start in one column");
             assert_eq!(format_col, setting_col, "Format and Depth/Bitrate must start in one column");
@@ -33457,10 +33474,13 @@ mod tests {
 
         // The values line up too, which is what the label padding is for. "◄ " precedes a focused
         // value, so compare the unfocused rows: Format is unfocused while the name has focus.
+        // And once more in character columns — see `column_of` above. This one compares two
+        // *different* rows, so a stray multi-byte character in either breaks it just the same.
         let value_col = |rows: &[String], label: &str| {
             let row = rows.iter().find(|r| r.contains(label)).expect("row");
             let after = row.find(label).unwrap() + label.len();
-            row[after..].find(|c: char| !c.is_whitespace()).map(|o| after + o).expect("a value")
+            let offset = row[after..].find(|c: char| !c.is_whitespace()).expect("a value");
+            row[..after + offset].chars().count()
         };
         assert_eq!(
             value_col(&unblocked, "File name:"),
@@ -35235,6 +35255,7 @@ mod tests {
                 list_is_time_sequence: false,
                 before_outfile: true,
             opens_praat_dialog: false,
+            praat_pause_block: None,
                 kind: ParamKind::FormantBufferRef {
                     buffer_kind: FormantBufferKind::Formant,
                     relative_name: "fmnt.for".into(),

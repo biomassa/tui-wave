@@ -9250,6 +9250,276 @@ kind = "toggle"
 default = false
 
 [[process]]
+key = "praat_distortion_sidechain_feedback_vca"
+bin = "Distortion/Sidechain_Feedback_VCA.praat"
+title = "Sidechain Feedback VCA"
+category = "praat"
+subcategory = "Distortion"
+short_description = "Sidechain Feedback VCA"
+description = "Sidechain Feedback VCA"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+
+[[process.script_presets]]
+option = 1
+params = [1, 2, 5, 6, 8, 9]
+values = [0.6, 0.3, 0.95, 30.0, 200.0, 0.03]
+
+[[process.script_presets]]
+option = 2
+params = [1, 2, 5, 6, 8, 9]
+values = [0.9, 0.7, 0.88, 50.0, 100.0, 0.08]
+
+[[process.script_presets]]
+option = 3
+params = [1, 2, 5, 6, 8, 9]
+values = [0.75, 0.4, 0.96, 60.0, 250.0, 0.02]
+
+[[process.script_presets]]
+option = 4
+params = [1, 2, 5, 6, 8, 9]
+values = [0.95, 0.9, 0.85, 40.0, 80.0, 0.15]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom (use settings below)", "Gentle Resonance", "Aggressive Feedback", "Slow Evolution", "Chaotic Burst"]
+default = 0
+
+[[process.params]]
+name = "Base_Feedback"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.8
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Input_Sensitivity"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Envelope_range_dB"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 40.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Allow_negative_VCA"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Damping_Factor"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.92
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Iterations"
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = inf
+step = 1.0
+default = 40.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Frequency_Offset_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Bandwidth_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 150.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Analog_Instability"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Dry_Wet"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Exciter_position"
+description = ""
+automatable = false
+kind = "choice"
+options = ["After the dry/wet mix (v0.2/v0.3)", "On the wet path only"]
+default = 0
+
+[[process.params]]
+name = "High_Freq_Add"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Spatial_Mode"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["Mono", "Stereo Wide", "Rotating", "Binaural"]
+default = 1
+
+[[process.params]]
+name = "Interaural_delay_ms"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.68
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Multichannel_policy"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["Downmix to mono, then duplicate", "Use the first two channels", "Refuse more than 2 channels"]
+default = 0
+
+[[process.params]]
+name = "Output_mode"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["Normalize each stage to 0.95 (v0.2/v0.3)", "Normalize only at the end", "Preserve loop level (output gain only)"]
+default = 0
+
+[[process.params]]
+name = "Output_Gain"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random_seed"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Draw_visualization"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Debug"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = true
+
+[[process]]
 key = "praat_distortion_tanh"
 bin = "Distortion/Tanh.praat"
 title = "Tanh"
@@ -41229,6 +41499,958 @@ kind = "toggle"
 default = false
 
 [[process]]
+key = "praat_reverb_universal_convolution_generator_accelerando"
+bin = "Reverb/Universal Convolution Generator.praat"
+title = "Universal Convolution Generator (Accelerando)"
+category = "praat"
+subcategory = "Reverb"
+short_description = "Universal Convolution Generator (Accelerando)"
+description = "Universal Convolution Generator (Accelerando)"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Algorithm"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["Accelerando"]
+default = 0
+
+[[process.params]]
+name = "Duration"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Wet_dry_percent"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 70.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_after_processing"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "First_hit_time"
+praat_pause_block = 1
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Number_of_pulses"
+praat_pause_block = 1
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = inf
+step = 1.0
+default = 24.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Gap_shrink_ratio"
+praat_pause_block = 1
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.85
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "praat_reverb_universal_convolution_generator_bouncing_ball"
+bin = "Reverb/Universal Convolution Generator.praat"
+title = "Universal Convolution Generator (Bouncing Ball)"
+category = "praat"
+subcategory = "Reverb"
+short_description = "Universal Convolution Generator (Bouncing Ball)"
+description = "Universal Convolution Generator (Bouncing Ball)"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Algorithm"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["Bouncing Ball"]
+default = 0
+
+[[process.params]]
+name = "Duration"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Wet_dry_percent"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 70.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_after_processing"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "First_bounce_time"
+praat_pause_block = 2
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gravity"
+praat_pause_block = 2
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 9.81
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Initial_velocity"
+praat_pause_block = 2
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 3.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Bounce_coefficient"
+praat_pause_block = 2
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.6
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "praat_reverb_universal_convolution_generator_bursts_and_taps"
+bin = "Reverb/Universal Convolution Generator.praat"
+title = "Universal Convolution Generator (Bursts and Taps)"
+category = "praat"
+subcategory = "Reverb"
+short_description = "Universal Convolution Generator (Bursts and Taps)"
+description = "Universal Convolution Generator (Bursts and Taps)"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Algorithm"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["Bursts and Taps"]
+default = 0
+
+[[process.params]]
+name = "Duration"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Wet_dry_percent"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 70.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_after_processing"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Tap_1_time"
+praat_pause_block = 3
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.15
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Tap_2_time"
+praat_pause_block = 3
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 1.2
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Number_of_bursts"
+praat_pause_block = 3
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = inf
+step = 1.0
+default = 3.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Points_per_burst"
+praat_pause_block = 3
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = inf
+step = 1.0
+default = 10.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Burst_stddev"
+praat_pause_block = 3
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.035
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "praat_reverb_universal_convolution_generator_euclidean_rhythm"
+bin = "Reverb/Universal Convolution Generator.praat"
+title = "Universal Convolution Generator (Euclidean Rhythm)"
+category = "praat"
+subcategory = "Reverb"
+short_description = "Universal Convolution Generator (Euclidean Rhythm)"
+description = "Universal Convolution Generator (Euclidean Rhythm)"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Algorithm"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["Euclidean Rhythm"]
+default = 0
+
+[[process.params]]
+name = "Duration"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Wet_dry_percent"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 70.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_after_processing"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Total_steps"
+praat_pause_block = 4
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = inf
+step = 1.0
+default = 16.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Active_pulses"
+praat_pause_block = 4
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = inf
+step = 1.0
+default = 5.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process]]
+key = "praat_reverb_universal_convolution_generator_fibonacci_mono"
+bin = "Reverb/Universal Convolution Generator.praat"
+title = "Universal Convolution Generator (Fibonacci (Mono))"
+category = "praat"
+subcategory = "Reverb"
+short_description = "Universal Convolution Generator (Fibonacci (Mono))"
+description = "Universal Convolution Generator (Fibonacci (Mono))"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Algorithm"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["Fibonacci (Mono)"]
+default = 0
+
+[[process.params]]
+name = "Duration"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Wet_dry_percent"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 70.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_after_processing"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Number_of_impulses"
+praat_pause_block = 5
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = inf
+step = 1.0
+default = 12.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Scale_divisor"
+praat_pause_block = 5
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 100.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Jitter_stddev"
+praat_pause_block = 5
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.01
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "praat_reverb_universal_convolution_generator_golden_angle_drift"
+bin = "Reverb/Universal Convolution Generator.praat"
+title = "Universal Convolution Generator (Golden Angle Drift)"
+category = "praat"
+subcategory = "Reverb"
+short_description = "Universal Convolution Generator (Golden Angle Drift)"
+description = "Universal Convolution Generator (Golden Angle Drift)"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Algorithm"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["Golden Angle Drift"]
+default = 0
+
+[[process.params]]
+name = "Duration"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Wet_dry_percent"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 70.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_after_processing"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Number_of_impulses"
+praat_pause_block = 6
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = inf
+step = 1.0
+default = 24.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Margin_s"
+praat_pause_block = 6
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "praat_reverb_universal_convolution_generator_random_walk"
+bin = "Reverb/Universal Convolution Generator.praat"
+title = "Universal Convolution Generator (Random Walk)"
+category = "praat"
+subcategory = "Reverb"
+short_description = "Universal Convolution Generator (Random Walk)"
+description = "Universal Convolution Generator (Random Walk)"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Algorithm"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["Random Walk"]
+default = 0
+
+[[process.params]]
+name = "Duration"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Wet_dry_percent"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 70.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_after_processing"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Initial_gap"
+praat_pause_block = 7
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.18
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gap_variation"
+praat_pause_block = 7
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.015
+exponential = false
+scale = "plain"
+
+[[process]]
+key = "praat_reverb_universal_convolution_generator_stereo_fibonacci"
+bin = "Reverb/Universal Convolution Generator.praat"
+title = "Universal Convolution Generator (Stereo Fibonacci)"
+category = "praat"
+subcategory = "Reverb"
+short_description = "Universal Convolution Generator (Stereo Fibonacci)"
+description = "Universal Convolution Generator (Stereo Fibonacci)"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Algorithm"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["Stereo Fibonacci"]
+default = 0
+
+[[process.params]]
+name = "Duration"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Wet_dry_percent"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 70.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_after_processing"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Number_of_impulses"
+praat_pause_block = 8
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = inf
+step = 1.0
+default = 12.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Left_seed_1"
+praat_pause_block = 8
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = inf
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Left_seed_2"
+praat_pause_block = 8
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = inf
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Right_seed_1"
+praat_pause_block = 8
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = inf
+step = 1.0
+default = 2.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Right_seed_2"
+praat_pause_block = 8
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = inf
+step = 1.0
+default = 3.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process]]
+key = "praat_reverb_universal_convolution_generator_swing"
+bin = "Reverb/Universal Convolution Generator.praat"
+title = "Universal Convolution Generator (Swing)"
+category = "praat"
+subcategory = "Reverb"
+short_description = "Universal Convolution Generator (Swing)"
+description = "Universal Convolution Generator (Swing)"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Algorithm"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["Swing"]
+default = 0
+
+[[process.params]]
+name = "Duration"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Wet_dry_percent"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 70.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_after_processing"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Tempo_BPM"
+praat_pause_block = 9
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 120.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Swing_delay_s"
+praat_pause_block = 9
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.06
+exponential = false
+scale = "plain"
+
+[[process]]
 key = "praat_reverb_convolve_ping_pong"
 bin = "Reverb/convolve_PING-PONG.praat"
 title = "convolve PING-PONG"
@@ -55904,6 +57126,292 @@ description = ""
 automatable = false
 kind = "toggle"
 default = false
+
+[[process]]
+key = "praat_time_granular_polyphonic_improviser"
+bin = "Time & Granular/Polyphonic_Improviser.praat"
+title = "Polyphonic Improviser"
+category = "praat"
+subcategory = "Time/Granular"
+short_description = "Polyphonic Improviser"
+description = "Polyphonic Improviser"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+
+[[process.script_presets]]
+option = 3
+params = [10]
+values = [6.0]
+
+[[process.script_presets]]
+option = 6
+params = [10]
+values = [1.5]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Slow Canon      (tape, octave drop, 4-bar entries)", "Dense Cluster   (tape, semitone cloud, short entries)", "Spectral Drift  (lengthen, subtle ratios, long entries)", "Rhythmic Echo   (tape, fifth+octave, beat-quantized)", "Mirror Scatter  (tape, inverse ratios, many chunks)", "Microtonal Haze (lengthen, tiny ratios, 4 voices)"]
+default = 0
+
+[[process.params]]
+name = "Number_of_chunks"
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = inf
+step = 1.0
+default = 12.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Crossfade_ms"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 30.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Number_of_voices"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 3.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Transform_mode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Tape speed  (pitch + time)", "Lengthen  (time only)"]
+default = 0
+
+[[process.params]]
+name = "V1_speed_ratio"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "V2_speed_ratio"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 1.059
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Quantize_entries"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Tempo_bpm"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 120.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Note_value"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Whole note  (4 beats)", "Half note  (2 beats)", "Quarter note  (1 beat)", "Eighth note  (0.5 beats)", "Dotted whole  (6 beats)", "Dotted half  (3 beats)", "Dotted quarter  (1.5 beats)", "2 bars  (8 beats)", "4 bars  (16 beats)"]
+default = 2
+
+[[process.params]]
+name = "Entry_delay_s"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 3.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_output"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "V3_speed_ratio"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "V4_speed_ratio"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 1.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "V1_amplitude"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "V2_amplitude"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.85
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "V3_amplitude"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.75
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "V4_amplitude"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.65
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "V1_pan"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = -0.35
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "V2_pan"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.4
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "V3_pan"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = -0.75
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "V4_pan"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.75
+exponential = false
+scale = "plain"
 
 [[process]]
 key = "praat_time_granular_quantum_state_superposition"

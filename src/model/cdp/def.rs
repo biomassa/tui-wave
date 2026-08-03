@@ -768,6 +768,30 @@ pub struct ParamDef {
     /// box unticked has always done anyway.
     #[serde(default)]
     pub opens_praat_dialog: bool,
+    /// `Some(n)` for a param **hoisted out of a Praat `beginPause` block** — `n` is that
+    /// block's index in the script, counting from 0 in source order.
+    ///
+    /// Praat allows exactly one `form` per script run, so an author needing a second page of
+    /// settings has no choice but a pause dialog. Three scripts here do that, and it is what
+    /// made them unusable: a `beginPause` under `--run` does not merely block, it **segfaults**
+    /// (exit 139, confirmed against praat 6.6.30). `Universal Convolution Generator` has no
+    /// `form` at all — its entire UI is a two-stage pause wizard.
+    ///
+    /// Such a param is never passed as a `runScript:` argument, because the script's `form` has
+    /// no slot for it. Instead `praat::runner` rewrites a **copy** of the script into the job's
+    /// temp directory, replacing each pause block with plain assignments to the very variables
+    /// the block would have set, and runs that. See `praat::rewrite` for the substitution rules
+    /// — in particular that Praat lowercases only the *first* character of a label
+    /// (`Output_Gain` becomes `output_Gain`) and that an `optionmenu` sets both a numeric
+    /// variable and a `$` one holding the option's text.
+    ///
+    /// The index is the block's position in the **original script**, not in this entry: the
+    /// nine `Universal Convolution Generator` entries each carry step 1's params plus one
+    /// algorithm's, so their indices are sparse (0 and 4, say). A block no param refers to is
+    /// simply deleted, which is correct — those sit inside an `if algorithm$ = "…"` that this
+    /// entry never satisfies.
+    #[serde(default)]
+    pub praat_pause_block: Option<usize>,
     /// True for a `Number` param whose real CDP-enforced range is a **multiple of the input's
     /// duration** rather than a fixed span of seconds. `min`/`max`/`default` are then read as
     /// multipliers, and `App::cdp_fields_for` turns them into absolute seconds against the
@@ -1260,6 +1284,7 @@ mod tests {
             rows_match_input_count: false,
             before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
             kind: ParamKind::Number {
                 min: 2.0,
                 max: 64.0,
@@ -1323,6 +1348,7 @@ mod tests {
             rows_match_input_count: false,
             before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
             kind: ParamKind::Toggle { default: false },
         };
         let choice = ParamDef {
@@ -1338,6 +1364,7 @@ mod tests {
             rows_match_input_count: false,
             before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
             kind: ParamKind::Choice {
                 options: vec!["44100".into(), "48000".into()],
                 default: 0,
@@ -1397,6 +1424,7 @@ mod tests {
             rows_match_input_count: false,
             before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
             kind: ParamKind::Table {
                 columns: vec![
                     TableColumn {
@@ -1487,6 +1515,7 @@ mod tests {
             rows_match_input_count: false,
             before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
             kind: ParamKind::MarkerTimeList {
                 markers: vec!['a', 'b'],
                 min: 0.0,
@@ -1558,6 +1587,7 @@ mod tests {
             rows_match_input_count: false,
             before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
             kind: ParamKind::HiliteBand {
                 lofrq: bounds("Lo Freq", 20.0, 20000.0, 200.0),
                 hifrq: bounds("Hi Freq", 20.0, 20000.0, 2000.0),
@@ -1616,6 +1646,7 @@ mod tests {
             // sits *after* the outfile, so this is the ordinary (default) placement.
             before_outfile: false,
             opens_praat_dialog: false,
+            praat_pause_block: None,
             kind: ParamKind::CrystalVdat,
         }
     }

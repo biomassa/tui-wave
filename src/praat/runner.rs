@@ -266,6 +266,29 @@ fn run_job_body(
         input_paths.push(path);
     }
 
+    // A process whose settings live in a Praat `beginPause` dialog runs against a rewritten
+    // *copy* of the script, written here beside the driver — the dialog cannot be shown under
+    // `--run` at all, it segfaults Praat outright. The original in the submodule is only read.
+    // See `model::praat::rewrite` for the substitution rules.
+    if let Some(rewrite) = &job.planned.pause_rewrite {
+        let source = std::fs::read_to_string(&job.planned.script_path).map_err(|e| {
+            PraatError::OutputRead {
+                path: job.planned.script_path.display().to_string(),
+                message: e.to_string(),
+            }
+        })?;
+        let rewritten = crate::model::praat::rewrite::rewrite_pause_blocks(&source, &rewrite.blocks)
+            .map_err(|e| PraatError::OutputRead {
+                path: job.planned.script_path.display().to_string(),
+                message: e.to_string(),
+            })?;
+        let path = temp_dir.join(&rewrite.script_name);
+        std::fs::write(&path, rewritten).map_err(|e| PraatError::OutputRead {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        })?;
+    }
+
     std::fs::write(&driver_path, &job.planned.driver_source).map_err(|e| PraatError::OutputRead {
         path: driver_path.display().to_string(),
         message: e.to_string(),
@@ -547,6 +570,7 @@ mod tests {
                 output_name: OUTPUT_WAV.into(),
                 picture_name: None,
                 script_path: PathBuf::from("/unused"),
+                pause_rewrite: None,
                 label: "test".into(),
             },
             inputs: vec![vec![vec![0.0f32; 1000], vec![0.0f32; 1000]]],
