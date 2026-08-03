@@ -11175,6 +11175,13 @@ impl App {
     /// five-second synthesised drone over a selection is not what "generate" means, and a result
     /// at a different rate could not be spliced at all — it was refused outright.
     ///
+    /// The whole `Vector Chain` group, for a related reason: those are not processes at all but
+    /// fixed four-stage *pipelines* of other processes, and what comes out the far end is
+    /// nothing like what went in. `chain_1` runs segmentation and reordering, then spectral
+    /// freezing, then a reverb cascade, then a **4-channel canon** — a result whose duration and
+    /// channel count both differ from the selection, and which is a new piece rather than an
+    /// edit of one (user report, 2026-08-03).
+    ///
     /// And any process taking a **folder of sounds** as a parameter, wherever it is filed. Its
     /// material is that folder, not the selection: `Bayesian Drone Weaver` weaves a drone out of
     /// a clip library and never reads the selection at all, `Sound atom composer` assembles from
@@ -11193,7 +11200,8 @@ impl App {
         if def.backend() != crate::model::cdp::def::Backend::Praat {
             return false;
         }
-        crate::model::cdp::cdp_group(def).is_some_and(|g| g.name == "Generative")
+        crate::model::cdp::cdp_group(def)
+            .is_some_and(|g| g.name == "Generative" || g.name == "Vector Chain")
             || def
                 .params
                 .iter()
@@ -22862,6 +22870,18 @@ mod tests {
                 App::praat_opens_new_buffer(def),
                 "{key} takes a folder of sounds and must not splice over the selection"
             );
+        }
+
+        // A chain is a fixed pipeline whose far end looks nothing like its input — chain_1
+        // ends in a 4-channel canon — so it is a new piece, not an edit of the selection.
+        let chains: Vec<_> = catalog
+            .processes
+            .iter()
+            .filter(|p| p.bin.starts_with("Vector Chain/"))
+            .collect();
+        assert_eq!(chains.len(), 18, "every chain entry");
+        for def in chains {
+            assert!(App::praat_opens_new_buffer(def), "{}", def.key);
         }
 
         // Every folder-taking Praat process, not just the four named above — the rule is

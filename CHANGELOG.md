@@ -28,6 +28,31 @@
   its author's own desktop. The genuinely free-text ones — L-system rules, a logical
   proposition, a note name, an output prefix, a Praat formula — get a plain typed field.
 
+- **The CDP browser now tells you what a Praat process does.** Every one of them previously
+  showed its own title back at you as its description — "chain 1" for *chain 1* — for all 397.
+  The text now comes from each script's own documentation header.
+
+  The Vector Chain entries carry the most useful gain: they are fixed pipelines of other
+  processes, and most of them document no description at all, so their entry now lists the
+  stages they run —
+
+  ```
+  Runs these processes in order:
+
+  1. HMM Timbre Sequencing
+  2. Kotoński FSM Event Generator
+  3. Risset's Mutations
+  ...
+  ```
+
+  which is what you need in order to rebuild one yourself in **CDP+Praat Chain** (`Ctrl+h`)
+  with parameters you control. The chain scripts themselves are fixed and live in a submodule,
+  so they are for reading, not editing.
+
+- **A Vector Chain now opens a new buffer** rather than overwriting your selection. A chain is
+  a four-stage pipeline whose far end looks nothing like its input — `chain 1` ends in a
+  4-channel canon — so it is a new piece, not an edit of one.
+
 - **A process built from a folder of sounds now opens a new buffer** instead of overwriting your
   selection. Its material is that folder, so its length has nothing to do with what you had
   selected, and splicing destroyed the audio it was launched from to make room for something

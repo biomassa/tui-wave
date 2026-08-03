@@ -218,6 +218,39 @@ mod tests {
         assert_eq!(keys.len(), count_before, "duplicate process keys in built-in catalog");
     }
 
+    /// A Praat entry's description must actually describe it, not repeat its own title.
+    ///
+    /// Every one of them used to: the converter emitted `description = <title>`, so the
+    /// browser's description panel read "chain 1" for `chain 1` and told the user nothing about
+    /// 397 processes. The text is now read from each script's own `# Description:` header — and
+    /// for the chain scripts, which mostly carry none, from the numbered stages they list
+    /// instead, which is the useful thing to know about a pipeline anyway.
+    ///
+    /// A handful genuinely document nothing and still fall back to the title; the threshold
+    /// catches a regression in the extractor without pretending upstream is uniform.
+    #[test]
+    fn praat_descriptions_come_from_the_scripts_not_from_their_titles() {
+        use super::super::def::Backend;
+        let (catalog, _) = CdpCatalog::load(None);
+        let praat: Vec<_> =
+            catalog.processes.iter().filter(|p| p.backend() == Backend::Praat).collect();
+        let described = praat.iter().filter(|p| p.description != p.title).count();
+        assert!(
+            described * 20 >= praat.len() * 19,
+            "only {described} of {} Praat entries have a real description",
+            praat.len()
+        );
+
+        // A chain is a pipeline of other processes, and naming them is the whole point.
+        let chain = catalog
+            .processes
+            .iter()
+            .find(|p| p.bin == "Vector Chain/chain_7.praat")
+            .expect("chain 7 in catalog");
+        assert!(chain.description.contains("Kotoński FSM Event Generator"), "{}", chain.description);
+        assert!(chain.description.contains("Golden Ratio Processor"), "{}", chain.description);
+    }
+
     /// No catalog file may repeat a key **within itself**.
     ///
     /// Across files a repeated key is the *override* mechanism, and a deliberate one:
