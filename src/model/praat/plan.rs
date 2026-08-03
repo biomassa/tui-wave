@@ -88,6 +88,13 @@ fn assignment_for(param: &ParamDef, value: &ParamValue) -> Result<Assignment, Pr
                 index: *i,
                 options: options.len(),
             }),
+        (ParamKind::Text { .. }, ParamValue::Text(text))
+        | (ParamKind::FolderPath, ParamValue::Text(text)) => {
+            Ok(Assignment::Text { label, value: text.clone() })
+        }
+        (ParamKind::FilePath { .. }, ParamValue::FilePath(path)) => {
+            Ok(Assignment::Text { label, value: path.clone() })
+        }
         (ParamKind::NumberList { separator, .. }, ParamValue::List(values)) => {
             let joined: Vec<String> = values.iter().map(|v| format!("{v}")).collect();
             Ok(Assignment::Text { label, value: joined.join(separator) })
@@ -174,6 +181,16 @@ fn argument_for(def: &ProcessDef, index: usize, value: &ParamValue) -> Result<Dr
         // Entries are formatted the same way a `Number` argument is, so `2` reaches the script
         // as `2` and not `2.0000000000000004` — the field's own `integer` flag has already
         // rounded where it applies, and this only has to avoid re-introducing float noise.
+        // Free text and a picked folder are both just strings to Praat — a `sentence`/`word`/
+        // `text` field takes one, and a folder path is a `sentence` field the app fills with a
+        // browser instead of the keyboard.
+        (ParamKind::Text { .. }, ParamValue::Text(text))
+        | (ParamKind::FolderPath, ParamValue::Text(text)) => Ok(DriverArg::Text(text.clone())),
+        // A picked file is a path like any other string. Missed on the first pass, which left
+        // `SPEAR_Par-Text-Frame_Format_Parser` unable to plan at all ("has no Praat
+        // equivalent") — caught by the real-binary sweep, not by any unit test, because
+        // nothing else in the catalog pairs a `FilePath` param with the Praat backend.
+        (ParamKind::FilePath { .. }, ParamValue::FilePath(path)) => Ok(DriverArg::Text(path.clone())),
         (ParamKind::NumberList { separator, .. }, ParamValue::List(values)) => {
             // `{v}` on an f64 is what `driver::praat_number_literal` uses for a numeric
             // argument, and prints 2.0 as `2` — the list editor clamps every entry into the
@@ -213,11 +230,35 @@ pub fn plan_praat_job(
     // what the script's own form declares, which is what Praat matches by position and count.
     let mut args = Vec::new();
     let mut blocks: BTreeMap<usize, Vec<Assignment>> = BTreeMap::new();
+    // Numbers split out of one `key=value` field rejoin into a single argument at the position
+    // of the first — see `ParamDef::key_value_group`. They are emitted consecutively by the
+    // converter, so tracking just the run in progress is enough.
+    let mut open_group: Option<(String, usize)> = None;
     for (i, value) in values.iter().enumerate() {
-        match def.params[i].praat_pause_block {
-            Some(block) => {
-                blocks.entry(block).or_default().push(assignment_for(&def.params[i], value)?)
+        let param = &def.params[i];
+        if let (Some(group), Some(key)) = (&param.key_value_group, &param.key_value_key) {
+            let ParamValue::Number(number) = value else {
+                return Err(PraatPlanError::ParamTypeMismatch { param: param.name.clone() });
+            };
+            let pair = format!("{key}={number}");
+            match &open_group {
+                // Same field as the previous param: append to the argument already placed.
+                Some((open, at)) if open == group => {
+                    if let Some(DriverArg::Text(text)) = args.get_mut(*at) {
+                        text.push(' ');
+                        text.push_str(&pair);
+                    }
+                }
+                _ => {
+                    open_group = Some((group.clone(), args.len()));
+                    args.push(DriverArg::Text(pair));
+                }
             }
+            continue;
+        }
+        open_group = None;
+        match param.praat_pause_block {
+            Some(block) => blocks.entry(block).or_default().push(assignment_for(param, value)?),
             None => args.push(argument_for(def, i, value)?),
         }
     }
@@ -355,6 +396,8 @@ mod tests {
             before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
             range_scales_with_input_duration: false,
             default_from_dc_offset: false,
             rows_match_input_count: false,
@@ -687,6 +730,61 @@ mod pause_hoist_tests {
             !job.driver_source.contains("0.375"),
             "a hoisted value must travel in the script, not on the argument list"
         );
+    }
+
+    /// Every param kind the Praat catalog actually uses must have an argument spelling.
+    ///
+    /// This is the test that was missing when `ParamKind::FilePath` reached the Praat catalog
+    /// for the first time: nothing else pairs that kind with this backend, so the gap only
+    /// surfaced in the real-binary sweep, as `SPEAR_Par-Text-Frame_Format_Parser` failing to
+    /// plan at all with "has no Praat equivalent". Planning every entry at its defaults costs a
+    /// fraction of a second and closes the whole class.
+    #[test]
+    fn every_praat_entry_plans_at_its_defaults() {
+        use crate::model::cdp::def::Backend;
+        let (catalog, _) = CdpCatalog::load(None);
+        let mut failures = Vec::new();
+        for def in catalog.processes.iter().filter(|p| p.backend() == Backend::Praat) {
+            let values: Vec<ParamValue> =
+                def.params.iter().map(|p| p.kind.default_value()).collect();
+            if let Err(err) = plan_praat_job(def, &values, &checkout()) {
+                failures.push(format!("{}: {err}", def.key));
+            }
+        }
+        assert!(failures.is_empty(), "entries that cannot be planned:\n  {}", failures.join("\n  "));
+    }
+
+    /// Numbers split out of a `key=value` field must rebuild exactly one argument holding every
+    /// key, and must not each become an argument of their own — Praat matches a script's form by
+    /// position and count, so a stray extra argument shifts everything after it.
+    #[test]
+    fn key_value_numbers_rejoin_into_one_argument() {
+        let (catalog, _) = CdpCatalog::load(None);
+        let def = catalog
+            .find("praat_spatial_surround_physics_based_stereo_dynamics")
+            .expect("entry exists");
+        let mut values: Vec<ParamValue> =
+            def.params.iter().map(|p| p.kind.default_value()).collect();
+        // Change one key, so the test proves the typed value travels rather than the default.
+        let grav = def.params.iter().position(|p| p.name == "Physics_grav").expect("Physics_grav");
+        values[grav] = ParamValue::Number(1.62); // lunar gravity
+        let job = plan_praat_job(def, &values, &checkout()).expect("plans");
+
+        assert!(
+            job.driver_source.contains("\"h0=1.2 v0=6 grav=1.62 rest=0.75 bounces=8\""),
+            "the five Physics keys must arrive as one argument:\n{}",
+            job.driver_source
+        );
+        // Three separate fields, three separate arguments — not one merged blob.
+        assert!(job.driver_source.contains("\"start=-0.9 end=0.9 cycles=2\""), "Pan_path");
+        assert!(job.driver_source.contains("\"width=3 listener=4 ref=1\""), "Geometry");
+        // And the argument count still matches the script's own form, which is what Praat
+        // checks: one argument per *field*, not per key.
+        let groups: std::collections::BTreeSet<_> =
+            def.params.iter().filter_map(|p| p.key_value_group.clone()).collect();
+        let split_params = def.params.iter().filter(|p| p.key_value_group.is_some()).count();
+        assert_eq!(groups.len(), 3);
+        assert_eq!(split_params, 11, "eleven numbers collapsing into three arguments");
     }
 
     /// The nine split entries differ in exactly the way they should: each pins `algorithm$` to

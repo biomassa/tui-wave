@@ -519,6 +519,19 @@ enum CdpField {
         path: Option<String>,
         extension: String,
     },
+    /// A `ParamKind::Text` field — plain typed text, seeded with the script's own default.
+    /// Unlike every other field here it has no bounded editor and needs none; the whole point
+    /// is that its content is prose, a grammar rule or a formula.
+    Text {
+        input: TextInput,
+    },
+    /// A `ParamKind::FolderPath` field — a directory, chosen with the file browser. `path`
+    /// starts `None` ("never picked") and blocks Apply until it is set, the same shape
+    /// `FilePath` uses: there is no sensible default directory to invent, and running one of
+    /// these scripts against the wrong folder wastes a long run rather than failing fast.
+    FolderPath {
+        path: Option<String>,
+    },
     /// A `ParamKind::CrystalVdat` field (`crystal rotate`'s compound VDAT datafile) — the
     /// only field holding *two* independently-edited sections, mirroring
     /// `model::cdp::CrystalVdat`'s own two halves exactly (see that type for why CDP forces
@@ -555,6 +568,8 @@ impl CdpField {
             // its bounds handling and its rendering are shared — the difference is only that
             // this one arrives *seeded* with the script's own working default instead of
             // empty, since there is nothing here the user is obliged to author.
+            ParamKind::Text { default } => CdpField::Text { input: TextInput::fresh(default.clone()) },
+            ParamKind::FolderPath => CdpField::FolderPath { path: None },
             ParamKind::NumberList { min, max, step, integer, default, .. } => CdpField::List {
                 values: default.clone(),
                 min: *min,
@@ -747,6 +762,10 @@ impl CdpField {
                 ParamValue::Number(input.value().trim().parse::<f64>().unwrap_or(0.0))
             }
             CdpField::Toggle { on } => ParamValue::Toggle(*on),
+            CdpField::Text { input } => ParamValue::Text(input.value().to_string()),
+            // An unpicked folder is the empty string, which `cdp_validate_fields` blocks before
+            // a run can start — the same treatment `FilePath` gets for the same reason.
+            CdpField::FolderPath { path } => ParamValue::Text(path.clone().unwrap_or_default()),
             CdpField::Choice { selected, .. } => ParamValue::Choice(*selected),
             CdpField::List { values, .. } => ParamValue::List(values.clone()),
             CdpField::Table { rows, .. } => ParamValue::Table(rows.clone()),
@@ -1633,6 +1652,13 @@ struct FormantBufferPicker {
 struct CdpFilePicker {
     field_index: usize,
     panel: FilePanel,
+    /// True when the field being filled is a `ParamKind::FolderPath` — the browser then lists
+    /// directories only (an empty extension list already does that, see `FilePanel::scan_dir`)
+    /// and Enter keeps *navigating*, because the folder you want is often several levels down.
+    /// `u` is what commits the directory currently open. Splitting the two is the only way to
+    /// reach a nested folder at all; making Enter commit would strand the picker at whatever
+    /// level it opened on.
+    folder: bool,
 }
 
 /// State for the plain-list editor, active while `Dialog::CdpParams.list_edit` is `Some` —
@@ -4975,6 +5001,7 @@ impl App {
                 } else {
                     match fields.get_mut(*focus - 1) {
                         Some(CdpField::Number { input, .. }) => Some(input),
+                        Some(CdpField::Text { input }) => Some(input),
                         _ => None,
                     }
                 }
@@ -5029,6 +5056,9 @@ impl App {
                     Some(CdpField::Number { integer, .. }) => {
                         c.is_ascii_digit() || c == '-' || (c == '.' && !*integer)
                     }
+                    // Free text: an L-system rule, a note name, a Praat formula. No filter can
+                    // help here, and one would only get in the way.
+                    Some(CdpField::Text { .. }) => true,
                     // Toggle/Choice fields aren't typed into, and the trailing
                     // second-input/Preview/Apply pseudo-fields accept nothing either.
                     _ => false,
@@ -9090,20 +9120,30 @@ impl App {
     /// convenience this session's design settled on (CDP-Release8-TODO.md, 2026-07-26).
     fn open_cdp_file_picker(&mut self) -> bool {
         let Some(Dialog::CdpParams { fields, focus, .. }) = &self.dialog else { return false };
-        let eligible = |_: usize, f: &CdpField| matches!(f, CdpField::FilePath { .. });
-        let unset = |_: usize, f: &CdpField| matches!(f, CdpField::FilePath { path: None, .. });
+        let eligible = |_: usize, f: &CdpField| {
+            matches!(f, CdpField::FilePath { .. } | CdpField::FolderPath { .. })
+        };
+        let unset = |_: usize, f: &CdpField| {
+            matches!(f, CdpField::FilePath { path: None, .. } | CdpField::FolderPath { path: None })
+        };
         let Some(field_index) = resolve_smart_field_target(fields, *focus, eligible, unset) else {
             return false;
         };
-        let Some(CdpField::FilePath { path, extension }) = fields.get(field_index) else {
-            return false;
+        let (path, extension, folder) = match fields.get(field_index) {
+            Some(CdpField::FilePath { path, extension }) => (path.clone(), extension.clone(), false),
+            // A folder picker wants no files at all — an empty extension list is exactly what
+            // `FilePanel::scan_dir` reads as "directories only".
+            Some(CdpField::FolderPath { path }) => (path.clone(), String::new(), true),
+            _ => return false,
         };
         let extensions: &'static [&'static str] = match extension.as_str() {
+            _ if folder => &[],
             "matrix" => &["matrix"],
-            // Every `FilePath` param this catalog declares today uses "matrix" (see
-            // `ParamKind::FilePath`'s doc comment) — this arm exists so a future
-            // differently-extensioned param fails loudly (falls back to "wav", clearly
-            // wrong) instead of silently misbehaving, rather than to handle a real case.
+            // A `.txt` partial-data file (`SPEAR_Par-Text-Frame_Format_Parser`); every other
+            // `FilePath` param this catalog declares uses "matrix". The fallback arm below
+            // stays deliberately wrong-looking so a future unhandled extension fails loudly
+            // instead of quietly filtering to the wrong thing.
+            "txt" => &["txt"],
             _ => &["wav"],
         };
         let start_dir = self
@@ -9113,7 +9153,11 @@ impl App {
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| self.file_panel.directory.clone());
-        let mut panel = FilePanel::new_with_extension(start_dir, extensions, "Pick File");
+        let mut panel = FilePanel::new_with_extension(
+            start_dir,
+            extensions,
+            if folder { "Pick Folder" } else { "Pick File" },
+        );
         // Preselect the field's current pick (if any), else the last matrix generated —
         // same "don't silently switch the pick on reopen" care as the formant picker.
         let preselect = path.clone().or_else(|| {
@@ -9134,7 +9178,7 @@ impl App {
             return false;
         };
         *dialog_focus = field_index + 1; // smart-target may have jumped focus to this field
-        *file_picker = Some(CdpFilePicker { field_index, panel });
+        *file_picker = Some(CdpFilePicker { field_index, panel, folder });
         true
     }
 
@@ -9181,6 +9225,9 @@ impl App {
             KeyCode::PageUp => panel.move_page_up(),
             KeyCode::PageDown => panel.move_page_down(),
             KeyCode::Enter => self.activate_cdp_file_picker(),
+            // Commit the directory currently open. Only meaningful in folder mode, where Enter
+            // is reserved for navigating deeper — see `CdpFilePicker::folder`.
+            KeyCode::Char('u') => self.use_cdp_picker_directory(),
             KeyCode::Char('/') => {
                 panel.filtering = true;
                 panel.filter.clear();
@@ -9194,11 +9241,33 @@ impl App {
         }
     }
 
+    /// `u` in a folder picker: commit the directory the browser is currently showing.
+    ///
+    /// Separate from Enter, which navigates. A folder picker that committed on Enter could only
+    /// ever return a directory one level below wherever it opened, since going deeper and
+    /// choosing would be the same keystroke.
+    fn use_cdp_picker_directory(&mut self) {
+        let Some(Dialog::CdpParams { file_picker: Some(picker), .. }) = self.dialog.as_ref() else {
+            return;
+        };
+        if !picker.folder {
+            return;
+        }
+        let (field_index, directory) = (picker.field_index, picker.panel.directory.clone());
+        let Some(Dialog::CdpParams { fields, file_picker, .. }) = self.dialog.as_mut() else {
+            return;
+        };
+        if let Some(CdpField::FolderPath { path }) = fields.get_mut(field_index) {
+            *path = Some(directory.to_string_lossy().into_owned());
+        }
+        *file_picker = None;
+    }
+
     /// Enter on `Dialog::CdpParams.file_picker`'s highlighted row: a directory navigates into
     /// it (picker stays open); a file commits its absolute path into the field's `path` and
     /// closes the picker. Mirrors `App::open_selected_file`'s navigate-vs-open split.
     fn activate_cdp_file_picker(&mut self) {
-        let Some(Dialog::CdpParams { file_picker: Some(CdpFilePicker { field_index, panel }), .. }) =
+        let Some(Dialog::CdpParams { file_picker: Some(CdpFilePicker { field_index, panel, .. }), .. }) =
             self.dialog.as_mut()
         else {
             return;
@@ -10055,6 +10124,13 @@ impl App {
             // `None` always means "never browsed to a file," same block as an unpicked
             // `FormantBufferRef` above.
             if let CdpField::FilePath { path: None, .. } = field {
+                return Some(i);
+            }
+            // Same for a folder that has never been picked. These scripts read a directory of
+            // sounds as their material, and several fall back to Praat's own `chooseFolder$`
+            // when the field is blank — a dialog this app cannot show at all — so an empty one
+            // is not a run that produces nothing, it is a run that takes Praat down.
+            if let CdpField::FolderPath { path: None } = field {
                 return Some(i);
             }
             // A crystal field's vertex half always has a seeded row, but its envelope half
@@ -11091,20 +11167,37 @@ impl App {
     /// Whether a Praat process's result should open as a **new buffer** rather than being
     /// spliced into the selection.
     ///
-    /// True for the whole `Generative` group. Those processes synthesise from scratch: their
-    /// length comes from their own Duration parameter and their rate from their own Sample Rate
-    /// parameter, so neither has any relationship to the selection they were launched from.
-    /// Splicing a five-second synthesised drone over a selection is not what "generate" means,
-    /// and a result at a different rate could not be spliced at all — it was refused outright.
+    /// True on either of two counts.
     ///
-    /// Keyed off the group rather than a per-entry catalog flag, for the same reason
-    /// `group::cdp_group` is derived rather than stored: `praat_catalog.toml` is machine-
-    /// generated and carries a "do not hand-edit" header, so a column here would be reverted by
-    /// the next converter run. It also means the rule reads the plugin's own taxonomy — a
-    /// process filed under Generative & Synthesis generates.
+    /// The whole `Generative` group: those processes synthesise from scratch: their length comes
+    /// from their own Duration parameter and their rate from their own Sample Rate parameter, so
+    /// neither has any relationship to the selection they were launched from. Splicing a
+    /// five-second synthesised drone over a selection is not what "generate" means, and a result
+    /// at a different rate could not be spliced at all — it was refused outright.
+    ///
+    /// And any process taking a **folder of sounds** as a parameter, wherever it is filed. Its
+    /// material is that folder, not the selection: `Bayesian Drone Weaver` weaves a drone out of
+    /// a clip library and never reads the selection at all, `Sound atom composer` assembles from
+    /// one, `KL Divergence Corpus Resynthesis` resynthesises against two corpora, and
+    /// `Gesture-Based Hard Quantization` recomposes against a reference set. The result is a new
+    /// work built from external material, so its length has no more to do with the selection
+    /// than a generator's does — and splicing it over the selection destroys the audio it was
+    /// launched from to make room for something unrelated (user report, 2026-08-03).
+    ///
+    /// Both tests are *derived* rather than stored as a per-entry catalog flag, for the same
+    /// reason `group::cdp_group` is: `praat_catalog.toml` is machine-generated and carries a
+    /// "do not hand-edit" header, so a column here would be reverted by the next converter run.
+    /// The group test also reads the plugin's own taxonomy — a process filed under Generative &
+    /// Synthesis generates — and the folder test reads a fact about the process's own inputs.
     fn praat_opens_new_buffer(def: &crate::model::cdp::ProcessDef) -> bool {
-        def.backend() == crate::model::cdp::def::Backend::Praat
-            && crate::model::cdp::cdp_group(def).is_some_and(|g| g.name == "Generative")
+        if def.backend() != crate::model::cdp::def::Backend::Praat {
+            return false;
+        }
+        crate::model::cdp::cdp_group(def).is_some_and(|g| g.name == "Generative")
+            || def
+                .params
+                .iter()
+                .any(|p| matches!(p.kind, crate::model::cdp::ParamKind::FolderPath))
     }
 
     /// Whether any step of `chain` — at any nesting depth — actually runs a CDP binary.
@@ -16264,8 +16357,11 @@ impl App {
         }
         // `Dialog::CdpParams.file_picker` reuses the exact same widget/render function as
         // `Dialog::LoadCurve` above, for the exact same `&mut FilePanel` reason.
-        if let Some(Dialog::CdpParams { file_picker: Some(CdpFilePicker { panel, .. }), .. }) = self.dialog.as_mut() {
-            render_load_curve_dialog(frame, area, panel);
+        if let Some(Dialog::CdpParams { file_picker: Some(CdpFilePicker { panel, folder, .. }), .. }) =
+            self.dialog.as_mut()
+        {
+            let folder = *folder;
+            render_file_picker_popup(frame, area, panel, folder);
         }
 
         // Graphics-mode envelope curve: `render_cdp_envelope_editor` (inside `render_dialog`
@@ -20404,6 +20500,21 @@ fn render_cdp_params_dialog(
             label_style
         };
         let line = match field {
+            CdpField::Text { input } => Line::from(vec![
+                Span::styled(label, label_style_here),
+                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(format!(" {}", input.value()), base),
+            ]),
+            CdpField::FolderPath { path: None } => Line::from(vec![
+                Span::styled(label, label_style_here),
+                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(" (not set — b to pick a folder)", dim_style),
+            ]),
+            CdpField::FolderPath { path: Some(path) } => Line::from(vec![
+                Span::styled(label, label_style_here),
+                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(format!(" {path}"), base),
+            ]),
             CdpField::Number { envelope: Some(points), .. } => Line::from(vec![
                 Span::styled(label, label_style_here),
                 Span::styled(format!("{:<range_width$}", ""), range_style),
@@ -21111,6 +21222,17 @@ fn render_cdp_output_dialog(frame: &mut Frame, area: Rect, title: &str, lines_te
 /// `dialog_row_rects` because mouse clicks go straight through `picker`'s own
 /// `hit_test`/`handle_click` instead (`App::try_handle_load_curve_mouse`).
 fn render_load_curve_dialog(frame: &mut Frame, area: Rect, picker: &mut FilePanel) {
+    render_file_picker_popup(frame, area, picker, false)
+}
+
+/// The same popup, with the hint row told whether this is a *folder* picker — where Enter
+/// navigates and `u` is what commits, so the row has to say so or the key is undiscoverable.
+fn render_file_picker_popup(
+    frame: &mut Frame,
+    area: Rect,
+    picker: &mut FilePanel,
+    folder: bool,
+) {
     let width = 60u16.min(area.width);
     let height = 22u16.min(area.height);
     let popup = Rect {
@@ -21133,7 +21255,9 @@ fn render_load_curve_dialog(frame: &mut Frame, area: Rect, picker: &mut FilePane
             Span::styled(" \u{2191}\u{2193}", hint_style),
             Span::styled(":move  ", label_style),
             Span::styled("Enter", hint_style),
-            Span::styled(":open/load  ", label_style),
+            Span::styled(if folder { ":open  " } else { ":open/load  " }, label_style),
+            Span::styled(if folder { "u" } else { "" }, hint_style),
+            Span::styled(if folder { ":use this folder  " } else { "" }, label_style),
             Span::styled("/", hint_style),
             Span::styled(":filter  ", label_style),
             Span::styled("Esc", hint_style),
@@ -22706,7 +22830,8 @@ mod tests {
         assert_eq!(app.documents.len(), 2, "a saved buffer must survive undo");
     }
 
-    /// The rule is the plugin's own Generative group, and nothing else.
+    /// Two rules: the plugin's own Generative group, and any process whose material is a
+    /// folder of sounds rather than the selection.
     #[test]
     fn only_generative_praat_processes_open_a_new_buffer() {
         let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
@@ -22723,6 +22848,33 @@ mod tests {
         // A CDP process is never routed this way, whatever its group.
         let cdp = catalog.find("distort_average").expect("distort_average in catalog");
         assert!(!App::praat_opens_new_buffer(cdp));
+
+        // Assembled from a folder, so its length has no more to do with the selection than a
+        // generator's does — and splicing would destroy the audio it was launched from.
+        for key in [
+            "praat_ai_adaptive_gesture_based_hard_quantization",
+            "praat_ai_adaptive_bayesian_drone_weaver",
+            "praat_ai_adaptive_kl_divergence_corpus_resynthesis",
+            "praat_time_granular_sound_atom_composer",
+        ] {
+            let def = catalog.find(key).unwrap_or_else(|| panic!("{key} in catalog"));
+            assert!(
+                App::praat_opens_new_buffer(def),
+                "{key} takes a folder of sounds and must not splice over the selection"
+            );
+        }
+
+        // Every folder-taking Praat process, not just the four named above — the rule is
+        // derived from the parameter, so a future one is covered without another edit here.
+        for def in &catalog.processes {
+            let takes_folder = def
+                .params
+                .iter()
+                .any(|p| matches!(p.kind, crate::model::cdp::ParamKind::FolderPath));
+            if takes_folder {
+                assert!(App::praat_opens_new_buffer(def), "{}", def.key);
+            }
+        }
     }
 
     /// Cycling the Internal Preset row fills the form immediately, and leaves the row naming
@@ -25791,6 +25943,8 @@ mod tests {
                 before_outfile: false,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
                 kind: ParamKind::Number {
                     min: 1.0,
                     max: 10.0,
@@ -28771,6 +28925,8 @@ mod tests {
                 before_outfile: true,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
                 kind: ParamKind::FormantBufferRef {
                     buffer_kind: crate::model::formant::FormantBufferKind::Formant,
                     relative_name: "fmnt.for".into(),
@@ -28856,6 +29012,8 @@ mod tests {
                 before_outfile: true,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
                 kind: ParamKind::FormantBufferRef {
                     buffer_kind: crate::model::formant::FormantBufferKind::Formant,
                     relative_name: "fmnt.for".into(),
@@ -35256,6 +35414,8 @@ mod tests {
                 before_outfile: true,
             opens_praat_dialog: false,
             praat_pause_block: None,
+            key_value_group: None,
+            key_value_key: None,
                 kind: ParamKind::FormantBufferRef {
                     buffer_kind: FormantBufferKind::Formant,
                     relative_name: "fmnt.for".into(),
@@ -36304,3 +36464,40 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod folder_gate_tests {
+    use super::*;
+
+    /// Apply must be blocked until a folder is picked. This is not cosmetic: these scripts fall
+    /// back to Praat's own `chooseFolder$` when the field is blank, and that dialog under
+    /// `--run` does not prompt — it **segfaults Praat**. The block is what makes that
+    /// unreachable from the app, and it is why the real-binary sweep has to seed a folder of its
+    /// own rather than run these at their (empty) defaults.
+    #[test]
+    fn a_folder_process_cannot_run_until_a_folder_is_picked() {
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog
+            .find("praat_ai_adaptive_bayesian_drone_weaver")
+            .expect("bayesian drone weaver in catalog");
+        let index = def
+            .params
+            .iter()
+            .position(|p| matches!(p.kind, crate::model::cdp::ParamKind::FolderPath))
+            .expect("it takes a folder");
+
+        let mut fields: Vec<CdpField> = def.params.iter().map(CdpField::from_default).collect();
+        assert_eq!(
+            App::cdp_validate_fields(def, &fields),
+            Some(index),
+            "an unpicked folder must block Apply, and name that field"
+        );
+
+        fields[index] = CdpField::FolderPath { path: Some("/tmp".into()) };
+        assert_eq!(
+            App::cdp_validate_fields(def, &fields),
+            None,
+            "once picked, nothing else on this process blocks"
+        );
+    }
+}
