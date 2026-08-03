@@ -542,6 +542,43 @@ pub enum ParamKind {
     /// resolves to a real absolute path, which `ParamValue::FilePath` carries directly.
     /// `extension` (no leading dot) is what the picker filters to.
     FilePath { extension: String },
+    /// A Praat `sentence` field that really holds a **delimited list of numbers**, edited as a
+    /// list and joined back into one string on the way to the script.
+    ///
+    /// The converter used to reject any `sentence`/`word`/`text` field outright, on the stated
+    /// grounds that "none of these carry a value a user would want to vary anyway (they are
+    /// labels and filenames)". For most of them that is the opposite of true: the field *is*
+    /// the process. `Total_Serialism_Machine`'s `Series_values` is a twelve-tone row
+    /// (`0,10,7,11,3,8,1,9,2,5,6,4`), `GRM-Style_Resonator`'s `manualFrequencies` is the
+    /// resonator bank (`300 520 890 1440 2330 3770`), `Rhythmic_Pitch_Percussion`'s
+    /// `Rhythm_pattern` is the rhythm (`1_0_1_1_0_1_0_1_1_0_0_1`). Eleven scripts are shaped
+    /// this way and only two are genuinely labels.
+    ///
+    /// `separator` is the script's own and is not negotiable — these are three different
+    /// delimiters across the set (space, comma, underscore) and one script uses none at all
+    /// (`BPM_Panning`'s `Accent_grid`, `1010100110101001`, one digit per sixteenth). It is
+    /// stored per param and written back verbatim, rather than normalised, because the
+    /// receiving script parses with exactly this delimiter and nothing else.
+    ///
+    /// Deliberately its own `ParamKind` rather than CDP's `required_list` flag on a `Number`.
+    /// That flag carries invariants this does not want — it demands `automatable = true`,
+    /// starts deliberately empty, and blocks Apply until the user fills it, all correct for a
+    /// CDP datafile the user must author, all wrong for a field whose script ships a working
+    /// default. Here the default is seeded and the process runs untouched. The *editor* is
+    /// shared, though: this builds the same `CdpField::List` that flag does, so the list UI,
+    /// its bounds handling and its rendering are reused rather than rebuilt.
+    NumberList {
+        /// Written between entries verbatim. Empty means the digits run together.
+        separator: String,
+        min: f64,
+        max: f64,
+        step: f64,
+        /// The script's own declared default, already parsed. Never empty — a `NumberList`
+        /// with nothing in it would be indistinguishable from a field the user has not filled.
+        default: Vec<f64>,
+        #[serde(default)]
+        integer: bool,
+    },
     /// `crystal rotate`'s VDAT datafile — a **compound** param, the first in this catalog:
     /// one argv token, one file, two structurally unrelated sections inside it (XYZ vertex
     /// triples, then a time/value amplitude envelope). See `ParamValue::CrystalVdat` and
@@ -579,6 +616,9 @@ impl ParamKind {
             ParamKind::Number { default, .. } => ParamValue::Number(*default),
             ParamKind::Toggle { default } => ParamValue::Toggle(*default),
             ParamKind::Choice { default, .. } => ParamValue::Choice(*default),
+            // The script's own default list, which is a working configuration — unlike
+            // `required_list`, which starts empty on purpose and blocks Apply until filled.
+            ParamKind::NumberList { default, .. } => ParamValue::List(default.clone()),
             // One row, each column at its own default — mirrors how the UI seeds a
             // never-yet-configured table field (`App::open_cdp_table_editor`).
             ParamKind::Table { columns, .. } => {
@@ -708,6 +748,26 @@ pub struct ParamDef {
     /// would already get on its own.
     #[serde(default)]
     pub before_outfile: bool,
+    /// True for a Praat `boolean` param whose *only* effect is to open a second Praat dialog
+    /// — a `beginPause` block holding advanced settings. Ticking it would try to put a GTK
+    /// window on screen under `praat --run`, which **segfaults** (exit 139, core dumped;
+    /// confirmed against praat 6.6.30). The field is rendered greyed and refuses to tick,
+    /// exactly as a drawing toggle does when the terminal has no graphics — see
+    /// `praat_toggle_block`, which resolves both reasons in one place so the three sites that
+    /// care (Space, click, render) cannot disagree about whether a row is live.
+    ///
+    /// The param is deliberately **kept and still emitted**, always as its `false` default,
+    /// rather than dropped from the catalog. Praat fills a script's `form` fields
+    /// *positionally* from `runScript:`'s arguments, so removing one shifts every argument
+    /// after it and silently feeds each field its neighbour's value. Dropping a *choice
+    /// option* is safe and needs no flag (Praat matches an `optionmenu` by label, and
+    /// `DriverArg::Text` carries the label) — dropping a param is not.
+    ///
+    /// The advanced settings therefore keep whatever defaults the script assigns them just
+    /// above its own `if show_advanced_settings` — which is what running the script with the
+    /// box unticked has always done anyway.
+    #[serde(default)]
+    pub opens_praat_dialog: bool,
     /// True for a `Number` param whose real CDP-enforced range is a **multiple of the input's
     /// duration** rather than a fixed span of seconds. `min`/`max`/`default` are then read as
     /// multipliers, and `App::cdp_fields_for` turns them into absolute seconds against the
@@ -1199,6 +1259,7 @@ mod tests {
             default_from_dc_offset: false,
             rows_match_input_count: false,
             before_outfile: false,
+            opens_praat_dialog: false,
             kind: ParamKind::Number {
                 min: 2.0,
                 max: 64.0,
@@ -1261,6 +1322,7 @@ mod tests {
             default_from_dc_offset: false,
             rows_match_input_count: false,
             before_outfile: false,
+            opens_praat_dialog: false,
             kind: ParamKind::Toggle { default: false },
         };
         let choice = ParamDef {
@@ -1275,6 +1337,7 @@ mod tests {
             default_from_dc_offset: false,
             rows_match_input_count: false,
             before_outfile: false,
+            opens_praat_dialog: false,
             kind: ParamKind::Choice {
                 options: vec!["44100".into(), "48000".into()],
                 default: 0,
@@ -1333,6 +1396,7 @@ mod tests {
             default_from_dc_offset: false,
             rows_match_input_count: false,
             before_outfile: false,
+            opens_praat_dialog: false,
             kind: ParamKind::Table {
                 columns: vec![
                     TableColumn {
@@ -1422,6 +1486,7 @@ mod tests {
             default_from_dc_offset: false,
             rows_match_input_count: false,
             before_outfile: false,
+            opens_praat_dialog: false,
             kind: ParamKind::MarkerTimeList {
                 markers: vec!['a', 'b'],
                 min: 0.0,
@@ -1492,6 +1557,7 @@ mod tests {
             default_from_dc_offset: false,
             rows_match_input_count: false,
             before_outfile: false,
+            opens_praat_dialog: false,
             kind: ParamKind::HiliteBand {
                 lofrq: bounds("Lo Freq", 20.0, 20000.0, 200.0),
                 hifrq: bounds("Hi Freq", 20.0, 20000.0, 2000.0),
@@ -1549,6 +1615,7 @@ mod tests {
             // The real argv is `crystal rotate <mode> fi [fi2..] fo vdat ...` — the datafile
             // sits *after* the outfile, so this is the ordinary (default) placement.
             before_outfile: false,
+            opens_praat_dialog: false,
             kind: ParamKind::CrystalVdat,
         }
     }

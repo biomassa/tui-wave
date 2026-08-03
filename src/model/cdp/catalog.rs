@@ -218,6 +218,41 @@ mod tests {
         assert_eq!(keys.len(), count_before, "duplicate process keys in built-in catalog");
     }
 
+    /// No catalog file may repeat a key **within itself**.
+    ///
+    /// Across files a repeated key is the *override* mechanism, and a deliberate one:
+    /// `catalog_extra.toml` replaces three of `catalog.toml`'s entries that way (`focus_step`,
+    /// `housekeep_extract_4`, `morph_glide`), each with a comment saying why. Within one file
+    /// it is nothing but a silently discarded process — later merge order simply wins.
+    ///
+    /// `builtin_keys_are_unique` above cannot see that and structurally never could: by the
+    /// time `load` returns, the collision has already resolved itself into one entry and the
+    /// list *is* unique. The loss is only visible in the source.
+    ///
+    /// Not hypothetical. The Praat converter slugified filenames, and upstream ships eight
+    /// pairs differing only in punctuation (`Whisper Morph.praat` / `Whisper_Morph.praat`,
+    /// `Stereo_Shimmer.praat` / `stereo_shimmer.praat`, …), so eight genuinely different
+    /// processes — every pair differs by hundreds of lines — overwrote each other and never
+    /// reached the browser.
+    #[test]
+    fn no_catalog_file_repeats_a_key_within_itself() {
+        for (name, source) in [
+            ("catalog.toml", include_str!("catalog.toml")),
+            ("catalog_extra.toml", include_str!("catalog_extra.toml")),
+            ("praat_catalog.toml", include_str!("praat_catalog.toml")),
+        ] {
+            let mut seen = std::collections::HashSet::new();
+            for line in source.lines() {
+                let Some(rest) = line.strip_prefix("key = \"") else { continue };
+                let Some(key) = rest.strip_suffix('"') else { continue };
+                assert!(
+                    seen.insert(key),
+                    "{name} declares {key:?} twice — the second silently replaces the first"
+                );
+            }
+        }
+    }
+
     /// Checks one `TableColumn`-shaped bounds set (used directly by `Table` columns, and
     /// reused for each of `HiliteBand`'s five numeric fields).
     fn assert_column_sane(proc_key: &str, param_name: &str, col: &super::super::def::TableColumn) {
@@ -293,6 +328,33 @@ mod tests {
                     // associated constants — see `ParamKind::CrystalVdat`'s doc comment), so
                     // there is nothing per-entry for this test to check. Its own equivalent
                     // guard is `CrystalVdat::validate`, exercised in `def.rs`'s tests.
+                    // Same bounds check every other numeric kind gets, plus the two rules
+                    // specific to this one: a `NumberList` with no default is
+                    // indistinguishable from an unfilled field, and a default entry outside
+                    // the field's own bounds is a value the editor would refuse to re-enter
+                    // once it had been changed.
+                    ParamKind::NumberList { min, max, default, .. } => {
+                        assert!(
+                            *min <= *max,
+                            "{}: param {:?} has min {min} > max {max}",
+                            proc.key,
+                            param.name
+                        );
+                        assert!(
+                            !default.is_empty(),
+                            "{}: param {:?} is a NumberList with an empty default",
+                            proc.key,
+                            param.name
+                        );
+                        for value in default {
+                            assert!(
+                                *min <= *value && *value <= *max,
+                                "{}: param {:?} default entry {value} is outside {min}..{max}",
+                                proc.key,
+                                param.name
+                            );
+                        }
+                    }
                     ParamKind::Toggle { .. }
                     | ParamKind::Choice { .. }
                     | ParamKind::FormantBufferRef { .. }

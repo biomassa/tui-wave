@@ -67,6 +67,57 @@ GROUP_DIRS = {
 # preferences directory holding a `plugin_AudioTools` symlink (see `prepare_prefs_dir`).
 SKIP_DIRS = {"py", "Max-MSP"}
 
+# Scripts that DO contain a blocking construct, but on a code path this app can guarantee is
+# never taken. Keyed by path relative to the plugin root; each entry says which construct, why
+# it is unreachable, and what the catalog entry has to do to keep it that way.
+#
+# This is an override of a *static* detector by a *reachability* argument, so every entry has to
+# carry the argument. A wrong one costs a segfault at run time, not a clean error -- confirmed
+# against praat 6.6.30, a `beginPause` under `--run` exits 139 with a core dump.
+#
+# Two kinds of adjustment, and the difference is not cosmetic:
+#
+#   lock_off      -- name a `boolean` param that must never be ticked. It stays in the catalog
+#                    and is still emitted, always as 0, and the app greys it (see
+#                    `ParamDef.opens_praat_dialog`). It CANNOT simply be dropped: Praat fills a
+#                    script's `form` positionally from `runScript:`'s arguments, so removing one
+#                    shifts every argument after it and feeds each field its neighbour's value.
+#   drop_options  -- name an `optionmenu` param and the option labels to remove. Safe to drop
+#                    outright, because Praat matches an optionmenu by *label* and the catalog
+#                    stores labels verbatim, so nothing is positional here.
+GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
+    # Three scripts of the same shape: `boolean Show_advanced_settings 0` guarding a
+    # `beginPause` block of advanced parameters, whose values are already assigned as plain
+    # variables immediately above the `if`. With the box unticked -- which is the script's own
+    # default, and what `SILENCE_RE` would force anyway -- the block is never entered and those
+    # defaults stand. Locking it off makes that the only reachable state.
+    "Generative & Synthesis/FM_Texture_Generator.praat": {
+        "lock_off": ["Show_Advanced_Settings"],
+        "why": "beginPause 'Advanced DX7 Parameters' is guarded by Show_Advanced_Settings, "
+               "which the script itself defaults to 0",
+    },
+    "Time & Granular/HFD-Driven_Time_Warping.praat": {
+        "lock_off": ["Show_advanced_settings"],
+        "why": "beginPause 'Advanced HFD Parameters' is guarded by Show_advanced_settings, "
+               "which the script itself defaults to 0",
+    },
+    "Time & Granular/Magnetic_Tape_Degradation.praat": {
+        "lock_off": ["Show_advanced_settings"],
+        "why": "beginPause 'Advanced Tape Physics' is guarded by Show_advanced_settings, "
+               "which the script itself defaults to 0",
+    },
+    # The only `View & Edit` here, and it sits under one option of one menu: pan mode 8 is a
+    # two-pass "draw the pan curve by hand" workflow that opens a RealTier editor and asks the
+    # user to come back. The other seven modes never touch it. Dropping that option leaves a
+    # 1248-line script with seven working modes rather than nothing.
+    "Spatial & Surround/Advanced_Stereo_Panner.praat": {
+        "drop_options": {
+            "Pan_mode": ["Trajectory: DRAW YOUR OWN (two passes - see Info)"],
+        },
+        "why": "View & Edit is reached only under pan_mode = 8 (the hand-drawn trajectory pass)",
+    },
+}
+
 # How much wider than its declared default a synthesised range runs. Deliberately generous:
 # these are experimental-music processes and pushing a parameter well past its intended value
 # is a legitimate use, while an out-of-range value costs only a clean Praat error.
@@ -154,6 +205,46 @@ def code_only(source: str) -> str:
 # whatever detector happened to fire next.
 CODE = "code"    # match against code_only(source)
 RAW = "raw"      # match against the source as written
+
+def apply_gui_override(params: list, override: dict) -> str | None:
+    """Apply one `GUI_BLOCKING_OVERRIDES` entry to a parsed form. Returns a problem, or None.
+
+    Every name in the override must resolve. A silent miss would leave the blocking construct
+    reachable while the entry claims otherwise, which is the one failure mode that costs a
+    segfault rather than an error message -- so a stale override excludes the script instead.
+    """
+    by_name = {p.name: p for p in params}
+
+    for name in override.get("lock_off", []):
+        param = by_name.get(name)
+        if param is None:
+            return f"no parameter named {name!r} (upstream renamed or removed it?)"
+        if param.kind != "toggle":
+            return f"parameter {name!r} is a {param.kind}, not a toggle"
+        param.default = False
+        param.locked_off = True
+
+    for name, labels in override.get("drop_options", {}).items():
+        param = by_name.get(name)
+        if param is None:
+            return f"no parameter named {name!r} (upstream renamed or removed it?)"
+        if param.kind != "choice":
+            return f"parameter {name!r} is a {param.kind}, not an optionmenu"
+        for label in labels:
+            if label not in param.options:
+                return f"{name!r} has no option {label!r} (upstream reworded it?)"
+        kept = [o for o in param.options if o not in labels]
+        if not kept:
+            return f"dropping every option of {name!r} would leave nothing to pick"
+        # The default is an *index* into the old list, so it has to be re-resolved against the
+        # new one rather than carried across. A default that was itself dropped falls back to
+        # the first survivor.
+        previous = param.options[int(param.default)] if int(param.default) < len(param.options) else None
+        param.options = kept
+        param.default = kept.index(previous) if previous in kept else 0
+
+    return None
+
 
 EXCLUSIONS: list[tuple[str, re.Pattern, str, str]] = [
     (
@@ -314,6 +405,14 @@ class Param:
     minimum: float = 0.0
     maximum: float = 0.0
     step: float = 0.0
+    # Set from GUI_BLOCKING_OVERRIDES' `lock_off`: a toggle that must never be ticked because
+    # doing so opens a Praat dialog. Emitted as `opens_praat_dialog = true`; the app greys the
+    # row and refuses the key. Never dropped -- see the override table for why.
+    locked_off: bool = False
+    # Set for kind == "number_list": the script's own delimiter, written back verbatim, and
+    # the default entries parsed out of its form declaration.
+    list_separator: str = ""
+    list_default: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -417,8 +516,18 @@ def parse_form(source: str) -> list[Param] | str:
                 return f"non-numeric default for {name!r}: {value_text!r}"
             params.append(make_number(keyword, name, default))
         elif keyword in TEXT_KEYWORDS:
-            # A free-text field has no bounded editor in this app, and none of these carry a
-            # value a user would want to vary anyway (they are labels and filenames).
+            # Most of these are not prose. A `sentence` whose default is a delimited run of
+            # numbers is a *list* -- a twelve-tone row, a resonator's frequency bank, a rhythm
+            # pattern -- and is very often the substance of the process rather than a label.
+            # Those become an editable list; see `parse_number_list`, which is deliberately
+            # strict so a genuine text field is never mistaken for one.
+            recognised = parse_number_list(value_text)
+            if recognised:
+                separator, values = recognised
+                params.append(make_number_list(name, separator, values))
+                continue
+            # What is left really is free text -- a folder path, an L-system alphabet, a Praat
+            # formula, an output-name prefix -- and has no bounded editor in this app yet.
             return f"parameter {name!r} is a free-text {keyword} field"
         else:
             return f"unsupported form field {keyword!r}"
@@ -429,6 +538,97 @@ def parse_form(source: str) -> list[Param] | str:
                 return f"optionmenu {param.name!r} declares no options"
             param.default = min(max(int(param.default), 1), len(param.options)) - 1
     return params
+
+
+# Delimiters a `sentence` field's number list is tried against, most specific first. Order
+# matters: "1.0, 1.5, 2.0" splits cleanly on ", " and would leave a leading space on every
+# entry but the first if split on "," alone, so the two-character form has to win.
+#
+# Deliberately does NOT include the empty delimiter. `BPM_Panning`'s `Accent_grid`
+# ("1010100110101001", one digit per sixteenth) is a real number list with no separator at
+# all, but auto-detecting that is indistinguishable from a plain sixteen-digit number, so it
+# stays excluded until it is worth an explicit per-script override. Guessing there would turn
+# any large integer default into a list of digits.
+LIST_SEPARATORS = (", ", ",", " ", "_")
+
+# Below this many entries, a "list" is more likely a word that happens to be numeric ("8") or
+# a filename fragment. Every real one in this plugin has at least three.
+MIN_LIST_ENTRIES = 2
+
+
+def parse_number_list(default: str) -> tuple[str, list[float]] | None:
+    """Recognise a `sentence` default that is really a delimited list of numbers.
+
+    Returns `(separator, values)`, or None when the field is genuinely free text. The
+    converter used to reject every text field on the stated grounds that they are "labels and
+    filenames"; across this plugin eleven are lists that ARE the process -- a twelve-tone row,
+    a resonator's frequencies, a rhythm pattern -- and only two are labels.
+
+    Conservative on purpose, since a false positive turns a working free-text field into a
+    numeric editor that cannot express what the script wants: every token must parse as a
+    float, and there must be at least MIN_LIST_ENTRIES of them. That rejects `sin(1/x)`,
+    `psi, phi, theta`, `Kemar_HRIR/`, `start_x=-1.0 start_y=0.0` and the L-system alphabets,
+    all of which contain a candidate delimiter but no numbers.
+    """
+    text = default.strip()
+    if not text:
+        return None
+    for separator in LIST_SEPARATORS:
+        parts = [p for p in text.split(separator)]
+        if len(parts) < MIN_LIST_ENTRIES:
+            continue
+        values = []
+        for part in parts:
+            part = part.strip()
+            if not part:
+                break
+            try:
+                values.append(float(part))
+            except ValueError:
+                break
+        else:
+            return separator, values
+    return None
+
+
+def make_number_list(name: str, separator: str, values: list[float]) -> Param:
+    """Synthesise bounds for a number list, wide enough to hold every declared entry.
+
+    Same spirit as `make_number` -- the script declares values and nothing about their range --
+    but the range has to contain the whole default list, not one value, or the catalog's own
+    `builtin_number_params_have_sane_ranges` check would reject a default the script itself
+    ships. Integer-ness is inferred: a twelve-tone row and a rhythm pattern are whole numbers
+    and are much nicer to edit as such, while a ratio list is not.
+    """
+    integer = all(float(v).is_integer() for v in values)
+    low, high = min(values), max(values)
+    span = max(abs(low), abs(high)) * RANGE_FACTOR
+    if span == 0.0:
+        span = 10.0 if integer else 1.0
+    minimum = min(low, -span if low < 0 else 0.0)
+    maximum = max(high, span)
+    minimum = strip_float_noise(minimum)
+    maximum = strip_float_noise(maximum)
+    if integer:
+        minimum = float(int(minimum))
+        maximum = float(int(maximum))
+        step = 1.0
+    else:
+        step = round_step(maximum - minimum)
+    if maximum <= minimum:
+        maximum = minimum + (1.0 if integer else max(abs(minimum), 1.0))
+
+    return Param(
+        name=name,
+        kind="number_list",
+        default=0.0,
+        integer=integer,
+        minimum=minimum,
+        maximum=maximum,
+        step=step,
+        list_separator=separator,
+        list_default=values,
+    )
 
 
 def make_number(keyword: str, name: str, default: float) -> Param:
@@ -536,6 +736,34 @@ def key_for(group_dir: str, stem: str) -> str:
     return f"praat_{slug}"
 
 
+def disambiguate(processes: list[Process]) -> list[str]:
+    """Give colliding keys and titles a numeric suffix, in place. Returns what it renamed.
+
+    Upstream ships eight pairs of scripts whose names differ only in punctuation -- `Whisper
+    Morph.praat` and `Whisper_Morph.praat`, `Undertone Field.praat` and
+    `Undertone_Field.praat`, `Stereo_Shimmer.praat` and `stereo_shimmer.praat` -- and
+    `key_for` slugifies both halves of each pair to the same string. That was not harmless:
+    `CdpCatalog::load` treats a repeated key as an *override* (which is how a user catalog
+    replaces a built-in entry), so the second silently replaced the first and eight real
+    processes never reached the browser. They are not duplicate files either; every pair
+    differs by hundreds of lines, so each is a genuinely different process.
+
+    Suffixes are assigned in sorted-path order, which `collect()` already iterates in, so a
+    given script keeps the same key across runs. The title gets the same treatment: two
+    identical rows in the browser would be no more usable than one missing one.
+    """
+    renamed: list[str] = []
+    seen: dict[str, int] = {}
+    for proc in processes:
+        count = seen.get(proc.key, 0) + 1
+        seen[proc.key] = count
+        if count > 1:
+            renamed.append(f"{proc.bin} -> {proc.key}_{count}")
+            proc.key = f"{proc.key}_{count}"
+            proc.title = f"{proc.title} ({count})"
+    return renamed
+
+
 def toml_string(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
     return f'"{escaped}"'
@@ -580,9 +808,13 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
         # detector must not read prose, and a string-contents detector must not have its
         # strings blanked out from under it.
         scannable = {CODE: code_only(source), RAW: source}
+        override = GUI_BLOCKING_OVERRIDES.get(str(rel).replace("\\", "/"))
         hit = next(
             ((slug, why) for slug, pattern, why, over in EXCLUSIONS
-             if pattern.search(scannable[over])),
+             if pattern.search(scannable[over])
+             # An override answers `gui_blocking` only. A script that also trips
+             # `hardcoded_path` or `non_sound_input` is still excluded for that.
+             and not (slug == "gui_blocking" and override)),
             None,
         )
         if hit:
@@ -599,6 +831,16 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
         if isinstance(params, str):
             excluded.append((str(rel), "unparseable_form", params))
             continue
+
+        if override:
+            problem = apply_gui_override(params, override)
+            # Loud, not silent: an override naming a param the script no longer has means
+            # upstream renamed or removed it, and the reachability argument the override rests
+            # on no longer holds. Shipping the entry anyway would ship the segfault.
+            if problem:
+                excluded.append((str(rel), "gui_blocking",
+                                 f"override is stale: {problem}"))
+                continue
 
         processes.append(Process(
             key=key_for(top, path.stem),
@@ -678,9 +920,24 @@ def render_catalog(processes: list[Process], sha: str) -> str:
                 out.append('scale = "plain"')
                 if param.integer:
                     out.append("integer = true")
+            elif param.kind == "number_list":
+                out.append('kind = "number_list"')
+                # The delimiter is written as a TOML string so a leading/trailing space
+                # survives -- ", " and "," are different fields to the receiving script, and
+                # stripping one into the other would silently reshape its input.
+                out.append(f"separator = {toml_string(param.list_separator)}")
+                out.append(f"min = {toml_number(param.minimum)}")
+                out.append(f"max = {toml_number(param.maximum)}")
+                out.append(f"step = {toml_number(param.step)}")
+                joined = ", ".join(toml_number(v) for v in param.list_default)
+                out.append(f"default = [{joined}]")
+                if param.integer:
+                    out.append("integer = true")
             elif param.kind == "toggle":
                 out.append('kind = "toggle"')
                 out.append(f"default = {'true' if param.default else 'false'}")
+                if param.locked_off:
+                    out.append("opens_praat_dialog = true")
             else:
                 out.append('kind = "choice"')
                 joined = ", ".join(toml_string(o) for o in param.options)
@@ -736,6 +993,19 @@ def main() -> int:
 
     sha = submodule_sha()
     processes, excluded = collect()
+
+    # Must happen before anything is written: a repeated key is an *override* to
+    # `CdpCatalog::load`, not an error, so a collision silently deletes a process from the
+    # browser rather than failing anywhere.
+    renamed = disambiguate(processes)
+    if renamed:
+        print(f"note: {len(renamed)} script(s) renamed to avoid a key collision "
+              f"(upstream ships near-identical filenames):", file=sys.stderr)
+        for line in renamed:
+            print(f"  {line}", file=sys.stderr)
+
+    keys = [p.key for p in processes]
+    assert len(keys) == len(set(keys)), "disambiguate() left duplicate keys"
 
     OUT_CATALOG.write_text(render_catalog(processes, sha), encoding="utf-8")
     OUT_REPORT.parent.mkdir(parents=True, exist_ok=True)

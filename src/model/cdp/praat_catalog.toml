@@ -2053,13 +2053,13 @@ kind = "toggle"
 default = false
 
 [[process]]
-key = "praat_ai_adaptive_nmf_spectral_resynthesizer"
+key = "praat_ai_adaptive_nmf_spectral_resynthesizer_2"
 bin = "AI & Adaptive/NMF_Spectral_Resynthesizer_.praat"
-title = "NMF Spectral Resynthesizer"
+title = "NMF Spectral Resynthesizer (2)"
 category = "praat"
 subcategory = "AI & Adaptive"
-short_description = "NMF Spectral Resynthesizer"
-description = "NMF Spectral Resynthesizer"
+short_description = "NMF Spectral Resynthesizer (2)"
+description = "NMF Spectral Resynthesizer (2)"
 input = "wav"
 output = "wav"
 stereo_native = true
@@ -12735,6 +12735,169 @@ kind = "toggle"
 default = false
 
 [[process]]
+key = "praat_dynamics_envelope_sample_and_hold_processor"
+bin = "Dynamics & Envelope/Sample-and-Hold_Processor.praat"
+title = "Sample-and-Hold Processor"
+category = "praat"
+subcategory = "Dynamics"
+short_description = "Sample-and-Hold Processor"
+description = "Sample-and-Hold Processor"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Rhythmic Chop (binary)", "Dynamics Gate (intensity)", "Tremolo (AM slow)", "Flutter (AM fast)", "Voiced Only (pitch-gate)", "Bright Only (centroid)", "Morse Code (pattern)"]
+default = 0
+
+[[process.params]]
+name = "Control_mode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Binary (alternating)", "Intensity-based", "Amplitude Modulation", "Pitch-gated", "Custom Pattern", "Spectral Centroid Gate"]
+default = 0
+
+[[process.params]]
+name = "Sample_period_s"
+description = ""
+automatable = false
+kind = "number"
+min = 2e-05
+max = 0.22
+step = 0.0001
+default = 0.02
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gate_threshold"
+description = ""
+automatable = false
+kind = "number"
+min = -5.0
+max = 5.5
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Intensity_threshold_dB"
+description = ""
+automatable = false
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "AM_frequency_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = -40.0
+max = 44.0
+step = 0.01
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "AM_depth"
+description = ""
+automatable = false
+kind = "number"
+min = -10.0
+max = 11.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch_threshold_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = -1000.0
+max = 1100.0
+step = 1.0
+default = 100.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Centroid_threshold_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = -10000.0
+max = 11000.0
+step = 10.0
+default = 1000.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pattern"
+description = ""
+automatable = false
+kind = "number_list"
+separator = " "
+min = 0.0
+max = 10.0
+step = 1.0
+default = [1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0]
+integer = true
+
+[[process.params]]
+name = "Mute_level"
+description = ""
+automatable = false
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Smoothing_ms"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 22.0
+step = 0.01
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Visualize"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
 key = "praat_dynamics_envelope_sound_duplicator"
 bin = "Dynamics & Envelope/Sound_Duplicator.praat"
 title = "Sound Duplicator"
@@ -15560,6 +15723,234 @@ kind = "toggle"
 default = false
 
 [[process]]
+key = "praat_filter_color_grm_style_resonator"
+bin = "Filter & Color/GRM-Style_Resonator.praat"
+title = "GRM-Style Resonator"
+category = "praat"
+subcategory = "Filter/Color"
+short_description = "GRM-Style Resonator"
+description = "GRM-Style Resonator"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+
+[[process.script_presets]]
+option = 1
+params = [1, 2, 4, 6, 7, 9, 10, 12, 13]
+values = [8.0, 2.0, 110.0, 100.0, 1.0, 20.0, 0.85, 2.0, 2.0]
+
+[[process.script_presets]]
+option = 2
+params = [1, 2, 4, 6, 7, 9, 10, 12, 13]
+values = [6.0, 3.0, 200.0, 40.0, 1.0, 10.0, 0.7, 1.0, 3.0]
+
+[[process.script_presets]]
+option = 3
+params = [1, 2, 6, 7, 8, 9, 10, 12, 13]
+values = [5.0, 1.0, 200.0, 0.0, 6.0, 2.0, 0.4, 2.0, 6.0]
+
+[[process.script_presets]]
+option = 4
+params = [1, 2, 6, 7, 9, 10, 11, 12, 13]
+values = [4.0, 1.0, 35.0, 1.0, 40.0, 0.95, 12.0, 2.0, 7.0]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Harmonic (organ-like)", "Inharmonic metallic", "Formant-ish (voice coloring)", "Sparse bells"]
+default = 0
+
+[[process.params]]
+name = "numBands"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = 66.0
+step = 1.0
+default = 6.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "tuningMode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Manual list", "Harmonic series", "Inharmonic ratios"]
+default = 0
+
+[[process.params]]
+name = "manualFrequencies"
+description = ""
+automatable = false
+kind = "number_list"
+separator = " "
+min = 0.0
+max = 37700.0
+step = 1.0
+default = [300.0, 520.0, 890.0, 1440.0, 2330.0, 3770.0]
+integer = true
+
+[[process.params]]
+name = "baseFreqHz"
+description = ""
+automatable = false
+kind = "number"
+min = -1100.0
+max = 1210.0
+step = 1.0
+default = 110.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "ratioList"
+description = ""
+automatable = false
+kind = "number_list"
+separator = " "
+min = 0.0
+max = 35.6
+step = 0.01
+default = [1.0, 1.41, 1.89, 2.37, 2.98, 3.56]
+
+[[process.params]]
+name = "bandwidthHz"
+description = ""
+automatable = false
+kind = "number"
+min = -800.0
+max = 880.0
+step = 1.0
+default = 80.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Tune_Delay_To_Pitch"
+description = ""
+automatable = false
+kind = "toggle"
+default = true
+
+[[process.params]]
+name = "Manual_Ring_Delay_Ms"
+description = ""
+automatable = false
+kind = "number"
+min = -80.0
+max = 88.0
+step = 0.1
+default = 8.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "ringIterations"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = 33.0
+step = 1.0
+default = 3.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "ringDecay"
+description = ""
+automatable = false
+kind = "number"
+min = -6.0
+max = 6.6
+step = 0.01
+default = 0.6
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "gainDB"
+description = ""
+automatable = false
+kind = "number"
+min = -60.0
+max = 66.0
+step = 0.1
+default = 6.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gain_Profile"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Flat (Equal)", "Dampen Highs (Tilt Down)", "Boost Highs (Tilt Up)"]
+default = 1
+
+[[process.params]]
+name = "Stereo_Panning"
+description = ""
+automatable = false
+kind = "choice"
+options = ["All Center (Mono)", "Stereo Spread (Alternate)", "Wide Spread (Hard L/R)", "Left Heavy", "Right Heavy", "V Shape (Outside In)", "Random"]
+default = 2
+
+[[process.params]]
+name = "dryWet"
+description = ""
+automatable = false
+kind = "number"
+min = -6.0
+max = 6.6
+step = 0.01
+default = 0.6
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "finalPeak"
+description = ""
+automatable = false
+kind = "number"
+min = -9.9
+max = 10.89
+step = 0.01
+default = 0.99
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Keep_individual_bands"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
 key = "praat_filter_color_golden_ratio_processor"
 bin = "Filter & Color/Golden_Ratio_Processor.praat"
 title = "Golden Ratio Processor"
@@ -15655,6 +16046,190 @@ min = 1e-05
 max = 0.11
 step = 0.0001
 default = 0.01
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_filter_color_harmonic_remover"
+bin = "Filter & Color/Harmonic_Remover.praat"
+title = "Harmonic Remover"
+category = "praat"
+subcategory = "Filter/Color"
+short_description = "Harmonic Remover"
+description = "Harmonic Remover"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+
+[[process.script_presets]]
+option = 1
+params = [1, 5, 6, 7]
+values = [1.0, 8.0, 60.0, 50.0]
+
+[[process.script_presets]]
+option = 2
+params = [1, 5, 6, 7]
+values = [2.0, 12.0, 60.0, 50.0]
+
+[[process.script_presets]]
+option = 3
+params = [1, 5, 6, 7]
+values = [2.0, 10.0, 60.0, 50.0]
+
+[[process.script_presets]]
+option = 4
+params = [1, 5, 6, 7]
+values = [3.0, 12.0, 80.0, 60.0]
+
+[[process.script_presets]]
+option = 5
+params = [1, 5, 6, 7]
+values = [4.0, 12.0, 80.0, 60.0]
+
+[[process.script_presets]]
+option = 6
+params = [1, 5, 6, 7]
+values = [2.0, 12.0, 60.0, 40.0]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Remove Fundamental (de-buzz)", "Remove Odd Harmonics (3,5,7...)", "Remove Even Harmonics (2,4,6...)", "Remove All Overtones (keep F0 only)", "Remove F0 + All Overtones (noise/breath only)", "Remove High Harmonics (warm/mellow, keep 1-3)"]
+default = 0
+
+[[process.params]]
+name = "Removal_mode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Fundamental only", "Selected overtone numbers", "All overtones (keep fundamental)", "Fundamental + all overtones"]
+default = 0
+
+[[process.params]]
+name = "Overtone_numbers"
+description = ""
+automatable = false
+kind = "number_list"
+separator = ","
+min = 0.0
+max = 60.0
+step = 1.0
+default = [2.0, 4.0, 6.0]
+integer = true
+
+[[process.params]]
+name = "Pitch_floor"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 825.0
+step = 0.1
+default = 75.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch_ceiling"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 6600.0
+step = 1.0
+default = 600.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Number_of_harmonics"
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = 88.0
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Analysis_window_ms"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 660.0
+step = 0.1
+default = 60.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Notch_bandwidth_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 660.0
+step = 0.1
+default = 60.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min_amplitude_dB"
+description = ""
+automatable = false
+kind = "number"
+min = -500.0
+max = 500.0
+step = 1.0
+default = -50.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Wet_dry_percent"
+description = ""
+automatable = false
+kind = "number"
+min = -1000.0
+max = 1100.0
+step = 1.0
+default = 100.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Scale_peak"
+description = ""
+automatable = false
+kind = "number"
+min = 0.00095
+max = 10.45
+step = 0.01
+default = 0.95
 exponential = false
 scale = "plain"
 
@@ -16319,6 +16894,338 @@ default = false
 
 [[process.params]]
 name = "Keep_intermediates"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_filter_color_lpc_excitation_lab"
+bin = "Filter & Color/LPC_Excitation_Lab.praat"
+title = "LPC Excitation Lab"
+category = "praat"
+subcategory = "Filter/Color"
+short_description = "LPC Excitation Lab"
+description = "LPC Excitation Lab"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+
+[[process.script_presets]]
+option = 1
+params = [2, 3, 4, 21]
+values = [1.0, 80.0, 400.0, 46.0]
+
+[[process.script_presets]]
+option = 2
+params = [2, 8, 21]
+values = [2.0, 0.008, 46.0]
+
+[[process.script_presets]]
+option = 3
+params = [2, 11, 21]
+values = [3.0, 5.0, 50.0]
+
+[[process.script_presets]]
+option = 4
+params = [2, 14, 15, 21]
+values = [4.0, 60.0, 8000.0, 46.0]
+
+[[process.script_presets]]
+option = 5
+params = [2, 18, 19, 21]
+values = [5.0, 0.4, 0.4, 40.0]
+
+[[process.script_presets]]
+option = 6
+params = [2, 3, 4, 5, 6, 7, 21]
+values = [1.0, 120.0, 220.0, 5.5, 35.0, 8.0, 46.0]
+
+[[process.script_presets]]
+option = 7
+params = [2, 8, 9, 10, 21]
+values = [2.0, 0.0073, 8.0, 25.0, 46.0]
+
+[[process.script_presets]]
+option = 8
+params = [2, 18, 19, 20, 21]
+values = [5.0, 0.2, 0.9, 30.0, 42.0]
+
+[[process.script_presets]]
+option = 9
+params = [2, 14, 15, 16, 21]
+values = [4.0, 80.0, 3000.0, 4.0, 50.0]
+
+[[process.script_presets]]
+option = 10
+params = [1, 2, 21]
+values = [2.0, 1.0, 48.0]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Voiced Sweep", "Robotic Pulse", "Stretched Whisper", "Chirp Texture", "Grain Cloud", "Vibrato Voice", "Jittered Pulse", "Density Cloud", "Chirp Stack", "Cross-Synth (needs 2 Sounds)"]
+default = 0
+
+[[process.params]]
+name = "Cross_synth_mode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Off (single Sound)", "Sound2 as excitation, through Sound1 filter", "Synth excitation, through Sound2 filter"]
+default = 0
+
+[[process.params]]
+name = "Excitation_method"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Pitch Sweep", "Pulse Train", "Time Stretch", "Chirp Burst", "Granular Noise"]
+default = 0
+
+[[process.params]]
+name = "Start_freq_hz"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 880.0
+step = 0.1
+default = 80.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "End_freq_hz"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 3300.0
+step = 1.0
+default = 300.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Vibrato_rate_hz"
+description = ""
+automatable = false
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Vibrato_depth_cents"
+description = ""
+automatable = false
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch_jitter_cents"
+description = ""
+automatable = false
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Period_s"
+description = ""
+automatable = false
+kind = "number"
+min = 1e-05
+max = 0.11
+step = 0.0001
+default = 0.01
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pulse_jitter_pct"
+description = ""
+automatable = false
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pulse_shimmer_pct"
+description = ""
+automatable = false
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Time_stretch_factor"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 33.0
+step = 0.01
+default = 3.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Density_mod_rate_hz"
+description = ""
+automatable = false
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Density_mod_depth"
+description = ""
+automatable = false
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Chirp_start_hz"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 1100.0
+step = 1.0
+default = 100.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Chirp_end_hz"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 44000.0
+step = 10.0
+default = 4000.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Chirp_layers"
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = 11.0
+step = 1.0
+default = 1.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Layer_ratios"
+description = ""
+automatable = false
+kind = "number_list"
+separator = ", "
+min = 0.0
+max = 27.0
+step = 0.01
+default = [1.0, 1.5, 2.0, 2.7]
+
+[[process.params]]
+name = "Grain_density_start"
+description = ""
+automatable = false
+kind = "number"
+min = -6.0
+max = 6.6
+step = 0.01
+default = 0.6
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Grain_density_end"
+description = ""
+automatable = false
+kind = "number"
+min = -6.0
+max = 6.6
+step = 0.01
+default = 0.6
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Grain_size_modulation_pct"
+description = ""
+automatable = false
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Lpc_order"
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = 506.0
+step = 1.0
+default = 46.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
 description = ""
 automatable = false
 kind = "toggle"
@@ -18029,13 +18936,13 @@ kind = "toggle"
 default = false
 
 [[process]]
-key = "praat_filter_color_whisper_morph"
+key = "praat_filter_color_whisper_morph_2"
 bin = "Filter & Color/Whisper_Morph.praat"
-title = "Whisper Morph"
+title = "Whisper Morph (2)"
 category = "praat"
 subcategory = "Filter/Color"
-short_description = "Whisper Morph"
-description = "Whisper Morph"
+short_description = "Whisper Morph (2)"
+description = "Whisper Morph (2)"
 input = "wav"
 output = "wav"
 stereo_native = true
@@ -21854,6 +22761,124 @@ description = ""
 automatable = false
 kind = "toggle"
 default = false
+
+[[process]]
+key = "praat_generative_synthesis_fm_texture_generator"
+bin = "Generative & Synthesis/FM_Texture_Generator.praat"
+title = "FM Texture Generator"
+category = "praat"
+subcategory = "Generative"
+short_description = "FM Texture Generator"
+description = "FM Texture Generator"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Melody_demo"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Electric Piano (DX7 Epiano 1)", "Slap Bass (Solid/Lately)", "Tubular Bells", "Hammond Organ", "Warm Pad", "Custom (Test Tone)"]
+default = 0
+
+[[process.params]]
+name = "Base_Frequency"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 1210.0
+step = 1.0
+default = 110.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Brightness"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 11.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Decay_Scale"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 11.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Envelope"
+description = ""
+automatable = false
+kind = "choice"
+options = ["No Envelope", "Percussive", "Slow Fade", "Gate", "Reverse", "Tremolo", "Swell", "ADSR", "Stutter", "Random Bursts"]
+default = 0
+
+[[process.params]]
+name = "Duration"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 22.0
+step = 0.01
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Master_Volume"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0008
+max = 8.8
+step = 0.001
+default = 0.8
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Show_Visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_Result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Show_Advanced_Settings"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+opens_praat_dialog = true
 
 [[process]]
 key = "praat_generative_synthesis_flute_klattgrid"
@@ -27938,6 +28963,185 @@ kind = "toggle"
 default = false
 
 [[process]]
+key = "praat_modulation_hexaphonic_serial_audio_processor"
+bin = "Modulation/Hexaphonic Serial Audio Processor.praat"
+title = "Hexaphonic Serial Audio Processor"
+category = "praat"
+subcategory = "Modulation"
+short_description = "Hexaphonic Serial Audio Processor"
+description = "Hexaphonic Serial Audio Processor"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Classic Webern", "Berg Symmetrical", "Schoenberg Op.25", "Chromatic Ascent", "All-Interval", "Pentatonic Serial", "Whole-Tone Serial", "Random Chaos"]
+default = 0
+
+[[process.params]]
+name = "Mod_rate_row"
+description = ""
+automatable = false
+kind = "number_list"
+separator = " "
+min = 0.0
+max = 110.0
+step = 1.0
+default = [0.0, 3.0, 7.0, 11.0, 2.0, 6.0, 9.0, 1.0, 5.0, 8.0, 4.0, 10.0]
+integer = true
+
+[[process.params]]
+name = "Mod_depth_row"
+description = ""
+automatable = false
+kind = "number_list"
+separator = " "
+min = 0.0
+max = 110.0
+step = 1.0
+default = [5.0, 9.0, 2.0, 11.0, 0.0, 7.0, 3.0, 10.0, 1.0, 6.0, 8.0, 4.0]
+integer = true
+
+[[process.params]]
+name = "Mod_shape_row"
+description = ""
+automatable = false
+kind = "number_list"
+separator = " "
+min = 0.0
+max = 110.0
+step = 1.0
+default = [2.0, 8.0, 5.0, 0.0, 11.0, 3.0, 7.0, 1.0, 9.0, 4.0, 10.0, 6.0]
+integer = true
+
+[[process.params]]
+name = "Duration_row"
+description = ""
+automatable = false
+kind = "number_list"
+separator = " "
+min = 0.0
+max = 110.0
+step = 1.0
+default = [6.0, 2.0, 9.0, 1.0, 11.0, 4.0, 8.0, 0.0, 7.0, 3.0, 10.0, 5.0]
+integer = true
+
+[[process.params]]
+name = "Panning_row"
+description = ""
+automatable = false
+kind = "number_list"
+separator = " "
+min = 0.0
+max = 110.0
+step = 1.0
+default = [4.0, 8.0, 1.0, 10.0, 3.0, 7.0, 0.0, 11.0, 5.0, 9.0, 2.0, 6.0]
+integer = true
+
+[[process.params]]
+name = "Speed_row"
+description = ""
+automatable = false
+kind = "number_list"
+separator = " "
+min = 0.0
+max = 110.0
+step = 1.0
+default = [6.0, 5.0, 7.0, 4.0, 8.0, 3.0, 9.0, 2.0, 10.0, 1.0, 11.0, 0.0]
+integer = true
+
+[[process.params]]
+name = "Min_rate"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0005
+max = 5.5
+step = 0.001
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max_rate"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 550.0
+step = 0.1
+default = 50.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min_depth"
+description = ""
+automatable = false
+kind = "number"
+min = 5e-05
+max = 0.55
+step = 0.0001
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max_depth"
+description = ""
+automatable = false
+kind = "number"
+min = 0.00095
+max = 10.45
+step = 0.01
+default = 0.95
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min_duration"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0001
+max = 1.1
+step = 0.001
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max_duration"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 33.0
+step = 0.01
+default = 3.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Perceptual_rate_scaling"
+description = ""
+automatable = false
+kind = "toggle"
+default = true
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
 key = "praat_modulation_karplus_strong_modulator"
 bin = "Modulation/Karplus-Strong Modulator .praat"
 title = "Karplus-Strong Modulator"
@@ -32435,6 +33639,186 @@ kind = "toggle"
 default = false
 
 [[process]]
+key = "praat_pitch_pitch_morphing_between_targets"
+bin = "Pitch/Pitch_Morphing_Between_Targets.praat"
+title = "Pitch Morphing Between Targets"
+category = "praat"
+subcategory = "Pitch"
+short_description = "Pitch Morphing Between Targets"
+description = "Pitch Morphing Between Targets"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+
+[[process.script_presets]]
+option = 1
+params = [2, 3, 4, 5]
+values = [2.0, 0.2, 0.05, 0.2]
+
+[[process.script_presets]]
+option = 2
+params = [2, 3, 4, 5]
+values = [1.8, 0.3, 0.15, 0.4]
+
+[[process.script_presets]]
+option = 3
+params = [2, 3, 4, 5]
+values = [1.2, 0.6, 0.25, 0.5]
+
+[[process.script_presets]]
+option = 4
+params = [2, 3, 4, 5]
+values = [1.5, 0.1, 0.08, 0.15]
+
+[[process.script_presets]]
+option = 5
+params = [2, 3, 4, 5]
+values = [2.5, 0.15, 0.03, 0.1]
+
+[[process.script_presets]]
+option = 6
+params = [2, 3, 4, 5]
+values = [1.3, 0.4, 0.3, 0.25]
+
+[[process.script_presets]]
+option = 7
+params = [2, 3, 4, 5]
+values = [0.8, 0.8, 0.4, 0.6]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Manual (configure below)", "Gentle Waves", "Emotional Arcs", "Dramatic Leaps", "Chromatic Walk", "Microtonal Glide", "Tension Build", "Chaotic Dance"]
+default = 0
+
+[[process.params]]
+name = "Target_pitches"
+description = ""
+automatable = false
+kind = "number_list"
+separator = "_"
+min = -200.0
+max = 200.0
+step = 1.0
+default = [0.0, 12.0, -8.0, 15.0, -12.0, 20.0, 5.0, -5.0]
+integer = true
+
+[[process.params]]
+name = "Morph_smoothness"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 16.5
+step = 0.01
+default = 1.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Overshoot_factor"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0004
+max = 4.4
+step = 0.001
+default = 0.4
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Tension_strength"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0001
+max = 1.1
+step = 0.001
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Vibrato_amount"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0003
+max = 3.3
+step = 0.001
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Vibrato_frequency"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 275.0
+step = 0.1
+default = 25.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Time_step"
+description = ""
+automatable = false
+kind = "number"
+min = 5e-06
+max = 0.055
+step = 1e-05
+default = 0.005
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Minimum_pitch"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 550.0
+step = 0.1
+default = 50.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Maximum_pitch"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 9900.0
+step = 1.0
+default = 900.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
 key = "praat_pitch_pitch_shift_semitones"
 bin = "Pitch/Pitch_Shift_Semitones.praat"
 title = "Pitch Shift Semitones"
@@ -32855,6 +34239,177 @@ step = 1.0
 default = 900.0
 exponential = false
 scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_pitch_rhythmic_pitch_percussion"
+bin = "Pitch/Rhythmic_Pitch_Percussion.praat"
+title = "Rhythmic Pitch Percussion"
+category = "praat"
+subcategory = "Pitch"
+short_description = "Rhythmic Pitch Percussion"
+description = "Rhythmic Pitch Percussion"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+
+[[process.script_presets]]
+option = 1
+params = [2, 3, 4, 5]
+values = [150.0, 15.0, 1.0, 0.0]
+
+[[process.script_presets]]
+option = 2
+params = [2, 3, 4, 5]
+values = [8.0, 40.0, 8.0, 2.0]
+
+[[process.script_presets]]
+option = 3
+params = [2, 3, 4, 5]
+values = [120.0, 2.0, 11.0, 0.8]
+
+[[process.script_presets]]
+option = 4
+params = [2, 3, 4, 5]
+values = [100.0, 20.0, 7.0, 1.2]
+
+[[process.script_presets]]
+option = 5
+params = [2, 3, 4, 5]
+values = [180.0, 0.5, 1.0, 0.0]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Techno Kick", "Trap Hi-Hat", "Dubstep Wobble", "Breakbeat", "Minimal Pulse"]
+default = 0
+
+[[process.params]]
+name = "Rhythm_pattern"
+description = ""
+automatable = false
+kind = "number_list"
+separator = "_"
+min = 0.0
+max = 10.0
+step = 1.0
+default = [1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]
+integer = true
+
+[[process.params]]
+name = "Hit_strength"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 275.0
+step = 0.1
+default = 25.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Decay_rate"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 66.0
+step = 0.01
+default = 6.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Polyrhythm_factor"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 33.0
+step = 0.01
+default = 3.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Ghost_hits"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0003
+max = 3.3
+step = 0.001
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Time_step"
+description = ""
+automatable = false
+kind = "number"
+min = 5e-06
+max = 0.055
+step = 1e-05
+default = 0.005
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Floor_pitch"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 550.0
+step = 0.1
+default = 50.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Ceiling_pitch"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 9900.0
+step = 1.0
+default = 900.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Npoints"
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = 6600.0
+step = 1.0
+default = 600.0
+exponential = false
+scale = "plain"
+integer = true
 
 [[process.params]]
 name = "Draw_visualization"
@@ -33353,6 +34908,352 @@ default = false
 
 [[process.params]]
 name = "Play_result_when_finished"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_pitch_undertone_field"
+bin = "Pitch/Undertone Field.praat"
+title = "Undertone Field"
+category = "praat"
+subcategory = "Pitch"
+short_description = "Undertone Field"
+description = "Undertone Field"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+
+[[process.script_presets]]
+option = 1
+params = [1, 2, 6, 7, 8, 9]
+values = [4.0, 0.0, 2.0, -12.0, 3.0, 2000.0]
+
+[[process.script_presets]]
+option = 2
+params = [1, 2, 6, 7, 8, 9]
+values = [5.0, 0.2, 4.0, -10.0, 2.0, 1800.0]
+
+[[process.script_presets]]
+option = 3
+params = [1, 2, 6, 7, 8, 9]
+values = [4.0, -0.2, 3.0, -14.0, 4.0, 2500.0]
+
+[[process.script_presets]]
+option = 4
+params = [1, 2, 6, 7, 8, 9]
+values = [6.0, 0.0, 5.0, -18.0, 2.0, 1500.0]
+
+[[process.script_presets]]
+option = 5
+params = [1, 2, 6, 7, 8, 9]
+values = [5.0, 0.12, 4.0, -9.0, 1.5, 3000.0]
+
+[[process.script_presets]]
+option = 6
+params = [1, 2, 6, 7, 8, 9]
+values = [4.0, -0.1, 3.0, -8.0, 6.0, 1200.0]
+
+[[process.script_presets]]
+option = 7
+params = [1, 2, 6, 7, 8, 9]
+values = [7.0, 0.05, 1.0, -20.0, 0.0, 2000.0]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Pure Harmonic        (integer series, linear rolloff)", "Stretched Cloud      (wider intervals, Gaussian)", "Compressed Cluster   (narrower, exponential decay)", "Bass Spectral        (6 partials, inverse, spectralist)", "Spectral Haze        (5 partials, micro-stretch, soft)", "Dark Undertow        (heavy low, fast rolloff, tight LP)", "Microtonal Dense     (7 partials, tiny stretch, flat)"]
+default = 0
+
+[[process.params]]
+name = "Number_of_undertones"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = 44.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Stretch_factor"
+description = ""
+automatable = false
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Series_mode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Integer          (1/2  1/3  1/4  ... standard undertone)", "Odd denominators (1/3  1/5  1/7  ... odd series)", "Even denominators (1/2  1/4  1/6  ... even/octave series)", "Custom list      (type denominators below, e.g. 2,3,5,7)", "Geometric        (1/2  1/2.5  1/3.1  ... microtonal)"]
+default = 0
+
+[[process.params]]
+name = "Custom_denominators"
+description = ""
+automatable = false
+kind = "number_list"
+separator = ","
+min = 0.0
+max = 70.0
+step = 1.0
+default = [2.0, 3.0, 5.0, 7.0]
+integer = true
+
+[[process.params]]
+name = "Micro_delay_ms"
+description = ""
+automatable = false
+kind = "number"
+min = -12.0
+max = 13.2
+step = 0.01
+default = 1.2
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gain_curve"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Flat             (all partials equal)", "Linear           (linear rolloff per partial)", "Exponential      (fast rolloff, warm body)", "Gaussian         (peak at middle partial)", "Inverse          (deeper = louder, spectralist build)"]
+default = 1
+
+[[process.params]]
+name = "Base_gain_dB"
+description = ""
+automatable = false
+kind = "number"
+min = -120.0
+max = 120.0
+step = 0.1
+default = -12.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Rolloff_dB"
+description = ""
+automatable = false
+kind = "number"
+min = -30.0
+max = 33.0
+step = 0.01
+default = 3.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Lowpass_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 22000.0
+step = 10.0
+default = 2000.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_pitch_undertone_field_2"
+bin = "Pitch/Undertone_Field.praat"
+title = "Undertone Field (2)"
+category = "praat"
+subcategory = "Pitch"
+short_description = "Undertone Field (2)"
+description = "Undertone Field (2)"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+
+[[process.script_presets]]
+option = 1
+params = [1, 2, 6, 7, 8, 9]
+values = [4.0, 0.0, 2.0, -12.0, 3.0, 2000.0]
+
+[[process.script_presets]]
+option = 2
+params = [1, 2, 6, 7, 8, 9]
+values = [5.0, 0.2, 4.0, -10.0, 2.0, 1800.0]
+
+[[process.script_presets]]
+option = 3
+params = [1, 2, 6, 7, 8, 9]
+values = [4.0, -0.2, 3.0, -14.0, 4.0, 2500.0]
+
+[[process.script_presets]]
+option = 4
+params = [1, 2, 6, 7, 8, 9]
+values = [6.0, 0.0, 5.0, -18.0, 2.0, 1500.0]
+
+[[process.script_presets]]
+option = 5
+params = [1, 2, 6, 7, 8, 9]
+values = [5.0, 0.12, 4.0, -9.0, 1.5, 3000.0]
+
+[[process.script_presets]]
+option = 6
+params = [1, 2, 6, 7, 8, 9]
+values = [4.0, -0.1, 3.0, -8.0, 6.0, 1200.0]
+
+[[process.script_presets]]
+option = 7
+params = [1, 2, 6, 7, 8, 9]
+values = [7.0, 0.05, 1.0, -20.0, 0.0, 2000.0]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Pure Harmonic        (integer series, linear rolloff)", "Stretched Cloud      (wider intervals, Gaussian)", "Compressed Cluster   (narrower, exponential decay)", "Bass Spectral        (6 partials, inverse, spectralist)", "Spectral Haze        (5 partials, micro-stretch, soft)", "Dark Undertow        (heavy low, fast rolloff, tight LP)", "Microtonal Dense     (7 partials, tiny stretch, flat)"]
+default = 0
+
+[[process.params]]
+name = "Number_of_undertones"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = 44.0
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Stretch_factor"
+description = ""
+automatable = false
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Series_mode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Integer          (1/2  1/3  1/4  ... standard undertone)", "Odd denominators (1/3  1/5  1/7  ... odd series)", "Even denominators (1/2  1/4  1/6  ... even/octave series)", "Custom list      (type denominators below, e.g. 2,3,5,7)", "Geometric        (1/2  1/2.5  1/3.1  ... microtonal)"]
+default = 0
+
+[[process.params]]
+name = "Custom_denominators"
+description = ""
+automatable = false
+kind = "number_list"
+separator = ","
+min = 0.0
+max = 70.0
+step = 1.0
+default = [2.0, 3.0, 5.0, 7.0]
+integer = true
+
+[[process.params]]
+name = "Micro_delay_ms"
+description = ""
+automatable = false
+kind = "number"
+min = -12.0
+max = 13.2
+step = 0.01
+default = 1.2
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gain_curve"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Flat             (all partials equal)", "Linear           (linear rolloff per partial)", "Exponential      (fast rolloff, warm body)", "Gaussian         (peak at middle partial)", "Inverse          (deeper = louder, spectralist build)"]
+default = 1
+
+[[process.params]]
+name = "Base_gain_dB"
+description = ""
+automatable = false
+kind = "number"
+min = -120.0
+max = 120.0
+step = 0.1
+default = -12.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Rolloff_dB"
+description = ""
+automatable = false
+kind = "number"
+min = -30.0
+max = 33.0
+step = 0.01
+default = 3.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Lowpass_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 22000.0
+step = 10.0
+default = 2000.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
 description = ""
 automatable = false
 kind = "toggle"
@@ -39731,13 +41632,13 @@ kind = "toggle"
 default = false
 
 [[process]]
-key = "praat_reverb_stereo_shimmer"
+key = "praat_reverb_stereo_shimmer_2"
 bin = "Reverb/stereo_shimmer.praat"
-title = "stereo shimmer"
+title = "stereo shimmer (2)"
 category = "praat"
 subcategory = "Reverb"
-short_description = "stereo shimmer"
-description = "stereo shimmer"
+short_description = "stereo shimmer (2)"
+description = "stereo shimmer (2)"
 input = "wav"
 output = "wav"
 stereo_native = true
@@ -41127,13 +43028,13 @@ kind = "toggle"
 default = false
 
 [[process]]
-key = "praat_spatial_surround_8_channel_movements"
+key = "praat_spatial_surround_8_channel_movements_2"
 bin = "Spatial & Surround/8-Channel_Movements.praat"
-title = "8-Channel Movements"
+title = "8-Channel Movements (2)"
 category = "praat"
 subcategory = "Spatial"
-short_description = "8-Channel Movements"
-description = "8-Channel Movements"
+short_description = "8-Channel Movements (2)"
+description = "8-Channel Movements (2)"
 input = "wav"
 output = "wav"
 stereo_native = true
@@ -41316,13 +43217,13 @@ kind = "toggle"
 default = false
 
 [[process]]
-key = "praat_spatial_surround_8_channel_spectral_shift"
+key = "praat_spatial_surround_8_channel_spectral_shift_2"
 bin = "Spatial & Surround/8-Channel_Spectral_Shift.praat"
-title = "8-Channel Spectral Shift"
+title = "8-Channel Spectral Shift (2)"
 category = "praat"
 subcategory = "Spatial"
-short_description = "8-Channel Spectral Shift"
-description = "8-Channel Spectral Shift"
+short_description = "8-Channel Spectral Shift (2)"
+description = "8-Channel Spectral Shift (2)"
 input = "wav"
 output = "wav"
 stereo_native = true
@@ -42517,13 +44418,13 @@ kind = "toggle"
 default = false
 
 [[process]]
-key = "praat_spatial_surround_8_channels_time_polyphony"
+key = "praat_spatial_surround_8_channels_time_polyphony_2"
 bin = "Spatial & Surround/8_Channels_Time_Polyphony.praat"
-title = "8 Channels Time Polyphony"
+title = "8 Channels Time Polyphony (2)"
 category = "praat"
 subcategory = "Spatial"
-short_description = "8 Channels Time Polyphony"
-description = "8 Channels Time Polyphony"
+short_description = "8 Channels Time Polyphony (2)"
+description = "8 Channels Time Polyphony (2)"
 input = "wav"
 output = "wav"
 stereo_native = true
@@ -42677,6 +44578,237 @@ min = -12.0
 max = 13.2
 step = 0.01
 default = 1.2
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_spatial_surround_advanced_stereo_panner"
+bin = "Spatial & Surround/Advanced_Stereo_Panner.praat"
+title = "Advanced Stereo Panner"
+category = "praat"
+subcategory = "Spatial"
+short_description = "Advanced Stereo Panner"
+description = "Advanced Stereo Panner"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Pan_mode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Static position", "Trajectory: left to right", "Trajectory: right to left", "Trajectory: sine sweep", "Trajectory: centre out to both sides", "Trajectory: sides in to centre", "Trajectory: pendulum (damped sine)"]
+default = 0
+
+[[process.params]]
+name = "Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Centre", "Hard Left", "Hard Right", "Medium Left", "Medium Right", "Subtle Left", "Subtle Right", "Wide Left", "Wide Right", "Custom (use value below)"]
+default = 0
+
+[[process.params]]
+name = "Pan_position"
+description = ""
+automatable = false
+kind = "number"
+min = -1.0
+max = 1.0
+step = 0.001
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Trajectory_cycles"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 22.0
+step = 0.01
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Trajectory_depth"
+description = ""
+automatable = false
+kind = "number"
+min = -10.0
+max = 11.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Panning_model"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Conventional equal-power (sqrt law, no separate ILD)", "Bounded psychoacoustic ILD (exactly ILD_max at hard pan)"]
+default = 1
+
+[[process.params]]
+name = "ILD_max_dB"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 132.0
+step = 0.1
+default = 12.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Use_ITD"
+description = ""
+automatable = false
+kind = "toggle"
+default = true
+
+[[process.params]]
+name = "Max_ITD_ms"
+description = ""
+automatable = false
+kind = "number"
+min = 0.00065
+max = 7.15
+step = 0.001
+default = 0.65
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Use_head_shadow"
+description = ""
+automatable = false
+kind = "toggle"
+default = true
+
+[[process.params]]
+name = "Head_shadow_cutoff_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 88000.0
+step = 10.0
+default = 8000.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Shadow_depth"
+description = ""
+automatable = false
+kind = "number"
+min = -5.0
+max = 5.5
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Use_distance"
+description = ""
+automatable = false
+kind = "toggle"
+default = true
+
+[[process.params]]
+name = "Distance_model"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Inverse distance (pressure ~ 1/d)", "Softened rolloff (the v1.1 curve)"]
+default = 0
+
+[[process.params]]
+name = "Distance_meters"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 11.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max_distance_meters"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 330.0
+step = 0.1
+default = 30.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Reference_distance_meters"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 11.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Use_air_absorption"
+description = ""
+automatable = false
+kind = "toggle"
+default = true
+
+[[process.params]]
+name = "Air_cutoff_at_reference_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 132000.0
+step = 100.0
+default = 12000.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Peak_ceiling"
+description = ""
+automatable = false
+kind = "number"
+min = -9.5
+max = 10.45
+step = 0.01
+default = 0.95
 exponential = false
 scale = "plain"
 
@@ -43934,6 +46066,78 @@ default = 0
 
 [[process.params]]
 name = "Run_reference_test"
+description = ""
+automatable = false
+kind = "toggle"
+default = true
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_spatial_surround_mix_multi_channel_to_stereo"
+bin = "Spatial & Surround/Mix_Multi-Channel_to_Stereo.praat"
+title = "Mix Multi-Channel to Stereo"
+category = "praat"
+subcategory = "Spatial"
+short_description = "Mix Multi-Channel to Stereo"
+description = "Mix Multi-Channel to Stereo"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Mix_mode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Split L/R (first half left, second half right)", "Circular Pan (distribute across stereo field)", "Mono Sum (all channels center)", "Front-Back (odds left, evens right)", "Quad to Stereo (1+3 left, 2+4 right)", "5.1 Downmix (standard film mix)", "7.1 Downmix (standard film mix)", "Manual (per-channel pan/gain lists)"]
+default = 1
+
+[[process.params]]
+name = "Manual_pan"
+description = ""
+automatable = false
+kind = "number_list"
+separator = " "
+min = 0.0
+max = 10.0
+step = 0.01
+default = [0.0, 0.5, 1.0]
+
+[[process.params]]
+name = "Manual_gain"
+description = ""
+automatable = false
+kind = "number_list"
+separator = " "
+min = 0.0
+max = 10.0
+step = 1.0
+default = [1.0, 1.0, 1.0]
+integer = true
+
+[[process.params]]
+name = "Use_constant_power_panning"
+description = ""
+automatable = false
+kind = "toggle"
+default = true
+
+[[process.params]]
+name = "Normalize_output"
 description = ""
 automatable = false
 kind = "toggle"
@@ -47675,13 +49879,13 @@ kind = "toggle"
 default = false
 
 [[process]]
-key = "praat_spectral_self_similarity_spectral_resynthesis"
+key = "praat_spectral_self_similarity_spectral_resynthesis_2"
 bin = "Spectral/Self-Similarity_Spectral_Resynthesis.praat"
-title = "Self-Similarity Spectral Resynthesis"
+title = "Self-Similarity Spectral Resynthesis (2)"
 category = "praat"
 subcategory = "Spectral"
-short_description = "Self-Similarity Spectral Resynthesis"
-description = "Self-Similarity Spectral Resynthesis"
+short_description = "Self-Similarity Spectral Resynthesis (2)"
+description = "Self-Similarity Spectral Resynthesis (2)"
 input = "wav"
 output = "wav"
 stereo_native = true
@@ -52093,6 +54297,57 @@ kind = "toggle"
 default = false
 
 [[process]]
+key = "praat_time_granular_hfd_driven_time_warping"
+bin = "Time & Granular/HFD-Driven_Time_Warping.praat"
+title = "HFD-Driven Time Warping"
+category = "praat"
+subcategory = "Time/Granular"
+short_description = "HFD-Driven Time Warping"
+description = "HFD-Driven Time Warping"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Subtle", "Moderate", "Dramatic", "Extreme", "Glitch"]
+default = 0
+
+[[process.params]]
+name = "Material_type"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Speech", "Music_Field_Recording"]
+default = 0
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Show_advanced_settings"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+opens_praat_dialog = true
+
+[[process]]
 key = "praat_time_granular_harmonic_resonance"
 bin = "Time & Granular/Harmonic_Resonance.praat"
 title = "Harmonic Resonance"
@@ -52880,6 +55135,96 @@ description = ""
 automatable = false
 kind = "toggle"
 default = false
+
+[[process]]
+key = "praat_time_granular_magnetic_tape_degradation"
+bin = "Time & Granular/Magnetic_Tape_Degradation.praat"
+title = "Magnetic Tape Degradation"
+category = "praat"
+subcategory = "Time/Granular"
+short_description = "Magnetic Tape Degradation"
+description = "Magnetic Tape Degradation"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+
+[[process.script_presets]]
+option = 1
+params = [1, 2]
+values = [3.0, 1.5]
+
+[[process.script_presets]]
+option = 2
+params = [1, 2]
+values = [6.0, 2.0]
+
+[[process.script_presets]]
+option = 3
+params = [1, 2]
+values = [10.0, 2.8]
+
+[[process.script_presets]]
+option = 4
+params = [1, 2]
+values = [15.0, 4.0]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Subtle Tape", "Medium Tape", "Heavy Tape", "Extreme Tape"]
+default = 0
+
+[[process.params]]
+name = "Generations"
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = 66.0
+step = 1.0
+default = 6.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Tail_duration_s"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 22.0
+step = 0.01
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Show_advanced_settings"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+opens_praat_dialog = true
 
 [[process]]
 key = "praat_time_granular_multi_channel_random_slice_time_stretcher"
@@ -56165,6 +58510,203 @@ step = 1.0
 default = 600.0
 exponential = false
 scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_time_granular_total_serialism_machine"
+bin = "Time & Granular/Total_Serialism_Machine.praat"
+title = "Total Serialism Machine"
+category = "praat"
+subcategory = "Time/Granular"
+short_description = "Total Serialism Machine"
+description = "Total Serialism Machine"
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+
+[[process.script_presets]]
+option = 1
+params = [7, 8, 9, 10, 11, 12]
+values = [24.0, 80.0, 250.0, 150.0, -400.0, 400.0]
+
+[[process.script_presets]]
+option = 2
+params = [7, 8, 9, 10, 11, 12]
+values = [20.0, 300.0, 800.0, 200.0, -300.0, 300.0]
+
+[[process.script_presets]]
+option = 3
+params = [7, 8, 9, 10, 11, 12]
+values = [60.0, 50.0, 150.0, 20.0, -200.0, 200.0]
+
+[[process.script_presets]]
+option = 4
+params = [4, 5, 7, 8, 9, 10, 11, 12]
+values = [1.0, 1.0, 40.0, 100.0, 700.0, 80.0, -600.0, 600.0]
+
+[[process.script_presets]]
+option = 5
+params = [7, 8, 9, 10, 11, 12]
+values = [80.0, 150.0, 500.0, -120.0, -300.0, 300.0]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom (manual settings)", "Pointillism (Webern-style)", "Moment Form (discrete blocks)", "Granular Texture (micro-events)", "Transformational (extreme ranges)", "Statistical Field (dense cloud)"]
+default = 0
+
+[[process.params]]
+name = "Series_length"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = 132.0
+step = 1.0
+default = 12.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Series_type"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Arithmetic (1..N)", "Permutation (custom)", "12-tone row (classic)"]
+default = 2
+
+[[process.params]]
+name = "Series_values"
+description = ""
+automatable = false
+kind = "number_list"
+separator = ","
+min = 0.0
+max = 110.0
+step = 1.0
+default = [0.0, 10.0, 7.0, 11.0, 3.0, 8.0, 1.0, 9.0, 2.0, 5.0, 6.0, 4.0]
+integer = true
+
+[[process.params]]
+name = "Use_inversion"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Use_retrograde"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Rotation"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = 10.0
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Num_events"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = 330.0
+step = 1.0
+default = 30.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Min_event_ms"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 2200.0
+step = 1.0
+default = 200.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max_event_ms"
+description = ""
+automatable = false
+kind = "number"
+min = 0.001
+max = 6600.0
+step = 1.0
+default = 600.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Gap_between_events_ms"
+description = ""
+automatable = false
+kind = "number"
+min = -500.0
+max = 550.0
+step = 1.0
+default = 50.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min_pitch_cents"
+description = ""
+automatable = false
+kind = "number"
+min = -2000.0
+max = 2000.0
+step = 1.0
+default = -200.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Max_pitch_cents"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = 2200.0
+step = 1.0
+default = 200.0
+exponential = false
+scale = "plain"
+integer = true
 
 [[process.params]]
 name = "Draw_visualization"
