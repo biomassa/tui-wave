@@ -109,6 +109,21 @@ fn argument_for(def: &ProcessDef, index: usize, value: &ParamValue) -> Result<Dr
                 index: *i,
                 options: options.len(),
             }),
+        // Joined with the script's *own* delimiter, never a normalised one: the receiving
+        // script splits on exactly this and nothing else, and across the eleven scripts of
+        // this shape it is variously a space, a comma, an underscore, or nothing at all
+        // (`BPM_Panning`'s accent grid is one digit per sixteenth, `1010100110101001`).
+        //
+        // Entries are formatted the same way a `Number` argument is, so `2` reaches the script
+        // as `2` and not `2.0000000000000004` — the field's own `integer` flag has already
+        // rounded where it applies, and this only has to avoid re-introducing float noise.
+        (ParamKind::NumberList { separator, .. }, ParamValue::List(values)) => {
+            // `{v}` on an f64 is what `driver::praat_number_literal` uses for a numeric
+            // argument, and prints 2.0 as `2` — the list editor clamps every entry into the
+            // param's own bounds, so nothing non-finite can reach here.
+            let joined: Vec<String> = values.iter().map(|v| format!("{v}")).collect();
+            Ok(DriverArg::Text(joined.join(separator)))
+        }
         (ParamKind::Number { .. }, _)
         | (ParamKind::Toggle { .. }, _)
         | (ParamKind::Choice { .. }, _) => Err(PraatPlanError::ParamTypeMismatch { param: name() }),
@@ -224,6 +239,33 @@ mod tests {
     use super::*;
     use crate::model::cdp::def::{Category, NumberScale, ParamDef};
 
+    /// A param marked `opens_praat_dialog` must be a toggle that defaults **off**, because
+    /// that default is the only value it can ever have — the app greys the row and refuses to
+    /// tick it. One defaulting `true` would open the dialog on every single run and segfault
+    /// Praat, with no way for the user to turn it off.
+    ///
+    /// Checked against the real generated catalog rather than a fixture: these entries come
+    /// from `scripts/convert_praat_audiotools.py`'s `GUI_BLOCKING_OVERRIDES`, and a converter
+    /// change is exactly what would break the invariant.
+    #[test]
+    fn a_dialog_opening_toggle_is_always_a_toggle_defaulting_off() {
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let mut seen = 0;
+        for def in &catalog.processes {
+            for param in def.params.iter().filter(|p| p.opens_praat_dialog) {
+                seen += 1;
+                assert!(
+                    matches!(param.kind, ParamKind::Toggle { default: false }),
+                    "{}: {:?} is marked opens_praat_dialog but is {:?}",
+                    def.key,
+                    param.name,
+                    param.kind
+                );
+            }
+        }
+        assert!(seen >= 3, "expected the locked advanced-settings toggles, found {seen}");
+    }
+
     fn number(name: &str, default: f64) -> ParamDef {
         ParamDef {
             name: name.into(),
@@ -234,6 +276,7 @@ mod tests {
             required_list: false,
             list_is_time_sequence: false,
             before_outfile: false,
+            opens_praat_dialog: false,
             range_scales_with_input_duration: false,
             default_from_dc_offset: false,
             rows_match_input_count: false,

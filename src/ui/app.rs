@@ -241,6 +241,37 @@ fn ms_to_samples(ms: f32, sample_rate: u32) -> usize {
     ((ms / 1000.0) * sample_rate as f32).round() as usize
 }
 
+/// Why a Praat `boolean` param's row is greyed and refuses to tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PraatToggleBlock {
+    /// A drawing toggle with nowhere to draw: it would still run the script's visualization
+    /// code and still cost that time, but the figure could not be put on screen.
+    NoGraphics,
+    /// A toggle whose only effect is to open a second Praat dialog — see
+    /// `ParamDef::opens_praat_dialog`. Unlike `NoGraphics` this can never be unblocked; the
+    /// window cannot be shown under `--run` at all, it segfaults Praat outright.
+    OpensDialog,
+}
+
+/// The one statement of when a Praat toggle is dead, shared by Space, mouse click and the
+/// renderer — see `App::praat_toggle_block` for why all three must read the same rule.
+///
+/// Backend-checked as well as name-checked for the drawing case: a CDP process could perfectly
+/// well have a parameter called `Show_something` that has nothing to do with Praat's Picture
+/// window. `opens_praat_dialog` needs no such guard, being set only by the Praat converter.
+fn praat_toggle_block(
+    def: &crate::model::cdp::ProcessDef,
+    param: &crate::model::cdp::def::ParamDef,
+    graphics_available: bool,
+) -> Option<PraatToggleBlock> {
+    if param.opens_praat_dialog {
+        return Some(PraatToggleBlock::OpensDialog);
+    }
+    let drawing = def.backend() == crate::model::cdp::def::Backend::Praat
+        && crate::model::praat::plan::is_picture_toggle_name(&param.name);
+    (drawing && !graphics_available).then_some(PraatToggleBlock::NoGraphics)
+}
+
 /// One-line message for a `PlanError`, shown inline in `Dialog::CdpParams`. Every case
 /// here is otherwise prevented by the UI (the browser hides dual-input processes, a
 /// document is always available once the dialog is open) except `ParamCountMismatch`,
@@ -520,6 +551,17 @@ impl CdpField {
             return CdpField::List { values: Vec::new(), min: *min, max: *max, step: *step, integer: *integer };
         }
         match &param.kind {
+            // The same `CdpField::List` a `required_list` param gets, so the list editor,
+            // its bounds handling and its rendering are shared — the difference is only that
+            // this one arrives *seeded* with the script's own working default instead of
+            // empty, since there is nothing here the user is obliged to author.
+            ParamKind::NumberList { min, max, step, integer, default, .. } => CdpField::List {
+                values: default.clone(),
+                min: *min,
+                max: *max,
+                step: *step,
+                integer: *integer,
+            },
             ParamKind::Number { default, min, max, step, integer, .. } => {
                 CdpField::Number {
                     input: TextInput::fresh(format_cdp_float_for_display(*default)),
@@ -3463,10 +3505,31 @@ impl App {
     }
 
     /// Whether the open `CdpParams` field at `field_index` (0-based, parallel to the process's
+    /// own params) is a toggle that cannot be ticked, and why. `None` means it is live.
+    ///
+    /// Three sites need this answer — Space, a mouse click, and the renderer that greys the row
+    /// — and they must agree: a row that renders live but refuses the key reads as a broken
+    /// keyboard, and one that renders greyed but ticks anyway reads as a broken display. So the
+    /// rule lives here and all three call it. The renderer has `def`/`param` in hand rather than
+    /// `self`, which is why the logic is the free function `praat_toggle_block` and this is a
+    /// thin lookup around it.
+    fn praat_toggle_block(&self, field_index: usize) -> Option<PraatToggleBlock> {
+        let Some(Dialog::CdpParams { catalog_index, fields, .. }) = &self.dialog else {
+            return None;
+        };
+        if !matches!(fields.get(field_index), Some(CdpField::Toggle { .. })) {
+            return None;
+        }
+        let def = self.cdp_catalog.processes.get(*catalog_index)?;
+        praat_toggle_block(def, def.params.get(field_index)?, self.graphics_available())
+    }
+
+    /// Whether the open `CdpParams` field at `field_index` (0-based, parallel to the process's
     /// own params) is a drawing toggle that cannot do anything right now.
     ///
     /// Backend-checked as well as name-checked: a CDP process could perfectly well have a
     /// parameter called `Show_something` that has nothing to do with Praat's Picture window.
+    #[cfg(test)]
     fn praat_draw_toggle_blocked(&self, field_index: usize) -> bool {
         if self.graphics_available() {
             return false;
@@ -3483,10 +3546,10 @@ impl App {
                 .is_some_and(|p| crate::model::praat::plan::is_picture_toggle_name(&p.name))
     }
 
-    /// The message shown when someone tries to tick a greyed drawing toggle. Names the parameter
-    /// and both halves of the fix — a dead key with no explanation reads as a bug, and "graphics
-    /// mode" alone would not help someone whose terminal simply cannot do it.
-    fn praat_draw_toggle_blocked_message(&self, field_index: usize) -> String {
+    /// The message shown when someone tries to tick a greyed toggle. Names the parameter and,
+    /// where there is one, the fix — a dead key with no explanation reads as a bug, and
+    /// "graphics mode" alone would not help someone whose terminal simply cannot do it.
+    fn praat_toggle_blocked_message(&self, field_index: usize, block: PraatToggleBlock) -> String {
         let name = match &self.dialog {
             Some(Dialog::CdpParams { catalog_index, .. }) => self
                 .cdp_catalog
@@ -3497,9 +3560,17 @@ impl App {
                 .unwrap_or_else(|| "This".into()),
             _ => "This".into(),
         };
-        format!(
-            "{name} needs graphics mode (View ▸ Graphics Mode) and a terminal with kitty or Sixel support."
-        )
+        match block {
+            PraatToggleBlock::NoGraphics => format!(
+                "{name} needs graphics mode (View ▸ Graphics Mode) and a terminal with kitty or Sixel support."
+            ),
+            // No fix to offer, so the message says what the setting would have done and what
+            // happens instead, rather than implying something could be turned on to allow it.
+            PraatToggleBlock::OpensDialog => format!(
+                "{name} asks Praat to open a second dialog window, which cannot be shown from here. \
+                 The advanced settings it would have offered keep their defaults."
+            ),
+        }
     }
 
     /// Show the figure a Praat run drew, if it drew one.
@@ -5521,18 +5592,14 @@ impl App {
                 let mut flipped_toggle = false;
                 // Resolved before the mutable borrow below, which is why it is a plain bool
                 // rather than a call inside the match arm.
-                let draw_blocked = match &self.dialog {
+                let toggle_blocked = match &self.dialog {
                     Some(Dialog::CdpParams { focus, .. }) if *focus != CDP_PRESET_FOCUS => focus
                         .checked_sub(1)
-                        .is_some_and(|index| self.praat_draw_toggle_blocked(index)),
-                    _ => false,
+                        .and_then(|index| Some((index, self.praat_toggle_block(index)?))),
+                    _ => None,
                 };
-                if draw_blocked {
-                    let index = match &self.dialog {
-                        Some(Dialog::CdpParams { focus, .. }) => focus.saturating_sub(1),
-                        _ => 0,
-                    };
-                    let message = self.praat_draw_toggle_blocked_message(index);
+                if let Some((index, block)) = toggle_blocked {
+                    let message = self.praat_toggle_blocked_message(index, block);
                     if let Some(Dialog::CdpParams { error, .. }) = self.dialog.as_mut() {
                         *error = Some(message);
                     }
@@ -5964,17 +6031,18 @@ impl App {
             }
             return;
         }
-        // A click on a greyed drawing toggle focuses the row and explains itself, exactly as
-        // Space on it does — resolved here, before the mutable borrow of `self.dialog` below.
-        if let Some(index) = row.checked_sub(1) {
-            if self.praat_draw_toggle_blocked(index) {
-                let message = self.praat_draw_toggle_blocked_message(index);
-                if let Some(Dialog::CdpParams { focus, error, .. }) = self.dialog.as_mut() {
-                    *focus = row;
-                    *error = Some(message);
-                }
-                return;
+        // A click on a greyed toggle focuses the row and explains itself, exactly as Space on
+        // it does — resolved here, before the mutable borrow of `self.dialog` below.
+        if let Some(block) = row.checked_sub(1).and_then(|index| {
+            self.praat_toggle_block(index).map(|block| (index, block))
+        }) {
+            let (index, block) = block;
+            let message = self.praat_toggle_blocked_message(index, block);
+            if let Some(Dialog::CdpParams { focus, error, .. }) = self.dialog.as_mut() {
+                *focus = row;
+                *error = Some(message);
             }
+            return;
         }
         // Deferred actions for the curve-transform params form: the click arm below sets these
         // while `self.dialog` is borrowed, then they run once the borrow ends (opening the
@@ -7819,8 +7887,16 @@ impl App {
         let Some(def) = self.cdp_catalog.processes.get(*catalog_index) else {
             return false;
         };
+        // `automatable` is CDP's "this param can take a breakpoint file", which is what gates
+        // the 'e' key for a `required_list` field. A Praat `NumberList` has no such notion —
+        // it is always editable — so it qualifies on its kind instead of borrowing a flag that
+        // would mean nothing on it.
         let eligible = |i: usize, f: &CdpField| {
-            matches!(f, CdpField::List { .. }) && def.params.get(i).is_some_and(|p| p.automatable)
+            matches!(f, CdpField::List { .. })
+                && def.params.get(i).is_some_and(|p| {
+                    p.automatable
+                        || matches!(p.kind, crate::model::cdp::ParamKind::NumberList { .. })
+                })
         };
         let unset = |_: usize, f: &CdpField| matches!(f, CdpField::List { values, .. } if values.is_empty());
         let Some(field_index) = resolve_smart_field_target(fields, *focus, eligible, unset) else {
@@ -20279,13 +20355,12 @@ fn render_cdp_params_dialog(
             }
             CdpField::Toggle { on } => {
                 let text = if *on { "[X]" } else { "[ ]" };
-                // A drawing toggle with nowhere to draw is greyed: it would still run the
-                // script's visualization code, and still cost that time, but the figure it
-                // produces could not be put on screen. Both the label and the box are dimmed,
-                // since dimming only one reads as a rendering glitch rather than as a state.
-                let disabled = !graphics_available
-                    && def.backend() == crate::model::cdp::def::Backend::Praat
-                    && crate::model::praat::plan::is_picture_toggle_name(&param.name);
+                // Greyed when the toggle cannot be ticked — a drawing toggle with nowhere to
+                // draw, or one whose only effect is to open a second Praat dialog. Through the
+                // same `praat_toggle_block` that Space and the click handler use, so a row
+                // cannot render live and then refuse the key. Both the label and the box are
+                // dimmed, since dimming only one reads as a rendering glitch rather than a state.
+                let disabled = praat_toggle_block(def, param, graphics_available).is_some();
                 let (label_style_here, value_style) = if disabled {
                     (dim_style, dim_style)
                 } else {
@@ -25553,6 +25628,7 @@ mod tests {
                 required_list: false,
                 list_is_time_sequence: false,
                 before_outfile: false,
+            opens_praat_dialog: false,
                 kind: ParamKind::Number {
                     min: 1.0,
                     max: 10.0,
@@ -28531,6 +28607,7 @@ mod tests {
                 required_list: false,
                 list_is_time_sequence: false,
                 before_outfile: true,
+            opens_praat_dialog: false,
                 kind: ParamKind::FormantBufferRef {
                     buffer_kind: crate::model::formant::FormantBufferKind::Formant,
                     relative_name: "fmnt.for".into(),
@@ -28614,6 +28691,7 @@ mod tests {
                 required_list: false,
                 list_is_time_sequence: false,
                 before_outfile: true,
+            opens_praat_dialog: false,
                 kind: ParamKind::FormantBufferRef {
                     buffer_kind: crate::model::formant::FormantBufferKind::Formant,
                     relative_name: "fmnt.for".into(),
@@ -34973,6 +35051,7 @@ mod tests {
                 required_list: false,
                 list_is_time_sequence: false,
                 before_outfile: true,
+            opens_praat_dialog: false,
                 kind: ParamKind::FormantBufferRef {
                     buffer_kind: FormantBufferKind::Formant,
                     relative_name: "fmnt.for".into(),
@@ -35806,6 +35885,37 @@ mod tests {
         // A dead key with no explanation reads as a bug, so the refusal names the fix.
         let error = error.as_deref().expect("the refusal must say why");
         assert!(error.contains("graphics"), "{error}");
+    }
+
+    /// A toggle whose only effect is to open a second Praat dialog is inert for a different
+    /// reason, and one that can never be lifted — the window segfaults Praat under `--run`
+    /// (exit 139), so there is no "turn something on and it works" to offer. Uses a real
+    /// catalog entry, since the whole point is that the converter marked one.
+    #[test]
+    fn a_dialog_opening_toggle_will_not_flip_even_with_graphics() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        let found = app.cdp_catalog.processes.iter().enumerate().find_map(|(i, def)| {
+            def.params.iter().position(|p| p.opens_praat_dialog).map(|f| (i, f))
+        });
+        let (catalog_index, index) = found.expect("the converter marks at least one");
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = index + 1;
+        }
+        // Not the graphics reason: this one holds whatever the terminal can do.
+        assert_eq!(app.praat_toggle_block(index), Some(PraatToggleBlock::OpensDialog));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { fields, error, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(
+            matches!(fields.get(index), Some(CdpField::Toggle { on: false })),
+            "the toggle flipped; ticking it would segfault Praat"
+        );
+        let error = error.as_deref().expect("the refusal must say why");
+        assert!(error.contains("dialog"), "{error}");
+        // No fix is offered, because there isn't one — saying "needs graphics mode" here would
+        // send someone to turn on a setting that changes nothing.
+        assert!(!error.contains("graphics"), "{error}");
     }
 
     /// The other toggles on the same process must stay live — `Play_result` works fine without
