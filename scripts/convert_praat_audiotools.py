@@ -264,7 +264,7 @@ CODE = "code"    # match against code_only(source)
 RAW = "raw"      # match against the source as written
 
 def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: list,
-                            hoist: dict, inputs: int):
+                            hoist: dict, inputs: int, description: str = ""):
     """Turn one pause-hoisted script into the catalog entries it should become.
 
     Returns a list of `Process`, or a problem string. Every name in the hoist config must
@@ -300,7 +300,8 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
             params.extend(tag(block["fields"], i))
         return [Process(key=key_for(top, stem), bin=str(rel).replace("\\", "/"),
                         title=title_for(stem), group=GROUP_DIRS[top], params=params,
-                        inputs=inputs)]
+                        inputs=inputs, description=description,
+                        short_description=short_description_from(description, title_for(stem)))]
 
     # --- split: one entry per option of a hoisted optionmenu ------------------------------
     variants = hoist.get("variants", {})
@@ -351,6 +352,10 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
             group=GROUP_DIRS[top],
             params=params,
             inputs=inputs,
+            description=description,
+            # Names the variant, since nine entries otherwise share one description.
+            short_description=f"{label} — "
+                              + short_description_from(description, title_for(stem)),
         ))
     return built
 
@@ -585,6 +590,11 @@ class Process:
     group: str
     params: list[Param]
     inputs: int = 1
+    # Read out of the script's own `# Description:` header block -- see `extract_description`.
+    # Empty for the handful of scripts that carry no such header; the emitter falls back to the
+    # title, which is what every entry used to get.
+    description: str = ""
+    short_description: str = ""
     preset_param: int | None = None
     preset_custom_option: int = 0
     # option index -> {param index: value}
@@ -655,6 +665,96 @@ def find_pause_blocks(source: str) -> list[dict]:
             "span": (m.start(), m.end()),
         })
     return blocks
+
+
+# The `# Description:` block every one of these scripts carries in its header, and the only
+# place any of them says what it actually does. Until this was read, every Praat entry's
+# description in the browser was its own title repeated back -- `description = "chain 1"` -- so
+# the description panel told the user nothing about 397 processes.
+#
+# Shape, consistent across the plugin: `# Description:` followed by continuation lines indented
+# under the `#`, ending at the next *unindented* header (`# Changelog v0.3:`) or the `# =====`
+# rule that closes the banner. The indent is what separates them -- a changelog entry like
+# `#   - FIX: ...` also contains a colon, so a colon cannot be the terminator.
+DESCRIPTION_START_RE = re.compile(r"^#\s*Description:\s*(.*)$")
+# A comment line whose text starts immediately after `# `, i.e. a new banner heading.
+DESCRIPTION_END_RE = re.compile(r"^#\s?(\S)")
+
+
+def extract_description(source: str) -> str:
+    """The script's own description, unwrapped into paragraphs. Empty if it has none."""
+    lines = source.splitlines()
+    start = None
+    first = ""
+    for i, line in enumerate(lines):
+        match = DESCRIPTION_START_RE.match(line.strip())
+        if match:
+            start, first = i, match.group(1).strip()
+            break
+    if start is None:
+        return ""
+
+    paragraphs: list[list[str]] = [[first]] if first else [[]]
+    for line in lines[start + 1:]:
+        stripped = line.rstrip()
+        if not stripped.startswith("#"):
+            break
+        body = stripped[1:]
+        if set(body.strip()) <= {"=", "-"} and body.strip():
+            break                       # the banner rule that closes the header
+        if not body.strip():
+            paragraphs.append([])       # blank comment line: paragraph break
+            continue
+        if DESCRIPTION_END_RE.match(stripped):
+            break                       # unindented heading: a new section
+        paragraphs[-1].append(body.strip())
+
+    # Rewrapping is the point: these are hand-wrapped to ~60 columns inside the comment, and the
+    # description panel does its own wrapping at whatever width it has.
+    joined = [" ".join(p) for p in paragraphs if p]
+    return "\n\n".join(joined).strip()
+
+
+# A chain script's own step list. The `Vector Chain` scripts are fixed pipelines of other
+# processes, and five of the seven carry no `# Description:` block at all -- but every one of
+# them numbers its stages in comments, which is precisely what a user needs to know about a
+# chain: which processes it runs, in what order. Some also open with a one-line `# Flow:`
+# summary.
+STEP_RE = re.compile(r"^#\s*STEP\s*(\d+)\s*:\s*(.+?)\s*$")
+FLOW_RE = re.compile(r"^#\s*Flow:\s*(.+?)\s*$")
+
+
+def describe_chain(source: str) -> str:
+    """A chain's stages, as a description. Empty when the script lists none."""
+    flow = ""
+    steps: list[str] = []
+    for line in source.splitlines():
+        if not steps:
+            match = FLOW_RE.match(line.strip())
+            if match:
+                flow = match.group(1)
+        match = STEP_RE.match(line.strip())
+        if match:
+            steps.append(f"{match.group(1)}. {match.group(2)}")
+    if not steps:
+        return flow
+    header = f"{flow}\n\n" if flow else ""
+    return f"{header}Runs these processes in order:\n\n" + "\n".join(steps)
+
+
+def short_description_from(text: str, fallback: str) -> str:
+    """One line for the browser list: the description's first sentence."""
+    if not text:
+        return fallback
+    first = text.split("\n\n")[0]
+    # A full stop after a *digit* is a numbered list item, not a sentence end: a chain reads
+    # "...using four AudioTools modules: 1. MDS Space Navigator - ...", and splitting naively
+    # cut it at "modules: 1".
+    match = re.search(r"(?<=[^\d\s])[.;]\s", first)
+    if match:
+        first = first[: match.start() + 1]
+    first = first.rstrip(".").strip()
+    return first[:160] if first else fallback
 
 
 def parse_form(source: str) -> list[Param] | str:
@@ -1218,12 +1318,17 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
 
         if hoist:
             built = build_hoisted_processes(rel, top, path.stem, source, params, hoist,
-                                            2 if needs_two_sounds(source) else 1)
+                                            2 if needs_two_sounds(source) else 1,
+                                            extract_description(source))
             if isinstance(built, str):
                 excluded.append((str(rel), "gui_blocking", f"pause hoist failed: {built}"))
                 continue
             processes.extend(built)
         else:
+            described = extract_description(source)
+            # A chain rarely carries a Description block, but always numbers its stages.
+            if not described:
+                described = describe_chain(source)
             processes.append(Process(
                 key=key_for(top, path.stem),
                 bin=str(rel).replace("\\", "/"),
@@ -1231,6 +1336,8 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
                 group=GROUP_DIRS[top],
                 params=params,
                 inputs=2 if needs_two_sounds(source) else 1,
+                description=described,
+                short_description=short_description_from(described, title_for(path.stem)),
             ))
         presets = extract_script_presets(source, params)
         if presets:
@@ -1264,8 +1371,8 @@ def render_catalog(processes: list[Process], sha: str) -> str:
         out.append(f"title = {toml_string(proc.title)}")
         out.append('category = "praat"')
         out.append(f"subcategory = {toml_string(proc.group)}")
-        out.append(f"short_description = {toml_string(proc.title)}")
-        out.append(f"description = {toml_string(proc.title)}")
+        out.append(f"short_description = {toml_string(proc.short_description or proc.title)}")
+        out.append(f"description = {toml_string(proc.description or proc.title)}")
         out.append(f'input = "{"dual_wav" if proc.inputs == 2 else "wav"}"')
         out.append('output = "wav"')
         # Praat reads a multi-channel Sound natively, so there is never a reason to split a
