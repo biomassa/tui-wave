@@ -1,17 +1,17 @@
 ## 1. Install
 
-Everything you may want to install lives here: tui-wave itself, and the two optional external
-tool suites it can drive. Only tui-wave is required — it opens, edits, plays and saves files
-with neither of the others present.
+**Start here: run `./install.sh` from the repository.** On macOS and Linux it does the whole of
+this section for you — it installs the Rust toolchain if missing, the build dependencies for your
+platform, Praat, the script submodule, and (after asking) the Python environment the `py` process
+group needs, then builds and installs tui-wave. It asks before anything requiring `sudo`, and
+`./install.sh --dry-run` prints every command it would run without changing anything. It does not
+install CDP, which is a separate licensed download.
 
-**The quick way, on macOS and Linux:** run `./install.sh` from the repository. It installs the
-Rust toolchain if missing, the build dependencies for your platform, Praat, the script
-submodule, and — after asking — the Python environment the `py` process group needs; then it
-builds and installs tui-wave. It asks before anything requiring `sudo`, and `./install.sh
---dry-run` prints every command it would run without changing anything. It does not install CDP,
-which is a separate licensed download.
+Everything you may want to install lives in this section: tui-wave itself, and the two optional
+external tool suites it can drive. Only tui-wave is required — it opens, edits, plays and saves
+files with neither of the others present.
 
-The rest of this section is what that script does, for anyone doing it by hand or on Windows.
+The rest of this section is what the script does, for anyone doing it by hand or on Windows.
 
 ### tui-wave
 
@@ -87,6 +87,9 @@ Praat is a speech-analysis program with a scripting language. praatAudioTools is
 collection of sound-transformation scripts written for it by Shai Cohen. Section 15 covers using
 them.
 
+**`./install.sh` installs both of the things below.** If you ran it, skip to section 15. What
+follows is the manual route, and what Windows needs.
+
 You need two things.
 
 **Praat itself.** Install it from your package manager.
@@ -149,7 +152,8 @@ praat_audiotools_dir = "/home/you/praat-audiotools"
 You do **not** need to install the scripts into Praat itself. tui-wave runs them by path and
 never writes to your Praat preferences folder, so an existing Praat setup is left alone.
 
-**Python, for the `py` group only.** 34 of the scripts do their work in Python instead of in
+**Python, for the `py` group only** — and again, `./install.sh` offers to do all of this for you,
+into a virtual environment it owns. 34 of the scripts do their work in Python instead of in
 Praat: they hand the audio to a helper and read back the result. They sit in their own **py**
 group in the browser so you can see the extra requirement before choosing one. The other
 thirteen groups need nothing beyond Praat.
