@@ -51,6 +51,20 @@ pub struct PraatPlannedJob {
     /// shown under `--run` (it segfaults). The runner writes a rewritten copy of the script into
     /// the job's temp directory and the driver calls *that* instead. See `praat::rewrite`.
     pub pause_rewrite: Option<PauseRewrite>,
+    /// `Some` for a process whose script tui-wave ships itself — the runner writes this text
+    /// into the job's temp directory and the driver calls it. See `praat::builtin`.
+    pub builtin_source: Option<BuiltinScript>,
+}
+
+/// A script the app carries rather than reads from the submodule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuiltinScript {
+    /// Name to write it under inside the job's temp directory. Relative for the same reason
+    /// [`PauseRewrite::script_name`] is: `runScript:` resolves a relative path against the
+    /// calling script's folder, and the driver sits in that same directory.
+    pub script_name: String,
+    /// The script's full text.
+    pub source: String,
 }
 
 /// What the runner must do to turn a pause-dialog script into a runnable one.
@@ -281,11 +295,24 @@ pub fn plan_praat_job(
     });
     let input_count = praat_input_count(def);
     let save_picture = draws_picture(def, values);
-    // The rewritten copy is a sibling of the driver, so a bare filename resolves — see
-    // `PauseRewrite::script_name`.
-    let called_script = match &pause_rewrite {
-        Some(rewrite) => rewrite.script_name.clone(),
-        None => script_path.to_string_lossy().into_owned(),
+    // A built-in ships with the app rather than living in the submodule, so there is nothing at
+    // `script_path` to run — the runner writes the embedded text beside the driver instead. Same
+    // shape as the pause rewrite below it, and mutually exclusive with it: a built-in has no
+    // pause dialog to rewrite, being written here.
+    let builtin_source = def
+        .praat_builtin
+        .then(|| super::builtin::source_for(&def.key))
+        .flatten()
+        .map(|source| BuiltinScript {
+            script_name: super::builtin::BUILTIN_SCRIPT.to_string(),
+            source: source.to_string(),
+        });
+    // Both a rewritten copy and a built-in are siblings of the driver, so a bare filename
+    // resolves — see `PauseRewrite::script_name`.
+    let called_script = match (&builtin_source, &pause_rewrite) {
+        (Some(builtin), _) => builtin.script_name.clone(),
+        (None, Some(rewrite)) => rewrite.script_name.clone(),
+        (None, None) => script_path.to_string_lossy().into_owned(),
     };
     let driver_source = driver_script(
         &called_script,
@@ -303,6 +330,7 @@ pub fn plan_praat_job(
         script_path,
         label: def.title.clone(),
         pause_rewrite,
+        builtin_source,
     })
 }
 
@@ -354,6 +382,11 @@ pub fn is_picture_toggle_name(name: &str) -> bool {
 pub fn praat_input_count(def: &ProcessDef) -> usize {
     match def.input {
         IoKind::DualWav => 2,
+        // A process that creates its Sound rather than transforming one — Record, today. The
+        // driver emits no `infile` field and no `selectObject:` for this, and the runner writes
+        // no temp WAV, so such a process runs with no document open at all. That is the point of
+        // it: needing something already loaded before you could record would defeat the feature.
+        IoKind::None => 0,
         _ => 1,
     }
 }
@@ -421,6 +454,7 @@ mod tests {
             output_new_buffer: false,
             interactive: false,
             praat_form_locks: Vec::new(),
+            praat_builtin: false,
             requires_simple_wav_input: false,
             sidecar_extension: None,
             min_inputs: None,

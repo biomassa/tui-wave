@@ -10475,7 +10475,23 @@ impl App {
 
         let values: Vec<_> = fields.iter().map(CdpField::to_value).collect();
         let idx = self.active_document;
-        let Some(doc) = self.documents.get(idx) else { return };
+        // A zero-input process reads nothing, so it must be runnable with **no buffer open at
+        // all** — that is the whole point of Record, which is otherwise a way to record only
+        // once you already have something to record over. Every other process needs a document
+        // to read, and returning here is how that has always been expressed.
+        //
+        // The synthetic empty document below stands in only for the fields the submit path
+        // reads off one (a sample rate, a cursor); nothing of it reaches Praat, because
+        // `praat_input_count` gives a zero-input process no input file to write.
+        let placeholder;
+        let doc = match self.documents.get(idx) {
+            Some(doc) => doc,
+            None if def.input == IoKind::None => {
+                placeholder = Document::default();
+                &placeholder
+            }
+            None => return,
+        };
 
         let range = if def.input == IoKind::None {
             (doc.cursor, doc.cursor)
@@ -26655,6 +26671,7 @@ mod tests {
             output_new_buffer: false,
             interactive: false,
             praat_form_locks: Vec::new(),
+            praat_builtin: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
@@ -29638,6 +29655,7 @@ mod tests {
             output_new_buffer: false,
             interactive: false,
             praat_form_locks: Vec::new(),
+            praat_builtin: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
@@ -29726,6 +29744,7 @@ mod tests {
             output_new_buffer: false,
             interactive: false,
             praat_form_locks: Vec::new(),
+            praat_builtin: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
@@ -36484,6 +36503,7 @@ mod tests {
             output_new_buffer: false,
             interactive: false,
             praat_form_locks: Vec::new(),
+            praat_builtin: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,

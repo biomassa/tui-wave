@@ -7,6 +7,7 @@
 //! its arguments straight on a per-process binary's argv, while Praat has a single binary that
 //! must be handed a generated script.
 
+pub mod builtin;
 pub mod driver;
 pub mod plan;
 pub mod rewrite;

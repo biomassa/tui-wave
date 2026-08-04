@@ -1050,6 +1050,17 @@ pub struct ProcessDef {
     /// must not remain in the script waiting for an argument.
     #[serde(default)]
     pub praat_form_locks: Vec<(String, bool)>,
+    /// True for a Praat process whose script tui-wave ships itself rather than running out of
+    /// the praatAudioTools submodule — see `model::praat::builtin`, which holds the source and
+    /// keys it by [`ProcessDef::key`].
+    ///
+    /// The planner uses it to skip resolving `bin` against the plugin directory: a built-in's
+    /// `bin` is a path that deliberately does not exist there, carrying only the directory
+    /// segment `cdp_group` reads to decide the browser group. The runner writes the embedded
+    /// text into the job's temp directory instead, exactly as it already does for a
+    /// pause-rewritten copy.
+    #[serde(default)]
+    pub praat_builtin: bool,
     /// True for a process whose binary can't correctly read the `WAVE_FORMAT_EXTENSIBLE`
     /// WAV header `hound` (this project's WAV library) writes for any file with
     /// `bits_per_sample > 16` — which is every input file this app ever sends CDP, since
@@ -1381,6 +1392,7 @@ mod tests {
             output_new_buffer: false,
             interactive: false,
             praat_form_locks: Vec::new(),
+            praat_builtin: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1456,6 +1468,7 @@ mod tests {
             output_new_buffer: false,
             interactive: false,
             praat_form_locks: Vec::new(),
+            praat_builtin: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1551,6 +1564,7 @@ mod tests {
             output_new_buffer: false,
             interactive: false,
             praat_form_locks: Vec::new(),
+            praat_builtin: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1617,6 +1631,7 @@ mod tests {
             output_new_buffer: false,
             interactive: false,
             praat_form_locks: Vec::new(),
+            praat_builtin: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1691,6 +1706,7 @@ mod tests {
             output_new_buffer: false,
             interactive: false,
             praat_form_locks: Vec::new(),
+            praat_builtin: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1750,6 +1766,7 @@ mod tests {
             output_new_buffer: false,
             interactive: false,
             praat_form_locks: Vec::new(),
+            praat_builtin: false,
             requires_simple_wav_input: false,
             sidecar_extension: None,
             needs_head_tail_marks: false,
