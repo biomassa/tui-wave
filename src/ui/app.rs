@@ -128,7 +128,10 @@ mod ec_focus {
 mod ms_focus {
     pub const CHANNELS: usize = 0;
     pub const LIMITER: usize = 1;
-    pub const COUNT: usize = 2;
+    /// The ceiling field, which shares the limiter's screen row — so a click resolves between
+    /// this and `LIMITER` by column, exactly as a channel row resolves destination vs gain.
+    pub const CEILING: usize = 2;
+    pub const COUNT: usize = 3;
 }
 
 /// Column layout of a Mix to Stereo channel row, derived from its pieces rather than hardcoded
@@ -146,6 +149,19 @@ struct MsColumns {
 /// selected row but the cell reserves their width on every row, so selecting one doesn't shift
 /// the attenuation column sideways.
 const MS_DEST_CELL_WIDTH: u16 = 9;
+
+/// The text between the limiter checkbox and its editable ceiling, on the shared row. A single
+/// definition because the renderer writes it and [`ms_ceiling_column`] measures it — a literal
+/// in each would let the caret land somewhere the value isn't.
+const MS_CEILING_LABEL: &str = "   Ceiling (dBFS): ";
+
+/// Character offset of the ceiling *value* within the limiter row, for hit-testing a click and
+/// placing the caret. Derived from the two pieces the renderer emits before it.
+fn ms_ceiling_column() -> u16 {
+    // "  [X] Tanh limiter" — two leading spaces, the three-character box, a space, the label.
+    let checkbox = "  [X] Tanh limiter".chars().count() as u16;
+    checkbox + MS_CEILING_LABEL.chars().count() as u16
+}
 
 fn ms_columns(channel_count: usize) -> MsColumns {
     let digits = channel_export::digit_width(channel_count).max(2) as u16;
@@ -1147,6 +1163,9 @@ enum Dialog {
         selected: usize,
         focused: usize,
         limiter: bool,
+        /// The limiter's ceiling in dBFS, editable. Shares the limiter's row rather than taking
+        /// one of its own, so the checkbox and the number it governs read as one control.
+        ceiling: TextInput,
         /// `"take01.wav — 30 ch · 96 kHz · 24-bit"`, built once when the dialog opens: none of
         /// it can change while the dialog is up, and `render_dialog` only gets `&Dialog`.
         header: String,
@@ -5116,17 +5135,18 @@ impl App {
                 let f = *focused;
                 inputs.get_mut(f)
             }
-            // Typing goes to the *selected* row's field, and only while the list has focus —
-            // with the limiter checkbox focused there is no field to type into, so characters
-            // fall through rather than silently editing a row the highlight has left.
-            Dialog::MixToStereo { gains, selected, focused, .. } => {
-                if *focused == ms_focus::CHANNELS {
+            // Typing goes to the *selected* row's field while the list has focus, or to the
+            // ceiling field while that has it. With the checkbox focused there is nothing to
+            // type into, so characters fall through rather than silently editing a row the
+            // highlight has left.
+            Dialog::MixToStereo { gains, ceiling, selected, focused, .. } => match *focused {
+                ms_focus::CHANNELS => {
                     let row = *selected;
                     gains.get_mut(row)
-                } else {
-                    None
                 }
-            }
+                ms_focus::CEILING => Some(ceiling),
+                _ => None,
+            },
             Dialog::ExportRegions {
                 folder_input, base_name_input, limit_length_input, normalize_input,
                 fade_in_input, fade_out_input, focused, ..
@@ -5476,7 +5496,9 @@ impl App {
                     let clip = tanh_clip;
                     self.apply_mix_to_mono(&inputs_snapshot, clip);
                 }
-                Some(Dialog::MixToStereo { dests, gains, selected, focused, limiter, header }) => {
+                Some(Dialog::MixToStereo {
+                    dests, gains, selected, focused, limiter, ceiling, header,
+                }) => {
                     let gains_db: Vec<Option<f32>> = gains
                         .iter()
                         .map(|g| stereo_mix::parse_gain_db(g.value()))
@@ -5487,11 +5509,12 @@ impl App {
                         // would hand back a new buffer of digital silence, which reads as the
                         // process having failed rather than as the routing being empty.
                         self.dialog = Some(Dialog::MixToStereo {
-                            dests, gains, selected, focused, limiter, header,
+                            dests, gains, selected, focused, limiter, ceiling, header,
                         });
                         return;
                     }
-                    self.apply_mix_to_stereo(&dests, &gains_db, limiter);
+                    let ceiling_db = stereo_mix::parse_ceiling_db(ceiling.value());
+                    self.apply_mix_to_stereo(&dests, &gains_db, limiter, ceiling_db);
                 }
                 Some(Dialog::ExportRegions {
                     folder_input, base_name_input, depth, dither,
@@ -6373,7 +6396,9 @@ impl App {
             // The channel rows come first, then the limiter checkbox. `ms_scroll_top` is
             // recomputed from the same `selected` the renderer used, so a click cannot land on
             // a different channel than the one drawn there.
-            Some(Dialog::MixToStereo { dests, gains, selected, focused, limiter, .. }) => {
+            Some(Dialog::MixToStereo {
+                dests, gains, selected, focused, limiter, ceiling, ..
+            }) => {
                 let visible = ms_visible_rows(self.last_frame_area, dests.len());
                 let top = ms_scroll_top(*selected, visible, dests.len());
                 let channel_rows = visible.min(dests.len());
@@ -6399,8 +6424,17 @@ impl App {
                         }
                     }
                 } else {
-                    *focused = ms_focus::LIMITER;
-                    *limiter = !*limiter;
+                    // The limiter row carries two controls. On the ceiling field a click places
+                    // the caret and leaves the checkbox alone; anywhere left of it toggles the
+                    // limiter, which is how a mouse user commits a choice everywhere else here.
+                    if x_in_row >= ms_ceiling_column() {
+                        *focused = ms_focus::CEILING;
+                        let col = ms_ceiling_column();
+                        ceiling.set_cursor_from_column(x_in_row.saturating_sub(col) as usize);
+                    } else {
+                        *focused = ms_focus::LIMITER;
+                        *limiter = !*limiter;
+                    }
                 }
             }
             // The channel rows come first, then Subfolder. `ec_scroll_top` is recomputed from
@@ -13207,8 +13241,7 @@ impl App {
     }
 
     /// Mixes the source channels down to a new stereo buffer under the dialog's per-channel
-    /// routing and dB attenuation, optionally through a tanh limiter at
-    /// [`stereo_mix::LIMIT_CEILING_DB`].
+    /// routing and dB attenuation, optionally through a tanh limiter at `ceiling_db` dBFS.
     ///
     /// A **new buffer**, not an edit of this one, for the same reason Mix to Mono and Copy to
     /// New are: the operation changes the channel count, and `insert_range` fills any channel
@@ -13224,6 +13257,7 @@ impl App {
         dests: &[StereoMixDest],
         gains_db: &[Option<f32>],
         limiter: bool,
+        ceiling_db: f32,
     ) {
         let Some(src) = self.active_doc() else { return };
         if src.channels.is_empty() {
@@ -13243,7 +13277,7 @@ impl App {
             .map(|m| Marker { position: m.position - range_start, label: m.label.clone() })
             .collect();
 
-        let ceiling = limiter.then(|| dsp::db_to_linear(stereo_mix::LIMIT_CEILING_DB));
+        let ceiling = limiter.then(|| dsp::db_to_linear(ceiling_db));
         let channels = stereo_mix::mix_to_stereo(
             &src.channels,
             range_start,
@@ -15379,6 +15413,9 @@ impl App {
                     // but a sparse take. tanh is unity-gain for small signals, so leaving it on
                     // costs a quiet mix nothing at all.
                     limiter: true,
+                    ceiling: TextInput::new(format_attenuation(
+                        stereo_mix::DEFAULT_LIMIT_CEILING_DB,
+                    )),
                     header,
                 });
             }
@@ -17709,9 +17746,9 @@ fn render_dialog(
                 frame, area, modes, *selected, folder_input, *focused, header, stem,
             );
         }
-        Dialog::MixToStereo { dests, gains, selected, focused, limiter, header } => {
+        Dialog::MixToStereo { dests, gains, selected, focused, limiter, ceiling, header } => {
             return render_mix_to_stereo_dialog(
-                frame, area, dests, gains, *selected, *focused, *limiter, header,
+                frame, area, dests, gains, *selected, *focused, *limiter, ceiling, header,
             );
         }
         Dialog::Info { message } => {
@@ -18351,12 +18388,13 @@ fn render_mix_to_stereo_dialog(
     selected: usize,
     focused: usize,
     limiter: bool,
+    ceiling_input: &TextInput,
     header: &str,
 ) -> Vec<Rect> {
     let n = dests.len();
-    // Wide enough for the header line's rate/depth tail without wrapping; the row content
-    // itself is far narrower than this.
-    let width = 62u16.min(area.width);
+    // Wide enough for the hints bar, which is the longest fixed line here — the header's
+    // filename tail and the channel rows both sit comfortably inside it.
+    let width = 68u16.min(area.width);
     let visible = ms_visible_rows(area, n);
     let scroll_top = ms_scroll_top(selected, visible, n);
     let end = (scroll_top + visible).min(n);
@@ -18444,42 +18482,43 @@ fn render_mix_to_stereo_dialog(
         lines.push(Line::from(Span::styled(format!("  ▼ {hidden_below} more"), dim_style)));
     }
 
-    // The leg tallies are the one thing that can't be read off a scrolled list: with 50 of 56
-    // rows off-screen, "how many channels am I actually sending left?" has no other answer.
+    // The tally is the one thing that can't be read off a scrolled list: with 50 of 56 rows
+    // off-screen, "where is everything going?" has no other answer. It is a *partition* — see
+    // `stereo_mix::tally` — so the four numbers always sum to the channel count, and a routing
+    // that misses a channel shows up as an unexpected `dropped` rather than having to be found
+    // by scrolling.
     let gains_db: Vec<Option<f32>> =
         gains.iter().map(|g| stereo_mix::parse_gain_db(g.value())).collect();
-    let mut left = 0usize;
-    let mut right = 0usize;
-    let mut dropped = 0usize;
-    for i in 0..n {
-        let (lg, rg) = stereo_mix::leg_gains(dests[i], gains_db.get(i).copied().flatten());
-        if lg != 0.0 {
-            left += 1;
-        }
-        if rg != 0.0 {
-            right += 1;
-        }
-        if lg == 0.0 && rg == 0.0 {
-            dropped += 1;
-        }
-    }
+    let t = stereo_mix::tally(dests, &gains_db);
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        format!("  L: {left} ch · R: {right} ch · {dropped} dropped"),
+        format!(
+            "  L: {} ch · R: {} ch · Both: {} ch · {} dropped",
+            t.left, t.right, t.both, t.dropped
+        ),
         label_style,
     )));
 
     lines.push(Line::from(""));
-    let limiter_focused = focused == ms_focus::LIMITER;
-    let limiter_label = format!(
-        "  [{}] Tanh limiter ({:.0} dBFS)",
-        if limiter { "X" } else { " " },
-        stereo_mix::LIMIT_CEILING_DB,
-    );
-    lines.push(Line::from(Span::styled(
-        limiter_label,
-        if limiter_focused { cursor_style } else { label_style },
-    )));
+    // Checkbox and ceiling share one row: the number only means anything while the box is
+    // ticked, so splitting them across two rows would read as two independent settings. With
+    // the limiter off the ceiling is dimmed rather than hidden — hiding it would resize the
+    // popup on every toggle, the reflow `render_gain_dialog` documents avoiding.
+    let ceiling_style = if limiter { base } else { dim_style };
+    let mut limiter_spans = vec![Span::styled(
+        format!("  [{}] Tanh limiter", if limiter { "X" } else { " " }),
+        if focused == ms_focus::LIMITER { cursor_style } else { label_style },
+    )];
+    limiter_spans.push(Span::styled(MS_CEILING_LABEL, label_style));
+    if focused == ms_focus::CEILING {
+        let (before, under, after) = ceiling_input.split_at_cursor();
+        limiter_spans.push(Span::styled(before, base));
+        limiter_spans.push(Span::styled(under, cursor_style));
+        limiter_spans.push(Span::styled(after, base));
+    } else {
+        limiter_spans.push(Span::styled(ceiling_input.value().to_string(), ceiling_style));
+    }
+    lines.push(Line::from(limiter_spans));
     let limiter_row = Rect {
         x: popup.x + 1,
         y: popup.y + lines.len() as u16,
@@ -18499,6 +18538,8 @@ fn render_mix_to_stereo_dialog(
         Span::styled(":send  ", label_style),
         Span::styled("Del", hint_style),
         Span::styled(":-inf  ", label_style),
+        Span::styled("Space", hint_style),
+        Span::styled(":limiter  ", label_style),
         Span::styled("Tab", hint_style),
         Span::styled(":next  ", label_style),
         Span::styled("Enter", go_style),
@@ -34839,7 +34880,7 @@ mod tests {
         // Apply at unity so the arithmetic is legible, limiter off.
         let dests = stereo_mix::default_dests(4);
         let gains = vec![Some(0.0f32); 4];
-        app.apply_mix_to_stereo(&dests, &gains, false);
+        app.apply_mix_to_stereo(&dests, &gains, false, stereo_mix::DEFAULT_LIMIT_CEILING_DB);
 
         assert_eq!(app.documents.len(), 2, "the source buffer is still open");
         assert_eq!(app.documents[0].channels, channels, "the source is untouched");
@@ -34871,7 +34912,7 @@ mod tests {
 
         let dests = stereo_mix::default_dests(4);
         let gains = vec![Some(0.0f32); 4];
-        app.apply_mix_to_stereo(&dests, &gains, false);
+        app.apply_mix_to_stereo(&dests, &gains, false, stereo_mix::DEFAULT_LIMIT_CEILING_DB);
 
         let mixed = &app.documents[app.active_document];
         assert_eq!(mixed.channels[0].len(), 300, "only the selected range");
@@ -34890,13 +34931,13 @@ mod tests {
         let gains = vec![Some(0.0f32); 8];
 
         let mut limited = new_app(Some(doc_with_channels(channels.clone())), None);
-        limited.apply_mix_to_stereo(&dests, &gains, true);
+        limited.apply_mix_to_stereo(&dests, &gains, true, stereo_mix::DEFAULT_LIMIT_CEILING_DB);
         let peak = limited.documents[limited.active_document].channels[0][0];
-        let ceiling = dsp::db_to_linear(stereo_mix::LIMIT_CEILING_DB);
+        let ceiling = dsp::db_to_linear(stereo_mix::DEFAULT_LIMIT_CEILING_DB);
         assert!(peak <= ceiling, "limited peak {peak} exceeded the ceiling {ceiling}");
 
         let mut raw = new_app(Some(doc_with_channels(channels)), None);
-        raw.apply_mix_to_stereo(&dests, &gains, false);
+        raw.apply_mix_to_stereo(&dests, &gains, false, stereo_mix::DEFAULT_LIMIT_CEILING_DB);
         let raw_peak = raw.documents[raw.active_document].channels[0][0];
         assert!((raw_peak - 8.0).abs() < 1e-5, "unlimited peak was {raw_peak}, expected 8.0");
     }
@@ -34917,6 +34958,131 @@ mod tests {
             matches!(app.dialog, Some(Dialog::MixToStereo { .. })),
             "the dialog stays up so the routing can be corrected"
         );
+    }
+
+    /// The limiter's ceiling is editable, starts at the documented default, and reaches the mix.
+    #[test]
+    fn mix_to_stereo_ceiling_starts_at_minus_one_and_is_editable() {
+        let mut app = new_app(Some(doc_with_channels(vec![vec![0.1f32; 64]; 4])), None);
+        app.handle_action(Action::MixToStereo);
+
+        let Some(Dialog::MixToStereo { ceiling, focused, .. }) = &app.dialog else {
+            panic!("expected the Mix to Stereo dialog");
+        };
+        assert_eq!(ceiling.value(), "-1.0");
+        assert_eq!(*focused, ms_focus::CHANNELS);
+
+        // Tab past the checkbox to the ceiling field, then type a new value over it.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let Some(Dialog::MixToStereo { focused, .. }) = &app.dialog else { panic!() };
+        assert_eq!(*focused, ms_focus::CEILING, "Tab reaches the ceiling field");
+
+        for _ in 0..4 {
+            app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        for c in "-6".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let Some(Dialog::MixToStereo { ceiling, gains, .. }) = &app.dialog else { panic!() };
+        assert_eq!(ceiling.value(), "-6");
+        // Typing while the ceiling has focus must not touch a channel's attenuation.
+        assert_eq!(gains[0].value(), "-6.0");
+        assert_eq!(stereo_mix::parse_ceiling_db(ceiling.value()), -6.0);
+    }
+
+    /// A ceiling typed into the dialog has to reach the samples — the whole point of making it
+    /// adjustable — so this drives the real Enter path rather than calling the mixer directly.
+    #[test]
+    fn mix_to_stereo_applies_the_ceiling_that_was_typed() {
+        // Eight full-scale channels all to the left leg: a raw sum of 8.0, deep into the limiter.
+        let mut app = new_app(Some(doc_with_channels(vec![vec![1.0f32; 16]; 8])), None);
+        app.handle_action(Action::MixToStereo);
+        if let Some(Dialog::MixToStereo { dests, gains, ceiling, .. }) = app.dialog.as_mut() {
+            dests.iter_mut().for_each(|d| *d = StereoMixDest::Left);
+            gains.iter_mut().for_each(|g| *g = TextInput::new("0"));
+            *ceiling = TextInput::new("-12.0");
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let peak = app.documents[app.active_document].channels[0][0];
+        let asked = dsp::db_to_linear(-12.0);
+        assert!(peak <= asked, "peak {peak} exceeded the -12 dBFS ceiling {asked}");
+        // And it really is the typed ceiling doing the work, not the default.
+        assert!(peak < dsp::db_to_linear(-6.0), "peak {peak} looks like a higher ceiling");
+    }
+
+    /// An unreadable ceiling falls back to the default rather than to silence or to no limiting —
+    /// the opposite of a gain field, because a ceiling is the bound rather than the signal.
+    #[test]
+    fn mix_to_stereo_an_unreadable_ceiling_falls_back_to_the_default() {
+        let mut app = new_app(Some(doc_with_channels(vec![vec![1.0f32; 16]; 8])), None);
+        app.handle_action(Action::MixToStereo);
+        if let Some(Dialog::MixToStereo { dests, gains, ceiling, .. }) = app.dialog.as_mut() {
+            dests.iter_mut().for_each(|d| *d = StereoMixDest::Left);
+            gains.iter_mut().for_each(|g| *g = TextInput::new("0"));
+            *ceiling = TextInput::new("oops");
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let peak = app.documents[app.active_document].channels[0][0];
+        let default = dsp::db_to_linear(stereo_mix::DEFAULT_LIMIT_CEILING_DB);
+        assert!(peak <= default, "peak {peak} exceeded the default ceiling {default}");
+        assert!(peak > 0.0, "a bad ceiling must not silence the mix");
+    }
+
+    /// The summary counts every channel exactly once, so its numbers reconcile with the rows —
+    /// the manual-test report was a 6-channel routing reading `L: 4 · R: 4` for 6 channels.
+    #[test]
+    fn mix_to_stereo_summary_partitions_the_channels_rather_than_double_counting_both() {
+        use StereoMixDest::*;
+        let mut app = new_app(Some(doc_with_channels(vec![vec![0.1f32; 64]; 6])), None);
+        app.handle_action(Action::MixToStereo);
+        if let Some(Dialog::MixToStereo { dests, .. }) = app.dialog.as_mut() {
+            dests.copy_from_slice(&[Left, Right, Both, Both, Left, Right]);
+        }
+
+        let rows = render_dialog_rows(&mut app, 100, 34);
+        let summary = rows
+            .iter()
+            .find(|r| r.contains("dropped"))
+            .unwrap_or_else(|| panic!("no summary line in:\n{}", rows.join("\n")))
+            .clone();
+        assert!(
+            summary.contains("L: 2 ch") && summary.contains("R: 2 ch")
+                && summary.contains("Both: 2 ch") && summary.contains("0 dropped"),
+            "summary must partition the six channels, got {summary:?}"
+        );
+    }
+
+    /// Renders the app to a `TestBackend` and returns its rows, for dialog assertions that are
+    /// about what actually reaches the screen rather than about dialog state.
+    fn render_dialog_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let buf = terminal.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// The ceiling field shares the limiter's row, so a click has to resolve between the two by
+    /// column — the same split the channel rows use for destination vs attenuation.
+    #[test]
+    fn mix_to_stereo_the_ceiling_column_sits_past_the_checkbox_label() {
+        let col = ms_ceiling_column();
+        let rendered = format!("  [X] Tanh limiter{MS_CEILING_LABEL}");
+        assert_eq!(
+            rendered.chars().count() as u16,
+            col,
+            "the hit-test column must equal what the renderer emits before the value"
+        );
+        assert!(MS_CEILING_LABEL.contains("dBFS"), "the unit has to be on screen");
     }
 
     /// The list scrolls, and the click handler must resolve a screen row to the same channel the

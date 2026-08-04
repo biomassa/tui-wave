@@ -49,13 +49,27 @@ pub const DEFAULT_ATTENUATION_DB: f32 = -6.0;
 /// user's own numbers, since it is a property of being centred rather than of any one channel.
 pub const BOTH_LEG_DB: f32 = -3.0;
 
-/// The ceiling of the optional output limiter, in dBFS.
+/// The ceiling the limiter field starts at, in dBFS.
 ///
 /// The same [`dsp::PLAYBACK_CEILING_DB`] the playback fold limits against, and deliberately the
 /// same: the fold is what the user was monitoring while deciding these routings, so a mix that
-/// limited to a different ceiling would not sound like the thing being mixed. It also leaves a
-/// dB of headroom for whatever lossy encoder the result is eventually handed to.
-pub const LIMIT_CEILING_DB: f32 = dsp::PLAYBACK_CEILING_DB;
+/// limited to a different ceiling would not open sounding unlike the thing being mixed. It also
+/// leaves a dB of headroom for whatever lossy encoder the result is eventually handed to. The
+/// field is editable from there — a bound for a lossy encode and one for a stem headed back into
+/// a session are not the same number.
+pub const DEFAULT_LIMIT_CEILING_DB: f32 = dsp::PLAYBACK_CEILING_DB;
+
+/// Parses the limiter's ceiling field into dBFS, falling back to [`DEFAULT_LIMIT_CEILING_DB`].
+///
+/// Unlike [`parse_gain_db`], an unreadable value here falls back to the default rather than to
+/// silence, and the asymmetry is deliberate: a gain is the *signal*, so a typo defaulting loud
+/// would clip, while a ceiling is the *bound* on it, and the default bound is the protective
+/// choice. Nothing is clamped — a ceiling above 0 dBFS is a deliberate "saturate, don't cap"
+/// and a very low one is a deliberate squash, and neither is this function's business to
+/// second-guess when the field is on screen showing exactly what was typed.
+pub fn parse_ceiling_db(raw: &str) -> f32 {
+    raw.trim().parse::<f32>().unwrap_or(DEFAULT_LIMIT_CEILING_DB)
+}
 
 /// Value a gain field holds to mean "contributes nothing", matching `Dialog::MixToMono`.
 pub const SILENCE_TOKEN: &str = "-inf";
@@ -132,6 +146,43 @@ pub fn leg_gains(dest: StereoMixDest, gain_db: Option<f32>) -> (f32, f32) {
     }
 }
 
+/// Where the channels are going, counted so that every channel falls in exactly one bucket and
+/// the four numbers sum to the channel count.
+///
+/// A partition rather than per-leg loads, which is what this used to report: a `Both` channel
+/// really does feed both legs, so counting it in each gave `L: 4 · R: 4` for a six-channel
+/// routing — every number defensible on its own, and the line as a whole reading as though it
+/// had miscounted. `Both` gets its own bucket instead, so the tallies reconcile with the rows
+/// they are summarising (user report, from a 6-channel manual test).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MixTally {
+    pub left: usize,
+    pub right: usize,
+    pub both: usize,
+    pub dropped: usize,
+}
+
+/// Counts the routing into [`MixTally`].
+///
+/// A channel counts as `dropped` when it contributes nothing *whatever its destination says* —
+/// `Skip`, or a gain of `-inf`/blank/unparseable. So a row reading "Both" at `-inf` is dropped
+/// rather than both, which is what keeps `dropped` meaning "silent in the output" and keeps the
+/// buckets from disagreeing with what the mix actually does.
+pub fn tally(dests: &[StereoMixDest], gains_db: &[Option<f32>]) -> MixTally {
+    let mut t = MixTally { left: 0, right: 0, both: 0, dropped: 0 };
+    for (i, &dest) in dests.iter().enumerate() {
+        let gain = gains_db.get(i).copied().flatten();
+        let (lg, rg) = leg_gains(dest, gain);
+        match (lg != 0.0, rg != 0.0) {
+            (true, true) => t.both += 1,
+            (true, false) => t.left += 1,
+            (false, true) => t.right += 1,
+            (false, false) => t.dropped += 1,
+        }
+    }
+    t
+}
+
 /// Whether this routing sends anything anywhere — what the dialog dims Apply on.
 ///
 /// A mix of nothing is two channels of digital silence, which is never what was intended and is
@@ -204,6 +255,12 @@ mod tests {
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-5
+    }
+
+    /// Channels a tally accounts for. The partition guarantee is that this equals the channel
+    /// count, so it is asserted here rather than being a method production code never calls.
+    fn total(t: MixTally) -> usize {
+        t.left + t.right + t.both + t.dropped
     }
 
     #[test]
@@ -315,6 +372,118 @@ mod tests {
         assert_eq!(leg_gains(StereoMixDest::Both, None), (0.0, 0.0));
     }
 
+    /// The routing from the manual-test report that produced `L: 4 · R: 4 · 0 dropped` on six
+    /// channels. Every channel must now land in exactly one bucket.
+    #[test]
+    fn the_ceiling_field_reads_back_what_was_typed_and_falls_back_to_the_default() {
+        assert_eq!(parse_ceiling_db("-1"), -1.0);
+        assert_eq!(parse_ceiling_db("-0.3"), -0.3);
+        assert_eq!(parse_ceiling_db(" -6.0 "), -6.0);
+        // Above full scale is a deliberate "saturate, don't cap" — passed through, not clamped.
+        assert_eq!(parse_ceiling_db("3"), 3.0);
+        // Unlike a gain field, an unreadable ceiling defaults rather than silencing: a ceiling
+        // is the bound on the signal, so the default bound is the protective fallback.
+        assert_eq!(parse_ceiling_db(""), DEFAULT_LIMIT_CEILING_DB);
+        assert_eq!(parse_ceiling_db("nonsense"), DEFAULT_LIMIT_CEILING_DB);
+        assert_eq!(DEFAULT_LIMIT_CEILING_DB, -1.0, "the documented default");
+    }
+
+    #[test]
+    fn a_lower_ceiling_bounds_the_mix_harder() {
+        let channels = vec![vec![1.0f32; 1]; 8];
+        let dests = [StereoMixDest::Left; 8];
+        let gains = [Some(0.0f32); 8];
+
+        let at_minus_one = mix_to_stereo(
+            &channels, 0, 1, &dests, &gains, Some(dsp::db_to_linear(-1.0)),
+        )[0][0];
+        let at_minus_twelve = mix_to_stereo(
+            &channels, 0, 1, &dests, &gains, Some(dsp::db_to_linear(-12.0)),
+        )[0][0];
+
+        assert!(at_minus_twelve < at_minus_one, "a lower ceiling must bound harder");
+        assert!(at_minus_one <= dsp::db_to_linear(-1.0));
+        assert!(at_minus_twelve <= dsp::db_to_linear(-12.0));
+    }
+
+    #[test]
+    fn a_routing_with_both_channels_tallies_to_the_channel_count() {
+        let dests = [
+            StereoMixDest::Left,
+            StereoMixDest::Right,
+            StereoMixDest::Both,
+            StereoMixDest::Both,
+            StereoMixDest::Left,
+            StereoMixDest::Right,
+        ];
+        let gains = vec![Some(-6.0f32); 6];
+        let t = tally(&dests, &gains);
+
+        assert_eq!(t, MixTally { left: 2, right: 2, both: 2, dropped: 0 });
+        assert_eq!(total(t), 6, "the tally must account for every channel exactly once");
+    }
+
+    /// The partition property, over every combination of destination and silence — this is the
+    /// invariant the display depends on, so it is worth asserting exhaustively rather than on
+    /// one example.
+    #[test]
+    fn every_tally_accounts_for_each_channel_exactly_once() {
+        let all = [
+            StereoMixDest::Left,
+            StereoMixDest::Right,
+            StereoMixDest::Both,
+            StereoMixDest::Skip,
+        ];
+        for &a in &all {
+            for &b in &all {
+                for &c in &all {
+                    for gains in [
+                        vec![Some(0.0), Some(-6.0), Some(-12.0)],
+                        vec![None, Some(-6.0), None],
+                        vec![None, None, None],
+                    ] {
+                        let dests = [a, b, c];
+                        let t = tally(&dests, &gains);
+                        assert_eq!(
+                            total(t),
+                            3,
+                            "{dests:?} with {gains:?} tallied {t:?}, which does not sum to 3"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A silenced row is dropped whatever its destination says, so `dropped` keeps meaning
+    /// "contributes nothing to the output" rather than "says Skip".
+    #[test]
+    fn a_silenced_channel_is_dropped_whatever_its_destination_reads() {
+        let dests = [StereoMixDest::Both, StereoMixDest::Left, StereoMixDest::Skip];
+        let gains = [None, Some(-6.0), Some(0.0)];
+        let t = tally(&dests, &gains);
+
+        assert_eq!(t, MixTally { left: 1, right: 0, both: 0, dropped: 2 });
+        assert_eq!(total(t), 3);
+    }
+
+    #[test]
+    fn an_all_skipped_routing_drops_everything() {
+        let dests = [StereoMixDest::Skip; 6];
+        let gains = vec![Some(-6.0f32); 6];
+        let t = tally(&dests, &gains);
+        assert_eq!(t, MixTally { left: 0, right: 0, both: 0, dropped: 6 });
+    }
+
+    #[test]
+    fn the_opening_defaults_tally_to_an_even_split_with_nothing_dropped() {
+        let dests = default_dests(30);
+        let gains = vec![Some(DEFAULT_ATTENUATION_DB); 30];
+        let t = tally(&dests, &gains);
+        assert_eq!(t, MixTally { left: 15, right: 15, both: 0, dropped: 0 });
+        assert_eq!(total(t), 30);
+    }
+
     #[test]
     fn a_routing_that_sends_nothing_anywhere_is_reported_silent() {
         assert!(is_silent(
@@ -383,7 +552,7 @@ mod tests {
         let dests = [StereoMixDest::Left; 4];
         let gains = [Some(0.0); 4];
 
-        let ceiling = dsp::db_to_linear(LIMIT_CEILING_DB);
+        let ceiling = dsp::db_to_linear(DEFAULT_LIMIT_CEILING_DB);
         let limited = mix_to_stereo(&channels, 0, 1, &dests, &gains, Some(ceiling));
         assert!(
             limited[0][0] <= ceiling,
@@ -401,7 +570,7 @@ mod tests {
         let dests = [StereoMixDest::Left];
         let gains = [Some(0.0)];
 
-        let ceiling = dsp::db_to_linear(LIMIT_CEILING_DB);
+        let ceiling = dsp::db_to_linear(DEFAULT_LIMIT_CEILING_DB);
         let out = mix_to_stereo(&channels, 0, 1, &dests, &gains, Some(ceiling));
         // tanh is unity-gain for small signals, which is what makes enabling it safe by default.
         assert!((out[0][0] - 0.05).abs() < 1e-3);
