@@ -196,10 +196,17 @@ fi
 # Kept entirely inside a venv the app owns. The `py` scripts resolve their interpreter as a
 # bare `python3` from PATH, and the app puts this venv's bin at the front of PATH for the Praat
 # child — so nothing has to be installed system-wide and nothing is patched in the scripts.
-step "Python backend (optional — the 31 processes in the 'py' group)"
+step "Python backend (optional — the 34 processes in the 'py' group)"
 VENV="${XDG_CONFIG_HOME:-$HOME/.config}/tui-wave/praat/pyenv"
+info "34 praatAudioTools scripts drive a Python helper and need numpy, scipy and soundfile"
+info "(plus sounddevice and pillow for three interactive editors). They go in a virtual"
+info "environment this app owns — your system Python is not touched."
+info "Everything else in tui-wave works without them."
 if [ "$WANT_PYTHON" = 0 ]; then
   info "skipped (--no-python); the 'py' group will report missing dependencies if used"
+elif ! confirm "Install Python dependencies for Praat-AudioTools scripts?"; then
+  info "skipped; the 'py' group will report missing dependencies if used"
+  info "you can add them later by re-running: ./install.sh"
 elif ! have python3; then
   warn "python3 not found; skipping. Install Python 3, then re-run with no other flags."
 else
@@ -219,7 +226,7 @@ else
     run python3 -m venv "$VENV"
     ok "venv created"
   fi
-  info "installing numpy, scipy and soundfile into it (about 60 MB)"
+  info "installing numpy, scipy, soundfile, sounddevice and pillow (about 60 MB)"
   run "$VENV/bin/pip" install --quiet --upgrade pip
   run "$VENV/bin/pip" install --quiet numpy scipy soundfile
   if [ "$DRY_RUN" = 0 ]; then
@@ -227,8 +234,23 @@ else
       && ok "numpy, scipy, soundfile ready" \
       || die "the venv was created but the packages did not import"
   fi
-  info "optional extras, for four more 'py' processes:"
-  info "  $VENV/bin/pip install sounddevice pillow pedalboard"
+  # Needed only by the three interactive editors (Arranger, Performance Launcher, Spectral
+  # Eraser). Installed by default because those processes are in the catalog, but a failure
+  # here is not fatal: sounddevice wants PortAudio at run time and can legitimately be
+  # unavailable on a headless machine, which costs three processes and nothing else.
+  if [ "$DRY_RUN" = 0 ]; then
+    if "$VENV/bin/pip" install --quiet sounddevice pillow 2>/dev/null \
+       && "$VENV/bin/python3" -c 'import sounddevice, PIL' 2>/dev/null; then
+      ok "sounddevice, pillow ready (the interactive editors)"
+    else
+      warn "sounddevice/pillow unavailable — Arranger, Performance Launcher and Spectral"
+      warn "Eraser will report missing dependencies; everything else is unaffected"
+    fi
+  else
+    run "$VENV/bin/pip" install --quiet sounddevice pillow
+  fi
+  # `pedalboard` is deliberately not installed: wheel 0.9.24 aborts with SIGILL on import on
+  # some x86-64 CPUs, so VST_Effect_from_Praat is excluded from the catalog regardless.
 fi
 
 # --- 6. Build and install -----------------------------------------------------------------

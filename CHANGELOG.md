@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **`./install.sh`** — one script that sets tui-wave up on macOS and Linux: Rust toolchain,
+  build dependencies, Praat, the script submodule, the optional Python environment, then builds
+  and installs. It asks before anything needing `sudo`, `--dry-run` shows exactly what it would
+  run without changing anything, and it never touches your system Python. CDP is deliberately
+  left to you — those binaries are a separate licensed download.
+
+- **34 more praatAudioTools processes, in a new `py` group.** These hand the audio to a Python
+  helper and read the result back, so they need `numpy`, `scipy` and `soundfile` (plus
+  `sounddevice` and `pillow` for three of them). They have their own group so that requirement
+  is visible before you pick one rather than a surprise when you run it — everything in the
+  other thirteen groups is unaffected.
+
+  The packages live in a virtual environment tui-wave owns, and **your system Python is never
+  modified**, which matters on Arch and recent Debian where it is marked externally-managed and
+  refuses `pip install` outright. If you already have those packages system-wide, that works too.
+
+- **Interactive processes.** Four of the new ones open a window of their own — a spatial
+  trajectory painter, a step arranger, a performance launcher, a spectrogram eraser. They run
+  with no time limit, since you are the one deciding when they are finished; `Esc` cancels.
+
 - **Three praatAudioTools processes that could never run before now do**, as 11 entries.
   Praat allows only one settings window per script, so an author needing a second page has to
   use a pop-up dialog — which, run headlessly, takes Praat down with it. tui-wave now runs a
