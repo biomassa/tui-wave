@@ -5,7 +5,8 @@
 //! Deliberately a parallel implementation rather than a shared abstraction over
 //! `cdp::runner`. The two differ in enough small ways — one binary instead of one per process,
 //! a generated script instead of argv, a single step instead of a chain, and a hard timeout
-//! that CDP has no need for — that factoring out the common half would leave a base with a
+//! that CDP has no need for (and that one class of process must be exempt from) — that
+//! factoring out the common half would leave a base with a
 //! parameter for each difference, and would put the working CDP path at risk for the benefit of
 //! code that is a few dozen lines either way.
 //!
@@ -18,6 +19,13 @@
 //! makes Praat hang rather than fail, which is worse — so the guard has to be a wall-clock
 //! limit here, plus passing `0` to each script's own Play/Draw form fields (which the catalog
 //! does, by defaulting those parameters off).
+//!
+//! The one exemption is a process that opens **its own window and waits for the user** — the
+//! `py` group's Tk editors (see `ProcessDef::interactive`). A person drawing a spatial
+//! trajectory is indistinguishable from a wedged script to a wall-clock limit, so those run
+//! with no timeout at all and are stopped by Esc instead, which the same poll loop already
+//! handles. They are not the `beginPause` hazard: that window belongs to Praat and segfaults
+//! under `--run`, while these belong to a separate Python process and genuinely work.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
@@ -79,6 +87,9 @@ pub struct PraatJob {
     /// the checkout — see `prepare_prefs_dir`. `None` runs Praat against its own default
     /// preferences folder, which is fine for every process that does not chain siblings.
     pub prefs_dir: Option<PathBuf>,
+    /// The app-owned Python venv's `bin`, prepended to the child's `PATH` — see
+    /// [`python_venv_bin`]. `None` inherits `PATH` unchanged.
+    pub python_venv_bin: Option<PathBuf>,
 }
 
 /// The audio a finished Praat job produced.
@@ -353,6 +364,12 @@ fn run_praat(
     if let Some(prefs) = &job.prefs_dir {
         command.arg(format!("--pref-dir={}", prefs.display()));
     }
+    // The `py` group's scripts invoke bare `python3`, so the interpreter they get is whatever
+    // `PATH` resolves — which is the whole hook needed to point them at an app-owned venv. Only
+    // set when one exists; otherwise the child inherits our `PATH` untouched.
+    if let Some(path) = path_with_venv(job.python_venv_bin.as_deref()) {
+        command.env("PATH", path);
+    }
     command.arg(driver_path).args(input_paths).arg(output_path);
     // Conditional in lockstep with the driver's own `outfile Picture_file` field: Praat fills a
     // form strictly by position *and count*, so one without the other is an immediate exit 255.
@@ -480,6 +497,44 @@ const PLUGIN_DIR_NAME: &str = "plugin_AudioTools";
 /// Best-effort: on failure the caller runs without `--pref-dir`, which costs only the chained
 /// processes rather than the whole backend. Symlinks are not portable everywhere, so a failure
 /// to create one is not treated as fatal.
+/// The app-owned directory holding Praat-side state: the redirected preferences folder and the
+/// Python venv. One definition, used by both the app and the real-binary sweep — the sweep
+/// needs the very same venv, or every `py` process fails there on missing imports while working
+/// perfectly in the app.
+pub fn state_dir() -> PathBuf {
+    let config_home = std::env::var("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|_| {
+        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string())).join(".config")
+    });
+    config_home.join("tui-wave").join("praat")
+}
+
+/// The app-owned Python virtual environment the `py` process group runs in, if it exists.
+///
+/// Those scripts shell out to a sibling `.py` and need `numpy`, `scipy` and `soundfile`. On
+/// Linux they resolve the interpreter as bare `python3` from `PATH`, so putting a venv's `bin`
+/// at the front of `PATH` for the Praat child is enough to supply all three — no script edits,
+/// no `pythonCmd$` patching, and **nothing installed into the system Python**, which on Arch and
+/// Debian is externally managed and rejects `pip install` outright (PEP 668).
+///
+/// `None` when the directory does not exist, and the caller then leaves `PATH` alone: someone
+/// who already has the packages on their system interpreter should not be forced into a venv to
+/// keep working. Verified both directions — with only the venv on `PATH` a py-group process
+/// runs, and with the venv absent and `~/.local` hidden the same process fails.
+pub fn python_venv_bin(state_dir: &Path) -> Option<PathBuf> {
+    // `bin` on Unix, `Scripts` on Windows — the same layout `python -m venv` produces.
+    let bin = state_dir.join("pyenv").join(if cfg!(windows) { "Scripts" } else { "bin" });
+    bin.is_dir().then_some(bin)
+}
+
+/// `PATH` for the Praat child with `venv_bin` at the front, or `None` to inherit unchanged.
+fn path_with_venv(venv_bin: Option<&Path>) -> Option<std::ffi::OsString> {
+    let venv_bin = venv_bin?;
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut entries = vec![venv_bin.to_path_buf()];
+    entries.extend(std::env::split_paths(&existing));
+    std::env::join_paths(entries).ok()
+}
+
 pub fn prepare_prefs_dir(state_dir: &Path, audiotools_dir: &Path) -> Option<PathBuf> {
     let prefs = state_dir.join("praat-prefs");
     std::fs::create_dir_all(&prefs).ok()?;
@@ -578,6 +633,7 @@ mod tests {
             purpose: JobPurpose::Apply,
             timeout,
             prefs_dir: None,
+            python_venv_bin: None,
         }
     }
 
@@ -979,6 +1035,13 @@ mod tests {
                     _ => p.kind.default_value(),
                 })
                 .collect();
+            // An interactive process opens a window and waits for a person, so it has no
+            // timeout (see `ProcessDef::interactive`) and would hang this sweep forever. There
+            // is nothing to check automatically about one anyway.
+            if def.interactive {
+                eprintln!("[{:>3}/{total}] {} — skipped (interactive)", index + 1, def.key);
+                continue;
+            }
             // Printed *before* the run, not after, and that ordering is the point: 32 of these
             // scripts call `Play` unconditionally, so the sweep audibly plays audio and there
             // was no way to tell which process was responsible. stderr is unbuffered, so the
@@ -1003,6 +1066,10 @@ mod tests {
                 purpose: JobPurpose::Apply,
                 timeout: Duration::from_secs(60),
                 prefs_dir: prefs.clone(),
+                // The sweep exercises the `py` group too, so it needs the same venv the app
+                // uses — otherwise every Python-backed process fails on missing imports here
+                // while working perfectly in the app.
+                python_venv_bin: python_venv_bin(&state_dir()),
             };
             ran += 1;
             if let Err(err) = run(&job) {
@@ -1120,6 +1187,10 @@ mod tests {
                 // minutes. 60s is well past the slowest measured drawing run.
                 timeout: Duration::from_secs(60),
                 prefs_dir: prefs.clone(),
+                // The sweep exercises the `py` group too, so it needs the same venv the app
+                // uses — otherwise every Python-backed process fails on missing imports here
+                // while working perfectly in the app.
+                python_venv_bin: python_venv_bin(&state_dir()),
             };
             // Printed before the run, not after: this is the line that tells you which entry
             // the sweep is *currently* on when it stops moving.
@@ -1165,5 +1236,47 @@ mod tests {
         }
         assert!(validate_audiotools_dir(&dir).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod venv_tests {
+    use super::*;
+
+    /// No venv means `PATH` is inherited untouched. Someone who already has numpy/scipy/
+    /// soundfile on their system interpreter must not be forced to create one to keep working.
+    #[test]
+    fn without_a_venv_the_child_inherits_path_unchanged() {
+        assert_eq!(path_with_venv(None), None);
+    }
+
+    /// With one, its `bin` goes to the **front**, so a bare `python3` — which is exactly how
+    /// these scripts resolve their interpreter on Linux — finds the venv's before the system's.
+    #[test]
+    fn a_venv_goes_to_the_front_of_path() {
+        let venv = Path::new("/state/pyenv/bin");
+        let joined = path_with_venv(Some(venv)).expect("a PATH is built");
+        let first = std::env::split_paths(&joined).next().expect("at least one entry");
+        assert_eq!(first, venv, "the venv must win over anything already on PATH");
+        // And nothing is dropped: whatever was there is still reachable behind it.
+        let existing = std::env::var_os("PATH").unwrap_or_default();
+        assert_eq!(
+            std::env::split_paths(&joined).count(),
+            std::env::split_paths(&existing).count() + 1
+        );
+    }
+
+    /// The venv is only reported when it is really there — `python_venv_bin` returning a path
+    /// for a missing directory would put a nonexistent entry on `PATH` and mask the real one.
+    #[test]
+    fn a_missing_venv_is_reported_as_absent() {
+        let empty = std::env::temp_dir().join(format!("tui-wave-venv-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&empty);
+        assert_eq!(python_venv_bin(&empty), None);
+
+        let bin = empty.join("pyenv").join(if cfg!(windows) { "Scripts" } else { "bin" });
+        std::fs::create_dir_all(&bin).expect("create probe venv");
+        assert_eq!(python_venv_bin(&empty), Some(bin));
+        let _ = std::fs::remove_dir_all(&empty);
     }
 }

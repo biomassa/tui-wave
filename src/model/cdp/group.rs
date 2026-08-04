@@ -84,6 +84,7 @@ pub const PRAAT_GROUPS: &[&str] = &[
     "Spectral",
     "Time/Granular",
     "Vector Chain",
+    "py",
 ];
 
 /// praatAudioTools directory → group heading. The directory is the leading path component of a
@@ -96,6 +97,16 @@ pub const PRAAT_GROUPS: &[&str] = &[
 /// `preferencesDirectory$`, which `praat::runner::prepare_prefs_dir` satisfies by pointing
 /// Praat at an app-owned preferences directory holding a `plugin_AudioTools` symlink — so they
 /// run without anything being installed into the user's own Praat preferences folder.
+///
+/// `py` is here too, and keeps its directory name as its heading deliberately. Those scripts
+/// write a temp WAV, shell out to a sibling Python helper, and read the result back — so alone
+/// among the catalog they need something installed that this app does not ship: `numpy`,
+/// `scipy` and `soundfile` on the interpreter Praat finds. A group of their own is what makes
+/// that prerequisite visible in the browser rather than a surprise at run time, and lets anyone
+/// who has not installed them ignore the lot in one place. Only the members whose Python halves
+/// need nothing beyond those three are catalogued at all — the converter derives that per
+/// script, so a helper that grows a `torch` import drops out with a reason rather than shipping
+/// a process that cannot run.
 const PRAAT_DIRS: &[(&str, &str)] = &[
     ("AI & Adaptive", "AI & Adaptive"),
     ("Analysis", "Analysis"),
@@ -110,6 +121,7 @@ const PRAAT_DIRS: &[(&str, &str)] = &[
     ("Spectral", "Spectral"),
     ("Time & Granular", "Time/Granular"),
     ("Vector Chain", "Vector Chain"),
+    ("py", "py"),
 ];
 
 /// Time-domain `bin` → group. Most groups are named after their principal binary; the extra

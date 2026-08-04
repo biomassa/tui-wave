@@ -2643,6 +2643,7 @@ mod tests {
             input_channels: None,
             output_channels: None,
             output_new_buffer: false,
+            interactive: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![number_param("Speed", -96.0, 96.0, 0.0, NumberScale::Plain)],
         }
