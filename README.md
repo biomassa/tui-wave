@@ -85,6 +85,11 @@ hear nothing.
 
 ## Build and run
 
+**On macOS and Linux, `./install.sh` does all of this for you** — it clones nothing (run it from
+the repository) but handles the toolchain, the build dependencies, the submodule and the release
+build, then installs the binary. The rest of this section is the manual equivalent, and what
+Windows needs.
+
 Clone the repository, then build with Cargo. The commands work the same on all three platforms.
 On Windows, use PowerShell or Windows Terminal.
 
@@ -192,6 +197,9 @@ chain (`Ctrl+h`) can mix the two freely.
 
 Praat support is optional in the same way CDP support is: tui-wave works fully without it.
 
+**`./install.sh` sets up both of the things below** — the Praat binary and the script submodule —
+so if you ran it there is nothing here left to do. What follows is the manual route.
+
 You need two things.
 
 **Praat**, from your package manager:
@@ -225,6 +233,9 @@ Nothing is installed into your Praat setup, and your Praat preferences folder is
 to.
 
 ### Optional: the `py` process group
+
+**`./install.sh` offers to set this up for you**, into a virtual environment it owns — the rest of
+this section is the manual route.
 
 34 of those scripts do their work in Python rather than in Praat: they hand the audio to a
 helper script and read the result back. They appear under their own **py** group in the browser,
