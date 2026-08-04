@@ -241,6 +241,26 @@ fn ms_to_samples(ms: f32, sample_rate: u32) -> usize {
     ((ms / 1000.0) * sample_rate as f32).round() as usize
 }
 
+/// Whether a process title states how many channels it produces — `4-Channel Canon`,
+/// `8 Channels Time Polyphony`, `8-channel I Ching`.
+///
+/// A name test rather than a catalog flag, for the same reason `is_picture_toggle_name` is one:
+/// `praat_catalog.toml` is machine-generated and carries a "do not hand-edit" header, so a
+/// column would be reverted by the next converter run. It reads the plugin's own naming
+/// convention, which every member of this family follows and which states a fact about the
+/// output rather than a category someone assigned.
+fn declares_a_channel_count(title: &str) -> bool {
+    let lower = title.to_lowercase();
+    lower.match_indices("channel").any(|(at, _)| {
+        // A digit, then optionally a separator, immediately before "channel".
+        lower[..at]
+            .trim_end_matches(['-', ' '])
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_digit())
+    })
+}
+
 /// Why a Praat `boolean` param's row is greyed and refuses to tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PraatToggleBlock {
@@ -7503,6 +7523,30 @@ impl App {
         self.open_cdp_params_with_values(catalog_index, &last.values, &last.input_buffers);
     }
 
+    /// Records a successfully-applied process as both **recent** and **last**.
+    ///
+    /// One function rather than two calls at each of four sites — the two CDP Apply branches and
+    /// the two Praat ones — because that is exactly how they drifted: the Praat side recorded a
+    /// process as recent but never as last, so `Ctrl+L` skipped every Praat run and recalled
+    /// whatever CDP process preceded them, however long ago (user report, 2026-08-03). The two
+    /// facts are recorded together or not at all.
+    ///
+    /// Preview deliberately calls neither: an audition is not a commitment.
+    fn record_process_applied(
+        key: &str,
+        values: &[crate::model::cdp::ParamValue],
+        input_buffers: &crate::model::cdp::input_buffers::CdpInputBuffers,
+    ) {
+        crate::model::cdp::recent::record_used(key);
+        crate::model::cdp::process_last::save_last_process(
+            &crate::model::cdp::process_last::LastProcess {
+                process_key: key.to_string(),
+                values: values.to_vec(),
+                input_buffers: input_buffers.clone(),
+            },
+        );
+    }
+
     /// Why the open CDP params dialog's process can't run yet, as a sentence to show inline —
     /// `None` when nothing is blocking it.
     ///
@@ -10234,7 +10278,15 @@ impl App {
                     // without this, it kept playing over the editor after the dialog closed
                     // (the only stop was the Esc path).
                     self.stop_cdp_preview_audio();
-                    crate::model::cdp::recent::record_used(&def.key);
+                    // Same pairing as the two Apply branches in each tick handler. This path —
+                    // Apply straight after a Preview whose parameters still match, i.e. the
+                    // ordinary way of working — had the same gap they did: recorded as recent,
+                    // never as last, so `Ctrl+L` skipped it.
+                    let buffers = variadic_input
+                        .as_ref()
+                        .map(|v| self.variadic_input_buffer_refs(v))
+                        .unwrap_or_default();
+                    Self::record_process_applied(&def.key, &values, &buffers);
                     return;
                 }
             }
@@ -10529,6 +10581,18 @@ impl App {
 
                     let recent_key =
                         self.cdp_catalog.processes.get(pending.catalog_index).map(|d| d.key.clone());
+                    // Captured up front, exactly as `tick_cdp` does, because both Apply branches
+                    // below need them after `pending.fields` has been moved from. Without this
+                    // the Praat side recorded a process as *recent* but never as the *last* one,
+                    // so `Ctrl+L` skipped past every Praat run and recalled the last CDP process
+                    // instead — however long ago that was (user report, 2026-08-03).
+                    let last_process_values: Vec<crate::model::cdp::ParamValue> =
+                        pending.fields.iter().map(CdpField::to_value).collect();
+                    let last_process_input_buffers = pending
+                        .variadic_input
+                        .as_ref()
+                        .map(|v| self.variadic_input_buffer_refs(v))
+                        .unwrap_or_default();
                     let timing_tolerance = crate::commands::cdp::timing_tolerance(
                         crate::model::cdp::Category::Praat,
                         crate::model::cdp::PvocSettings::default().points,
@@ -10599,7 +10663,7 @@ impl App {
                                     self.dialog = None;
                                 }
                                 if let Some(key) = &recent_key {
-                                    crate::model::cdp::recent::record_used(key);
+                                    Self::record_process_applied(key, &last_process_values, &last_process_input_buffers);
                                 }
                                 continue;
                             }
@@ -10644,7 +10708,7 @@ impl App {
                                 self.dialog = None;
                             }
                             if let Some(key) = &recent_key {
-                                crate::model::cdp::recent::record_used(key);
+                                Self::record_process_applied(key, &last_process_values, &last_process_input_buffers);
                             }
                         }
                         crate::cdp::JobPurpose::Preview => {
@@ -11182,6 +11246,13 @@ impl App {
     /// channel count both differ from the selection, and which is a new piece rather than an
     /// edit of one (user report, 2026-08-03).
     ///
+    /// And any process whose title declares a **channel count** — `4-Channel Canon`,
+    /// `8-Channel Comb Delay`, `8-channel speed deviations`. Those fan one input out to four or
+    /// eight, so splicing the result would rewrite the document's own width and, on a mono
+    /// take, smear channel 0 across the rest (`Document::insert_range` fills any channel the
+    /// data doesn't cover from channel 0). The whole family is filed under Spatial & Surround
+    /// and there are twelve of them (user report, 2026-08-03, naming the two canons).
+    ///
     /// And any process taking a **folder of sounds** as a parameter, wherever it is filed. Its
     /// material is that folder, not the selection: `Bayesian Drone Weaver` weaves a drone out of
     /// a clip library and never reads the selection at all, `Sound atom composer` assembles from
@@ -11206,6 +11277,7 @@ impl App {
                 .params
                 .iter()
                 .any(|p| matches!(p.kind, crate::model::cdp::ParamKind::FolderPath))
+            || declares_a_channel_count(&def.title)
     }
 
     /// Whether any step of `chain` — at any nesting depth — actually runs a CDP binary.
@@ -12029,12 +12101,7 @@ impl App {
                                 self.rebuild_waveform_caches();
                                 self.dialog = None;
                                 if let Some(key) = &recent_key {
-                                    crate::model::cdp::recent::record_used(key);
-                                    crate::model::cdp::process_last::save_last_process(&crate::model::cdp::process_last::LastProcess {
-                                        process_key: key.clone(),
-                                        values: last_process_values.clone(),
-                                        input_buffers: last_process_input_buffers.clone(),
-                                    });
+                                    Self::record_process_applied(key, &last_process_values, &last_process_input_buffers);
                                 }
                             }
                             crate::cdp::JobPurpose::Apply => {
@@ -12101,12 +12168,7 @@ impl App {
                                     None => None,
                                 };
                                 if let Some(key) = &recent_key {
-                                    crate::model::cdp::recent::record_used(key);
-                                    crate::model::cdp::process_last::save_last_process(&crate::model::cdp::process_last::LastProcess {
-                                        process_key: key.clone(),
-                                        values: last_process_values.clone(),
-                                        input_buffers: last_process_input_buffers.clone(),
-                                    });
+                                    Self::record_process_applied(key, &last_process_values, &last_process_input_buffers);
                                 }
                             }
                             crate::cdp::JobPurpose::Preview => {
@@ -22883,6 +22945,37 @@ mod tests {
         for def in chains {
             assert!(App::praat_opens_new_buffer(def), "{}", def.key);
         }
+
+        // A process that fans one input out to four or eight channels: splicing would rewrite
+        // the document's own width, and on a mono take smear channel 0 across the rest.
+        for key in [
+            "praat_spatial_surround_4_channel_canon",
+            "praat_spatial_surround_8_channel_canon",
+        ] {
+            let def = catalog.find(key).unwrap_or_else(|| panic!("{key} in catalog"));
+            assert!(App::praat_opens_new_buffer(def), "{key}");
+        }
+        // ...and the rest of the family it belongs to, found by the same rule. Filtered to
+        // Praat: the CDP catalog names its channel counts the same way (`Crumble Sound
+        // (8 Channels)`), and those already route to a new buffer through their own
+        // `output_new_buffer` flag, which `praat_opens_new_buffer` correctly leaves alone.
+        let widening: Vec<_> = catalog
+            .processes
+            .iter()
+            .filter(|p| {
+                p.backend() == crate::model::cdp::def::Backend::Praat
+                    && declares_a_channel_count(&p.title)
+            })
+            .collect();
+        assert_eq!(widening.len(), 12, "the N-channel family");
+        for def in widening {
+            assert!(App::praat_opens_new_buffer(def), "{}", def.key);
+        }
+        // The name test must not fire on an ordinary channel-related title.
+        assert!(!declares_a_channel_count("Mix Multi-Channel to Stereo"));
+        assert!(!declares_a_channel_count("Stereo Channel Similarity Meter"));
+        assert!(declares_a_channel_count("8-channel I Ching"));
+        assert!(declares_a_channel_count("8 Channels Time Polyphony (2)"));
 
         // Every folder-taking Praat process, not just the four named above — the rule is
         // derived from the parameter, so a future one is covered without another edit here.
