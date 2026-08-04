@@ -123,6 +123,7 @@ impl MenuBar {
                     entry("Resample...",        Action::Resample,      "Ctrl+e"),
                     entry("Technical Fades", Action::TechnicalFades,"Ctrl+b"),
                     entry("Mix to Mono...",     Action::MixToMono,     "Ctrl+m"),
+                    entry("Mix Multichannel to Stereo...", Action::MixToStereo, ""),
                     entry("Remove Empty Channels...", Action::RemoveEmptyChannels, ""),
                 ],
             },

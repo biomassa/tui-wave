@@ -28,6 +28,7 @@ use crate::commands::remove_channels::{
     remove_channels_command, remove_streamed_channels_command,
 };
 use crate::model::channel_export::{self, ChannelExportMode};
+use crate::model::stereo_mix::{self, StereoMixDest};
 use crate::model::export::{self as audio_export, ExportFormat, ExportSettings};
 use crate::commands::normalize::normalize_command;
 use crate::commands::resample::resample_command;
@@ -119,6 +120,65 @@ mod ec_focus {
     pub const CHANNELS: usize = 0;
     pub const SUBFOLDER: usize = 1;
     pub const COUNT: usize = 2;
+}
+
+/// Focus indices for `Dialog::MixToStereo`. Two stops, exactly as `ec_focus`: the channel list
+/// (whose `selected` row moves inside it, and whose gain field takes typing) and the limiter
+/// checkbox.
+mod ms_focus {
+    pub const CHANNELS: usize = 0;
+    pub const LIMITER: usize = 1;
+    pub const COUNT: usize = 2;
+}
+
+/// Column layout of a Mix to Stereo channel row, derived from its pieces rather than hardcoded
+/// so the header line, the rows and `handle_dialog_row_click` cannot disagree — the same
+/// arrangement, and the same reason, as [`EcColumns`].
+///
+/// A row is: marker (1) + right-aligned channel number (`digits`) + two spaces, then the
+/// destination cell, then two spaces, then the attenuation field.
+struct MsColumns {
+    dest: u16,
+    gain: u16,
+}
+
+/// Width of the destination cell, sized to `"◄ Right ►"` — the arrows are drawn only on the
+/// selected row but the cell reserves their width on every row, so selecting one doesn't shift
+/// the attenuation column sideways.
+const MS_DEST_CELL_WIDTH: u16 = 9;
+
+fn ms_columns(channel_count: usize) -> MsColumns {
+    let digits = channel_export::digit_width(channel_count).max(2) as u16;
+    let dest = 1 + digits + 2;
+    MsColumns { dest, gain: dest + MS_DEST_CELL_WIDTH + 2 }
+}
+
+/// Rows the Mix to Stereo dialog always spends: two borders, the header, the column header,
+/// the leg summary, the limiter checkbox, the hints bar — and the five blank rows separating
+/// those groups.
+const MS_FIXED_ROWS: u16 = 12;
+/// …plus the two possible scroll indicators, for sizing the list against the available height.
+const MS_CHROME_ROWS: u16 = MS_FIXED_ROWS + 2;
+/// Never fewer channel rows than this, however short the terminal.
+const MS_MIN_CHANNEL_ROWS: usize = 6;
+
+/// How many channel rows the Mix to Stereo dialog can draw in `area`. Grows to fill the
+/// terminal so a 30-channel file is mostly visible — the same rationale as [`ec_visible_rows`],
+/// and doubly so here, since routing is a decision made by comparing rows against each other.
+fn ms_visible_rows(area: Rect, channel_count: usize) -> usize {
+    let by_height = (area.height.saturating_sub(MS_CHROME_ROWS) as usize).max(MS_MIN_CHANNEL_ROWS);
+    by_height.min(channel_count.max(1))
+}
+
+/// Topmost visible channel row — [`ec_scroll_top`]'s rule, applied to this dialog's list.
+fn ms_scroll_top(selected: usize, visible: usize, channel_count: usize) -> usize {
+    ec_scroll_top(selected, visible, channel_count)
+}
+
+/// Renders a dB attenuation the way the dialog's fields hold it: one decimal, so every row is
+/// the same width and a typed `-6` and the default `-6.0` are not two different-looking things.
+fn format_attenuation(db: f32) -> String {
+    format!("{db:.1}")
 }
 
 /// The channel-row column layout, derived from the row's own pieces rather than hardcoded, so
@@ -1069,6 +1129,28 @@ enum Dialog {
     /// silence). `focused` is the index of the currently-active field; Tab cycles through.
     /// `tanh_clip` enables a tanh soft-limiter on the mixed output (same as Gain's option).
     MixToMono { inputs: Vec<TextInput>, focused: usize, tanh_clip: bool },
+    /// Mix Multichannel to Stereo: one row per source channel carrying a destination
+    /// (`StereoMixDest`) and a dB attenuation, mixed into a new stereo buffer.
+    ///
+    /// Structurally an Export Channels dialog rather than a Mix to Mono one, despite being the
+    /// closer sibling of the latter in what it does: the list **scrolls**, because 30+ channels
+    /// is the case this exists for and Mix to Mono's grow-a-row-per-channel popup runs off the
+    /// screen well before that. As there, the scroll position is *derived* from `selected` by
+    /// [`ms_scroll_top`] and never stored, so the renderer and the click hit-test cannot
+    /// disagree about which channel a screen row belongs to.
+    ///
+    /// `gains` is index-parallel to `dests`; the selected row's field is the one that receives
+    /// typing, which is what frees ←/→ to cycle the destination instead of moving a caret.
+    MixToStereo {
+        dests: Vec<StereoMixDest>,
+        gains: Vec<TextInput>,
+        selected: usize,
+        focused: usize,
+        limiter: bool,
+        /// `"take01.wav — 30 ch · 96 kHz · 24-bit"`, built once when the dialog opens: none of
+        /// it can change while the dialog is up, and `render_dialog` only gets `&Dialog`.
+        header: String,
+    },
     /// File ▸ Export: writes the active buffer as FLAC or MP3. Separate from Save/Save As,
     /// which own the WAV working file. Both the FLAC depth and the MP3 bitrate are kept
     /// across format switches, so flipping to compare and back doesn't lose the setting.
@@ -4948,6 +5030,56 @@ impl App {
         }
     }
 
+    /// The keys `Dialog::MixToStereo` owns while the channel list has focus: Up/Down move the
+    /// highlighted row, Left/Right cycle its destination, Home/End jump to the ends of the list.
+    /// Returns whether the key was consumed — Enter, Esc, Tab and Space deliberately are not, so
+    /// they keep the generic dialog behaviour (Space toggles the limiter checkbox).
+    ///
+    /// **←/→ cycle the destination rather than moving the caret**, which is the one place this
+    /// diverges from every other dialog holding a `TextInput`. Routing is the decision this
+    /// dialog exists for and the one made most often — thirty times on a thirty-channel file —
+    /// so it gets the arrow keys, and the attenuation field beside it is edited by typing over
+    /// it (Delete clears it to `-inf`). The fields hold a handful of characters, so what is
+    /// given up is caret movement inside `"-6.0"`.
+    fn handle_mix_to_stereo_key(&mut self, key: KeyEvent) -> bool {
+        let Some(Dialog::MixToStereo { dests, selected, focused, .. }) = self.dialog.as_mut()
+        else {
+            return false;
+        };
+        let on_list = *focused == ms_focus::CHANNELS;
+        match key.code {
+            // Up/Down also *return* focus to the list, so a user who tabbed to the limiter can
+            // get back to routing without tabbing around the cycle. Matches `ec_focus`.
+            KeyCode::Up => {
+                *focused = ms_focus::CHANNELS;
+                *selected = selected.saturating_sub(1);
+                true
+            }
+            KeyCode::Down => {
+                *focused = ms_focus::CHANNELS;
+                *selected = (*selected + 1).min(dests.len().saturating_sub(1));
+                true
+            }
+            KeyCode::Home if on_list => {
+                *selected = 0;
+                true
+            }
+            KeyCode::End if on_list => {
+                *selected = dests.len().saturating_sub(1);
+                true
+            }
+            KeyCode::Left if on_list => {
+                stereo_mix::cycle_dest(dests, *selected, false);
+                true
+            }
+            KeyCode::Right if on_list => {
+                stereo_mix::cycle_dest(dests, *selected, true);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// `&mut TextInput` for the active dialog, if it's a text-bearing one.
     fn dialog_input(&mut self) -> Option<&mut TextInput> {
         match self.dialog.as_mut()? {
@@ -4983,6 +5115,17 @@ impl App {
             Dialog::MixToMono { inputs, focused, .. } => {
                 let f = *focused;
                 inputs.get_mut(f)
+            }
+            // Typing goes to the *selected* row's field, and only while the list has focus —
+            // with the limiter checkbox focused there is no field to type into, so characters
+            // fall through rather than silently editing a row the highlight has left.
+            Dialog::MixToStereo { gains, selected, focused, .. } => {
+                if *focused == ms_focus::CHANNELS {
+                    let row = *selected;
+                    gains.get_mut(row)
+                } else {
+                    None
+                }
             }
             Dialog::ExportRegions {
                 folder_input, base_name_input, limit_length_input, normalize_input,
@@ -5037,7 +5180,9 @@ impl App {
             | Some(Dialog::Gain { .. })
             | Some(Dialog::RemoveEmptyChannels { .. }) => c.is_ascii_digit() || c == '-' || c == '.',
             Some(Dialog::Resample { .. }) => c.is_ascii_digit(),
-            Some(Dialog::MixToMono { .. }) => {
+            // Same character set as Mix to Mono: a signed decimal, plus the letters that spell
+            // the "-inf" this dialog also accepts for silence.
+            Some(Dialog::MixToStereo { .. }) | Some(Dialog::MixToMono { .. }) => {
                 c.is_ascii_digit() || matches!(c, '-' | '.' | 'i' | 'n' | 'f')
             }
             Some(Dialog::ExportRegions { focused, .. }) => {
@@ -5232,6 +5377,14 @@ impl App {
                 return;
             }
         }
+        // Mix to Stereo intercepts the same set for the same reason — see
+        // `handle_mix_to_stereo_key` for why ←/→ belong to the destination cell here rather
+        // than to the caret of the attenuation field beside it.
+        if let Some(Dialog::MixToStereo { .. }) = &self.dialog {
+            if self.handle_mix_to_stereo_key(key) {
+                return;
+            }
+        }
 
         match key.code {
             KeyCode::Enter => match self.dialog.take() {
@@ -5322,6 +5475,23 @@ impl App {
                     let inputs_snapshot = inputs.clone();
                     let clip = tanh_clip;
                     self.apply_mix_to_mono(&inputs_snapshot, clip);
+                }
+                Some(Dialog::MixToStereo { dests, gains, selected, focused, limiter, header }) => {
+                    let gains_db: Vec<Option<f32>> = gains
+                        .iter()
+                        .map(|g| stereo_mix::parse_gain_db(g.value()))
+                        .collect();
+                    if stereo_mix::is_silent(&dests, &gains_db) {
+                        // Matches the dimmed Enter hint: re-created unchanged, so the routing
+                        // that produced nothing is still on screen to be corrected. Applying
+                        // would hand back a new buffer of digital silence, which reads as the
+                        // process having failed rather than as the routing being empty.
+                        self.dialog = Some(Dialog::MixToStereo {
+                            dests, gains, selected, focused, limiter, header,
+                        });
+                        return;
+                    }
+                    self.apply_mix_to_stereo(&dests, &gains_db, limiter);
                 }
                 Some(Dialog::ExportRegions {
                     folder_input, base_name_input, depth, dither,
@@ -5662,6 +5832,16 @@ impl App {
                     if f < inputs.len() {
                         inputs[f] = TextInput::new("-inf");
                     }
+                // Same shortcut in Mix to Stereo, on the selected row. Note this silences the
+                // channel without changing its destination — Skip is the other way to say it,
+                // and keeping both means a channel can be muted and put back at its old routing.
+                } else if let Some(Dialog::MixToStereo { gains, selected, focused, .. }) =
+                    self.dialog.as_mut()
+                {
+                    let row = *selected;
+                    if *focused == ms_focus::CHANNELS && row < gains.len() {
+                        gains[row] = TextInput::new(stereo_mix::SILENCE_TOKEN);
+                    }
                 } else if let Some(input) = self.dialog_input() {
                     input.delete();
                 }
@@ -5698,6 +5878,17 @@ impl App {
                     Some(Dialog::MixToMono { inputs, focused, tanh_clip }) => {
                         if *focused == inputs.len() {
                             *tanh_clip = !*tanh_clip;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    // Only with the checkbox focused. On the list, Space falls through to being
+                    // typed — which `dialog_accepts` then rejects, so it is inert rather than
+                    // inserting a stray space into an attenuation field.
+                    Some(Dialog::MixToStereo { focused, limiter, .. }) => {
+                        if *focused == ms_focus::LIMITER {
+                            *limiter = !*limiter;
                             true
                         } else {
                             false
@@ -5986,6 +6177,7 @@ impl App {
             }
             Some(Dialog::ExportRegions { focused, .. }) => *focused = step(*focused, er_focus::COUNT),
             Some(Dialog::ExportChannels { focused, .. }) => *focused = step(*focused, ec_focus::COUNT),
+            Some(Dialog::MixToStereo { focused, .. }) => *focused = step(*focused, ms_focus::COUNT),
             Some(Dialog::Export { focused, .. }) => *focused = step(*focused, ex_focus::COUNT),
             // Only two columns receive keyboard focus (Groups, Processes — the description
             // column is display-only), so Tab and Shift+Tab both just flip it.
@@ -6176,6 +6368,39 @@ impl App {
                 } else if row == n {
                     *focused = n;
                     *tanh_clip = !*tanh_clip;
+                }
+            }
+            // The channel rows come first, then the limiter checkbox. `ms_scroll_top` is
+            // recomputed from the same `selected` the renderer used, so a click cannot land on
+            // a different channel than the one drawn there.
+            Some(Dialog::MixToStereo { dests, gains, selected, focused, limiter, .. }) => {
+                let visible = ms_visible_rows(self.last_frame_area, dests.len());
+                let top = ms_scroll_top(*selected, visible, dests.len());
+                let channel_rows = visible.min(dests.len());
+                if row < channel_rows {
+                    let clicked = top + row;
+                    if clicked < dests.len() {
+                        *focused = ms_focus::CHANNELS;
+                        *selected = clicked;
+                        let cols = ms_columns(dests.len());
+                        // Three zones across a row, so a mouse user can reach either control:
+                        // on the destination cell the click cycles it (how a choice is
+                        // committed everywhere in this dialog family), on the attenuation
+                        // field it places the caret, and left of both it only moves the
+                        // highlight.
+                        if x_in_row >= cols.gain {
+                            if let Some(field) = gains.get_mut(clicked) {
+                                field.set_cursor_from_column(
+                                    x_in_row.saturating_sub(cols.gain) as usize
+                                );
+                            }
+                        } else if x_in_row >= cols.dest {
+                            stereo_mix::cycle_dest(dests, clicked, true);
+                        }
+                    }
+                } else {
+                    *focused = ms_focus::LIMITER;
+                    *limiter = !*limiter;
                 }
             }
             // The channel rows come first, then Subfolder. `ec_scroll_top` is recomputed from
@@ -12981,6 +13206,76 @@ impl App {
         self.rebuild_waveform_caches();
     }
 
+    /// Mixes the source channels down to a new stereo buffer under the dialog's per-channel
+    /// routing and dB attenuation, optionally through a tanh limiter at
+    /// [`stereo_mix::LIMIT_CEILING_DB`].
+    ///
+    /// A **new buffer**, not an edit of this one, for the same reason Mix to Mono and Copy to
+    /// New are: the operation changes the channel count, and `insert_range` fills any channel
+    /// the incoming data doesn't cover from channel 0 — so a narrowing splice would smear
+    /// channel 0 across the rest. It also means the multichannel source stays open beside the
+    /// mix, which is the thing you want when auditioning a routing.
+    ///
+    /// Honours an active selection, like Mix to Mono: mixing a section is the common way to
+    /// check a routing before committing to the whole take. Markers inside the range come
+    /// across rebased; head/tail marks do not, matching every other new-buffer path.
+    fn apply_mix_to_stereo(
+        &mut self,
+        dests: &[StereoMixDest],
+        gains_db: &[Option<f32>],
+        limiter: bool,
+    ) {
+        let Some(src) = self.active_doc() else { return };
+        if src.channels.is_empty() {
+            return;
+        }
+        let (range_start, range_len) = match src.selection.map(|s| s.normalized()) {
+            Some((s, e)) if s < e => (s, e - s),
+            _ => (0, src.channels[0].len()),
+        };
+        let sample_rate = src.sample_rate;
+        let bits_per_sample = src.bits_per_sample;
+        let range_end = range_start + range_len;
+        let new_markers: Vec<Marker> = src
+            .markers
+            .iter()
+            .filter(|m| m.position >= range_start && m.position < range_end)
+            .map(|m| Marker { position: m.position - range_start, label: m.label.clone() })
+            .collect();
+
+        let ceiling = limiter.then(|| dsp::db_to_linear(stereo_mix::LIMIT_CEILING_DB));
+        let channels = stereo_mix::mix_to_stereo(
+            &src.channels,
+            range_start,
+            range_len,
+            dests,
+            gains_db,
+            ceiling,
+        );
+
+        let new_doc = Document {
+            head_tail_marks: Vec::new(),
+            channels,
+            sample_rate,
+            bits_per_sample,
+            selection: None,
+            cursor: 0,
+            dirty: true,
+            path: None,
+            markers: new_markers,
+            bext: None,
+            stream: None,
+        };
+        self.dialog = None;
+        self.push_document(new_doc);
+        self.histories.last_mut().unwrap().created_by_copy_to_new = true;
+        // Dropped so the new buffer gets a viewport fitted to its own length rather than
+        // inheriting a scroll/zoom computed for the source — same as Mix to Mono.
+        self.viewport = None;
+        self.rebuild_audio();
+        self.rebuild_waveform_caches();
+    }
+
     /// Chops the active document at its markers and saves each region as a numbered WAV file
     /// into `subfolder` (created inside the document's directory, or the file panel's current
     /// directory for unsaved buffers). Files are named `{base_name}-001.wav`, `-002.wav`, …
@@ -15044,6 +15339,52 @@ impl App {
             return;
         }
 
+        if action == Action::MixToStereo {
+            if let Some(doc) = self.active_doc() {
+                let n = doc.channels.len();
+                // Refused below 3 channels, and not because the mix would fail — it would work
+                // fine — but because on a mono or stereo document every routing this dialog can
+                // express is either the identity or something Gain and Mix to Mono already do
+                // more directly. Export Channels draws its "nothing to split" line in the same
+                // place for the same reason.
+                if n < dsp::DOWNMIX_MIN_CHANNELS {
+                    self.dialog = Some(Dialog::Info {
+                        message: format!(
+                            "Mix to Stereo needs {} or more channels — this buffer has {n}.",
+                            dsp::DOWNMIX_MIN_CHANNELS
+                        ),
+                    });
+                    return;
+                }
+                let name = doc
+                    .path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "untitled.wav".to_string());
+                let header = format!(
+                    "{name} — {n} ch · {} · {}",
+                    format_sample_rate(doc.sample_rate),
+                    BitDepth::from_bits(doc.bits_per_sample).label(),
+                );
+                self.dialog = Some(Dialog::MixToStereo {
+                    dests: stereo_mix::default_dests(n),
+                    gains: (0..n)
+                        .map(|_| TextInput::new(format_attenuation(stereo_mix::DEFAULT_ATTENUATION_DB)))
+                        .collect(),
+                    selected: 0,
+                    focused: ms_focus::CHANNELS,
+                    // On by default: this is the one operation in the app that routinely sums
+                    // dozens of channels into two, so the sum overruns full scale on anything
+                    // but a sparse take. tanh is unity-gain for small signals, so leaving it on
+                    // costs a quiet mix nothing at all.
+                    limiter: true,
+                    header,
+                });
+            }
+            return;
+        }
+
         if action == Action::RemoveEmptyChannels {
             // Refused on mono for the same reason the guards in `apply_remove_empty_channels`
             // exist: there is no channel it could remove and still leave a document behind.
@@ -15325,6 +15666,7 @@ impl App {
             | Action::Gain
             | Action::CopyToNew
             | Action::MixToMono
+            | Action::MixToStereo
             | Action::NewFromLeft
             | Action::NewFromRight
             | Action::FadeIn
@@ -17367,6 +17709,11 @@ fn render_dialog(
                 frame, area, modes, *selected, folder_input, *focused, header, stem,
             );
         }
+        Dialog::MixToStereo { dests, gains, selected, focused, limiter, header } => {
+            return render_mix_to_stereo_dialog(
+                frame, area, dests, gains, *selected, *focused, *limiter, header,
+            );
+        }
         Dialog::Info { message } => {
             return render_info_dialog(frame, area, message);
         }
@@ -17477,6 +17824,7 @@ fn render_dialog(
         | Dialog::PraatPicture { .. }
         | Dialog::CdpChainEditor
         | Dialog::ExportChannels { .. }
+        | Dialog::MixToStereo { .. }
         | Dialog::Export { .. }
         | Dialog::LoadCurve { .. } => {
             unreachable!("handled by match arms above")
@@ -17968,6 +18316,209 @@ fn render_export_channels_dialog(
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 
     row_rects.push(folder_row);
+    row_rects.push(hints_row);
+    row_rects
+}
+
+/// The Mix to Stereo column header, built from [`ms_columns`] so it cannot drift from the rows
+/// beneath it.
+fn ms_header_line(channel_count: usize) -> String {
+    let cols = ms_columns(channel_count);
+    let mut line = String::from(" Ch");
+    while line.chars().count() < cols.dest as usize {
+        line.push(' ');
+    }
+    line.push_str("Send");
+    while line.chars().count() < cols.gain as usize {
+        line.push(' ');
+    }
+    line.push_str("Atten (dB)");
+    line
+}
+
+/// Mix Multichannel to Stereo. Like Export Channels — and unlike every fixed-height popup in
+/// the app — the channel list grows to fill the terminal and scrolls, with `▲ N more` /
+/// `▼ N more` markers, because 30+ channels is the case this dialog exists for.
+///
+/// Returns one rect per *visible* channel row, then the limiter row, then the hints bar
+/// (always last, and always the submit target — `dialog_n_interactive` is `len - 1`).
+#[allow(clippy::too_many_arguments)]
+fn render_mix_to_stereo_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    dests: &[StereoMixDest],
+    gains: &[TextInput],
+    selected: usize,
+    focused: usize,
+    limiter: bool,
+    header: &str,
+) -> Vec<Rect> {
+    let n = dests.len();
+    // Wide enough for the header line's rate/depth tail without wrapping; the row content
+    // itself is far narrower than this.
+    let width = 62u16.min(area.width);
+    let visible = ms_visible_rows(area, n);
+    let scroll_top = ms_scroll_top(selected, visible, n);
+    let end = (scroll_top + visible).min(n);
+    let hidden_above = scroll_top;
+    let hidden_below = n - end;
+    let indicator_rows = u16::from(hidden_above > 0) + u16::from(hidden_below > 0);
+    let height = (visible as u16 + indicator_rows + MS_FIXED_ROWS).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+
+    let w = channel_export::digit_width(n).max(2);
+    let mut lines: Vec<Line> = vec![
+        Line::from(""),
+        Line::from(Span::styled(format!("  {header}"), label_style)),
+        Line::from(""),
+        Line::from(Span::styled(
+            ms_header_line(n),
+            Style::default().fg(theme::COLUMN_HEADER).bg(theme::SURFACE0),
+        )),
+    ];
+
+    if hidden_above > 0 {
+        lines.push(Line::from(Span::styled(format!("  ▲ {hidden_above} more"), dim_style)));
+    }
+    let mut row_rects: Vec<Rect> = Vec::with_capacity(visible + 2);
+    // `lines` already carries the header, column header and any `▲` row, so this is the screen
+    // row the first channel lands on.
+    let list_top = popup.y + 1 + lines.len() as u16;
+
+    for (row, ch) in (scroll_top..end).enumerate() {
+        let is_sel = ch == selected && focused == ms_focus::CHANNELS;
+        let marker = if is_sel { "▸" } else { " " };
+        let num = format!("{marker}{:>w$}  ", ch + 1, w = w);
+
+        let label = dests[ch].label();
+        // The arrows appear only on the selected row, but the cell is padded to the same width
+        // on every row so selecting one doesn't shift the attenuation column sideways.
+        let dest_cell = if is_sel {
+            format!("◄ {label:<5} ►")
+        } else {
+            format!("  {label:<5}  ")
+        };
+
+        // A skipped or silenced channel is dimmed across the whole row — on a 56-row list the
+        // routing has to be readable at a glance, not by reading each field.
+        let contributes =
+            stereo_mix::leg_gains(dests[ch], stereo_mix::parse_gain_db(gains[ch].value()))
+                != (0.0, 0.0);
+        let gain_style = if contributes { base } else { dim_style };
+
+        let mut spans = vec![
+            Span::styled(num, if is_sel { label_style } else { dim_style }),
+            Span::styled(dest_cell, if is_sel { cursor_style } else { gain_style }),
+            Span::styled("  ", base),
+        ];
+        // Only the selected row shows a caret; the rest render as plain text.
+        if is_sel {
+            let (before, under, after) = gains[ch].split_at_cursor();
+            spans.push(Span::styled(before, base));
+            spans.push(Span::styled(under, cursor_style));
+            spans.push(Span::styled(after, base));
+        } else {
+            spans.push(Span::styled(gains[ch].value().to_string(), gain_style));
+        }
+        lines.push(Line::from(spans));
+        row_rects.push(Rect {
+            x: popup.x + 1,
+            y: list_top + row as u16,
+            width: popup.width.saturating_sub(2),
+            height: 1,
+        });
+    }
+    if hidden_below > 0 {
+        lines.push(Line::from(Span::styled(format!("  ▼ {hidden_below} more"), dim_style)));
+    }
+
+    // The leg tallies are the one thing that can't be read off a scrolled list: with 50 of 56
+    // rows off-screen, "how many channels am I actually sending left?" has no other answer.
+    let gains_db: Vec<Option<f32>> =
+        gains.iter().map(|g| stereo_mix::parse_gain_db(g.value())).collect();
+    let mut left = 0usize;
+    let mut right = 0usize;
+    let mut dropped = 0usize;
+    for i in 0..n {
+        let (lg, rg) = stereo_mix::leg_gains(dests[i], gains_db.get(i).copied().flatten());
+        if lg != 0.0 {
+            left += 1;
+        }
+        if rg != 0.0 {
+            right += 1;
+        }
+        if lg == 0.0 && rg == 0.0 {
+            dropped += 1;
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("  L: {left} ch · R: {right} ch · {dropped} dropped"),
+        label_style,
+    )));
+
+    lines.push(Line::from(""));
+    let limiter_focused = focused == ms_focus::LIMITER;
+    let limiter_label = format!(
+        "  [{}] Tanh limiter ({:.0} dBFS)",
+        if limiter { "X" } else { " " },
+        stereo_mix::LIMIT_CEILING_DB,
+    );
+    lines.push(Line::from(Span::styled(
+        limiter_label,
+        if limiter_focused { cursor_style } else { label_style },
+    )));
+    let limiter_row = Rect {
+        x: popup.x + 1,
+        y: popup.y + lines.len() as u16,
+        width: popup.width.saturating_sub(2),
+        height: 1,
+    };
+
+    lines.push(Line::from(""));
+    // Dimmed on a routing that sends nothing anywhere, matching the Enter guard in the submit
+    // handler — the hint and the behaviour are two views of `stereo_mix::is_silent`.
+    let can_mix = !stereo_mix::is_silent(dests, &gains_db);
+    let go_style = if can_mix { hint_style } else { dim_style };
+    lines.push(Line::from(vec![
+        Span::styled("  ↑↓", hint_style),
+        Span::styled(":row  ", label_style),
+        Span::styled("←→", hint_style),
+        Span::styled(":send  ", label_style),
+        Span::styled("Del", hint_style),
+        Span::styled(":-inf  ", label_style),
+        Span::styled("Tab", hint_style),
+        Span::styled(":next  ", label_style),
+        Span::styled("Enter", go_style),
+        Span::styled(":Mix", label_style),
+    ]));
+    let hints_row = Rect {
+        x: popup.x + 1,
+        y: popup.y + lines.len() as u16,
+        width: popup.width.saturating_sub(2),
+        height: 1,
+    };
+
+    let block = Block::default()
+        .title("Mix Multichannel to Stereo")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(Style::default().bg(theme::SURFACE0));
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+
+    row_rects.push(limiter_row);
     row_rects.push(hints_row);
     row_rects
 }
@@ -33813,7 +34364,11 @@ mod tests {
         for (label, action) in entries {
             let mut app = new_app(
                 Some(Document {
-                    channels: vec![vec![0.3f32; 44_100]; 2],
+                    // Four channels, not two: Mix Multichannel to Stereo declines below
+                    // `dsp::DOWNMIX_MIN_CHANNELS` (showing `Info` rather than its dialog), so a
+                    // stereo probe would read that correct refusal as "has an ellipsis but
+                    // never prompts". Every other entry behaves the same at either width.
+                    channels: vec![vec![0.3f32; 44_100]; 4],
                     sample_rate: 44_100,
                     path: Some(PathBuf::from("/tmp/probe.wav")),
                     markers: vec![
@@ -34174,6 +34729,232 @@ mod tests {
             let top = ec_scroll_top(sel, visible, 30);
             assert!(sel >= top && sel < top + visible, "row {sel} fell outside its window");
         }
+    }
+
+    /// Opening the dialog must prefill exactly what was asked for: odd channels left, even
+    /// channels right, every attenuation at -6 dB.
+    #[test]
+    fn mix_to_stereo_opens_prefilled_with_alternating_legs_and_minus_six_db() {
+        let mut app = new_app(Some(doc_with_channels(vec![vec![0.1f32; 64]; 8])), None);
+        app.handle_action(Action::MixToStereo);
+
+        let Some(Dialog::MixToStereo { dests, gains, limiter, selected, focused, .. }) = &app.dialog
+        else {
+            panic!("expected the Mix to Stereo dialog, got {:?}", app.dialog.is_some());
+        };
+        assert_eq!(dests.len(), 8);
+        assert_eq!(gains.len(), 8);
+        for (i, dest) in dests.iter().enumerate() {
+            // Channel numbers are 1-based: channel 1 is index 0 and goes left.
+            let expected = if i % 2 == 0 { StereoMixDest::Left } else { StereoMixDest::Right };
+            assert_eq!(*dest, expected, "channel {}", i + 1);
+            assert_eq!(gains[i].value(), "-6.0", "channel {}", i + 1);
+        }
+        assert!(*limiter, "the limiter starts on");
+        assert_eq!(*selected, 0);
+        assert_eq!(*focused, ms_focus::CHANNELS);
+    }
+
+    /// Below three channels there is nothing this dialog can express that Gain and Mix to Mono
+    /// don't already do, so it declines with a message rather than opening.
+    #[test]
+    fn mix_to_stereo_declines_on_mono_and_stereo_buffers() {
+        for channels in 1..=2 {
+            let mut app = new_app(Some(doc_with_channels(vec![vec![0.1f32; 64]; channels])), None);
+            app.handle_action(Action::MixToStereo);
+            match &app.dialog {
+                Some(Dialog::Info { message }) => {
+                    assert!(
+                        message.contains("or more channels"),
+                        "{channels} ch: unhelpful message {message:?}"
+                    );
+                }
+                other => panic!("{channels} ch: expected Info, got {}", other.is_some()),
+            }
+        }
+    }
+
+    /// ←/→ cycle the destination of the selected row — the one place this dialog diverges from
+    /// every other one holding a `TextInput`, so it is worth pinning — and typing edits the
+    /// attenuation of that same row rather than of whichever row was focused last.
+    #[test]
+    fn mix_to_stereo_arrows_cycle_the_destination_and_typing_edits_the_selected_row() {
+        let mut app = new_app(Some(doc_with_channels(vec![vec![0.1f32; 64]; 4])), None);
+        app.handle_action(Action::MixToStereo);
+
+        // Row 0 starts on Left; one press right lands on Right.
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        // Move to row 1 and cycle it twice: Right -> Both -> Skip.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        // Type a new attenuation for row 1.
+        for c in "-12".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+
+        let Some(Dialog::MixToStereo { dests, gains, selected, .. }) = &app.dialog else {
+            panic!("dialog closed unexpectedly");
+        };
+        assert_eq!(*selected, 1);
+        assert_eq!(dests[0], StereoMixDest::Right);
+        assert_eq!(dests[1], StereoMixDest::Skip);
+        // Row 1's field was prefilled "-6.0" with the caret at the end, so typing appends.
+        assert_eq!(gains[1].value(), "-6.0-12");
+        // Untouched rows keep their defaults — typing went to the selected row only.
+        assert_eq!(gains[0].value(), "-6.0");
+        assert_eq!(dests[2], StereoMixDest::Left);
+    }
+
+    /// Delete silences the selected channel without disturbing its destination, so a channel can
+    /// be muted and later restored to the leg it was already assigned.
+    #[test]
+    fn mix_to_stereo_delete_silences_the_row_but_leaves_its_destination() {
+        let mut app = new_app(Some(doc_with_channels(vec![vec![0.1f32; 64]; 4])), None);
+        app.handle_action(Action::MixToStereo);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+
+        let Some(Dialog::MixToStereo { dests, gains, .. }) = &app.dialog else {
+            panic!("dialog closed unexpectedly");
+        };
+        assert_eq!(gains[1].value(), "-inf");
+        assert_eq!(dests[1], StereoMixDest::Right, "the routing is untouched");
+        assert_eq!(stereo_mix::parse_gain_db(gains[1].value()), None);
+    }
+
+    /// Applying produces a *new* stereo buffer, leaves the multichannel source open and intact,
+    /// and routes each channel to the leg the dialog said it would.
+    #[test]
+    fn mix_to_stereo_creates_a_new_stereo_buffer_and_leaves_the_source_alone() {
+        // Four channels: 1 and 3 (indices 0, 2) left, 2 and 4 (indices 1, 3) right by default.
+        let channels = vec![
+            vec![0.5f32; 64],
+            vec![0.25f32; 64],
+            vec![0.5f32; 64],
+            vec![0.25f32; 64],
+        ];
+        let mut app = new_app(Some(doc_with_channels(channels.clone())), None);
+        app.handle_action(Action::MixToStereo);
+        // Apply at unity so the arithmetic is legible, limiter off.
+        let dests = stereo_mix::default_dests(4);
+        let gains = vec![Some(0.0f32); 4];
+        app.apply_mix_to_stereo(&dests, &gains, false);
+
+        assert_eq!(app.documents.len(), 2, "the source buffer is still open");
+        assert_eq!(app.documents[0].channels, channels, "the source is untouched");
+
+        let mixed = &app.documents[app.active_document];
+        assert_eq!(mixed.channels.len(), 2);
+        assert_eq!(mixed.channels[0].len(), 64);
+        // Left leg = channels 1 + 3 = 0.5 + 0.5; right = channels 2 + 4 = 0.25 + 0.25.
+        assert!((mixed.channels[0][0] - 1.0).abs() < 1e-6, "left was {}", mixed.channels[0][0]);
+        assert!((mixed.channels[1][0] - 0.5).abs() < 1e-6, "right was {}", mixed.channels[1][0]);
+        assert!(mixed.dirty);
+        assert!(mixed.path.is_none(), "a mix is unsaved until the user says where");
+        // Each channel got its own cache, which is the proof the new buffer was really wired up.
+        assert_eq!(app.waveform_caches[app.active_document].len(), 2);
+    }
+
+    /// With a selection active the mix covers only that range, matching Mix to Mono — and the
+    /// markers inside it come across rebased to the new buffer's own timeline.
+    #[test]
+    fn mix_to_stereo_honours_a_selection_and_rebases_the_markers_inside_it() {
+        let mut doc = doc_with_channels(vec![vec![0.5f32; 1000]; 4]);
+        doc.selection = Some(crate::model::selection::Selection { start: 200, end: 500 });
+        doc.markers = vec![
+            Marker { position: 100, label: "before".into() },
+            Marker { position: 300, label: "inside".into() },
+            Marker { position: 900, label: "after".into() },
+        ];
+        let mut app = new_app(Some(doc), None);
+
+        let dests = stereo_mix::default_dests(4);
+        let gains = vec![Some(0.0f32); 4];
+        app.apply_mix_to_stereo(&dests, &gains, false);
+
+        let mixed = &app.documents[app.active_document];
+        assert_eq!(mixed.channels[0].len(), 300, "only the selected range");
+        assert_eq!(mixed.markers.len(), 1, "only the marker inside the range");
+        assert_eq!(mixed.markers[0].label, "inside");
+        assert_eq!(mixed.markers[0].position, 100, "rebased to the range start");
+    }
+
+    /// The limiter is what keeps a dense mix from leaving the buffer clipped, so its presence
+    /// has to be visible in the samples rather than only in the checkbox.
+    #[test]
+    fn mix_to_stereo_limiter_bounds_the_output_and_off_leaves_it_raw() {
+        // Eight channels at full scale, all to the left leg: a raw sum of 8.0.
+        let channels = vec![vec![1.0f32; 16]; 8];
+        let dests = vec![StereoMixDest::Left; 8];
+        let gains = vec![Some(0.0f32); 8];
+
+        let mut limited = new_app(Some(doc_with_channels(channels.clone())), None);
+        limited.apply_mix_to_stereo(&dests, &gains, true);
+        let peak = limited.documents[limited.active_document].channels[0][0];
+        let ceiling = dsp::db_to_linear(stereo_mix::LIMIT_CEILING_DB);
+        assert!(peak <= ceiling, "limited peak {peak} exceeded the ceiling {ceiling}");
+
+        let mut raw = new_app(Some(doc_with_channels(channels)), None);
+        raw.apply_mix_to_stereo(&dests, &gains, false);
+        let raw_peak = raw.documents[raw.active_document].channels[0][0];
+        assert!((raw_peak - 8.0).abs() < 1e-5, "unlimited peak was {raw_peak}, expected 8.0");
+    }
+
+    /// A routing that sends nothing anywhere must not hand back a buffer of digital silence —
+    /// Enter re-opens the dialog instead, matching the dimmed hint.
+    #[test]
+    fn mix_to_stereo_refuses_to_apply_a_routing_that_sends_nothing() {
+        let mut app = new_app(Some(doc_with_channels(vec![vec![0.5f32; 64]; 4])), None);
+        app.handle_action(Action::MixToStereo);
+        if let Some(Dialog::MixToStereo { dests, .. }) = app.dialog.as_mut() {
+            dests.iter_mut().for_each(|d| *d = StereoMixDest::Skip);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.documents.len(), 1, "no buffer was created");
+        assert!(
+            matches!(app.dialog, Some(Dialog::MixToStereo { .. })),
+            "the dialog stays up so the routing can be corrected"
+        );
+    }
+
+    /// The list scrolls, and the click handler must resolve a screen row to the same channel the
+    /// renderer drew there — they share `ms_scroll_top`, so this pins that agreement.
+    #[test]
+    fn the_mix_to_stereo_scroll_window_keeps_the_selection_visible() {
+        let area = Rect::new(0, 0, 80, 24);
+        let visible = ms_visible_rows(area, 56);
+        assert!(visible >= MS_MIN_CHANNEL_ROWS);
+
+        assert_eq!(ms_scroll_top(0, visible, 56), 0);
+        let top = ms_scroll_top(55, visible, 56);
+        assert_eq!(top, 56 - visible, "the last page is full rather than trailing blanks");
+        for sel in 0..56 {
+            let top = ms_scroll_top(sel, visible, 56);
+            assert!(sel >= top && sel < top + visible, "row {sel} fell outside its window");
+        }
+    }
+
+    /// The destination cell and the attenuation field must not overlap, and the number column
+    /// has to widen for a 100-channel file without the columns crossing.
+    #[test]
+    fn mix_to_stereo_columns_stay_ordered_as_the_channel_count_grows() {
+        for n in [4usize, 30, 100] {
+            let cols = ms_columns(n);
+            assert!(cols.dest < cols.gain, "{n} ch: destination and gain columns overlap");
+            assert!(
+                cols.gain - cols.dest >= MS_DEST_CELL_WIDTH,
+                "{n} ch: the destination cell has no room"
+            );
+            // The header line agrees with the columns the rows use.
+            let header = ms_header_line(n);
+            assert_eq!(
+                header.chars().skip(cols.dest as usize).take(4).collect::<String>(),
+                "Send",
+            );
+        }
+        assert!(ms_columns(100).dest > ms_columns(30).dest, "the number column widens");
     }
 
     /// A 30-channel document with real audio on four channels collapses to those four, and
