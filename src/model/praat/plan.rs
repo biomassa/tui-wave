@@ -435,6 +435,7 @@ mod tests {
             input_channels: None,
             output_channels: None,
             output_new_buffer: false,
+            interactive: false,
             requires_simple_wav_input: false,
             sidecar_extension: None,
             min_inputs: None,
@@ -837,6 +838,36 @@ mod pause_hoist_tests {
                 "{}: must call the rewritten copy with no arguments",
                 def.key
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod interactive_tests {
+    use super::*;
+    use crate::model::cdp::CdpCatalog;
+
+    /// A process that opens its own window is marked, and it is the Python-GUI kind rather than
+    /// the Praat-`beginPause` kind — those two look alike and behave nothing alike. The marker
+    /// is what stops the runner killing a run mid-edit, which is how "broken pipe" on Apply
+    /// happened.
+    #[test]
+    fn a_python_gui_process_is_marked_interactive() {
+        let (catalog, _) = CdpCatalog::load(None);
+        let interactive: Vec<_> = catalog.processes.iter().filter(|p| p.interactive).collect();
+        assert!(!interactive.is_empty(), "the py group ships at least one Tk editor");
+        for def in &interactive {
+            assert!(
+                def.bin.starts_with("py/"),
+                "{}: only the Python-helper group can open a window that works — Praat's own \
+                 beginPause segfaults under --run and must stay excluded, not marked",
+                def.key
+            );
+            // It still has to be a plannable process, not a special case that skips the pipeline.
+            let values: Vec<ParamValue> =
+                def.params.iter().map(|p| p.kind.default_value()).collect();
+            plan_praat_job(def, &values, Path::new("/plugins"))
+                .unwrap_or_else(|e| panic!("{}: {e}", def.key));
         }
     }
 }

@@ -382,13 +382,7 @@ fn cdp_error_lines(err: &crate::cdp::CdpError) -> Vec<String> {
 /// `$XDG_CONFIG_HOME/tui-wave/` root that `preset::presets_dir` resolves, so everything this
 /// app writes lives in one place.
 fn praat_state_dir() -> std::path::PathBuf {
-    let config_home = std::env::var("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            std::path::PathBuf::from(home).join(".config")
-        });
-    config_home.join("tui-wave").join("praat")
+    crate::praat::runner::state_dir()
 }
 
 /// Renders a `PraatError` for `Dialog::CdpOutput`, mirroring `cdp_error_lines`.
@@ -10501,7 +10495,16 @@ impl App {
                 &praat_state_dir(),
                 &audiotools_dir,
             ),
-            timeout: if planned.picture_name.is_some() {
+            // Supplies numpy/scipy/soundfile to the `py` group without touching the system
+            // Python; `None` when no venv has been created, which leaves `PATH` alone.
+            python_venv_bin: crate::praat::runner::python_venv_bin(&praat_state_dir()),
+            // A process that opens its own window runs **unbounded**: a person editing a
+            // trajectory is indistinguishable from a wedged script to a wall-clock limit, and
+            // killing them mid-edit is what produced "broken pipe" on Apply. Esc still stops it
+            // — `cancel` is checked on the same poll tick the timeout was.
+            timeout: if def.interactive {
+                Duration::MAX
+            } else if planned.picture_name.is_some() {
                 crate::praat::DRAWING_TIMEOUT
             } else {
                 crate::praat::DEFAULT_TIMEOUT
@@ -11352,6 +11355,9 @@ impl App {
                 &praat_state_dir(),
                 &audiotools_dir,
             ),
+            // Supplies numpy/scipy/soundfile to the `py` group without touching the system
+            // Python; `None` when no venv has been created, which leaves `PATH` alone.
+            python_venv_bin: crate::praat::runner::python_venv_bin(&praat_state_dir()),
             planned,
             inputs,
             input_sample_rate: sample_rate,
@@ -26041,6 +26047,7 @@ mod tests {
             input_channels: None,
             output_channels: None,
             output_new_buffer: false,
+            interactive: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
@@ -29023,6 +29030,7 @@ mod tests {
             input_channels: None,
             output_channels: None,
             output_new_buffer: false,
+            interactive: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
@@ -29110,6 +29118,7 @@ mod tests {
             input_channels: None,
             output_channels: None,
             output_new_buffer: false,
+            interactive: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
@@ -35512,6 +35521,7 @@ mod tests {
             input_channels: None,
             output_channels: None,
             output_new_buffer: false,
+            interactive: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,

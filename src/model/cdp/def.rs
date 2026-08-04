@@ -1039,6 +1039,22 @@ pub struct ProcessDef {
     /// results, just reached by declaration rather than by result count.
     #[serde(default)]
     pub output_new_buffer: bool,
+    /// True for a process that **opens its own window and waits for the user** — the `py`
+    /// group's Tk editors: a spatial trajectory painter, an envelope editor, a VST host.
+    ///
+    /// Not the same hazard as Praat's own `beginPause`, which segfaults under `--run`. These
+    /// windows belong to a *separate Python process* with its own display connection, and they
+    /// genuinely work; what they cannot do is finish inside a wall-clock limit. The runner's
+    /// timeout exists to kill a run that will never return, and a person editing a trajectory
+    /// looks exactly like one — so an interactive job runs unbounded and is stopped by Esc
+    /// instead (`cancel` is checked on the same poll tick the timeout used to be).
+    ///
+    /// Found the hard way: `spatial_panner.py` shipped because `tkinter` is in the *standard*
+    /// library and the converter's rule was "nothing beyond numpy/scipy/soundfile and stdlib".
+    /// The window opened, the sweep killed Praat at 60s, and pressing Apply afterwards wrote
+    /// into a closed pipe — "broken pipe" (user report, 2026-08-03).
+    #[serde(default)]
+    pub interactive: bool,
     /// True for a process whose binary can't correctly read the `WAVE_FORMAT_EXTENSIBLE`
     /// WAV header `hound` (this project's WAV library) writes for any file with
     /// `bits_per_sample > 16` — which is every input file this app ever sends CDP, since
@@ -1369,6 +1385,7 @@ mod tests {
             input_channels: None,
             output_channels: None,
             output_new_buffer: false,
+            interactive: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1444,6 +1461,7 @@ mod tests {
             input_channels: None,
             output_channels: None,
             output_new_buffer: false,
+            interactive: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1538,6 +1556,7 @@ mod tests {
             input_channels: None,
             output_channels: None,
             output_new_buffer: false,
+            interactive: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1603,6 +1622,7 @@ mod tests {
             input_channels: None,
             output_channels: None,
             output_new_buffer: false,
+            interactive: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1676,6 +1696,7 @@ mod tests {
             input_channels: None,
             output_channels: None,
             output_new_buffer: false,
+            interactive: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1734,6 +1755,7 @@ mod tests {
             input_channels: None,
             output_channels: None,
             output_new_buffer: false,
+            interactive: false,
             requires_simple_wav_input: false,
             sidecar_extension: None,
             needs_head_tail_marks: false,

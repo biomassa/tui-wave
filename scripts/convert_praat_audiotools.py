@@ -27,6 +27,7 @@ Two things this cannot get from the source, both handled deliberately below:
 
 from __future__ import annotations
 
+import ast
 import math
 import re
 import subprocess
@@ -60,6 +61,10 @@ GROUP_DIRS = {
     "Spectral": "Spectral",
     "Time & Granular": "Time/Granular",
     "Vector Chain": "Vector Chain",
+    # Praat scripts that drive a Python helper. Their own heading, so the extra prerequisite
+    # (numpy/scipy/soundfile on PATH) is visible in the browser rather than a surprise at run
+    # time -- and so they can be avoided wholesale by anyone who has not installed them.
+    "py": "py",
 }
 
 # `py/` shells out to Python/IRCAM/VST3 tooling and is out of scope entirely. `Max-MSP` is a
@@ -68,7 +73,84 @@ GROUP_DIRS = {
 # `Vector Chain` is *not* skipped: those scripts chain sibling scripts located through
 # `preferencesDirectory$`, which the runner satisfies by pointing Praat at an app-owned
 # preferences directory holding a `plugin_AudioTools` symlink (see `prepare_prefs_dir`).
-SKIP_DIRS = {"py", "Max-MSP"}
+SKIP_DIRS = {"Max-MSP"}
+
+# Third-party Python modules this app is willing to make a prerequisite. Everything in the
+# standard library is fine; anything else here disqualifies the script.
+#
+# The `py/` scripts write a temp WAV, shell out to a sibling `.py`, and read the result back.
+# Their Python halves split sharply: about half need only array maths, while the rest want
+# torch, librosa, encodec, ddsp, PySide6 or tkinter -- and six open a Tk window, which is the
+# same unusable-headless problem `beginPause` is. Requiring numpy/scipy/soundfile is a
+# reasonable ask; requiring a deep-learning stack to open a waveform editor is not.
+#
+# Derived per script rather than listed, so this survives a submodule bump: a new numpy-only
+# script appears on its own, and one that gains a torch import drops out with a reason.
+PY_ALLOWED_IMPORTS = {"numpy", "scipy", "soundfile"}
+
+# Standard-library modules that mean the helper opens a window and waits for the user.
+#
+# These do NOT disqualify a script -- the windows genuinely work, being a separate Python
+# process with its own display, unlike Praat's own `beginPause` which segfaults under `--run`.
+# What they cannot do is finish inside a wall-clock limit, so the entry is marked `interactive`
+# and the runner drops its timeout for it (see `ProcessDef::interactive`).
+#
+# Being in the standard library says nothing about whether a thing can run headlessly, and that
+# gap cost a real failure: `spatial_panner.py` imports `tkinter`, the rule was "nothing beyond
+# numpy/scipy/soundfile and stdlib", so it shipped as an ordinary process. The window opened,
+# the runner killed Praat at its timeout, and pressing Apply afterwards wrote into a closed
+# pipe -- "broken pipe" (user report, 2026-08-03).
+PY_INTERACTIVE_IMPORTS = {"tkinter", "turtle", "idlelib"}
+
+
+def python_imports(path: Path) -> set[str]:
+    """Top-level modules a Python file imports.
+
+    Parsed with `ast`, not a regex. A regex over `^\s*(?:import|from)\s+(\w+)` reads ordinary
+    English out of docstrings as dependencies -- these files contain lines like "from the
+    original version which lacked...", "from them with Boltzmann probability" and "from scratch
+    on the log-Mel patches", which had four perfectly usable scripts excluded for needing
+    modules named `the`, `them` and `scratch`.
+
+    A file that does not parse is treated as importing nothing rather than crashing the
+    converter; it will fail loudly at run time instead, which is the right place for a syntax
+    error in someone else's script.
+    """
+    text = path.read_text(encoding="utf-8", errors="replace")
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            # `level > 0` is a relative import (`from . import x`) -- a sibling file, not a
+            # dependency to install.
+            if node.module and not node.level:
+                modules.add(node.module.split(".")[0])
+    return modules
+
+
+def python_helper_requirements(script: Path) -> tuple[list[str], set[str]] | None:
+    """The `.py` helpers a `py/` script drives, and the non-stdlib modules they need.
+
+    `None` when the script drives no resolvable helper at all -- either it is pure Praat that
+    merely lives in this directory, or it only writes a `temp_*_probe.py` at run time to test
+    for its dependencies, which says nothing about what it ultimately needs.
+    """
+    text = script.read_text(encoding="utf-8", errors="replace")
+    names = sorted({n for n in re.findall(r"([A-Za-z_0-9]+\.py)", text) if not n.startswith("temp_")})
+    helpers = [script.parent / n for n in names]
+    helpers = [h for h in helpers if h.is_file()]
+    if not helpers:
+        return None
+    needed: set[str] = set()
+    for helper in helpers:
+        needed |= python_imports(helper)
+    extras = needed - sys.stdlib_module_names - PY_ALLOWED_IMPORTS
+    return [h.name for h in helpers], extras, bool(needed & PY_INTERACTIVE_IMPORTS)
 
 # Scripts that DO contain a blocking construct, but on a code path this app can guarantee is
 # never taken. Keyed by path relative to the plugin root; each entry says which construct, why
@@ -602,6 +684,8 @@ class Process:
     group: str
     params: list[Param]
     inputs: int = 1
+    # Opens its own window and waits: the runner runs it unbounded. See PY_INTERACTIVE_IMPORTS.
+    interactive: bool = False
     # Read out of the script's own `# Description:` header block -- see `extract_description`.
     # Empty for the handful of scripts that carry no such header; the emitter falls back to the
     # title, which is what every entry used to get.
@@ -1286,6 +1370,23 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
 
         source = read_script(path)
 
+        # A `py/` script is only usable if the Python helper it drives needs nothing beyond
+        # numpy/scipy/soundfile. Checked before the generic detectors so the reason names the
+        # real obstacle -- "needs torch" is more use than "uses an interactive construct".
+        py_interactive = False
+        if top == "py":
+            requirement = python_helper_requirements(path)
+            if requirement is None:
+                excluded.append((str(rel), "out_of_scope",
+                                 "drives no Python helper; nothing here for this app to run"))
+                continue
+            helpers, extras, interactive = requirement
+            if extras:
+                excluded.append((str(rel), "out_of_scope",
+                                 f"{helpers[0]} needs {', '.join(sorted(extras))}"))
+                continue
+            py_interactive = interactive
+
         out_of_scope = OUT_OF_SCOPE.get(str(rel).replace("\\", "/"))
         if out_of_scope:
             excluded.append((str(rel), "out_of_scope", out_of_scope))
@@ -1357,6 +1458,7 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
                 inputs=2 if needs_two_sounds(source) else 1,
                 description=described,
                 short_description=short_description_from(described, title_for(path.stem)),
+                interactive=py_interactive,
             ))
         presets = extract_script_presets(source, params)
         if presets:
@@ -1392,6 +1494,8 @@ def render_catalog(processes: list[Process], sha: str) -> str:
         out.append(f"subcategory = {toml_string(proc.group)}")
         out.append(f"short_description = {toml_string(proc.short_description or proc.title)}")
         out.append(f"description = {toml_string(proc.description or proc.title)}")
+        if proc.interactive:
+            out.append("interactive = true")
         out.append(f'input = "{"dual_wav" if proc.inputs == 2 else "wav"}"')
         out.append('output = "wav"')
         # Praat reads a multi-channel Sound natively, so there is never a reason to split a
