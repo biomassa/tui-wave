@@ -288,7 +288,7 @@ fn run_job_body(
                 message: e.to_string(),
             }
         })?;
-        let rewritten = crate::model::praat::rewrite::rewrite_pause_blocks(&source, &rewrite.blocks)
+        let rewritten = crate::model::praat::rewrite::rewrite_pause_blocks(&source, &rewrite.blocks, &rewrite.form_locks)
             .map_err(|e| PraatError::OutputRead {
                 path: job.planned.script_path.display().to_string(),
                 message: e.to_string(),

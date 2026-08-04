@@ -177,35 +177,10 @@ def python_helper_requirements(script: Path) -> tuple[list[str], set[str]] | Non
 #
 # Two kinds of adjustment, and the difference is not cosmetic:
 #
-#   lock_off      -- name a `boolean` param that must never be ticked. It stays in the catalog
-#                    and is still emitted, always as 0, and the app greys it (see
-#                    `ParamDef.opens_praat_dialog`). It CANNOT simply be dropped: Praat fills a
-#                    script's `form` positionally from `runScript:`'s arguments, so removing one
-#                    shifts every argument after it and feeds each field its neighbour's value.
 #   drop_options  -- name an `optionmenu` param and the option labels to remove. Safe to drop
 #                    outright, because Praat matches an optionmenu by *label* and the catalog
 #                    stores labels verbatim, so nothing is positional here.
 GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
-    # Three scripts of the same shape: `boolean Show_advanced_settings 0` guarding a
-    # `beginPause` block of advanced parameters, whose values are already assigned as plain
-    # variables immediately above the `if`. With the box unticked -- which is the script's own
-    # default, and what `SILENCE_RE` would force anyway -- the block is never entered and those
-    # defaults stand. Locking it off makes that the only reachable state.
-    "Generative & Synthesis/FM_Texture_Generator.praat": {
-        "lock_off": ["Show_Advanced_Settings"],
-        "why": "beginPause 'Advanced DX7 Parameters' is guarded by Show_Advanced_Settings, "
-               "which the script itself defaults to 0",
-    },
-    "Time & Granular/HFD-Driven_Time_Warping.praat": {
-        "lock_off": ["Show_advanced_settings"],
-        "why": "beginPause 'Advanced HFD Parameters' is guarded by Show_advanced_settings, "
-               "which the script itself defaults to 0",
-    },
-    "Time & Granular/Magnetic_Tape_Degradation.praat": {
-        "lock_off": ["Show_advanced_settings"],
-        "why": "beginPause 'Advanced Tape Physics' is guarded by Show_advanced_settings, "
-               "which the script itself defaults to 0",
-    },
     # Both of these call `chooseFolder$` -- but only as a *fallback for a blank field*, and both
     # say so in the same comment: "use the typed path, or fall back to a dialog when the field is
     # left blank". The field is now a `ParamKind::FolderPath`, which `cdp_validate_fields` blocks
@@ -269,6 +244,29 @@ PAUSE_HOISTS: dict[str, dict] = {
     # hoisted assignments and the script's own placeholder block must agree.
     "Time & Granular/Polyphonic_Improviser.praat": {
         "why": "Voice Details page, reached on the Custom preset (option 1, the default)",
+    },
+    # Three of a shape: `boolean Show_advanced_settings 0` guarding a `beginPause` block of
+    # advanced parameters. They shipped first with that toggle merely *locked off*, which made
+    # them runnable but left 54 parameters at their script defaults with no way to touch them.
+    #
+    # Hoisting exposes all 54 in the ordinary dialog, but needs the guard to be true or the
+    # assignments the rewrite emits sit inside an `if` that never runs. So the toggle is locked
+    # **on** rather than off. That is not a behaviour change smuggled in: with the dialog
+    # replaced by assignments the toggle no longer *shows* anything, it only decides whether the
+    # advanced values apply -- and the dialog is now where they are set, so they always should.
+    # The script assigns every one of them as a plain variable just above the `if`, and those
+    # assignments remain as the defaults the catalog reports.
+    "Generative & Synthesis/FM_Texture_Generator.praat": {
+        "lock_on": ["Show_Advanced_Settings"],
+        "why": "exposes the 22 Advanced DX7 Parameters",
+    },
+    "Time & Granular/HFD-Driven_Time_Warping.praat": {
+        "lock_on": ["Show_advanced_settings"],
+        "why": "exposes the 17 Advanced HFD Parameters",
+    },
+    "Time & Granular/Magnetic_Tape_Degradation.praat": {
+        "lock_on": ["Show_advanced_settings"],
+        "why": "exposes the 15 Advanced Tape Physics parameters",
     },
     # No `form` at all -- the whole UI is a two-stage wizard. Step 1 picks an algorithm, then
     # exactly one of nine settings blocks runs, each behind `if algorithm$ = "..."`.
@@ -386,6 +384,24 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
     blocks = find_pause_blocks(source)
     if not blocks:
         return "no beginPause block found (upstream may have removed it)"
+
+    # A block guarded by `if show_advanced_settings` only runs when that toggle is true, and the
+    # assignments the rewrite emits sit *inside* the guard — so the toggle has to be forced on
+    # or the hoisted values are silently ignored. Locked, because with the dialog gone it no
+    # longer shows anything: it only decides whether the fields below take effect.
+    form_locks: list[tuple[str, bool]] = []
+    for name in hoist.get("lock_on", []):
+        param = next((p for p in form_params if p.name == name), None)
+        if param is None:
+            return f"no parameter named {name!r} to lock on (upstream renamed or removed it?)"
+        if param.kind != "toggle":
+            return f"parameter {name!r} is a {param.kind}, not a toggle"
+        # Dropped from the catalog entirely and assigned in the rewritten script instead. A
+        # switch that gates parameters now shown in the same dialog is not a setting any more:
+        # it cannot be turned off without those parameters silently ceasing to apply, and
+        # turning it on reveals nothing. Shown as a locked checkbox it read as a broken control.
+        form_params = [p for p in form_params if p is not param]
+        form_locks.append((name, True))
     for i, block in enumerate(blocks):
         if isinstance(block["fields"], str):
             return f"block {i} ({block['title']!r}): {block['fields']}"
@@ -410,7 +426,8 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
         return [Process(key=key_for(top, stem), bin=str(rel).replace("\\", "/"),
                         title=title_for(stem), group=GROUP_DIRS[top], params=params,
                         inputs=inputs, description=description,
-                        short_description=short_description_from(description, title_for(stem)))]
+                        short_description=short_description_from(description, title_for(stem)),
+                        form_locks=form_locks)]
 
     # --- split: one entry per option of a hoisted optionmenu ------------------------------
     variants = hoist.get("variants", {})
@@ -481,15 +498,6 @@ def apply_gui_override(params: list, override: dict) -> str | None:
     segfault rather than an error message -- so a stale override excludes the script instead.
     """
     by_name = {p.name: p for p in params}
-
-    for name in override.get("lock_off", []):
-        param = by_name.get(name)
-        if param is None:
-            return f"no parameter named {name!r} (upstream renamed or removed it?)"
-        if param.kind != "toggle":
-            return f"parameter {name!r} is a {param.kind}, not a toggle"
-        param.default = False
-        param.locked_off = True
 
     for name, labels in override.get("drop_options", {}).items():
         param = by_name.get(name)
@@ -672,10 +680,6 @@ class Param:
     minimum: float = 0.0
     maximum: float = 0.0
     step: float = 0.0
-    # Set from GUI_BLOCKING_OVERRIDES' `lock_off`: a toggle that must never be ticked because
-    # doing so opens a Praat dialog. Emitted as `opens_praat_dialog = true`; the app greys the
-    # row and refuses the key. Never dropped -- see the override table for why.
-    locked_off: bool = False
     # Set for kind == "number_list": the script's own delimiter, written back verbatim, and
     # the default entries parsed out of its form declaration.
     list_separator: str = ""
@@ -701,6 +705,8 @@ class Process:
     inputs: int = 1
     # Opens its own window and waits: the runner runs it unbounded. See PY_INTERACTIVE_IMPORTS.
     interactive: bool = False
+    # `boolean` form fields deleted from the script and assigned instead — see `lock_on`.
+    form_locks: list = field(default_factory=list)
     # Read out of the script's own `# Description:` header block -- see `extract_description`.
     # Empty for the handful of scripts that carry no such header; the emitter falls back to the
     # title, which is what every entry used to get.
@@ -769,7 +775,7 @@ def find_pause_blocks(source: str) -> list[dict]:
         numbers = re.findall(r"(?<![\w.])(\d+)(?![\w.])", tail)
         blocks.append({
             "title": m.group("title").strip().strip('"'),
-            "fields": parse_fields(m.group("body")),
+            "fields": parse_fields(m.group("body"), script_variables(source, m.start())),
             # No number at all would be a malformed endPause; 1 is the only sane guess and the
             # commonest real value.
             "default_button": int(numbers[0]) if numbers else 1,
@@ -876,8 +882,67 @@ def parse_form(source: str) -> list[Param] | str:
     return parse_fields(match.group(1))
 
 
-def parse_fields(body: str) -> list[Param] | str:
-    """Parse a run of Praat field declarations -- a `form` body or a `beginPause` body."""
+# A bare numeric literal, so a default that is anything else can be recognised as a variable
+# reference and looked up.
+NUMBER_RE = re.compile(r"^[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?$")
+
+# `name = <literal>` at the top level of a script. Pause blocks in the "advanced settings" shape
+# declare their defaults as these variables, assigned immediately above the `if` that guards the
+# block, so this is where the real values live.
+ASSIGNMENT_RE = re.compile(r"^\s*(\w+\$?)\s*=\s*(\"[^\"]*\"|[-+]?[\d.]+(?:[eE][-+]?\d+)?)\s*$", re.M)
+
+
+def script_variables(source: str, before: int | None = None) -> dict[str, str]:
+    """`name = <literal>` assignments, optionally only those before offset `before`.
+
+    The cutoff is not optional in practice, it is the whole correctness of this. These scripts
+    assign a pause field's default once near the top and then *again* inside every branch of an
+    `if preset = N` chain further down — `HFD-Driven_Time_Warping` sets
+    `use_percentile_mapping` six times. Reading the whole file and letting the last win picks up
+    whichever preset happens to be written last, so the catalog would advertise one preset's
+    value as the parameter's default. Only the assignments *preceding* the block are the
+    defaults in force when it runs.
+    """
+    text = source if before is None else source[:before]
+    out: dict[str, str] = {}
+    for name, value in ASSIGNMENT_RE.findall(text):
+        out[name] = value.strip('"')
+    return out
+
+
+def split_label_and_value(rest: str, colon_form: bool) -> tuple[str | None, str]:
+    """Split a field declaration's operands into its label and its default.
+
+    The modern colon syntax quotes the label, and that label may contain spaces --
+    `positive: "Frame length s", frame_length_s`. Splitting on whitespace, which is right for
+    the classic syntax, cuts that into `"Frame` and the rest, and the field is then reported as
+    having a non-numeric default. That is what kept three "advanced settings" blocks
+    unparseable, and with them 54 parameters locked at their script defaults.
+    """
+    rest = rest.strip()
+    if colon_form and rest.startswith('"'):
+        end = rest.find('"', 1)
+        if end == -1:
+            return None, ""
+        # The value still needs unquoting — the colon syntax quotes numeric defaults too
+        # (`positive: "Interaural_delay_ms", "0.68"`), and returning `"0.68"` with its quotes
+        # reads as a non-numeric default and drops the whole script.
+        value = rest[end + 1 :].lstrip().lstrip(",").strip()
+        return rest[1:end], unquote(value, colon_form)
+    bits = rest.split(None, 1)
+    if not bits:
+        return None, ""
+    name = unquote(bits[0].rstrip(",").rstrip(":"), colon_form)
+    value = unquote(bits[1].strip().lstrip(",").strip(), colon_form) if len(bits) > 1 else ""
+    return name, value
+
+
+def parse_fields(body: str, variables: dict[str, str] | None = None) -> list[Param] | str:
+    """Parse a run of Praat field declarations -- a `form` body or a `beginPause` body.
+
+    `variables` supplies the script's top-level assignments, so a pause field whose default is a
+    variable reference resolves to the value the script actually uses.
+    """
     params: list[Param] = []
     pending: Param | None = None
 
@@ -899,11 +964,16 @@ def parse_fields(body: str) -> list[Param] | str:
             continue
 
         if keyword in CHOICE_KEYWORDS:
-            bits = rest.split()
-            if not bits:
+            # Same quoted-label handling as every other field — `optionmenu: "Mapping curve",
+            # mapping_curve` splits into `"Mapping` and junk otherwise, and the malformed entry
+            # then swallows the `option:` lines that follow and shifts every later field's value
+            # by one.
+            name, index_text = split_label_and_value(rest, colon_form)
+            if name is None:
                 return f"malformed {keyword} declaration: {line!r}"
-            name = unquote(bits[0].rstrip(",").rstrip(":"), colon_form)
-            index_text = unquote(bits[1].rstrip(","), colon_form) if len(bits) > 1 else "1"
+            index_text = index_text or "1"
+            if not NUMBER_RE.match(index_text.strip()) and variables:
+                index_text = variables.get(index_text.strip(), index_text)
             try:
                 index = int(float(index_text))
             except ValueError:
@@ -913,11 +983,17 @@ def parse_fields(body: str) -> list[Param] | str:
             continue
 
         pending = None
-        bits = rest.split(None, 1)
-        if not bits:
+        name, value_text = split_label_and_value(rest, colon_form)
+        if name is None:
             return f"malformed declaration: {line!r}"
-        name = unquote(bits[0].rstrip(",").rstrip(":"), colon_form)
-        value_text = unquote(bits[1].strip().lstrip(",").strip(), colon_form) if len(bits) > 1 else ""
+        # A pause block often gives its default as the *variable* the script assigned just
+        # above it (`positive: "Frame length s", frame_length_s`) rather than as a literal.
+        # Resolve it from those assignments; an unresolvable one falls through and is reported
+        # by the caller as a non-numeric default, which is the honest outcome.
+        if value_text and not NUMBER_RE.match(value_text.strip()):
+            resolved = variables.get(value_text.strip()) if variables else None
+            if resolved is not None:
+                value_text = resolved
 
         if keyword == "boolean":
             on = value_text.strip() in ("1", "yes", "on")
@@ -1517,6 +1593,10 @@ def render_catalog(processes: list[Process], sha: str) -> str:
         out.append(f"description = {toml_string(proc.description or proc.title)}")
         if proc.interactive:
             out.append("interactive = true")
+        if proc.form_locks:
+            pairs = ", ".join(f"[{toml_string(n)}, {'true' if v else 'false'}]"
+                              for n, v in proc.form_locks)
+            out.append(f"praat_form_locks = [{pairs}]")
         out.append(f'input = "{"dual_wav" if proc.inputs == 2 else "wav"}"')
         out.append('output = "wav"')
         # Praat reads a multi-channel Sound natively, so there is never a reason to split a
@@ -1582,8 +1662,6 @@ def render_catalog(processes: list[Process], sha: str) -> str:
             elif param.kind == "toggle":
                 out.append('kind = "toggle"')
                 out.append(f"default = {'true' if param.default else 'false'}")
-                if param.locked_off:
-                    out.append("opens_praat_dialog = true")
             else:
                 out.append('kind = "choice"')
                 joined = ", ".join(toml_string(o) for o in param.options)

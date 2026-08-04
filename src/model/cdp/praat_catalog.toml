@@ -24544,6 +24544,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "FM (Frequency Modulation) Synthesis texture generator"
 description = "FM (Frequency Modulation) Synthesis texture generator. Classic Chowning/DX7-style FM sounds with various timbres."
+praat_form_locks = [["Show_Advanced_Settings", true]]
 input = "wav"
 output = "wav"
 stereo_native = true
@@ -24647,12 +24648,262 @@ kind = "toggle"
 default = false
 
 [[process.params]]
-name = "Show_Advanced_Settings"
+name = "Algorithm"
+praat_pause_block = 0
 description = ""
 automatable = false
-kind = "toggle"
-default = false
-opens_praat_dialog = true
+kind = "choice"
+options = ["Parallel (All ops to output)", "Series (6->5->4->3->2->1)", "Dual Stack (5->4 + 2->1)"]
+default = 0
+
+[[process.params]]
+name = "Op1 freq"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Op1 level"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Op1 envelope"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["snap", "decay", "sus", "slow"]
+default = 0
+
+[[process.params]]
+name = "Op2 freq"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Op2 level"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Op2 envelope"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["snap", "decay", "sus", "slow"]
+default = 1
+
+[[process.params]]
+name = "Op3 freq"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Op3 level"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Op3 envelope"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["snap", "decay", "sus", "slow"]
+default = 0
+
+[[process.params]]
+name = "Op4 freq"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Op4 level"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Op4 envelope"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["snap", "decay", "sus", "slow"]
+default = 1
+
+[[process.params]]
+name = "Op5 freq"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Op5 level"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Op5 envelope"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["snap", "decay", "sus", "slow"]
+default = 0
+
+[[process.params]]
+name = "Op6 freq"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Op6 level"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Op6 feedback"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Op6 envelope"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["snap", "decay", "sus", "slow"]
+default = 2
+
+[[process.params]]
+name = "Snap decay time"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Tone decay time"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.8
+exponential = false
+scale = "plain"
 
 [[process]]
 key = "praat_generative_synthesis_flute_klattgrid"
@@ -58286,6 +58537,7 @@ category = "praat"
 subcategory = "Time/Granular"
 short_description = "HFD-Driven Time Warping"
 description = "HFD-Driven Time Warping. Computes the Higuchi Fractal Dimension (signal complexity) per frame, maps it to a per-frame time-stretch factor (with curve shaping, voicing gating and slew limiting), and resynthesizes via a DurationTier on a Manipulation object. Complex passages stretch; simple ones contract (or vice-versa via curves)."
+praat_form_locks = [["Show_advanced_settings", true]]
 input = "wav"
 output = "wav"
 stereo_native = true
@@ -58322,12 +58574,211 @@ kind = "toggle"
 default = false
 
 [[process.params]]
-name = "Show_advanced_settings"
+name = "Frame length s"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Hop size s"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "K max"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 5.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Smoothing window size"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 5.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Min stretch factor"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max stretch factor"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Use percentile mapping"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = true
+
+[[process.params]]
+name = "Mapping curve"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "choice"
+options = ["Linear", "Emphasize extremes", "Emphasize changes", "Quantized steps"]
+default = 0
+
+[[process.params]]
+name = "Use voicing gate"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "toggle"
+default = true
+
+[[process.params]]
+name = "Voicing influence"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.7
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Voicing smooth window"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 3.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Final stretch smooth"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 3.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Max stretch change per sec"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 5.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Minimum pitch Hz"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 75.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Maximum pitch Hz"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 600.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Downsample factor"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 6.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Skip windowing"
+praat_pause_block = 0
 description = ""
 automatable = false
 kind = "toggle"
 default = false
-opens_praat_dialog = true
 
 [[process]]
 key = "praat_time_granular_harmonic_resonance"
@@ -59336,6 +59787,7 @@ category = "praat"
 subcategory = "Time/Granular"
 short_description = "Magnetic Tape Degradation - simulates analog tape aging: - Hysteresis (magnetic memory effect) - Print-through (signal bleeding between tape layers) - High-freq"
 description = "Magnetic Tape Degradation - simulates analog tape aging: - Hysteresis (magnetic memory effect) - Print-through (signal bleeding between tape layers) - High-frequency loss (tape loses HF over time) - Bias modulation (recorder bias oscillation)"
+praat_form_locks = [["Show_advanced_settings", true]]
 input = "wav"
 output = "wav"
 stereo_native = true
@@ -59411,12 +59863,195 @@ kind = "toggle"
 default = false
 
 [[process.params]]
-name = "Show_advanced_settings"
+name = "Hysteresis current"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.7
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Hysteresis previous"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Print through initial"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.25
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Print through decay"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.8
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Print offset divisor"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 1.0
+max = inf
+step = 1.0
+default = 100.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Bias min"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.8
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Bias max"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 1.2
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Use fixed bias"
+praat_pause_block = 0
 description = ""
 automatable = false
 kind = "toggle"
 default = false
-opens_praat_dialog = true
+
+[[process.params]]
+name = "Fixed bias"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Hf loss rate"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Hf smoothing"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.9
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Bias mod center"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.9
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Bias mod depth"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.1
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Scale peak"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.87
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Fadeout duration s"
+praat_pause_block = 0
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
 
 [[process]]
 key = "praat_time_granular_multi_channel_random_slice_time_stretcher"

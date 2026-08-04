@@ -66,10 +66,14 @@ impl std::fmt::Display for RewriteError {
 
 /// The Praat variable name a field labelled `label` creates.
 ///
-/// Only the first character is lowercased; the rest of the label is untouched. See the module
-/// docs for why that precise rule matters.
+/// Two rules, and both bite. Only the **first character** is lowercased — `Output_Gain` becomes
+/// `output_Gain`, not `output_gain`. And **spaces become underscores**: a pause field may be
+/// declared `positive: "Frame length s", frame_length_s`, and Praat makes that
+/// `frame_length_s`. The first scripts hoisted here happened to use underscore-only labels, so
+/// the space rule was unexercised until a block with spaced labels needed it.
 pub fn variable_name(label: &str) -> String {
-    let mut chars = label.chars();
+    let underscored = label.replace(' ', "_");
+    let mut chars = underscored.chars();
     match chars.next() {
         Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
         None => String::new(),
@@ -136,9 +140,46 @@ fn render_number(value: f64) -> String {
 ///
 /// Indentation of the `beginPause` line is carried onto the generated lines, purely so a failed
 /// run's leftover script in the temp directory is still readable — Praat itself does not care.
+/// Remove a `boolean` field from the script's `form` and assign its variable instead.
+///
+/// For a toggle that exists only to gate a hoisted block — `Show_advanced_settings` guarding an
+/// "advanced parameters" dialog. Once those parameters are in this app's own dialog the switch
+/// controls nothing a user would recognise: it cannot be turned off (the values below would
+/// silently stop applying) and turning it on shows nothing new. Leaving it visible meant a
+/// checkbox that refused to be clicked and explained itself with a message about a dialog that
+/// no longer opens (user report, 2026-08-03).
+///
+/// Deleting the field from the *form* rather than hiding the row in the dialog is what keeps
+/// everything consistent: Praat fills a form positionally, so a field the catalog no longer
+/// declares must not be there to receive an argument either. The variable is then assigned
+/// immediately after `endform`, before any code that reads it.
+fn apply_form_locks(lines: &mut Vec<String>, locks: &[(String, f64)]) {
+    if locks.is_empty() {
+        return;
+    }
+    let mut assignments: Vec<String> = Vec::new();
+    for (label, value) in locks {
+        let declaration = format!("boolean {label}");
+        if let Some(at) = lines.iter().position(|l| {
+            let t = l.trim();
+            t.starts_with(&declaration)
+                && t[declaration.len()..].chars().next().is_none_or(char::is_whitespace)
+        }) {
+            lines.remove(at);
+        }
+        assignments.push(format!("{} = {}", variable_name(label), render_number(*value)));
+    }
+    if let Some(at) = lines.iter().position(|l| l.trim() == "endform") {
+        for (offset, line) in assignments.into_iter().enumerate() {
+            lines.insert(at + 1 + offset, line);
+        }
+    }
+}
+
 pub fn rewrite_pause_blocks(
     source: &str,
     blocks: &BTreeMap<usize, Vec<Assignment>>,
+    form_locks: &[(String, f64)],
 ) -> Result<String, RewriteError> {
     let lines: Vec<&str> = source.lines().collect();
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
@@ -183,6 +224,8 @@ pub fn rewrite_pause_blocks(
             return Err(RewriteError::MissingBlock { index: highest, found: block_index });
         }
     }
+
+    apply_form_locks(&mut out, form_locks);
 
     let mut text = out.join("\n");
     if source.ends_with('\n') {
@@ -245,6 +288,10 @@ mod tests {
         assert_eq!(variable_name("Spatial_Mode"), "spatial_Mode");
         assert_eq!(variable_name("Interaural_delay_ms"), "interaural_delay_ms");
         assert_eq!(variable_name("V3_speed_ratio"), "v3_speed_ratio");
+        // Spaces become underscores — the shape an "advanced settings" block uses.
+        assert_eq!(variable_name("Frame length s"), "frame_length_s");
+        assert_eq!(variable_name("Use percentile mapping"), "use_percentile_mapping");
+        assert_eq!(variable_name("K max"), "k_max");
     }
 
     /// An optionmenu sets both variables, because scripts read both.
@@ -279,7 +326,7 @@ mod tests {
                 Assignment::Number { label: "Debug".into(), value: 0.0 },
             ],
         );
-        let out = rewrite_pause_blocks(&source, &blocks).expect("rewrites");
+        let out = rewrite_pause_blocks(&source, &blocks, &[]).expect("rewrites");
 
         assert!(!has_live_pause(&out), "a surviving beginPause would segfault Praat");
         // Every variable the script goes on to read must now be set.
@@ -317,7 +364,7 @@ mod tests {
                 .map(|(l, v)| Assignment::Number { label: (*l).into(), value: *v })
                 .collect(),
         );
-        let out = rewrite_pause_blocks(&source, &blocks).expect("rewrites");
+        let out = rewrite_pause_blocks(&source, &blocks, &[]).expect("rewrites");
         assert!(!has_live_pause(&out));
         for (label, value) in defaults {
             let line = format!("{} = {}", variable_name(label), value);
@@ -337,7 +384,7 @@ mod tests {
         let mut blocks = BTreeMap::new();
         blocks.insert(0, vec![Assignment::Choice { label: "Algorithm".into(), index: 1, text: "Accelerando".into() }]);
         blocks.insert(1, vec![Assignment::Number { label: "First_hit_time".into(), value: 0.1 }]);
-        let out = rewrite_pause_blocks(&source, &blocks).expect("rewrites");
+        let out = rewrite_pause_blocks(&source, &blocks, &[]).expect("rewrites");
         assert!(!has_live_pause(&out), "all ten dialogs must go, not just the two used");
         assert!(out.contains("algorithm$ = \"Accelerando\""));
         assert!(out.contains("first_hit_time = 0.1"));
@@ -351,8 +398,43 @@ mod tests {
     fn referring_to_a_block_that_does_not_exist_is_an_error() {
         let mut blocks = BTreeMap::new();
         blocks.insert(3, vec![Assignment::Number { label: "X".into(), value: 1.0 }]);
-        let err = rewrite_pause_blocks("beginPause: \"a\"\nendPause: \"ok\", 1\n", &blocks)
+        let err = rewrite_pause_blocks("beginPause: \"a\"\nendPause: \"ok\", 1\n", &blocks, &[])
             .expect_err("must refuse");
         assert_eq!(err, RewriteError::MissingBlock { index: 3, found: 1 });
+    }
+}
+
+#[cfg(test)]
+mod form_lock_tests {
+    use super::*;
+
+    /// The gating switch is removed from the `form` and assigned instead. Removing it from the
+    /// form — rather than hiding its row in the dialog — is what keeps the two sides consistent:
+    /// Praat fills a form by position, so a field the catalog no longer declares must not stay
+    /// in the script waiting for an argument.
+    #[test]
+    fn a_locked_form_field_is_deleted_and_assigned() {
+        let source = "form Test\n    real Amount 1.0\n    boolean Show_advanced_settings 0\nendform\n\
+                      if show_advanced_settings\n    x = 1\nendif\n";
+        let out = rewrite_pause_blocks(&source.replace('\\', ""), &BTreeMap::new(),
+                                       &[("Show_advanced_settings".into(), 1.0)])
+            .expect("rewrites");
+
+        assert!(!out.contains("boolean Show_advanced_settings"), "the form field must be gone:\n{out}");
+        assert!(out.contains("real Amount"), "other form fields must survive:\n{out}");
+        // Assigned right after endform, so it is set before anything reads it.
+        let after_endform = out.split("endform\n").nth(1).expect("an endform");
+        assert!(
+            after_endform.starts_with("show_advanced_settings = 1"),
+            "must be assigned immediately after the form:\n{out}"
+        );
+    }
+
+    /// No locks means the form is untouched — every other process must be unaffected.
+    #[test]
+    fn without_locks_the_form_is_left_alone() {
+        let source = "form Test\n    boolean Show_advanced_settings 0\nendform\n";
+        let out = rewrite_pause_blocks(source, &BTreeMap::new(), &[]).expect("rewrites");
+        assert_eq!(out, source);
     }
 }
