@@ -63938,6 +63938,20 @@ stereo_native = true
 output_is_stereo = false
 
 [[process]]
+key = "praat_py_arranger"
+bin = "py/Arranger.praat"
+title = "Arranger"
+category = "praat"
+subcategory = "py"
+short_description = "Selects one or more Sound objects, exports each as a WAV, writes a manifest JSON, launches the Python arranger GUI, then imports the rendered stereo mix back in"
+description = "Selects one or more Sound objects, exports each as a WAV, writes a manifest JSON, launches the Python arranger GUI, then imports the rendered stereo mix back into Praat."
+interactive = true
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process]]
 key = "praat_py_formantswarmgranulator"
 bin = "py/FormantSwarmGranulator.praat"
 title = "FormantSwarmGranulator"
@@ -66604,6 +66618,20 @@ kind = "toggle"
 default = false
 
 [[process]]
+key = "praat_py_performancelauncher"
+bin = "py/PerformanceLauncher.praat"
+title = "PerformanceLauncher"
+category = "praat"
+subcategory = "py"
+short_description = "Prepares selected Sound objects, resamples them to a unified maximum sample rate, writes a performance manifest, and hands complete execution over to the real-t"
+description = "Prepares selected Sound objects, resamples them to a unified maximum sample rate, writes a performance manifest, and hands complete execution over to the real-time Python audio engine."
+interactive = true
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process]]
 key = "praat_py_phasediffusion"
 bin = "py/PhaseDiffusion.praat"
 title = "PhaseDiffusion"
@@ -67774,6 +67802,42 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+
+[[process]]
+key = "praat_py_spectral_eraser"
+bin = "py/Spectral_Eraser.praat"
+title = "Spectral Eraser"
+category = "praat"
+subcategory = "py"
+short_description = "Spectral Eraser — interactive time-frequency eraser"
+description = "Spectral Eraser — interactive time-frequency eraser. Opens a Python/tkinter GUI showing the spectrogram. The user draws on it to silence specific frequency-time regions.  Uses STFT → mask → iSTFT round-trip.\n\nPipeline: 1. Praat exports mono WAV to temp path 2. Python computes STFT, displays spectrogram GUI 3. User paints erasure regions (sets STFT bins to zero) 4. Python applies mask, iSTFT, writes output WAV 5. Praat imports result, visualises before/after\n\nDependencies: Python 3 with numpy, soundfile, tkinter"
+interactive = true
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "FFT_size"
+description = ""
+automatable = false
+kind = "choice"
+options = ["512 (fast, low freq resolution)", "1024 (balanced)", "2048 (high resolution)", "4096 (very high, slower GUI)"]
+default = 1
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
 
 [[process]]
 key = "praat_py_spectral_freeze"

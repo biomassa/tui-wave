@@ -86,7 +86,22 @@ SKIP_DIRS = {"Max-MSP"}
 #
 # Derived per script rather than listed, so this survives a submodule bump: a new numpy-only
 # script appears on its own, and one that gains a torch import drops out with a reason.
-PY_ALLOWED_IMPORTS = {"numpy", "scipy", "soundfile"}
+PY_ALLOWED_IMPORTS = {
+    "numpy",
+    "scipy",
+    "soundfile",
+    # The optional extras `install.sh` offers, needed only by the interactive editors:
+    # `sounddevice` for Arranger and Performance Launcher, `PIL` (pillow) for Spectral Eraser.
+    # Listing them here means those three appear in the browser whether or not the extras were
+    # installed -- and if they were not, the script's own dependency check reports it by name.
+    # That is the bargain the whole `py` group already makes, and the reason it is its own group.
+    #
+    # `pedalboard` is deliberately NOT here, and not for a policy reason: wheel 0.9.24 dies with
+    # SIGILL on import (reproducible, on a 13th-gen Intel Core i7-1355U), so `VST_Effect_from_
+    # Praat` could not work even with it installed.
+    "sounddevice",
+    "PIL",
+}
 
 # Standard-library modules that mean the helper opens a window and waits for the user.
 #
@@ -1068,6 +1083,12 @@ OUT_OF_SCOPE: dict[str, str] = {
         "needs an external HRIR library on disk, which this app does not manage",
     "Spatial & Surround/Higher-Order_Ambisonic_Encoder.praat":
         "reads a folder of B-format WAVs and writes another; neither is the open selection",
+    # Excluded outright rather than by its dependency, so that installing `pedalboard` cannot
+    # bring it back: wheel 0.9.24 aborts the interpreter with SIGILL on import (reproducible, on
+    # a 13th-gen Intel Core i7-1355U). A process that crashes Python before it runs has nothing
+    # to offer, and leaving it out by policy is clearer than leaving it out by omission.
+    "py/VST_Effect_from_Praat.praat":
+        "hosts VST plugins through pedalboard, whose wheel aborts with SIGILL on import",
 }
 
 # Below this many entries, a "list" is more likely a word that happens to be numeric ("8") or
@@ -1370,6 +1391,11 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
 
         source = read_script(path)
 
+        out_of_scope = OUT_OF_SCOPE.get(str(rel).replace("\\", "/"))
+        if out_of_scope:
+            excluded.append((str(rel), "out_of_scope", out_of_scope))
+            continue
+
         # A `py/` script is only usable if the Python helper it drives needs nothing beyond
         # numpy/scipy/soundfile. Checked before the generic detectors so the reason names the
         # real obstacle -- "needs torch" is more use than "uses an interactive construct".
@@ -1386,11 +1412,6 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
                                  f"{helpers[0]} needs {', '.join(sorted(extras))}"))
                 continue
             py_interactive = interactive
-
-        out_of_scope = OUT_OF_SCOPE.get(str(rel).replace("\\", "/"))
-        if out_of_scope:
-            excluded.append((str(rel), "out_of_scope", out_of_scope))
-            continue
 
         # Each detector says which text it reads (see `CODE`/`RAW` above): a construct
         # detector must not read prose, and a string-contents detector must not have its

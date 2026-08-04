@@ -4,6 +4,15 @@ Everything you may want to install lives here: tui-wave itself, and the two opti
 tool suites it can drive. Only tui-wave is required — it opens, edits, plays and saves files
 with neither of the others present.
 
+**The quick way, on macOS and Linux:** run `./install.sh` from the repository. It installs the
+Rust toolchain if missing, the build dependencies for your platform, Praat, the script
+submodule, and — after asking — the Python environment the `py` process group needs; then it
+builds and installs tui-wave. It asks before anything requiring `sudo`, and `./install.sh
+--dry-run` prints every command it would run without changing anything. It does not install CDP,
+which is a separate licensed download.
+
+The rest of this section is what that script does, for anyone doing it by hand or on Windows.
+
 ### tui-wave
 
 To build tui-wave from source:
@@ -139,6 +148,38 @@ praat_audiotools_dir = "/home/you/praat-audiotools"
 
 You do **not** need to install the scripts into Praat itself. tui-wave runs them by path and
 never writes to your Praat preferences folder, so an existing Praat setup is left alone.
+
+**Python, for the `py` group only.** 34 of the scripts do their work in Python instead of in
+Praat: they hand the audio to a helper and read back the result. They sit in their own **py**
+group in the browser so you can see the extra requirement before choosing one. The other
+thirteen groups need nothing beyond Praat.
+
+| Package | What needs it |
+|---|---|
+| `numpy`, `scipy`, `soundfile` | all 34 — array maths and WAV reading/writing |
+| `sounddevice` | Arranger, Performance Launcher — they audition as you work |
+| `pillow` | Spectral Eraser — it paints on a spectrogram image |
+
+`./install.sh` asks whether to install these and puts them in a virtual environment tui-wave
+owns, at `~/.config/tui-wave/praat/pyenv`. Your system Python is never modified. That is not
+only tidiness: Arch and recent Debian mark the system interpreter externally-managed, and
+`pip install` there fails outright.
+
+By hand:
+
+```sh
+python3 -m venv ~/.config/tui-wave/praat/pyenv
+~/.config/tui-wave/praat/pyenv/bin/pip install numpy scipy soundfile sounddevice pillow
+```
+
+tui-wave puts that environment at the front of `PATH` for the Praat process it starts, which is
+all the scripts need to find it — none of them is edited. With no such environment, `PATH` is
+left untouched and the scripts use whatever `python3` is already there, so a system-wide install
+of those packages works too.
+
+Four of the `py` processes open a window of their own — a spatial trajectory painter, a step
+arranger, a performance launcher and a spectrogram eraser. Those run with no time limit, because
+you decide when they are done. `Esc` cancels.
 
 ---
 

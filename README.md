@@ -53,6 +53,15 @@ Release builds for Linux exist. A build from source gives you the most current v
 
 ## Prerequisites
 
+**The quick way.** `./install.sh` does everything below on macOS and Linux — toolchain, build
+dependencies, Praat, the script submodule, the optional Python environment, then builds and
+installs. It asks before anything needing `sudo`, `--dry-run` shows exactly what it would run,
+and it never touches your system Python. It deliberately does not install CDP: those binaries
+are a separate licensed download (see below).
+
+Everything after this section is what that script automates, for anyone who would rather do it
+by hand or is on Windows.
+
 You need the Rust toolchain, version 1.85 or newer. The project uses the 2024 edition. Install
 it from <https://rustup.rs>:
 
@@ -177,7 +186,7 @@ just as well. The tui-wave catalog does not depend on one CDP release.
 ## Optional: Praat support
 
 praatAudioTools is a collection of sound-transformation scripts for Praat, by Shai Cohen of
-Bar-Ilan University. tui-wave runs 352 of them: granular, spectral, reverb, distortion, spatial,
+Bar-Ilan University. tui-wave runs 434 of them: granular, spectral, reverb, distortion, spatial,
 generative and more. They share the `Ctrl+p` browser with CDP, under a **Praat** domain, and a
 chain (`Ctrl+h`) can mix the two freely.
 
@@ -214,6 +223,40 @@ If you forget, tui-wave says exactly that when you run a Praat process. Point
 
 Nothing is installed into your Praat setup, and your Praat preferences folder is never written
 to.
+
+### Optional: the `py` process group
+
+34 of those scripts do their work in Python rather than in Praat: they hand the audio to a
+helper script and read the result back. They appear under their own **py** group in the browser,
+so the extra requirement is visible before you pick one rather than a surprise when you run it.
+Everything in the other thirteen groups works without any of this.
+
+They need three Python packages, and two more for the interactive ones:
+
+| Package | Needed for |
+|---|---|
+| `numpy`, `scipy`, `soundfile` | all 34 — the array maths and WAV I/O every helper uses |
+| `sounddevice` | Arranger and Performance Launcher, which audition while you work |
+| `pillow` | Spectral Eraser, which paints on a spectrogram image |
+
+`./install.sh` asks whether to install them and puts them in a virtual environment tui-wave
+owns, at `~/.config/tui-wave/praat/pyenv`. **Your system Python is never modified** — which
+matters on Arch and recent Debian, where it is marked externally-managed and `pip install`
+refuses outright. To do it by hand:
+
+```sh
+python3 -m venv ~/.config/tui-wave/praat/pyenv
+~/.config/tui-wave/praat/pyenv/bin/pip install numpy scipy soundfile sounddevice pillow
+```
+
+tui-wave puts that environment ahead of your `PATH` for the Praat process it starts, so the
+scripts find it without any of them being edited. If the environment does not exist, `PATH` is
+left alone and the scripts use whatever `python3` you already have — so if those packages are
+already installed system-wide, nothing more is needed.
+
+Four of these open a window of their own — a spatial trajectory painter, a step arranger, a
+performance launcher, a spectrogram eraser. They run with no time limit, since you are the one
+deciding when they are finished; `Esc` cancels.
 
 ## Development
 
