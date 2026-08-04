@@ -11242,6 +11242,10 @@ impl App {
     /// five-second synthesised drone over a selection is not what "generate" means, and a result
     /// at a different rate could not be spliced at all — it was refused outright.
     ///
+    /// Every **interactive** process, for the same reason as the two groups below: the window
+    /// is where the result was decided, so it is a new piece rather than an edit of the
+    /// selection.
+    ///
     /// The whole `Vector Chain` group, for a related reason: those are not processes at all but
     /// fixed four-stage *pipelines* of other processes, and what comes out the far end is
     /// nothing like what went in. `chain_1` runs segmentation and reordering, then spectral
@@ -11281,6 +11285,12 @@ impl App {
                 .iter()
                 .any(|p| matches!(p.kind, crate::model::cdp::ParamKind::FolderPath))
             || declares_a_channel_count(&def.title)
+            // And any process you drive **interactively**. What comes back is the arrangement
+            // you built in its own window — a painted trajectory, a step sequence, an erased
+            // spectrogram — whose length and shape you chose there and which bears no fixed
+            // relation to whatever was selected when you launched it. Splicing would destroy
+            // the material you were working from to make room for the thing you made out of it.
+            || def.interactive
     }
 
     /// Whether any step of `chain` — at any nesting depth — actually runs a CDP binary.
@@ -22937,6 +22947,18 @@ mod tests {
             assert!(
                 App::praat_opens_new_buffer(def),
                 "{key} takes a folder of sounds and must not splice over the selection"
+            );
+        }
+
+        // Anything you drive in its own window: the result is what you built there.
+        let interactive: Vec<_> = catalog.processes.iter().filter(|p| p.interactive).collect();
+        assert_eq!(interactive.len(), 4, "the four Tk editors");
+        for def in interactive {
+            assert!(
+                App::praat_opens_new_buffer(def),
+                "{}: an interactive process must not splice over the selection it was \
+                 launched from",
+                def.key
             );
         }
 
