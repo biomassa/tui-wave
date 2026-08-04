@@ -1,3 +1,4 @@
 [submodule "third_party/praat-audiotools"]
 	path = third_party/praat-audiotools
 	url = https://github.com/ShaiCohen-ops/Praat-plugin_AudioTools
+	branch = main
