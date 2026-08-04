@@ -69673,3 +69673,49 @@ description = ""
 automatable = false
 kind = "toggle"
 default = false
+
+[[process]]
+key = "praat_generative_synthesis_tui_wave_record"
+bin = "Generative & Synthesis/record.praat"
+title = "Record"
+category = "praat"
+subcategory = "Generative"
+short_description = "Record from the system's selected input device into a new buffer"
+description = "Records from the microphone for a fixed time and opens the result as a new buffer. Captures from whichever input device the system sound settings currently select. Needs no open file and ignores any selection -- a recording is new material, not an edit of what you had. Requires Praat, like every process in this group.\n\nSample rate should usually match the session you intend to mix this into; a 44100 take dropped into a 96000 project plays at the wrong pitch and speed. Input gain is Praat's own capture gain, 1.0 being unattenuated."
+praat_builtin = true
+input = "none"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Duration_seconds_(0.1-3600)"
+description = ""
+automatable = false
+kind = "number"
+min = 0.1
+max = 3600.0
+step = 0.1
+default = 10.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Sample_rate"
+description = ""
+automatable = false
+kind = "choice"
+options = ["44100", "48000", "88200", "96000", "192000", "22050", "16000", "8000"]
+default = 0
+
+[[process.params]]
+name = "Input_gain_(0-1)"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = 1.0
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"

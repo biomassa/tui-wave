@@ -277,6 +277,18 @@ fn run_job_body(
         input_paths.push(path);
     }
 
+    // A built-in process's script ships with the app rather than living in the submodule, so
+    // there is no file to read — the text travels in the plan and is written here beside the
+    // driver, which calls it by bare filename. See `model::praat::builtin` for why it is
+    // embedded rather than installed.
+    if let Some(builtin) = &job.planned.builtin_source {
+        let path = temp_dir.join(&builtin.script_name);
+        std::fs::write(&path, &builtin.source).map_err(|e| PraatError::OutputRead {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        })?;
+    }
+
     // A process whose settings live in a Praat `beginPause` dialog runs against a rewritten
     // *copy* of the script, written here beside the driver — the dialog cannot be shown under
     // `--run` at all, it segfaults Praat outright. The original in the submodule is only read.
@@ -626,6 +638,7 @@ mod tests {
                 picture_name: None,
                 script_path: PathBuf::from("/unused"),
                 pause_rewrite: None,
+                builtin_source: None,
                 label: "test".into(),
             },
             inputs: vec![vec![vec![0.0f32; 1000], vec![0.0f32; 1000]]],

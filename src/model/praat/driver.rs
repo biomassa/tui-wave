@@ -89,12 +89,25 @@ pub enum DriverError {
 /// says nothing about what the `true` selects, and both fields already need explaining.
 /// [`Default`] is the pre-picture behaviour exactly — one input, no picture — which is what most
 /// call sites and tests want.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DriverOptions {
-    /// How many Sound objects the script expects selected. `0` is normalised to `1`.
+    /// How many Sound objects the script expects selected.
+    ///
+    /// `0` is a real value, not a mistake to normalise: a Record or generator script creates its
+    /// Sound rather than being handed one. It used to be clamped to 1, which is why [`Default`]
+    /// below is written by hand — a derived one would give `0`, silently turning every call site
+    /// that says `..Default::default()` into a zero-input run.
     pub input_count: usize,
     /// Save Praat's Picture window to a third `outfile` path after the audio is written.
     pub save_picture: bool,
+}
+
+impl Default for DriverOptions {
+    /// One input, no picture — what all but two of the catalogued processes want, and exactly
+    /// the behaviour that existed before either field did.
+    fn default() -> Self {
+        Self { input_count: 1, save_picture: false }
+    }
 }
 
 impl std::fmt::Display for DriverError {
@@ -145,7 +158,7 @@ pub fn driver_script(
     args: &[DriverArg],
     options: DriverOptions,
 ) -> Result<String, DriverError> {
-    let input_count = options.input_count.max(1);
+    let input_count = options.input_count;
 
     let mut call = format!("runScript: {}", praat_string_literal(script_path));
     for arg in args {
@@ -171,7 +184,16 @@ pub fn driver_script(
     for i in 1..=input_count {
         reads.push_str(&format!("snd{i} = Read from file: input_file_{i}$\n"));
     }
-    let selection = (1..=input_count).map(|i| format!("snd{i}")).collect::<Vec<_>>().join(", ");
+    // A zero-input process has nothing to select, and `selectObject:` with no arguments is a
+    // syntax error rather than a no-op — so the line is omitted entirely rather than emitted
+    // empty. The script called next is expected to *create* the Sound (Record, or any
+    // generator), which `select all` below then finds exactly as it finds a transformed one.
+    let selection = if input_count == 0 {
+        String::new()
+    } else {
+        let objects = (1..=input_count).map(|i| format!("snd{i}")).collect::<Vec<_>>().join(", ");
+        format!("selectObject: {objects}\n")
+    };
 
     let picture = if options.save_picture {
         "nocheck Select outer viewport: 0, 12, 0, 12\n\
@@ -187,7 +209,7 @@ pub fn driver_script(
     Ok(format!(
         "{form}\
          {reads}\
-         selectObject: {selection}\n\
+         {selection}\
          {call}\n\
          select all\n\
          n = numberOfSelected(\"Sound\")\n\
@@ -343,12 +365,36 @@ mod tests {
         assert!(first < second, "inputs must be read in declaration order");
     }
 
-    /// Zero is not a meaningful input count and must not produce a script that selects nothing.
+    /// Zero inputs is now a real case — a process that *creates* its Sound rather than
+    /// transforming one (Record, and any generator that follows it). It used to be clamped to
+    /// one, on the reasoning that a script selecting nothing is a broken script; the clamp was
+    /// the wrong half of that, since what breaks is emitting `selectObject:` with no arguments
+    /// (a syntax error), not having nothing to select. So the line is omitted instead.
     #[test]
-    fn an_input_count_of_zero_is_treated_as_one() {
+    fn an_input_count_of_zero_reads_and_selects_nothing() {
         let script = driver_script("/p/x.praat", &[], DriverOptions { input_count: 0, ..Default::default() }).unwrap();
+        // No *input* selection. `selectObject: last` still appears in the epilogue, which is
+        // how the result gets saved and is not what this is about.
+        assert!(!script.contains("selectObject: snd"), "nothing exists to select yet:\n{script}");
+        assert!(!script.contains("selectObject: \n"), "no empty select:\n{script}");
+        assert!(!script.contains("Input_file"), "no input form field:\n{script}");
+        assert!(!script.contains("Read from file"), "nothing to read:\n{script}");
+        // The output leg is unchanged: whatever Sound the called script created is saved.
+        assert!(script.contains("outfile Output_file"));
+        assert!(script.contains("runScript: \"/p/x.praat\""));
+        assert!(script.contains("Save as 32-bit WAV file: output_file$"));
+        // And the guard that turns "the script made nothing" into a real error still applies.
+        assert!(script.contains("praat script produced no Sound object"));
+    }
+
+    /// An ordinary one-input process is byte-identical to before zero-input existed — the
+    /// guarantee that this change cannot alter how any of the 434 catalogued processes run.
+    #[test]
+    fn one_input_still_reads_and_selects_exactly_as_before() {
+        let script = driver_script("/p/x.praat", &[], DriverOptions::default()).unwrap();
+        assert!(script.contains("    infile Input_file_1\n"));
+        assert!(script.contains("snd1 = Read from file: input_file_1$\n"));
         assert!(script.contains("selectObject: snd1\n"));
-        assert!(!script.contains("selectObject: \n"));
     }
 
     /// The picture costs nothing when it is not asked for: no third form field, no save.
