@@ -120,6 +120,18 @@ GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
     "AI & Adaptive/Gesture-Based_Hard_Quantization.praat": {
         "why": "chooseFolder$ is a fallback for a blank Folder_path field, which is now unpickable-empty",
     },
+    # Two more of the blank-field-falls-back-to-a-dialog shape, identical to the two above.
+    # `OT_CORPUS_CONCATENATOR`'s own changelog names the idiom: "the typed path is whitespace-
+    # and trailing-slash-trimmed, a blank field falls back to a chooseFolder$ dialog". Both
+    # guard the call with `if directory$ == ""`, and both fields become `ParamKind::FolderPath`,
+    # which blocks Apply until a folder is picked -- so blank is unreachable and so is the
+    # dialog.
+    "AI & Adaptive/OT_CORPUS_CONCATENATOR.praat": {
+        "why": "chooseFolder$ is a fallback for a blank Folder_path field, which cannot be blank",
+    },
+    "AI & Adaptive/Timbral_Similarity_Browser.praat": {
+        "why": "chooseFolder$ is a fallback for a blank Folder field, which cannot be blank",
+    },
     # The only `View & Edit` here, and it sits under one option of one menu: pan mode 8 is a
     # two-pass "draw the pan curve by hand" workflow that opens a RealTier editor and asks the
     # user to come back. The other seven modes never touch it. Dropping that option leaves a
@@ -956,6 +968,13 @@ GENERATORS: dict[str, str] = {
     # immediately here, so the whole run took 5.6s wall clock.
     "AI & Adaptive/Bayesian_Drone_Weaver.praat":
         "builds a drone from a folder of clips; the selection is not its material",
+    # A pure generator: builds a Risset-style mutation study from its own parameters. Verified
+    # by running it -- ends `selectObject: "Sound " + master_name$` and leaves exactly one Sound
+    # object (`Master_Mix_...`, the requested duration), in 0.6s. Its `Play` is guarded by
+    # `show_visuals`, which SILENCE_RE already forces off. `chain_7` runs it as its third stage,
+    # so it was already reachable through a chain but not on its own.
+    "Generative & Synthesis/Risset\'s_Mutations.praat":
+        "generates a mutation study from its own parameters; reads no input sound",
 }
 
 OUT_OF_SCOPE: dict[str, str] = {
