@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased
+## 2026-08-04 (2.4.0)
+
+- **Process ▸ Mix Multichannel to Stereo.** A per-channel mixdown: every source channel gets a
+  destination — Left, Right, Both or Skip — and its own attenuation in dB, summed into a new
+  stereo buffer. It opens on channel 1 left, channel 2 right, alternating, at -6 dB a channel,
+  which is the routing the file was already playing back through and a level with headroom to
+  spare; unity everywhere is the one setting guaranteed to clip.
+
+  The list scrolls, because 30-plus channels is the case this exists for. ←/→ cycle a channel's
+  destination, typing edits its attenuation, `Del` silences it without disturbing where it was
+  going. A channel sent to Both is attenuated a further 3 dB per leg so centred material does
+  not sit louder than anything panned.
+
+  The result is a **new buffer**, leaving the multichannel source open beside it — which is what
+  you want while auditioning a routing. An active selection is honoured, so you can check a
+  routing on one passage before committing to the whole take.
+
+- **The mixdown's tanh limiter is optional, on by default, and its ceiling is yours to set.** It
+  runs on the summed legs rather than on each channel on the way in — limiting each contribution
+  bounds each one and still lets the sum run past full scale. It starts at -1 dBFS, the same
+  ceiling multichannel playback folds against, so a mix opens limiting where you were monitoring.
+  Leaving it on costs a quiet mix nothing: tanh is unity-gain for small signals.
 
 - **`./install.sh`** — one script that sets tui-wave up on macOS and Linux: Rust toolchain,
   build dependencies, Praat, the script submodule, the optional Python environment, then builds
@@ -89,6 +110,12 @@
 - The dual-input tag reads `2 inputs` rather than `>1 inputs`. Those processes take exactly
   two, and the old wording was easy to confuse with the open-ended `N inputs` tag sitting
   beside it in the same list.
+
+- Every install section in the README and the documentation now leads with `./install.sh`.
+  Following the docs top to bottom previously meant installing the toolchain, the platform
+  dependencies, Praat and the script submodule by hand before learning one command does all four.
+
+- Bumped version to 2.4.0.
 
 ## 2026-08-03 (2.3.0)
 
