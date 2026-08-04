@@ -3991,6 +3991,170 @@ kind = "toggle"
 default = false
 
 [[process]]
+key = "praat_ai_adaptive_ot_corpus_concatenator"
+bin = "AI & Adaptive/OT_CORPUS_CONCATENATOR.praat"
+title = "OT CORPUS CONCATENATOR"
+category = "praat"
+subcategory = "AI & Adaptive"
+short_description = "OT Corpus Concatenator - Optimality Theory-inspired audio selection and concatenation based on weighted constraint violations"
+description = "OT Corpus Concatenator - Optimality Theory-inspired audio selection and concatenation based on weighted constraint violations."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+
+[[process.script_presets]]
+option = 1
+params = [3, 4, 5, 6]
+values = [2.0, 0.0, 3.0, 0.5]
+
+[[process.script_presets]]
+option = 2
+params = [3, 4, 5, 6]
+values = [0.0, 2.0, 1.0, 3.0]
+
+[[process.script_presets]]
+option = 3
+params = [3, 4, 5, 6]
+values = [1.0, 1.0, 1.0, 1.0]
+
+[[process.script_presets]]
+option = 4
+params = [3, 4, 5, 6]
+values = [0.5, 0.5, 5.0, 0.0]
+
+[[process.script_presets]]
+option = 5
+params = [3, 4, 5, 6]
+values = [0.5, 0.5, 0.5, 5.0]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Manual", "Bright & Energetic", "Dark & Stable", "Balanced", "Maximum Energy", "Timbral Consistency"]
+default = 0
+
+[[process.params]]
+name = "Limit_files"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 10.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Folder_path"
+description = ""
+automatable = false
+kind = "folder_path"
+
+[[process.params]]
+name = "Weight_darkness"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Weight_brightness"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Weight_energy"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 2.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Weight_stability"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Stability_measure"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Dispersion (SD of C1)", "Temporal (mean frame-to-frame change)"]
+default = 0
+
+[[process.params]]
+name = "Join_mode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Hard cut", "Short crossfade", "Long crossfade"]
+default = 0
+
+[[process.params]]
+name = "Crossfade_ms"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 30.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Normalize_output_peak"
+description = ""
+automatable = false
+kind = "toggle"
+default = true
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
 key = "praat_ai_adaptive_pca_timbre_selector"
 bin = "AI & Adaptive/PCA_Timbre_Selector.praat"
 title = "PCA Timbre Selector"
@@ -5015,6 +5179,166 @@ description = ""
 automatable = false
 kind = "toggle"
 default = false
+
+[[process]]
+key = "praat_ai_adaptive_timbral_similarity_browser"
+bin = "AI & Adaptive/Timbral_Similarity_Browser.praat"
+title = "Timbral Similarity Browser"
+category = "praat"
+subcategory = "AI & Adaptive"
+short_description = "Timbral Similarity Browser - Orders sounds from a folder by MFCC-based timbral similarity using a nearest-neighbor path"
+description = "Timbral Similarity Browser - Orders sounds from a folder by MFCC-based timbral similarity using a nearest-neighbor path.\n\nSimilarity model: each sound is reduced to the TIME-AVERAGED MFCC vector and compared by Euclidean distance. This is a global average timbre model, not a model of timbral evolution - two files with the same mean MFCC but completely different trajectories come out near-identical. The Standardized metric equalizes the weight of each coefficient; neither variant uses variance, deltas, covariance or DTW. Mean + SD, frame-distribution distance and trajectory DTW are the obvious extensions if evolution matters for a given collection."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 1
+preset_custom_option = 3
+
+[[process.script_presets]]
+option = 0
+params = [4, 5, 6]
+values = [12.0, 0.015, 0.005]
+
+[[process.script_presets]]
+option = 1
+params = [4, 5, 6]
+values = [24.0, 0.02, 0.005]
+
+[[process.script_presets]]
+option = 2
+params = [4, 5, 6]
+values = [6.0, 0.015, 0.01]
+
+[[process.params]]
+name = "Folder"
+description = ""
+automatable = false
+kind = "folder_path"
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Standard (12 MFCC)", "Detailed (24 MFCC)", "Fast (6 MFCC)", "Custom (use Analysis Parameters below)"]
+default = 0
+
+[[process.params]]
+name = "Max_files_to_load"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Target_sample_rate"
+description = ""
+automatable = false
+kind = "choice"
+options = ["First loaded file", "Highest in collection", "44100 Hz", "48000 Hz"]
+default = 0
+
+[[process.params]]
+name = "Num_coefficients"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 12.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Window_length"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.015
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Time_step"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.005
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Distance_metric"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Raw mean MFCC", "Standardized mean MFCC"]
+default = 0
+
+[[process.params]]
+name = "Start_mode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["First analyzable file", "Most central (medoid)", "Most isolated", "Shortest greedy path (try all starts)"]
+default = 0
+
+[[process.params]]
+name = "Join_mode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Hard concatenate", "Short fades", "Crossfade"]
+default = 0
+
+[[process.params]]
+name = "Join_fade_s"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.01
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Output_level"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Preserve", "Conditional limiter", "Normalize to 0.99"]
+default = 2
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Auto_play"
+description = ""
+automatable = false
+kind = "toggle"
+default = true
 
 [[process]]
 key = "praat_analysis_acoustic_pedagogy"
@@ -28294,6 +28618,46 @@ default = false
 
 [[process.params]]
 name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_generative_synthesis_risset_s_mutations"
+bin = "Generative & Synthesis/Risset's_Mutations.praat"
+title = "Risset's Mutations"
+category = "praat"
+subcategory = "Generative"
+short_description = "Risset-inspired timbre-mutation generator"
+description = "Risset-inspired timbre-mutation generator. Scheduled sine events are morphed through waveshaping spectra (odd-harmonic \"woody\", brassy, and high-order \"glassy\" Chebyshev shapes) that swell in and out mid-event, so each tone mutates in timbre over its duration."
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["1. Full Composition (3-Part Arc)", "2. Study in Odd Harmonics (Woody/Hollow)", "3. Study in High Order (Glassy/Chime)", "4. Study in Density (Brassy/Chaos)"]
+default = 0
+
+[[process.params]]
+name = "master_duration"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 30.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "show_visuals"
 description = ""
 automatable = false
 kind = "toggle"
