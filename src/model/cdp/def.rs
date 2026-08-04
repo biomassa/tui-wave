@@ -780,26 +780,6 @@ pub struct ParamDef {
     /// would already get on its own.
     #[serde(default)]
     pub before_outfile: bool,
-    /// True for a Praat `boolean` param whose *only* effect is to open a second Praat dialog
-    /// — a `beginPause` block holding advanced settings. Ticking it would try to put a GTK
-    /// window on screen under `praat --run`, which **segfaults** (exit 139, core dumped;
-    /// confirmed against praat 6.6.30). The field is rendered greyed and refuses to tick,
-    /// exactly as a drawing toggle does when the terminal has no graphics — see
-    /// `praat_toggle_block`, which resolves both reasons in one place so the three sites that
-    /// care (Space, click, render) cannot disagree about whether a row is live.
-    ///
-    /// The param is deliberately **kept and still emitted**, always as its `false` default,
-    /// rather than dropped from the catalog. Praat fills a script's `form` fields
-    /// *positionally* from `runScript:`'s arguments, so removing one shifts every argument
-    /// after it and silently feeds each field its neighbour's value. Dropping a *choice
-    /// option* is safe and needs no flag (Praat matches an `optionmenu` by label, and
-    /// `DriverArg::Text` carries the label) — dropping a param is not.
-    ///
-    /// The advanced settings therefore keep whatever defaults the script assigns them just
-    /// above its own `if show_advanced_settings` — which is what running the script with the
-    /// box unticked has always done anyway.
-    #[serde(default)]
-    pub opens_praat_dialog: bool,
     /// `Some(n)` for a param **hoisted out of a Praat `beginPause` block** — `n` is that
     /// block's index in the script, counting from 0 in source order.
     ///
@@ -1055,6 +1035,21 @@ pub struct ProcessDef {
     /// into a closed pipe — "broken pipe" (user report, 2026-08-03).
     #[serde(default)]
     pub interactive: bool,
+    /// Praat `boolean` form fields that are deleted from the script and assigned a fixed value
+    /// instead, as `(label, value)`.
+    ///
+    /// For a switch whose only job is to gate a `beginPause` block that has been hoisted into
+    /// this app's dialog — `Show_advanced_settings`. Once those parameters are ordinary fields
+    /// here, the switch controls nothing a user could act on: it must stay on or they silently
+    /// stop applying, and turning it on shows nothing new. Shipped first as a locked, greyed
+    /// checkbox, which read as a broken control and explained itself with a message about a
+    /// dialog that no longer opens.
+    ///
+    /// Removing it from the *form* rather than hiding the row is what keeps the two sides
+    /// consistent: Praat fills a form positionally, so a field the catalog no longer declares
+    /// must not remain in the script waiting for an argument.
+    #[serde(default)]
+    pub praat_form_locks: Vec<(String, bool)>,
     /// True for a process whose binary can't correctly read the `WAVE_FORMAT_EXTENSIBLE`
     /// WAV header `hound` (this project's WAV library) writes for any file with
     /// `bits_per_sample > 16` — which is every input file this app ever sends CDP, since
@@ -1350,7 +1345,6 @@ mod tests {
             default_from_dc_offset: false,
             rows_match_input_count: false,
             before_outfile: false,
-            opens_praat_dialog: false,
             praat_pause_block: None,
             key_value_group: None,
             key_value_key: None,
@@ -1386,6 +1380,7 @@ mod tests {
             output_channels: None,
             output_new_buffer: false,
             interactive: false,
+            praat_form_locks: Vec::new(),
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1417,7 +1412,6 @@ mod tests {
             default_from_dc_offset: false,
             rows_match_input_count: false,
             before_outfile: false,
-            opens_praat_dialog: false,
             praat_pause_block: None,
             key_value_group: None,
             key_value_key: None,
@@ -1435,7 +1429,6 @@ mod tests {
             default_from_dc_offset: false,
             rows_match_input_count: false,
             before_outfile: false,
-            opens_praat_dialog: false,
             praat_pause_block: None,
             key_value_group: None,
             key_value_key: None,
@@ -1462,6 +1455,7 @@ mod tests {
             output_channels: None,
             output_new_buffer: false,
             interactive: false,
+            praat_form_locks: Vec::new(),
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1498,7 +1492,6 @@ mod tests {
             default_from_dc_offset: false,
             rows_match_input_count: false,
             before_outfile: false,
-            opens_praat_dialog: false,
             praat_pause_block: None,
             key_value_group: None,
             key_value_key: None,
@@ -1557,6 +1550,7 @@ mod tests {
             output_channels: None,
             output_new_buffer: false,
             interactive: false,
+            praat_form_locks: Vec::new(),
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1592,7 +1586,6 @@ mod tests {
             default_from_dc_offset: false,
             rows_match_input_count: false,
             before_outfile: false,
-            opens_praat_dialog: false,
             praat_pause_block: None,
             key_value_group: None,
             key_value_key: None,
@@ -1623,6 +1616,7 @@ mod tests {
             output_channels: None,
             output_new_buffer: false,
             interactive: false,
+            praat_form_locks: Vec::new(),
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1667,7 +1661,6 @@ mod tests {
             default_from_dc_offset: false,
             rows_match_input_count: false,
             before_outfile: false,
-            opens_praat_dialog: false,
             praat_pause_block: None,
             key_value_group: None,
             key_value_key: None,
@@ -1697,6 +1690,7 @@ mod tests {
             output_channels: None,
             output_new_buffer: false,
             interactive: false,
+            praat_form_locks: Vec::new(),
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1729,7 +1723,6 @@ mod tests {
             // The real argv is `crystal rotate <mode> fi [fi2..] fo vdat ...` — the datafile
             // sits *after* the outfile, so this is the ordinary (default) placement.
             before_outfile: false,
-            opens_praat_dialog: false,
             praat_pause_block: None,
             key_value_group: None,
             key_value_key: None,
@@ -1756,6 +1749,7 @@ mod tests {
             output_channels: None,
             output_new_buffer: false,
             interactive: false,
+            praat_form_locks: Vec::new(),
             requires_simple_wav_input: false,
             sidecar_extension: None,
             needs_head_tail_marks: false,

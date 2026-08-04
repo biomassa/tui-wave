@@ -64,6 +64,11 @@ pub struct PauseRewrite {
     /// Assignments replacing each pause block, keyed by the block's index in the original
     /// script. A block with no entry is deleted outright — see `rewrite_pause_blocks`.
     pub blocks: BTreeMap<usize, Vec<Assignment>>,
+    /// `boolean` form fields to delete from the script and assign instead, as (label, value).
+    /// For a switch that exists only to gate a hoisted block: once its parameters are in this
+    /// app's dialog the switch controls nothing, so it is removed rather than shown as a
+    /// checkbox that refuses to be clicked.
+    pub form_locks: Vec<(String, f64)>,
 }
 
 /// The assignment standing in for one hoisted param, or `None` for a param that travels as an
@@ -264,9 +269,15 @@ pub fn plan_praat_job(
     }
 
     let script_path = audiotools_dir.join(&def.bin);
-    let pause_rewrite = (!blocks.is_empty()).then(|| PauseRewrite {
+    let form_locks: Vec<(String, f64)> = def
+        .praat_form_locks
+        .iter()
+        .map(|(label, on)| (label.clone(), if *on { 1.0 } else { 0.0 }))
+        .collect();
+    let pause_rewrite = (!blocks.is_empty() || !form_locks.is_empty()).then(|| PauseRewrite {
         script_name: REWRITTEN_SCRIPT.to_string(),
         blocks,
+        form_locks,
     });
     let input_count = praat_input_count(def);
     let save_picture = draws_picture(def, values);
@@ -357,32 +368,6 @@ mod tests {
     use super::*;
     use crate::model::cdp::def::{Category, NumberScale, ParamDef};
 
-    /// A param marked `opens_praat_dialog` must be a toggle that defaults **off**, because
-    /// that default is the only value it can ever have — the app greys the row and refuses to
-    /// tick it. One defaulting `true` would open the dialog on every single run and segfault
-    /// Praat, with no way for the user to turn it off.
-    ///
-    /// Checked against the real generated catalog rather than a fixture: these entries come
-    /// from `scripts/convert_praat_audiotools.py`'s `GUI_BLOCKING_OVERRIDES`, and a converter
-    /// change is exactly what would break the invariant.
-    #[test]
-    fn a_dialog_opening_toggle_is_always_a_toggle_defaulting_off() {
-        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
-        let mut seen = 0;
-        for def in &catalog.processes {
-            for param in def.params.iter().filter(|p| p.opens_praat_dialog) {
-                seen += 1;
-                assert!(
-                    matches!(param.kind, ParamKind::Toggle { default: false }),
-                    "{}: {:?} is marked opens_praat_dialog but is {:?}",
-                    def.key,
-                    param.name,
-                    param.kind
-                );
-            }
-        }
-        assert!(seen >= 3, "expected the locked advanced-settings toggles, found {seen}");
-    }
 
     fn number(name: &str, default: f64) -> ParamDef {
         ParamDef {
@@ -394,7 +379,6 @@ mod tests {
             required_list: false,
             list_is_time_sequence: false,
             before_outfile: false,
-            opens_praat_dialog: false,
             praat_pause_block: None,
             key_value_group: None,
             key_value_key: None,
@@ -436,6 +420,7 @@ mod tests {
             output_channels: None,
             output_new_buffer: false,
             interactive: false,
+            praat_form_locks: Vec::new(),
             requires_simple_wav_input: false,
             sidecar_extension: None,
             min_inputs: None,
@@ -710,7 +695,7 @@ mod pause_hoist_tests {
 
         let job = plan_praat_job(def, &values, &checkout()).expect("plans");
         let rewrite = job.pause_rewrite.as_ref().expect("this entry rewrites");
-        let script = crate::model::praat::rewrite::rewrite_pause_blocks(&source, &rewrite.blocks)
+        let script = crate::model::praat::rewrite::rewrite_pause_blocks(&source, &rewrite.blocks, &[])
             .expect("rewrites");
 
         // The exact variable names the script reads further down — note `output_Gain` keeps its
@@ -812,7 +797,7 @@ mod pause_hoist_tests {
             let job = plan_praat_job(def, &values, &checkout()).expect("plans");
             let rewrite = job.pause_rewrite.as_ref().expect("rewrites");
             let script =
-                crate::model::praat::rewrite::rewrite_pause_blocks(&source, &rewrite.blocks)
+                crate::model::praat::rewrite::rewrite_pause_blocks(&source, &rewrite.blocks, &[])
                     .expect("rewrites");
             // Read from the entry's own locked Algorithm choice, not parsed out of the title:
             // one of the algorithms is literally "Fibonacci (Mono)", so splitting the title on

@@ -262,15 +262,16 @@ fn declares_a_channel_count(title: &str) -> bool {
 }
 
 /// Why a Praat `boolean` param's row is greyed and refuses to tick.
+///
+/// One reason today. A second existed briefly — a toggle whose only job was to open a Praat
+/// dialog this app cannot show — but that is now handled by deleting the field from the script
+/// outright (`ProcessDef::praat_form_locks`), which is better: a switch that cannot be moved and
+/// controls nothing visible reads as a broken control, however carefully it explains itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PraatToggleBlock {
     /// A drawing toggle with nowhere to draw: it would still run the script's visualization
     /// code and still cost that time, but the figure could not be put on screen.
     NoGraphics,
-    /// A toggle whose only effect is to open a second Praat dialog — see
-    /// `ParamDef::opens_praat_dialog`. Unlike `NoGraphics` this can never be unblocked; the
-    /// window cannot be shown under `--run` at all, it segfaults Praat outright.
-    OpensDialog,
 }
 
 /// The one statement of when a Praat toggle is dead, shared by Space, mouse click and the
@@ -278,15 +279,12 @@ enum PraatToggleBlock {
 ///
 /// Backend-checked as well as name-checked for the drawing case: a CDP process could perfectly
 /// well have a parameter called `Show_something` that has nothing to do with Praat's Picture
-/// window. `opens_praat_dialog` needs no such guard, being set only by the Praat converter.
+/// window.
 fn praat_toggle_block(
     def: &crate::model::cdp::ProcessDef,
     param: &crate::model::cdp::def::ParamDef,
     graphics_available: bool,
 ) -> Option<PraatToggleBlock> {
-    if param.opens_praat_dialog {
-        return Some(PraatToggleBlock::OpensDialog);
-    }
     let drawing = def.backend() == crate::model::cdp::def::Backend::Praat
         && crate::model::praat::plan::is_picture_toggle_name(&param.name);
     (drawing && !graphics_available).then_some(PraatToggleBlock::NoGraphics)
@@ -3649,12 +3647,6 @@ impl App {
         match block {
             PraatToggleBlock::NoGraphics => format!(
                 "{name} needs graphics mode (View ▸ Graphics Mode) and a terminal with kitty or Sixel support."
-            ),
-            // No fix to offer, so the message says what the setting would have done and what
-            // happens instead, rather than implying something could be turned on to allow it.
-            PraatToggleBlock::OpensDialog => format!(
-                "{name} asks Praat to open a second dialog window, which cannot be shown from here. \
-                 The advanced settings it would have offered keep their defaults."
             ),
         }
     }
@@ -26070,6 +26062,7 @@ mod tests {
             output_channels: None,
             output_new_buffer: false,
             interactive: false,
+            praat_form_locks: Vec::new(),
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
@@ -26083,7 +26076,6 @@ mod tests {
                 required_list: false,
                 list_is_time_sequence: false,
                 before_outfile: false,
-            opens_praat_dialog: false,
             praat_pause_block: None,
             key_value_group: None,
             key_value_key: None,
@@ -29053,6 +29045,7 @@ mod tests {
             output_channels: None,
             output_new_buffer: false,
             interactive: false,
+            praat_form_locks: Vec::new(),
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
@@ -29066,7 +29059,6 @@ mod tests {
                 required_list: false,
                 list_is_time_sequence: false,
                 before_outfile: true,
-            opens_praat_dialog: false,
             praat_pause_block: None,
             key_value_group: None,
             key_value_key: None,
@@ -29141,6 +29133,7 @@ mod tests {
             output_channels: None,
             output_new_buffer: false,
             interactive: false,
+            praat_form_locks: Vec::new(),
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
@@ -29154,7 +29147,6 @@ mod tests {
                 required_list: false,
                 list_is_time_sequence: false,
                 before_outfile: true,
-            opens_praat_dialog: false,
             praat_pause_block: None,
             key_value_group: None,
             key_value_key: None,
@@ -35544,6 +35536,7 @@ mod tests {
             output_channels: None,
             output_new_buffer: false,
             interactive: false,
+            praat_form_locks: Vec::new(),
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
@@ -35557,7 +35550,6 @@ mod tests {
                 required_list: false,
                 list_is_time_sequence: false,
                 before_outfile: true,
-            opens_praat_dialog: false,
             praat_pause_block: None,
             key_value_group: None,
             key_value_key: None,
@@ -36462,37 +36454,6 @@ mod tests {
         // A dead key with no explanation reads as a bug, so the refusal names the fix.
         let error = error.as_deref().expect("the refusal must say why");
         assert!(error.contains("graphics"), "{error}");
-    }
-
-    /// A toggle whose only effect is to open a second Praat dialog is inert for a different
-    /// reason, and one that can never be lifted — the window segfaults Praat under `--run`
-    /// (exit 139), so there is no "turn something on and it works" to offer. Uses a real
-    /// catalog entry, since the whole point is that the converter marked one.
-    #[test]
-    fn a_dialog_opening_toggle_will_not_flip_even_with_graphics() {
-        let mut app = new_app(Some(doc(0.1, 44100)), None);
-        let found = app.cdp_catalog.processes.iter().enumerate().find_map(|(i, def)| {
-            def.params.iter().position(|p| p.opens_praat_dialog).map(|f| (i, f))
-        });
-        let (catalog_index, index) = found.expect("the converter marks at least one");
-        app.open_cdp_params(catalog_index);
-        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
-            *focus = index + 1;
-        }
-        // Not the graphics reason: this one holds whatever the terminal can do.
-        assert_eq!(app.praat_toggle_block(index), Some(PraatToggleBlock::OpensDialog));
-
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        let Some(Dialog::CdpParams { fields, error, .. }) = &app.dialog else { panic!("no dialog") };
-        assert!(
-            matches!(fields.get(index), Some(CdpField::Toggle { on: false })),
-            "the toggle flipped; ticking it would segfault Praat"
-        );
-        let error = error.as_deref().expect("the refusal must say why");
-        assert!(error.contains("dialog"), "{error}");
-        // No fix is offered, because there isn't one — saying "needs graphics mode" here would
-        // send someone to turn on a setting that changes nothing.
-        assert!(!error.contains("graphics"), "{error}");
     }
 
     /// The other toggles on the same process must stay live — `Play_result` works fine without
