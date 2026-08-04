@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-08-04 (2.5.0)
+
+- **Record, in CDP+Praat ▸ Generative.** Records from the microphone for a fixed number of
+  seconds and opens the result as a new buffer. It captures from whichever input device your
+  system sound settings currently select, and needs no file open — a recording is new material,
+  not an edit of whatever you had loaded, so it runs on an empty screen.
+
+  praatAudioTools has always been able to do this: ten of its Vector Chain `Live_*` processes
+  begin by recording. But the capture was welded to the chain that followed it, so there was no
+  way to reach it without also getting a Neural Drone and a Crystalline Reverb on the end. This
+  is that first stage on its own.
+
+  Duration, sample rate and input gain are yours to set. Pick the sample rate to match the
+  session you mean to use the take in — a 44100 recording dropped into a 96000 project plays at
+  the wrong pitch and speed. Requires Praat, like everything else in this group.
+
+- Bumped version to 2.5.0.
+
 ## 2026-08-04 (2.4.0)
 
 - **Process ▸ Mix Multichannel to Stereo.** A per-channel mixdown: every source channel gets a
