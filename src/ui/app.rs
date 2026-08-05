@@ -5757,11 +5757,16 @@ impl App {
                     self.cycle_dialog_curve(true);
                 }
             }
-            // Groups list is fully visible at once (no scrolling — see `Dialog::CdpBrowser`'s
-            // doc comment), so a page-step there would be indistinguishable from a
-            // single-step one; PageUp/PageDown only ever act on the process list, regardless
-            // of `group_focus`.
+            // In the Groups column these jump to the first/last group rather than stepping a
+            // page: that column never scrolls (see `Dialog::CdpBrowser`'s doc comment), so a
+            // page-step really would be indistinguishable from a single step — but reaching the
+            // end of a dozen-entry list without holding Down is worth having. In the Processes
+            // column they page through the list as before.
             KeyCode::PageUp => {
+                if let Some(Dialog::CdpBrowser { focus: CdpBrowserColumn::Groups, .. }) = self.dialog {
+                    self.cdp_browser_jump_group(false);
+                    return;
+                }
                 if let Some(Dialog::CdpBrowser { focus: CdpBrowserColumn::Processes, selected, desc_scroll, .. }) = self.dialog.as_mut() {
                     *selected = selected.saturating_sub(CDP_BROWSER_PAGE_SIZE);
                     *desc_scroll = 0;
@@ -5770,6 +5775,10 @@ impl App {
                 }
             }
             KeyCode::PageDown => {
+                if let Some(Dialog::CdpBrowser { focus: CdpBrowserColumn::Groups, .. }) = self.dialog {
+                    self.cdp_browser_jump_group(true);
+                    return;
+                }
                 if let Some(Dialog::CdpBrowser { focus: CdpBrowserColumn::Processes, entries, selected, desc_scroll, .. }) = self.dialog.as_mut() {
                     if !entries.is_empty() {
                         *selected = (*selected + CDP_BROWSER_PAGE_SIZE).min(entries.len() - 1);
@@ -6124,6 +6133,22 @@ impl App {
             }
             *group_selected =
                 (*group_selected as isize + delta).clamp(0, groups.len() as isize - 1) as usize;
+        }
+        self.refresh_cdp_browser_filter();
+    }
+
+    /// Sends the Groups column's highlight to its first or last entry.
+    ///
+    /// What PageUp/PageDown do there. A *page* step would be meaningless — the column never
+    /// scrolls, so every group is already on screen — but jumping to an end is not: the longest
+    /// domain lists a dozen groups plus `All`, and reaching the last one otherwise means holding
+    /// Down. Same reset of the process filter as a single step, so the two cannot disagree.
+    fn cdp_browser_jump_group(&mut self, to_last: bool) {
+        if let Some(Dialog::CdpBrowser { groups, group_selected, .. }) = self.dialog.as_mut() {
+            if groups.is_empty() {
+                return;
+            }
+            *group_selected = if to_last { groups.len() - 1 } else { 0 };
         }
         self.refresh_cdp_browser_filter();
     }
@@ -26672,6 +26697,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
+            praat_python_rewrite: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
@@ -29656,6 +29682,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
+            praat_python_rewrite: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
@@ -29745,6 +29772,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
+            praat_python_rewrite: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
@@ -31475,6 +31503,80 @@ mod tests {
         let Some(Dialog::CdpBrowser { groups, focus, .. }) = &app.dialog else { panic!("no dialog") };
         assert!(groups.is_empty());
         assert_eq!(*focus, CdpBrowserColumn::Processes, "focus must leave the emptied column");
+    }
+
+    /// PageUp/PageDown in the Groups column jump to the first/last group. A *page* step would be
+    /// meaningless there — the column never scrolls — but reaching the end of a dozen entries
+    /// without holding Down is not.
+    #[test]
+    fn page_keys_jump_to_the_first_and_last_group() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_browser();
+        // Time-domain: the widest Groups column, and one that is actually subdivided.
+        app.cdp_browser_move_domain(2);
+        if let Some(Dialog::CdpBrowser { focus, .. }) = app.dialog.as_mut() {
+            *focus = CdpBrowserColumn::Groups;
+        }
+        let Some(Dialog::CdpBrowser { groups, .. }) = &app.dialog else { panic!("no dialog") };
+        let last = groups.len() - 1;
+        assert!(last >= 3, "expected a subdivided domain, got {} groups", last + 1);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { group_selected, focus, .. }) = &app.dialog else { panic!() };
+        assert_eq!(*group_selected, last, "PageDown goes to the last group");
+        assert_eq!(*focus, CdpBrowserColumn::Groups, "focus stays in the column");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { group_selected, .. }) = &app.dialog else { panic!() };
+        assert_eq!(*group_selected, 0, "PageUp goes to the first group");
+
+        // Repeats are no-ops rather than wrapping or running off the end.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { group_selected, .. }) = &app.dialog else { panic!() };
+        assert_eq!(*group_selected, 0);
+    }
+
+    /// The jump must re-filter the process list, exactly as a single step does — otherwise the
+    /// highlighted group and the processes beside it would disagree.
+    #[test]
+    fn jumping_to_the_last_group_refilters_the_process_list() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_browser();
+        app.cdp_browser_move_domain(2);
+        if let Some(Dialog::CdpBrowser { focus, .. }) = app.dialog.as_mut() {
+            *focus = CdpBrowserColumn::Groups;
+        }
+        let Some(Dialog::CdpBrowser { entries, .. }) = &app.dialog else { panic!() };
+        let all_entries = entries.len();
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { groups, group_selected, entries, .. }) = &app.dialog else {
+            panic!()
+        };
+        let CdpGroupChoice::Named(name) = groups[*group_selected] else {
+            panic!("the last group must be a named one, not All")
+        };
+        assert!(!entries.is_empty(), "a listed group is never empty");
+        assert!(entries.len() < all_entries, "the list narrowed to {name}");
+    }
+
+    /// Neither key may act on the Processes column's list while Groups has focus, and vice
+    /// versa — the two share the keys and are told apart only by `focus`.
+    #[test]
+    fn page_keys_still_page_the_process_list_when_it_has_focus() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_browser();
+        if let Some(Dialog::CdpBrowser { focus, .. }) = app.dialog.as_mut() {
+            *focus = CdpBrowserColumn::Processes;
+        }
+        let Some(Dialog::CdpBrowser { group_selected, entries, .. }) = &app.dialog else { panic!() };
+        let group_before = *group_selected;
+        assert!(entries.len() > CDP_BROWSER_PAGE_SIZE, "need a list longer than a page");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { selected, group_selected, .. }) = &app.dialog else { panic!() };
+        assert_eq!(*selected, CDP_BROWSER_PAGE_SIZE, "the process list paged");
+        assert_eq!(*group_selected, group_before, "the group must not move");
     }
 
     /// Moving to a different domain rebuilds the Groups column and resets it to `All`. Group
@@ -36504,6 +36606,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
+            praat_python_rewrite: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![ParamDef {
                 rows_match_input_count: false,
