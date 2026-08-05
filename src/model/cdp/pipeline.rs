@@ -2645,6 +2645,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
+            praat_python_rewrite: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             params: vec![number_param("Speed", -96.0, 96.0, 0.0, NumberScale::Plain)],
         }

@@ -54,6 +54,20 @@ pub struct PraatPlannedJob {
     /// `Some` for a process whose script tui-wave ships itself — the runner writes this text
     /// into the job's temp directory and the driver calls it. See `praat::builtin`.
     pub builtin_source: Option<BuiltinScript>,
+    /// `Some` when the script picks its own Python interpreter and we have one to point it at.
+    /// The runner writes a copy with every interpreter assignment repointed. See
+    /// `praat::python` for why `PATH` alone cannot do this on macOS.
+    pub python_rewrite: Option<PythonRewrite>,
+}
+
+/// Repointing a `py`-group script's interpreter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PythonRewrite {
+    /// Name to write the rewritten copy under, inside the job's temp directory — relative for
+    /// the same reason [`PauseRewrite::script_name`] is.
+    pub script_name: String,
+    /// Absolute path to the interpreter every assignment is repointed at.
+    pub interpreter: String,
 }
 
 /// A script the app carries rather than reads from the submodule.
@@ -228,10 +242,30 @@ fn argument_for(def: &ProcessDef, index: usize, value: &ParamValue) -> Result<Dr
 ///
 /// `audiotools_dir` is the root of the praatAudioTools checkout; `def.bin` is a path relative to
 /// it (e.g. `Distortion/Wavefolder__Foldback_.praat`), so the two join to the script to run.
+/// Test-only now that every production caller supplies an interpreter. Kept because the ~25
+/// tests below are about parameters, drivers and pause hoisting, none of which involve Python,
+/// and threading a `None` through all of them would say nothing.
+#[cfg(test)]
 pub fn plan_praat_job(
     def: &ProcessDef,
     values: &[ParamValue],
     audiotools_dir: &Path,
+) -> Result<PraatPlannedJob, PraatPlanError> {
+    plan_praat_job_with(def, values, audiotools_dir, None)
+}
+
+/// [`plan_praat_job`] with an explicit Python interpreter for the `py` group.
+///
+/// A separate entry point rather than a fourth parameter on the original because the
+/// interpreter is irrelevant to all but 34 of the 435 catalogued processes, and every existing
+/// caller and test that has nothing to do with Python should not have to say so. `None` leaves
+/// each script's own discovery in place, which is right when no app-owned venv exists: someone
+/// with the packages on their system interpreter should keep working.
+pub fn plan_praat_job_with(
+    def: &ProcessDef,
+    values: &[ParamValue],
+    audiotools_dir: &Path,
+    python_interpreter: Option<&Path>,
 ) -> Result<PraatPlannedJob, PraatPlanError> {
     if def.backend() != Backend::Praat {
         return Err(PraatPlanError::NotAPraatProcess);
@@ -307,12 +341,26 @@ pub fn plan_praat_job(
             script_name: super::builtin::BUILTIN_SCRIPT.to_string(),
             source: source.to_string(),
         });
+    // A `py`-group script resolves its own interpreter, and on macOS resolves it to an absolute
+    // path that `PATH` cannot influence — so the venv the app installed is bypassed and every
+    // import fails. Repointing happens in a copy, like the pause rewrite. The two never co-occur
+    // (no py-group script has a pause dialog, asserted in this module's tests), so they share
+    // the copy's filename without any need to compose.
+    let python_rewrite = def
+        .praat_python_rewrite
+        .then_some(python_interpreter)
+        .flatten()
+        .map(|interpreter| PythonRewrite {
+            script_name: REWRITTEN_SCRIPT.to_string(),
+            interpreter: interpreter.to_string_lossy().into_owned(),
+        });
     // Both a rewritten copy and a built-in are siblings of the driver, so a bare filename
     // resolves — see `PauseRewrite::script_name`.
-    let called_script = match (&builtin_source, &pause_rewrite) {
-        (Some(builtin), _) => builtin.script_name.clone(),
-        (None, Some(rewrite)) => rewrite.script_name.clone(),
-        (None, None) => script_path.to_string_lossy().into_owned(),
+    let called_script = match (&builtin_source, &pause_rewrite, &python_rewrite) {
+        (Some(builtin), _, _) => builtin.script_name.clone(),
+        (None, Some(rewrite), _) => rewrite.script_name.clone(),
+        (None, None, Some(rewrite)) => rewrite.script_name.clone(),
+        (None, None, None) => script_path.to_string_lossy().into_owned(),
     };
     let driver_source = driver_script(
         &called_script,
@@ -331,6 +379,7 @@ pub fn plan_praat_job(
         label: def.title.clone(),
         pause_rewrite,
         builtin_source,
+        python_rewrite,
     })
 }
 
@@ -455,6 +504,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
+            praat_python_rewrite: false,
             requires_simple_wav_input: false,
             sidecar_extension: None,
             min_inputs: None,

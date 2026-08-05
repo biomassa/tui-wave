@@ -253,7 +253,15 @@ They need three Python packages, and two more for the interactive ones:
 `./install.sh` asks whether to install them and puts them in a virtual environment tui-wave
 owns, at `~/.config/tui-wave/praat/pyenv`. **Your system Python is never modified** — which
 matters on Arch and recent Debian, where it is marked externally-managed and `pip install`
-refuses outright. To do it by hand:
+refuses outright.
+
+tui-wave runs these scripts against that venv's interpreter directly, so it does not matter
+which Pythons your machine has or how Praat was launched. This is what makes the `py` group
+work on macOS: the scripts pick their own interpreter and on a Mac pick an *absolute* path
+(`/opt/homebrew/bin/python3` and friends), which no `PATH` setting can influence — so before
+this they quietly used a Python that had none of these packages.
+
+To do it by hand:
 
 ```sh
 python3 -m venv ~/.config/tui-wave/praat/pyenv

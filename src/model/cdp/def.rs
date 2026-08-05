@@ -1061,6 +1061,15 @@ pub struct ProcessDef {
     /// pause-rewritten copy.
     #[serde(default)]
     pub praat_builtin: bool,
+    /// True for a Praat script that picks its own Python interpreter — every `py`-group process.
+    ///
+    /// Set by the converter, which counts the script's bare-literal interpreter assignments. It
+    /// exists because those scripts hardcode *absolute* paths on macOS
+    /// (`/opt/homebrew/bin/python3`, `/Library/Frameworks/...`), which the app's `PATH`-based
+    /// venv mechanism cannot influence — so the venv is silently bypassed there and every import
+    /// fails. The app runs a copy with those assignments repointed; see `model::praat::python`.
+    #[serde(default)]
+    pub praat_python_rewrite: bool,
     /// True for a process whose binary can't correctly read the `WAVE_FORMAT_EXTENSIBLE`
     /// WAV header `hound` (this project's WAV library) writes for any file with
     /// `bits_per_sample > 16` — which is every input file this app ever sends CDP, since
@@ -1393,6 +1402,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
+            praat_python_rewrite: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1469,6 +1479,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
+            praat_python_rewrite: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1565,6 +1576,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
+            praat_python_rewrite: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1632,6 +1644,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
+            praat_python_rewrite: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1707,6 +1720,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
+            praat_python_rewrite: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1767,6 +1781,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
+            praat_python_rewrite: false,
             requires_simple_wav_input: false,
             sidecar_extension: None,
             needs_head_tail_marks: false,
