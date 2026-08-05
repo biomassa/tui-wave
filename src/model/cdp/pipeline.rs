@@ -63,9 +63,9 @@ pub struct Invocation {
     pub label: String,
     /// Relative filename this step is expected to produce — checked for existence
     /// (non-empty) after the step exits, independent of whether it's an intermediate
-    /// `.ana`/`.wav` or the job's final output (see CDP-PLAN.md §7: CDP never creates an
-    /// output file on failure, but a defensive existence check is cheap and catches any
-    /// exit-0-but-no-output edge case).
+    /// `.ana`/`.wav` or the job's final output. CDP never creates an output file on failure,
+    /// so this is belt-and-braces — but the check is cheap and catches any exit-0-but-no-output
+    /// edge case.
     pub expected_output: String,
 }
 
@@ -98,9 +98,9 @@ pub struct OutputWavSpec {
 }
 
 /// A `PercentOfAnaWindowCount` parameter can't be resolved until the real `.ana` file
-/// exists — see CDP-PLAN.md Phase 0 spike finding S5: CDP recalculates the actual analysis
-/// window length from the requested overlap factor in a way that can't be predicted before
-/// `pvoc anal` runs. The runner parses `ana_relative_name`'s header for `decfactor` after
+/// exists — CDP recalculates the actual analysis window length from the requested overlap
+/// factor in a way that can't be predicted before `pvoc anal` runs. The runner parses
+/// `ana_relative_name`'s header for `decfactor` after
 /// that step completes, computes the window count, and patches `target` before spawning
 /// that step.
 ///
