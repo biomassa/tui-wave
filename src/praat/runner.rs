@@ -289,6 +289,50 @@ fn run_job_body(
         })?;
     }
 
+    // A `py`-group script picks its own interpreter, and on macOS picks an absolute path that
+    // `PATH` cannot influence — so the app-owned venv is bypassed and numpy/scipy/soundfile are
+    // simply not there. Run a copy with every interpreter assignment repointed. See
+    // `model::praat::python`; the count is checked because a script that resolves its
+    // interpreter some way the rewriter does not recognise would otherwise fail later, on an
+    // import, with nothing pointing at the cause.
+    if let Some(rewrite) = &job.planned.python_rewrite {
+        let source = std::fs::read_to_string(&job.planned.script_path).map_err(|e| {
+            PraatError::OutputRead {
+                path: job.planned.script_path.display().to_string(),
+                message: e.to_string(),
+            }
+        })?;
+        // `defaultDirectory$` is pinned to the original script's folder as well, because the
+        // copy runs from the job's temp directory and 33 of these scripts locate their `.py`
+        // helper relative to themselves — `defaultDirectory$ + "/spat_binaural_bridge.py"`.
+        // Without it the copy runs and then reports the helper missing.
+        let original_dir = job
+            .planned
+            .script_path
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let (rewritten, replaced) = crate::model::praat::python::rewrite_for_venv(
+            &source,
+            &rewrite.interpreter,
+            &original_dir,
+        );
+        if replaced == 0 {
+            return Err(PraatError::OutputRead {
+                path: job.planned.script_path.display().to_string(),
+                message: "this script was expected to select a Python interpreter but none was \
+                          found to repoint; it may need numpy/scipy/soundfile on the system \
+                          interpreter instead"
+                    .to_string(),
+            });
+        }
+        let path = temp_dir.join(&rewrite.script_name);
+        std::fs::write(&path, rewritten).map_err(|e| PraatError::OutputRead {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        })?;
+    }
+
     // A process whose settings live in a Praat `beginPause` dialog runs against a rewritten
     // *copy* of the script, written here beside the driver — the dialog cannot be shown under
     // `--run` at all, it segfaults Praat outright. The original in the submodule is only read.
@@ -538,6 +582,19 @@ pub fn python_venv_bin(state_dir: &Path) -> Option<PathBuf> {
     bin.is_dir().then_some(bin)
 }
 
+/// The venv's interpreter itself, for scripts that resolve one by absolute path.
+///
+/// [`python_venv_bin`] covers the scripts that ask `PATH`; this covers the ones that do not, and
+/// on macOS that is all of them — they probe `/opt/homebrew/bin/python3` and friends before ever
+/// consulting `PATH`, so the venv was reachable on Linux and invisible on a Mac. Both mechanisms
+/// stay: the rewrite fixes the interpreter, and `PATH` still matters for anything the helper
+/// itself shells out to.
+pub fn python_venv_interpreter(state_dir: &Path) -> Option<PathBuf> {
+    let bin = python_venv_bin(state_dir)?;
+    let exe = bin.join(if cfg!(windows) { "python.exe" } else { "python3" });
+    exe.is_file().then_some(exe)
+}
+
 /// `PATH` for the Praat child with `venv_bin` at the front, or `None` to inherit unchanged.
 fn path_with_venv(venv_bin: Option<&Path>) -> Option<std::ffi::OsString> {
     let venv_bin = venv_bin?;
@@ -639,6 +696,7 @@ mod tests {
                 script_path: PathBuf::from("/unused"),
                 pause_rewrite: None,
                 builtin_source: None,
+                python_rewrite: None,
                 label: "test".into(),
             },
             inputs: vec![vec![vec![0.0f32; 1000], vec![0.0f32; 1000]]],
@@ -1025,19 +1083,23 @@ mod tests {
         }
         let corpus_path = corpus.to_string_lossy().into_owned();
 
+        // Narrows the sweep to entries whose key contains this substring, e.g.
+        // `TUI_WAVE_PRAAT_SMOKE_FILTER=praat_py_` for the Python group alone. The full sweep is
+        // minutes of wall clock and plays audio the whole time, so re-testing one group after
+        // touching it was otherwise all-or-nothing.
+        let filter = std::env::var("TUI_WAVE_PRAAT_SMOKE_FILTER").unwrap_or_default();
+        let matches = |d: &crate::model::cdp::ProcessDef| {
+            d.backend() == crate::model::cdp::def::Backend::Praat
+                && (filter.is_empty() || d.key.contains(&filter))
+        };
+
         let mut failures: Vec<String> = Vec::new();
         let mut ran = 0usize;
-        let total = catalog
-            .processes
-            .iter()
-            .filter(|d| d.backend() == crate::model::cdp::def::Backend::Praat)
-            .count();
-        for (index, def) in catalog
-            .processes
-            .iter()
-            .filter(|d| d.backend() == crate::model::cdp::def::Backend::Praat)
-            .enumerate()
-        {
+        let total = catalog.processes.iter().filter(|d| matches(d)).count();
+        if !filter.is_empty() {
+            eprintln!("filter {filter:?}: {total} of {} Praat entries", catalog.processes.iter().filter(|d| d.backend() == crate::model::cdp::def::Backend::Praat).count());
+        }
+        for (index, def) in catalog.processes.iter().filter(|d| matches(d)).enumerate() {
             let values: Vec<_> = def
                 .params
                 .iter()
@@ -1060,7 +1122,7 @@ mod tests {
             // was no way to tell which process was responsible. stderr is unbuffered, so the
             // name is on screen before the sound starts.
             eprintln!("[{:>3}/{total}] {}", index + 1, def.key);
-            let planned = match crate::model::praat::plan_praat_job(def, &values, &checkout) {
+            let planned = match crate::model::praat::plan_praat_job_with(def, &values, &checkout, python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref()) {
                 Ok(planned) => planned,
                 Err(err) => {
                     failures.push(format!("{}: plan failed: {err}", def.key));
@@ -1179,7 +1241,7 @@ mod tests {
                     }
                 })
                 .collect();
-            let planned = match crate::model::praat::plan_praat_job(def, &values, &checkout) {
+            let planned = match crate::model::praat::plan_praat_job_with(def, &values, &checkout, python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref()) {
                 Ok(planned) => planned,
                 Err(err) => {
                     failures.push(format!("{}: plan failed: {err}", def.key));

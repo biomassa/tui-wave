@@ -78,6 +78,79 @@ confirm() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# --- long-running command with live feedback ----------------------------------------------
+#
+# Every pip install below goes through this. It exists because `pip install --quiet` printed
+# nothing at all for however long it ran, and on macOS that is routinely many minutes: when a
+# wheel is missing for your Python version, pip silently falls back to *compiling from source*.
+# The install looked frozen and there was no way to tell a slow build from a wedged one.
+#
+# So: announce the package before starting, tick a live elapsed timer, and keep the full output
+# in a log that is printed only if the command fails. `pip --progress-bar off` because its bar
+# fights the timer for the same line; the timer is the better signal, being visible on a
+# non-tty too.
+LOGDIR=""
+run_with_progress() {
+  label="$1"; shift
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '    %s$ %s%s\n' "$DIM" "$*" "$RESET"
+    return 0
+  fi
+  [ -n "$LOGDIR" ] || LOGDIR=$(mktemp -d 2>/dev/null || echo /tmp)
+  log="$LOGDIR/$(echo "$label" | tr -c 'A-Za-z0-9' '_').log"
+
+  "$@" >"$log" 2>&1 &
+  pid=$!
+  start=$(date +%s)
+  note=""
+  ticks=0
+  while kill -0 "$pid" 2>/dev/null; do
+    now=$(date +%s); elapsed=$(( now - start ))
+    # Say *why* it is slow rather than only that it is. A source build is the one cause that
+    # takes minutes, and pip announces it in the log before it starts.
+    if [ -z "$note" ] && grep -qi 'building wheel\|setup.py\|pyproject.toml (PEP 517)' "$log" 2>/dev/null; then
+      note=" — building from source, this can take 10+ minutes"
+    fi
+    if [ -t 1 ]; then
+      printf '\r    %s …%s  [ %sm%02ds ]  ' "$label" "$note" "$(( elapsed / 60 ))" "$(( elapsed % 60 ))"
+    elif [ "$ticks" -gt 0 ] && [ $(( ticks % 30 )) = 0 ]; then
+      # Counted in loop iterations rather than off the clock: testing `elapsed % 30` and then
+      # sleeping to avoid a duplicate line drifts the heartbeat off its own cadence.
+      printf '    %s … still working (%ss)%s\n' "$label" "$elapsed" "$note"
+    fi
+    ticks=$(( ticks + 1 ))
+    sleep 1
+  done
+  wait "$pid"; status=$?
+  now=$(date +%s); elapsed=$(( now - start ))
+  [ -t 1 ] && printf '\r%s\r' "                                                                            "
+  if [ "$status" = 0 ]; then
+    ok "$label (${elapsed}s)"
+  else
+    warn "$label FAILED after ${elapsed}s — last 20 lines of $log:"
+    tail -20 "$log" | sed 's/^/      /'
+  fi
+  return $status
+}
+
+# The newest Python that has prebuilt numpy/scipy wheels, falling back to plain `python3`.
+#
+# Ordered newest-first among versions known to ship wheels, because the alternative is what made
+# this slow in the first place: a brand-new interpreter (macOS installers are already shipping
+# 3.14) has no wheels yet, so pip compiles scipy from source and the install takes tens of
+# minutes instead of seconds. Nothing here is pinned or installed — it only picks among the
+# interpreters already present.
+pick_python() {
+  for candidate in python3.13 python3.12 python3.11 python3.10; do
+    # Must actually *run*, not merely exist on PATH. A pyenv install leaves a shim for every
+    # version it knows about, so `command -v python3.12` succeeds on a machine where running it
+    # prints "command not found" and exits non-zero — found by dry-running this on a box with
+    # pyenv. Creating the venv is the thing that would have failed, several steps later.
+    if "$candidate" -c 'import venv' >/dev/null 2>&1; then echo "$candidate"; return 0; fi
+  done
+  echo python3
+}
+
 # --- platform -----------------------------------------------------------------------------
 OS="$(uname -s)"
 case "$OS" in
@@ -193,9 +266,10 @@ fi
 
 # --- 5. Python venv for the `py` process group --------------------------------------------
 #
-# Kept entirely inside a venv the app owns. The `py` scripts resolve their interpreter as a
-# bare `python3` from PATH, and the app puts this venv's bin at the front of PATH for the Praat
-# child — so nothing has to be installed system-wide and nothing is patched in the scripts.
+# Kept entirely inside a venv the app owns. The `py` scripts pick their own interpreter, so the
+# app runs a copy with those assignments repointed at this venv (see `model::praat::python`) --
+# a PATH-only mechanism worked on Linux and silently did nothing on macOS, where they resolve an
+# absolute path.
 step "Python backend (optional — the 34 processes in the 'py' group)"
 VENV="${XDG_CONFIG_HOME:-$HOME/.config}/tui-wave/praat/pyenv"
 info "34 praatAudioTools scripts drive a Python helper and need numpy, scipy and soundfile"
@@ -210,44 +284,60 @@ elif ! confirm "Install Python dependencies for Praat-AudioTools scripts?"; then
 elif ! have python3; then
   warn "python3 not found; skipping. Install Python 3, then re-run with no other flags."
 else
+  PYBIN=$(pick_python)
   info "venv: $VENV"
+  info "interpreter: $PYBIN ($("$PYBIN" -V 2>&1))"
+  if [ "$PYBIN" = python3 ]; then
+    info "(no 3.10-3.13 found; if numpy/scipy have no wheel for this version pip will build"
+    info "them from source, which is slow but works — the timer below will say so)"
+  fi
   if [ -x "$VENV/bin/python3" ]; then
     ok "venv already exists"
   else
     # Debian splits venv support into its own package; fail with that hint rather than a
     # bare traceback from the module.
-    if ! python3 -c 'import venv' 2>/dev/null; then
+    if ! "$PYBIN" -c 'import venv' 2>/dev/null; then
       case "$PKG" in
         apt-get) install_packages "Python venv support" python3-venv || true ;;
-        *) warn "python3's venv module is unavailable; install it and re-run" ;;
+        *) warn "$PYBIN's venv module is unavailable; install it and re-run" ;;
       esac
     fi
     run mkdir -p "$(dirname "$VENV")"
-    run python3 -m venv "$VENV"
+    run "$PYBIN" -m venv "$VENV"
     ok "venv created"
   fi
   info "installing numpy, scipy, soundfile, sounddevice and pillow (about 60 MB)"
-  run "$VENV/bin/pip" install --quiet --upgrade pip
-  run "$VENV/bin/pip" install --quiet numpy scipy soundfile
+  info "each step prints its own elapsed time; nothing here is silent"
+  # One package per call so a stall names the package it is stalled on. `--progress-bar off`
+  # because pip's bar and the elapsed timer would fight over the same line.
+  PIP="$VENV/bin/pip"
+  run_with_progress "upgrading pip" "$PIP" install --disable-pip-version-check --progress-bar off --upgrade pip \
+    || warn "could not upgrade pip; continuing with the version the venv shipped"
+  for pkg in numpy scipy soundfile; do
+    run_with_progress "installing $pkg" "$PIP" install --disable-pip-version-check --progress-bar off "$pkg" \
+      || die "$pkg failed to install — see the log above; the 'py' group needs all three"
+  done
   if [ "$DRY_RUN" = 0 ]; then
     "$VENV/bin/python3" -c 'import numpy, scipy, soundfile' \
-      && ok "numpy, scipy, soundfile ready" \
+      && ok "numpy, scipy, soundfile import cleanly" \
       || die "the venv was created but the packages did not import"
   fi
   # Needed only by the three interactive editors (Arranger, Performance Launcher, Spectral
   # Eraser). Installed by default because those processes are in the catalog, but a failure
   # here is not fatal: sounddevice wants PortAudio at run time and can legitimately be
   # unavailable on a headless machine, which costs three processes and nothing else.
+  extras_ok=1
+  for pkg in sounddevice pillow; do
+    run_with_progress "installing $pkg (interactive editors)" \
+      "$PIP" install --disable-pip-version-check --progress-bar off "$pkg" || extras_ok=0
+  done
   if [ "$DRY_RUN" = 0 ]; then
-    if "$VENV/bin/pip" install --quiet sounddevice pillow 2>/dev/null \
-       && "$VENV/bin/python3" -c 'import sounddevice, PIL' 2>/dev/null; then
+    if [ "$extras_ok" = 1 ] && "$VENV/bin/python3" -c 'import sounddevice, PIL' 2>/dev/null; then
       ok "sounddevice, pillow ready (the interactive editors)"
     else
       warn "sounddevice/pillow unavailable — Arranger, Performance Launcher and Spectral"
       warn "Eraser will report missing dependencies; everything else is unaffected"
     fi
-  else
-    run "$VENV/bin/pip" install --quiet sounddevice pillow
   fi
   # `pedalboard` is deliberately not installed: wheel 0.9.24 aborts with SIGILL on import on
   # some x86-64 CPUs, so VST_Effect_from_Praat is excluded from the catalog regardless.

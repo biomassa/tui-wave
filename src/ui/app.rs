@@ -455,7 +455,7 @@ fn cdp_error_lines(err: &crate::cdp::CdpError) -> Vec<String> {
 /// (`praat::runner::prepare_prefs_dir`). Sits beside `cdp_presets/` under the same
 /// `$XDG_CONFIG_HOME/tui-wave/` root that `preset::presets_dir` resolves, so everything this
 /// app writes lives in one place.
-fn praat_state_dir() -> std::path::PathBuf {
+pub(crate) fn praat_state_dir() -> std::path::PathBuf {
     crate::praat::runner::state_dir()
 }
 
@@ -10726,7 +10726,7 @@ impl App {
             return Some(message);
         }
 
-        let planned = match crate::model::praat::plan_praat_job(def, values, &audiotools_dir) {
+        let planned = match crate::model::praat::plan_praat_job_with(def, values, &audiotools_dir, crate::praat::runner::python_venv_interpreter(&praat_state_dir()).as_deref()) {
             Ok(planned) => planned,
             Err(err) => return Some(err.to_string()),
         };
@@ -11613,7 +11613,7 @@ impl App {
         if let Err(message) = crate::praat::probe_praat(&self.config.praat_bin) {
             return fail(self, message);
         }
-        let planned = match crate::model::praat::plan_praat_job(def, values, &audiotools_dir) {
+        let planned = match crate::model::praat::plan_praat_job_with(def, values, &audiotools_dir, crate::praat::runner::python_venv_interpreter(&praat_state_dir()).as_deref()) {
             Ok(planned) => planned,
             Err(err) => return fail(self, err.to_string()),
         };

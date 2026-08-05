@@ -10,6 +10,9 @@
 pub mod builtin;
 pub mod driver;
 pub mod plan;
+pub mod python;
 pub mod rewrite;
 
-pub use plan::plan_praat_job;
+/// The four-argument form is the one production uses; `plan::plan_praat_job` remains for the
+/// callers and tests that have nothing to do with Python. See its doc comment.
+pub use plan::plan_praat_job_with;

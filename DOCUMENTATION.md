@@ -169,6 +169,12 @@ owns, at `~/.config/tui-wave/praat/pyenv`. Your system Python is never modified.
 only tidiness: Arch and recent Debian mark the system interpreter externally-managed, and
 `pip install` there fails outright.
 
+tui-wave runs these scripts against that venv's interpreter directly, so it does not matter
+which Pythons your machine has or how Praat was launched. This is what makes the `py` group
+work on macOS: the scripts pick their own interpreter and on a Mac pick an *absolute* path
+(`/opt/homebrew/bin/python3` and friends), which no `PATH` setting can influence — so before
+this they quietly used a Python that had none of these packages.
+
 By hand:
 
 ```sh
@@ -176,10 +182,11 @@ python3 -m venv ~/.config/tui-wave/praat/pyenv
 ~/.config/tui-wave/praat/pyenv/bin/pip install numpy scipy soundfile sounddevice pillow
 ```
 
-tui-wave puts that environment at the front of `PATH` for the Praat process it starts, which is
-all the scripts need to find it — none of them is edited. With no such environment, `PATH` is
-left untouched and the scripts use whatever `python3` is already there, so a system-wide install
-of those packages works too.
+tui-wave runs each of these scripts from a temporary *copy* whose interpreter is repointed at
+that environment, and also puts it at the front of `PATH` for the Praat process it starts. Your
+own copy of the plugin is never modified. With no such environment neither happens: the scripts
+resolve their interpreter exactly as they always would, so a system-wide install of those
+packages works too.
 
 Four of the `py` processes open a window of their own — a spatial trajectory painter, a step
 arranger, a performance launcher and a spectrogram eraser. Those run with no time limit, because
