@@ -389,9 +389,12 @@ fn write_binary_input_files(job: &Job, temp_dir: &Path) -> Result<(), CdpError> 
     Ok(())
 }
 
-/// Patches the placeholder(s) for `PercentOfAnaWindowCount` params (see CDP-PLAN.md Phase 0
-/// spike S5) with their real values, computed from the `.ana` file each entry's preceding
-/// `pvoc anal` step produced. A no-op for every job except the one process in the catalog
+/// Patches the placeholder(s) for `PercentOfAnaWindowCount` params with their real values,
+/// computed from the `.ana` file each entry's preceding `pvoc anal` step produced.
+///
+/// Deferred to here rather than resolved at planning time because CDP recalculates the actual
+/// analysis window length from the requested overlap factor, in a way that cannot be predicted
+/// before `pvoc anal` has run — so the real count only exists once that step has finished. A no-op for every job except the one process in the catalog
 /// that uses this scale (`blur_blur`'s "Blurring" param). Iterates every entry matching
 /// `step_index` rather than a single slot — a stereo file produces one entry per channel
 /// lane (each analyzing its own `.ana` file), and patching only one of them was the bug

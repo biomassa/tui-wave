@@ -130,10 +130,10 @@ pub enum OutputChannels {
 
 /// How a `Number` parameter's raw slider value (0-100 for percentage-based scales) maps to
 /// the value actually passed on the CDP command line. Resolved at pipeline-planning time,
-/// except `PercentOfAnaWindowCount` — see CDP-PLAN.md Phase 0 spike finding S5: CDP
-/// recalculates the true analysis window length from the requested overlap factor in a way
-/// that can't be predicted before `pvoc anal` actually runs, so that scale is resolved by the
-/// runner after the analysis step completes, not by `pipeline::plan_job`.
+/// except `PercentOfAnaWindowCount` — CDP recalculates the true analysis window length from
+/// the requested overlap factor in a way that can't be predicted before `pvoc anal` actually
+/// runs, so that scale is resolved by the runner after the analysis step completes, not by
+/// `pipeline::plan_job`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NumberScale {
