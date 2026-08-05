@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-08-05 (2.5.1)
+
+- **The `py` process group now works on macOS.** Those 34 scripts pick their own Python
+  interpreter, and on a Mac they pick an absolute path — `/opt/homebrew/bin/python3` and
+  friends — before ever consulting `PATH`. tui-wave installs their numpy/scipy/soundfile into a
+  virtual environment it owns and used to make that reachable through `PATH` alone, which a Mac
+  never looked at: the packages were installed and the scripts could not see them. tui-wave now
+  points each script directly at that interpreter, in a temporary copy. Your own copy of the
+  plugin is never modified.
+
+- **`./install.sh` no longer looks frozen while installing Python packages.** It printed nothing
+  at all for however long pip ran, which on macOS is routinely several minutes — with no
+  prebuilt wheel for your Python version, pip quietly compiles from source instead. Each package
+  now names itself, shows a running clock, and says when a source build has started. A failure
+  prints the end of the log rather than vanishing.
+
+  It also prefers a Python that has prebuilt wheels (3.13 down to 3.10) over whatever `python3`
+  happens to be, which is what avoids that long compile in the first place.
+
+- **PageUp and PageDown jump to the first and last group** in the CDP+Praat browser's Groups
+  column. They did nothing there before.
+
+- praatAudioTools updated to `5c6df5b`: five Filter & Color scripts rewritten upstream
+  (Adaptive Spectral Resonance Suppressor, Amplitude-Varying Ring Modulation,
+  Autocorrelation-Based Self-Filtering, Band-Based Concatenative Synthesis, Bit Crusher).
+
+- Bumped version to 2.5.1.
+
 ## 2026-08-04 (2.5.0)
 
 - **Record, in CDP+Praat ▸ Generative.** Records from the microphone for a fixed number of
