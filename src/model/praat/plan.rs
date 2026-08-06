@@ -517,6 +517,7 @@ mod tests {
             preset_custom_option: 0,
             script_presets: Vec::new(),
             params,
+            param_notes: Vec::new(),
         }
     }
 

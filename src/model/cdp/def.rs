@@ -1234,6 +1234,39 @@ pub struct ProcessDef {
     /// hence `#[serde(default)]`.
     #[serde(default)]
     pub params: Vec<ParamDef>,
+    /// Explanatory lines the source dialog carried between its fields — section headings and
+    /// per-field notes. Praat-only in practice (`scripts/convert_praat_audiotools.py` reads
+    /// them out of each script's `form` block); empty for every CDP process, which has no such
+    /// text to preserve. See [`ParamNote`].
+    #[serde(default)]
+    pub param_notes: Vec<ParamNote>,
+}
+
+/// One line of explanatory text that belongs *between* a process's parameters rather than to
+/// any single one of them.
+///
+/// A Praat `form` interleaves `comment` lines with its fields, and the plugin's authors use
+/// them for two things: section headings (`=== Wave Shaping ===`) and notes on the field just
+/// declared (`(how much jitter affects drive)`). The converter used to drop both, since neither
+/// contributes an argument — which cost the dialog every cue about how its twelve fields group
+/// and what half of them mean (user report, 2026-08-06). They are kept as their own display
+/// rows instead of being folded into [`ParamDef::description`], because a note's position is
+/// the whole of its meaning: the same text placed one row up annotates a different field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ParamNote {
+    /// Index into `ProcessDef::params` of the parameter this note renders *above*. `0` renders
+    /// above the dialog's own Preset row, i.e. at the very top — matching the source dialog,
+    /// where a note preceding every field sits above everything. `params.len()` renders below
+    /// the last field.
+    pub before: usize,
+    /// The text, with the script's own heading decoration (`===`, `---`, `──`) already
+    /// stripped — the dialog draws its own rule, so carrying four different ASCII styles
+    /// through would only make one process look unlike the next.
+    pub text: String,
+    /// A section heading (drawn as a titled rule, with a blank line above it) rather than a
+    /// note (drawn as an indented, dimmed line under the field it describes).
+    #[serde(default)]
+    pub section: bool,
 }
 
 impl ProcessDef {
@@ -1413,6 +1446,7 @@ mod tests {
             preset_custom_option: 0,
             script_presets: Vec::new(),
             params: vec![sample_number()],
+            param_notes: Vec::new(),
         };
 
         let text = toml::to_string(&def).expect("serialize");
@@ -1490,6 +1524,7 @@ mod tests {
             preset_custom_option: 0,
             script_presets: Vec::new(),
             params: vec![toggle, choice],
+            param_notes: Vec::new(),
         };
 
         let text = toml::to_string(&def).expect("serialize");
@@ -1587,6 +1622,7 @@ mod tests {
             preset_custom_option: 0,
             script_presets: Vec::new(),
             params: vec![table],
+            param_notes: Vec::new(),
         };
 
         let text = toml::to_string(&def).expect("serialize");
@@ -1655,6 +1691,7 @@ mod tests {
             preset_custom_option: 0,
             script_presets: Vec::new(),
             params: vec![param],
+            param_notes: Vec::new(),
         };
 
         let text = toml::to_string(&def).expect("serialize");
@@ -1731,6 +1768,7 @@ mod tests {
             preset_custom_option: 0,
             script_presets: Vec::new(),
             params: vec![param],
+            param_notes: Vec::new(),
         };
 
         let text = toml::to_string(&def).expect("serialize");
@@ -1794,6 +1832,7 @@ mod tests {
             script_presets: Vec::new(),
             min_inputs: None,
             params,
+            param_notes: Vec::new(),
         }
     }
 
