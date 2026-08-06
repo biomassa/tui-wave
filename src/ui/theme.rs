@@ -93,6 +93,16 @@ pub const WARNING_BG: Color = SURFACE1;
 /// which are for text that's still meant to be read at a glance.
 pub const ANNOTATION: Color = OVERLAY0;
 
+/// A section heading inside a parameter dialog, and the rule drawn from it out to the dialog's
+/// right edge (`model::cdp::ParamNote`). Deliberately *not* a new accent: the params dialog
+/// already spends peach on shortcuts and buttons and green on automatable labels, so a heading
+/// is set apart by weight and by its rule rather than by a fourth pastel competing with them.
+pub const DIALOG_SECTION: Color = TEXT;
+pub const DIALOG_RULE: Color = SURFACE2;
+/// A note attached to one field of a parameter dialog. A step below the value beside it, but
+/// still meant to be read — unlike `ANNOTATION`, which is for text that only needs noticing.
+pub const DIALOG_NOTE: Color = SUBTEXT0;
+
 /// Dot-matrix waveform gradient stops (quiet -> loud): green -> yellow -> red, echoing
 /// btop's height-graded braille graphs, where dots near 0 dBFS read as "louder" than dots
 /// near the centerline. Used by both `waveform::WaveformWidget` (character glyphs) and

@@ -21070,12 +21070,140 @@ fn cdp_params_value_width(def: &crate::model::cdp::ProcessDef) -> usize {
         .max(24)
 }
 
+/// One rendered line of `Dialog::CdpParams`'s scrolling region.
+///
+/// The region used to be exactly one line per parameter, which is what let `scroll_top`,
+/// `visible_field_rows` and the click rects all be counted in the same unit. A Praat form's
+/// section headings and per-field notes (`model::cdp::ParamNote`) put lines in there that are
+/// not fields, so the two units come apart: this enum is the display unit, and a `Field`'s
+/// *index* is still the focus unit. Everything that positions a field now looks its display row
+/// up through this plan (`cdp_params_rows`) rather than assuming the two are the same number —
+/// duplicating that arithmetic anywhere is how a click ends up editing the wrong field.
+#[derive(Debug, Clone, PartialEq)]
+enum CdpParamsRow {
+    /// The blank line that separates one section from the fields above it.
+    Gap,
+    /// A section heading: the title, plus a rule out to the dialog's right edge.
+    Section(String),
+    /// One already-wrapped line of a note.
+    Note(String),
+    /// The parameter at this index of `def.params` / `fields`.
+    Field(usize),
+}
+
+/// Indent on a note line, so it reads as hanging off the field above rather than as a field of
+/// its own. Two columns past the label column's own leading space.
+const CDP_NOTE_INDENT: &str = "   ";
+
+/// Turn `def`'s notes for one position into display rows, appending to `rows`.
+///
+/// `rows` being empty means this is the top of the region, where a heading needs no blank line
+/// above it — the popup's own border and header spacer already provide the separation.
+fn push_cdp_param_notes<'a>(
+    rows: &mut Vec<CdpParamsRow>,
+    notes: impl Iterator<Item = &'a crate::model::cdp::ParamNote>,
+    width: usize,
+) {
+    for note in notes {
+        if note.section {
+            if !rows.is_empty() {
+                rows.push(CdpParamsRow::Gap);
+            }
+            rows.push(CdpParamsRow::Section(note.text.clone()));
+        } else {
+            // Wrapped rather than clipped: the dialog's width is set by its widest *field*, and
+            // widening it to fit the longest note would make every Praat dialog as wide as its
+            // most talkative comment. The indent is applied *after* wrapping, since
+            // `wrap_to_width` breaks on spaces and so would eat a leading one.
+            let body = width.saturating_sub(CDP_NOTE_INDENT.len()).max(1);
+            for line in wrap_to_width(&note.text, body) {
+                rows.push(CdpParamsRow::Note(format!("{CDP_NOTE_INDENT}{line}")));
+            }
+        }
+    }
+}
+
+/// Where the notes a form placed before *any* of its fields stop belonging to the dialog as a
+/// whole and start belonging to the first field: the first section heading among them.
+///
+/// A standing instruction like "First selected = Reference, Second = Test" is about the run, so it
+/// sits above everything, Preset row included — that is where the source dialog puts it. A
+/// heading is not: it introduces the fields under it, and this dialog slips its own Preset row
+/// between the two, so a heading hoisted to the top would be reading a rule over a row it has
+/// nothing to do with. Everything from the heading onward therefore travels with field 0 —
+/// including plain notes after it, which belong to the section it opened.
+fn cdp_leading_note_count(def: &crate::model::cdp::ProcessDef) -> usize {
+    let leading = def.param_notes.iter().filter(|n| n.before == 0);
+    leading.take_while(|n| !n.section).count()
+}
+
+/// The notes that render above the dialog's own Preset row. Kept out of `cdp_params_rows`
+/// because these lines do not scroll: they are as pinned as the Preset row under them.
+fn cdp_params_leading_rows(
+    def: &crate::model::cdp::ProcessDef,
+    width: usize,
+) -> Vec<CdpParamsRow> {
+    let mut rows = Vec::new();
+    let notes = def.param_notes.iter().filter(|n| n.before == 0);
+    push_cdp_param_notes(&mut rows, notes.take(cdp_leading_note_count(def)), width);
+    rows
+}
+
+/// The display plan for the scrolling region: every field, with its notes and section headings
+/// interleaved in the order the source form declared them.
+///
+/// `field_count` rather than `def.params.len()` because focus is indexed against `fields`, and a
+/// note is only worth a row if the field it introduces has one. Notes at or past the end land
+/// after the last field, which is where a form's trailing comment belongs.
+fn cdp_params_rows(
+    def: &crate::model::cdp::ProcessDef,
+    field_count: usize,
+    width: usize,
+) -> Vec<CdpParamsRow> {
+    let mut rows = Vec::new();
+    for i in 0..field_count {
+        // Field 0's notes are the ones `cdp_params_leading_rows` did *not* pin above the Preset
+        // row — see `cdp_leading_note_count`.
+        let skip = if i == 0 { cdp_leading_note_count(def) } else { 0 };
+        let notes = def.param_notes.iter().filter(|n| n.before == i).skip(skip);
+        push_cdp_param_notes(&mut rows, notes, width);
+        rows.push(CdpParamsRow::Field(i));
+    }
+    push_cdp_param_notes(
+        &mut rows,
+        def.param_notes.iter().filter(|n| n.before >= field_count.max(1)),
+        width,
+    );
+    rows
+}
+
+/// The display row `field` occupies in `rows`.
+fn cdp_params_field_row(rows: &[CdpParamsRow], field: usize) -> Option<usize> {
+    rows.iter().position(|r| *r == CdpParamsRow::Field(field))
+}
+
+/// `── Title ─────────…` out to `width`, truncated if the title alone overruns it.
+fn cdp_section_line(title: &str, width: usize, title_style: Style, rule_style: Style) -> Line<'static> {
+    const LEAD: &str = " \u{2500}\u{2500} ";
+    let body = format!("{title} ");
+    let used = LEAD.chars().count() + body.chars().count();
+    Line::from(vec![
+        Span::styled(LEAD, rule_style),
+        Span::styled(truncate_to_width(&body, width.saturating_sub(LEAD.chars().count())), title_style),
+        Span::styled("\u{2500}".repeat(width.saturating_sub(used)), rule_style),
+    ])
+}
+
 /// The parameter-editing form for one CDP process, opened from `Dialog::CdpBrowser`. Sized
 /// to fit every field up to the terminal's height; past that, the field list scrolls to
 /// keep the focused field visible (`visible_field_rows`/`scroll_top` below) while the
 /// preset row, second-input row, buttons, and hints stay pinned. Column widths are computed
 /// fresh from `def.params` (`cdp_params_column_widths`) rather than a fixed guess — see that
 /// function's doc comment.
+///
+/// The scrolling region holds more than fields: `cdp_params_rows` interleaves the source
+/// dialog's own section headings and per-field notes (`model::cdp::ParamNote`) between them, so
+/// every count and offset below is in *display rows* while `focus` stays in field indices.
 fn render_cdp_params_dialog(
     frame: &mut Frame,
     area: Rect,
@@ -21121,10 +21249,15 @@ fn render_cdp_params_dialog(
         Some(msg) => wrap_to_width(&format!(" ! {msg}"), width.saturating_sub(2) as usize),
         None => vec![String::new()],
     };
-    // header spacer + preset row + blank + [fields] + extra-input? + blank + buttons +
-    // error + hints, + 2 border.
-    let overhead = 1 + 1 + 1 + has_extra_input + 1 + 1 + error_lines.len() + 1;
-    let content_field_rows = fields.len().max(1);
+    // The source dialog's own section headings and per-field notes, laid out as display rows.
+    // `width - 2` is the text width inside the borders, matching how `error_lines` wraps.
+    let note_width = width.saturating_sub(2) as usize;
+    let leading_rows = cdp_params_leading_rows(def, note_width);
+    let rows = cdp_params_rows(def, fields.len(), note_width);
+    // header spacer + leading notes + preset row + blank + [fields] + extra-input? + blank +
+    // buttons + error + hints, + 2 border.
+    let overhead = 1 + leading_rows.len() + 1 + 1 + has_extra_input + 1 + 1 + error_lines.len() + 1;
+    let content_field_rows = rows.len().max(1);
     let ideal_height = overhead + content_field_rows + 2;
     let height = (ideal_height as u16).min(area.height);
     let visible_field_rows = (height as usize)
@@ -21158,7 +21291,25 @@ fn render_cdp_params_dialog(
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    let section_style = Style::default()
+        .fg(theme::DIALOG_SECTION)
+        .bg(theme::SURFACE0)
+        .add_modifier(ratatui::style::Modifier::BOLD);
+    let rule_style = Style::default().fg(theme::DIALOG_RULE).bg(theme::SURFACE0);
+    let note_style = Style::default().fg(theme::DIALOG_NOTE).bg(theme::SURFACE0);
+    let render_note_row = |row: &CdpParamsRow| match row {
+        CdpParamsRow::Gap => Line::raw(""),
+        CdpParamsRow::Section(title) => {
+            cdp_section_line(title, inner.width as usize, section_style, rule_style)
+        }
+        CdpParamsRow::Note(text) => Line::from(Span::styled(text.clone(), note_style)),
+        CdpParamsRow::Field(_) => Line::raw(""),
+    };
+
     let mut lines = vec![Line::raw("")];
+
+    // ---- Notes the form placed above every field (see `cdp_params_leading_rows`) ----
+    lines.extend(leading_rows.iter().map(&render_note_row));
 
     // ---- Preset row ----
     let preset_focused = focus == CDP_PRESET_FOCUS;
@@ -21190,14 +21341,26 @@ fn render_cdp_params_dialog(
     lines.push(Line::raw(""));
 
     // ---- Field rows (scrolled window) ----
-    let focus_field_row = (focus >= 1 && focus <= fields.len()).then(|| focus - 1);
+    // Scrolling is counted in *display* rows, so the focused field's position is looked up in
+    // the row plan rather than being its own index — with notes and headings interleaved the
+    // two differ, and using the index would scroll the wrong distance.
+    let focus_field_row = (focus >= 1 && focus <= fields.len())
+        .then(|| cdp_params_field_row(&rows, focus - 1))
+        .flatten();
     let scroll_top = match focus_field_row {
         Some(row) => row
             .saturating_sub(visible_field_rows.saturating_sub(1))
             .min(content_field_rows.saturating_sub(visible_field_rows)),
         None => 0,
     };
-    for (i, (param, field)) in def.params.iter().zip(fields).enumerate().skip(scroll_top).take(visible_field_rows) {
+    for row in rows.iter().skip(scroll_top).take(visible_field_rows) {
+        let CdpParamsRow::Field(i) = *row else {
+            lines.push(render_note_row(row));
+            continue;
+        };
+        // Indexing rather than zipping: the plan's rows are not one-per-field any more, and
+        // `cdp_params_rows` only ever emits an index inside both of these.
+        let (Some(param), Some(field)) = (def.params.get(i), fields.get(i)) else { continue };
         let is_focused = focus == i + 1;
         let label = format!(" {:<label_width$}  ", param.name);
         // Automatable params (the ones 'e' can open the envelope editor on) get a green
@@ -21396,7 +21559,7 @@ fn render_cdp_params_dialog(
     }
     // Pad up to `visible_field_rows` so the trailing chrome (second-input/buttons/hints)
     // lands at the same row every frame regardless of the current scroll window's fill.
-    let rendered_field_rows = fields.len().min(visible_field_rows).max(fields.is_empty() as usize);
+    let rendered_field_rows = rows.len().min(visible_field_rows).max(fields.is_empty() as usize);
     for _ in rendered_field_rows..visible_field_rows {
         lines.push(Line::raw(""));
     }
@@ -21503,7 +21666,8 @@ fn render_cdp_params_dialog(
     //                        packing only the visible rows is what keeps `row` == `focus`
     //                        without the handler re-deriving `scroll_top`; duplicating that
     //                        arithmetic is exactly how a click ends up editing the wrong field
-    //                        after a scroll.
+    //                        after a scroll. Section headings and notes are *not* in this list:
+    //                        they take display lines but have nothing to focus or edit.
     //   [..]                 the extra-input row, if the process has one
     //   [..] [..]            Preview, then Apply
     //   [last]               the hints bar — `dialog_n_interactive` is `len - 1`, so this is
@@ -21519,10 +21683,17 @@ fn render_cdp_params_dialog(
         height: 1,
     };
     const HIDDEN: Rect = Rect { x: 0, y: 0, width: 0, height: 0 };
-    let field_line_base = 3; // header spacer + preset + blank
-    let mut rects = vec![rect_at(1)];
+    // header spacer + leading notes + preset + blank.
+    let field_line_base = 3 + leading_rows.len();
+    let mut rects = vec![rect_at(1 + leading_rows.len())];
     for i in 0..fields.len() {
-        match i.checked_sub(scroll_top).filter(|v| *v < visible_field_rows) {
+        // A field's line is its position in the row plan, not its index: a heading or note above
+        // it occupies a line of its own. Note/heading lines get no rect at all — there is nothing
+        // to click — which is why this walks fields rather than rows.
+        let visible = cdp_params_field_row(&rows, i)
+            .and_then(|row| row.checked_sub(scroll_top))
+            .filter(|v| *v < visible_field_rows);
+        match visible {
             Some(visible_row) => rects.push(rect_at(field_line_base + visible_row)),
             None => rects.push(HIDDEN),
         }
@@ -23867,6 +24038,225 @@ mod tests {
             second_input.is_some(),
             "a dual-input Praat process must offer a second-buffer picker"
         );
+    }
+
+    /// A Praat `form`'s section headings and per-field notes reach the dialog, positioned against
+    /// the fields they were declared beside. The converter used to drop every `comment` line,
+    /// which cost a twelve-field dialog every cue about how its fields group (user report,
+    /// 2026-08-06).
+    #[test]
+    fn a_praat_form_keeps_its_section_headings_and_notes() {
+        let app = new_app(Some(doc(0.25, 100)), None);
+        let def = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .find(|p| p.key == "praat_distortion_adaptive_wave_shaper")
+            .expect("Adaptive Wave Shaper is in the shipped catalog");
+        let heading = |title: &str| {
+            def.param_notes
+                .iter()
+                .find(|n| n.text == title)
+                .unwrap_or_else(|| panic!("no note titled {title:?}"))
+        };
+        // Headings arrive with the script's own `=== ... ===` decoration stripped, and marked as
+        // headings rather than prose.
+        for title in ["Base Parameters (Custom preset only)", "Wave Shaping", "Analysis", "Output"] {
+            assert!(heading(title).section, "{title:?} should be a section heading");
+        }
+        // `=== Preset ===` is dropped: the dialog puts its own Preset row immediately above the
+        // script's `Internal Preset` field, so the heading would label the same thing twice.
+        assert!(
+            !def.param_notes.iter().any(|n| n.section && n.text.eq_ignore_ascii_case("preset")),
+            "the Preset heading should be dropped"
+        );
+        // A prose note stays prose, and stays under the field it annotates -- `Jitter_sensitivity`
+        // is param 1, so its note renders above param 2.
+        let note = heading("(how much jitter affects drive)");
+        assert!(!note.section);
+        assert_eq!(def.params[note.before - 1].name, "Jitter_sensitivity");
+        // Declaration order is preserved even where a trailing note and the next heading meet:
+        // the note belongs to the field above it and must not slip below the rule.
+        let ordered: Vec<&str> = def
+            .param_notes
+            .iter()
+            .filter(|n| n.before == note.before + 1)
+            .map(|n| n.text.as_str())
+            .collect();
+        assert_eq!(ordered, ["(how much shimmer affects folding)", "Wave Shaping"]);
+    }
+
+    /// The rendered result: headings and notes occupy their own lines, in the right places, and
+    /// the fields around them still land on their own click targets. `focus` is a field index
+    /// while the region is laid out in display rows, and this pins that the two do not drift.
+    #[test]
+    fn the_params_dialog_draws_headings_and_notes_between_its_fields() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.25, 100)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "praat_distortion_adaptive_wave_shaper")
+            .expect("Adaptive Wave Shaper is in the shipped catalog");
+        app.open_cdp_params(index);
+        // Focus `Shimmer_sensitivity` (field 3), which has a note above it, a field above that, and
+        // a blank-plus-heading above that: it renders three lines below where its index alone puts it.
+        for _ in 0..4 {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 45)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+
+        let row_of = |needle: &str| {
+            text.lines()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("{needle:?} not on screen:\n{text}"))
+        };
+        // Only the popup's own columns: the panels behind it share every terminal row.
+        let popup = app.dialog_row_rects[0];
+        let inside = |row: usize| -> String {
+            text.lines()
+                .nth(row)
+                .unwrap()
+                .chars()
+                .skip(popup.x as usize)
+                .take(popup.width as usize)
+                .collect()
+        };
+        // A heading is drawn as a titled rule out to the dialog's edge, with a blank line above it.
+        let heading = row_of("── Wave Shaping ");
+        assert!(
+            text.contains("── Wave Shaping ──────────"),
+            "a heading's rule should run out towards the dialog's right edge:\n{text}"
+        );
+        assert_eq!(inside(heading - 1).trim(), "", "a heading needs a blank line above it");
+        // Each note sits directly under the field it describes, and above the next field.
+        assert_eq!(row_of("(how much jitter affects drive)"), row_of("Jitter_sensitivity") + 1);
+        assert_eq!(row_of("(how much shimmer affects folding)"), row_of("Shimmer_sensitivity") + 1);
+        assert!(row_of("Saturation_type") > heading);
+        // And the click target for the focused field is the line that field actually rendered on.
+        let focused = match &app.dialog {
+            Some(Dialog::CdpParams { focus, .. }) => *focus,
+            _ => panic!("expected the params dialog"),
+        };
+        assert_eq!(
+            app.dialog_row_rects[focused].y as usize,
+            row_of("Shimmer_sensitivity"),
+            "a click on a field must land on the row it was drawn on, not on its index"
+        );
+    }
+
+    /// A note declared before every field is about the run as a whole, so it sits above the Preset
+    /// row; a *heading* declared there introduces the fields under it, so it stays below the Preset
+    /// row with them — see `cdp_leading_note_count`.
+    #[test]
+    fn a_leading_note_sits_above_the_preset_row_but_a_leading_heading_stays_with_its_fields() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        // This process declares both, in that order: a standing instruction, then `=== Analysis ===`.
+        let mut app = new_app(Some(doc(0.25, 100)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "praat_pitch_pitch_contour_transfer")
+            .expect("Pitch Contour Transfer is in the shipped catalog");
+        app.open_cdp_params(index);
+        let mut terminal = Terminal::new(TestBackend::new(120, 45)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        let row_of = |needle: &str| {
+            text.lines()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("{needle:?} not on screen:\n{text}"))
+        };
+        assert!(row_of("Select 2 Sounds") < row_of(" Preset "));
+        assert!(row_of(" Preset ") < row_of("── Analysis "));
+        // And the pinned lines are counted into the field region's offset, so the first field's
+        // click target still matches the line it drew on.
+        assert_eq!(app.dialog_row_rects[1].y as usize, row_of(&app.cdp_catalog.processes[index].params[0].name));
+    }
+
+    /// Scrolling is counted in display rows, and notes/headings are display rows — so on a
+    /// terminal too short for the whole form, the focused field must still be on screen and its
+    /// click target must still be the line it drew on. Counting in field indices instead put the
+    /// rect one line off per note above the focused field.
+    #[test]
+    fn a_scrolled_params_dialog_keeps_the_focused_field_and_its_click_target_together() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.25, 100)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "praat_distortion_adaptive_wave_shaper")
+            .expect("Adaptive Wave Shaper is in the shipped catalog");
+        app.open_cdp_params(index);
+        let field_count = app.cdp_catalog.processes[index].params.len();
+        let last = app.cdp_catalog.processes[index].params[field_count - 1].name.clone();
+        for _ in 0..field_count {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+
+        // Short enough that the form cannot fit even without the notes.
+        let mut terminal = Terminal::new(TestBackend::new(120, 22)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        let row = text
+            .lines()
+            .position(|line| line.contains(&last))
+            .unwrap_or_else(|| panic!("the focused field scrolled off screen:\n{text}"));
+        assert_eq!(app.dialog_row_rects[field_count].y as usize, row);
+    }
+
+    /// Across the whole shipped catalog: every note points at a real position, and the row plan it
+    /// produces still holds exactly one row per field. A note whose `before` overran `params` would
+    /// silently vanish (or, worse, land in the trailing bucket), and a plan that dropped or
+    /// duplicated a `Field` row would put a click on the wrong parameter.
+    #[test]
+    fn every_catalog_note_lands_on_a_real_row() {
+        let app = new_app(None, None);
+        for def in &app.cdp_catalog.processes {
+            for note in &def.param_notes {
+                assert!(
+                    note.before <= def.params.len(),
+                    "{}: note {:?} points past the last param",
+                    def.key,
+                    note.text
+                );
+                assert!(!note.text.trim().is_empty(), "{}: empty note", def.key);
+                // Heading decoration is stripped by the converter; a heading that arrived with it
+                // would draw a rule inside a rule.
+                assert!(
+                    !note.section || !note.text.starts_with(['=', '-', '\u{2500}']),
+                    "{}: heading {:?} kept its decoration",
+                    def.key,
+                    note.text
+                );
+            }
+            let rows = cdp_params_rows(def, def.params.len(), 60);
+            let fields: Vec<usize> = rows
+                .iter()
+                .filter_map(|r| match r {
+                    CdpParamsRow::Field(i) => Some(*i),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                fields,
+                (0..def.params.len()).collect::<Vec<_>>(),
+                "{}: the row plan lost or reordered a field",
+                def.key
+            );
+        }
     }
 
     /// The counterpart: an unset `cdp_dir` must **not** lock the browser when Praat is usable.
@@ -26699,6 +27089,7 @@ mod tests {
             praat_builtin: false,
             praat_python_rewrite: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
+            param_notes: Vec::new(),
             params: vec![ParamDef {
                 rows_match_input_count: false,
                 range_scales_with_input_duration: false,
@@ -29684,6 +30075,7 @@ mod tests {
             praat_builtin: false,
             praat_python_rewrite: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
+            param_notes: Vec::new(),
             params: vec![ParamDef {
                 rows_match_input_count: false,
                 range_scales_with_input_duration: false,
@@ -29774,6 +30166,7 @@ mod tests {
             praat_builtin: false,
             praat_python_rewrite: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
+            param_notes: Vec::new(),
             params: vec![ParamDef {
                 rows_match_input_count: false,
                 range_scales_with_input_duration: false,
@@ -36608,6 +37001,7 @@ mod tests {
             praat_builtin: false,
             praat_python_rewrite: false,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
+            param_notes: Vec::new(),
             params: vec![ParamDef {
                 rows_match_input_count: false,
                 range_scales_with_input_duration: false,

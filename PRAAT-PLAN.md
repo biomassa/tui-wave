@@ -326,7 +326,9 @@ Mirrors `scripts/convert_soundthread_catalog.py`: run manually, output committed
 - Parse `form … endform`, handling **both syntaxes and CRLF**.
 - Type mapping: `real`/`positive`/`integer`/`natural` → `Number`; `boolean` → `Toggle`;
   `optionmenu`/`choice` (plus following `option`/`button` lines) → `Choice`; `sentence`/`word`/`text`
-  → text param; skip `comment`.
+  → text param; skip `comment`. *(Revised 2026-08-06: a `comment` carries no argument but is not
+  skipped any more — it becomes a `ParamNote` and is drawn in the dialog. See "Form comments"
+  below.)*
 - **Range synthesis at 10× default**, respecting Praat's floors:
 
   ```
@@ -344,6 +346,19 @@ Mirrors `scripts/convert_soundthread_catalog.py`: run manually, output committed
   script records a reason (`gui_blocking`, `multi_sound_input`, `non_sound_input`,
   `hardcoded_path`). Keeping reasons in-tree makes the exclusion set reviewable and lets upstream
   fixes be re-tested.
+- **Form comments** (`classify_comment`, `note_rows` → `ProcessDef.param_notes`). The plugin uses
+  `comment` for two things, and both were being dropped: section headings (`=== Wave Shaping ===`)
+  and notes on the field just declared (`(how much jitter affects drive)`). 2399 of them across the
+  481 scripts, and without them a twelve-field dialog gives no cue how its fields group or what half
+  of them mean (user report, 2026-08-06). Each note stores the *index of the param it renders above*
+  rather than being folded into that param's `description`, because position is the whole of a
+  note's meaning — the same text one row up annotates a different field. A heading is recognised by
+  the decoration it loses to a both-ends strip (which normalises the four styles the scripts use —
+  `===`, `---`, `──`, `═══` — into one look) or by a trailing colon on an undecorated label.
+  Dropped: `=== Preset ===` and its variants (the dialog puts its own Preset row immediately above
+  the script's `Internal Preset` field, so the heading labels the same thing twice), rule lines with
+  no title, and the bare instruction `Select a Sound object first` — there is no object list here,
+  so it is not merely redundant but wrong. 347 of the 2399 drop out that way.
 - Group = the script's leading directory; title = cleaned filename; key = `praat_<group>_<stem>`.
 - **Record the submodule commit SHA in the generated catalog header**, and add a test that warns
   when the checked-out SHA differs from the one the catalog was generated against. The catalog is

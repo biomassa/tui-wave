@@ -19,6 +19,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 1
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Audio Folder", section = true },
+  { before = 0, text = "(Leave blank to pick a folder with a dialog)" },
+  { before = 1, text = "Composition Style", section = true },
+  { before = 2, text = "Parameters", section = true },
+  { before = 4, text = "Output level (controls the quiet-start / changing-volume)", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -107,6 +114,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Core Behavior", section = true },
+  { before = 3, text = "Random seed (0 = auto-generate; the seed used is printed below)" },
+  { before = 4, text = "Pitch", section = true },
+  { before = 6, text = "Other Modulations", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -274,6 +288,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Preset Selection", section = true },
+  { before = 1, text = "Frame & Spectral Analysis", section = true },
+  { before = 4, text = "Musicality (0 = pure per-frame argmin)", section = true },
+  { before = 6, text = "Silence handling", section = true },
+  { before = 8, text = "Stereo image (v1.4)", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -460,6 +482,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Output", section = true },
+  { before = 2, text = "Effect Strength (1-10)", section = true },
+  { before = 3, text = "Quality / Speed", section = true },
+  { before = 5, text = "Segmentation (ms)", section = true },
+  { before = 7, text = "Texture", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -2336,6 +2366,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Analysis Window", section = true },
+  { before = 3, text = "Smoothing", section = true },
+  { before = 5, text = "Pitch Tracking", section = true },
+  { before = 8, text = "NMF Engine", section = true },
+  { before = 11, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -2761,6 +2798,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Stretch Factors (>1 = longer, <1 = shorter)", section = true },
+  { before = 5, text = "Processing", section = true },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -3246,6 +3288,9 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Top selected Sound = Target, lower one = Source (list order)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -4763,6 +4808,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Analysis Parameters", section = true },
+  { before = 4, text = "Smoothing", section = true },
+  { before = 4, text = "(Overlap_time is deprecated since v3.2: placement is 50% Hann OLA)" },
+  { before = 5, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -4879,6 +4930,13 @@ input = "dual_wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Synchrony Mode", section = true },
+  { before = 1, text = "Analysis", section = true },
+  { before = 5, text = "Clustering", section = true },
+  { before = 9, text = "Effect Intensity", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Sync_mode"
@@ -5017,6 +5075,9 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 4, text = "Temperature affects Sampling mode only (Greedy is argmax-invariant)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -5194,6 +5255,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 1
 preset_custom_option = 3
+param_notes = [
+  { before = 0, text = "Audio Folder", section = true },
+  { before = 0, text = "(Leave blank to pick a folder with a dialog)" },
+  { before = 2, text = "Loading Options", section = true },
+  { before = 4, text = "Analysis Parameters (Custom preset only)", section = true },
+  { before = 8, text = "Path", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -5352,6 +5421,11 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "SELECT PHENOMENON", section = true },
+  { before = 1, text = "PLAYBACK CONTROLS", section = true },
+  { before = 4, text = "OPTIONS", section = true },
+]
 
 [[process.params]]
 name = "Phenomenon"
@@ -5452,6 +5526,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Analysis", section = true },
+  { before = 4, text = "Envelope Detection", section = true },
+  { before = 6, text = "Transient Detection", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -5633,6 +5713,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Analysis", section = true },
+  { before = 5, text = "Climax Detection Thresholds", section = true },
+  { before = 10, text = "Transfer Weights (0..1)", section = true },
+  { before = 14, text = "Processing (reserved - not yet used)", section = true },
+  { before = 16, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -5868,6 +5955,15 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Analysis", section = true },
+  { before = 3, text = "MIDI Range", section = true },
+  { before = 7, text = "Smoothing", section = true },
+  { before = 8, text = "Color Scheme", section = true },
+  { before = 9, text = "Line Style", section = true },
+  { before = 12, text = "Display", section = true },
+  { before = 15, text = "Intensity", section = true },
+]
 
 [[process.params]]
 name = "Pitch_floor"
@@ -6062,6 +6158,14 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Pitch Analysis", section = true },
+  { before = 3, text = "Target Note", section = true },
+  { before = 3, text = "Leave MIDI=0 to extract ALL detected notes" },
+  { before = 4, text = "Or specify note name (e.g. C4, F#3)" },
+  { before = 5, text = "Post-processing", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Pitch_floor_Hz"
@@ -6179,6 +6283,13 @@ input = "dual_wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Reference (Teacher) & Test (Student)", section = true },
+  { before = 0, text = "First selected = Reference, Second = Test" },
+  { before = 0, text = "MFCC Parameters", section = true },
+  { before = 3, text = "Pitch Parameters", section = true },
+  { before = 5, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Window_length_s"
@@ -6262,6 +6373,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Extraction Method", section = true },
+  { before = 2, text = "Manual / Percentage Parameters", section = true },
+  { before = 4, text = "Random Single Parameters", section = true },
+  { before = 5, text = "Random Multiple Parameters", section = true },
+  { before = 8, text = "Processing", section = true },
+  { before = 11, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -6438,6 +6557,10 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Analysis Parameters", section = true },
+  { before = 5, text = "Visualization Options", section = true },
+]
 
 [[process.params]]
 name = "Number_of_segments"
@@ -6671,6 +6794,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Key Profile", section = true },
+  { before = 2, text = "Analysis Parameters", section = true },
+  { before = 6, text = "Window Settings", section = true },
+  { before = 9, text = "Speed Optimization", section = true },
+  { before = 11, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -6862,6 +6992,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Segmentation (Silence Detection)", section = true },
+  { before = 5, text = "Pitch Analysis", section = true },
+  { before = 7, text = "Contour Comparison", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -7006,6 +7142,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Detection", section = true },
+  { before = 5, text = "Filterbank", section = true },
+  { before = 8, text = "Analysis", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -7180,6 +7322,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Layers to Display", section = true },
+  { before = 7, text = "Formant Options", section = true },
+  { before = 10, text = "Analysis Parameters", section = true },
+  { before = 14, text = "Intensity Range", section = true },
+]
 
 [[process.params]]
 name = "Draw_spectrogram"
@@ -7337,6 +7485,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "PHRASE STRUCTURE", section = true },
+  { before = 2, text = "FEATURE WEIGHTING", section = true },
+  { before = 5, text = "SEGMENT SELECTION", section = true },
+  { before = 6, text = "(If unchecked, each segment used max once)" },
+  { before = 6, text = "MUSICAL EXPRESSION", section = true },
+  { before = 12, text = "VISUALIZATION", section = true },
+  { before = 13, text = "PLAYBACK", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -7522,6 +7679,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Instrument", section = true },
+  { before = 1, text = "Scale", section = true },
+  { before = 4, text = "GEN (candidate generator)", section = true },
+  { before = 6, text = "Learning algorithm", section = true },
+  { before = 11, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Instrument"
@@ -7719,6 +7883,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 5
 preset_custom_option = 0
+param_notes = [
+  { before = 2, text = "Sound-analysis only: max-freq, hop(s), peak-threshold" },
+  { before = 8, text = "Frequency: transpose x, inharmonicity ^, shift +Hz" },
+  { before = 11, text = "Spectral: brightness tilt, amp gate, band lo/hi Hz" },
+  { before = 16, text = "Time: stretch x, reverse, freeze-on-frame (0=off)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -8021,6 +8191,11 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Analysis", section = true },
+  { before = 3, text = "(1=all, 2=every 2nd, etc.)" },
+  { before = 3, text = "Visualization", section = true },
+]
 
 [[process.params]]
 name = "Feature"
@@ -8096,6 +8271,10 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Analysis Parameters", section = true },
+  { before = 5, text = "Visualization", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -8207,6 +8386,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Select instruments to include", section = true },
+  { before = 12, text = "Search parameters", section = true },
+  { before = 14, text = "Voicing strategy", section = true },
+  { before = 15, text = "Microtonal settings", section = true },
+  { before = 19, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "BTb"
@@ -8391,6 +8577,15 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Tempo and Quantization", section = true },
+  { before = 5, text = "Time Signature", section = true },
+  { before = 9, text = "Onset Detection", section = true },
+  { before = 12, text = "Silence Detection", section = true },
+  { before = 15, text = "Dynamics", section = true },
+  { before = 17, text = "Claves Synthesis (NEW v2.8)", section = true },
+  { before = 19, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Auto_detect_tempo"
@@ -8612,6 +8807,10 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Analysis Options", section = true },
+  { before = 1, text = "(for time-varying analysis)" },
+]
 
 [[process.params]]
 name = "Window_size_seconds"
@@ -8653,6 +8852,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Tempo Range", section = true },
+  { before = 3, text = "Detection", section = true },
+  { before = 5, text = "Octave Preference", section = true },
+  { before = 6, text = "Smoothing", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -8796,6 +9001,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 5
+param_notes = [
+  { before = 1, text = "Base Parameters (Custom preset only)", section = true },
+  { before = 3, text = "(how much jitter affects drive)" },
+  { before = 4, text = "(how much shimmer affects folding)" },
+  { before = 4, text = "Wave Shaping", section = true },
+  { before = 6, text = "Analysis", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -8954,6 +9167,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Select a Preset (overrides sliders below)" },
+  { before = 1, text = "Manual Parameters" },
+  { before = 6, text = "Output" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -9092,6 +9310,17 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 5
+param_notes = [
+  { before = 1, text = "Drive & Folding", section = true },
+  { before = 3, text = "(0 = none; each is ONE reflection pass, not a full fold)" },
+  { before = 5, text = "Bit Crushing", section = true },
+  { before = 6, text = "(16 = CD quality, 4 = extreme)" },
+  { before = 7, text = "Sample Rate", section = true },
+  { before = 8, text = "(100 = original, lower = narrower band)" },
+  { before = 9, text = "Extras", section = true },
+  { before = 13, text = "(0 = unpredictable, positive = reproducible)" },
+  { before = 13, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -9288,6 +9517,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Mode Selection", section = true },
+  { before = 2, text = "Bit Crusher Parameters", section = true },
+  { before = 3, text = "(steps per unit; smaller = harsher)" },
+  { before = 4, text = "Harsh Distortion Parameters", section = true },
+  { before = 11, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -9490,6 +9726,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Envelope Follower", section = true },
+  { before = 2, text = "(nominal drive at zero envelope)" },
+  { before = 3, text = "(how much envelope adds to drive)" },
+  { before = 4, text = "(zero-phase mode: smoothing cutoff)" },
+  { before = 7, text = "(causal mode only)" },
+  { before = 8, text = "Output", section = true },
+  { before = 10, text = "Visualization", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -9642,6 +9887,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 3
+param_notes = [
+  { before = 1, text = "DC handling", section = true },
+  { before = 2, text = "Output", section = true },
+  { before = 5, text = "(ON shows harmonic enrichment, but adds analysis time)" },
+]
 
 [[process.script_presets]]
 option = 0
@@ -9737,6 +9987,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Select a Preset (overrides sliders below)" },
+  { before = 1, text = "Parameters" },
+  { before = 4, text = "(knee spans Threshold +/- this, so total width is 2x; 0 = exact hard clip)" },
+  { before = 5, text = "Anti-aliasing (oversample factor; clipping aliases without it)" },
+  { before = 6, text = "Output" },
+  { before = 8, text = "Visualization" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -9888,6 +10146,16 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Parameters", section = true },
+  { before = 2, text = "(1=subtle, 5=moderate, 10+=heavy)" },
+  { before = 4, text = "(coefficient mode; see the report for the time it really gives)" },
+  { before = 5, text = "(time-constant mode)" },
+  { before = 6, text = "(0=symmetric, +/-0.3=asymmetric)" },
+  { before = 7, text = "Output", section = true },
+  { before = 9, text = "(ON shows harmonic enrichment, but adds analysis time)" },
+  { before = 12, text = "(hysteresis loop panel: sweep rate to trace the loop at)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -10051,6 +10319,21 @@ input = "dual_wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Select exactly 2 Sound objects first" },
+  { before = 1, text = "Basic Operations", section = true },
+  { before = 2, text = "Modulation", section = true },
+  { before = 3, text = "Nonlinear", section = true },
+  { before = 4, text = "Advanced", section = true },
+  { before = 5, text = "Parameters", section = true },
+  { before = 7, text = "(was unused by 7 operations; 5 now use it - the report says which)" },
+  { before = 8, text = "(Wavefold only: one pass leaves loud input still past threshold)" },
+  { before = 9, text = "(Divide only: |denominator| at or below this yields 0)" },
+  { before = 10, text = "(Sqrt / Exp domain only)" },
+  { before = 11, text = "(Random scatter only; 0 = unpredictable)" },
+  { before = 11, text = "Channels", section = true },
+  { before = 12, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -10218,6 +10501,17 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Crossovers", section = true },
+  { before = 3, text = "Drive normalizes into the waveshaper (off = legacy level-dependent)", section = true },
+  { before = 4, text = "Low Band", section = true },
+  { before = 7, text = "Mid Band", section = true },
+  { before = 10, text = "High Band", section = true },
+  { before = 13, text = "Master", section = true },
+  { before = 17, text = "(on: drive changes shape only, not band level)" },
+  { before = 17, text = "Anti-aliasing (oversample factor; 1 = off)", section = true },
+  { before = 18, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -10471,6 +10765,23 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Select a Sound object - it CONTROLS the feedback circuit" },
+  { before = 0, text = "(use Dry/Wet below to blend the original sound back in)" },
+  { before = 1, text = "Circuit Behavior", section = true },
+  { before = 3, text = "(envelope adds this much on top of Base_Feedback)" },
+  { before = 4, text = "(dB below the loudest moment that maps to 0)" },
+  { before = 7, text = "Resonance", section = true },
+  { before = 10, text = "Dry / Wet (0 = pure feedback, 1 = dry path only)", section = true },
+  { before = 10, text = "(exact bypass at 1 needs Exciter_position 2 + Output_mode Preserve)" },
+  { before = 12, text = "Synthetic high frequencies / air (0 = off)", section = true },
+  { before = 13, text = "(negative behaves as off; the exciter runs only when this is > 0)" },
+  { before = 13, text = "Spatial Mode", section = true },
+  { before = 15, text = "(Binaural mode; v0.3 used a fixed 30 samples)" },
+  { before = 16, text = "Output", section = true },
+  { before = 19, text = "(0 or below = unpredictable; positive = reproducible)" },
+  { before = 21, text = "Debug (logs per-stage levels to the Info window)", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -10741,6 +11052,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 5
+param_notes = [
+  { before = 1, text = "Saturation", section = true },
+  { before = 2, text = "(2-2.5 gentle, 4 medium, 6-8 strong, 12-15 heavy)" },
+  { before = 3, text = "(saturated path level, applied BEFORE the dry/wet mix)" },
+  { before = 5, text = "(1 = off; tanh aliases badly without it. 2 is disabled)" },
+  { before = 5, text = "Output", section = true },
+  { before = 9, text = "(numerical guard: peaks at or below this are not normalized)" },
+  { before = 10, text = "(1 = all processed; 0 = dry path, at the original LEVEL only in Preserve mode)" },
+]
 
 [[process.script_presets]]
 option = 0
@@ -10904,6 +11224,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Select a Preset (overrides sliders below)" },
+  { before = 3, text = "Manual Parameters" },
+  { before = 5, text = "(v0.3 called this Mu; see the header - it is not the oscillator's mu)" },
+  { before = 7, text = "(1 = off; the fold and clamp alias badly without it. 2 is disabled)" },
+  { before = 7, text = "Output" },
+  { before = 8, text = "(Limiter applies to the fold Character only)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -11039,6 +11367,19 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Phantom Bass", section = true },
+  { before = 4, text = "(higher = more harmonics)" },
+  { before = 5, text = "(addition gain onto the high-passed source; not dry/wet -- 0 still high-passes)" },
+  { before = 7, text = "Bass Reference (keeps Drive consistent across input levels)", section = true },
+  { before = 9, text = "Mid-Side Width", section = true },
+  { before = 11, text = "(1 = identity, <1 narrows, >1 widens; default 0.5 narrows)" },
+  { before = 11, text = "Side Channel", section = true },
+  { before = 12, text = "(removes low-frequency content from the Side channel only; L'+R' mono sum is unaffected either way)" },
+  { before = 12, text = "Output Level", section = true },
+  { before = 15, text = "(below this peak level, normalization is skipped and reported instead of applied)" },
+  { before = 15, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -11249,6 +11590,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Waveshaping Algorithm", section = true },
+  { before = 1, text = "Parameters", section = true },
+  { before = 3, text = "Processing Mode", section = true },
+  { before = 4, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Shape"
@@ -11325,6 +11672,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Foldback Parameters", section = true },
+  { before = 5, text = "Waveshaping", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -11501,6 +11853,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Swell Shape", section = true },
+  { before = 2, text = "Timing", section = true },
+  { before = 4, text = "Stereo Mode", section = true },
+  { before = 8, text = "Advanced", section = true },
+  { before = 11, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -11682,6 +12041,9 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Pitch floor is used only in Speech-band mode." },
+]
 
 [[process.params]]
 name = "Detection_mode"
@@ -11808,6 +12170,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Dynamics", section = true },
+  { before = 4, text = "Time Constants (ms)", section = true },
+  { before = 6, text = "Detector (RMS analysis window)", section = true },
+  { before = 8, text = "Sidechain Filter (zero-phase, offline)", section = true },
+  { before = 9, text = "Output", section = true },
+  { before = 13, text = "Options", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -12266,6 +12636,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 2, text = "Levels (0-1)", section = true },
+  { before = 6, text = "Times in seconds (Sustain: 0 = auto)", section = true },
+  { before = 10, text = "Shape & Modulation", section = true },
+  { before = 14, text = "Modifiers", section = true },
+  { before = 17, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -12687,6 +13064,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 2, text = "Power: exponent (<1 compress, >1 expand)" },
+  { before = 3, text = "Tremolo: rate Hz, depth, center, phase deg" },
+  { before = 7, text = "Gate: rate Hz, duty %, max, min, smooth ms" },
+  { before = 12, text = "Time: shift s, scale (0.5=2x speed, 2=half)" },
+  { before = 14, text = "Random: rate Hz, depth, seed (0=random)" },
+  { before = 17, text = "Safety: gain cap for Power Shaping compression / Envelope Inversion" },
+  { before = 18, text = "Output: normalize / visualize / play" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -12977,6 +13363,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Physics Parameters", section = true },
+  { before = 7, text = "Envelope Mapping", section = true },
+  { before = 10, text = "Modifiers", section = true },
+  { before = 13, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -13214,6 +13606,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 2, text = "Channel Configuration", section = true },
+  { before = 3, text = "Processing Mode", section = true },
+  { before = 4, text = "True Peak Ceiling", section = true },
+  { before = 5, text = "Output Options", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -13321,6 +13719,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Threshold & Ceiling", section = true },
+  { before = 3, text = "Dynamics & Character", section = true },
+  { before = 6, text = "Output Options", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -13453,6 +13856,15 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Fade Curve", section = true },
+  { before = 3, text = "(used by Exponential and Logarithmic only)" },
+  { before = 3, text = "Fade Range", section = true },
+  { before = 5, text = "(ignored when Full_duration = on)" },
+  { before = 5, text = "Attenuation", section = true },
+  { before = 7, text = "(negative = quieter, e.g. -6 dB = half amplitude)" },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -13546,6 +13958,15 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Fade Curve", section = true },
+  { before = 3, text = "(used by Exponential and Logarithmic only)" },
+  { before = 3, text = "Fade Range", section = true },
+  { before = 5, text = "(fade covers last N seconds; ignored when Full_duration = on)" },
+  { before = 5, text = "Soft Compression (optional)", section = true },
+  { before = 7, text = "(higher = less effect  |  try 2-8)" },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -13641,6 +14062,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Crossover Frequencies", section = true },
+  { before = 3, text = "LOW Band", section = true },
+  { before = 6, text = "MID Band", section = true },
+  { before = 9, text = "HIGH Band", section = true },
+  { before = 12, text = "Dynamic Settings", section = true },
+  { before = 15, text = "Monitor", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -13884,6 +14313,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Threshold", section = true },
+  { before = 3, text = "(Gate closes at Threshold minus Hysteresis)" },
+  { before = 3, text = "Timing", section = true },
+  { before = 6, text = "Range & Mute", section = true },
+  { before = 8, text = "Sidechain Filter", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -14045,6 +14482,17 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Envelope Type", section = true },
+  { before = 3, text = "Domain", section = true },
+  { before = 5, text = "Polynomial Coefficients (ax^3 + bx^2 + cx + d)", section = true },
+  { before = 9, text = "Product Terms (x-r1)(x-r2)(x-r3)", section = true },
+  { before = 12, text = "Perceptual Tuning", section = true },
+  { before = 13, text = "(1=linear, 2-3=perceived loudness)" },
+  { before = 13, text = "Dynamic Range", section = true },
+  { before = 15, text = "Behavior", section = true },
+  { before = 16, text = "(ON: |p(x)| used as gain envelope. OFF: signed polarity envelope)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -14299,6 +14747,17 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 2, text = "Timing", section = true },
+  { before = 4, text = "(0 to 1)" },
+  { before = 4, text = "Mode Parameters", section = true },
+  { before = 5, text = "(0 = auto from median)" },
+  { before = 7, text = "(0 to 1; AM freq must be <= 1 / (2 x sample period))" },
+  { before = 10, text = "Gate Character", section = true },
+  { before = 11, text = "(0 to 1)" },
+  { before = 13, text = "(transition length, capped at one sample period)" },
+  { before = 13, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -14479,6 +14938,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Duplication", section = true },
+  { before = 2, text = "Crossfade", section = true },
+  { before = 3, text = "Overall Envelope", section = true },
+  { before = 7, text = "(above 100% amplifies before any normalization)" },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -14622,6 +15088,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 1
 preset_custom_option = 0
+param_notes = [
+  { before = 2, text = "Transfer: Select 2 sounds (1=Donor, 2=Recipient). Others: Select 1." },
+  { before = 5, text = "(POWER-domain time constants; in amplitude the attack 10%-90%" },
+  { before = 5, text = "is about 1.65x and the release 90%-10% about 4.39x these values)" },
+  { before = 8, text = "(input span over which the envelope rises 0 -> 1)" },
+  { before = 9, text = "(v1.2 behaviour: maps the loudest point in this file to gain 1)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -14814,6 +15287,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Dynamics", section = true },
+  { before = 4, text = "Time Constants (ms)", section = true },
+  { before = 6, text = "Analog Character", section = true },
+  { before = 9, text = "Output", section = true },
+  { before = 13, text = "Options", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -15030,6 +15510,18 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Input", section = true },
+  { before = 2, text = "(waveset boundaries are per-channel: output is always mono)" },
+  { before = 2, text = "Parameters", section = true },
+  { before = 4, text = "Repeat only", section = true },
+  { before = 5, text = "(per repetition: 1 = no change, below 1 decays, above 1 grows)" },
+  { before = 5, text = "Randomize / Keep-Delete / Telescope: group size", section = true },
+  { before = 6, text = "Telescope only", section = true },
+  { before = 8, text = "(matches total seconds only: trims the tail if long, pads if short)" },
+  { before = 9, text = "(material before the first and after the last zero crossing)" },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -15216,6 +15708,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Filter Type", section = true },
+  { before = 2, text = "Frequency Sweep", section = true },
+  { before = 5, text = "Bandpass Width", section = true },
+  { before = 6, text = "Gaussian Emphasis (not a filter Q)", section = true },
+  { before = 9, text = "Window", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -15702,6 +16202,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Ring modulation with frequency chirp and amplitude tremolo." },
+  { before = 1, text = "Carrier parameters", section = true },
+  { before = 2, text = "Carrier frequency at t = 1s (f(t) = C * t^(E-1))" },
+  { before = 3, text = "Exponent E >= 1.0 (1 = fixed carrier, >1 = accelerating chirp)" },
+  { before = 3, text = "Amplitude modulation", section = true },
+  { before = 6, text = "Output options", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -15848,6 +16356,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Processing Parameters", section = true },
+  { before = 5, text = "Stereo Spatialization", section = true },
+  { before = 6, text = "Gain & Loudness Control", section = true },
+  { before = 10, text = "Display & Playback", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -16153,6 +16667,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Processing Mode", section = true },
+  { before = 2, text = "Time Domain Parameters", section = true },
+  { before = 6, text = "Band / Spectral Parameters", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -16618,6 +17138,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 10, text = "Reversal", section = true },
+  { before = 11, text = "(frequencies are mirrored between this and Max_formant_hz)" },
+  { before = 11, text = "Scrambling", section = true },
+  { before = 13, text = "(0 = unseeded; any other value makes the run reproducible)" },
+  { before = 13, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -16885,6 +17412,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "LPC Parameters", section = true },
+  { before = 5, text = "(fraction of LPC order used for the envelope: higher = more detail)" },
+  { before = 5, text = "Morph Control", section = true },
+  { before = 6, text = "(0 = source unchanged, 1 = full envelope transfer)" },
+  { before = 6, text = "Duration", section = true },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -17036,6 +17571,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "LFO Parameters", section = true },
+  { before = 4, text = "Filter Shape", section = true },
+  { before = 6, text = "Processing", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -17333,6 +17874,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Detection Mode", section = true },
+  { before = 2, text = "Filter Settings", section = true },
+  { before = 5, text = "(Higher harmonics get wider notches: BW × scaling^n)" },
+  { before = 5, text = "Processing", section = true },
+  { before = 6, text = "(0 = original, 1 = full removal, 0.5 = blend)" },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -17550,6 +18099,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "GENERATOR SETTINGS", section = true },
+  { before = 7, text = "PHYSICS (RESONANCE)", section = true },
+  { before = 11, text = "GAIN & MIX", section = true },
+  { before = 13, text = "STEREO MIXER", section = true },
+  { before = 16, text = "OUTPUT", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -17776,6 +18332,16 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Processing Intensity", section = true },
+  { before = 1, text = "Golden Ratio Components", section = true },
+  { before = 4, text = "(Global spectral warp by φ factor)" },
+  { before = 5, text = "(φ-scaled bandwidth, gentle)" },
+  { before = 6, text = "(Stereo width blooms at φ-Climax)" },
+  { before = 7, text = "(φ-derived vibrato cascade)" },
+  { before = 7, text = "Analysis Parameters", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -17891,6 +18457,17 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "What to Remove", section = true },
+  { before = 3, text = "(used when mode = \"Selected overtone numbers\")" },
+  { before = 3, text = "Pitch Detection", section = true },
+  { before = 5, text = "Harmonics", section = true },
+  { before = 6, text = "Spectral Removal", section = true },
+  { before = 8, text = "(half-width of bandpass around each harmonic)" },
+  { before = 8, text = "Threshold", section = true },
+  { before = 9, text = "(skip frames below this RMS level)" },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -18073,6 +18650,9 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 3, text = "(> 1 = punchier attacks, < 1 = softer attacks)" },
+]
 
 [[process.params]]
 name = "Preset"
@@ -18166,6 +18746,16 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Individual Formant Control (semitones)", section = true },
+  { before = 6, text = "Global Control", section = true },
+  { before = 7, text = "(Applied to all formants before individual offsets)" },
+  { before = 8, text = "(< 1.0 = narrower/sharper, > 1.0 = wider/softer)" },
+  { before = 8, text = "Quality Settings", section = true },
+  { before = 9, text = "(Reduces jitter/\"water\" artifacts)" },
+  { before = 10, text = "Analysis Parameters", section = true },
+  { before = 13, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -18424,6 +19014,16 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Pitch Tracking", section = true },
+  { before = 4, text = "Harmonic/Octave Control", section = true },
+  { before = 5, text = "(1.0=F0, 2.0=octave up, 0.5=octave down, 3.0=12th, etc.)" },
+  { before = 6, text = "(Additional Hz offset after multiplier)" },
+  { before = 6, text = "Filter Parameters", section = true },
+  { before = 9, text = "Unvoiced Handling", section = true },
+  { before = 11, text = "Quality/Speed", section = true },
+  { before = 12, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -18609,6 +19209,14 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "MAPPING INTENSITY", section = true },
+  { before = 2, text = "CUSTOM WEIGHTS (0 for no effect)", section = true },
+  { before = 2, text = "Low formants influenced by shimmer" },
+  { before = 3, text = "High formants influenced by jitter" },
+  { before = 4, text = "PITCH CONTROL", section = true },
+  { before = 8, text = "OUTPUT", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -19057,6 +19665,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "MANUAL SETTINGS (Custom only)", section = true },
+  { before = 2, text = "Control Ranges (Direct Control only)", section = true },
+  { before = 4, text = "Other Algorithm Parameters", section = true },
+  { before = 9, text = "Performance", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -19194,6 +19809,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Static Parameters", section = true },
+  { before = 3, text = "(Resonance 0-1, higher = more peak)" },
+  { before = 3, text = "Automation Parameters", section = true },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -19588,6 +20209,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Crossover", section = true },
+  { before = 3, text = "Panning", section = true },
+  { before = 5, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -19694,6 +20320,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Pitch Analysis", section = true },
+  { before = 3, text = "Notch Parameters", section = true },
+  { before = 6, text = "Mix", section = true },
+  { before = 7, text = "(1.0 = full wet, 0.0 = full dry)" },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -19997,6 +20630,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Filter Parameters", section = true },
+  { before = 4, text = "(positive=boost, negative=cut, -inf=remove)" },
+  { before = 4, text = "For LP/HP: center = cutoff, bandwidth = transition" },
+  { before = 4, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -20070,6 +20709,10 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Manual Parameters", section = true },
+  { before = 5, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -20215,6 +20858,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Morph Region", section = true },
+  { before = 4, text = "Analysis", section = true },
+  { before = 7, text = "Morph Type", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -20349,6 +20998,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Analysis", section = true },
+  { before = 3, text = "Formant Mapping", section = true },
+  { before = 5, text = "(higher = more effect from jitter/shimmer)" },
+  { before = 5, text = "Formant Ranges", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -20503,6 +21159,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Wah Parameters", section = true },
+  { before = 6, text = "(1=flat, higher=more resonant peak)" },
+  { before = 6, text = "Stereo", section = true },
+  { before = 7, text = "(phase offset between L/R, 0-0.5)" },
+  { before = 7, text = "Mix", section = true },
+  { before = 8, text = "(100 = full wah, 0 = dry only)" },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -20654,6 +21319,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Morph Type", section = true },
+  { before = 2, text = "Whisper Parameters", section = true },
+  { before = 3, text = "(1.0 = standard, higher = more formant detail)" },
+  { before = 4, text = "(0 = more tonal, 1 = full noise)" },
+  { before = 5, text = "Morph Curve", section = true },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -20763,6 +21436,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Morph Type", section = true },
+  { before = 2, text = "Whisper Parameters", section = true },
+  { before = 3, text = "(1.0 = standard, higher = more formant detail)" },
+  { before = 4, text = "(0 = more tonal, 1 = full noise)" },
+  { before = 5, text = "Morph Curve", section = true },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -20872,6 +21553,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Modulation Type", section = true },
+  { before = 2, text = "Modulator Source", section = true },
+  { before = 3, text = "Oscillator Parameters", section = true },
+  { before = 5, text = "(0-1 for AM/Gate, any value for Ring)" },
+  { before = 5, text = "Gate Envelope", section = true },
+  { before = 8, text = "(0-1, ratio of ON time per cycle)" },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -21025,6 +21715,10 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Vowel Selection (for Manual)", section = true },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -21149,6 +21843,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 1
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Demo Mode", section = true },
+  { before = 1, text = "(If checked, plays a major arpeggio with the selected preset)" },
+  { before = 2, text = "Basic Settings", section = true },
+  { before = 6, text = "Texture Type", section = true },
+  { before = 7, text = "Modulation", section = true },
+  { before = 9, text = "Envelope", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -21338,6 +22041,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Duration  (Target overrides Base if > 0)", section = true },
+  { before = 4, text = "Patterns  (beats / Hz)", section = true },
+  { before = 8, text = "Acceleration", section = true },
+  { before = 10, text = "Morphing", section = true },
+  { before = 11, text = "Tone Shape", section = true },
+  { before = 15, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -21583,6 +22294,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 5, text = "Brownian Motion", section = true },
+  { before = 9, text = "Synthesis Mode", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -21788,6 +22505,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 5, text = "Chaos Parameters", section = true },
+  { before = 11, text = "Modulation", section = true },
+  { before = 14, text = "Synthesis Mode", section = true },
+  { before = 15, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -22053,6 +22777,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 5, text = "Modulation", section = true },
+  { before = 9, text = "Synthesis Mode", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -22253,6 +22983,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 6, text = "Poisson Rates", section = true },
+  { before = 8, text = "Grain Settings", section = true },
+  { before = 10, text = "Synthesis Mode", section = true },
+  { before = 11, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -22477,6 +23214,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 6, text = "Modulation", section = true },
+  { before = 9, text = "Synthesis Mode", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -22809,6 +23552,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 4, text = "CA Type", section = true },
+  { before = 6, text = "Sound Mapping", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -22986,6 +23735,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 4, text = "Function Type", section = true },
+  { before = 5, text = "Iterated Map Settings", section = true },
+  { before = 7, text = "Output", section = true },
+  { before = 11, text = "Custom", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -23139,6 +23895,9 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Custom Settings", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -23466,6 +24225,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 5, text = "Modulation", section = true },
+  { before = 8, text = "Envelope", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -23672,6 +24437,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 3, text = "Frequencies", section = true },
+  { before = 7, text = "Source Type", section = true },
+  { before = 8, text = "Envelope", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -23868,6 +24640,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Simulation", section = true },
+  { before = 4, text = "Resonator (overridden by preset unless Custom)", section = true },
+  { before = 13, text = "Excitation / Geometry", section = true },
+  { before = 19, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -24146,6 +24924,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 4, text = "Density Evolution", section = true },
+  { before = 7, text = "Grain Settings", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -24335,6 +25119,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 4, text = "Start Vowel Formants (Hz)", section = true },
+  { before = 7, text = "End Vowel Formants (Hz)", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -24536,6 +25326,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 4, text = "Density Evolution", section = true },
+  { before = 6, text = "Frequency Evolution", section = true },
+  { before = 7, text = "Evolution Type", section = true },
+  { before = 8, text = "Grain Settings", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -24742,6 +25540,24 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Demo Mode", section = true },
+  { before = 1, text = "(If checked, plays a test melody with selected preset)" },
+  { before = 2, text = "Timbre Controls", section = true },
+  { before = 3, text = "(Scales Modulation Index - Turn up for \"Bite\")" },
+  { before = 4, text = "(Scales Decay Times - Lower = tighter, Higher = lush)" },
+  { before = 5, text = "Amplitude Envelope", section = true },
+  { before = 6, text = "Output", section = true },
+  { before = 10, text = "Advanced", section = true },
+  { before = 10, text = "Algorithm", section = true },
+  { before = 11, text = "Operator 1 (Carrier)", section = true },
+  { before = 14, text = "Operator 2", section = true },
+  { before = 17, text = "Operator 3", section = true },
+  { before = 20, text = "Operator 4", section = true },
+  { before = 23, text = "Operator 5", section = true },
+  { before = 26, text = "Operator 6 (Feedback)", section = true },
+  { before = 30, text = "Envelope Timing", section = true },
+]
 
 [[process.params]]
 name = "Melody_demo"
@@ -25112,6 +25928,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Mode & Pitch", section = true },
+  { before = 5, text = "Serial Rhythm (palette Min..Max in 5 steps)", section = true },
+  { before = 8, text = "Flute Body", section = true },
+  { before = 13, text = "Chiff & Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -25355,6 +26177,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 4, text = "Grain Settings", section = true },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -25520,6 +26347,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 4, text = "Formant Frequencies (Hz)", section = true },
+  { before = 8, text = "Formant Bandwidths (Hz)", section = true },
+  { before = 12, text = "Voice Quality", section = true },
+  { before = 16, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -25801,6 +26635,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 4, text = "Markov Settings", section = true },
+  { before = 7, text = "Markov Chain Type", section = true },
+  { before = 8, text = "Sound Options", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -25989,6 +26830,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 3, text = "Breakpoint Configuration", section = true },
+  { before = 6, text = "Stochastic Parameters", section = true },
+  { before = 9, text = "Barrier Settings", section = true },
+  { before = 12, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -26209,6 +27057,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Synthesis Mode", section = true },
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 4, text = "Layer Settings", section = true },
+  { before = 6, text = "Envelope", section = true },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Synthesis_mode"
@@ -26531,6 +27386,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 4, text = "KS Parameters", section = true },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -26730,6 +27590,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 5
+param_notes = [
+  { before = 0, text = "PRESET STRATEGIES", section = true },
+  { before = 1, text = "GLOBAL PARAMETERS", section = true },
+  { before = 7, text = "CUSTOM MODE: COMPOSITIONAL CONTROLS", section = true },
+  { before = 7, text = "(Only active when Custom preset selected)" },
+  { before = 13, text = "(< 1 = denser, > 1 = sparser)" },
+  { before = 18, text = "VISUALIZATION", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -26972,6 +27840,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 4, text = "Layer Settings", section = true },
+  { before = 7, text = "Markov Settings", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -27159,6 +28033,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 3, text = "Logistic Map Parameters", section = true },
+  { before = 5, text = "Visualization", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -27302,6 +28182,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 3, text = "Lorenz Parameters", section = true },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -27444,6 +28329,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 4, text = "Clave Sound", section = true },
+  { before = 7, text = "Canon Mode", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -27614,6 +28505,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Settings", section = true },
+  { before = 4, text = "Circuit Physics", section = true },
+  { before = 6, text = "Filter Drift", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -27781,6 +28678,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Global", section = true },
+  { before = 3, text = "Event Rate (events per second)", section = true },
+  { before = 5, text = "Frequency (Hz)", section = true },
+  { before = 9, text = "Grain Duration (s)", section = true },
+  { before = 13, text = "Amplitude", section = true },
+  { before = 16, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -28034,6 +28939,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Canon Mode", section = true },
+  { before = 3, text = "Timing", section = true },
+  { before = 5, text = "Rhythm Parameters", section = true },
+  { before = 7, text = "Sound Parameters", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -28388,6 +29300,16 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Mode", section = true },
+  { before = 2, text = "Timing", section = true },
+  { before = 4, text = "Stochastic (Mode B only)", section = true },
+  { before = 5, text = "Pulsaret Shape", section = true },
+  { before = 7, text = "Chirp (Periodic mode only)", section = true },
+  { before = 9, text = "Amplitude Modulation", section = true },
+  { before = 12, text = "Envelope", section = true },
+  { before = 14, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -28602,6 +29524,16 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Timing", section = true },
+  { before = 4, text = "Pitch", section = true },
+  { before = 5, text = "Scale degrees = notes in scale" },
+  { before = 6, text = "Walk Behavior", section = true },
+  { before = 6, text = "Step probability = chance of moving each note" },
+  { before = 7, text = "Max step size = max interval jump" },
+  { before = 8, text = "Tuning", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -28764,6 +29696,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Timing", section = true },
+  { before = 5, text = "Frequency Walk", section = true },
+  { before = 7, text = "Walk Probabilities", section = true },
+  { before = 9, text = "Spatialization", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -28947,6 +29886,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Timing", section = true },
+  { before = 4, text = "Pitch", section = true },
+  { before = 5, text = "Spatialization", section = true },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -29079,6 +30024,10 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Select a Compositional Strategy", section = true },
+  { before = 1, text = "Global Parameters", section = true },
+]
 
 [[process.params]]
 name = "preset"
@@ -29119,6 +30068,14 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Generation Mode", section = true },
+  { before = 1, text = "Composition Parameters", section = true },
+  { before = 3, text = "Audio Settings", section = true },
+  { before = 5, text = "Amplitude Range", section = true },
+  { before = 7, text = "Options", section = true },
+  { before = 10, text = "Serial Mode: rotation offset (0 = beginning)", section = true },
+]
 
 [[process.params]]
 name = "Generation_mode"
@@ -29249,6 +30206,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Demo Mode", section = true },
+  { before = 2, text = "(If checked, generates 4-note bass pattern)" },
+  { before = 2, text = "Oscillator", section = true },
+  { before = 5, text = "Filter", section = true },
+  { before = 8, text = "Filter Envelope", section = true },
+  { before = 10, text = "Amplitude Envelope", section = true },
+  { before = 11, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -29437,6 +30403,15 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Mode", section = true },
+  { before = 1, text = "(If checked, plays a test melody)" },
+  { before = 1, text = "Vector Path", section = true },
+  { before = 3, text = "(Path_speed: cycles per second)" },
+  { before = 3, text = "Single Note Parameters", section = true },
+  { before = 5, text = "Visualization", section = true },
+  { before = 7, text = "(Show gradient trail effect)" },
+]
 
 [[process.params]]
 name = "Melody_demo"
@@ -29524,6 +30499,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Famous Patterns", section = true },
+  { before = 1, text = "Grid Settings", section = true },
+  { before = 3, text = "Timing", section = true },
+  { before = 5, text = "Audio Settings", section = true },
+  { before = 8, text = "Playback", section = true },
+  { before = 10, text = "Output", section = true },
+  { before = 11, text = "Visualization", section = true },
+]
 
 [[process.script_presets]]
 option = 3
@@ -29673,6 +30657,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Duration & Sample Rate", section = true },
+  { before = 3, text = "Terrain Settings", section = true },
+  { before = 6, text = "X Trajectory", section = true },
+  { before = 12, text = "Y Trajectory", section = true },
+  { before = 18, text = "Modulation & Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -29967,6 +30958,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 5
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Input Mode", section = true },
+  { before = 0, text = "(Select a Sound object before running to use audio analysis)" },
+  { before = 1, text = "(If unchecked, manual parameters below are used)" },
+  { before = 2, text = "CPU / Bandwidth (measured: 8 s piece renders in", section = true },
+  { before = 2, text = "11 s at 11025 Hz, ~39 s at 22050; Nyquist = rate/2)", section = true },
+  { before = 5, text = "Spectral Decay Reverb", section = true },
+  { before = 15, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -30194,6 +31194,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Instrument Model", section = true },
+  { before = 2, text = "(Melody plays a short arpeggio with the selected model)" },
+  { before = 2, text = "Physical Parameters", section = true },
+  { before = 7, text = "Amplitude Envelope", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Method"
@@ -30304,6 +31311,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Custom Settings", section = true },
+  { before = 4, text = "Envelope", section = true },
+  { before = 5, text = "(lower = smoother envelope response)" },
+  { before = 5, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Style"
@@ -30389,6 +31402,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Orbit Parameters", section = true },
+  { before = 4, text = "Modulation Rates", section = true },
+  { before = 7, text = "Stereo", section = true },
+  { before = 8, text = "Mix", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -30577,6 +31597,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Pitch Mode", section = true },
+  { before = 3, text = "Logistic Parameters", section = true },
+  { before = 5, text = "OU Parameters", section = true },
+  { before = 7, text = "Lorenz AM Parameters", section = true },
+  { before = 12, text = "Fade Out", section = true },
+  { before = 13, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -30779,6 +31807,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Mode", section = true },
+  { before = 2, text = "Rate", section = true },
+  { before = 3, text = "Adaptive Mode Settings", section = true },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -30914,6 +31948,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Fractal Parameters", section = true },
+  { before = 3, text = "Scaling", section = true },
+  { before = 6, text = "Processing", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -31071,6 +32111,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Delay Parameters", section = true },
+  { before = 3, text = "Modulation Rates", section = true },
+  { before = 4, text = "(Pi)" },
+  { before = 5, text = "(Euler e)" },
+  { before = 6, text = "(Golden Ratio Phi)" },
+  { before = 6, text = "Mixing", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -31232,6 +32281,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "PRIME ROW DEFINITIONS (values 0-11)", section = true },
+  { before = 7, text = "PARAMETER RANGES", section = true },
+  { before = 15, text = "Shape: 0-2=sine, 3-5=triangle, 6-8=square, 9-11=sawtooth" },
+  { before = 15, text = "Panning: 0=left, 6=center, 11=right" },
+  { before = 15, text = "Speed: 0=-6 semitones, 6=original, 11=+5 semitones" },
+]
 
 [[process.params]]
 name = "Preset"
@@ -31413,6 +32469,17 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Resonator", section = true },
+  { before = 2, text = "(Resonator frequency in Hz)" },
+  { before = 2, text = "Modulation", section = true },
+  { before = 4, text = "(Depth in semitones)" },
+  { before = 4, text = "Decay", section = true },
+  { before = 5, text = "(0.99 = long sustain, 0.5 = short pluck)" },
+  { before = 5, text = "Mix", section = true },
+  { before = 6, text = "(0 = dry, 1 = wet)" },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -31652,6 +32719,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Effect Parameters", section = true },
+  { before = 4, text = "Feature Extraction", section = true },
+  { before = 6, text = "Classification Thresholds", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -31839,6 +32912,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "BPM Calculation", section = true },
+  { before = 1, text = "Beats in selection (0 = use manual BPM)", section = true },
+  { before = 3, text = "Rhythm Settings", section = true },
+  { before = 5, text = "Wah Tone", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -31982,6 +33062,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Analysis", section = true },
+  { before = 5, text = "Modulation Mapping", section = true },
+  { before = 9, text = "Protection (tonal content)", section = true },
+  { before = 13, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -32201,6 +33287,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Analysis Range", section = true },
+  { before = 3, text = "Depth Mapping (semitones)", section = true },
+  { before = 5, text = "Rate Mapping (Hz)", section = true },
+  { before = 8, text = "Delay Line", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -32359,6 +33452,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "LFO Settings", section = true },
+  { before = 4, text = "Stereo Image", section = true },
+  { before = 5, text = "(180=counter-sweep, 0=mono)" },
+  { before = 5, text = "Mix & Feedback", section = true },
+  { before = 6, text = "(negative = hollow/metallic)" },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -32510,6 +33611,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "LFO Settings", section = true },
+  { before = 4, text = "Stereo Image", section = true },
+  { before = 5, text = "(180=counter-sweep, 90=quadrature, 0=mono)" },
+  { before = 5, text = "Intensity", section = true },
+  { before = 6, text = "(0=soft, 0.9=metallic jet)" },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -32661,6 +33770,16 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Rotation", section = true },
+  { before = 2, text = "(Chorale ~0.8 Hz, Tremolo ~7 Hz)" },
+  { before = 2, text = "Horn Physics", section = true },
+  { before = 3, text = "(Pitch wobble: 0.05=subtle, 0.2=strong)" },
+  { before = 4, text = "(Volume wobble: 0.3=subtle, 0.7=strong)" },
+  { before = 4, text = "Microphone Placement", section = true },
+  { before = 5, text = "(Angle between L/R mics: 90=narrow, 180=wide)" },
+  { before = 5, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -32781,6 +33900,14 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Requires a Sound object (Mono inputs will be converted)" },
+  { before = 1, text = "PARAMETERS", section = true },
+  { before = 4, text = "STEREO FIELD", section = true },
+  { before = 5, text = "(0=Mono, 90=Circular, 180=Ping-Pong, 270=Reverse)" },
+  { before = 5, text = "OUTPUT SAFETY", section = true },
+  { before = 6, text = "(0.90 prevents distortion/clipping)" },
+]
 
 [[process.params]]
 name = "Preset"
@@ -32878,6 +34005,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Stretch Parameters", section = true },
+  { before = 2, text = "(Higher = smoother, longer texture)" },
+  { before = 2, text = "Cloud Modulation", section = true },
+  { before = 4, text = "(0 = no tremolo, 1 = full tremolo)" },
+  { before = 4, text = "Mix", section = true },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -33007,6 +34142,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Rate Evolution (Hz)", section = true },
+  { before = 3, text = "Depth Evolution (Semitones)", section = true },
+  { before = 5, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -33122,6 +34262,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 1
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Mode Selection", section = true },
+  { before = 2, text = "Signal Balance", section = true },
+  { before = 4, text = "Delay Settings", section = true },
+  { before = 6, text = "LFO Rates (Hz)", section = true },
+  { before = 9, text = "Orbit Settings (Mode 3 Only)", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -33298,6 +34446,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "PRESET & MODE", section = true },
+  { before = 2, text = "PARAMETERS", section = true },
+  { before = 5, text = "SMART KNOBS (Function depends on Mode)", section = true },
+  { before = 7, text = "OUTPUT", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -33415,6 +34569,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Shape", section = true },
+  { before = 2, text = "Modulation Mode", section = true },
+  { before = 3, text = "Parameters", section = true },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -33541,6 +34701,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Basic Controls", section = true },
+  { before = 3, text = "Modulation Source", section = true },
+  { before = 6, text = "Processing", section = true },
+  { before = 9, text = "Quality", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -33797,6 +34964,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Grammar Parameters (Custom only)", section = true },
+  { before = 6, text = "Random Seed", section = true },
+  { before = 7, text = "(0 = use current time, any other number = fixed seed)" },
+  { before = 7, text = "Color & Style", section = true },
+  { before = 11, text = "Audio Synthesis", section = true },
+  { before = 13, text = "Display Options", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -34003,6 +35178,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Breathing Parameters", section = true },
+  { before = 2, text = "(cycles per second)" },
+  { before = 3, text = "Flutter & Chaos", section = true },
+  { before = 5, text = "Pitch Analysis", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -34169,6 +35351,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Chord Type", section = true },
+  { before = 1, text = "Levels (0-1)", section = true },
+  { before = 5, text = "Stereo Spread", section = true },
+  { before = 7, text = "(0 = mono, 1 = hard L/R)" },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Chord_type"
@@ -34271,6 +35460,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Select a Preset or use Custom settings" },
+  { before = 1, text = "Custom Parameters (ignored if Preset is not Custom)" },
+  { before = 4, text = "Effect Settings" },
+  { before = 6, text = "Visualization & Playback" },
+  { before = 8, text = "Technical (Pitch Analysis)" },
+]
 
 [[process.params]]
 name = "Preset"
@@ -34382,6 +35578,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Glide Parameters", section = true },
+  { before = 4, text = "(higher = faster initial change)" },
+  { before = 4, text = "Pitch Analysis", section = true },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -34537,6 +35739,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Amplitude Modulation", section = true },
+  { before = 4, text = "(1=simple, 2=layered, 3=chaotic)" },
+  { before = 4, text = "Pitch Modulation", section = true },
+  { before = 7, text = "Ring Modulation", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -34708,6 +35917,16 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Fractal Parameters", section = true },
+  { before = 5, text = "Wave Mixing", section = true },
+  { before = 7, text = "Frequency Progression", section = true },
+  { before = 8, text = "(golden ratio squared)" },
+  { before = 9, text = "Pitch Scaling", section = true },
+  { before = 13, text = "Time Evolution", section = true },
+  { before = 15, text = "Pitch Analysis", section = true },
+  { before = 18, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -34980,6 +36199,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 6
+param_notes = [
+  { before = 1, text = "Global (used when Preset = Custom)", section = true },
+  { before = 2, text = "(0 = dry, 1 = full wet)" },
+  { before = 3, text = "Dimension influences", section = true },
+  { before = 7, text = "Safety / range", section = true },
+  { before = 11, text = "Smoothing (ms)", section = true },
+  { before = 14, text = "Analysis grid", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -35239,6 +36466,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 8
+param_notes = [
+  { before = 1, text = "L-System Rules", section = true },
+  { before = 9, text = "Granular", section = true },
+  { before = 13, text = "Pitch", section = true },
+  { before = 16, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -35461,6 +36694,18 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Target register (MIDI note the hexachord transposes to, C2=36)", section = true },
+  { before = 2, text = "Quartertone detune of the target register [semitones, e.g. 0.5 = 50 cents]", section = true },
+  { before = 3, text = "Assumed fundamental of the INPUT recording [MIDI note, default C2=36] (presets never override this — it describes your file, not the preset)", section = true },
+  { before = 4, text = "Timing  [0 = auto-fit to input duration]", section = true },
+  { before = 5, text = "Entry smoothing", section = true },
+  { before = 6, text = "Stereo field  [0=centre  1=full L-R]", section = true },
+  { before = 7, text = "Dry / Wet  [0=dry only  1=wet only]", section = true },
+  { before = 8, text = "Source handling", section = true },
+  { before = 9, text = "Render speed (per-layer resample precision)", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -35627,6 +36872,16 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "ENGINE PRESET", section = true },
+  { before = 1, text = "TUNING (used when Preset is Custom)", section = true },
+  { before = 3, text = "VOICES AND LEVELS", section = true },
+  { before = 6, text = "BEHAVIOR (used when Preset is Custom)", section = true },
+  { before = 7, text = "PLACEMENT", section = true },
+  { before = 8, text = "TIME CORRECTION (PSOLA sync to source phrase duration)", section = true },
+  { before = 9, text = "STEREO SPREAD (0=mono  1=full L-R)", section = true },
+  { before = 10, text = "OUTPUT", section = true },
+]
 
 [[process.params]]
 name = "Preset_mode"
@@ -35763,6 +37018,14 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Operation Mode", section = true },
+  { before = 1, text = "Presets (Canon Only)", section = true },
+  { before = 2, text = "Mode 1: Stereo Detune Settings", section = true },
+  { before = 3, text = "(Positive = right channel higher)" },
+  { before = 3, text = "Mode 2: Canon Settings (Custom)", section = true },
+  { before = 9, text = "Global Settings", section = true },
+]
 
 [[process.params]]
 name = "Mode"
@@ -35911,6 +37174,15 @@ input = "dual_wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Select 2 Sounds: A (source style), B (target to shift)" },
+  { before = 0, text = "Analysis", section = true },
+  { before = 1, text = "Pitch Range (Sound A)", section = true },
+  { before = 3, text = "Pitch Range (Sound B)", section = true },
+  { before = 5, text = "Transfer", section = true },
+  { before = 7, text = "(0 = keep B's own contour, 1 = full A contour)" },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Analysis_time_step"
@@ -36132,6 +37404,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Target Pitches", section = true },
+  { before = 2, text = "(underscore-separated semitone values)" },
+  { before = 2, text = "Morphing Behavior", section = true },
+  { before = 4, text = "Dynamics", section = true },
+  { before = 7, text = "Pitch Analysis", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -36312,6 +37592,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Interval Preset", section = true },
+  { before = 1, text = "Custom Value", section = true },
+  { before = 2, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -36434,6 +37719,11 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Manual Parameters", section = true },
+  { before = 3, text = "Analysis", section = true },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -36531,6 +37821,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Quantum Parameters", section = true },
+  { before = 4, text = "Energy", section = true },
+  { before = 6, text = "Glitch Range", section = true },
+  { before = 8, text = "Uncertainty", section = true },
+  { before = 10, text = "Pitch Analysis", section = true },
+  { before = 13, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -36748,6 +38046,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Rhythm Pattern", section = true },
+  { before = 2, text = "(1=hit, 0=rest, underscore-separated)" },
+  { before = 2, text = "Hit Parameters", section = true },
+  { before = 6, text = "Analysis", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -36919,6 +38224,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Analysis", section = true },
+  { before = 4, text = "Pitch Modulation", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -37061,6 +38371,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Spiral Parameters", section = true },
+  { before = 4, text = "Analysis", section = true },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -37203,6 +38518,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Segmentation", section = true },
+  { before = 2, text = "Duration Spiral", section = true },
+  { before = 4, text = "Pitch Spiral", section = true },
+  { before = 8, text = "Temporal Jitter (non-metric)", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -37330,6 +38652,10 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Apply tempo variations to the selected sound" },
+  { before = 3, text = "(1 = mild, 2 = medium, 3 = strong)" },
+]
 
 [[process.params]]
 name = "Pattern_type"
@@ -37407,6 +38733,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Partial Structure", section = true },
+  { before = 2, text = "Stretch: 0=pure  +0.15=wider  -0.15=compressed (Integer/Geometric modes)" },
+  { before = 3, text = "Series mode" },
+  { before = 5, text = "Micro-delay decorrelation (ms, 0=off)", section = true },
+  { before = 6, text = "Gain Curve", section = true },
+  { before = 9, text = "Filter", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -37580,6 +38915,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Partial Structure", section = true },
+  { before = 2, text = "Stretch: 0=pure  +0.15=wider  -0.15=compressed (Integer/Geometric modes)" },
+  { before = 3, text = "Series mode" },
+  { before = 5, text = "Micro-delay decorrelation (ms, 0=off)", section = true },
+  { before = 6, text = "Gain Curve", section = true },
+  { before = 9, text = "Filter", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -37753,6 +39097,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Pitch Analysis", section = true },
+  { before = 4, text = "Frequency Range", section = true },
+  { before = 6, text = "Transformations", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -37924,6 +39274,16 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Room Preset", section = true },
+  { before = 1, text = "Custom Dimensions (only if Custom)", section = true },
+  { before = 4, text = "Custom Materials (only if Custom)", section = true },
+  { before = 8, text = "IR Settings", section = true },
+  { before = 12, text = "Mix Control", section = true },
+  { before = 13, text = "(0 = dry only, 100 = wet only)" },
+  { before = 14, text = "(extends output to let the reverb tail decay fully)" },
+  { before = 14, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Room_preset"
@@ -38108,6 +39468,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 5
+param_notes = [
+  { before = 1, text = "Cellular Automaton (Custom)", section = true },
+  { before = 5, text = "Impulse Response (Custom)", section = true },
+  { before = 8, text = "(ON = room-like; OFF = keep the samplerate/width comb: metallic)" },
+  { before = 8, text = "Mix", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -38592,6 +39959,20 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Duration", section = true },
+  { before = 2, text = "Sparse Taps (discrete echoes)", section = true },
+  { before = 4, text = "Burst Clusters", section = true },
+  { before = 7, text = "(Gaussian spread of each cluster)" },
+  { before = 8, text = "(minimum distance from edges)" },
+  { before = 8, text = "Pulse Shaping", section = true },
+  { before = 9, text = "(burst-cloud level relative to the sparse taps)" },
+  { before = 10, text = "(grain length; only used when Pulse_tone_Hz > 0)" },
+  { before = 11, text = "(0 = broadband clicks, >0 = tonal grains at this carrier Hz)" },
+  { before = 11, text = "Mix", section = true },
+  { before = 12, text = "(0 = dry only, 100 = wet only)" },
+  { before = 12, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -38790,6 +40171,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Duration", section = true },
+  { before = 3, text = "Left Channel", section = true },
+  { before = 7, text = "Right Channel", section = true },
+  { before = 11, text = "Pulse Parameters", section = true },
+  { before = 14, text = "Mix", section = true },
+  { before = 15, text = "(0 = dry only, 100 = wet only)" },
+  { before = 15, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -39023,6 +40413,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Duration", section = true },
+  { before = 2, text = "Poisson Process", section = true },
+  { before = 5, text = "Modulation", section = true },
+  { before = 8, text = "Layer Mix", section = true },
+  { before = 10, text = "Output Mix", section = true },
+  { before = 11, text = "(0 = dry only, 100 = wet only)" },
+  { before = 12, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -39210,6 +40609,11 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Analysis Parameters", section = true },
+  { before = 3, text = "Reverb Parameters", section = true },
+  { before = 7, text = "Mix Parameters", section = true },
+]
 
 [[process.params]]
 name = "analysis_window_size"
@@ -39340,6 +40744,16 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Performance", section = true },
+  { before = 2, text = "Analysis", section = true },
+  { before = 5, text = "Dark Reverb (low entropy)", section = true },
+  { before = 7, text = "Bright Reverb (high entropy)", section = true },
+  { before = 9, text = "Dynamic Mix", section = true },
+  { before = 12, text = "Overall Mix", section = true },
+  { before = 13, text = "(0 = dry only, 100 = wet only)" },
+  { before = 13, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -39532,6 +40946,18 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Parameter Type", section = true },
+  { before = 2, text = "Detection", section = true },
+  { before = 3, text = "(Intensity: dB, Pitch: Hz)" },
+  { before = 4, text = "(Refractory period between impulses)" },
+  { before = 4, text = "Pitch Settings (ignored in Intensity mode)", section = true },
+  { before = 6, text = "Impulse Characteristics", section = true },
+  { before = 8, text = "(0.5=subtle, 1.0=normal, 2.0=intense)" },
+  { before = 8, text = "Mix", section = true },
+  { before = 9, text = "(0 = dry only, 100 = wet only)" },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -39681,6 +41107,16 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Fractal Parameters", section = true },
+  { before = 2, text = "(number of recursive divisions: 2^n segments)" },
+  { before = 2, text = "Delay Range", section = true },
+  { before = 4, text = "Feedback", section = true },
+  { before = 5, text = "(decreases by 1/layer at each depth)" },
+  { before = 5, text = "Mix", section = true },
+  { before = 6, text = "(0 = dry only, 100 = wet only)" },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -39811,6 +41247,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Tail", section = true },
+  { before = 2, text = "Chaos Parameters", section = true },
+  { before = 6, text = "Amplitude", section = true },
+  { before = 9, text = "Mix", section = true },
+  { before = 10, text = "(0 = dry only, 100 = wet only)" },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -39978,6 +41422,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Grain Parameters", section = true },
+  { before = 3, text = "Delay Range", section = true },
+  { before = 5, text = "(max = grain_duration × factor)" },
+  { before = 5, text = "Amplitude Range", section = true },
+  { before = 7, text = "Mix", section = true },
+  { before = 8, text = "(0 = dry only, 100 = wet only)" },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -40132,6 +41585,16 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Spacetime Parameters", section = true },
+  { before = 5, text = "Mass Properties", section = true },
+  { before = 7, text = "Ray Properties", section = true },
+  { before = 11, text = "Decay & Early Reflections", section = true },
+  { before = 14, text = "Fadeout", section = true },
+  { before = 15, text = "Mix", section = true },
+  { before = 16, text = "(0 = dry only, 100 = wet only)" },
+  { before = 16, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -40377,6 +41840,16 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Harmonic Parameters", section = true },
+  { before = 4, text = "Inharmonicity morph (beta)", section = true },
+  { before = 6, text = "(1 = harmonic, <1 compressed, >1 stretched/bell)" },
+  { before = 6, text = "Modulation", section = true },
+  { before = 7, text = "(phase modulation period in samples)" },
+  { before = 7, text = "Mix", section = true },
+  { before = 8, text = "(0 = dry only, 100 = wet only)" },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -40531,6 +42004,16 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Reverb Parameters", section = true },
+  { before = 4, text = "Harmonic Spacing", section = true },
+  { before = 5, text = "(higher = more compressed spacing)" },
+  { before = 5, text = "Amplitude", section = true },
+  { before = 8, text = "Fadeout", section = true },
+  { before = 9, text = "Mix", section = true },
+  { before = 10, text = "(0 = dry only, 100 = wet only)" },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -40695,6 +42178,14 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Behavioral Preset", section = true },
+  { before = 1, text = "Performance", section = true },
+  { before = 2, text = "Voice Parameters", section = true },
+  { before = 6, text = "Output", section = true },
+  { before = 9, text = "Mix", section = true },
+  { before = 10, text = "(0 = dry only, 100 = wet only)" },
+]
 
 [[process.params]]
 name = "Preset"
@@ -40838,6 +42329,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Reverb Parameters", section = true },
+  { before = 4, text = "Chirp Modulation", section = true },
+  { before = 7, text = "Chorus", section = true },
+  { before = 9, text = "Mix", section = true },
+  { before = 11, text = "(0 = dry only, 100 = wet only)" },
+  { before = 11, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -41039,6 +42538,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Delay Parameters", section = true },
+  { before = 5, text = "Amplitude", section = true },
+  { before = 7, text = "Stereo / Sparkle", section = true },
+  { before = 10, text = "Mix", section = true },
+  { before = 11, text = "(0 = dry only, 100 = wet only)" },
+  { before = 11, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -41229,6 +42736,9 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "This script creates reverse exponential crescendo with triple layers" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -41411,6 +42921,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Quantum Parameters", section = true },
+  { before = 4, text = "State Collapse", section = true },
+  { before = 5, text = "(probability for collapse vs superposition)" },
+  { before = 7, text = "Amplitude", section = true },
+  { before = 12, text = "Mix", section = true },
+  { before = 13, text = "(0 = dry only, 100 = wet only)" },
+  { before = 13, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -41919,6 +43438,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Effect Parameters", section = true },
+  { before = 7, text = "HF Sparkle", section = true },
+  { before = 8, text = "Mix", section = true },
+  { before = 9, text = "(0 = dry only, 100 = wet only)" },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -42085,6 +43611,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Main Parameters", section = true },
+  { before = 5, text = "Delay Range", section = true },
+  { before = 8, text = "Modulation", section = true },
+  { before = 10, text = "HF Enhancement", section = true },
+  { before = 12, text = "Mix", section = true },
+  { before = 13, text = "(0 = dry only, 100 = wet only)" },
+  { before = 13, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -42299,6 +43834,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Main Parameters", section = true },
+  { before = 5, text = "Delay Range", section = true },
+  { before = 8, text = "Modulation", section = true },
+  { before = 10, text = "HF Enhancement", section = true },
+  { before = 12, text = "Mix", section = true },
+  { before = 13, text = "(0 = dry only, 100 = wet only)" },
+  { before = 13, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -42513,6 +44057,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "IR Parameters", section = true },
+  { before = 5, text = "Spectral Filtering", section = true },
+  { before = 8, text = "Mix", section = true },
+  { before = 9, text = "(0 = dry only, 100 = wet only)" },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -42678,6 +44229,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Drift Parameters", section = true },
+  { before = 5, text = "Mix", section = true },
+  { before = 6, text = "(0 = dry only, 100 = wet only)" },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -42808,6 +44365,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Smearing Parameters", section = true },
+  { before = 5, text = "Frequency Response", section = true },
+  { before = 7, text = "Mix", section = true },
+  { before = 8, text = "(0 = dry only, 100 = wet only)" },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -42962,6 +44526,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 5
+param_notes = [
+  { before = 1, text = "Timing", section = true },
+  { before = 5, text = "Pulse Parameters", section = true },
+  { before = 7, text = "Mix", section = true },
+  { before = 8, text = "(0 = dry only, 100 = wet only)" },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -43108,6 +44679,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Performance", section = true },
+  { before = 2, text = "Shimmer Parameters", section = true },
+  { before = 9, text = "HF Enhancement", section = true },
+  { before = 10, text = "Mix", section = true },
+  { before = 11, text = "(0 = dry only, 100 = wet only)" },
+  { before = 11, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -43282,6 +44861,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "IR Parameters", section = true },
+  { before = 4, text = "Filtering", section = true },
+  { before = 7, text = "Erosion", section = true },
+  { before = 8, text = "(standard deviation of Gaussian amplitude variation)" },
+  { before = 8, text = "Mix", section = true },
+  { before = 9, text = "(0 = dry only, 100 = wet only)" },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -43447,6 +45035,10 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Parameters", section = true },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -43574,6 +45166,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Select a Sound object first (speech recommended)" },
+  { before = 1, text = "Room Acoustics", section = true },
+  { before = 4, text = "Microphone Placement", section = true },
+  { before = 6, text = "(0.95-0.99 = close mic, slow change)" },
+  { before = 6, text = "(0.70-0.90 = far mic, fast change)" },
+  { before = 6, text = "Simulation", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -43720,6 +45321,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Select your generation algorithm", section = true },
+  { before = 1, text = "General Settings", section = true },
+  { before = 3, text = "Output", section = true },
+  { before = 5, text = "Pulses that accelerate (gaps shrink)" },
+]
 
 [[process.params]]
 name = "Algorithm"
@@ -43824,6 +45431,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Select your generation algorithm", section = true },
+  { before = 1, text = "General Settings", section = true },
+  { before = 3, text = "Output", section = true },
+  { before = 5, text = "Physics-based bouncing pattern" },
+]
 
 [[process.params]]
 name = "Algorithm"
@@ -43940,6 +45553,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Select your generation algorithm", section = true },
+  { before = 1, text = "General Settings", section = true },
+  { before = 3, text = "Output", section = true },
+  { before = 5, text = "Random bursts with tap accents" },
+]
 
 [[process.params]]
 name = "Algorithm"
@@ -44071,6 +45690,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Select your generation algorithm", section = true },
+  { before = 1, text = "General Settings", section = true },
+  { before = 3, text = "Output", section = true },
+  { before = 5, text = "Bjorklund algorithm: K pulses in N steps" },
+]
 
 [[process.params]]
 name = "Algorithm"
@@ -44163,6 +45788,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Select your generation algorithm", section = true },
+  { before = 1, text = "General Settings", section = true },
+  { before = 3, text = "Output", section = true },
+  { before = 5, text = "Impulses at Fibonacci sequence times" },
+]
 
 [[process.params]]
 name = "Algorithm"
@@ -44267,6 +45898,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Select your generation algorithm", section = true },
+  { before = 1, text = "General Settings", section = true },
+  { before = 3, text = "Output", section = true },
+  { before = 5, text = "Golden ratio distribution" },
+]
 
 [[process.params]]
 name = "Algorithm"
@@ -44358,6 +45995,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Select your generation algorithm", section = true },
+  { before = 1, text = "General Settings", section = true },
+  { before = 3, text = "Output", section = true },
+  { before = 5, text = "Gap varies by random walk" },
+]
 
 [[process.params]]
 name = "Algorithm"
@@ -44448,6 +46091,14 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Select your generation algorithm", section = true },
+  { before = 1, text = "General Settings", section = true },
+  { before = 3, text = "Output", section = true },
+  { before = 5, text = "Different Fibonacci seeds per channel" },
+  { before = 6, text = "Left Channel Seeds", section = true },
+  { before = 8, text = "Right Channel Seeds", section = true },
+]
 
 [[process.params]]
 name = "Algorithm"
@@ -44582,6 +46233,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Select your generation algorithm", section = true },
+  { before = 1, text = "General Settings", section = true },
+  { before = 3, text = "Output", section = true },
+  { before = 5, text = "Jazz swing timing" },
+]
 
 [[process.params]]
 name = "Algorithm"
@@ -44674,6 +46331,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "This script creates sparse taps plus clustered bursts" },
+  { before = 2, text = "Sparse tap times", section = true },
+  { before = 4, text = "Burst parameters", section = true },
+  { before = 7, text = "(Gaussian spread of burst cluster)" },
+  { before = 8, text = "(margin from edges)" },
+  { before = 8, text = "Pulse train parameters", section = true },
+  { before = 12, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -44858,6 +46524,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "This script creates stereo Fibonacci patterns with different jitter" },
+  { before = 3, text = "Left channel", section = true },
+  { before = 7, text = "Right channel", section = true },
+  { before = 11, text = "Pulse train parameters", section = true },
+  { before = 15, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -45077,6 +46750,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Shimmer Parameters", section = true },
+  { before = 8, text = "HF Enhancement", section = true },
+  { before = 9, text = "Mix", section = true },
+  { before = 10, text = "(0 = dry only, 100 = wet only)" },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -45241,6 +46921,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Room Preset (length x width x height = L/R, B/F, D/U)", section = true },
+  { before = 1, text = "Custom dimensions (used only if preset=Custom)", section = true },
+  { before = 1, text = "Length = left-right, Width = back-front, Height = down-up" },
+  { before = 5, text = "Movement (radius = max distance from listener)", section = true },
+  { before = 8, text = "Room model", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -45391,6 +47078,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Pitch shift (percent, + = higher, - = lower)", section = true },
+  { before = 5, text = "Canon delays (seconds)", section = true },
+  { before = 9, text = "Settings", section = true },
+  { before = 11, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -45601,6 +47294,10 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Bin shift amounts (positive=up, negative=down)", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -45792,6 +47489,14 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "MOVEMENT PATTERN", section = true },
+  { before = 1, text = "TIMING PARAMETERS", section = true },
+  { before = 4, text = "VOLUME PARAMETERS", section = true },
+  { before = 8, text = "CUSTOM POSITION (pattern 12 only)", section = true },
+  { before = 10, text = "QUALITY", section = true },
+  { before = 12, text = "OUTPUT", section = true },
+]
 
 [[process.params]]
 name = "Pattern"
@@ -45962,6 +47667,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Pitch shifts (semitones)", section = true },
+  { before = 9, text = "Canon delays (seconds)", section = true },
+  { before = 17, text = "Settings", section = true },
+  { before = 19, text = "Output format", section = true },
+  { before = 20, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -46268,6 +47980,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Comb filter divisors (higher = shorter delay)", section = true },
+  { before = 9, text = "Processing options", section = true },
+  { before = 11, text = "Output format", section = true },
+  { before = 12, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -46471,6 +48189,15 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "MOVEMENT PATTERN", section = true },
+  { before = 1, text = "TIMING (Motion_speed: Circular, Figure-8, Spiral, Walk only)", section = true },
+  { before = 5, text = "SPATIAL (speakers sit on the unit circle, r = 1)", section = true },
+  { before = 9, text = "GAIN (tier holds relative dB: 0 = unity)", section = true },
+  { before = 11, text = "QUALITY", section = true },
+  { before = 13, text = "OUTPUT FORMAT", section = true },
+  { before = 14, text = "OUTPUT", section = true },
+]
 
 [[process.params]]
 name = "Pattern"
@@ -46662,6 +48389,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "PRESETS (values in Hz)", section = true },
+  { before = 1, text = "Units for the values below (presets are always Hz)", section = true },
+  { before = 2, text = "Shift amounts (positive = up, negative = down)", section = true },
+  { before = 10, text = "OUTPUT FORMAT", section = true },
+  { before = 11, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -46863,6 +48597,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Pitch mapping", section = true },
+  { before = 6, text = "Intensity -> proximity gain (amplitude, not distance)", section = true },
+  { before = 9, text = "Analysis", section = true },
+  { before = 11, text = "OUTPUT FORMAT", section = true },
+  { before = 12, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -47061,6 +48802,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Duration factors (1.0 = normal, >1 = longer/slower)", section = true },
+  { before = 9, text = "Entry alignment", section = true },
+  { before = 10, text = "Edge fades (applied per voice, before padding)", section = true },
+  { before = 12, text = "PSOLA analysis", section = true },
+  { before = 15, text = "OUTPUT FORMAT", section = true },
+  { before = 16, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -47332,6 +49081,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "I Ching Configuration", section = true },
+  { before = 3, text = "Random seed (0 = unpredictable, >0 = reproducible)", section = true },
+  { before = 4, text = "Audio Settings", section = true },
+  { before = 9, text = "Cage-inspired Options", section = true },
+  { before = 17, text = "OUTPUT FORMAT", section = true },
+  { before = 18, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -47580,6 +49337,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "MODE", section = true },
+  { before = 2, text = "Automatic mode: deviation factor, 0 to below 1", section = true },
+  { before = 3, text = "Manual mode settings", section = true },
+  { before = 11, text = "Random mode settings (0 seed = unpredictable)", section = true },
+  { before = 14, text = "Audio settings", section = true },
+  { before = 18, text = "OUTPUT FORMAT", section = true },
+  { before = 19, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -47863,6 +49629,10 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Time scales (1.0 = normal, >1 = slower, <1 = faster)", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -48039,6 +49809,16 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "PAN MODE", section = true },
+  { before = 1, text = "Static presets (used only when Pan mode = Static)", section = true },
+  { before = 3, text = "Trajectory settings (cycles applies to oscillating shapes)", section = true },
+  { before = 5, text = "PANNING MODEL", section = true },
+  { before = 7, text = "ITD (Interaural Time Difference)", section = true },
+  { before = 9, text = "Far-ear head shadow (lowpass on the far channel)", section = true },
+  { before = 12, text = "Distance", section = true },
+  { before = 19, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Pan_mode"
@@ -48270,6 +50050,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "TEMPO", section = true },
+  { before = 2, text = "SWING (50 = straight, 66.7 = triplet, 75 = hard shuffle)", section = true },
+  { before = 4, text = "RHYTHMIC PATTERN", section = true },
+  { before = 5, text = "SHAPING", section = true },
+  { before = 6, text = "INPUT / OUTPUT", section = true },
+]
 
 [[process.params]]
 name = "Tempo_bpm"
@@ -48384,6 +50171,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "RATE", section = true },
+  { before = 4, text = "SPATIAL PATTERN", section = true },
+  { before = 5, text = "SPEAKERS AND PANNING", section = true },
+  { before = 9, text = "LFE (7.1 mode only)", section = true },
+  { before = 11, text = "OUTPUT", section = true },
+]
 
 [[process.params]]
 name = "Rate_mode"
@@ -48546,6 +50340,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "MOVEMENT TRAJECTORY", section = true },
+  { before = 9, text = "SPEAKERS", section = true },
+  { before = 12, text = "DBAP", section = true },
+  { before = 19, text = "OUTPUT", section = true },
+]
 
 [[process.params]]
 name = "Movement_type"
@@ -48811,6 +50611,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 11
+param_notes = [
+  { before = 1, text = "DBAP Settings", section = true },
+  { before = 4, text = "Custom source position (-1 to 1)", section = true },
+  { before = 6, text = "Custom speaker count (for preset 12)", section = true },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -48971,6 +50777,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Spread", section = true },
+  { before = 3, text = "Pan law", section = true },
+  { before = 4, text = "Stereo input", section = true },
+  { before = 5, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -49079,6 +50891,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Separation Method", section = true },
+  { before = 2, text = "F0 Detection", section = true },
+  { before = 6, text = "Filter Settings", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -49191,6 +51009,24 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "REAR CHANNEL LEVEL", section = true },
+  { before = 2, text = "(dB relative to front; typically -12 to -3)" },
+  { before = 2, text = "REAR DELAY", section = true },
+  { before = 3, text = "(Hamasaki-style delay for rears; typically 20–80 ms)" },
+  { before = 3, text = "DECORRELATION OFFSET", section = true },
+  { before = 4, text = "(Extra offset between Ls and Rs; 5–15 ms typical)" },
+  { before = 4, text = "MONO FRONT WIDENING", section = true },
+  { before = 5, text = "(Micro-delay for L vs R when input is mono; 0.1–1 ms)" },
+  { before = 5, text = "REAR MID BLEND", section = true },
+  { before = 6, text = "(Blends mid/sum signal into rears; useful when side energy is low)" },
+  { before = 6, text = "(Set to -100 to disable; typically -18 to -6 dB)" },
+  { before = 6, text = "REAR BANDPASS", section = true },
+  { before = 7, text = "(High-pass cutoff for rear channels; removes LF)" },
+  { before = 8, text = "(Low-pass cutoff for rear channels; softens HF)" },
+  { before = 8, text = "OUTPUT", section = true },
+  { before = 9, text = "(Peak ceiling in dBFS; e.g. -1.0)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -49347,6 +51183,11 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Input: a combined ambiX Sound (from the encoder) OR legacy separate" },
+  { before = 0, text = "ACN channels selected in order. This is a HORIZONTAL decoder" },
+  { before = 0, text = "(speakers in the horizontal plane; height is not reconstructed)." },
+]
 
 [[process.params]]
 name = "Input_mode"
@@ -49413,6 +51254,11 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Tour Pattern" },
+  { before = 1, text = "Effect Preset" },
+  { before = 6, text = "Visualization Mode" },
+]
 
 [[process.params]]
 name = "Tour_preset"
@@ -49517,6 +51363,18 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Aesthetic Mode", section = true },
+  { before = 1, text = "Speed (resample precision per phrase)", section = true },
+  { before = 2, text = "Reproducibility", section = true },
+  { before = 3, text = "(0 = unpredictable/random each run; any other integer = reproducible chain)" },
+  { before = 3, text = "Chain", section = true },
+  { before = 5, text = "Temperature", section = true },
+  { before = 8, text = "Phrase Detection", section = true },
+  { before = 10, text = "Pitch Range for PSOLA Lengthen", section = true },
+  { before = 12, text = "Tonal Center (0=C 2=D 4=E 5=F 7=G 9=A 11=B)", section = true },
+  { before = 13, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Aesthetic_mode"
@@ -49713,6 +51571,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Preset (overrides custom settings)" },
+  { before = 1, text = "Microphone Pattern" },
+  { before = 2, text = "Stereo Configuration" },
+  { before = 3, text = "Source Position" },
+  { before = 4, text = "(0°=front, +90°=right, -90°=left, ±180°=back)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -49864,6 +51729,9 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Mode", section = true },
+]
 
 [[process.params]]
 name = "Mode"
@@ -49906,6 +51774,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Mix Mode" },
+  { before = 1, text = "Manual mode: one value per channel, space or comma separated" },
+  { before = 2, text = "(0 = hard left, 0.5 = center, 1 = hard right)" },
+  { before = 3, text = "(linear gain per channel; blank entries default to 1)" },
+]
 
 [[process.params]]
 name = "Mix_mode"
@@ -49978,6 +51852,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Slice Parameters", section = true },
+  { before = 4, text = "Time-Stretching (duration factor: >1 longer, <1 shorter)", section = true },
+  { before = 8, text = "Levels", section = true },
+  { before = 10, text = "Output", section = true },
+  { before = 16, text = "Visualization", section = true },
+]
 
 [[process.params]]
 name = "Number_of_segments"
@@ -50315,6 +52196,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Panning Pattern" },
+  { before = 1, text = "Motion Parameters" },
+  { before = 3, text = "Pan Range" },
+  { before = 4, text = "(0 = full left, 0.5 = center, 1 = full right)" },
+  { before = 6, text = "Output" },
+]
 
 [[process.params]]
 name = "Panning_pattern"
@@ -50431,6 +52319,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Preset" },
+  { before = 4, text = "(0 = mono, 1 = full spread along the arc, neg = reverse)" },
+  { before = 5, text = "(0.25 = narrow, 1.0 = wide)" },
+  { before = 6, text = "(180 = full front, 360 = full ring around listener)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -50612,6 +52506,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Fugue Structure", section = true },
+  { before = 6, text = "Transposition (see notes: v2.3 did not preserve the subject)", section = true },
+  { before = 9, text = "Spatial Parameters", section = true },
+  { before = 14, text = "Render speed (transpose resample precision)", section = true },
+  { before = 15, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -50803,6 +52704,10 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Custom only. Keep the key= words; only the numbers matter." },
+  { before = 10, text = "Level, mapping, output" },
+]
 
 [[process.params]]
 name = "Preset"
@@ -51070,6 +52975,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Channel Settings", section = true },
+  { before = 2, text = "Duration Variation", section = true },
+  { before = 7, text = "Pitch Analysis", section = true },
+  { before = 10, text = "Output Options", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -51276,6 +53187,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Panning Parameters", section = true },
+  { before = 4, text = "Pan center: -1=left  0=center  +1=right" },
+  { before = 6, text = "Output (Mix: 0=dry 100=wet)", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -51419,6 +53335,14 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Speaker Layout (Custom only)", section = true },
+  { before = 2, text = "Analysis", section = true },
+  { before = 4, text = "Orbit Parameters", section = true },
+  { before = 8, text = "DBAP", section = true },
+  { before = 9, text = "Mix", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -51703,6 +53627,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "PRESET PANNING", section = true },
+  { before = 1, text = "CUSTOM GAINS (Sound 1-4 shown, edit script for 5-8)", section = true },
+  { before = 1, text = "Sounds mixed in selection order" },
+  { before = 9, text = "OUTPUT", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -51855,6 +53785,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 4
+param_notes = [
+  { before = 2, text = "Custom Cutoff", section = true },
+  { before = 3, text = "(Higher = lower cutoff = more mirroring)" },
+  { before = 3, text = "Stereo Width", section = true },
+  { before = 5, text = "Mix", section = true },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -51980,6 +53917,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Spectral Effect", section = true },
+  { before = 3, text = "(Sample offset mixing creates spectral color)" },
+  { before = 3, text = "Bell Envelope", section = true },
+  { before = 4, text = "(higher=narrower, lower=wider)" },
+  { before = 5, text = "(0=start, 0.5=middle, 1=end)" },
+  { before = 6, text = "(raised-cosine fade closing the envelope edges)" },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -52129,6 +54075,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Analysis", section = true },
+  { before = 6, text = "Diffusion", section = true },
+  { before = 12, text = "Effect", section = true },
+  { before = 14, text = "Stereo (Paulstretch pattern)", section = true },
+  { before = 16, text = "(0 = identical channels ... 1 = fully independent/widest)" },
+  { before = 16, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -52381,6 +54335,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Pitch Shift", section = true },
+  { before = 3, text = "(Total shift range: base to base+amount)" },
+  { before = 4, text = "(Higher = more dramatic acceleration)" },
+  { before = 4, text = "Distance Decay", section = true },
+  { before = 5, text = "(Simulates amplitude loss with distance)" },
+  { before = 5, text = "Source", section = true },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -52526,6 +54489,16 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Performance", section = true },
+  { before = 2, text = "Tremolo Parameters", section = true },
+  { before = 3, text = "(Frequencies below this get tremolo)" },
+  { before = 5, text = "(Modulation range: min to min+max)" },
+  { before = 6, text = "(Higher = slower tremolo cycle)" },
+  { before = 6, text = "High Frequency", section = true },
+  { before = 7, text = "(Gain for frequencies above cutoff)" },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -52683,6 +54656,18 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Spectral Processing", section = true },
+  { before = 2, text = "(0 = off, 3 = subtle, 10 = heavy)" },
+  { before = 3, text = "(0 = off, 0.5 = moderate, 2.0 = extreme)" },
+  { before = 3, text = "Fractal Zoom", section = true },
+  { before = 4, text = "(1.0 = off, 1.3 = subtle, 2.0 = extreme)" },
+  { before = 5, text = "(frequency around which zoom expands)" },
+  { before = 6, text = "(1 = linear, 3-5 = fractal, 8 = deep recursion)" },
+  { before = 7, text = "(amplitude of each nested copy: 0.3 = sparse, 0.7 = dense)" },
+  { before = 7, text = "Output", section = true },
+  { before = 8, text = "(0 = dry, 1 = full wet)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -52848,6 +54833,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Performance", section = true },
+  { before = 2, text = "Phase Parameters", section = true },
+  { before = 3, text = "(higher = more dramatic effect)" },
+  { before = 4, text = "(L/R difference: 0.1-1.0)" },
+  { before = 5, text = "Output", section = true },
+  { before = 6, text = "(0 = dry, 1 = wet)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -52984,6 +54977,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Harmonic Parameters", section = true },
+  { before = 4, text = "Non-Harmonic Attenuation", section = true },
+  { before = 7, text = "Stereo", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -53164,6 +55163,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Processing", section = true },
+  { before = 3, text = "Envelope Shaping", section = true },
+  { before = 5, text = "(< 1 = sharper, > 1 = smoother)" },
+  { before = 5, text = "High-Pass Filter", section = true },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -53318,6 +55324,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "SOURCE PARAMETERS", section = true },
+  { before = 6, text = "LPC FILTER PARAMETERS", section = true },
+  { before = 6, text = "(0 = Auto-calculate based on sample rate)" },
+  { before = 9, text = "OUTPUT", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -53479,6 +55491,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "FOLDING PARAMETERS", section = true },
+  { before = 7, text = "OUTPUT", section = true },
+  { before = 9, text = "(0 = dual mono ... 1 = fully complementary combs)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -53641,6 +55658,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Synthesis Parameters", section = true },
+  { before = 6, text = "Diffusion & Texture", section = true },
+  { before = 8, text = "Pitch/Formant", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -53842,6 +55864,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Performance", section = true },
+  { before = 2, text = "Custom Settings", section = true },
+  { before = 4, text = "(Left = Split, Right = Split + Offset)" },
+  { before = 4, text = "Tail & Fade", section = true },
+  { before = 5, text = "(Extra time for natural decay)" },
+  { before = 6, text = "(Fade to zero at the end)" },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -53997,6 +56028,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 1
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Select Mode", section = true },
+  { before = 1, text = "Preset (overrides intensity)", section = true },
+  { before = 2, text = "Parameters", section = true },
+  { before = 3, text = "(controls length, density, or aggression)" },
+  { before = 4, text = "(0 = dry, 100 = full wet)" },
+  { before = 4, text = "Output Options", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -54110,6 +56149,16 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "CREATIVE MODE", section = true },
+  { before = 2, text = "Performance", section = true },
+  { before = 3, text = "Analysis Parameters", section = true },
+  { before = 6, text = "Self-Similarity", section = true },
+  { before = 7, text = "Spectral Masking", section = true },
+  { before = 11, text = "Experimental Controls", section = true },
+  { before = 14, text = "Spatial Processing", section = true },
+  { before = 15, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Creative_mode"
@@ -54318,6 +56367,17 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 1
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "CREATIVE MODE", section = true },
+  { before = 1, text = "(used with the Custom preset; named presets choose their own mode)" },
+  { before = 2, text = "Performance", section = true },
+  { before = 3, text = "Analysis Parameters", section = true },
+  { before = 6, text = "Self-Similarity", section = true },
+  { before = 7, text = "Spectral Masking", section = true },
+  { before = 12, text = "Experimental Controls", section = true },
+  { before = 15, text = "Spatial Processing", section = true },
+  { before = 16, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -54568,6 +56628,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Grain Parameters", section = true },
+  { before = 4, text = "IR Parameters", section = true },
+  { before = 8, text = "Sieve A (grain n routed when n mod m = r)", section = true },
+  { before = 10, text = "Sieve B (grain n routed when n mod m = r)", section = true },
+  { before = 12, text = "Adaptive IR Updates", section = true },
+  { before = 15, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -54805,6 +56873,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 5
+param_notes = [
+  { before = 1, text = "Blur Parameters", section = true },
+  { before = 2, text = "(3 = subtle, 10 = clear, 30+ = extreme)" },
+  { before = 3, text = "Mix", section = true },
+  { before = 4, text = "Tail & Fade", section = true },
+  { before = 5, text = "(extra room after the input; the blur spills into it organically)" },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -54935,6 +57011,18 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 1
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "EFFECT TYPE", section = true },
+  { before = 2, text = "SPECTRAL PARAMETERS", section = true },
+  { before = 5, text = "(Cycles for wobble/modulation effects)" },
+  { before = 5, text = "AMPLITUDE ENVELOPE", section = true },
+  { before = 7, text = "(Higher = stronger effect)" },
+  { before = 7, text = "MODULATION", section = true },
+  { before = 10, text = "(For tremolo/oscillation/pulsing effects)" },
+  { before = 10, text = "MIX", section = true },
+  { before = 11, text = "(0 = dry, 100 = full wet)" },
+  { before = 11, text = "OUTPUT", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -55116,6 +57204,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Analysis", section = true },
+  { before = 5, text = "Performance", section = true },
+  { before = 6, text = "(Lower = Faster. 12000 is great for drones.)" },
+  { before = 6, text = "Transformation", section = true },
+  { before = 8, text = "Mix", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -55353,6 +57449,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "MODULATION TYPE", section = true },
+  { before = 2, text = "BASIC PARAMETERS", section = true },
+  { before = 6, text = "ADVANCED", section = true },
+  { before = 9, text = "TIME MODIFICATIONS", section = true },
+  { before = 11, text = "MIX", section = true },
+  { before = 13, text = "VISUALIZATION", section = true },
+  { before = 14, text = "OUTPUT", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -55627,6 +57732,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Swirl Parameters", section = true },
+  { before = 3, text = "Mix", section = true },
+  { before = 5, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -55745,6 +57855,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Band 1", section = true },
+  { before = 4, text = "Band 2", section = true },
+  { before = 7, text = "Outside Bands", section = true },
+  { before = 8, text = "Mix", section = true },
+  { before = 9, text = "(0 = dry, 100 = full wet)" },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -55917,6 +58035,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Resonance Parameters", section = true },
+  { before = 4, text = "(0.5 = subtle, 2.0 = clear, 5.0 = extreme)" },
+  { before = 4, text = "Frequency Range", section = true },
+  { before = 6, text = "Time Variation", section = true },
+  { before = 7, text = "(1 = static, 4-8 = evolving shimmer)" },
+  { before = 7, text = "Mix", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -56082,6 +58209,17 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Vocoder Style", section = true },
+  { before = 3, text = "Expansions", section = true },
+  { before = 4, text = "(Negative = Deeper/Bigger, Positive = Higher/Smaller)" },
+  { before = 5, text = "(Frequencies above this use Noise for crisp consonants)" },
+  { before = 5, text = "Bands", section = true },
+  { before = 8, text = "Envelope", section = true },
+  { before = 9, text = "Mix", section = true },
+  { before = 10, text = "(0 = dry, 100 = full vocoder)" },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -56255,6 +58393,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Interference Parameters", section = true },
+  { before = 1, text = "(divisors are in FFT bins: pattern spacing in Hz scales with input duration)" },
+  { before = 5, text = "Tone", section = true },
+  { before = 6, text = "(boosts highs to prevent dark sound)" },
+  { before = 6, text = "Mix", section = true },
+  { before = 7, text = "(0 = dry, 100 = full wet)" },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -56413,6 +58560,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Grain Parameters", section = true },
+  { before = 4, text = "Scatter", section = true },
+  { before = 6, text = "Processing", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -56721,6 +58874,12 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Preset (number of equal blocks)", section = true },
+  { before = 1, text = "Grid Parameters", section = true },
+  { before = 3, text = "Direction per block", section = true },
+  { before = 5, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -56806,6 +58965,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Processing Mode", section = true },
+  { before = 2, text = "Musical Timing", section = true },
+  { before = 6, text = "Subdivision", section = true },
+  { before = 7, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -57133,6 +59298,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Output", section = true },
+  { before = 2, text = "(Script will loop input to fill target duration)" },
+  { before = 2, text = "Window Settings", section = true },
+  { before = 5, text = "Stereo Processing Mode", section = true },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -57450,6 +59622,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Grain Parameters", section = true },
+  { before = 4, text = "Temporal Brownian Motion", section = true },
+  { before = 6, text = "Spatial Brownian Motion (Stereo)", section = true },
+  { before = 10, text = "Options", section = true },
+  { before = 15, text = "(ON: dense grain clouds overlap correctly. OFF: v0.2 serial behavior)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -57666,6 +59845,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "OT Constraints", section = true },
+  { before = 4, text = "Auto-Segmentation", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -57812,6 +59996,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 6
+param_notes = [
+  { before = 1, text = "Divisors", section = true },
+  { before = 5, text = "Iterations", section = true },
+  { before = 6, text = "Delay Mode", section = true },
+  { before = 11, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -58005,6 +60195,9 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 2, text = "Novelty threshold is relative (0-1 of peak); Harmonicity is HNR in dB" },
+]
 
 [[process.params]]
 name = "Min_section_duration_s"
@@ -58200,6 +60393,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Grain Parameters (Custom only)", section = true },
+  { before = 5, text = "Evolution", section = true },
+  { before = 7, text = "Randomization", section = true },
+  { before = 10, text = "Stereo", section = true },
+  { before = 11, text = "(0 = mono, ~0.3 subtle, ~0.5 stereo, 1 = wide)" },
+  { before = 11, text = "Options", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -58543,6 +60744,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Grains", section = true },
+  { before = 4, text = "Pitch", section = true },
+  { before = 7, text = "Panning", section = true },
+  { before = 9, text = "Modulation", section = true },
+  { before = 11, text = "Distribution", section = true },
+  { before = 13, text = "Output", section = true },
+  { before = 14, text = "(0 = use input duration)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -58735,6 +60945,14 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 4, text = "Analysis Parameters", section = true },
+  { before = 7, text = "Smoothing and Mapping", section = true },
+  { before = 12, text = "Voicing Control", section = true },
+  { before = 15, text = "Control Smoothing", section = true },
+  { before = 17, text = "Pitch settings", section = true },
+  { before = 19, text = "Speed Optimization", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -58987,6 +61205,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 2, text = "Resonance Parameters", section = true },
+  { before = 4, text = "Harmonic Base", section = true },
+  { before = 8, text = "Decay", section = true },
+  { before = 9, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -59156,6 +61380,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Grain Parameters (Custom only)", section = true },
+  { before = 4, text = "Density", section = true },
+  { before = 6, text = "Spectral Analysis", section = true },
+  { before = 8, text = "Sorting", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -59713,6 +61944,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Analysis", section = true },
+  { before = 4, text = "Similarity", section = true },
+  { before = 6, text = "Variation", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -59864,6 +62101,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "SEGMENTATION", section = true },
+  { before = 3, text = "ANALYSIS METHOD", section = true },
+  { before = 4, text = "Formant Params", section = true },
+  { before = 6, text = "MFCC Params", section = true },
+  { before = 7, text = "CONCATENATION", section = true },
+]
 
 [[process.params]]
 name = "Silence_threshold_dB"
@@ -59987,6 +62231,17 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "MAIN CONTROLS", section = true },
+  { before = 3, text = "OUTPUT", section = true },
+  { before = 5, text = "ADVANCED", section = true },
+  { before = 5, text = "Hysteresis (Memory Effect)", section = true },
+  { before = 7, text = "Print-Through (Ghosting)", section = true },
+  { before = 10, text = "Tape Bias", section = true },
+  { before = 14, text = "Signal Loss", section = true },
+  { before = 16, text = "Bias Modulation (Wow/Flutter)", section = true },
+  { before = 18, text = "Output Envelope", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -60258,6 +62513,10 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 3, text = "Output Options", section = true },
+  { before = 4, text = "Duration manipulation parameters", section = true },
+]
 
 [[process.params]]
 name = "number_of_segments"
@@ -60324,6 +62583,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Performance", section = true },
+  { before = 2, text = "Parameters", section = true },
+  { before = 5, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -60442,6 +62706,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Pattern", section = true },
+  { before = 3, text = "Detection", section = true },
+  { before = 6, text = "Groove", section = true },
+  { before = 8, text = "Dynamics", section = true },
+  { before = 11, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Pattern_length"
@@ -60600,6 +62871,13 @@ input = "dual_wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Timing", section = true },
+  { before = 6, text = "Splice mode", section = true },
+  { before = 7, text = "Variation", section = true },
+  { before = 8, text = "Start and alternation", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -60735,6 +63013,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 4
+param_notes = [
+  { before = 1, text = "Layers", section = true },
+  { before = 2, text = "Carrier Frequency", section = true },
+  { before = 6, text = "Modulation Depth", section = true },
+  { before = 10, text = "Feedback", section = true },
+  { before = 11, text = "Layer Gain", section = true },
+  { before = 13, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -60939,6 +63225,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Chunks", section = true },
+  { before = 3, text = "Voices & Transform", section = true },
+  { before = 7, text = "Entry Timing", section = true },
+  { before = 11, text = "Output", section = true },
+  { before = 13, text = "V3 & V4 Speed Ratios", section = true },
+  { before = 15, text = "Amplitudes", section = true },
+  { before = 19, text = "Pan  (-1=left  0=centre  +1=right)", section = true },
+]
 
 [[process.script_presets]]
 option = 3
@@ -61225,6 +63520,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 4
+param_notes = [
+  { before = 1, text = "States", section = true },
+  { before = 2, text = "Superposition Strength", section = true },
+  { before = 6, text = "Phase Shift", section = true },
+  { before = 10, text = "State Offset", section = true },
+  { before = 12, text = "Decay", section = true },
+  { before = 13, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -61427,6 +63730,15 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Source Extraction", section = true },
+  { before = 3, text = "Voice 2 (The Drifter)", section = true },
+  { before = 4, text = "Voice 3 (The Glue)", section = true },
+  { before = 6, text = "Structure & Feel", section = true },
+  { before = 10, text = "Reproducibility [0 = fresh random sequence each run]", section = true },
+  { before = 11, text = "Visualizations", section = true },
+  { before = 12, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -61573,6 +63885,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 2, text = "Params: Su/Sy/Sd use [a]; Sc uses [a,b]; SRC uses [a,b,c,d,e]" },
+  { before = 7, text = "BPM (0 = off); grid snaps splits to the pulse" },
+  { before = 9, text = "Pitch (levels=1 = off); step in semitones" },
+  { before = 12, text = "Stereo (width=0 = off); equal-power panning" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -61786,6 +64104,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Output Structure", section = true },
+  { before = 4, text = "Grain Envelope", section = true },
+  { before = 5, text = "Source Reading", section = true },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -61908,6 +64232,9 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Select multiple Sound objects first" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -62039,6 +64366,16 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 1
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "This version uses the ACTUAL AUDIO from your files." },
+  { before = 0, text = "Audio Folder", section = true },
+  { before = 0, text = "(Leave blank to pick a folder with a dialog)" },
+  { before = 2, text = "Analysis", section = true },
+  { before = 4, text = "Selection", section = true },
+  { before = 7, text = "Transformation", section = true },
+  { before = 9, text = "Synthesis", section = true },
+  { before = 12, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -62362,6 +64699,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 4
+param_notes = [
+  { before = 1, text = "Cascade", section = true },
+  { before = 4, text = "Delay Timing", section = true },
+  { before = 6, text = "Echo Shimmer (time-varying gain)", section = true },
+  { before = 8, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -62523,6 +64866,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 4
+param_notes = [
+  { before = 1, text = "Freeze Parameters", section = true },
+  { before = 6, text = "Artifacts", section = true },
+  { before = 7, text = "Loop Smoothing", section = true },
+  { before = 9, text = "Silence Avoidance", section = true },
+  { before = 12, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -62716,6 +65066,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 4
+param_notes = [
+  { before = 1, text = "Left Channel Divisors", section = true },
+  { before = 3, text = "Right Channel Divisors", section = true },
+  { before = 5, text = "Delay Mode", section = true },
+  { before = 6, text = "Millisecond Delays (Milliseconds mode)", section = true },
+  { before = 10, text = "Tempo (Tempo-synced mode)", section = true },
+  { before = 15, text = "Mix", section = true },
+  { before = 16, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -62945,6 +65304,15 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Preset Selection", section = true },
+  { before = 1, text = "Analysis Parameters", section = true },
+  { before = 8, text = "Transformation Parameters", section = true },
+  { before = 11, text = "Stereo Parameters", section = true },
+  { before = 12, text = "Assembly Parameters", section = true },
+  { before = 13, text = "Output", section = true },
+  { before = 18, text = "Normalization", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -63223,6 +65591,9 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Select 2+ Sound objects first" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -63848,6 +66219,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Time Stretch", section = true },
+  { before = 2, text = "Spectral Blur", section = true },
+  { before = 3, text = "(1=subtle, 3=moderate, 5=heavy, 7=extreme)" },
+  { before = 5, text = "Stereo Width", section = true },
+  { before = 8, text = "PSOLA Pitch Range", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -64018,6 +66397,13 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "SERIES", section = true },
+  { before = 4, text = "TRANSFORMATIONS", section = true },
+  { before = 7, text = "STRUCTURE", section = true },
+  { before = 11, text = "PITCH RANGE", section = true },
+  { before = 13, text = "OUTPUT", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -64215,6 +66601,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 4
+param_notes = [
+  { before = 1, text = "Mode", section = true },
+  { before = 2, text = "ZigZag Parameters", section = true },
+  { before = 5, text = "Direction Changes", section = true },
+  { before = 7, text = "Envelope", section = true },
+  { before = 8, text = "Variation", section = true },
+  { before = 10, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 0
@@ -64447,6 +66841,9 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Random seed (0 = use current time)" },
+]
 
 [[process.params]]
 name = "Recording_time_seconds"
@@ -64510,6 +66907,9 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Random seed (0 = use current time)" },
+]
 
 [[process.params]]
 name = "Recording_time_seconds"
@@ -64573,6 +66973,9 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Random seed (0 = use current time)" },
+]
 
 [[process.params]]
 name = "Recording_time_seconds"
@@ -64975,6 +67378,10 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Parameters", section = true },
+  { before = 4, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -65078,6 +67485,14 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "SPAT5 TOOLS FOLDER", section = true },
+  { before = 0, text = "Folder containing spat5.virtualspeakers~ binary" },
+  { before = 1, text = "SPEAKER LAYOUT", section = true },
+  { before = 2, text = "HRTF / ROOM", section = true },
+  { before = 2, text = "Room_preset is ignored unless Hrtf_preset is \"SOFA custom / none\"" },
+  { before = 6, text = "OUTPUT", section = true },
+]
 
 [[process.params]]
 name = "Tools_folder"
@@ -65167,6 +67582,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "SPAT5 TOOLS FOLDER", section = true },
+  { before = 0, text = "Folder containing spat5 binaries (hoa.encoder~, hoa.decoder~, virtualspeakers~)" },
+  { before = 1, text = "POSITION / MOVEMENT", section = true },
+  { before = 11, text = "SOURCE / HOA", section = true },
+  { before = 16, text = "HRTF / ROOM", section = true },
+]
 
 [[process.params]]
 name = "Tools_folder"
@@ -65381,6 +67803,19 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "PM2 / TOOLS PATH", section = true },
+  { before = 0, text = "Folder containing the PM2 binary (pm2 or pm2.exe)" },
+  { before = 1, text = "MODE", section = true },
+  { before = 2, text = "SPECTRAL STRETCH", section = true },
+  { before = 4, text = "BAND STRETCH", section = true },
+  { before = 9, text = "FREEZE", section = true },
+  { before = 10, text = "(normalised 0..1 — position in the sound)" },
+  { before = 11, text = "PARTIAL THIN", section = true },
+  { before = 13, text = "SPECTRAL BLUR", section = true },
+  { before = 14, text = "ANALYSIS", section = true },
+  { before = 17, text = "OUTPUT", section = true },
+]
 
 [[process.params]]
 name = "PM2_bin_directory"
@@ -65617,6 +68052,10 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Input = ambiX B-format (W,Y,Z,X... ACN/SN3D). Decoded, never re-encoded." },
+  { before = 1, text = "Decoder OSC preset is built automatically from order + layout." },
+]
 
 [[process.params]]
 name = "Tools_folder"
@@ -65696,6 +68135,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Decomposition", section = true },
+  { before = 5, text = "Output / Staging", section = true },
+  { before = 10, text = "Mix / Character", section = true },
+  { before = 14, text = "Options", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -65921,6 +68366,13 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Target & Corpus", section = true },
+  { before = 3, text = "Architecture", section = true },
+  { before = 5, text = "Aesthetics", section = true },
+  { before = 13, text = "Output", section = true },
+  { before = 17, text = "(ON shows time-frequency comparison, but adds analysis time)" },
+]
 
 [[process.params]]
 name = "Corpus_folder"
@@ -66128,6 +68580,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 6, text = "Plan source", section = true },
+  { before = 7, text = "Generator controls (used when Auto-generate is selected)", section = true },
+  { before = 19, text = "Output level", section = true },
+  { before = 20, text = "Pitch preservation", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -67074,6 +69532,11 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Autoencoder", section = true },
+  { before = 3, text = "Relocation Controls", section = true },
+  { before = 6, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -67219,6 +69682,9 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 8, text = "Output duration in seconds (0 = original)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -67390,6 +69856,10 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Parameters", section = true },
+  { before = 3, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -67492,6 +69962,10 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 6, text = "(Mag_smear: spectral blur — all models; strongest on AE-Weighted / AR Smear)" },
+  { before = 11, text = "(Temperature: Latent model only — ignored by AE-Weighted / AR Smear)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -67719,6 +70193,16 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Attractor", section = true },
+  { before = 1, text = "State Space", section = true },
+  { before = 2, text = "Distance Weighting", section = true },
+  { before = 3, text = "Composition", section = true },
+  { before = 7, text = "Dynamics", section = true },
+  { before = 9, text = "Audio", section = true },
+  { before = 11, text = "Segmentation", section = true },
+  { before = 14, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "Attractor_type"
@@ -67913,6 +70397,10 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 5, text = "(Preserve / Intensity / Variation act differently per mode — Info window lists this mode's primary controls)" },
+  { before = 9, text = "Constellation controls (ignored by other modes)", section = true },
+]
 
 [[process.params]]
 name = "Mode"
@@ -68039,6 +70527,12 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 7, text = "Research mode (constrained prosody-only stimuli)", section = true },
+  { before = 11, text = "(carrier/max-partials/rolloff only apply when Research mode = prosody_only)" },
+  { before = 11, text = "(rolloff: 1_over_k_squared = strict/dull; 1_over_k = brighter, audible partials)" },
+  { before = 13, text = "(ON shows time-frequency comparison, but adds analysis time)" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -68300,6 +70794,11 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Preset (overrides arrangement / arc / rhythm / sparsity)", section = true },
+  { before = 1, text = "Manual controls (ignored when a preset is active)", section = true },
+  { before = 4, text = "Sparsity (0 = dense, 1 = sparse)", section = true },
+]
 
 [[process.params]]
 name = "Preset"
@@ -68671,6 +71170,10 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "FFT Resolution", section = true },
+  { before = 1, text = "Output", section = true },
+]
 
 [[process.params]]
 name = "FFT_size"
@@ -68709,6 +71212,16 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Mode", section = true },
+  { before = 2, text = "Single-freeze point (seconds)", section = true },
+  { before = 3, text = "Multi-freeze settings", section = true },
+  { before = 7, text = "Output", section = true },
+  { before = 8, text = "Analysis", section = true },
+  { before = 9, text = "Character", section = true },
+  { before = 11, text = "Fades", section = true },
+  { before = 13, text = "Display", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -69053,6 +71566,16 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+param_notes = [
+  { before = 0, text = "INPUT", section = true },
+  { before = 1, text = "(folder containing audio files to analyse)" },
+  { before = 1, text = "OUTPUT", section = true },
+  { before = 3, text = "(0 = random seed)" },
+  { before = 3, text = "SPECTRAL SETTINGS", section = true },
+  { before = 7, text = "(0 = pure mean spectrum / 1 = max variation)" },
+  { before = 7, text = "AUDIO", section = true },
+  { before = 8, text = "OUTPUT OPTIONS", section = true },
+]
 
 [[process.params]]
 name = "Input_folder"
@@ -69173,6 +71696,10 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Custom parameters (ignored when Preset is not Custom)", section = true },
+  { before = 5, text = "Wet/dry  ( 0 = 100% resonance   1 = 100% dry original )" },
+]
 
 [[process.script_presets]]
 option = 1
@@ -69298,6 +71825,14 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Segmentation", section = true },
+  { before = 4, text = "Latent space", section = true },
+  { before = 8, text = "Temporal field", section = true },
+  { before = 12, text = "Duration rules", section = true },
+  { before = 13, text = "Reconstruction", section = true },
+  { before = 14, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1
@@ -69813,6 +72348,10 @@ stereo_native = true
 output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Parameters", section = true },
+  { before = 3, text = "Output", section = true },
+]
 
 [[process.script_presets]]
 option = 1

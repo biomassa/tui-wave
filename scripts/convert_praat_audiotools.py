@@ -400,7 +400,17 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
         # switch that gates parameters now shown in the same dialog is not a setting any more:
         # it cannot be turned off without those parameters silently ceasing to apply, and
         # turning it on reveals nothing. Shown as a locked checkbox it read as a broken control.
+        # Its notes are not the toggle's own property -- a `=== Output ===` heading declared
+        # above it introduces the fields that follow, and would vanish with it -- so they move
+        # onto whatever field now leads the section.
+        dropped = form_params.index(param)
+        carried = param.notes + param.notes_after
         form_params = [p for p in form_params if p is not param]
+        if carried:
+            if dropped < len(form_params):
+                form_params[dropped].notes[:0] = carried
+            elif form_params:
+                form_params[-1].notes_after.extend(carried)
         form_locks.append((name, True))
     for i, block in enumerate(blocks):
         if isinstance(block["fields"], str):
@@ -666,8 +676,57 @@ def extract_script_presets(source: str, params: list[Param]):
 NUMERIC_KEYWORDS = {"real", "positive", "integer", "natural"}
 TEXT_KEYWORDS = {"sentence", "word", "text"}
 CHOICE_KEYWORDS = {"optionmenu", "choice"}
-# Declared in a form but meaningless as an argument.
+# Declared in a form but meaningless as an *argument* -- a `comment` carries no value. It is
+# not meaningless to the user, though: see `classify_comment`, which turns it into a catalog
+# note rather than dropping it.
 IGNORED_KEYWORDS = {"comment"}
+
+# Characters a script uses purely to decorate a section heading (`=== Preset ===`,
+# `--- Output ---`, `── Mode ──────`). Stripping them from both ends is also how a heading is
+# *recognised*: text that loses characters to this strip was decorated, and therefore a heading.
+# Deliberately excludes `.` -- a prose note ending in a full stop would otherwise be promoted to
+# a heading -- and excludes `(`/`)`, since a parenthesised note is prose by definition.
+HEADING_DECORATION = "=-–—─═━_~*# \t"
+# A heading that only names the preset picker. tui-wave already puts a `Preset` row at the top
+# of every params dialog, immediately above the script's own `Internal Preset` field, so a
+# heading between the two labels the thing it sits under twice.
+PRESET_HEADING_RE = re.compile(r"presets?", re.I)
+# Praat's standing instruction to select a Sound in the object list before pressing Run. There
+# is no object list here -- tui-wave hands the process the current selection -- so the line is
+# not merely redundant but wrong. Only the bare instruction is dropped: `Select a Sound object
+# - it CONTROLS the feedback circuit` says something real and is kept.
+SELECT_SOUND_RE = re.compile(r"select (?:a|an|the) sound(?: object)?(?: first)?[.!]?", re.I)
+
+
+@dataclass
+class Note:
+    """One `comment` line from a form, kept for display in the params dialog."""
+    text: str
+    section: bool
+
+
+def classify_comment(text: str, colon_form: bool) -> Note | None:
+    """Turn a `comment` line's operand into a `Note`, or None if it carries no information."""
+    body = text.strip()
+    # The modern `comment: "..."` syntax quotes its operand; the classic `comment ...` does not.
+    if colon_form and len(body) >= 2 and body[0] == '"' and body[-1] == '"':
+        body = body[1:-1].strip()
+    bare = body.strip(HEADING_DECORATION)
+    # Nothing but decoration: a horizontal rule with no title, or an empty `comment`. The
+    # dialog draws its own rule under every heading, so a free-standing one adds nothing.
+    if not bare:
+        return None
+    if SELECT_SOUND_RE.fullmatch(bare):
+        return None
+    if bare != body:
+        # The script decorated it, so it is a heading.
+        return None if PRESET_HEADING_RE.fullmatch(bare) else Note(bare, True)
+    # `comment Output:` -- undecorated, but a trailing colon on a short label is a heading too.
+    if body.endswith(":") and len(body) > 1:
+        title = body[:-1].strip()
+        if title:
+            return None if PRESET_HEADING_RE.fullmatch(title) else Note(title, True)
+    return Note(body, False)
 
 
 @dataclass
@@ -693,6 +752,13 @@ class Param:
     # Index of the `beginPause` block this param was hoisted out of, in the *original* script's
     # source order. None for an ordinary `form` param, which travels as a runScript: argument.
     pause_block: int | None = None
+    # `comment` lines the form placed immediately *before* this field, in source order, and --
+    # for the last field of a body only -- the ones placed after it. See `note_rows`, which
+    # flattens both into the (index, note) pairs the catalog stores; keeping "after" separate
+    # until then is what lets a trailing note stay attached to its own field when a hoisted
+    # pause block appends more params behind it.
+    notes: list[Note] = field(default_factory=list)
+    notes_after: list[Note] = field(default_factory=list)
 
 
 @dataclass
@@ -955,6 +1021,10 @@ def parse_fields(body: str, variables: dict[str, str] | None = None) -> list[Par
     """
     params: list[Param] = []
     pending: Param | None = None
+    # (index of the param the note precedes, note). Recorded as `len(params)` at the moment the
+    # `comment` is read, which is exactly the index the *next* field will take -- so the notes
+    # need no bookkeeping at each of the half-dozen places below that append a param.
+    notes: list[tuple[int, Note]] = []
 
     for raw in body.splitlines():
         line = raw.strip()
@@ -966,6 +1036,9 @@ def parse_fields(body: str, variables: dict[str, str] | None = None) -> list[Par
         keyword = head.rstrip(":").lower()
 
         if keyword in IGNORED_KEYWORDS:
+            note = classify_comment(rest, colon_form)
+            if note is not None:
+                notes.append((len(params), note))
             continue
 
         if keyword in ("option", "button"):
@@ -1071,6 +1144,13 @@ def parse_fields(body: str, variables: dict[str, str] | None = None) -> list[Par
             if not param.options:
                 return f"optionmenu {param.name!r} declares no options"
             param.default = min(max(int(param.default), 1), len(param.options)) - 1
+    for index, note in notes:
+        if index < len(params):
+            params[index].notes.append(note)
+        elif params:
+            params[-1].notes_after.append(note)
+        # A body whose only content is a comment has no field to hang it on, and no row in the
+        # dialog either; there is nothing to preserve.
     return params
 
 
@@ -1692,6 +1772,22 @@ def counts_python_assignments(source: str) -> int:
     return count
 
 
+def note_rows(params: list[Param]) -> list[tuple[int, Note]]:
+    """Flatten per-param notes into the (before, note) pairs the catalog stores.
+
+    `before` is the index of the param the note renders above; `len(params)` means "below the
+    last field" and 0 means "above the dialog's own Preset row". A `notes_after` entry becomes
+    `before = i + 1`, which is the same statement -- the note sits above whatever comes next --
+    so a form's trailing comment stays put even when a hoisted pause block appends fields
+    behind it.
+    """
+    rows: list[tuple[int, Note]] = []
+    for i, param in enumerate(params):
+        rows.extend((i, note) for note in param.notes)
+        rows.extend((i + 1, note) for note in param.notes_after)
+    return rows
+
+
 def render_catalog(processes: list[Process], sha: str) -> str:
     out: list[str] = []
     out.append("# Generated by scripts/convert_praat_audiotools.py from the praatAudioTools")
@@ -1731,6 +1827,16 @@ def render_catalog(processes: list[Process], sha: str) -> str:
         if proc.preset_param is not None:
             out.append(f"preset_param = {proc.preset_param}")
             out.append(f"preset_custom_option = {proc.preset_custom_option}")
+        # One line per note rather than a `[[process.param_notes]]` block each: there are ~2400
+        # of them across the catalog, and four lines apiece would roughly double a generated
+        # file nobody hand-edits anyway.
+        rows = note_rows(proc.params)
+        if rows:
+            out.append("param_notes = [")
+            for before, note in rows:
+                section = ", section = true" if note.section else ""
+                out.append(f"  {{ before = {before}, text = {toml_string(note.text)}{section} }},")
+            out.append("]")
         out.append("")
 
         # Praat option indices are 1-based; the catalog's are 0-based.
