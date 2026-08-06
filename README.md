@@ -49,7 +49,6 @@ breakpoint envelope editor:
 An LLM helped to write this program. I am not a Rust developer. I have a lot of experience 
 with digital audio, and I put a lot of effort into tui-wave's architecture, logic and UX / UI.
 I needed this tool for my own work.
-Release builds for Linux exist. A build from source gives you the most current version.
 
 ## Prerequisites
 
@@ -286,25 +285,3 @@ cargo test       # run the test suite
 
 `CHANGELOG.md` records what changed in each version. `MANUAL_TESTING.md` holds the checklist for
 the parts that no test can cover, such as real audio hardware and real terminal quirks.
-
-## Packaging
-
-The scripts under `packaging/` build Linux packages into `dist/`. Each package carries the same
-`Terminal=true` desktop entry and 512 by 512 icon. Each file name carries the version and the
-target architecture.
-
-```sh
-./packaging/build-appimage.sh   # -> dist/tui-wave-<ver>-<arch>.AppImage
-./packaging/build-pkg.sh        # -> dist/tui-wave-<ver>-1-<arch>.pkg.tar.zst
-./packaging/build-deb.sh        # -> dist/tui-wave_<ver>_amd64.deb
-```
-
-- **AppImage.** Built with [cargo-appimage](https://crates.io/crates/cargo-appimage), which
-  needs `appimagetool` on your `PATH`. It bundles `libasound.so.2`, so audio works without a
-  system ALSA.
-- **Arch.** `makepkg` wraps the release binary. It depends on `gcc-libs` and `alsa-lib`.
-- **Debian.** Assembled with `ar` and `tar`, so you do not need `dpkg-deb`. It depends on
-  `libc6`, `libgcc-s1`, and `libasound2`.
-
-The native packages link against the glibc of the build machine. To target an older system,
-build inside a matching container.
