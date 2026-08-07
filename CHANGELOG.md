@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-08-08 (2.5.4)
+
+- **Clicking a dialog's bottom hint bar now does what the hint under the pointer says.** It was
+  one wide button that always meant Enter, so clicking `Esc:cancel` *applied* the dialog — the
+  exact opposite of the word being clicked. `Enter` submits, `Esc` cancels, and everything else
+  on the bar does nothing, because a motion key like `Tab` or `←→` names no outcome to perform.
+
+- **Every dialog now offers a way out.** Gain, both Fades, Mix to Mono, Mix to Stereo, Export
+  Channels and Export Regions never showed `Esc:cancel` — Esc worked, it was just never
+  advertised, so there was nothing to click. Four of those dialogs were also narrower than their
+  own hint bar and were quietly clipping the new hint off the edge; they have been widened to
+  fit.
+
 ## 2026-08-08 (2.5.3)
 
 - **`setup-environment.sh` makes a downloaded build actually work.** The release packages carry
