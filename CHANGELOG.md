@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-08-08 (2.5.3)
+
+- **The mouse now works the same way in every dialog.** Clicking a folder in the destination
+  column of Save As, Export, Export Channels, Export Regions, Save Curve As or Save Matrix As
+  selects it; double-clicking opens it. The image picker used by the Praat sonifiers is
+  clickable at all for the first time.
+
+  Underneath, four separate causes of the mouse quietly not working are gone. Click targets are
+  now derived from the rows themselves rather than from hand-counted offsets into a parallel
+  list — that mismatch is what made Save As's fields respond one row above where they were
+  drawn. A dialog with no click targets no longer inherits the previous dialog's. And the four
+  embedded file browsers share one handler instead of two near-copies, one missing one, and one
+  pane that could only be focused.
+
+  Nine dialogs now have a test that reads the rendered screen and checks each click target sits
+  on the row it names, so this class of fault fails loudly instead of silently.
+
+- Hidden files and folders stay hidden in every picker, and the parent row is always offered.
+
 ## 2026-08-07 (2.5.2)
 
 - **Prebuilt packages are back, built by CI rather than by hand.** Tagging a release now
