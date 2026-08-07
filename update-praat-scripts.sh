@@ -88,7 +88,7 @@ CATALOG=src/model/cdp/praat_catalog.toml
 # rules rather than a parser. Tab-separated and sorted so `comm` and `join` can both read it.
 catalog_processes() {
   [ -f "$CATALOG" ] || return 0
-  awk -F'"' '/^key = /{k=$2} /^bin = /{print k"\t"$2}' "$CATALOG" | sort
+  awk -F'"' '/^key = /{k=$2} /^bin = /{print k"\t"$2}' "$CATALOG" | LC_ALL=C sort
 }
 
 # --- 1. Preflight -------------------------------------------------------------------------
@@ -179,12 +179,23 @@ if [ "$DRY_RUN" = 0 ]; then
   # arriving, which is the opposite of informative — and upstream renames constantly
   # (`Creative Formant Manipulations.praat` -> `Creative_Formant_Manipulations.praat` in a
   # single update, spaces to underscores).
-  BEFORE_KEYS=$(printf '%s\n' "$BEFORE_LIST" | cut -f1)
-  AFTER_KEYS=$(printf '%s\n' "$AFTER_LIST" | cut -f1)
-  ADDED=$(comm -13 <(printf '%s\n' "$BEFORE_KEYS") <(printf '%s\n' "$AFTER_KEYS") || true)
-  REMOVED=$(comm -23 <(printf '%s\n' "$BEFORE_KEYS") <(printf '%s\n' "$AFTER_KEYS") || true)
-  RENAMED=$(join -t "$(printf '\t')" \
-              <(printf '%s\n' "$BEFORE_LIST") <(printf '%s\n' "$AFTER_LIST") 2>/dev/null \
+  # Re-sorted after `cut`, under `LC_ALL=C`, and both are load-bearing.
+  #
+  # `catalog_processes` sorts whole `key<TAB>path` lines, and cutting field 1 from a
+  # line-sorted list does **not** leave a key-sorted list: where one key is a prefix of another
+  # (`..._sweeper` and `..._sweeper_2`), the tab separating key from path collates differently
+  # from the `_` that follows the prefix, so the two lines order by their paths rather than
+  # their keys. `comm` then silently reports nonsense — it printed "not in sorted order" and
+  # listed `praat_filter_color_dynamic_formant_sweeper` as both added *and* removed on the
+  # 2026-08-08 update, which is how this was noticed. `LC_ALL=C` because `comm` and `sort` must
+  # agree on collation and a locale-aware `sort` does not order the way `comm` checks for.
+  BEFORE_KEYS=$(printf '%s\n' "$BEFORE_LIST" | cut -f1 | LC_ALL=C sort)
+  AFTER_KEYS=$(printf '%s\n' "$AFTER_LIST" | cut -f1 | LC_ALL=C sort)
+  ADDED=$(LC_ALL=C comm -13 <(printf '%s\n' "$BEFORE_KEYS") <(printf '%s\n' "$AFTER_KEYS") || true)
+  REMOVED=$(LC_ALL=C comm -23 <(printf '%s\n' "$BEFORE_KEYS") <(printf '%s\n' "$AFTER_KEYS") || true)
+  RENAMED=$(LC_ALL=C join -t "$(printf '\t')" \
+              <(printf '%s\n' "$BEFORE_LIST" | LC_ALL=C sort) \
+              <(printf '%s\n' "$AFTER_LIST" | LC_ALL=C sort) 2>/dev/null \
             | awk -F'\t' '$2 != $3 { print $2" -> "$3 }' || true)
 
   info ""
