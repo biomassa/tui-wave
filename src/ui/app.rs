@@ -17336,9 +17336,25 @@ impl App {
                 )
             })
             .unwrap_or_default();
-        if !dialog_rects.is_empty() {
+        // Whatever is on screen owns the click targets, and nothing else may leave any behind.
+        //
+        // This used to skip the update whenever a dialog reported no targets, which meant every
+        // such dialog inherited the *previous* one's rects — `CdpRunning`, `CdpOutput`,
+        // `CurveEditor`, `CdpChainEditor` and `PraatPicture` all report none, so a click in any
+        // of them could hit a target belonging to a dialog no longer on screen and, being past
+        // `dialog_n_interactive`, usually read as "submit".
+        //
+        // Assigning unconditionally is *not* the fix, and was tried: Save As renders earlier in
+        // this same function and sets its own rects, so an unconditional reset here (where
+        // `self.dialog` is `None`) wiped them and broke its mouse support outright. The rule is
+        // therefore per-owner — a dialog sets its own, and the list is cleared only when neither
+        // a dialog nor Save As is up.
+        if self.dialog.is_some() {
             self.dialog_n_interactive = dialog_rects.len().saturating_sub(1);
             self.dialog_row_rects = dialog_rects;
+        } else if !self.save_as_active {
+            self.dialog_n_interactive = 0;
+            self.dialog_row_rects.clear();
         }
         self.render_dest_picker_column(frame);
 
@@ -38081,6 +38097,45 @@ mod tests {
             app.handle_dialog_row_click(row, 0);
             assert_eq!(app.save_as_focused, row, "clicking row {row} should focus it");
         }
+    }
+
+    /// A dialog with no click targets must not inherit the previous dialog's.
+    ///
+    /// Five dialogs report no targets at all (`CdpRunning`, `CdpOutput`, `CurveEditor`,
+    /// `CdpChainEditor`, `PraatPicture`). While the rect list was only replaced when non-empty,
+    /// each of them kept whatever the dialog before it had left behind — so a click landed on a
+    /// target belonging to something no longer on screen, and being past `dialog_n_interactive`
+    /// usually read as "submit".
+    #[test]
+    fn a_dialog_with_no_click_targets_clears_the_previous_ones() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        let mut terminal = Terminal::new(TestBackend::new(110, 34)).unwrap();
+
+        // A dialog that *does* publish targets.
+        app.dialog = Some(Dialog::Normalize { input: TextInput::fresh("-1.0".to_string()) });
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(!app.dialog_row_rects.is_empty(), "Normalize should publish click targets");
+
+        // ...replaced by one that publishes none.
+        app.dialog = Some(Dialog::CdpOutput {
+            title: "x".into(),
+            lines: vec!["y".into()],
+            scroll: 0,
+        });
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(
+            app.dialog_row_rects.is_empty(),
+            "a target-less dialog must not inherit the previous dialog's rects"
+        );
+
+        // ...and closing every dialog clears them too.
+        app.dialog = None;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(app.dialog_row_rects.is_empty());
+        assert_eq!(app.dialog_n_interactive, 0);
     }
 
     /// Ctrl+W on a `[f]`/`[s]` row closes it immediately — no dirty/save
