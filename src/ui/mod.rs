@@ -1,9 +1,11 @@
 pub mod app;
 pub mod buffer_panel;
+pub mod dest_picker;
 pub mod file_panel;
 pub mod keymap;
 pub mod layout;
 pub mod menu;
+pub mod photo;
 pub mod terminal;
 pub mod text_input;
 pub mod theme;

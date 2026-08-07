@@ -100,13 +100,27 @@ pub struct DriverOptions {
     pub input_count: usize,
     /// Save Praat's Picture window to a third `outfile` path after the audio is written.
     pub save_picture: bool,
+    /// Read a PNG into a Praat `Photo` object and add it to the selection before the plugin
+    /// script runs — the four image-sonification scripts, which `exitScript` immediately
+    /// without one ("Please select a Photo object first.").
+    ///
+    /// A separate flag rather than another `input_count`, because a Photo is not a Sound: the
+    /// scripts locate it with `numberOfSelected("Photo")`/`selected("Photo")`, and the driver's
+    /// own `select all` result-finding counts only Sounds. The two compose — a process could in
+    /// principle want both — even though every process that wants a photo today wants zero
+    /// Sounds (see `IoKind::Photo`).
+    ///
+    /// **PNG only.** Praat links `libpng` and nothing else: a JPEG or TIFF fails with
+    /// `Error reading PNG file`, and a BMP/GIF with `not recognized`. So the picker filters to
+    /// `.png` rather than the app converting behind the user's back.
+    pub photo_input: bool,
 }
 
 impl Default for DriverOptions {
-    /// One input, no picture — what all but two of the catalogued processes want, and exactly
-    /// the behaviour that existed before either field did.
+    /// One input, no picture, no photo — what all but two of the catalogued processes want, and
+    /// exactly the behaviour that existed before any of these fields did.
     fn default() -> Self {
-        Self { input_count: 1, save_picture: false }
+        Self { input_count: 1, save_picture: false, photo_input: false }
     }
 }
 
@@ -174,6 +188,12 @@ pub fn driver_script(
     for i in 1..=input_count {
         form.push_str(&format!("    infile Input_file_{i}\n"));
     }
+    // Between the sound inputs and the outputs, which is the order the runner puts them on
+    // argv. Praat fills a form positionally, so these three blocks and the runner's
+    // `.args(input_paths).arg(photo).arg(output)` are one decision written in two places.
+    if options.photo_input {
+        form.push_str("    infile Photo_file\n");
+    }
     form.push_str("    outfile Output_file\n");
     if options.save_picture {
         form.push_str("    outfile Picture_file\n");
@@ -184,15 +204,23 @@ pub fn driver_script(
     for i in 1..=input_count {
         reads.push_str(&format!("snd{i} = Read from file: input_file_{i}$\n"));
     }
+    // `Read from file:` returns the Photo's id exactly as it does a Sound's — Praat dispatches
+    // on the file's own content, and a PNG becomes a Photo object.
+    if options.photo_input {
+        reads.push_str("photo = Read from file: photo_file$\n");
+    }
     // A zero-input process has nothing to select, and `selectObject:` with no arguments is a
     // syntax error rather than a no-op — so the line is omitted entirely rather than emitted
     // empty. The script called next is expected to *create* the Sound (Record, or any
     // generator), which `select all` below then finds exactly as it finds a transformed one.
-    let selection = if input_count == 0 {
+    let mut objects: Vec<String> = (1..=input_count).map(|i| format!("snd{i}")).collect();
+    if options.photo_input {
+        objects.push("photo".to_string());
+    }
+    let selection = if objects.is_empty() {
         String::new()
     } else {
-        let objects = (1..=input_count).map(|i| format!("snd{i}")).collect::<Vec<_>>().join(", ");
-        format!("selectObject: {objects}\n")
+        format!("selectObject: {}\n", objects.join(", "))
     };
 
     let picture = if options.save_picture {
@@ -411,7 +439,7 @@ mod tests {
     #[test]
     fn saving_a_picture_adds_a_third_outfile_field_after_the_output() {
         let script =
-            driver_script("/p/x.praat", &[], DriverOptions { input_count: 1, save_picture: true })
+            driver_script("/p/x.praat", &[], DriverOptions { input_count: 1, save_picture: true, ..Default::default() })
                 .unwrap();
         let output = script.find("    outfile Output_file\n").unwrap();
         let picture = script.find("    outfile Picture_file\n").unwrap();
@@ -425,7 +453,7 @@ mod tests {
     #[test]
     fn the_picture_is_saved_after_the_audio_and_cannot_fail_the_run() {
         let script =
-            driver_script("/p/x.praat", &[], DriverOptions { input_count: 1, save_picture: true })
+            driver_script("/p/x.praat", &[], DriverOptions { input_count: 1, save_picture: true, ..Default::default() })
                 .unwrap();
         let wav = script.find("Save as 32-bit WAV file:").unwrap();
         let png = script.find("Save as 300-dpi PNG file: picture_file$").unwrap();
@@ -442,11 +470,75 @@ mod tests {
     #[test]
     fn the_full_canvas_is_selected_before_the_picture_is_saved() {
         let script =
-            driver_script("/p/x.praat", &[], DriverOptions { input_count: 1, save_picture: true })
+            driver_script("/p/x.praat", &[], DriverOptions { input_count: 1, save_picture: true, ..Default::default() })
                 .unwrap();
         let viewport = script.find("Select outer viewport: 0, 12, 0, 12").unwrap();
         let png = script.find("Save as 300-dpi PNG file:").unwrap();
         assert!(viewport < png);
+    }
+
+    /// The image sonifiers find their picture with `numberOfSelected("Photo")`, so reading the
+    /// PNG is not enough — it has to be *selected* when `runScript:` is reached, or the script
+    /// exits on "Please select a Photo object first." and the driver reports only the
+    /// downstream "produced no Sound object".
+    #[test]
+    fn a_photo_process_reads_the_image_and_selects_it_before_the_script_runs() {
+        let script = driver_script(
+            "/p/Generative/Photo__sonification.praat",
+            &[],
+            DriverOptions { input_count: 0, photo_input: true, ..Default::default() },
+        )
+        .unwrap();
+        let read = script.find("photo = Read from file: photo_file$").expect("no photo read");
+        let select = script.find("selectObject: photo\n").expect("photo was never selected");
+        let call = script.find("runScript:").unwrap();
+        assert!(read < select && select < call, "wrong order: {script}");
+    }
+
+    /// Praat fills a form strictly by position *and* count, and `runner::run_job_body` puts the
+    /// photo between the inputs and the output on argv. If these two ever disagree the run is an
+    /// immediate exit 255 with a message that names neither side, so the order is asserted here
+    /// rather than left to the two call sites to keep in step by hand.
+    #[test]
+    fn the_photo_infile_sits_between_the_sound_inputs_and_the_output() {
+        let script = driver_script(
+            "/p/x.praat",
+            &[],
+            DriverOptions { input_count: 1, photo_input: true, save_picture: true },
+        )
+        .unwrap();
+        let input = script.find("    infile Input_file_1\n").unwrap();
+        let photo = script.find("    infile Photo_file\n").unwrap();
+        let output = script.find("    outfile Output_file\n").unwrap();
+        let picture = script.find("    outfile Picture_file\n").unwrap();
+        assert!(input < photo && photo < output && output < picture, "wrong form order: {script}");
+    }
+
+    /// A photo process takes zero *Sounds*, so the selection is the photo alone — but
+    /// `selectObject:` with no arguments is a syntax error, and the photo must not be dropped
+    /// from a line that the zero-input branch would otherwise omit entirely.
+    #[test]
+    fn a_zero_sound_photo_process_still_emits_a_selection_line() {
+        let script = driver_script(
+            "/p/x.praat",
+            &[],
+            DriverOptions { input_count: 0, photo_input: true, ..Default::default() },
+        )
+        .unwrap();
+        assert!(script.contains("selectObject: photo\n"));
+        assert!(!script.contains("selectObject: \n"), "empty selectObject is a syntax error");
+        assert!(!script.contains("infile Input_file_1"), "no Sound input was asked for");
+    }
+
+    /// The whole feature must be inert for every other process: no form field, no read, nothing
+    /// on the selection line. This is what guarantees adding it cannot change how the other 435
+    /// entries run.
+    #[test]
+    fn an_ordinary_process_mentions_no_photo_at_all() {
+        let script = driver_script("/p/x.praat", &[], DriverOptions::default()).unwrap();
+        assert!(!script.contains("Photo_file"));
+        assert!(!script.to_lowercase().contains("photo"));
+        assert_eq!(script.matches("selectObject:").count(), 2, "input select + result select");
     }
 
     /// A non-finite value must not reach the script text.

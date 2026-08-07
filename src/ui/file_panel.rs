@@ -107,6 +107,15 @@ impl FilePanel {
                 let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) else {
                     continue;
                 };
+                // Hidden entries are skipped — **directories as well as files**. A home
+                // directory is mostly `.config`, `.cache`, `.local` and friends, and burying
+                // the two folders someone actually keeps audio in among thirty dotfiles makes
+                // the panel harder to read for no gain: nothing this app opens is ever stored
+                // in one. The `..` row is unaffected, being synthesised below rather than read
+                // from the listing.
+                if name.starts_with('.') {
+                    continue;
+                }
                 if path.is_dir() {
                     dirs.push(FileEntry { name, path, kind: EntryKind::Dir });
                 } else if path
@@ -245,6 +254,37 @@ impl FilePanel {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+        self.render_with(frame, area, Borders::ALL, theme::BASE);
+    }
+
+    /// Render as a **column inside a dialog** rather than as a standalone panel: one vertical
+    /// divider on the right instead of a full box, and the dialog's own surface colour instead
+    /// of the editor background.
+    ///
+    /// The same treatment `Dialog::CdpBrowser`'s Domain/Groups columns get, and for the same
+    /// reason — a fully-boxed list nested inside a dialog's own border reads as a cramped
+    /// panel-within-a-panel (user report, 2026-08-07), and the two backgrounds meeting at that
+    /// inner border make the contrast worse. A single rule separating two columns is enough to
+    /// say "these are different things".
+    ///
+    /// `Borders::RIGHT` rather than `LEFT` (which is what `CdpBrowser` uses) because this
+    /// column is the leftmost thing in its dialog: the divider belongs between the list and the
+    /// form, not against the popup's own edge.
+    pub fn render_column(&mut self, frame: &mut Frame, area: Rect) {
+        // No border at all: the hosting column draws one full-height divider of its own, so the
+        // list rows can run the whole width and the rule is unbroken by the header and footer
+        // rows above and below them. A per-list `Borders::RIGHT` produced a divider that started
+        // and stopped partway down the column, which reads as a rendering fault.
+        self.render_with(frame, area, Borders::NONE, theme::SURFACE0);
+    }
+
+    fn render_with(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        borders: Borders,
+        background: ratatui::style::Color,
+    ) {
         self.rects.clear();
 
         let title = format!(" {} ({}) ", self.label, self.entries.len());
@@ -254,11 +294,15 @@ impl FilePanel {
         } else {
             Style::default().fg(theme::BORDER)
         };
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
+        let mut block = Block::default()
+            .borders(borders)
             .border_style(border_style)
-            .style(Style::default().bg(theme::BASE));
+            .style(Style::default().bg(background));
+        // A full box carries its own title; a column has no top edge to hang one on, so the
+        // hosting dialog labels it instead.
+        if borders == Borders::ALL {
+            block = block.title(title);
+        }
         let inner = block.inner(area);
 
         frame.render_widget(block, area);
@@ -325,13 +369,13 @@ impl FilePanel {
             let style = if is_selected && self.focused {
                 Style::default().fg(theme::HIGHLIGHT_FG).bg(theme::HIGHLIGHT_BG)
             } else if is_selected {
-                Style::default().fg(theme::TEXT).bg(theme::SURFACE0)
+                Style::default().fg(theme::TEXT).bg(theme::SURFACE1)
             } else if is_folder {
-                Style::default().fg(theme::SKY).bg(theme::BASE)
+                Style::default().fg(theme::SKY).bg(background)
             } else if is_dirty {
-                Style::default().fg(theme::DIRTY).bg(theme::BASE)
+                Style::default().fg(theme::DIRTY).bg(background)
             } else {
-                Style::default().fg(theme::TEXT).bg(theme::BASE)
+                Style::default().fg(theme::TEXT).bg(background)
             };
 
             self.rects.push(Rect {
@@ -385,6 +429,29 @@ mod tests {
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"mono_sine.wav"));
         assert!(names.contains(&"stereo_sine.wav"));
+    }
+
+    /// Hidden entries are skipped, and **directories count as entries**: a home directory is
+    /// mostly `.config`/`.cache`/`.local`, and listing them buries the folders someone actually
+    /// keeps audio in. The `..` row must survive, since it is synthesised rather than read from
+    /// the listing — the one name starting with a dot that has to stay.
+    #[test]
+    fn scan_hides_dotfiles_and_dot_directories_but_keeps_the_parent_row() {
+        use std::fs;
+        let base = std::env::temp_dir().join(format!("tui_wave_hidden_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        fs::write(base.join("visible.wav"), b"x").unwrap();
+        fs::write(base.join(".hidden.wav"), b"x").unwrap();
+        fs::create_dir_all(base.join("sounds")).unwrap();
+        fs::create_dir_all(base.join(".config")).unwrap();
+
+        let entries = FilePanel::scan_dir(&base, &["wav"]);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["..", "sounds", "visible.wav"]);
+        assert!(matches!(entries[0].kind, EntryKind::Parent), "the parent row must come first");
+
+        fs::remove_dir_all(&base).unwrap();
     }
 
     /// The main panel lists every importable audio format intermixed in one alphabetical

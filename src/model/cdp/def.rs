@@ -75,6 +75,19 @@ pub enum Backend {
 /// all four real binaries: "File x.wav is not of correct type (must be mono)"), so
 /// `plan_variadic_wav` always writes one mono temp file per input rather than splitting a
 /// stereo document into per-channel lanes the way `plan_wav`/`plan_dual_wav` do.
+///
+/// `Photo` is Praat-only and is the one input kind that carries **no audio in either
+/// direction**: the four image-sonification scripts read a Praat `Photo` object and *generate*
+/// a Sound from it, so there is nothing to splice into and nothing for a CDP planner to do
+/// with it (`pipeline::plan_job_inner` rejects it the same way it rejects `WavGlob`). It is
+/// deliberately not a `ParamKind::FilePath` param: Praat matches a script's `form` fields to
+/// `runScript:` arguments strictly by position and count, so an extra argument is a hard
+/// error — the path has to reach the *driver's* own form instead, which is a property of the
+/// run rather than of the parameter list. See `praat::driver`'s `DriverOptions::photo_input`.
+///
+/// Like `None` it takes zero Sound objects (`praat::plan::praat_input_count`), so these
+/// processes run with no document open at all; the result is new material, not an edit, and
+/// the Generative group `App::praat_opens_new_buffer` already routes to a new buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IoKind {
@@ -87,6 +100,7 @@ pub enum IoKind {
     Curve,
     VariadicWav,
     GroupedWav,
+    Photo,
 }
 
 /// The channel count a process's binary demands of its input file, and which of the
@@ -1370,7 +1384,9 @@ impl ProcessDef {
 
     pub fn input_arity(&self) -> (usize, Option<usize>, bool) {
         match self.input {
-            IoKind::None | IoKind::Curve => (0, Some(0), false),
+            // `Photo` takes no *Sound* input; its image is not an audio input and travels
+            // outside this arity entirely (see `IoKind::Photo`).
+            IoKind::None | IoKind::Curve | IoKind::Photo => (0, Some(0), false),
             IoKind::Wav | IoKind::Ana | IoKind::WavGlob => (1, Some(1), false),
             IoKind::DualWav | IoKind::DualAna => (2, Some(2), false),
             IoKind::VariadicWav => (self.min_inputs.unwrap_or(1).max(1), None, false),

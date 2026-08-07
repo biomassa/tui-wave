@@ -1,0 +1,259 @@
+# Builds the five release artifacts and, for a tag, publishes them to a GitHub Release.
+#
+#   macOS Intel          tui-wave-<ver>-x86_64-apple-darwin.tar.gz
+#   macOS Apple Silicon  tui-wave-<ver>-aarch64-apple-darwin.tar.gz
+#   Debian/Ubuntu        tui-wave_<ver>_amd64.deb
+#   Fedora/RHEL/SUSE     tui-wave-<ver>-1.x86_64.rpm
+#   Anywhere (Linux)     tui-wave-<ver>-x86_64.AppImage
+#
+# Triggered by a `v*` tag, or by hand from the Actions tab (`workflow_dispatch`) — the manual
+# run builds and uploads artifacts but publishes no Release, which is what makes it safe to use
+# for testing this workflow itself.
+#
+# **No test gate.** `cargo test` is expected to have been run locally before tagging; see
+# `MANUAL_TESTING.md`. Note also that the two most valuable suites here — the Praat and CDP
+# catalog sweeps — are env-gated and need external binaries no runner has, so a CI test step
+# would cover strictly less than it appears to.
+#
+# **The catalog is built as committed.** `praat_catalog.toml` is `include_str!`d into the
+# binary and generated from the `praat-audiotools` submodule, so the checkout below pins that
+# submodule and nothing regenerates it: a release must be reproducible from its tag, and the
+# committed catalog is the one that was actually run against Praat. See update-praat-scripts.sh.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Only what the release job needs. The build jobs get the default read-only token.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # A release build that fails is worth more than a fast one that hides why.
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---- macOS: two separate binaries, not a universal one -----------------------------------
+  #
+  # Deliberately two artifacts rather than one `lipo`'d universal binary. A universal build
+  # doubles the download for everyone to spare the minority on the other architecture a choice
+  # they only have to make once, and this binary carries a ~70k-line catalog, so it is not small
+  # to begin with. `macos-15` is arm64 and `macos-15-intel` is x86_64; each builds natively, so
+  # neither is cross-compiled and both are exercised by their own runner.
+  macos:
+    name: macOS ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One architecture failing should not cancel the other — they fail for different reasons.
+      fail-fast: false
+      matrix:
+        include:
+          - label: Apple Silicon
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - label: Intel
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Load-bearing: praat_catalog.toml is include_str!'d from third_party/praat-audiotools,
+          # so without the submodule the build fails outright rather than degrading.
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # CoreAudio is part of the system, so unlike Linux there is nothing to install for cpal.
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          staging="tui-wave-${version}-${{ matrix.target }}"
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/tui-wave" "$staging/"
+          cp README.md CHANGELOG.md LICENSE THIRD_PARTY_NOTICES.md install.sh "$staging/"
+          # Reproducible-ish: sort entries and zero the mtimes, so rebuilding the same tag
+          # produces the same tarball rather than one differing only by timestamps.
+          tar --format=ustar -czf "${staging}.tar.gz" "$staging"
+          shasum -a 256 "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+          echo "ASSET=${staging}.tar.gz" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+          if-no-files-found: error
+
+  # ---- Linux: one build, three packages ----------------------------------------------------
+  #
+  # All three Linux formats come from a single `cargo build --release`, because they differ only
+  # in how the same binary is wrapped. Building it three times would treble the runner minutes
+  # and, worse, allow the three packages to contain different binaries.
+  #
+  # `ubuntu-22.04` rather than `ubuntu-latest` on purpose: a binary linked against glibc 2.35
+  # runs on anything newer, while one built on 24.04's glibc 2.39 refuses to start on 22.04 with
+  # a bare "version `GLIBC_2.39' not found". The oldest supported runner is the widest audience.
+  linux:
+    name: Linux packages
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # cpal links ALSA on Linux and will not build without its development headers — the single
+      # most common first failure for an audio crate in CI. `libfuse2` is for AppImage: the
+      # runtime is a FUSE filesystem, and appimagetool needs it to assemble one.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev pkg-config libfuse2 desktop-file-utils
+
+      - name: Install packagers
+        run: |
+          cargo install cargo-deb --locked
+          cargo install cargo-generate-rpm --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Read version
+        id: version
+        run: echo "value=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')" >> "$GITHUB_OUTPUT"
+
+      # Both packagers read their [package.metadata.*] tables from Cargo.toml — see the comments
+      # there for what goes in each package and why ALSA is auto-resolved for deb but named
+      # explicitly for rpm. `--no-build` on both: they must wrap the binary built above, not
+      # trigger a second build with different flags.
+      - name: Build .deb
+        run: cargo deb --no-build --output "tui-wave_${{ steps.version.outputs.value }}_amd64.deb"
+
+      # Actually install the package and run the binary, on **both** distribution generations.
+      #
+      # Grepping the `Depends:` field was the first version of this step and was worthless: the
+      # dependency string is now hardcoded in Cargo.toml, so any check that it *contains*
+      # "libasound" passes by construction and tests nothing.
+      #
+      # Two generations because ALSA was renamed in the 64-bit time_t transition and the two
+      # halves of `libasound2t64 | libasound2` can only be exercised separately: 22.04 has no
+      # `libasound2t64` and resolves the fallback, 24.04 has no real `libasound2` and resolves
+      # the first alternative. A package that installs on one and not the other looks completely
+      # healthy from the other side, which is exactly how this would ship broken.
+      #
+      # `--version` exits immediately and needs no TTY (see `parse_args`), so it is safe to run
+      # in CI while still proving the dynamic linker found libasound at run time — the failure
+      # an unsatisfied dependency actually produces.
+      - name: Verify the .deb installs and runs (22.04 and 24.04)
+        run: |
+          set -euo pipefail
+          deb="tui-wave_${{ steps.version.outputs.value }}_amd64.deb"
+          echo "Depends: $(dpkg-deb -f "$deb" Depends)"
+
+          # The host runner is 22.04 — the `libasound2` fallback branch.
+          sudo apt-get install -y "./$deb"
+          tui-wave --version
+          sudo apt-get remove -y tui-wave
+
+          # A container for 24.04 — the `libasound2t64` branch. `-e DEBIAN_FRONTEND` keeps
+          # apt from stopping on a tzdata prompt in a bare image.
+          docker run --rm -v "$PWD:/w" -e DEBIAN_FRONTEND=noninteractive ubuntu:24.04 \
+            bash -euo pipefail -c '
+              apt-get update -qq
+              apt-get install -y --no-install-recommends "/w/'"$deb"'"
+              tui-wave --version
+            '
+
+      - name: Build .rpm
+        run: |
+          cargo generate-rpm
+          mv target/generate-rpm/*.rpm .
+
+      # AppImage last, because it is the one that most often needs a retry: appimagetool
+      # downloads its runtime at build time, so a network blip fails here and nowhere else.
+      - name: Build AppImage
+        run: |
+          set -euo pipefail
+          cargo install cargo-appimage --locked
+          curl -fsSL -o /usr/local/bin/appimagetool \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          sudo chmod +x /usr/local/bin/appimagetool
+          # --appimage-extract-and-run avoids needing FUSE inside the container-ish runner.
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          cargo appimage
+          mv target/appimage/*.AppImage \
+            "tui-wave-${{ steps.version.outputs.value }}-x86_64.AppImage"
+
+      - name: Checksums
+        run: |
+          for f in *.deb *.rpm *.AppImage; do
+            sha256sum "$f" > "$f.sha256"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            *.deb
+            *.rpm
+            *.AppImage
+            *.sha256
+          if-no-files-found: error
+
+  # ---- Publish -----------------------------------------------------------------------------
+  #
+  # Tag pushes only. A `workflow_dispatch` run stops after the build jobs, so the workflow can
+  # be exercised from a branch without creating a Release — which matters, because a CI workflow
+  # essentially never works on the first attempt.
+  release:
+    name: Publish release
+    needs: [macos, linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      # The only job that writes anything.
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          # Drafted rather than published outright: the artifacts are worth downloading and
+          # actually running once before anyone else gets them, and a Release is much harder to
+          # retract than to finish writing.
+          draft: true
+          generate_release_notes: true
+          body: |
+            See [CHANGELOG.md](https://github.com/biomassa/tui-wave/blob/master/CHANGELOG.md).
+
+            **Praat and CDP are installed separately** and are not bundled in any of these
+            packages — tui-wave shells out to them and reports what is missing at run time.
+            `install.sh` sets both up; the Linux packages carry only the editor.
+
+            Verify a download with the matching `.sha256` file.

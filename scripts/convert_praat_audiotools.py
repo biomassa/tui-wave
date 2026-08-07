@@ -1242,6 +1242,32 @@ GENERATORS: dict[str, str] = {
         "generates a mutation study from its own parameters; reads no input sound",
 }
 
+# Scripts that read a Praat **Photo** object rather than a Sound -- the image sonifiers. They
+# trip `non_sound_input` by design (they say "Please select a Photo object first."), and that
+# exclusion is still right for every other script it catches: a TextGrid or Table process has no
+# input this app can supply. An image does. The app opens a file picker for it, reads the PNG
+# into a Photo and selects that before `runScript:` -- see `IoKind::Photo` and
+# `praat::driver`'s `DriverOptions::photo_input`.
+#
+# Emitted as `input = "photo"`, which also means **zero Sound inputs**: these generate audio from
+# a picture, so they run with no document open at all, exactly as Record does. Their `Generative`
+# group already routes the result to a new buffer (`App::praat_opens_new_buffer`).
+#
+# **PNG only**, and that is Praat's limit rather than a choice made here: it links `libpng` and
+# nothing else, so a JPEG or TIFF fails with `Error reading PNG file` and a BMP/GIF with `not
+# recognized`. All four verified by running them against a generated PNG through a driver of
+# exactly the shape the app builds.
+PHOTO_INPUTS: dict[str, str] = {
+    "Generative & Synthesis/Percussive_Image_Sonification.praat":
+        "scans image columns left-to-right into clicks; brightness drives rate, pitch and volume",
+    "Generative & Synthesis/Photo__sonification.praat":
+        "maps R/G/B to low/mid/high frequency bands, brightness to amplitude",
+    "Generative & Synthesis/Photo_Brightness-Controlled_Pitch_Sonification.praat":
+        "maps brightness to a phase-continuous pitch contour",
+    "Generative & Synthesis/Spectral_Image_Sonification.praat":
+        "additive synthesis; R/G/B drive interleaved harmonic groups",
+}
+
 OUT_OF_SCOPE: dict[str, str] = {
     "Analysis/Batch_Channel_Format_Exporter.praat":
         "writes a folder of files elsewhere; nothing returns to the editor",
@@ -1539,6 +1565,40 @@ def submodule_sha() -> str:
         return "unknown"
 
 
+# Regex the near-miss report below looks for: a script that reads a Photo object. Both spellings
+# the four known ones use -- the runtime check they gate themselves with, and the message they
+# print when it fails.
+PHOTO_HINT_RE = re.compile(r'numberOfSelected\s*\(\s*"Photo"\s*\)|select a Photo object', re.I)
+
+
+def check_stale_keys() -> list[str]:
+    """Names in a path-keyed table that no longer match any script in the checkout.
+
+    Every one of these tables makes a *claim* about a specific file -- "this one hoists a pause
+    dialog", "this one reads a Photo", "this one generates rather than transforms". Upstream
+    renames constantly (`Creative Formant Manipulations.praat` ->
+    `Creative_Formant_Manipulations.praat` in one update), and a key that stops matching does not
+    fail: the script quietly falls back to the generic path, which for `PHOTO_INPUTS` and
+    `GENERATORS` means being *excluded* instead. 439 processes become 438 with nothing said.
+
+    Warned rather than fatal, so a routine `update-praat-scripts.sh` still produces a catalog --
+    but named loudly, because the update script's own "gone:" diff blames upstream for what is
+    really a stale table here.
+    """
+    present = {str(p.relative_to(PLUGIN)).replace("\\", "/") for p in PLUGIN.rglob("*.praat")}
+    stale = []
+    for label, table in (
+        ("PAUSE_HOISTS", PAUSE_HOISTS),
+        ("GENERATORS", GENERATORS),
+        ("PHOTO_INPUTS", PHOTO_INPUTS),
+        ("OUT_OF_SCOPE", OUT_OF_SCOPE),
+    ):
+        for key in table:
+            if key not in present:
+                stale.append(f"{label}: {key}")
+    return sorted(stale)
+
+
 def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
     processes: list[Process] = []
     excluded: list[tuple[str, str, str]] = []  # (relative path, reason slug, detail)
@@ -1594,11 +1654,24 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
              if pattern.search(scannable[over])
              # An override answers `gui_blocking` only. A script that also trips
              # `hardcoded_path` or `non_sound_input` is still excluded for that.
-             and not (slug == "gui_blocking" and (override or hoist))),
+             and not (slug == "gui_blocking" and (override or hoist))
+             # ...except a listed image sonifier, whose Photo input this app *can* supply.
+             # Deliberately narrow: it answers `non_sound_input` alone, so one of these that
+             # also opened a GUI or hardcoded a path would still be excluded for that.
+             and not (slug == "non_sound_input" and rel_key in PHOTO_INPUTS)),
             None,
         )
         if hit:
-            excluded.append((str(rel), hit[0], hit[1]))
+            detail = hit[1]
+            # A script excluded as `non_sound_input` that reads a *Photo* is a candidate for
+            # `PHOTO_INPUTS` -- the app can supply an image, unlike a TextGrid or a Table. Said
+            # here so a new one upstream shows up in the report as something to look at, rather
+            # than disappearing into a category of things nothing can be done about. Deliberately
+            # not automatic: every photo entry that ships has been run against the real binary,
+            # which is the same bar `GENERATORS` and `PAUSE_HOISTS` set.
+            if hit[0] == "non_sound_input" and PHOTO_HINT_RE.search(source):
+                detail += " -- reads a Photo; a candidate for PHOTO_INPUTS once verified"
+            excluded.append((str(rel), hit[0], detail))
             continue
 
         # A script that never mentions the selected Sound is not a process on our input --
@@ -1651,6 +1724,9 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
                 description=described,
                 short_description=short_description_from(described, title_for(path.stem)),
                 interactive=py_interactive,
+                # An image sonifier reads a Photo and no Sound at all -- see PHOTO_INPUTS.
+                # `""` elsewhere lets the emitter fall back to its wav/dual_wav default.
+                input_kind="photo" if rel_key in PHOTO_INPUTS else "",
             ))
         for proc in processes[first_new:]:
             proc.python_rewrite = needs_python_rewrite
@@ -1947,6 +2023,16 @@ def main() -> int:
         return 1
 
     sha = submodule_sha()
+
+    stale = check_stale_keys()
+    if stale:
+        print(f"warning: {len(stale)} hand-maintained key(s) no longer match any script -- "
+              f"upstream probably renamed them. The scripts they name have fallen back to the "
+              f"generic path, which for PHOTO_INPUTS/GENERATORS means being EXCLUDED:",
+              file=sys.stderr)
+        for line in stale:
+            print(f"  {line}", file=sys.stderr)
+
     processes, excluded = collect()
 
     # Must happen before anything is written: a repeated key is an *override* to

@@ -28665,6 +28665,371 @@ kind = "toggle"
 default = false
 
 [[process]]
+key = "praat_generative_synthesis_percussive_image_sonification"
+bin = "Generative & Synthesis/Percussive_Image_Sonification.praat"
+title = "Percussive Image Sonification"
+category = "praat"
+subcategory = "Generative"
+short_description = "Converts an image to percussive sound by scanning columns left-to-right and generating clicks based on pixel data"
+description = "Converts an image to percussive sound by scanning columns left-to-right and generating clicks based on pixel data.\n\nSonification mapping: - Column position → Time (left-to-right scan) - Brightness (avg RGB) → Click rate (bright = faster) - Brightness → Pitch (bright = higher, 800-2000 Hz) - Brightness → Volume (bright = louder) - Red-Blue balance → Stereo pan (red=left, blue=right)"
+input = "photo"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Timing", section = true },
+  { before = 2, text = "Click Parameters", section = true },
+  { before = 5, text = "Output", section = true },
+]
+
+[[process.params]]
+name = "Duration_s"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Sample_rate_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 44100.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Min_click_interval_s"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.08
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max_click_interval_s"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Click_duration_s"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.05
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_generative_synthesis_photo_brightness_controlled_pitch_sonification"
+bin = "Generative & Synthesis/Photo_Brightness-Controlled_Pitch_Sonification.praat"
+title = "Photo Brightness-Controlled Pitch Sonification"
+category = "praat"
+subcategory = "Generative"
+short_description = "Sonifies an image by mapping brightness to pitch: - Brightness (avg RGB) → Pitch (continuous tone) - Red-Blue balance → Stereo pan"
+description = "Sonifies an image by mapping brightness to pitch: - Brightness (avg RGB) → Pitch (continuous tone) - Red-Blue balance → Stereo pan\n\nUses phase-continuous synthesis to avoid clicks at frequency transitions."
+input = "photo"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Timing", section = true },
+  { before = 2, text = "Pitch Range", section = true },
+  { before = 4, text = "Analysis Resolution", section = true },
+  { before = 6, text = "Output", section = true },
+]
+
+[[process.params]]
+name = "Duration_s"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 3.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Sample_rate_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 44100.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Min_pitch_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 100.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Max_pitch_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 1000.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Analysis_columns"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 200.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Analysis_rows"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 100.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_generative_synthesis_photo_sonification"
+bin = "Generative & Synthesis/Photo__sonification.praat"
+title = "Photo sonification"
+category = "praat"
+subcategory = "Generative"
+short_description = "Sonifies an image by mapping RGB channels to frequency bands: - Red → Low frequencies (warm = bass) - Green → Mid frequencies - Blue → High frequencies (cool = "
+description = "Sonifies an image by mapping RGB channels to frequency bands: - Red → Low frequencies (warm = bass) - Green → Mid frequencies - Blue → High frequencies (cool = treble) - Brightness → Amplitude - Red-Blue balance → Stereo pan"
+input = "photo"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Timing", section = true },
+  { before = 2, text = "Analysis Resolution", section = true },
+  { before = 4, text = "Frequency Bands", section = true },
+  { before = 10, text = "Output", section = true },
+]
+
+[[process.params]]
+name = "Duration_s"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 3.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Sample_rate_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 44100.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Analysis_columns"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 200.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Analysis_rows"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 100.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Low_band_min_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 100.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Low_band_max_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 800.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Mid_band_min_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 800.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Mid_band_max_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 3000.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "High_band_min_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 3000.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "High_band_max_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 9000.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
 key = "praat_generative_synthesis_poisson_point_process_synthesis"
 bin = "Generative & Synthesis/Poisson_Point_Process_Synthesis.praat"
 title = "Poisson Point Process Synthesis"
@@ -30051,6 +30416,115 @@ scale = "plain"
 
 [[process.params]]
 name = "show_visuals"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_generative_synthesis_spectral_image_sonification"
+bin = "Generative & Synthesis/Spectral_Image_Sonification.praat"
+title = "Spectral Image Sonification"
+category = "praat"
+subcategory = "Generative"
+short_description = "Sonifies an image using additive synthesis"
+description = "Sonifies an image using additive synthesis. RGB channels control the amplitudes of different harmonic groups: - Red → Harmonics 1, 4, 7, 10... (fundamental + every 3rd) - Green → Harmonics 2, 5, 8, 11... - Blue → Harmonics 3, 6, 9, 12..."
+input = "photo"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Timing", section = true },
+  { before = 2, text = "Synthesis", section = true },
+  { before = 4, text = "Analysis Resolution (smaller = faster)", section = true },
+  { before = 6, text = "Output", section = true },
+]
+
+[[process.params]]
+name = "Duration_s"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 5.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Sample_rate_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 44100.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Fundamental_Hz"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 110.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max_harmonics"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 12.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Analysis_columns"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 80.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Sample_rows_per_column"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 8.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
 description = ""
 automatable = false
 kind = "toggle"

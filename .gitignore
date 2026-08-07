@@ -19,3 +19,7 @@
 
 # Python bytecode from the catalog converters
 __pycache__/
+
+# Local convenience wrapper for the env-gated Praat sweep (see praat::runner's
+# catalog_smoke_test) — a personal shortcut, not part of the build
+/run-praat-smoke-test.sh

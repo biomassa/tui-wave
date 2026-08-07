@@ -175,6 +175,10 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('R') => Some(Action::NewFromRight),
         // Shift+E (kitty intercepts Ctrl+Shift+key, so Export Regions can't use Ctrl+Shift).
         KeyCode::Char('E') => Some(Action::ExportRegions),
+        // Shift+S alongside the original Ctrl+Shift+S, for the same reason: the double-modifier
+        // combo is not reliably delivered without the kitty keyboard protocol, so a plain
+        // Shift+letter is the binding that always works. Both stay bound.
+        KeyCode::Char('S') => Some(Action::SaveAs),
         KeyCode::Left if shift => Some(Action::ExtendSelectionLeft),
         KeyCode::Right if shift => Some(Action::ExtendSelectionRight),
         KeyCode::Home if shift => Some(Action::ExtendSelectionToStart),
@@ -352,7 +356,7 @@ pub fn default_keybindings() -> HashMap<String, Vec<String>> {
     bind!("Undo", "ctrl+z");
     bind!("Redo", "ctrl+y", "ctrl+shift+z");
     bind!("Save", "ctrl+s");
-    bind!("SaveAs", "ctrl+shift+s");
+    bind!("SaveAs", "S", "ctrl+shift+s");
     bind!("SaveAll", "ctrl+l");
     bind!("Delete", "delete");
     bind!("ClearSelection", "ctrl+d");
@@ -538,17 +542,31 @@ pub fn format_menu_key(key: KeyEvent) -> String {
     out
 }
 
-/// Formats a `KeyEvent` as a compact toolbar-style shortcut: `"^x"`, `"S+Up"`, `"Dn"`,
-/// `"Spc"`, `"q"`, `"L"`, etc.
+/// How Shift is spelled in every toolbar and hint-bar shortcut: U+21E7 UPWARDS WHITE ARROW,
+/// the conventional key-cap symbol.
+///
+/// Standard Unicode from the Arrows block, not a Nerd Font glyph — the same rule the waveform's
+/// eighth-block characters follow, and for the same reason: this has to render in whatever
+/// terminal font the user already has.
+pub const SHIFT_SYMBOL: &str = "\u{21e7}";
+
+/// Formats a `KeyEvent` as a compact toolbar-style shortcut: `"^x"`, `"\u{21e7}Up"`, `"Dn"`,
+/// `"Spc"`, `"q"`, `"\u{21e7}L"`, etc.
+///
+/// Shift is [`SHIFT_SYMBOL`] rather than the old `"S+"`, and a Shift+letter is *never* shown as
+/// a bare uppercase letter. Both spellings were reported as confusing (2026-08-07), and for the
+/// same reason: `"S+E"` reads as "the S key, then E" as easily as "Shift+E", and a bare `"M"`
+/// gives no sign that Shift is needed at all — the toolbar was showing `Del  M` for Delete
+/// Marker while the very next group showed `regToFolder  S+E`, two spellings of one idea.
 pub fn format_toolbar_key(key: KeyEvent) -> String {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
-    // Named keys use abbreviated names; modifiers add "^" (ctrl) and "S+" (shift) prefixes.
+    // Named keys use abbreviated names; modifiers add "^" (ctrl) and the Shift symbol.
     let named = |s: &str| -> String {
         let mut out = String::new();
         if ctrl { out.push('^'); }
-        if shift { out.push_str("S+"); }
+        if shift { out.push_str(SHIFT_SYMBOL); }
         out.push_str(s);
         out
     };
@@ -571,12 +589,13 @@ pub fn format_toolbar_key(key: KeyEvent) -> String {
         KeyCode::Char(c) => {
             if ctrl && shift {
                 let u = if c.is_ascii_lowercase() { c.to_ascii_uppercase() } else { c };
-                format!("^S+{u}")
+                format!("^{SHIFT_SYMBOL}{u}")
             } else if ctrl {
                 format!("^{c}")
             } else if c.is_ascii_uppercase() {
-                // shift+letter: uppercase char with no modifier bits — show "S+C" not "C".
-                format!("S+{c}")
+                // Shift+letter arrives as an uppercase char with no modifier bits, so the
+                // symbol has to be added from the case rather than read off `shift`.
+                format!("{SHIFT_SYMBOL}{c}")
             } else {
                 c.to_string()
             }
@@ -990,6 +1009,46 @@ mod tests {
         );
         // Genuinely malformed input is still rejected (empty modifier token).
         assert_eq!(parse_key_binding("ctrl++x"), None);
+    }
+
+    /// Shift is spelled with its key-cap symbol, and a Shift+letter is never shown as a bare
+    /// uppercase letter. Both old spellings were reported as confusing (2026-08-07): "S+E"
+    /// reads as "S then E", and "M" gives no sign Shift is involved at all.
+    #[test]
+    fn shift_is_shown_as_its_key_symbol_never_as_s_plus_or_a_bare_capital() {
+        let up = |c| key(KeyCode::Char(c), KeyModifiers::NONE);
+        assert_eq!(format_toolbar_key(up('M')), "\u{21e7}M");
+        assert_eq!(format_toolbar_key(up('S')), "\u{21e7}S");
+        assert_eq!(
+            format_toolbar_key(key(KeyCode::Up, KeyModifiers::SHIFT)),
+            "\u{21e7}Up"
+        );
+        // Ctrl+Shift keeps the caret *and* gains the symbol.
+        assert_eq!(
+            format_toolbar_key(key(KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
+            "^\u{21e7}Z"
+        );
+        // An unshifted key is untouched.
+        assert_eq!(format_toolbar_key(up('m')), "m");
+    }
+
+    /// Save As is bound to plain Shift+S *first*, so that is what the toolbar and menus show.
+    /// Ctrl+Shift+S stays bound as a second key — it was the only binding until 2026-08-07 and
+    /// removing it would break anyone's muscle memory — but a double-modifier combo is not
+    /// reliably delivered without the kitty keyboard protocol, which is why it is not the one
+    /// displayed.
+    #[test]
+    fn save_as_displays_plain_shift_s_not_the_ctrl_shift_variant() {
+        assert_eq!(map_key(key(KeyCode::Char('S'), KeyModifiers::NONE)), Some(Action::SaveAs));
+
+        let mut bindings = default_keybindings();
+        fill_missing_keybindings(&mut bindings);
+        let display = build_action_display_map(&bindings, true);
+        assert_eq!(
+            display.get(&Action::SaveAs).map(String::as_str),
+            Some("\u{21e7}S"),
+            "the toolbar legend must not carry a caret — Shift+S needs no Ctrl"
+        );
     }
 
     #[test]
