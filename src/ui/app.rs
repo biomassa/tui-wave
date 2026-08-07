@@ -18107,22 +18107,29 @@ fn render_save_as_dialog(
     let columns_height = form.height.saturating_sub(crate::ui::dest_picker::PATH_ROWS + 1);
     let full_width = Rect { x: popup.x + 1, width: popup.width.saturating_sub(2), height: 1, y: 0 };
 
-    // Built as one list so the click rects below can be derived from *these* offsets rather
-    // than hand-numbered. Hand-numbering is what broke Save As's mouse support the moment the
-    // leading blank row was added for the destination column's top padding: every rect stayed
-    // where it was and every click landed one row above the field it named.
-    const SAVE_AS_ROW_FILENAME: u16 = 1;
-    const SAVE_AS_ROW_FORMAT: u16 = 2;
-    const SAVE_AS_ROW_DITHER: u16 = 4;
-    let mut form_lines = vec![Line::raw(""); (SAVE_AS_ROW_DITHER + 1) as usize];
-    form_lines[SAVE_AS_ROW_FILENAME as usize] = filename_line;
-    form_lines[SAVE_AS_ROW_FORMAT as usize] = format_line;
-    form_lines[SAVE_AS_ROW_DITHER as usize] = dither_line;
-    frame.render_widget(Paragraph::new(form_lines), Rect { height: columns_height, ..form });
+    // Rows and their click targets from one statement each — this dialog is why
+    // `ui::dialog_rows` exists: its rects were hand-numbered offsets into a separate line list,
+    // and adding the leading blank row below (for the destination column's top padding) moved
+    // every line without moving a single rect.
+    let mut rows = crate::ui::dialog_rows::DialogRows::new(Rect { height: columns_height, ..form });
+    rows.blank();
+    rows.field(filename_line);
+    rows.field(format_line);
+    rows.blank();
+    rows.field(dither_line);
+    rows.pad_to(columns_height);
+    // Last in focus order (`SAVE_AS_DEST_FOCUS`), immediately before the hints bar.
+    rows.pane(list_area.unwrap_or_default());
+    // The hints line spans both columns along the bottom rather than sitting in the form
+    // column, so it is drawn separately and its rect corrected below.
+    let mut rects = rows.finish(frame, Line::raw(""));
     frame.render_widget(
         Paragraph::new(hints),
         Rect { y: popup.y + popup.height - 2, ..full_width },
     );
+    if let Some(last) = rects.last_mut() {
+        *last = hints_bar_rect(popup, popup.width.saturating_sub(2));
+    }
 
     // Drawn last so its own border sits over the block's background rather than under it.
     // `split` returns `None` on a terminal too narrow for both, where the form gets everything
@@ -18133,17 +18140,9 @@ fn render_save_as_dialog(
         dest.render_path(frame, Rect { y: popup.y + popup.height - 3, ..full_width });
     }
 
-    // Return hit-test rects: three interactive form rows, the destination list, then apply
-    // (the hints bar) as the last element.
-    let row_w = form.width;
-    let field_row = |offset: u16| Rect { x: form.x, y: form.y + offset, width: row_w, height: 1 };
-    vec![
-        field_row(SAVE_AS_ROW_FILENAME),
-        field_row(SAVE_AS_ROW_FORMAT),
-        field_row(SAVE_AS_ROW_DITHER),
-        list_area.unwrap_or_default(),
-        hints_bar_rect(popup, popup.width.saturating_sub(2)),
-    ]
+    // Three interactive form rows, the destination pane, then the hints bar — all built by
+    // `DialogRows` above, so their order here is the order they were pushed in.
+    rects
 }
 
 /// The hints-bar row of a dialog popup — the last entry in every dialog's hit-test list,
@@ -19614,21 +19613,27 @@ fn render_export_regions_dialog(
     let (list_area, form) = crate::ui::dest_picker::split(popup);
     // The path row and the hints bar span the whole dialog beneath both columns.
     let columns_height = form.height.saturating_sub(crate::ui::dest_picker::PATH_ROWS + 1);
-    let mut form_lines = vec![
-        Line::raw(""),
-        folder_line, base_line, Line::raw(""),
-        format_line, dither_line, Line::raw(""),
-        limit_length_line, normalize_line, Line::raw(""),
-        fade_in_line, fade_out_line,
-    ];
-    while (form_lines.len() as u16) < columns_height {
-        form_lines.push(Line::raw(""));
-    }
-    frame.render_widget(Paragraph::new(form_lines), Rect { height: columns_height, ..form });
-    frame.render_widget(
-        Paragraph::new(hints),
-        Rect { x: popup.x + 1, y: popup.y + height - 2, width: popup.width.saturating_sub(2), height: 1 },
-    );
+
+    // Rows and their click targets from one statement each — the eight fields used to be
+    // rendered as a `Vec<Line>` and hit-tested through a separate `row(2), row(3), row(5), …`
+    // table of hand-counted offsets into it. See `ui::dialog_rows`.
+    let mut rows = crate::ui::dialog_rows::DialogRows::new(Rect { height: columns_height, ..form });
+    rows.blank();
+    rows.field(folder_line);
+    rows.field(base_line);
+    rows.blank();
+    rows.field(format_line);
+    rows.field(dither_line);
+    rows.blank();
+    rows.field(limit_length_line);
+    rows.field(normalize_line);
+    rows.blank();
+    rows.field(fade_in_line);
+    rows.field(fade_out_line);
+    // The destination pane sits last in focus order (`er_focus::DEST`), immediately before the
+    // hints bar `finish` appends — the position `App::render_dest_picker_column` relies on.
+    rows.pad_to(columns_height);
+    rows.pane(list_area.unwrap_or_default());
 
     // Each interactive row's Rect is clipped to the popup's inner area: on a terminal
     // shorter than FULL_HEIGHT the bottom rows aren't drawn, and an unclipped Rect there
@@ -19641,33 +19646,30 @@ fn render_export_regions_dialog(
         width: popup.width.saturating_sub(2),
         height: popup.height.saturating_sub(2),
     };
-    // Confined to the form column, since that is where the rows are now drawn.
-    let row = |y_offset: u16| {
-        Rect { x: form.x, y: popup.y + y_offset, width: form.width, height: 1 }.intersection(inner)
-    };
-    vec![
-        row(2),  // subfolder (row 0) -- +1 for the header spacer row
-        row(3),  // base name (row 1)
-        row(5),  // format (row 2)
-        row(6),  // dither (row 3)
-        row(8),  // limit length (row 4)
-        row(9),  // normalize (row 5)
-        row(11), // fade in (row 6)
-        row(12), // fade out (row 7)
-        // The destination pane, immediately before the hints bar — the order
-        // `App::render_dest_picker_column` relies on.
-        list_area.unwrap_or_default(),
-        // Hints/apply bar — clicking it (or anywhere past row 7) submits, matching
-        // handle_dialog_row_click's `row >= dialog_n_interactive` convention. Only
-        // present when the popup is full-height: when clamped, the row at
-        // popup.height - 2 shows a clipped field line, not the hints bar (Enter still
-        // submits — this only drops the mouse target, never the action).
-        if popup.height == FULL_HEIGHT {
+    // `finish` renders the rows and appends the hints bar's own rect. The hints line spans the
+    // full inner width beneath both columns rather than sitting in the form column, so it is
+    // drawn separately and its rect replaced below.
+    let mut rects = rows.finish(frame, Line::raw(""));
+    frame.render_widget(
+        Paragraph::new(hints),
+        Rect { x: popup.x + 1, y: popup.y + height - 2, width: popup.width.saturating_sub(2), height: 1 },
+    );
+    // Every field rect clipped to the popup: on a terminal shorter than FULL_HEIGHT the bottom
+    // rows are not drawn, and an unclipped rect there would still catch clicks.
+    for rect in rects.iter_mut() {
+        *rect = rect.intersection(inner);
+    }
+    // The submit target. Only present at full height: when clamped, the row at
+    // `popup.height - 2` shows a clipped field line rather than the hints bar (Enter still
+    // submits — this only drops the mouse target, never the action).
+    if let Some(last) = rects.last_mut() {
+        *last = if popup.height == FULL_HEIGHT {
             hints_bar_rect(popup, inner.width)
         } else {
             Rect::default()
-        },
-    ]
+        };
+    }
+    rects
 }
 
 /// The CDP process browser: a search field over a scrollable, filtered list of catalog
@@ -38301,6 +38303,52 @@ mod tests {
         assert_eq!(app.save_as_focused, 1, "a click beside the column must reach the form");
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The same rect-lands-on-its-label guard as Save As, for the dialog with the most rows to
+    /// get wrong. Export Regions had eight fields hit-tested through a hand-counted
+    /// `row(2), row(3), row(5), row(6), row(8), row(9), row(11), row(12)` table.
+    #[test]
+    fn export_regions_click_rects_land_on_the_rows_they_name() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 400)), None);
+        app.documents[0].markers.push(crate::model::document::Marker {
+            position: 100,
+            label: "a".into(),
+        });
+        app.handle_action(Action::ExportRegions);
+        assert!(matches!(app.dialog, Some(Dialog::ExportRegions { .. })));
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text_at = |r: Rect| -> String {
+            (r.x..r.x + r.width).map(|x| buffer[(x, r.y)].symbol()).collect::<String>()
+        };
+
+        // Indexed by **row**, not by focus: the four checkbox rows carry two focus indices each
+        // (the box and its value field) on one line, which is what `er_focus::
+        // FIRST_CHECKBOX_ROW` and `checkbox_row_focus` exist to translate. Writing this test
+        // against `er_focus` constants was the first attempt and it failed on the fifth row —
+        // a useful reminder that the two spaces diverge here and nowhere else.
+        for (index, expected) in [
+            (0usize, "Subfolder"),
+            (1, "Base name"),
+            (2, "Format"),
+            (3, "Dither"),
+            (4, "Limit length"),
+            (5, "Normalize"),
+            (6, "Fade in"),
+            (7, "Fade out"),
+        ] {
+            let row = text_at(app.dialog_row_rects[index]);
+            assert!(
+                row.contains(expected),
+                "rect {index} should sit on the {expected:?} row, but it reads {row:?}"
+            );
+        }
     }
 
     /// Ctrl+W on a `[f]`/`[s]` row closes it immediately — no dirty/save
