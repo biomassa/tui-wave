@@ -18010,15 +18010,18 @@ fn render_save_as_dialog(
     let columns_height = form.height.saturating_sub(crate::ui::dest_picker::PATH_ROWS + 1);
     let full_width = Rect { x: popup.x + 1, width: popup.width.saturating_sub(2), height: 1, y: 0 };
 
-    frame.render_widget(
-        // A leading blank row, matching the one the destination column opens with, so the two
-        // columns' first lines sit on the same row.
-        Paragraph::new(vec![
-            Line::raw(""),
-            filename_line, format_line, Line::raw(""), dither_line,
-        ]),
-        Rect { height: columns_height, ..form },
-    );
+    // Built as one list so the click rects below can be derived from *these* offsets rather
+    // than hand-numbered. Hand-numbering is what broke Save As's mouse support the moment the
+    // leading blank row was added for the destination column's top padding: every rect stayed
+    // where it was and every click landed one row above the field it named.
+    const SAVE_AS_ROW_FILENAME: u16 = 1;
+    const SAVE_AS_ROW_FORMAT: u16 = 2;
+    const SAVE_AS_ROW_DITHER: u16 = 4;
+    let mut form_lines = vec![Line::raw(""); (SAVE_AS_ROW_DITHER + 1) as usize];
+    form_lines[SAVE_AS_ROW_FILENAME as usize] = filename_line;
+    form_lines[SAVE_AS_ROW_FORMAT as usize] = format_line;
+    form_lines[SAVE_AS_ROW_DITHER as usize] = dither_line;
+    frame.render_widget(Paragraph::new(form_lines), Rect { height: columns_height, ..form });
     frame.render_widget(
         Paragraph::new(hints),
         Rect { y: popup.y + popup.height - 2, ..full_width },
@@ -18036,10 +18039,11 @@ fn render_save_as_dialog(
     // Return hit-test rects: three interactive form rows, the destination list, then apply
     // (the hints bar) as the last element.
     let row_w = form.width;
+    let field_row = |offset: u16| Rect { x: form.x, y: form.y + offset, width: row_w, height: 1 };
     vec![
-        Rect { x: form.x, y: form.y, width: row_w, height: 1 },
-        Rect { x: form.x, y: form.y + 1, width: row_w, height: 1 },
-        Rect { x: form.x, y: form.y + 3, width: row_w, height: 1 },
+        field_row(SAVE_AS_ROW_FILENAME),
+        field_row(SAVE_AS_ROW_FORMAT),
+        field_row(SAVE_AS_ROW_DITHER),
         list_area.unwrap_or_default(),
         hints_bar_rect(popup, popup.width.saturating_sub(2)),
     ]
@@ -37999,6 +38003,84 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Every interactive click rect must land on the row whose control it names.
+    ///
+    /// Regression (user report, 2026-08-07): Save As's mouse support broke silently the moment
+    /// the form gained a leading blank row for the destination column's top padding. The rects
+    /// were hand-numbered offsets into a line list they had no connection to, so all three
+    /// stayed put while every line moved down one — clicking "Filename" focused nothing,
+    /// clicking "Format" focused Filename. Nothing failed; the clicks just went to the wrong
+    /// place, which is why it survived a full green suite.
+    ///
+    /// Asserting against the *rendered buffer* rather than against expected offsets is the
+    /// whole point: a test that hardcoded `form.y + 1` would have been updated in lockstep with
+    /// the bug and caught nothing.
+    #[test]
+    fn save_as_click_rects_land_on_the_rows_they_name() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let base = std::env::temp_dir().join(format!("tui-wave-saclick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let mut app = new_app(Some(doc(0.1, 10)), Some(base.clone()));
+        app.handle_action(Action::SaveAs);
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        // The text actually drawn inside a rect.
+        let text_at = |r: Rect| -> String {
+            (r.x..r.x + r.width).map(|x| buffer[(x, r.y)].symbol()).collect::<String>()
+        };
+
+        let rects = &app.dialog_row_rects;
+        assert!(rects.len() >= 4, "Save As should report filename/format/dither/dest + submit");
+        for (index, expected) in [(0usize, "Filename"), (1, "Format"), (2, "Dither")] {
+            let row = text_at(rects[index]);
+            assert!(
+                row.contains(expected),
+                "click rect {index} should sit on the {expected} row, but that row reads {row:?}"
+            );
+        }
+        // And the destination pane's rect must cover the folder list, not a form row.
+        let dest = rects[SAVE_AS_DEST_FOCUS];
+        assert!(dest.height > 1, "the destination pane is a column, not a single row");
+        let dest_text: String = (dest.y..dest.y + dest.height.min(4))
+            .map(|y| {
+                (dest.x..dest.x + dest.width).map(|x| buffer[(x, y)].symbol()).collect::<String>()
+            })
+            .collect();
+        assert!(dest_text.contains("Save in"), "the dest rect misses its own column: {dest_text:?}");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Clicking each Save As row must actually focus it — the rects being right is necessary
+    /// but not sufficient, since `handle_dialog_row_click` maps row indices to focus itself.
+    #[test]
+    fn clicking_a_save_as_row_focuses_it() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.handle_action(Action::SaveAs);
+        // Depth must support dither, or the row is inert by design.
+        app.save_as_depth = BitDepth::Int16;
+        // A render must precede any click: `dialog_n_interactive` is derived from the rect list
+        // the renderer returns, and without it every row reads as "past the last interactive
+        // one" and submits the dialog instead of focusing anything. The real app always renders
+        // before it can receive a click, so this is the test catching up to reality.
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        for row in [1usize, 0, 2, SAVE_AS_DEST_FOCUS] {
+            app.handle_dialog_row_click(row, 0);
+            assert_eq!(app.save_as_focused, row, "clicking row {row} should focus it");
+        }
     }
 
     /// Ctrl+W on a `[f]`/`[s]` row closes it immediately — no dirty/save
