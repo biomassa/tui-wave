@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+- **`setup-environment.sh` makes a downloaded build actually work.** The release packages carry
+  the tui-wave binary and nothing else, and about 439 of its processes are *scripts* from the
+  praatAudioTools project that no package bundles — so a downloaded tui-wave listed every Praat
+  process and could run none of them, and asked for a directory you had no copy of. The new
+  script fetches the scripts, points tui-wave at them, checks Praat is installed, and sets up the
+  Python environment the `py` group needs. It ships in `/usr/share/tui-wave/` in the packages,
+  beside the binary in the macOS tarballs, and standalone on every release page.
+
+  It pins the **exact** praatAudioTools commit your build's catalog was generated from, and
+  tui-wave now warns in the process dialog when a checkout has drifted from it. That matters
+  because the failure is otherwise silent: Praat fills a script's form positionally, so scripts
+  at the wrong commit produce plausible, wrong audio rather than an error.
+
+  The "no scripts" message now names the remedy and where to find it, instead of naming a config
+  key.
+
+- **No more AppImage.** It is a single self-contained file with nowhere to put the scripts or the
+  setup script, and tui-wave without its Praat and CDP integrations is not worth shipping.
+
 ## 2026-08-08 (2.5.3)
 
 - **The mouse now works the same way in every dialog.** Clicking a folder in the destination

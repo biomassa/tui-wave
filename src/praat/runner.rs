@@ -658,16 +658,88 @@ pub fn prepare_prefs_dir(state_dir: &Path, audiotools_dir: &Path) -> Option<Path
 /// submodule that was never initialised — a directory that exists and is empty. Telling someone
 /// to check their path when the fix is one `git submodule` command would send them looking in
 /// the wrong place entirely.
+/// The praatAudioTools commit this build's process catalog was generated from, read from the
+/// header the converter writes into `praat_catalog.toml` (which is `include_str!`d, so this is a
+/// compile-time constant in practice).
+///
+/// `None` only if that header is ever reworded — the callers then skip the staleness check
+/// rather than inventing an answer.
+pub fn catalog_commit() -> Option<&'static str> {
+    crate::model::cdp::catalog::praat_catalog_source()
+        .lines()
+        .take(10)
+        .find_map(|line| line.split("at commit ").nth(1))
+        .map(|rest| rest.trim_end_matches('.').trim())
+        .filter(|sha| sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// The commit a praatAudioTools checkout is currently on, or `None` when it is not a git
+/// checkout at all.
+///
+/// Reads `.git` directly rather than shelling out to `git`: this runs on a UI path, `git` may
+/// not be installed, and the two files involved are trivial to parse. A detached HEAD — which is
+/// what `setup-environment.sh` produces, since this is a pinned dependency — holds the SHA
+/// itself; a branch holds `ref: refs/heads/...`, which is one more file read.
+pub fn checkout_commit(dir: &Path) -> Option<String> {
+    let head = std::fs::read_to_string(dir.join(".git").join("HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(reference) = head.strip_prefix("ref: ") {
+        // Loose ref first; a packed-refs lookup is the fallback for a freshly cloned checkout.
+        if let Ok(sha) = std::fs::read_to_string(dir.join(".git").join(reference)) {
+            return Some(sha.trim().to_string());
+        }
+        let packed = std::fs::read_to_string(dir.join(".git").join("packed-refs")).ok()?;
+        return packed.lines().find_map(|line| {
+            let (sha, name) = line.split_once(' ')?;
+            (name.trim() == reference).then(|| sha.trim().to_string())
+        });
+    }
+    (head.len() == 40 && head.chars().all(|c| c.is_ascii_hexdigit())).then(|| head.to_string())
+}
+
+/// `Some((expected, found))` when the checkout is on a different commit than the catalog was
+/// generated from.
+///
+/// **Why this is worth detecting.** The catalog carries each script's parameter names, types,
+/// order and count, and Praat fills a script's `form` **positionally**. Upstream rewrites
+/// scripts constantly and without warning, so a checkout a few commits off does not fail — it
+/// silently hands arguments to fields that have moved, and produces plausible, wrong audio.
+/// Nothing else in `validate_audiotools_dir` can see that: the directory exists, is non-empty
+/// and has the sentinel folders, so it passes every other check.
+///
+/// `None` whenever the question cannot be answered — not a git checkout, unreadable, or the
+/// catalog header reworded. A user pointing at their own working copy is a legitimate thing to
+/// do, and this must not nag them about it.
+pub fn checkout_staleness(dir: &Path) -> Option<(String, String)> {
+    let expected = catalog_commit()?;
+    let found = checkout_commit(dir)?;
+    (found != expected).then(|| (expected.to_string(), found))
+}
+
+/// What to tell a user who has no praatAudioTools scripts. Named once so every path that can
+/// report the condition says the same thing.
+pub const SETUP_HINT: &str = "About 439 of this app's processes are scripts from the \
+praatAudioTools project, which the packages do not bundle. Run setup-environment.sh to fetch \
+them: it is in /usr/share/tui-wave/ if you installed a .deb or .rpm, beside the binary if you \
+unpacked a tarball, and attached to every release at \
+https://github.com/biomassa/tui-wave/releases. Or set praat_audiotools_dir in the config to \
+your own checkout.";
+
 pub fn validate_audiotools_dir(dir: &Path) -> Result<(), String> {
     // An empty path renders as nothing at all, so the generic message below became the
     // unreadable `is not a directory` with no subject. Callers should route through
     // `Config::praat_audiotools_path`, which substitutes the bundled submodule — but say
     // something useful rather than nothing if one ever does not.
     if dir.as_os_str().is_empty() {
-        return Err("no praatAudioTools directory is configured (set praat_audiotools_dir)".into());
+        // The state a *downloaded* build starts in: the packages carry the binary and none of
+        // the scripts, and the executable-relative fallback cannot resolve from /usr/bin. Naming
+        // the remedy rather than the config key is the difference between a dead end and a
+        // one-line fix — the key alone left the user to discover both that the scripts are a
+        // separate project and where to put them.
+        return Err(format!("no praatAudioTools scripts found.\n\n{SETUP_HINT}"));
     }
     if !dir.is_dir() {
-        return Err(format!("{} is not a directory", dir.display()));
+        return Err(format!("{} is not a directory.\n\n{SETUP_HINT}", dir.display()));
     }
     let empty = std::fs::read_dir(dir).map(|mut e| e.next().is_none()).unwrap_or(false);
     if empty {
@@ -1038,6 +1110,62 @@ mod tests {
     /// scripts analyse pitch, envelope or dynamics, and Praat rejects a signal whose loudest
     /// and softest parts differ by 0.0002 dB outright. The variation here is what makes a
     /// failure mean "the catalog entry is wrong" rather than "the fixture was degenerate".
+    /// `setup-environment.sh` pins the praatAudioTools commit it checks out, and that pin must
+    /// equal the one this build's catalog was generated from.
+    ///
+    /// The catalog carries every script's parameter order, and Praat fills a `form`
+    /// **positionally** — so a script fetched at the wrong commit does not fail, it hands
+    /// arguments to fields that have moved and produces plausible, wrong audio. A submodule bump
+    /// that forgets the script would otherwise ship exactly that.
+    #[test]
+    fn praat_setup_commit_matches_the_catalog() {
+        let expected = catalog_commit().expect("the catalog header names its source commit");
+        let script = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("setup-environment.sh"),
+        )
+        .expect("setup-environment.sh ships with the repo");
+        let pinned = script
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("PINNED_COMMIT="))
+            .map(|v| v.trim().trim_matches('"').to_string())
+            .expect("setup-environment.sh declares PINNED_COMMIT");
+        assert_eq!(
+            pinned, expected,
+            "setup-environment.sh checks out {pinned}, but this build's catalog was generated \
+             from {expected} — re-run update-praat-scripts.sh and update PINNED_COMMIT together"
+        );
+    }
+
+    /// The bundled submodule is on the commit the catalog names, so a source checkout reports no
+    /// staleness. This is also what proves `checkout_commit` can read a real `.git` — the
+    /// submodule's is a `.git` *file* pointing into the parent's modules directory, not a
+    /// directory, which a naive implementation gets wrong.
+    #[test]
+    fn the_bundled_checkout_is_not_reported_as_stale() {
+        let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/praat-audiotools");
+        if !checkout.join("Distortion").is_dir() {
+            eprintln!("skipping: submodule not initialised");
+            return;
+        }
+        match checkout_staleness(&checkout) {
+            None => {}
+            Some((expected, found)) => panic!(
+                "the bundled submodule is at {found} but the catalog expects {expected}"
+            ),
+        }
+    }
+
+    /// A directory that is not a git checkout answers "cannot tell" rather than "stale" — a user
+    /// pointing at their own unpacked copy is legitimate and must not be nagged.
+    #[test]
+    fn a_non_git_directory_reports_no_staleness() {
+        let dir = std::env::temp_dir().join(format!("tui-wave-nogit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(checkout_staleness(&dir).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn smoke_fixture() -> (Vec<Vec<f32>>, u32) {
         const RATE: u32 = 44_100;
         let samples = (0..RATE * 2)

@@ -52,7 +52,7 @@ I needed this tool for my own work.
 
 ## Prerequisites
 
-**The quick way.** `./install.sh` does everything below on macOS and Linux — toolchain, build
+**If you can, build from source please.** `./install.sh` does everything below on macOS and Linux — toolchain, build
 dependencies, Praat, the script submodule, the optional Python environment, then builds and
 installs. It asks before anything needing `sudo`, `--dry-run` shows exactly what it would run,
 and it never touches your system Python. It deliberately does not install CDP: those binaries
@@ -81,6 +81,39 @@ hear nothing.
   - Arch: `sudo pacman -S alsa-lib pkgconf`
 - **macOS.** Nothing extra. The program uses the system CoreAudio framework.
 - **Windows.** Nothing extra. The program uses the system WASAPI backend.
+
+## Installing a released build
+
+Each release carries a macOS build for Intel and Apple Silicon, plus a `.deb` and an `.rpm` for
+Linux — [github.com/biomassa/tui-wave/releases](https://github.com/biomassa/tui-wave/releases).
+
+**Run `setup-environment.sh` afterwards.** The packages contain the tui-wave binary and nothing
+else, and about 439 of its processes are *scripts* from the praatAudioTools project, which no
+package bundles. Without them tui-wave lists every Praat process and can run none. The script
+fetches them, points tui-wave at them, and optionally sets up the Python environment the 34
+processes in the `py` group need.
+
+You will find it:
+
+| how you installed | where the script is |
+| --- | --- |
+| `.deb` or `.rpm` | `/usr/share/tui-wave/setup-environment.sh` |
+| macOS tarball | beside the binary, where you unpacked it |
+| any release | attached to the release page on its own |
+| source checkout | the repository root |
+
+```sh
+./setup-environment.sh              # fetch the scripts, configure, set up Python
+./setup-environment.sh --dry-run    # print every command, change nothing
+./setup-environment.sh --no-python  # skip the venv; the 'py' group stays unavailable
+```
+
+It fetches praatAudioTools at the **exact commit** your build's catalog was generated from.
+That pin matters: tui-wave's catalog records each script's parameter order, and Praat fills a
+script's form positionally — so a checkout at a different commit does not fail, it produces
+plausible, wrong audio. tui-wave says so in the process dialog if the two ever drift apart.
+
+CDP is separate again, and has no installer anywhere; see [Optional: CDP support](#optional-cdp-support).
 
 ## Build and run
 

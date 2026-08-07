@@ -1,5 +1,42 @@
 ## 1. Install
 
+### If you downloaded a release
+
+Releases carry a macOS build for Intel and Apple Silicon and a `.deb`/`.rpm` for Linux. They
+contain the tui-wave binary and nothing else.
+
+**Run `setup-environment.sh` after installing.** About 439 of tui-wave's processes are scripts
+from the praatAudioTools project, which no package bundles — without them tui-wave lists every
+Praat process and can run none of them. The script fetches the scripts, writes their location
+into your config, and (after asking) sets up the Python environment the 34 processes in the `py`
+group need. It also checks whether Praat itself is installed and says where to get it.
+
+| how you installed | where the script is |
+| --- | --- |
+| `.deb` or `.rpm` | `/usr/share/tui-wave/setup-environment.sh` |
+| macOS tarball | beside the binary, where you unpacked it |
+| any release | attached to the release page on its own |
+| source checkout | the repository root |
+
+```sh
+./setup-environment.sh              # fetch the scripts, configure, set up Python
+./setup-environment.sh --dry-run    # print every command, change nothing
+./setup-environment.sh --yes        # take every prompt as yes
+./setup-environment.sh --no-python  # skip the venv; the 'py' group stays unavailable
+```
+
+It clones praatAudioTools at the **exact commit** your build's process catalog was generated
+from, and re-running it moves an existing checkout to that commit. The pin is not cosmetic: the
+catalog records every script's parameter names, types and *order*, and Praat fills a script's
+form positionally — a checkout at a different commit does not error, it hands arguments to
+fields that have moved and produces plausible, wrong audio. If the two ever drift apart, the
+process dialog says so.
+
+It does not install CDP: that is a separate download with no installer on any platform, and
+tui-wave asks for its directory the first time you run a CDP process.
+
+### If you are building from source
+
 **Start here: run `./install.sh` from the repository.** On macOS and Linux it does the whole of
 this section for you — it installs the Rust toolchain if missing, the build dependencies for your
 platform, Praat, the script submodule, and (after asking) the Python environment the `py` process
