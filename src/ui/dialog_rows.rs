@@ -66,6 +66,21 @@ impl<'a> DialogRows<'a> {
         self.lines.push(line);
     }
 
+    /// An interactive row whose click target is **narrower** than the row — a text field whose
+    /// rect starts past its label or indent, so the click's offset within it is already the
+    /// character offset `TextInput::set_cursor_from_column` wants, with no per-dialog prefix
+    /// arithmetic at the handler end.
+    pub fn field_inset(&mut self, line: Line<'a>, x_offset: u16, width: u16) {
+        let full = self.next_row_rect();
+        let x = full.x.saturating_add(x_offset).min(full.x + full.width);
+        self.rects.push(Rect {
+            x,
+            width: width.min((full.x + full.width).saturating_sub(x)),
+            ..full
+        });
+        self.lines.push(line);
+    }
+
     /// An interactive region that is not one of these rows at all — the inline destination
     /// column, which is several rows tall and drawn separately.
     ///
@@ -142,6 +157,21 @@ mod tests {
         rows.field(Line::raw("only field"));
         assert_eq!(rows.rects.len(), 1, "the heading must not claim a click target");
         assert_eq!(rows.rects[0].y, 5 + 1);
+    }
+
+    /// An inset field's rect starts past its label and is clamped to the row, so a click's
+    /// offset within it is the character offset the caret wants.
+    #[test]
+    fn an_inset_field_starts_past_its_label_and_stays_inside_the_row() {
+        let mut rows = DialogRows::new(area());
+        rows.field_inset(Line::raw(" Name: xyz"), 7, 4);
+        assert_eq!(rows.rects[0].x, 10 + 7);
+        assert_eq!(rows.rects[0].width, 4);
+
+        // A width running past the row is clipped rather than overflowing it.
+        let mut rows = DialogRows::new(area());
+        rows.field_inset(Line::raw("x"), 38, 20);
+        assert_eq!(rows.rects[0].x + rows.rects[0].width, 10 + 40);
     }
 
     /// A pane sits in focus order among the rows without occupying one.

@@ -18210,12 +18210,13 @@ fn render_mix_to_mono_dialog(
     let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
     let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
 
-    let mut lines: Vec<Line> = vec![Line::raw("")];
+    let mut rows = crate::ui::dialog_rows::DialogRows::new(block_inner(popup));
+    rows.blank();
     for (i, ti) in inputs.iter().enumerate() {
         let ch_label = mix_to_mono_row_label(n, i);
         let (before, under, after) = ti.split_at_cursor();
         if i == focused {
-            lines.push(Line::from(vec![
+            rows.field(Line::from(vec![
                 Span::styled(format!(" {ch_label}"), label_style),
                 Span::styled(before, base),
                 Span::styled(under, cursor_style),
@@ -18224,22 +18225,22 @@ fn render_mix_to_mono_dialog(
             ]));
         } else {
             let value = ti.value().to_string();
-            lines.push(Line::from(vec![
+            rows.field(Line::from(vec![
                 Span::styled(format!(" {ch_label}"), label_style),
                 Span::styled(value, base),
             ]));
         }
     }
     // Blank separator before the checkbox, then tanh soft-limiter checkbox row.
-    lines.push(Line::raw(""));
+    rows.blank();
     let tanh_label = if tanh_clip { " [X] Tanh limiter" } else { " [ ] Tanh limiter" };
     if focused == n {
-        lines.push(Line::from(Span::styled(tanh_label, cursor_style)));
+        rows.field(Line::from(Span::styled(tanh_label, cursor_style)));
     } else {
-        lines.push(Line::from(Span::styled(tanh_label, label_style)));
+        rows.field(Line::from(Span::styled(tanh_label, label_style)));
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
+    rows.blank();
+    let hints = Line::from(vec![
         Span::styled(" Tab", hint_style),
         Span::styled(":next  ", label_style),
         Span::styled("Space", hint_style),
@@ -18248,25 +18249,18 @@ fn render_mix_to_mono_dialog(
         Span::styled(":-inf  ", label_style),
         Span::styled("Enter", hint_style),
         Span::styled(":apply", label_style),
-    ]));
+    ]);
 
     let block = Block::default()
         .title("Mix to Mono")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
-    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    frame.render_widget(block, popup);
 
-    // Return hit-test rects: channel rows at y+2..y+n+1 (header spacer at y+1), tanh at
-    // y+n+3 (blank line at y+n+2).
-    let row_w = popup.width.saturating_sub(2);
-    let mut rects: Vec<Rect> = (0..n)
-        .map(|i| Rect { x: popup.x + 1, y: popup.y + 2 + i as u16, width: row_w, height: 1 })
-        .collect();
-    rects.push(Rect { x: popup.x + 1, y: popup.y + 3 + n as u16, width: row_w, height: 1 });
-    // Apply (hints bar) rect — last element triggers Enter when clicked.
-    rects.push(hints_bar_rect(popup, row_w));
-    rects
+    // One channel row per input, then the limiter — each claimed as it was pushed above, so a
+    // channel count that changes the row count cannot desynchronise the targets from the rows.
+    rows.finish(frame, hints)
 }
 
 /// Renders the Gain dialog. The layout grows with `GainRows`: a mono/multi-channel document
@@ -19660,47 +19654,43 @@ fn render_cdp_setup_dialog(
     let error_style = Style::default().fg(theme::RED).bg(theme::SURFACE0);
 
     let (before, under, after) = input.split_at_cursor();
-    let lines = vec![
-        Line::raw(""),
-        Line::from(Span::styled(" Directory containing the CDP binaries:", label_style)),
-        Line::from(vec![
-            Span::styled(" ", base),
-            Span::styled(before, base),
-            Span::styled(under, cursor_style),
-            Span::styled(after, base),
-        ]),
-        match error {
-            Some(msg) => Line::from(Span::styled(format!(" ! {msg}"), error_style)),
-            None => Line::raw(""),
-        },
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled(" Enter", hint_style),
-            Span::styled(":save & continue  ", label_style),
-            Span::styled("Esc", hint_style),
-            Span::styled(":cancel", label_style),
-        ]),
-    ];
+    let hints = Line::from(vec![
+        Span::styled(" Enter", hint_style),
+        Span::styled(":save & continue  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
+    ]);
 
     let block = Block::default()
         .title("CDP Directory")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
-    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    frame.render_widget(block, popup);
 
-    // Row 0 is the path field, spanning just its text (its `x` is past the one-space indent),
-    // so `x_in_row` is the character offset; the trailing entry is the hints bar.
-    let inner = block_inner(popup);
-    vec![
-        Rect {
-            x: inner.x + 1,
-            y: inner.y + 2,
-            width: inner.width.saturating_sub(1),
-            height: 1,
-        },
-        dialog_submit_rect(inner),
-    ]
+    let mut rows = crate::ui::dialog_rows::DialogRows::new(block_inner(popup));
+    rows.blank();
+    // A prompt, not a control — it explains the field below and claims no click target.
+    rows.text(Line::from(Span::styled(" Directory containing the CDP binaries:", label_style)));
+    // Inset past the one-space indent, so `x_in_row` is the character offset the caret wants
+    // rather than something the click handler has to adjust.
+    let inner_width = block_inner(popup).width;
+    rows.field_inset(
+        Line::from(vec![
+            Span::styled(" ", base),
+            Span::styled(before, base),
+            Span::styled(under, cursor_style),
+            Span::styled(after, base),
+        ]),
+        1,
+        inner_width.saturating_sub(1),
+    );
+    rows.text(match error {
+        Some(msg) => Line::from(Span::styled(format!(" ! {msg}"), error_style)),
+        None => Line::raw(""),
+    });
+    rows.blank();
+    rows.finish(frame, hints)
 }
 
 /// Formats a `ParamKind::Number`'s valid range for inline display next to its field, e.g.
@@ -38453,6 +38443,89 @@ mod tests {
         let mut app = new_app(Some(doc(0.1, 10)), None);
         app.handle_action(Action::FadeIn);
         assert_rect_labels(&mut app, "Fade In", &[(0, "Curve")]);
+    }
+
+    /// Mix to Mono's first test of any kind.
+    ///
+    /// It had none when its renderer was converted to `DialogRows`, which is worth recording:
+    /// the conversion was safe only because the shape was simple, not because anything would
+    /// have caught it going wrong. Its row count follows the channel count, so both a stereo
+    /// and a wider buffer are checked — that variability is the part a fixed-offset rect list
+    /// gets wrong first.
+    #[test]
+    fn mix_to_mono_click_rects_follow_the_channel_count() {
+        // Stereo: two channel rows, then the limiter.
+        let mut app = new_app(Some(stereo_doc(0.2, 0.3, 200)), None);
+        app.handle_action(Action::MixToMono);
+        assert!(matches!(app.dialog, Some(Dialog::MixToMono { .. })), "expected the dialog");
+        let rows = dialog_rect_text(&mut app);
+        assert_eq!(rows.len(), 2 + 1 + 1, "two channels, the limiter, and the hints bar");
+        assert!(rows[2].contains("limiter"), "rect 2 should be the limiter: {:?}", rows[2]);
+
+        // Four channels: the limiter moves down two rows, and its rect must move with it.
+        let mut app = new_app(
+            Some(Document {
+                channels: (0..4).map(|c| vec![0.3 - c as f32 * 0.05; 200]).collect(),
+                ..Document::default()
+            }),
+            None,
+        );
+        app.handle_action(Action::MixToMono);
+        let rows = dialog_rect_text(&mut app);
+        assert_eq!(rows.len(), 4 + 1 + 1, "four channels, the limiter, and the hints bar");
+        assert!(rows[4].contains("limiter"), "rect 4 should be the limiter: {:?}", rows[4]);
+    }
+
+    /// The last two guards: CDP Setup (converted) and CDP Params (deliberately not).
+    ///
+    /// CDP Params keeps its hand-written rect list. It emits a **zero-size placeholder** for
+    /// every scrolled-out field so that a rect index stays equal to a focus index, which is
+    /// what lets `handle_dialog_row_click` need no layout knowledge of its own — and which
+    /// `DialogRows` has no way to express. It is also the most-used dialog in the app, so a
+    /// silent regression there is the most expensive one available. A guard is free; the
+    /// refactor is not worth its risk.
+    #[test]
+    fn cdp_dialogs_click_rects_land_on_the_rows_they_name() {
+        // --- CDP Setup: one path field, inset past its indent so a click maps to a caret
+        // position rather than needing prefix arithmetic in the handler.
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.dialog = Some(Dialog::CdpSetup {
+            input: TextInput::new("/opt/cdp"),
+            error: None,
+        });
+        let rows = dialog_rect_text(&mut app);
+        assert!(rows[0].contains("/opt/cdp"), "rect 0 should be the path field: {:?}", rows[0]);
+        let field = app.dialog_row_rects[0];
+        let inner = block_inner_for_test(&app);
+        assert!(field.x > inner.x, "the field rect must be inset past the indent");
+
+        // --- CDP Params: the preset row, then one rect per field, in focus order.
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| !p.params.is_empty())
+            .expect("the catalog has a process with parameters");
+        app.open_cdp_params(index);
+        let rows = dialog_rect_text(&mut app);
+        assert!(
+            rows[CDP_PRESET_FOCUS].to_lowercase().contains("preset"),
+            "rect {CDP_PRESET_FOCUS} should be the preset row: {:?}",
+            rows[CDP_PRESET_FOCUS]
+        );
+        let name = app.cdp_catalog.processes[index].params[0].name.clone();
+        assert!(
+            rows[1].contains(name.split_whitespace().next().unwrap_or(&name)),
+            "rect 1 should be the first parameter ({name:?}), but it reads {:?}",
+            rows[1]
+        );
+    }
+
+    /// The inner area of whatever popup is open — for asserting a rect sits inside it.
+    fn block_inner_for_test(app: &App) -> Rect {
+        // Derived from the rect list itself: the hints bar always spans the popup's full inner
+        // width, so its `x` is the inner left edge.
+        app.dialog_row_rects.last().copied().unwrap_or_default()
     }
 
     /// Ctrl+W on a `[f]`/`[s]` row closes it immediately — no dirty/save
