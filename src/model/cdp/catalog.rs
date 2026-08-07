@@ -46,6 +46,13 @@ const TITLE_OVERRIDES_TOML: &str = include_str!("catalog_titles.toml");
 /// costs the UI nothing (see `model::praat`).
 const PRAAT_CATALOG_TOML: &str = include_str!("praat_catalog.toml");
 
+/// The embedded Praat catalog's own text, so callers can read the header the converter writes —
+/// notably the praatAudioTools commit it was generated from, which
+/// `praat::runner::checkout_staleness` compares against the user's checkout.
+pub fn praat_catalog_source() -> &'static str {
+    PRAAT_CATALOG_TOML
+}
+
 #[derive(Deserialize)]
 struct CatalogFile {
     #[serde(default, rename = "process")]

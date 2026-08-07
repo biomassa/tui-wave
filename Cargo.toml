@@ -77,6 +77,7 @@ assets = [
     ["target/release/tui-wave", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/tui-wave/README.md", "644"],
     ["THIRD_PARTY_NOTICES.md", "usr/share/doc/tui-wave/THIRD_PARTY_NOTICES.md", "644"],
+    ["setup-environment.sh", "usr/share/tui-wave/setup-environment.sh", "755"],
     ["packaging/tui-wave.desktop", "usr/share/applications/tui-wave.desktop", "644"],
     ["icon.png", "usr/share/icons/hicolor/256x256/apps/tui-wave.png", "644"],
 ]
@@ -89,6 +90,7 @@ assets = [
     { source = "target/release/tui-wave", dest = "/usr/bin/tui-wave", mode = "755" },
     { source = "README.md", dest = "/usr/share/doc/tui-wave/README.md", mode = "644" },
     { source = "THIRD_PARTY_NOTICES.md", dest = "/usr/share/doc/tui-wave/THIRD_PARTY_NOTICES.md", mode = "644" },
+    { source = "setup-environment.sh", dest = "/usr/share/tui-wave/setup-environment.sh", mode = "755" },
     { source = "packaging/tui-wave.desktop", dest = "/usr/share/applications/tui-wave.desktop", mode = "644" },
     { source = "icon.png", dest = "/usr/share/icons/hicolor/256x256/apps/tui-wave.png", mode = "644" },
 ]
@@ -100,21 +102,3 @@ alsa-lib = "*"
 [package.metadata.generate-rpm.recommends]
 praat = "*"
 
-# AppImage packaging (cargo-appimage). The desktop entry sets Terminal=true since this is a TUI.
-# `auto_link` bundles the one non-core shared library the binary needs (libasound.so.2, via
-# cpal/rodio); the exclude list keeps ubiquitous system libraries out so they resolve against
-# the host at run time rather than being frozen at build time.
-[package.metadata.appimage]
-icon = "icon.png"
-desktop_entry = "packaging/tui-wave.desktop"
-auto_link = true
-auto_link_exclude_list = [
-    "libc.so*",
-    "libm.so*",
-    "libdl.so*",
-    "librt.so*",
-    "libpthread.so*",
-    "ld-linux*.so*",
-    "libgcc_s.so*",
-    "libstdc++.so*",
-]

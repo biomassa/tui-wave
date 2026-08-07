@@ -7214,6 +7214,36 @@ impl App {
         }
     }
 
+    /// A note for the params dialog when the praatAudioTools checkout is on a different commit
+    /// than this build's catalog was generated from.
+    ///
+    /// **Warned, not blocked.** Pointing at your own checkout is a legitimate thing to do, and
+    /// upstream scripts often work fine across a few commits — so this takes the dialog's
+    /// inline `error` line, which explains without dimming Apply, rather than
+    /// `cdp_params_blocker`, which refuses.
+    ///
+    /// Worth saying at all because the failure it warns about is silent: Praat fills a script's
+    /// `form` **positionally**, so a script whose parameters have moved does not error, it
+    /// produces plausible, wrong audio. Every other check passes — the directory exists, is
+    /// non-empty, and has the sentinel folders.
+    ///
+    /// Praat processes only; a CDP one has no checkout to be stale.
+    fn praat_checkout_staleness_note(
+        &self,
+        def: &crate::model::cdp::ProcessDef,
+    ) -> Option<String> {
+        if def.backend() != crate::model::cdp::def::Backend::Praat {
+            return None;
+        }
+        let (expected, found) =
+            crate::praat::runner::checkout_staleness(&self.config.praat_audiotools_path())?;
+        Some(format!(
+            "scripts are at {} but this build expects {} — re-run setup-environment.sh",
+            &found[..7.min(found.len())],
+            &expected[..7.min(expected.len())],
+        ))
+    }
+
     /// Whether the Praat backend could run something right now: a usable checkout *and* a
     /// working `praat`. Both are cheap (a directory stat and a `--version` that prints one
     /// line), and neither is cached — Praat is optional, and installing it mid-session should
@@ -7908,6 +7938,7 @@ impl App {
         let Some(def) = self.cdp_catalog.processes.get(catalog_index) else { return };
         let (fields, second_input, variadic_input, photo_input) = self.cdp_fields_for(catalog_index);
         let presets = crate::model::cdp::preset::load_presets(&def.key, def.params.len());
+        let error = self.praat_checkout_staleness_note(def);
         self.dialog = Some(Dialog::CdpParams {
             catalog_index,
             fields,
@@ -7915,7 +7946,7 @@ impl App {
             variadic_input,
             photo_input,
             focus: CDP_PRESET_FOCUS,
-            error: None,
+            error,
             preview: None,
             envelope: None,
             list_edit: None,

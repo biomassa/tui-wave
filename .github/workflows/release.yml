@@ -4,7 +4,10 @@
 #   macOS Apple Silicon  tui-wave-<ver>-aarch64-apple-darwin.tar.gz
 #   Debian/Ubuntu        tui-wave_<ver>_amd64.deb
 #   Fedora/RHEL/SUSE     tui-wave-<ver>-1.x86_64.rpm
-#   Anywhere (Linux)     tui-wave-<ver>-x86_64.AppImage
+#   Every release        setup-environment.sh (standalone, and inside each package)
+#
+# No AppImage: it is a single self-contained file with no room for the praatAudioTools scripts
+# or a setup script, and tui-wave without its Praat and CDP integrations is not worth shipping.
 #
 # Triggered by a `v*` tag, or by hand from the Actions tab (`workflow_dispatch`) — the manual
 # run builds and uploads artifacts but publishes no Release, which is what makes it safe to use
@@ -92,7 +95,8 @@ jobs:
           staging="tui-wave-${version}-${{ matrix.target }}"
           mkdir -p "$staging"
           cp "target/${{ matrix.target }}/release/tui-wave" "$staging/"
-          cp README.md CHANGELOG.md LICENSE THIRD_PARTY_NOTICES.md install.sh "$staging/"
+          cp README.md CHANGELOG.md LICENSE THIRD_PARTY_NOTICES.md \
+             install.sh setup-environment.sh "$staging/"
           # Reproducible-ish: sort entries and zero the mtimes, so rebuilding the same tag
           # produces the same tarball rather than one differing only by timestamps.
           tar --format=ustar -czf "${staging}.tar.gz" "$staging"
@@ -130,13 +134,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # cpal links ALSA on Linux and will not build without its development headers — the single
-      # most common first failure for an audio crate in CI. `libfuse2` is for AppImage: the
-      # runtime is a FUSE filesystem, and appimagetool needs it to assemble one.
+      # most common first failure for an audio crate in CI.
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libasound2-dev pkg-config libfuse2 desktop-file-utils
+            libasound2-dev pkg-config
 
       - name: Install packagers
         run: |
@@ -197,24 +200,9 @@ jobs:
           cargo generate-rpm
           mv target/generate-rpm/*.rpm .
 
-      # AppImage last, because it is the one that most often needs a retry: appimagetool
-      # downloads its runtime at build time, so a network blip fails here and nowhere else.
-      - name: Build AppImage
-        run: |
-          set -euo pipefail
-          cargo install cargo-appimage --locked
-          curl -fsSL -o /usr/local/bin/appimagetool \
-            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
-          sudo chmod +x /usr/local/bin/appimagetool
-          # --appimage-extract-and-run avoids needing FUSE inside the container-ish runner.
-          export APPIMAGE_EXTRACT_AND_RUN=1
-          cargo appimage
-          mv target/appimage/*.AppImage \
-            "tui-wave-${{ steps.version.outputs.value }}-x86_64.AppImage"
-
       - name: Checksums
         run: |
-          for f in *.deb *.rpm *.AppImage; do
+          for f in *.deb *.rpm; do
             sha256sum "$f" > "$f.sha256"
           done
 
@@ -224,8 +212,10 @@ jobs:
           path: |
             *.deb
             *.rpm
-            *.AppImage
             *.sha256
+            # Attached to the release standalone as well as installed by the packages, which
+            # bury it under /usr/share — no help to someone deciding whether to install at all.
+            setup-environment.sh
           if-no-files-found: error
 
   # ---- Publish -----------------------------------------------------------------------------
