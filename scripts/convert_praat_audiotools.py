@@ -1240,6 +1240,15 @@ GENERATORS: dict[str, str] = {
     # so it was already reachable through a chain but not on its own.
     "Generative & Synthesis/Risset\'s_Mutations.praat":
         "generates a mutation study from its own parameters; reads no input sound",
+    # Was an ordinary transform until upstream reworked it (2026-08-08, commit 0de18db) into
+    # multi-bank source-filter granular synthesis: it now builds its Sound from its own
+    # parameters and mentions neither `selected` nor `"Sound"`, so the generic detector dropped
+    # it. Verified by running it -- it ends on `selectObject: output_sound`, calls `removeObject`
+    # on all nine of its intermediates, and leaves exactly that one Sound, so the driver's
+    # highest-numbered-Sound rule cannot pick up the wrong object. Its `Play` is guarded by
+    # `play_result`, which SILENCE_RE already forces off.
+    "Generative & Synthesis/Rich_Formant_Grains.praat":
+        "synthesises formant grains from its own parameters; reads no input sound",
 }
 
 # Scripts that read a Praat **Photo** object rather than a Sound -- the image sonifiers. They
