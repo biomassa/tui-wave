@@ -115,16 +115,26 @@ impl DestPicker {
             KeyCode::End => self.panel.move_bottom(),
             KeyCode::PageUp => self.panel.move_page_up(),
             KeyCode::PageDown => self.panel.move_page_down(),
-            KeyCode::Enter => {
-                if let Some((path, EntryKind::Parent | EntryKind::Dir)) = self.panel.selected_entry()
-                {
-                    let path = path.to_path_buf();
-                    self.panel.set_directory(path);
-                }
-            }
+            KeyCode::Enter => self.activate(),
             _ => return false,
         }
         true
+    }
+
+    /// Selects the row under `(x, y)`. `true` when one was hit, so a caller can tell a click
+    /// inside the column from one that missed it — the inline column shares its dialog with
+    /// other rows, unlike the overlay pickers, so a miss must fall through rather than be
+    /// swallowed.
+    pub fn handle_click(&mut self, x: u16, y: u16) -> bool {
+        self.panel.handle_click(x, y)
+    }
+
+    /// Descends into the highlighted directory — the mouse's double-click, the keyboard's
+    /// Enter. Shares `handle_key`'s rule that this never commits, only navigates.
+    pub fn activate(&mut self) {
+        if let Some((path, EntryKind::Parent | EntryKind::Dir)) = self.panel.selected_entry() {
+            self.panel.set_directory(path);
+        }
     }
 
     /// Draws the list and the current-path footer into `area`.

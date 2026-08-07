@@ -1834,6 +1834,26 @@ struct FormantBufferPicker {
     selected: usize,
 }
 
+/// Which embedded file browser is currently on screen. At most one ever is, so this is a
+/// plain tag rather than a set.
+///
+/// The `is_overlay` split is the load-bearing part: three of these cover their dialog and so
+/// own every click in it, while the destination column sits beside the form it serves and must
+/// let a click that misses its rows through to the fields next to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmbeddedPicker {
+    LoadCurve,
+    CdpFile,
+    Photo,
+    Dest,
+}
+
+impl EmbeddedPicker {
+    fn is_overlay(self) -> bool {
+        !matches!(self, EmbeddedPicker::Dest)
+    }
+}
+
 /// State for `Dialog::CdpParams.file_picker` — reuses `FilePanel` (same widget as
 /// `Dialog::LoadCurve`) rather than a bespoke list like `FormantBufferPicker`, since a real
 /// filesystem browse (navigate directories, filter by extension) is a fundamentally
@@ -14700,10 +14720,7 @@ impl App {
         if self.try_handle_cdp_envelope_mouse(mouse) {
             return;
         }
-        if self.try_handle_load_curve_mouse(mouse) {
-            return;
-        }
-        if self.try_handle_cdp_file_picker_mouse(mouse) {
+        if self.try_handle_picker_mouse(mouse) {
             return;
         }
         // When a dialog or Save-As prompt is open, absorb all mouse events so clicks on the
@@ -14979,65 +14996,129 @@ impl App {
     /// *what to do* with it, never whether to let it through to whatever's behind the popup.
     /// Returns `false` immediately when the editor isn't open, so `handle_mouse` falls
     /// through to its normal dialog-click handling for every other dialog unaffected by this.
-    /// `Dialog::LoadCurve`'s picker uses `FilePanel`'s own `hit_test`/`handle_click` against
-    /// its last-rendered absolute rects, exactly like the persistent Files panel's mouse
-    /// handling (`App::handle_mouse`'s `file_panel.handle_click` block) — a single click
-    /// selects, a double-click (same 400ms/1-column/same-row window) activates the row, via
-    /// `activate_load_curve_picker`. Checked before the generic `dialog_row_rects` handling
-    /// in `handle_mouse` since this picker never populates that (see
-    /// `render_load_curve_dialog`'s doc comment).
-    fn try_handle_load_curve_mouse(&mut self, mouse: MouseEvent) -> bool {
-        if !matches!(self.dialog, Some(Dialog::LoadCurve { .. })) {
-            return false;
+    /// Every embedded file browser's mouse handling, in one place.
+    ///
+    /// Four dialogs embed a `FilePanel`: `Dialog::LoadCurve`, the CDP params file picker, the
+    /// image picker, and the inline destination column that six file-writing dialogs share.
+    /// Each used to need its own `try_handle_*_mouse` — two were written, the image picker
+    /// never got one, and the destination column could only be *focused* by clicking, never
+    /// row-selected. Unifying them is what makes "the mouse works the same everywhere" a
+    /// property of the code rather than a promise renewed per dialog.
+    ///
+    /// One click selects a row; a double-click (400ms, same row, within a column) activates it,
+    /// matching the persistent Files panel and the keyboard's Enter.
+    ///
+    /// **Overlay pickers swallow every click; the inline column does not.** `LoadCurve` and the
+    /// two CDP pickers cover their dialog, so any click belongs to them. The destination column
+    /// sits *beside* the form it serves, so a click that misses its rows has to fall through to
+    /// the ordinary `dialog_row_rects` handling or the fields next to it would go dead.
+    fn try_handle_picker_mouse(&mut self, mouse: MouseEvent) -> bool {
+        let Some(target) = self.embedded_picker() else { return false };
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            // An overlay still absorbs the non-click events, so nothing behind it reacts.
+            return target.is_overlay();
         }
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            let Some(Dialog::LoadCurve { picker }) = self.dialog.as_mut() else { return true };
-            if picker.handle_click(mouse.column, mouse.row) {
-                let now = Instant::now();
-                let is_double_click = self.last_load_curve_click.is_some_and(|(t, x, y)| {
-                    now.duration_since(t) < Duration::from_millis(400)
-                        && x.abs_diff(mouse.column) <= 1
-                        && y == mouse.row
-                });
-                self.last_load_curve_click = Some((now, mouse.column, mouse.row));
-                if is_double_click {
-                    self.last_load_curve_click = None;
-                    let Some(Dialog::LoadCurve { picker }) = self.dialog.take() else { return true };
-                    self.activate_load_curve_picker(picker);
-                }
+
+        // `DestPicker` owns its panel rather than exposing it, so it hit-tests through its own
+        // `handle_click`; the other three hand back the `FilePanel` directly.
+        let hit = if target == EmbeddedPicker::Dest {
+            self.dest_picker
+                .as_mut()
+                .is_some_and(|dest| dest.handle_click(mouse.column, mouse.row))
+        } else {
+            match self.embedded_picker_panel(target) {
+                Some(panel) => panel.handle_click(mouse.column, mouse.row),
+                None => false,
             }
+        };
+        if !hit {
+            return target.is_overlay();
+        }
+
+        // Focus follows the click, so the pane the user just acted on is the one the keyboard
+        // then drives. Only the inline column has anywhere else for focus to be.
+        if target == EmbeddedPicker::Dest {
+            self.focus_dest_picker();
+        }
+
+        // Shared with the Files panel's own double-click window; the pickers are mutually
+        // exclusive, so one timestamp covers all four.
+        let now = Instant::now();
+        let is_double_click = self.last_load_curve_click.is_some_and(|(t, x, y)| {
+            now.duration_since(t) < Duration::from_millis(400)
+                && x.abs_diff(mouse.column) <= 1
+                && y == mouse.row
+        });
+        self.last_load_curve_click = Some((now, mouse.column, mouse.row));
+        if is_double_click {
+            self.last_load_curve_click = None;
+            self.activate_embedded_picker(target);
         }
         true
     }
 
-    /// `Dialog::CdpParams.file_picker`'s mouse handling — same click/double-click convention
-    /// as `try_handle_load_curve_mouse`, just committing into the field's `path` via
-    /// `activate_cdp_file_picker` instead of loading a curve. Reuses `last_load_curve_click`
-    /// for double-click timing (the two pickers can't both be open at once).
-    fn try_handle_cdp_file_picker_mouse(&mut self, mouse: MouseEvent) -> bool {
-        if !matches!(self.dialog, Some(Dialog::CdpParams { file_picker: Some(_), .. })) {
-            return false;
+    /// Which embedded file browser is on screen, if any. At most one ever is.
+    fn embedded_picker(&self) -> Option<EmbeddedPicker> {
+        match &self.dialog {
+            Some(Dialog::LoadCurve { .. }) => Some(EmbeddedPicker::LoadCurve),
+            Some(Dialog::CdpParams { file_picker: Some(_), .. }) => Some(EmbeddedPicker::CdpFile),
+            Some(Dialog::CdpParams { photo_picker: Some(_), .. }) => Some(EmbeddedPicker::Photo),
+            _ if self.dest_picker.is_some() => Some(EmbeddedPicker::Dest),
+            _ => None,
         }
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            let Some(Dialog::CdpParams { file_picker: Some(CdpFilePicker { panel, .. }), .. }) = self.dialog.as_mut()
-            else {
-                return true;
-            };
-            if panel.handle_click(mouse.column, mouse.row) {
-                let now = Instant::now();
-                let is_double_click = self.last_load_curve_click.is_some_and(|(t, x, y)| {
-                    now.duration_since(t) < Duration::from_millis(400)
-                        && x.abs_diff(mouse.column) <= 1
-                        && y == mouse.row
-                });
-                self.last_load_curve_click = Some((now, mouse.column, mouse.row));
-                if is_double_click {
-                    self.last_load_curve_click = None;
-                    self.activate_cdp_file_picker();
+    }
+
+    fn embedded_picker_panel(&mut self, target: EmbeddedPicker) -> Option<&mut FilePanel> {
+        match target {
+            EmbeddedPicker::LoadCurve => match self.dialog.as_mut() {
+                Some(Dialog::LoadCurve { picker }) => Some(picker),
+                _ => None,
+            },
+            EmbeddedPicker::CdpFile => match self.dialog.as_mut() {
+                Some(Dialog::CdpParams { file_picker: Some(p), .. }) => Some(&mut p.panel),
+                _ => None,
+            },
+            EmbeddedPicker::Photo => match self.dialog.as_mut() {
+                Some(Dialog::CdpParams { photo_picker: Some(p), .. }) => Some(&mut p.panel),
+                _ => None,
+            },
+            // The destination column owns its panel rather than exposing it, so it is handled
+            // through `DestPicker`'s own click/activate pair instead — see the `None` arm's
+            // callers, which fall back to those.
+            EmbeddedPicker::Dest => None,
+        }
+    }
+
+    /// Double-click: the same thing the keyboard's Enter does on that row.
+    fn activate_embedded_picker(&mut self, target: EmbeddedPicker) {
+        match target {
+            EmbeddedPicker::LoadCurve => {
+                if let Some(Dialog::LoadCurve { picker }) = self.dialog.take() {
+                    self.activate_load_curve_picker(picker);
+                }
+            }
+            EmbeddedPicker::CdpFile => self.activate_cdp_file_picker(),
+            EmbeddedPicker::Photo => self.activate_cdp_photo_picker(),
+            EmbeddedPicker::Dest => {
+                if let Some(dest) = self.dest_picker.as_mut() {
+                    dest.activate();
                 }
             }
         }
-        true
+    }
+
+    /// Moves dialog focus onto the inline destination column, whichever dialog is hosting it.
+    fn focus_dest_picker(&mut self) {
+        match self.dialog.as_mut() {
+            Some(Dialog::Export { focused, .. }) => *focused = ex_focus::DEST,
+            Some(Dialog::ExportChannels { focused, .. }) => *focused = ec_focus::DEST,
+            Some(Dialog::ExportRegions { focused, .. }) => *focused = er_focus::DEST,
+            Some(Dialog::SaveCurveAs { dest_focused, .. })
+            | Some(Dialog::SaveMatrixAs { dest_focused, .. }) => *dest_focused = true,
+            // Save As is not a `Dialog` variant; it tracks focus on `App`.
+            None => self.save_as_focused = SAVE_AS_DEST_FOCUS,
+            _ => {}
+        }
     }
 
     fn try_handle_cdp_envelope_mouse(&mut self, mouse: MouseEvent) -> bool {
@@ -38136,6 +38217,90 @@ mod tests {
         terminal.draw(|frame| app.render(frame)).unwrap();
         assert!(app.dialog_row_rects.is_empty());
         assert_eq!(app.dialog_n_interactive, 0);
+    }
+
+    /// Clicking a folder in the inline destination column selects it and focuses the column —
+    /// and a **double**-click descends into it, the same thing Enter does.
+    ///
+    /// The column could previously only be focused by clicking, never row-selected: it was the
+    /// one embedded `FilePanel` with no mouse handling of its own.
+    #[test]
+    fn clicking_the_destination_column_selects_a_folder_and_double_click_enters_it() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let base = std::env::temp_dir().join(format!("tui-wave-destclick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("stems")).unwrap();
+
+        let mut app = new_app(Some(doc(0.1, 10)), Some(base.clone()));
+        app.handle_action(Action::SaveAs);
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        // The pane's own rect, then the `stems/` row inside it. Row 0 of the list is `..`.
+        let pane = app.dialog_row_rects[SAVE_AS_DEST_FOCUS];
+        let stems_row = pane.y + 2 + 1; // top pad + "Save in" header, then past `..`
+        let click = |app: &mut App, y: u16| {
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: pane.x + 2,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+
+        click(&mut app, stems_row);
+        assert_eq!(
+            app.save_as_focused, SAVE_AS_DEST_FOCUS,
+            "clicking the column should focus it"
+        );
+        assert_eq!(
+            app.dest_picker.as_ref().unwrap().resolve("t.wav"),
+            base.join("t.wav"),
+            "a single click selects, it must not navigate"
+        );
+
+        // Second click in the same place, inside the double-click window.
+        click(&mut app, stems_row);
+        assert_eq!(
+            app.dest_picker.as_ref().unwrap().resolve("t.wav"),
+            base.join("stems").join("t.wav"),
+            "a double-click should descend into the folder"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The inline column must **not** swallow clicks that miss it — it shares its dialog with
+    /// the form beside it, unlike the three overlay pickers which cover theirs. Getting this
+    /// wrong makes every field next to the column go dead.
+    #[test]
+    fn a_click_beside_the_destination_column_still_reaches_the_form() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let base = std::env::temp_dir().join(format!("tui-wave-destmiss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let mut app = new_app(Some(doc(0.1, 10)), Some(base.clone()));
+        app.handle_action(Action::SaveAs);
+        app.save_as_depth = BitDepth::Int16;
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        // The Format row, which lives in the form column to the right of the picker.
+        let format_row = app.dialog_row_rects[1];
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: format_row.x + 1,
+            row: format_row.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.save_as_focused, 1, "a click beside the column must reach the form");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Ctrl+W on a `[f]`/`[s]` row closes it immediately — no dirty/save
