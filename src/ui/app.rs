@@ -34806,16 +34806,19 @@ mod tests {
         app.documents[1].dirty = true;
         app.confirm = Some(Confirm::Quit);
 
+        // Set *before* the prompt opens: the destination picker binds to the Files panel's
+        // directory when the dialog is created, so pointing it somewhere afterwards would leave
+        // the first buffer writing into the process's working directory — the checkout itself.
+        let dir = std::env::temp_dir().join(format!("tui_wave_quit_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        app.file_panel.set_directory(dir.clone());
+
         app.handle_confirm_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
 
         // Must not quit yet — two buffers still need a filename.
         assert!(!app.should_quit);
         assert!(app.save_as_active);
         assert_eq!(app.active_document, 0, "should prompt for the first buffer first");
-
-        let dir = std::env::temp_dir().join(format!("tui_wave_quit_test_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        app.file_panel.set_directory(dir.clone());
 
         app.save_as_input = TextInput::fresh("first.wav".to_string());
         app.handle_save_as_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -34906,15 +34909,17 @@ mod tests {
         app.documents[1].dirty = true;
         app.confirm = Some(Confirm::CloseBuffer(1));
 
+        // Before the prompt opens — see the quit test above for why.
+        let dir = std::env::temp_dir().join(format!("tui_wave_close_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        app.file_panel.set_directory(dir.clone());
+
         app.handle_confirm_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
 
         assert_eq!(app.documents.len(), 2, "must not close until the name is given");
         assert!(app.save_as_active);
         assert_eq!(app.active_document, 1);
 
-        let dir = std::env::temp_dir().join(format!("tui_wave_close_test_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        app.file_panel.set_directory(dir.clone());
         app.save_as_input = TextInput::fresh("named.wav".to_string());
         app.handle_save_as_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
