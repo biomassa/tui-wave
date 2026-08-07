@@ -42,6 +42,12 @@ pub struct PraatPlannedJob {
     /// directory, or `None` when this run draws nothing (see [`draws_picture`]). Doubles as the
     /// signal to the runner: `Some` means pass a third path on argv and try to read it back.
     pub picture_name: Option<String>,
+    /// Whether the driver expects a `Photo_file` path on argv — true exactly for an
+    /// `IoKind::Photo` process. The *path* is not here: unlike every other file this struct
+    /// names, it is one the **user** already has on disk rather than one the runner
+    /// materialises, so it travels on `PraatJob.photo_path` beside the input audio, and this
+    /// module stays free of any real filesystem path it did not derive itself.
+    pub photo_input: bool,
     /// Absolute path to the plugin script being run — resolved here so the runner never has to
     /// know how the submodule is laid out.
     pub script_path: PathBuf,
@@ -362,10 +368,11 @@ pub fn plan_praat_job_with(
         (None, None, Some(rewrite)) => rewrite.script_name.clone(),
         (None, None, None) => script_path.to_string_lossy().into_owned(),
     };
+    let photo_input = praat_needs_photo(def);
     let driver_source = driver_script(
         &called_script,
         &args,
-        DriverOptions { input_count, save_picture },
+        DriverOptions { input_count, save_picture, photo_input },
     )
     .map_err(PraatPlanError::Driver)?;
 
@@ -375,6 +382,7 @@ pub fn plan_praat_job_with(
         input_names: (1..=input_count).map(input_wav_name).collect(),
         output_name: OUTPUT_WAV.to_string(),
         picture_name: save_picture.then(|| PICTURE_PNG.to_string()),
+        photo_input,
         script_path,
         label: def.title.clone(),
         pause_rewrite,
@@ -435,9 +443,22 @@ pub fn praat_input_count(def: &ProcessDef) -> usize {
         // driver emits no `infile` field and no `selectObject:` for this, and the runner writes
         // no temp WAV, so such a process runs with no document open at all. That is the point of
         // it: needing something already loaded before you could record would defeat the feature.
-        IoKind::None => 0,
+        //
+        // `Photo` counts zero for the same reason: the image sonifiers *generate* a Sound from a
+        // picture. The picture is still selected before `runScript:`, but it is not a Sound and
+        // so takes no slot here — the driver's `photo_input` handles it separately.
+        IoKind::None | IoKind::Photo => 0,
         _ => 1,
     }
+}
+
+/// Whether this process wants a Praat `Photo` object selected — the four image-sonification
+/// scripts, which `exitScript` immediately without one ("Please select a Photo object first.").
+///
+/// Read off `def.input` rather than sniffed from the params, so a hand-written user catalog
+/// entry opts in the same way the generated ones do.
+pub fn praat_needs_photo(def: &ProcessDef) -> bool {
+    def.input == IoKind::Photo
 }
 
 /// Temp filename for the nth input (1-based), matching the driver's `Input_file_N` form field.
@@ -938,6 +959,45 @@ mod interactive_tests {
                 def.params.iter().map(|p| p.kind.default_value()).collect();
             plan_praat_job(def, &values, Path::new("/plugins"))
                 .unwrap_or_else(|e| panic!("{}: {e}", def.key));
+        }
+    }
+
+    /// The four image sonifiers, as the catalog actually ships them.
+    ///
+    /// Each assertion is a thing that would fail *silently* if wrong: a Sound input would make
+    /// the runner write a temp WAV the script never reads (and, with no document open, refuse
+    /// to run at all); a missing `photo_input` would give the driver no `Photo_file` field
+    /// while the runner still put a path on argv, which Praat answers with a bare exit 255.
+    #[test]
+    fn the_image_sonifiers_ask_for_a_photo_and_no_sound() {
+        let (catalog, _) = CdpCatalog::load(None);
+        let photo: Vec<_> =
+            catalog.processes.iter().filter(|p| p.input == IoKind::Photo).collect();
+        assert_eq!(photo.len(), 4, "the four image sonifiers, no more and no fewer");
+        for def in &photo {
+            assert_eq!(praat_input_count(def), 0, "{}: reads a picture, not a buffer", def.key);
+            assert!(praat_needs_photo(def), "{}", def.key);
+            let values: Vec<ParamValue> =
+                def.params.iter().map(|p| p.kind.default_value()).collect();
+            let planned = plan_praat_job(def, &values, Path::new("/plugins"))
+                .unwrap_or_else(|e| panic!("{}: {e}", def.key));
+            assert!(planned.photo_input, "{}: the driver was not told to read one", def.key);
+            assert!(planned.input_names.is_empty(), "{}: no temp WAV to write", def.key);
+            assert!(
+                planned.driver_source.contains("infile Photo_file"),
+                "{}: driver has no photo field",
+                def.key
+            );
+        }
+    }
+
+    /// The inverse, across the whole catalog: no other process may claim a photo. `photo_input`
+    /// drives an extra argv slot, so a stray one would break that process's runs entirely.
+    #[test]
+    fn no_other_process_asks_for_a_photo() {
+        let (catalog, _) = CdpCatalog::load(None);
+        for def in catalog.processes.iter().filter(|p| p.input != IoKind::Photo) {
+            assert!(!praat_needs_photo(def), "{}", def.key);
         }
     }
 }

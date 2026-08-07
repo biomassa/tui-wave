@@ -80,7 +80,10 @@ mod er_focus {
     pub const FADE_IN_MS: usize = 9;
     pub const FADE_OUT_CB: usize = 10;
     pub const FADE_OUT_MS: usize = 11;
-    pub const COUNT: usize = 12;
+    /// The destination list (`ui::dest_picker`) — the parent the Subfolder above is created
+    /// in. Appended after every existing stop so no index shifts; see `ec_focus::DEST`.
+    pub const DEST: usize = 12;
+    pub const COUNT: usize = 13;
 
     /// First index (into `dialog_row_rects`) of the four checkbox+value rows — the rows
     /// before it (subfolder, base name, format, dither) have focus index == row index.
@@ -103,6 +106,13 @@ mod er_focus {
     pub const VALUE_COL: u16 = (3 + 3 + 1 + ROW_LABEL_WIDTH + 1) as u16;
 }
 
+/// Save As's focus stops: filename, format, dither, then the destination list
+/// (`ui::dest_picker`). The list is last rather than first despite rendering on the left —
+/// opening on the filename is right, because renaming is the common edit and re-homing the file
+/// is the occasional one.
+const SAVE_AS_DEST_FOCUS: usize = 3;
+const SAVE_AS_FOCUS_COUNT: usize = 4;
+
 /// Focus indices for `Dialog::Export`. The third row swaps between Depth (FLAC) and Bitrate
 /// (MP3) rather than appearing and disappearing, so the focus indices and the rect list stay
 /// the same whichever format is selected — the contract `render_cdp_params_dialog` documents
@@ -111,7 +121,10 @@ mod ex_focus {
     pub const NAME: usize = 0;
     pub const FORMAT: usize = 1;
     pub const SETTING: usize = 2;
-    pub const COUNT: usize = 3;
+    /// The destination list (`ui::dest_picker`). Last, for the reason `SAVE_AS_DEST_FOCUS`
+    /// gives: the dialog should open on the name, which is the field usually edited.
+    pub const DEST: usize = 3;
+    pub const COUNT: usize = 4;
 }
 
 /// Focus indices for `Dialog::ExportChannels`. Only two stops: the channel list (with its own
@@ -119,7 +132,12 @@ mod ex_focus {
 mod ec_focus {
     pub const CHANNELS: usize = 0;
     pub const SUBFOLDER: usize = 1;
-    pub const COUNT: usize = 2;
+    /// The destination list (`ui::dest_picker`). It chooses the **parent** directory; the
+    /// Subfolder field above still names the folder created inside it. The two compose rather
+    /// than compete — this dialog always writes into a subfolder, which is what keeps N files
+    /// from landing loose among the source material.
+    pub const DEST: usize = 2;
+    pub const COUNT: usize = 3;
 }
 
 /// Focus indices for `Dialog::MixToStereo`. Two stops, exactly as `ec_focus`: the channel list
@@ -1124,13 +1142,20 @@ enum Dialog {
     /// Prompts for a path the first time a curve is saved (`App::save_or_prompt_curve`) —
     /// `Ctrl+S` on a curve row already having a `path` saves straight to it with no dialog,
     /// mirroring how a document with a known path behaves.
-    SaveCurveAs { curve_index: usize, input: TextInput },
+    SaveCurveAs {
+        curve_index: usize,
+        input: TextInput,
+        /// Whether the inline destination list has focus rather than the name field. A bare
+        /// `bool` because these two prompts have exactly two stops, unlike the `focused: usize`
+        /// index every multi-field dialog carries — Tab flips it.
+        dest_focused: bool,
+    },
     /// Prompts for a filename after a successful Apply of a process declaring
     /// `sidecar_extension` (e.g. `matrix matrix 1`) — `bytes` are the secondary output file's
     /// raw contents, already read out of the job's temp directory (about to be cleaned up),
     /// held here until the user names where to write them. Enter saves into the Files
     /// panel's current directory (mirrors `SaveCurveAs`) and updates `App.last_matrix_path`.
-    SaveMatrixAs { bytes: Vec<u8>, input: TextInput },
+    SaveMatrixAs { bytes: Vec<u8>, input: TextInput, dest_focused: bool },
     /// "Load Pitch Curve..." (CDP menu) — a directory-browsing file picker (`FilePanel`,
     /// same widget the Files panel uses, in `show_all_files` mode since a saved curve is
     /// plain text with no fixed extension) rather than a typed path: the user has no way to
@@ -1320,6 +1345,10 @@ enum Dialog {
         /// mutually exclusive by construction (an `IoKind` is one or the other), which is why
         /// they share a single focus row: see `cdp_params_focus_extra_input`.
         variadic_input: Option<CdpVariadicInput>,
+        /// `Some` exactly when the process reads an image (`IoKind::Photo`) — the third and
+        /// last occupant of that same shared row, mutually exclusive with the two above for
+        /// the same reason.
+        photo_input: Option<CdpPhotoInput>,
         focus: usize,
         error: Option<String>,
         preview: Option<CdpPreview>,
@@ -1365,6 +1394,12 @@ enum Dialog {
         /// `fields` (so there's no `field_index`): "which buffers" is an input-arity concern,
         /// not a process parameter.
         variadic_picker: Option<CdpVariadicPicker>,
+        /// `Some` while the image browser is open for `photo_input` — mutually exclusive with
+        /// every other sub-editor above, same take-over-all-key-handling shape. Like
+        /// `variadic_picker` and unlike `file_picker` it edits the dialog's own extra-input row
+        /// rather than one of `fields` (so there is no `field_index`): which image to sonify is
+        /// the process's input, not one of its parameters.
+        photo_picker: Option<CdpPhotoPicker>,
         presets: Vec<crate::model::cdp::preset::CdpPreset>,
         preset_selected: Option<usize>,
         /// A snapshot of `fields` (as `ParamValue`s) taken the first time cycling or saving
@@ -1465,6 +1500,32 @@ impl CdpSecondInput {
         self.names.get(self.selected).map(String::as_str).unwrap_or("")
     }
 }
+
+/// The image an `IoKind::Photo` process reads — the four sonifiers, whose "input" is a picture
+/// rather than a buffer.
+///
+/// Occupies the same single extra-input row `CdpSecondInput`/`CdpVariadicInput` do (an
+/// `IoKind` is exactly one of the three), so no focus index shifts; see
+/// `cdp_has_extra_input`. Enter on the row opens `Dialog::CdpParams.photo_picker`.
+///
+/// `path` starts `None` — "never picked" — for the same reason `CdpField::FilePath`'s does:
+/// there is no image an app can sensibly invent, and running one of these against a guess is
+/// worse than refusing until the user has chosen. That `None` is what
+/// `App::cdp_params_blocker` reports inline and what dims Preview/Apply, exactly as an unfilled
+/// marklist does for the DISTMORE family — a missing picture is a property of the *run*, so no
+/// field in the dialog looks wrong.
+#[derive(Clone, Default)]
+struct CdpPhotoInput {
+    path: Option<String>,
+}
+
+/// File extensions the image picker offers.
+///
+/// **PNG alone, and that is Praat's limit rather than ours.** Praat links `libpng` and nothing
+/// else: a JPEG or TIFF fails with `Error reading PNG file`, a BMP/GIF/PPM with `not
+/// recognized`. Offering a format Praat would refuse would move the failure from the picker,
+/// where it costs one glance, to a run that has already spent its time.
+const PHOTO_EXTENSIONS: &[&str] = &["png"];
 
 /// The additional-input state for a variadic-input CDP process (`IoKind::VariadicWav`/
 /// `GroupedWav` — `pulser multi`, `tesselate`, `crystal rotate`, `repair repair`). The
@@ -1582,6 +1643,21 @@ struct CdpVariadicPicker {
     /// rather than two separate picked/unpicked lists, so toggling never makes a row jump
     /// out from under the cursor.
     cursor: usize,
+}
+
+/// The transient overlay state for `Dialog::CdpParams.photo_picker` — open while the user is
+/// browsing for an image. Split from `CdpPhotoInput` along the same line every other
+/// `CdpParams` sub-editor draws: the committed pick lives on the dialog, the browse cursor
+/// lives here and vanishes when the picker closes.
+///
+/// A take-over-all-keys overlay for the same reason `CdpVariadicPicker` is one: the dialog's
+/// linear Up/Down focus walk is already spoken for, and a file list needs its own.
+///
+/// Deliberately thinner than `CdpFilePicker` — no `field_index` (it fills the extra-input row,
+/// not a param) and no `folder` flag (an image is always a file, so Enter commits rather than
+/// having to split navigate-vs-commit the way a folder picker must).
+struct CdpPhotoPicker {
+    panel: FilePanel,
 }
 
 /// State for the ASCII breakpoint-curve editor, active while `Dialog::CdpParams.envelope`
@@ -2250,12 +2326,16 @@ fn cdp_params_apply_focus(field_count: usize, has_extra_input: bool) -> usize {
     cdp_params_preview_focus(field_count, has_extra_input) + 1
 }
 
-/// Whether `Dialog::CdpParams` shows its one extra-input row at all — true for a dual-input
-/// *or* a variadic-input process. One helper so the ~10 focus-arithmetic call sites can't
-/// each forget one of the two cases (which is exactly what would happen if they kept writing
-/// `second_input.is_some()` by hand).
-fn cdp_has_extra_input(second: Option<&CdpSecondInput>, variadic: Option<&CdpVariadicInput>) -> bool {
-    second.is_some() || variadic.is_some()
+/// Whether `Dialog::CdpParams` shows its one extra-input row at all — true for a dual-input,
+/// a variadic-input *or* a photo-input process. One helper so the ~10 focus-arithmetic call
+/// sites can't each forget one of the three cases (which is exactly what would happen if they
+/// kept writing `second_input.is_some()` by hand).
+fn cdp_has_extra_input(
+    second: Option<&CdpSecondInput>,
+    variadic: Option<&CdpVariadicInput>,
+    photo: Option<&CdpPhotoInput>,
+) -> bool {
+    second.is_some() || variadic.is_some() || photo.is_some()
 }
 
 /// `Dialog::CdpParams.focus` reserves 0 for the preset row; a field's own focus value is
@@ -2568,6 +2648,18 @@ pub struct App {
     /// rebuilding costs nothing extra. A captured picture never changes, and it is megabytes —
     /// re-wrapping it 60 times a second would be pure waste.
     praat_picture_graphics_protocol: Option<ratatui_image::protocol::StatefulProtocol>,
+    /// The image `Dialog::CdpParams.photo_picker` is previewing, cached against its own path
+    /// so a redraw costs nothing and only *moving* the highlight re-decodes. Held here rather
+    /// than on the dialog for the same reason `praat_picture` is: an `RgbaImage` has no
+    /// business inside a `Dialog` variant that gets cloned and pattern-matched at 270+ sites.
+    photo_preview: Option<crate::ui::photo::PhotoPreview>,
+    /// Folder the last image was picked from this session, so a second pick starts where the
+    /// first was found. Session-only and deliberately not persisted: which folder holds the
+    /// images is a property of what you are working on right now, not a setting.
+    last_photo_dir: Option<std::path::PathBuf>,
+    /// `photo_preview`'s graphics-mode protocol slot. Rebuilt whenever `photo_preview` is,
+    /// because a `StatefulProtocol` is bound to the image it was created for.
+    photo_preview_graphics_protocol: Option<ratatui_image::protocol::StatefulProtocol>,
     /// All open documents (buffers). Index 0 is always the first file loaded; subsequent
     /// entries are created by "Copy to New" or loading additional files.
     pub documents: Vec<Document>,
@@ -2688,6 +2780,15 @@ pub struct App {
     pub save_as_dither: bool,
     /// Which row has keyboard focus in the Save As dialog (0=filename, 1=format, 2=dither).
     save_as_focused: usize,
+    /// Where the open file-writing dialog will write, browsable inline (`ui::dest_picker`).
+    ///
+    /// **One field for all six** — Save As, Export, Export Channels, Export Regions, Save Curve
+    /// As, Save Matrix As — because they are modal and so at most one is ever open. A picker per
+    /// dialog variant would mean six near-identical fields and six chances to forget to clear
+    /// one. `Some` for the whole time its dialog is up and dropped with it, so reopening always
+    /// starts from the Files panel's current directory rather than wherever a previous save
+    /// wandered to.
+    dest_picker: Option<crate::ui::dest_picker::DestPicker>,
     /// Clickable row rects from the last dialog render, used for mouse hit-testing.
     dialog_row_rects: Vec<Rect>,
     dialog_n_interactive: usize,
@@ -2884,6 +2985,9 @@ struct CdpPending {
     fields: Vec<CdpField>,
     second_input: Option<CdpSecondInput>,
     variadic_input: Option<CdpVariadicInput>,
+    /// Carried across the run for the same reason the two above are: a Preview that comes back
+    /// and reopens the dialog must not silently forget which image the user picked.
+    photo_input: Option<CdpPhotoInput>,
     focus: usize,
     presets: Vec<crate::model::cdp::preset::CdpPreset>,
     preset_selected: Option<usize>,
@@ -2943,6 +3047,11 @@ struct SuspendedStepEdit {
     /// suspended session rebuilds `Dialog::CdpParams` from exactly one place rather than
     /// hardcoding a `None` that would silently start lying the day chains do support them.
     variadic_input: Option<CdpVariadicInput>,
+    /// Always `None` in practice, for the same reason `variadic_input` is: `chain::
+    /// step_is_supported` accepts only `Wav`/`Ana`/`Dual*`, so an `IoKind::Photo` process can
+    /// never be a chain step. Kept for the same reason too — one rebuild site, not a hardcoded
+    /// `None` that would start lying the day chains do support them.
+    photo_input: Option<CdpPhotoInput>,
     presets: Vec<crate::model::cdp::preset::CdpPreset>,
 }
 
@@ -3386,6 +3495,9 @@ impl App {
             cdp_formant_graphics_protocol: None,
             praat_picture: None,
             praat_picture_graphics_protocol: None,
+            photo_preview: None,
+            photo_preview_graphics_protocol: None,
+            last_photo_dir: None,
             documents,
             active_document: 0,
             viewport: None,
@@ -3424,6 +3536,7 @@ impl App {
             save_as_depth: BitDepth::Float32,
             save_as_dither: false,
             save_as_focused: 0,
+            dest_picker: None,
             dialog_row_rects: Vec::new(),
             dialog_n_interactive: 0,
             last_frame_area: Rect::default(),
@@ -4190,7 +4303,13 @@ impl App {
         }
         let default_name =
             format!("{}.{}", curve.name.replace(' ', "_"), crate::model::curve::CURVE_EXTENSION);
-        self.dialog = Some(Dialog::SaveCurveAs { curve_index, input: TextInput::fresh(default_name) });
+        self.dest_picker =
+            Some(crate::ui::dest_picker::DestPicker::new(self.file_panel.directory.clone()));
+        self.dialog = Some(Dialog::SaveCurveAs {
+            curve_index,
+            input: TextInput::fresh(default_name),
+            dest_focused: false,
+        });
     }
 
     /// Enter from `Dialog::SaveCurveAs` — saves into the Files panel's current directory
@@ -4200,8 +4319,13 @@ impl App {
         if file_name.is_empty() {
             return;
         }
+        // The dialog's own destination list, else the pre-picker rule (the Files panel).
+        let dest = self.dest_picker.take();
         let Some(curve) = self.curves.get(curve_index) else { return };
-        let path = self.file_panel.directory.join(file_name);
+        let path = match &dest {
+            Some(dest) => dest.resolve(file_name),
+            None => self.file_panel.directory.join(file_name),
+        };
         if crate::model::curve::save_curve(curve, &path).is_err() {
             return;
         }
@@ -4219,7 +4343,11 @@ impl App {
         if file_name.is_empty() {
             return;
         }
-        let path = self.file_panel.directory.join(file_name);
+        let dest = self.dest_picker.take();
+        let path = match &dest {
+            Some(dest) => dest.resolve(file_name),
+            None => self.file_panel.directory.join(file_name),
+        };
         if std::fs::write(&path, bytes).is_err() {
             return;
         }
@@ -4909,16 +5037,37 @@ impl App {
     }
 
     fn handle_save_as_key(&mut self, key: KeyEvent) {
+        // The directory list is the last focus stop and owns the navigation keys while it has
+        // them — Up/Down/Home/End/PageUp/PageDown, and Enter to descend. Handled before the
+        // match below so Enter on the list navigates rather than saving into whatever folder
+        // the highlight happened to be resting on, which is the one way this could quietly
+        // write to the wrong place.
+        if self.save_as_focused == SAVE_AS_DEST_FOCUS {
+            if let Some(dest) = self.dest_picker.as_mut() {
+                if dest.handle_key(key) {
+                    return;
+                }
+            }
+        }
         match key.code {
             KeyCode::Enter => {
                 // Ensure a .wav extension before resolving the path.
                 let name = ensure_wav_extension(self.save_as_input.value().trim());
                 if !name.is_empty() {
-                    let path = PathBuf::from(&name);
-                    let path = if path.is_absolute() {
-                        path
-                    } else {
-                        self.file_panel.directory.join(&name)
+                    // Resolved against the picker's directory. Identical to the old
+                    // `file_panel.directory` behaviour until the user moves the list, since
+                    // that is what it was seeded with — the destination became *choosable*,
+                    // not different.
+                    let path = match self.dest_picker.as_ref() {
+                        Some(dest) => dest.resolve(&name),
+                        None => {
+                            let path = PathBuf::from(&name);
+                            if path.is_absolute() {
+                                path
+                            } else {
+                                self.file_panel.directory.join(&name)
+                            }
+                        }
                     };
                     let depth = self.save_as_depth;
                     let dither = self.save_as_dither && depth.supports_dither();
@@ -4964,15 +5113,16 @@ impl App {
                 // — if the user meant to quit/close anyway, (y)/(s) without saving is right
                 // there in the confirmation that started this.
                 self.save_as_active = false;
+                self.dest_picker = None;
                 self.save_as_queue.clear();
                 self.save_as_queue_then = None;
             }
             // Tab cycles focus forward (0=filename, 1=format, 2=dither); Shift+Tab backward.
-            KeyCode::BackTab => self.save_as_focused = (self.save_as_focused + 2) % 3,
+            KeyCode::BackTab => self.save_as_focused = (self.save_as_focused + SAVE_AS_FOCUS_COUNT - 1) % SAVE_AS_FOCUS_COUNT,
             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.save_as_focused = (self.save_as_focused + 2) % 3
+                self.save_as_focused = (self.save_as_focused + SAVE_AS_FOCUS_COUNT - 1) % SAVE_AS_FOCUS_COUNT
             }
-            KeyCode::Tab => self.save_as_focused = (self.save_as_focused + 1) % 3,
+            KeyCode::Tab => self.save_as_focused = (self.save_as_focused + 1) % SAVE_AS_FOCUS_COUNT,
             KeyCode::Char(' ') => {
                 if self.save_as_focused == 2 && self.save_as_depth.supports_dither() {
                     self.save_as_dither = !self.save_as_dither;
@@ -5313,6 +5463,17 @@ impl App {
     }
 
     fn handle_dialog_key_inner(&mut self, key: KeyEvent) {
+        // The inline destination list owns the navigation keys while it has focus, before any
+        // dialog-specific handling sees them — so Enter on it *navigates* rather than
+        // submitting the dialog into whatever folder the highlight was resting on, which is the
+        // one way this could quietly write to the wrong place.
+        if self.dest_picker_has_focus() {
+            if let Some(dest) = self.dest_picker.as_mut() {
+                if dest.handle_key(key) {
+                    return;
+                }
+            }
+        }
         if let Some(Dialog::CurveEditor(CurveEditorState {
             picker: Some(CurveTransformPicker { params: Some(CurveTransformParams { list_edit: Some(_), .. }), .. }),
             ..
@@ -5379,6 +5540,10 @@ impl App {
         }
         if let Some(Dialog::CdpParams { file_picker: Some(_), .. }) = &self.dialog {
             self.handle_cdp_file_picker_key(key);
+            return;
+        }
+        if let Some(Dialog::CdpParams { photo_picker: Some(_), .. }) = &self.dialog {
+            self.handle_cdp_photo_picker_key(key);
             return;
         }
         if let Some(Dialog::CdpParams { variadic_picker: Some(_), .. }) = &self.dialog {
@@ -5485,10 +5650,10 @@ impl App {
                 Some(Dialog::RenameFile { path, input }) => {
                     self.rename_file(&path, &ensure_wav_extension(input.value().trim()));
                 }
-                Some(Dialog::SaveCurveAs { curve_index, input }) => {
+                Some(Dialog::SaveCurveAs { curve_index, input, .. }) => {
                     self.save_curve_as(curve_index, &ensure_curve_extension(input.value().trim()));
                 }
-                Some(Dialog::SaveMatrixAs { bytes, input }) => {
+                Some(Dialog::SaveMatrixAs { bytes, input, .. }) => {
                     self.save_matrix_as(&bytes, &ensure_matrix_extension(input.value().trim()));
                 }
                 Some(Dialog::MixToMono { inputs, tanh_clip, .. }) => {
@@ -5581,8 +5746,8 @@ impl App {
                     }
                 }
                 Some(Dialog::CdpParams {
-                    catalog_index, fields, second_input, variadic_input, focus, error, preview, envelope, list_edit, table_edit,
-                    marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, variadic_picker, presets, preset_selected, custom_values, save_prompt, scroll,
+                    catalog_index, fields, second_input, variadic_input, photo_input, focus, error, preview, envelope, list_edit, table_edit,
+                    marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, variadic_picker, photo_picker, presets, preset_selected, custom_values, save_prompt, scroll,
                 }) => {
                     // Enter's default action is Apply (from anywhere, including the preset
                     // row — a highlighted preset's values, or the process's defaults, are
@@ -5616,7 +5781,7 @@ impl App {
                                 _ => None,
                             }
                         });
-                    let purpose = if focus == cdp_params_focus_preview(fields.len(), cdp_has_extra_input(second_input.as_ref(), variadic_input.as_ref())) {
+                    let purpose = if focus == cdp_params_focus_preview(fields.len(), cdp_has_extra_input(second_input.as_ref(), variadic_input.as_ref(), photo_input.as_ref())) {
                         crate::cdp::JobPurpose::Preview
                     } else {
                         crate::cdp::JobPurpose::Apply
@@ -5625,8 +5790,8 @@ impl App {
                     // need `&mut self.dialog` too, so it's restored here first rather than
                     // passed directly.
                     self.dialog = Some(Dialog::CdpParams {
-                        catalog_index, fields, second_input, variadic_input, focus, error, preview, envelope, list_edit, table_edit,
-                        marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, variadic_picker, presets, preset_selected, custom_values, save_prompt, scroll,
+                        catalog_index, fields, second_input, variadic_input, photo_input, focus, error, preview, envelope, list_edit, table_edit,
+                        marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, variadic_picker, photo_picker, presets, preset_selected, custom_values, save_prompt, scroll,
                     });
                     // `open_cdp_variadic_picker` self-checks that focus is actually on the
                     // extra-input row of a variadic process, so it is safe to try
@@ -5639,7 +5804,7 @@ impl App {
                         Some(CdpFieldSetupKind::FormantBuffer) => self.open_cdp_formant_picker(),
                         Some(CdpFieldSetupKind::FilePath) => self.open_cdp_file_picker(),
                         Some(CdpFieldSetupKind::CrystalEnvelope) => self.open_cdp_crystal_envelope_editor(),
-                        None => self.open_cdp_variadic_picker(),
+                        None => self.open_cdp_variadic_picker() || self.open_cdp_photo_picker(),
                     };
                     if !opened {
                         // Reused for chain-step editing (`ChainEditTarget`): Apply commits
@@ -6227,6 +6392,10 @@ impl App {
             Some(Dialog::ExportChannels { focused, .. }) => *focused = step(*focused, ec_focus::COUNT),
             Some(Dialog::MixToStereo { focused, .. }) => *focused = step(*focused, ms_focus::COUNT),
             Some(Dialog::Export { focused, .. }) => *focused = step(*focused, ex_focus::COUNT),
+            // Two stops — the name field and the destination list — so both Tab and Shift+Tab
+            // just flip between them, like `CdpBrowser`'s two focusable columns above.
+            Some(Dialog::SaveCurveAs { dest_focused, .. })
+            | Some(Dialog::SaveMatrixAs { dest_focused, .. }) => *dest_focused = !*dest_focused,
             // Only two columns receive keyboard focus (Groups, Processes — the description
             // column is display-only), so Tab and Shift+Tab both just flip it.
             Some(Dialog::CdpBrowser { focus, groups, .. }) => {
@@ -6238,8 +6407,8 @@ impl App {
             // computes the visible scroll window fresh from `focus` every frame (mirroring
             // `Dialog::CdpBrowser`'s own on-the-fly `scroll_top` from `selected`), so there's
             // nothing to update here beyond `focus` itself.
-            Some(Dialog::CdpParams { fields, second_input, variadic_input, focus, .. }) => {
-                *focus = step(*focus, cdp_params_focus_apply(fields.len(), cdp_has_extra_input(second_input.as_ref(), variadic_input.as_ref())) + 1);
+            Some(Dialog::CdpParams { fields, second_input, variadic_input, photo_input, focus, .. }) => {
+                *focus = step(*focus, cdp_params_focus_apply(fields.len(), cdp_has_extra_input(second_input.as_ref(), variadic_input.as_ref(), photo_input.as_ref())) + 1);
             }
             _ => {}
         }
@@ -6356,6 +6525,10 @@ impl App {
                     self.save_as_focused = 2;
                     self.save_as_dither = !self.save_as_dither;
                 }
+                // The destination list. Focusing it is all a click does — the row within it is
+                // not resolved here, since `FilePanel` owns its own row rects and the pane is
+                // several rows tall rather than the single row every other entry describes.
+                SAVE_AS_DEST_FOCUS => self.save_as_focused = SAVE_AS_DEST_FOCUS,
                 _ => {}
             }
             return;
@@ -6689,6 +6862,7 @@ impl App {
                 fields,
                 second_input,
                 variadic_input,
+                photo_input,
                 focus,
                 envelope,
                 list_edit,
@@ -6711,7 +6885,7 @@ impl App {
                 && save_prompt.is_none() =>
             {
                 let field_count = fields.len();
-                let has_extra = cdp_has_extra_input(second_input.as_ref(), variadic_input.as_ref());
+                let has_extra = cdp_has_extra_input(second_input.as_ref(), variadic_input.as_ref(), photo_input.as_ref());
                 let extra_row = cdp_params_focus_extra_input(field_count);
                 let preview_row = cdp_params_focus_preview(field_count, has_extra);
                 let apply_row = cdp_params_focus_apply(field_count, has_extra);
@@ -7287,7 +7461,7 @@ impl App {
             }
             return;
         };
-        let (mut fields, mut second_input, variadic_input) = self.cdp_fields_for(catalog_index);
+        let (mut fields, mut second_input, variadic_input, photo_input) = self.cdp_fields_for(catalog_index);
         let def = &self.cdp_catalog.processes[catalog_index];
         if step.values.len() == fields.len() {
             fields = def.params.iter().zip(&step.values).map(|(p, v)| CdpField::from_value(p, v)).collect();
@@ -7308,6 +7482,7 @@ impl App {
             fields,
             second_input,
             variadic_input,
+            photo_input,
             focus: CDP_PRESET_FOCUS,
             error: None,
             preview: None,
@@ -7316,7 +7491,7 @@ impl App {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None, file_picker: None, variadic_picker: None,
+            formant_picker: None, file_picker: None, variadic_picker: None, photo_picker: None,
             presets,
             preset_selected: None,
             custom_values: None,
@@ -7336,7 +7511,7 @@ impl App {
     /// exists, otherwise the top-level `Dialog::CdpChainEditor`.
     fn cdp_chain_commit_step(&mut self) {
         let Some(target) = self.cdp_chain_edit_target.take() else { return };
-        let Some(Dialog::CdpParams { catalog_index, fields, second_input, variadic_input, .. }) = self.dialog.take() else {
+        let Some(Dialog::CdpParams { catalog_index, fields, second_input, variadic_input, photo_input, .. }) = self.dialog.take() else {
             return;
         };
         let Some(def) = self.cdp_catalog.processes.get(catalog_index).cloned() else {
@@ -7350,6 +7525,7 @@ impl App {
                 fields,
                 second_input,
                 variadic_input,
+                photo_input,
                 focus: bad + 1,
                 error: Some("value out of range".into()),
                 preview: None,
@@ -7358,7 +7534,7 @@ impl App {
                 table_edit: None,
                 marker_time_list_edit: None,
                 hilite_band_edit: None,
-                formant_picker: None, file_picker: None, variadic_picker: None,
+                formant_picker: None, file_picker: None, variadic_picker: None, photo_picker: None,
                 presets: Vec::new(),
                 preset_selected: None,
                 custom_values: None,
@@ -7430,6 +7606,7 @@ impl App {
             fields: parent.fields,
             second_input: parent.second_input,
             variadic_input: parent.variadic_input,
+            photo_input: parent.photo_input,
             focus: CDP_PRESET_FOCUS,
             error: None,
             preview: None,
@@ -7438,7 +7615,7 @@ impl App {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None, file_picker: None, variadic_picker: None,
+            formant_picker: None, file_picker: None, variadic_picker: None, photo_picker: None,
             presets: parent.presets,
             preset_selected: None,
             custom_values: None,
@@ -7455,7 +7632,7 @@ impl App {
     /// `open_cdp_preset_save_prompt`'s "reject, let the key fall through" convention.
     fn configure_chain_side_chain(&mut self) -> bool {
         let Some(ChainEditTarget::Replace(path)) = self.cdp_chain_edit_target.clone() else { return false };
-        let Some(Dialog::CdpParams { catalog_index, fields, second_input, variadic_input, focus, presets, .. }) = self.dialog.as_ref()
+        let Some(Dialog::CdpParams { catalog_index, fields, second_input, variadic_input, photo_input, focus, presets, .. }) = self.dialog.as_ref()
         else {
             return false;
         };
@@ -7472,6 +7649,7 @@ impl App {
             fields: fields.clone(),
             second_input: second_input.clone(),
             variadic_input: variadic_input.clone(),
+            photo_input: photo_input.clone(),
             presets: presets.clone(),
         });
         self.cdp_chain_edit_target = Some(ChainEditTarget::Append(path));
@@ -7708,13 +7886,14 @@ impl App {
     /// default-valued fields and loading any presets saved for it from disk.
     fn open_cdp_params(&mut self, catalog_index: usize) {
         let Some(def) = self.cdp_catalog.processes.get(catalog_index) else { return };
-        let (fields, second_input, variadic_input) = self.cdp_fields_for(catalog_index);
+        let (fields, second_input, variadic_input, photo_input) = self.cdp_fields_for(catalog_index);
         let presets = crate::model::cdp::preset::load_presets(&def.key, def.params.len());
         self.dialog = Some(Dialog::CdpParams {
             catalog_index,
             fields,
             second_input,
             variadic_input,
+            photo_input,
             focus: CDP_PRESET_FOCUS,
             error: None,
             preview: None,
@@ -7723,7 +7902,7 @@ impl App {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None, file_picker: None, variadic_picker: None,
+            formant_picker: None, file_picker: None, variadic_picker: None, photo_picker: None,
             presets,
             preset_selected: None,
             custom_values: None,
@@ -7827,8 +8006,22 @@ impl App {
     /// attempted, which is soon enough for something the user can see and fix in front of
     /// them.
     fn cdp_params_blocker(&self) -> Option<String> {
-        let Some(Dialog::CdpParams { catalog_index, .. }) = &self.dialog else { return None };
+        let Some(Dialog::CdpParams { catalog_index, photo_input, .. }) = &self.dialog else {
+            return None;
+        };
         let def = self.cdp_catalog.processes.get(*catalog_index)?;
+        // Same class of blocker as the marklist below: the image is a property of the *run*,
+        // not of any field, so nothing in the dialog looks wrong and Apply would otherwise
+        // appear to do nothing (the script `exitScript`s with "Please select a Photo object
+        // first." and the driver reports only "produced no Sound object"). Checked first
+        // because a photo process has neither channels to demand nor marks to count.
+        if let Some(photo) = photo_input {
+            if photo.path.is_none() {
+                return Some(format!(
+                    "no image picked — press Enter on the {PHOTO_INPUT_LABEL} row to browse for a PNG"
+                ));
+            }
+        }
         // A channel-count demand is the same kind of blocker as a missing marklist and belongs
         // here for the same reason: it's a property of the *selection*, not of any field, so
         // the dialog offers nothing to look at and see is wrong. Checked before the marklist
@@ -7923,10 +8116,10 @@ impl App {
     fn cdp_fields_for(
         &self,
         catalog_index: usize,
-    ) -> (Vec<CdpField>, Option<CdpSecondInput>, Option<CdpVariadicInput>) {
+    ) -> (Vec<CdpField>, Option<CdpSecondInput>, Option<CdpVariadicInput>, Option<CdpPhotoInput>) {
         use crate::model::cdp::IoKind;
         let Some(def) = self.cdp_catalog.processes.get(catalog_index) else {
-            return (Vec::new(), None, None);
+            return (Vec::new(), None, None, None);
         };
         let mut fields: Vec<CdpField> = def.params.iter().map(CdpField::from_default).collect();
         // Two per-document dynamic defaults, applied against the range that will actually be
@@ -8019,7 +8212,11 @@ impl App {
             }
             _ => None,
         };
-        (fields, second_input, variadic_input)
+        // Starts with nothing picked, and unlike the variadic case that is never runnable —
+        // these scripts `exitScript` without a Photo. `cdp_params_blocker` says so inline and
+        // dims Apply; see `CdpPhotoInput`.
+        let photo_input = (def.input == IoKind::Photo).then(CdpPhotoInput::default);
+        (fields, second_input, variadic_input, photo_input)
     }
 
     /// Rebuilds `Dialog::CdpBrowser`'s `fields`/`second_input` for whatever process
@@ -9555,6 +9752,195 @@ impl App {
         }
     }
 
+    /// Opens the image browser for an `IoKind::Photo` process's extra-input row.
+    ///
+    /// Self-checking like `open_cdp_variadic_picker`: returns `false` unless the dialog really
+    /// is a photo process's with focus on that row, so Enter's dispatch can try it
+    /// unconditionally without knowing which kind of process it is looking at.
+    ///
+    /// Starts at the directory of whatever is already picked, else `App.last_photo_dir` (the
+    /// folder the last image was taken from this session), else the Files panel's own
+    /// directory. The middle term is what makes sonifying several images from one folder a
+    /// sequence of picks rather than a sequence of navigations — the same convenience
+    /// `open_cdp_file_picker` gets from `last_matrix_path`.
+    fn open_cdp_photo_picker(&mut self) -> bool {
+        let Some(Dialog::CdpParams { fields, photo_input: Some(photo), focus, .. }) = &self.dialog
+        else {
+            return false;
+        };
+        if *focus != cdp_params_focus_extra_input(fields.len()) {
+            return false;
+        }
+        let picked = photo.path.clone();
+        let start_dir = picked
+            .as_deref()
+            .map(std::path::Path::new)
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .or_else(|| self.last_photo_dir.clone())
+            .unwrap_or_else(|| self.file_panel.directory.clone());
+        let mut panel = FilePanel::new_with_extension(start_dir, PHOTO_EXTENSIONS, "Pick Image");
+        // Preselect the current pick, so reopening the picker lands on it rather than silently
+        // offering to change it — the same care `open_cdp_file_picker` takes.
+        if let Some(name) = picked.as_deref().and_then(|p| std::path::Path::new(p).file_name()) {
+            if let Some(idx) = (0..panel.filtered_count()).find(|&i| {
+                panel.selected = i;
+                panel.selected_entry().is_some_and(|(p, _)| p.file_name() == Some(name))
+            }) {
+                panel.selected = idx;
+            }
+        }
+        panel.focused = true;
+        let Some(Dialog::CdpParams { photo_picker, .. }) = self.dialog.as_mut() else {
+            return false;
+        };
+        *photo_picker = Some(CdpPhotoPicker { panel });
+        self.refresh_photo_preview();
+        true
+    }
+
+    /// Rebuilds `App.photo_preview` for whatever the picker currently highlights.
+    ///
+    /// Cached against the path, so the common case — a redraw with the highlight unmoved — does
+    /// no work at all. Only an actual change of file pays a decode, which is what keeps holding
+    /// Down through a folder from decoding the same image sixty times a second.
+    ///
+    /// A directory row clears the preview rather than leaving the previous file's bitmap up,
+    /// which would read as "this folder is that picture".
+    fn refresh_photo_preview(&mut self) {
+        let Some(Dialog::CdpParams { photo_picker: Some(picker), .. }) = self.dialog.as_ref()
+        else {
+            self.photo_preview = None;
+            self.photo_preview_graphics_protocol = None;
+            return;
+        };
+        let target = match picker.panel.selected_entry() {
+            Some((path, FileEntryKind::File)) => Some(path.to_path_buf()),
+            _ => None,
+        };
+        let Some(target) = target else {
+            self.photo_preview = None;
+            self.photo_preview_graphics_protocol = None;
+            return;
+        };
+        if self.photo_preview.as_ref().is_some_and(|p| p.path == target) {
+            return;
+        }
+        let preview = crate::ui::photo::load(&target);
+        // Built even when graphics are off, for the same reason `open_praat_picture` builds
+        // its protocol unconditionally: toggling graphics on with the picker open should show
+        // the image rather than requiring the highlight to be moved and moved back.
+        self.photo_preview_graphics_protocol = preview.image.as_ref().and_then(|image| {
+            self.picker
+                .as_mut()
+                .map(|picker| picker.new_resize_protocol(image::DynamicImage::ImageRgba8(image.clone())))
+        });
+        self.photo_preview = Some(preview);
+    }
+
+    /// All key handling while `Dialog::CdpParams.photo_picker` is `Some`.
+    ///
+    /// Mirrors `handle_cdp_file_picker_key` — same widget, same navigation — with two
+    /// differences. There is no `u` (an image is a file, so Enter commits and never has to
+    /// share the key with "use this directory"), and every cursor move is followed by
+    /// `refresh_photo_preview`, which is what makes the pane track the highlight.
+    fn handle_cdp_photo_picker_key(&mut self, key: KeyEvent) {
+        let Some(Dialog::CdpParams { photo_picker: Some(CdpPhotoPicker { panel }), .. }) =
+            self.dialog.as_mut()
+        else {
+            return;
+        };
+        if panel.filtering {
+            match key.code {
+                KeyCode::Esc => {
+                    panel.filtering = false;
+                    panel.filter.clear();
+                }
+                KeyCode::Enter => return self.activate_cdp_photo_picker(),
+                KeyCode::Up => panel.move_up(),
+                KeyCode::Down => panel.move_down(),
+                KeyCode::Home => panel.move_top(),
+                KeyCode::End => panel.move_bottom(),
+                KeyCode::PageUp => panel.move_page_up(),
+                KeyCode::PageDown => panel.move_page_down(),
+                KeyCode::Backspace => {
+                    panel.filter.pop();
+                    panel.selected = 0;
+                }
+                KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                    panel.filter.push(c);
+                    panel.selected = 0;
+                }
+                _ => {}
+            }
+            self.refresh_photo_preview();
+            return;
+        }
+        match key.code {
+            KeyCode::Up => panel.move_up(),
+            KeyCode::Down => panel.move_down(),
+            KeyCode::Home => panel.move_top(),
+            KeyCode::End => panel.move_bottom(),
+            KeyCode::PageUp => panel.move_page_up(),
+            KeyCode::PageDown => panel.move_page_down(),
+            KeyCode::Enter => return self.activate_cdp_photo_picker(),
+            KeyCode::Char('/') => {
+                panel.filtering = true;
+                panel.filter.clear();
+            }
+            KeyCode::Esc => {
+                self.close_cdp_photo_picker();
+                return;
+            }
+            _ => {}
+        }
+        self.refresh_photo_preview();
+    }
+
+    /// Enter on the image browser's highlighted row: a directory navigates into it (picker
+    /// stays open), a file commits its absolute path and closes the picker. Mirrors
+    /// `activate_cdp_file_picker`'s navigate-vs-open split.
+    ///
+    /// Committing also records the file's folder as `last_photo_dir`, so the next image picked
+    /// this session starts where this one was found.
+    fn activate_cdp_photo_picker(&mut self) {
+        let Some(Dialog::CdpParams { photo_picker: Some(CdpPhotoPicker { panel }), .. }) =
+            self.dialog.as_mut()
+        else {
+            return;
+        };
+        match panel.selected_entry() {
+            Some((path, FileEntryKind::Parent | FileEntryKind::Dir)) => {
+                panel.set_directory(path);
+                self.refresh_photo_preview();
+            }
+            Some((path, FileEntryKind::File)) => {
+                let path = path.to_path_buf();
+                self.last_photo_dir = path.parent().map(|p| p.to_path_buf());
+                if let Some(Dialog::CdpParams { photo_input, .. }) = self.dialog.as_mut() {
+                    if let Some(photo) = photo_input.as_mut() {
+                        photo.path = Some(path.to_string_lossy().into_owned());
+                    }
+                }
+                self.close_cdp_photo_picker();
+            }
+            None => {}
+        }
+    }
+
+    /// Closes the image browser and drops the preview with it.
+    ///
+    /// The bitmap and its protocol are released here rather than left for the next open to
+    /// overwrite — same reasoning as `close_praat_picture`: a preview has no reason to outlive
+    /// the pane showing it, and this one can be megabytes.
+    fn close_cdp_photo_picker(&mut self) {
+        if let Some(Dialog::CdpParams { photo_picker, .. }) = self.dialog.as_mut() {
+            *photo_picker = None;
+        }
+        self.photo_preview = None;
+        self.photo_preview_graphics_protocol = None;
+    }
+
     /// `u` in a folder picker: commit the directory the browser is currently showing.
     ///
     /// Separate from Enter, which navigates. A folder picker that committed on Enter could only
@@ -10470,7 +10856,7 @@ impl App {
     fn cdp_run(&mut self, purpose: crate::cdp::JobPurpose) {
         use crate::model::cdp::IoKind;
         let Some(Dialog::CdpParams {
-            catalog_index, fields, second_input, variadic_input, focus, preview, presets, preset_selected, custom_values, ..
+            catalog_index, fields, second_input, variadic_input, photo_input, focus, preview, presets, preset_selected, custom_values, ..
         }) = self.dialog.take()
         else {
             return;
@@ -10486,9 +10872,9 @@ impl App {
         // since nothing between here and any `reopen(...)` call below inspects or consumes it.
         let reopen = |focus: usize, error: String, fields: Vec<CdpField>, second_input: Option<CdpSecondInput>, variadic_input: Option<CdpVariadicInput>, preview: Option<CdpPreview>, presets: Vec<crate::model::cdp::preset::CdpPreset>, preset_selected: Option<usize>| {
             Dialog::CdpParams {
-                catalog_index, fields, second_input, variadic_input, focus, error: Some(error), preview,
+                catalog_index, fields, second_input, variadic_input, photo_input: photo_input.clone(), focus, error: Some(error), preview,
                 envelope: None, list_edit: None, table_edit: None, marker_time_list_edit: None,
-                hilite_band_edit: None, formant_picker: None, file_picker: None, variadic_picker: None, presets, preset_selected,
+                hilite_band_edit: None, formant_picker: None, file_picker: None, variadic_picker: None, photo_picker: None, presets, preset_selected,
                 custom_values: custom_values.clone(), save_prompt: None, scroll: 0,
             }
         };
@@ -10511,14 +10897,21 @@ impl App {
         let placeholder;
         let doc = match self.documents.get(idx) {
             Some(doc) => doc,
-            None if def.input == IoKind::None => {
+            // `Photo` alongside `None` for the same reason: an image sonifier reads a
+            // picture, not a buffer, so requiring one open would be as arbitrary as requiring
+            // one before you could record.
+            None if matches!(def.input, IoKind::None | IoKind::Photo) => {
                 placeholder = Document::default();
                 &placeholder
             }
             None => return,
         };
 
-        let range = if def.input == IoKind::None {
+        // A process that reads no audio has no range to compute, and `cdp_process_range`
+        // returns `None` when there is no document — which this would then report as "no audio
+        // to process", the one thing an image sonifier is entitled not to have. `Photo` joins
+        // `None` here for exactly the reason it joins it above: the picture is the input.
+        let range = if matches!(def.input, IoKind::None | IoKind::Photo) {
             (doc.cursor, doc.cursor)
         } else {
             match self.cdp_process_range(idx, &def) {
@@ -10578,7 +10971,11 @@ impl App {
             }
         }
         let mut input_specs = Vec::new();
-        if def.input != IoKind::None {
+        // `Photo` alongside `None`: neither reads audio, so neither has an input file to
+        // describe. Without this a photo process would hand the planner a spec for a
+        // zero-length slice of a placeholder document — harmless today only because
+        // `praat_input_count` gives it no temp WAV to write, which is a coincidence to rely on.
+        if !matches!(def.input, IoKind::None | IoKind::Photo) {
             input_specs.push(crate::model::cdp::InputSpec {
                 // Only the selection's own spec carries head/tail marks — CDP is handed a
                 // temp WAV of the selection, and the DISTMORE family reads its marklist
@@ -10633,7 +11030,7 @@ impl App {
             let sample_rate = doc.sample_rate;
             if let Some(error) = self.praat_submit(
                 &def, catalog_index, &values, praat_inputs, sample_rate, range, idx, purpose,
-                &fields, &second_input, &variadic_input, focus, &presets, preset_selected,
+                &fields, &second_input, &variadic_input, &photo_input, focus, &presets, preset_selected,
                 &custom_values,
             ) {
                 self.dialog = Some(reopen(focus, error, fields, second_input, variadic_input, preview, presets, preset_selected));
@@ -10659,7 +11056,9 @@ impl App {
         }
 
         let mut inputs = Vec::new();
-        if def.input != IoKind::None {
+        // Same pair, same reason as `input_specs` above — and here it also avoids copying the
+        // whole selection's samples for a process that will never look at them.
+        if !matches!(def.input, IoKind::None | IoKind::Photo) {
             inputs.push(doc.slice(range.0..range.1));
         }
         if let Some(doc_b) = second_doc_index.and_then(|i| self.documents.get(i)) {
@@ -10692,6 +11091,7 @@ impl App {
             fields: fields.clone(),
             second_input,
             variadic_input,
+            photo_input,
             focus,
             presets,
             preset_selected,
@@ -10736,6 +11136,7 @@ impl App {
         fields: &[CdpField],
         second_input: &Option<CdpSecondInput>,
         variadic_input: &Option<CdpVariadicInput>,
+        photo_input: &Option<CdpPhotoInput>,
         focus: usize,
         presets: &[crate::model::cdp::preset::CdpPreset],
         preset_selected: Option<usize>,
@@ -10773,6 +11174,7 @@ impl App {
             fields: fields.to_vec(),
             second_input: second_input.clone(),
             variadic_input: variadic_input.clone(),
+            photo_input: photo_input.clone(),
             focus,
             presets: presets.to_vec(),
             preset_selected,
@@ -10801,8 +11203,17 @@ impl App {
             } else {
                 crate::praat::DEFAULT_TIMEOUT
             },
-            planned,
             inputs,
+            // `planned.photo_input` and this must agree — the driver's form field and the
+            // runner's argv are filled from the two independently, and Praat fills a form by
+            // position *and count*. `cdp_params_blocker` is what guarantees a pick exists by
+            // the time Apply can be pressed, so the `unwrap_or_default` is unreachable rather
+            // than a fallback with meaning.
+            photo_path: planned
+                .photo_input
+                .then(|| photo_input.as_ref().and_then(|p| p.path.clone()).unwrap_or_default())
+                .map(std::path::PathBuf::from),
+            planned,
             input_sample_rate: sample_rate,
             purpose,
         });
@@ -11020,6 +11431,7 @@ impl App {
                                 fields: pending.fields,
                                 second_input: pending.second_input,
                                 variadic_input: pending.variadic_input,
+                                photo_input: pending.photo_input,
                                 focus: pending.focus,
                                 error: None,
                                 preview: Some(CdpPreview {
@@ -11039,6 +11451,7 @@ impl App {
                                 formant_picker: None,
                                 file_picker: None,
                                 variadic_picker: None,
+                                photo_picker: None,
                                 presets: pending.presets,
                                 preset_selected: pending.preset_selected,
                                 custom_values: pending.custom_values,
@@ -11150,7 +11563,7 @@ impl App {
     /// again when adding this): every Preview press reruns the upstream steps fresh.
     fn preview_chain_step(&mut self) {
         let Some(target) = self.cdp_chain_edit_target.clone() else { return };
-        let Some(Dialog::CdpParams { catalog_index, fields, second_input, variadic_input, presets, .. }) = self.dialog.take() else {
+        let Some(Dialog::CdpParams { catalog_index, fields, second_input, variadic_input, photo_input, presets, .. }) = self.dialog.take() else {
             return;
         };
         let Some(def) = self.cdp_catalog.processes.get(catalog_index).cloned() else {
@@ -11164,6 +11577,7 @@ impl App {
                 fields,
                 second_input,
                 variadic_input,
+                photo_input,
                 focus: bad + 1,
                 error: Some("value out of range".into()),
                 preview: None,
@@ -11172,7 +11586,7 @@ impl App {
                 table_edit: None,
                 marker_time_list_edit: None,
                 hilite_band_edit: None,
-                formant_picker: None, file_picker: None, variadic_picker: None,
+                formant_picker: None, file_picker: None, variadic_picker: None, photo_picker: None,
                 presets,
                 preset_selected: None,
                 custom_values: None,
@@ -11196,7 +11610,7 @@ impl App {
             }
         };
 
-        let resume = SuspendedStepEdit { target, catalog_index, fields, second_input, variadic_input, presets };
+        let resume = SuspendedStepEdit { target, catalog_index, fields, second_input, variadic_input, photo_input, presets };
 
         let Some(state) = self.cdp_chain_editor.as_ref() else { return };
         let Some(upstream) = crate::model::cdp::steps_at(&state.chain, &parent_path) else { return };
@@ -11252,6 +11666,7 @@ impl App {
             fields: resume.fields,
             second_input: resume.second_input,
             variadic_input: resume.variadic_input,
+            photo_input: resume.photo_input,
             focus: CDP_PRESET_FOCUS,
             error: Some(error),
             preview: None,
@@ -11260,7 +11675,7 @@ impl App {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None, file_picker: None, variadic_picker: None,
+            formant_picker: None, file_picker: None, variadic_picker: None, photo_picker: None,
             presets: resume.presets,
             preset_selected: None,
             custom_values: None,
@@ -11662,6 +12077,10 @@ impl App {
             python_venv_bin: crate::praat::runner::python_venv_bin(&praat_state_dir()),
             planned,
             inputs,
+            // A chain step is never an `IoKind::Photo` process: `chain::step_is_supported`
+            // accepts only `Wav`/`Ana`/`Dual*` input, so one can't be added to a chain at all.
+            // `None` here is that fact, not a dropped pick.
+            photo_path: None,
             input_sample_rate: sample_rate,
             purpose: crate::cdp::JobPurpose::Apply,
             timeout: crate::praat::DEFAULT_TIMEOUT,
@@ -11853,6 +12272,7 @@ impl App {
                     fields: resume.fields,
                     second_input: resume.second_input,
                     variadic_input: resume.variadic_input,
+                    photo_input: resume.photo_input,
                     focus: CDP_PRESET_FOCUS,
                     error: None,
                     preview: Some(CdpPreview { values, range: splice_range, channels, sample_rate, second_input_doc, variadic_docs: Vec::new(), formant_selections }),
@@ -11861,7 +12281,7 @@ impl App {
                     table_edit: None,
                     marker_time_list_edit: None,
                     hilite_band_edit: None,
-                    formant_picker: None, file_picker: None, variadic_picker: None,
+                    formant_picker: None, file_picker: None, variadic_picker: None, photo_picker: None,
                     presets: resume.presets,
                     preset_selected: None,
                     custom_values: None,
@@ -12465,6 +12885,9 @@ impl App {
                                 // alongside the one just spliced above — prompt to save it
                                 // instead of just closing, since its temp directory (and this
                                 // is the only copy) is about to be cleaned up.
+                                self.dest_picker = Some(crate::ui::dest_picker::DestPicker::new(
+                                    self.file_panel.directory.clone(),
+                                ));
                                 self.dialog = match output.sidecar_bytes.filter(|b| !b.is_empty()) {
                                     Some(bytes) => Some(Dialog::SaveMatrixAs {
                                         bytes,
@@ -12472,6 +12895,7 @@ impl App {
                                             "{}.{MATRIX_EXTENSION}",
                                             recent_key.as_deref().unwrap_or("matrix")
                                         )),
+                                        dest_focused: false,
                                     }),
                                     None => None,
                                 };
@@ -12502,6 +12926,7 @@ impl App {
                                     fields: pending.fields,
                                     second_input: pending.second_input,
                                     variadic_input: pending.variadic_input,
+                                    photo_input: pending.photo_input,
                                     focus: pending.focus,
                                     error: None,
                                     preview: Some(CdpPreview {
@@ -12518,7 +12943,7 @@ impl App {
                                     table_edit: None,
                                     marker_time_list_edit: None,
                                     hilite_band_edit: None,
-                                    formant_picker: None, file_picker: None, variadic_picker: None,
+                                    formant_picker: None, file_picker: None, variadic_picker: None, photo_picker: None,
                                     presets: pending.presets,
                                     preset_selected: pending.preset_selected,
                                     custom_values: pending.custom_values,
@@ -13375,14 +13800,24 @@ impl App {
         opts: RegionExportOptions,
     ) {
         let idx = self.active_document;
+        // The parent the user chose in the dialog's own destination list, taken before the
+        // immutable borrow below and dropped either way — the dialog is finished with by now.
+        let chosen_parent = self.dest_picker.take();
         let Some(doc) = self.documents.get(idx) else { return };
         if doc.markers.is_empty() { return; }
 
-        // Determine the output directory: sibling of the document's file, or current panel dir.
-        let parent_dir = doc.path.as_ref()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| self.file_panel.directory.clone());
+        // Determine the output directory: whatever the dialog's destination list is showing,
+        // else (for a call that never opened it) the pre-picker rule — sibling of the
+        // document's file, or the current panel dir.
+        let parent_dir = match &chosen_parent {
+            Some(dest) => dest.directory().to_path_buf(),
+            None => doc
+                .path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| self.file_panel.directory.clone()),
+        };
 
         let out_dir = parent_dir.join(subfolder);
         if std::fs::create_dir_all(&out_dir).is_err() {
@@ -13574,14 +14009,22 @@ impl App {
     /// not a new working file, so it must not make the app think the buffer is now saved.
     fn run_export(&mut self, file_name: &str, settings: ExportSettings) {
         let idx = self.active_document;
+        // Taken before the immutable borrow of `documents` below, and dropped either way: the
+        // dialog is finished with by the time this runs.
+        let dest = self.dest_picker.take();
         let Some(doc) = self.documents.get(idx) else { return };
-        let dir = doc
-            .path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| self.file_panel.directory.clone());
-        let path = dir.join(file_name);
+        let path = match &dest {
+            Some(dest) => dest.resolve(file_name),
+            // The pre-picker rule, kept as the fallback so a call that never opened the dialog
+            // (there are none today) still writes somewhere sensible rather than the cwd.
+            None => doc
+                .path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| self.file_panel.directory.clone())
+                .join(file_name),
+        };
         self.dialog = Some(match audio_export::export(doc, &path, settings) {
             Ok(()) => {
                 self.file_panel.scan();
@@ -13603,6 +14046,9 @@ impl App {
     /// would be wrong. `bext` is dropped, matching every other new-file path in the app.
     fn export_channels(&mut self, subfolder: &str, modes: &[ChannelExportMode]) {
         let idx = self.active_document;
+        // The parent the user chose in the dialog's own destination list — taken before the
+        // borrow below and dropped either way, the dialog being finished with by now.
+        let chosen_parent = self.dest_picker.take();
         let Some(doc) = self.documents.get(idx) else { return };
 
         let files = channel_export::plan(modes);
@@ -13613,12 +14059,16 @@ impl App {
             return;
         }
 
-        let parent_dir = doc
-            .path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| self.file_panel.directory.clone());
+        // Whatever the dialog's destination list is showing, else the pre-picker rule.
+        let parent_dir = match &chosen_parent {
+            Some(dest) => dest.directory().to_path_buf(),
+            None => doc
+                .path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| self.file_panel.directory.clone()),
+        };
         let out_dir = parent_dir.join(subfolder);
         if std::fs::create_dir_all(&out_dir).is_err() {
             self.dialog =
@@ -14112,6 +14562,7 @@ impl App {
     fn advance_save_as_queue(&mut self) {
         let Some(idx) = self.save_as_queue.pop() else {
             self.save_as_active = false;
+            self.dest_picker = None;
             match self.save_as_queue_then.take() {
                 Some(SaveAsQueueThen::Quit) => self.should_quit = true,
                 Some(SaveAsQueueThen::CloseBuffer(idx)) => self.close_buffer(idx),
@@ -14129,6 +14580,9 @@ impl App {
             .unwrap_or_else(|| "untitled.wav".to_string());
         self.save_as_input = TextInput::fresh(name);
         self.save_as_focused = 0;
+        self.dest_picker = Some(crate::ui::dest_picker::DestPicker::new(
+            self.file_panel.directory.clone(),
+        ));
         // Default to the document's original bit depth so a Save As on a 24-bit file
         // offers 24-bit by default rather than always falling back to 32-bit float.
         self.save_as_depth = self.documents.get(idx)
@@ -15483,21 +15937,37 @@ impl App {
         }
 
         if action == Action::Export {
-            if let Some(doc) = self.active_doc() {
+            // Everything read off the document is resolved into owned values *before* the
+            // picker is seeded — assigning to `self.dest_picker` needs `&mut self`, which the
+            // `active_doc()` borrow would otherwise still hold for the whole block.
+            let export_setup = self.active_doc().map(|doc| {
                 let stem = doc
                     .path
                     .as_ref()
                     .and_then(|p| p.file_stem())
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "untitled".to_string());
+                // Where the export would already have gone — beside the source file, falling
+                // back to the Files panel (`run_export`'s own rule). The default destination is
+                // unchanged; it is merely visible and changeable now.
+                let dir = doc
+                    .path
+                    .as_ref()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.to_path_buf());
+                (stem, dir, doc.bits_per_sample)
+            });
+            if let Some((stem, dir, bits_per_sample)) = export_setup {
+                let dir = dir.unwrap_or_else(|| self.file_panel.directory.clone());
                 let format = ExportFormat::Flac;
+                self.dest_picker = Some(crate::ui::dest_picker::DestPicker::new(dir));
                 self.dialog = Some(Dialog::Export {
                     name_input: TextInput::fresh(format!("{stem}.{}", format.extension())),
                     format,
                     // FLAC is integer-only, so the source's own depth is used when it is one
                     // FLAC can store and 24-bit otherwise (a 32-bit float working buffer has
                     // no lossless integer equivalent, and 24 loses least).
-                    flac_depth: match BitDepth::from_bits(doc.bits_per_sample) {
+                    flac_depth: match BitDepth::from_bits(bits_per_sample) {
                         BitDepth::Int16 => BitDepth::Int16,
                         _ => BitDepth::Int24,
                     },
@@ -15533,6 +16003,16 @@ impl App {
                         format_sample_rate(doc.sample_rate),
                         BitDepth::from_bits(doc.bits_per_sample).label(),
                     );
+                    // The parent the subfolder is created in — beside the source file,
+                    // falling back to the Files panel, which is `export_channels`' own rule.
+                    // Unchanged by default; visible and changeable now.
+                    let parent = doc
+                        .path
+                        .as_ref()
+                        .and_then(|p| p.parent())
+                        .map(|p| p.to_path_buf());
+                    let parent = parent.unwrap_or_else(|| self.file_panel.directory.clone());
+                    self.dest_picker = Some(crate::ui::dest_picker::DestPicker::new(parent));
                     self.dialog = Some(Dialog::ExportChannels {
                         modes: channel_export::default_modes(channels),
                         selected: 0,
@@ -15554,6 +16034,15 @@ impl App {
                     });
                 } else {
                     let default_depth = BitDepth::from_bits(doc.bits_per_sample);
+                    // Same parent-of-the-subfolder rule as Export Channels — `export_regions`
+                    // computes it identically.
+                    let parent = doc
+                        .path
+                        .as_ref()
+                        .and_then(|p| p.parent())
+                        .map(|p| p.to_path_buf());
+                    let parent = parent.unwrap_or_else(|| self.file_panel.directory.clone());
+                    self.dest_picker = Some(crate::ui::dest_picker::DestPicker::new(parent));
                     self.dialog = Some(Dialog::ExportRegions {
                         folder_input: TextInput::new(""),
                         base_name_input: TextInput::new(""),
@@ -16036,6 +16525,11 @@ impl App {
                 self.save_as_depth = BitDepth::from_bits(document.bits_per_sample);
                 self.save_as_dither = false;
                 self.save_as_focused = 0;
+                // Seeded from the Files panel, which is where a bare filename already
+                // resolved — so the default destination is unchanged, it is merely visible now.
+                self.dest_picker = Some(crate::ui::dest_picker::DestPicker::new(
+                    self.file_panel.directory.clone(),
+                ));
                 self.save_as_active = true;
             }
             Action::Reverse => {
@@ -16818,6 +17312,7 @@ impl App {
             let rects = render_save_as_dialog(
                 frame, area,
                 &self.save_as_input, self.save_as_depth, self.save_as_dither, self.save_as_focused,
+                self.dest_picker.as_mut(),
             );
             // Last element is the apply (hints bar) rect; everything before it is interactive.
             self.dialog_n_interactive = rects.len().saturating_sub(1);
@@ -16845,6 +17340,7 @@ impl App {
             self.dialog_n_interactive = dialog_rects.len().saturating_sub(1);
             self.dialog_row_rects = dialog_rects;
         }
+        self.render_dest_picker_column(frame);
 
         // `Dialog::LoadCurve` renders separately from the generic `render_dialog` above
         // (which only ever gets `&Dialog`) because `FilePanel::render` needs `&mut self` for
@@ -16860,6 +17356,20 @@ impl App {
         {
             let folder = *folder;
             render_file_picker_popup(frame, area, panel, folder);
+        }
+        // Same `&mut FilePanel` reason again, plus it needs `self.photo_preview` alongside —
+        // so the borrow is split by taking the preview out by reference first.
+        if self.dialog.as_ref().is_some_and(|d| {
+            matches!(d, Dialog::CdpParams { photo_picker: Some(_), .. })
+        }) {
+            let graphics = self.graphics_mode && self.picker.is_some();
+            let preview = self.photo_preview.take();
+            if let Some(Dialog::CdpParams { photo_picker: Some(CdpPhotoPicker { panel }), .. }) =
+                self.dialog.as_mut()
+            {
+                render_photo_picker_popup(frame, area, panel, preview.as_ref(), graphics);
+            }
+            self.photo_preview = preview;
         }
 
         // Graphics-mode envelope curve: `render_cdp_envelope_editor` (inside `render_dialog`
@@ -16989,6 +17499,110 @@ impl App {
                 );
             }
         }
+
+        // The image picker's preview, on exactly the same terms as the picture blit above:
+        // `picker.is_some()` as well as `graphics_mode`, because `render_photo_picker_popup`
+        // is told the same pair and leaves the pane blank only under it — if the two
+        // disagreed, a frame would show either a message under a bitmap or neither.
+        //
+        // `Fit`, not the picture popup's `Scale`. A photograph must not be enlarged past its
+        // own pixels to fill the pane: upscaling a small image invents detail and, worse,
+        // misrepresents what the sonifiers will read — the analysis grid samples the source's
+        // real columns, so a 64px-wide image should *look* like a small image.
+        if self.graphics_mode
+            && self.picker.is_some()
+            && matches!(self.dialog, Some(Dialog::CdpParams { photo_picker: Some(_), .. }))
+        {
+            let rect = photo_picker_layout(area).image;
+            if let Some(protocol) = self.photo_preview_graphics_protocol.as_mut() {
+                frame.render_stateful_widget(
+                    ratatui_image::StatefulImage::default().resize(
+                        ratatui_image::Resize::Fit(Some(image::imageops::FilterType::Triangle)),
+                    ),
+                    rect,
+                    protocol,
+                );
+            }
+        }
+    }
+
+    /// Whether the open dialog's inline destination list currently has focus.
+    ///
+    /// One place, read by both the key router and the column renderer, so a keystroke and the
+    /// accent colour can never disagree about which pane is active.
+    fn dest_picker_has_focus(&self) -> bool {
+        match self.dialog.as_ref() {
+            Some(Dialog::Export { focused, .. }) => *focused == ex_focus::DEST,
+            Some(Dialog::ExportChannels { focused, .. }) => *focused == ec_focus::DEST,
+            Some(Dialog::ExportRegions { focused, .. }) => *focused == er_focus::DEST,
+            Some(Dialog::SaveCurveAs { dest_focused, .. })
+            | Some(Dialog::SaveMatrixAs { dest_focused, .. }) => *dest_focused,
+            _ => false,
+        }
+    }
+
+    /// Draws the inline destination column for whichever file-writing dialog is open.
+    ///
+    /// Separate from `render_dialog` for the reason `Dialog::LoadCurve` is: that function only
+    /// ever gets `&Dialog`, and a `DestPicker` needs `&mut` for its own scroll and row-rect
+    /// bookkeeping. Each dialog's renderer therefore leaves the column blank and *reports* its
+    /// `Rect` in the row list, which this reads back — so the two cannot compute different
+    /// geometry for the same frame, the same guarantee `photo_picker_layout` gives by being a
+    /// single function.
+    ///
+    /// Save As is absent because it renders from `App::render` already and draws its own column
+    /// inline, having the `&mut` there.
+    fn render_dest_picker_column(&mut self, frame: &mut Frame) {
+        let Some(dialog) = self.dialog.as_ref() else { return };
+        // (row index of the destination pane, whether it currently has focus)
+        // Whether this dialog hosts a destination pane, and whether it currently has focus.
+        let focused = match dialog {
+            Dialog::Export { focused, .. } => *focused == ex_focus::DEST,
+            Dialog::ExportChannels { focused, .. } => *focused == ec_focus::DEST,
+            Dialog::ExportRegions { focused, .. } => *focused == er_focus::DEST,
+            Dialog::SaveCurveAs { dest_focused, .. }
+            | Dialog::SaveMatrixAs { dest_focused, .. } => *dest_focused,
+            _ => return,
+        };
+        // **The pane is always the rect immediately before the hints bar.** A convention rather
+        // than a per-dialog index, because Export Channels and Export Regions report more row
+        // rects than they have focus stops — one per visible channel row, one per checkbox row
+        // — so a focus index would address the wrong rect in exactly those two. Each renderer
+        // pushes the pane, then the hints bar, last.
+        let Some(area) = self
+            .dialog_row_rects
+            .len()
+            .checked_sub(2)
+            .and_then(|i| self.dialog_row_rects.get(i))
+            .copied()
+        else {
+            return;
+        };
+        // A dialog clamped onto a terminal too narrow for two columns reports an empty rect
+        // (`dest_picker::split` returns `None`), which must draw nothing rather than a
+        // zero-width pane.
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        // The path row and the hints bar span the full dialog width beneath both columns, so
+        // the column itself stops two rows short of the bottom. `area` is the list pane the
+        // dialog reported, whose height is the whole inner height.
+        let reserved = crate::ui::dest_picker::PATH_ROWS + 1;
+        let columns_height = area.height.saturating_sub(reserved);
+        // Full inner width, taken from the hints bar — the last row rect every dialog reports,
+        // and already exactly the popup's inner width. Reading it rather than recomputing the
+        // popup geometry here keeps this from being a second copy of each dialog's own layout.
+        let full_width = self.dialog_row_rects.last().map_or(area.width, |r| r.width);
+        let path_row = Rect {
+            x: area.x,
+            y: area.y + columns_height,
+            width: full_width,
+            height: crate::ui::dest_picker::PATH_ROWS,
+        };
+        let Some(dest) = self.dest_picker.as_mut() else { return };
+        dest.set_focused(focused);
+        dest.render(frame, Rect { height: columns_height, ..area });
+        dest.render_path(frame, path_row);
     }
 
     /// Rectified (abs-value) peak amplitude per *pixel* column across `range`, using the
@@ -17299,11 +17913,17 @@ fn render_save_as_dialog(
     depth: BitDepth,
     dither: bool,
     focused: usize,
+    dest: Option<&mut crate::ui::dest_picker::DestPicker>,
 ) -> Vec<Rect> {
-    let width = 52u16.min(area.width);
-    // header spacer + filename + format + blank + dither + blank + hints = 7 inner rows
-    // + 2 border
-    let height = 9u16.min(area.height);
+    // Wide enough for the form *plus* the destination list beside it, and sized around the
+    // list's own fixed row count the way `cdp_browser_layout` is — the dialog is now a
+    // two-column browser with a form in it, not a form with a list bolted on, so the list is
+    // what sets the height rather than what fits in the leftovers.
+    let width = (52 + crate::ui::dest_picker::WIDTH).min(area.width);
+    // top pad + header + list rows + full-width path row + hints, + 2 border.
+    let height = (1 + 1 + crate::ui::dest_picker::LIST_ROWS
+        + crate::ui::dest_picker::PATH_ROWS + 1 + 2)
+        .min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -17373,27 +17993,55 @@ fn render_save_as_dialog(
         Span::styled(":apply", label_style),
     ]);
 
-    let block = Block::default()
-        .title("Save As")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::BORDER))
-        .style(base);
+    // The outer border first, then the two panes inside it — so the block's own background
+    // covers the whole popup and neither pane has to paint the gap between them.
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::raw(""),
-            filename_line, format_line, Line::raw(""), dither_line, Line::raw(""), hints,
-        ]).block(block),
+        Block::default()
+            .title("Save As")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::BORDER))
+            .style(base),
         popup,
     );
 
-    // Return hit-test rects: three interactive rows + apply (hints bar) as last element.
-    // +1 on each vs. the line's raw index, for the header spacer row prepended above.
-    let row_w = popup.width.saturating_sub(2);
+    let (list_area, form) = crate::ui::dest_picker::split(popup);
+    // The path row and the hints bar both span the full inner width along the bottom, under
+    // both panes — they describe the dialog, not either column. The columns stop above them.
+    let columns_height = form.height.saturating_sub(crate::ui::dest_picker::PATH_ROWS + 1);
+    let full_width = Rect { x: popup.x + 1, width: popup.width.saturating_sub(2), height: 1, y: 0 };
+
+    frame.render_widget(
+        // A leading blank row, matching the one the destination column opens with, so the two
+        // columns' first lines sit on the same row.
+        Paragraph::new(vec![
+            Line::raw(""),
+            filename_line, format_line, Line::raw(""), dither_line,
+        ]),
+        Rect { height: columns_height, ..form },
+    );
+    frame.render_widget(
+        Paragraph::new(hints),
+        Rect { y: popup.y + popup.height - 2, ..full_width },
+    );
+
+    // Drawn last so its own border sits over the block's background rather than under it.
+    // `split` returns `None` on a terminal too narrow for both, where the form gets everything
+    // and there is simply no list to draw — see its doc comment.
+    if let (Some(list_area), Some(dest)) = (list_area, dest) {
+        dest.set_focused(focused == SAVE_AS_DEST_FOCUS);
+        dest.render(frame, Rect { height: columns_height, ..list_area });
+        dest.render_path(frame, Rect { y: popup.y + popup.height - 3, ..full_width });
+    }
+
+    // Return hit-test rects: three interactive form rows, the destination list, then apply
+    // (the hints bar) as the last element.
+    let row_w = form.width;
     vec![
-        Rect { x: popup.x + 1, y: popup.y + 2, width: row_w, height: 1 },
-        Rect { x: popup.x + 1, y: popup.y + 3, width: row_w, height: 1 },
-        Rect { x: popup.x + 1, y: popup.y + 5, width: row_w, height: 1 },
-        hints_bar_rect(popup, row_w),
+        Rect { x: form.x, y: form.y, width: row_w, height: 1 },
+        Rect { x: form.x, y: form.y + 1, width: row_w, height: 1 },
+        Rect { x: form.x, y: form.y + 3, width: row_w, height: 1 },
+        list_area.unwrap_or_default(),
+        hints_bar_rect(popup, popup.width.saturating_sub(2)),
     ]
 }
 
@@ -17801,8 +18449,8 @@ fn render_dialog(
             );
         }
         Dialog::CdpParams {
-            catalog_index, fields, second_input, variadic_input, focus, error, preview, envelope, list_edit, table_edit,
-            marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, variadic_picker, presets, preset_selected, custom_values: _, save_prompt, scroll,
+            catalog_index, fields, second_input, variadic_input, photo_input, focus, error, preview, envelope, list_edit, table_edit,
+            marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, variadic_picker, photo_picker: _, presets, preset_selected, custom_values: _, save_prompt, scroll,
         } => {
             let def = catalog.processes.get(*catalog_index);
             if let Some(edit) = envelope {
@@ -17832,7 +18480,7 @@ fn render_dialog(
                 return Vec::new();
             }
             return render_cdp_params_dialog(
-                frame, area, def, fields, second_input.as_ref(), variadic_input.as_ref(), *focus, error, preview,
+                frame, area, def, fields, second_input.as_ref(), variadic_input.as_ref(), photo_input.as_ref(), *focus, error, preview,
                 presets, *preset_selected, save_prompt.as_ref(), *scroll, formant_buffers, blocked,
                 graphics_mode,
             );
@@ -17943,11 +18591,21 @@ fn render_dialog(
     let hint_len = 1 + 5 + 1 + commit.len() + 2 + 3 + 1 + cancel.len();
     let content_len = content_len.max(hint_len);
 
-    let width = (content_len as u16 + 2).min(area.width);
+    // Only the two prompts that write a file host a destination list; the other six in this
+    // shared group (Normalize, Resample, rename, Open Directory, …) take no path at all and
+    // must keep their small popup.
+    let has_dest = matches!(dialog, Dialog::SaveCurveAs { .. } | Dialog::SaveMatrixAs { .. });
+    let dest_width = if has_dest { crate::ui::dest_picker::WIDTH } else { 0 };
+    let width = (content_len as u16 + 2 + dest_width).min(area.width);
     // Border + blank + content + blank + hint + border. The blank *below* the content matters as
     // much as the one above it: without it the hint reads as a third line of the prompt rather
     // than as a legend for it (user report, on the Normalize and threshold prompts).
-    let height = 6u16.min(area.height);
+    let height = if has_dest {
+        (1 + 1 + crate::ui::dest_picker::LIST_ROWS + crate::ui::dest_picker::PATH_ROWS + 1 + 2)
+            .min(area.height)
+    } else {
+        6u16.min(area.height)
+    };
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -17974,7 +18632,27 @@ fn render_dialog(
             Span::styled(format!(":{cancel}"), label_style),
         ]),
     ];
-    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    frame.render_widget(block, popup);
+    // For the two file-writing prompts the form is confined to its own column and the hints
+    // line floats to the bottom, since the popup is now sized by the destination list beside
+    // it. Every other dialog in this group renders exactly as before, into the full inner area.
+    let (list_area, form) = if has_dest {
+        crate::ui::dest_picker::split(popup)
+    } else {
+        (None, block_inner(popup))
+    };
+    let mut lines = lines;
+    let hints_line = lines.pop().expect("the hint line is always last");
+    let body_height = if has_dest {
+        form.height.saturating_sub(crate::ui::dest_picker::PATH_ROWS + 1)
+    } else {
+        form.height.saturating_sub(1)
+    };
+    while (lines.len() as u16) < body_height {
+        lines.push(Line::raw(""));
+    }
+    lines.push(hints_line);
+    frame.render_widget(Paragraph::new(lines), form);
 
     // Click targets. Exactly two, in `handle_dialog_row_click`'s convention: the interactive
     // rows first, then one trailing "submit" rect (`dialog_n_interactive` is derived as
@@ -18001,8 +18679,18 @@ fn render_dialog(
     };
     // The hint row is the submit target, as in every other dialog — and now that every dialog in
     // this group has one, all of them are clickable rather than only `SaveMatrixAs`.
-    let submit_rect = Rect { x: inner.x, y: inner.y + 3, width: inner.width, height: 1 };
-    vec![input_rect, submit_rect]
+    let submit_rect = Rect {
+        x: inner.x,
+        y: inner.y + body_height,
+        width: inner.width,
+        height: 1,
+    };
+    // The destination pane goes immediately before the hints bar, the order
+    // `App::render_dest_picker_column` relies on. Absent for the six prompts with no path.
+    match list_area {
+        Some(list_area) => vec![input_rect, list_area, submit_rect],
+        None => vec![input_rect, submit_rect],
+    }
 }
 
 /// A `Block`'s inner area without having to keep the block itself around — `Block::inner`
@@ -18093,11 +18781,20 @@ fn render_export_dialog(
     // 68 is wide enough for the longest blocker (`export::blocker`'s mono/stereo message, ~102
     // chars) to wrap into `EXPORT_BLOCKER_ROWS`.
     const EXPORT_BLOCKER_ROWS: usize = 2;
-    let width = 68u16.min(area.width);
-    let inner_width = width.saturating_sub(2).max(1) as usize;
+    let width = (68 + crate::ui::dest_picker::WIDTH).min(area.width);
+    // The *form* column's width, which is what every line below is sized against — the
+    // destination list takes its own fixed share beside them.
+    let inner_width = width
+        .saturating_sub(2)
+        .saturating_sub(crate::ui::dest_picker::WIDTH)
+        .max(1) as usize;
     // Content rows: filename, format, setting, blank, the blocker block, blank, hints.
-    let content_rows = 6 + EXPORT_BLOCKER_ROWS as u16;
-    let height = (content_rows + 2).min(area.height);
+    let content_rows = (6 + EXPORT_BLOCKER_ROWS) as u16;
+    // Sized around the destination list rather than the form, for the reason
+    // `render_save_as_dialog` is: this is now a two-column dialog with a form in it.
+    let height = (content_rows + 2)
+        .max(1 + crate::ui::dest_picker::LIST_ROWS + 1 + 1 + 1 + 2)
+        .min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -18193,17 +18890,36 @@ fn render_export_dialog(
     // Deliberately **not** wrapped: every line is already sized to fit, and reflowing is what made
     // this dialog resize. It also means a very long file name is clipped at the border rather than
     // spilling onto a second row and pushing everything below it down.
-    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    frame.render_widget(block, popup);
 
-    // One rect per interactive row, then the hints bar (always last = submit).
-    (0..=ex_focus::COUNT as u16)
-        .map(|i| Rect {
-            x: popup.x + 1,
-            y: popup.y + 1 + if i as usize == ex_focus::COUNT { height - 3 } else { i },
-            width: popup.width.saturating_sub(2),
-            height: 1,
-        })
-        .collect()
+    let (list_area, form) = crate::ui::dest_picker::split(popup);
+    // The popup is sized by the destination list, which is taller than the form's own content
+    // — so the hints line is pushed to the bottom rather than sitting wherever the content
+    // happens to end. Its click rect below claims the bottom row, and the two must agree.
+    let hints_line = lines.pop().expect("the hints line is always the last pushed");
+    while (lines.len() as u16) < form.height.saturating_sub(1) {
+        lines.push(Line::raw(""));
+    }
+    lines.push(hints_line);
+    frame.render_widget(Paragraph::new(lines), form);
+    // The destination column itself is drawn by `App::render_dest_picker_column`, from the
+    // `Rect` reported below — `render_dialog` only ever gets `&Dialog`, and a `DestPicker`
+    // needs `&mut` for its own scroll bookkeeping. Same split `Dialog::LoadCurve` and the CDP
+    // file picker already use, and the reason the pane is reported rather than drawn here.
+
+    // One rect per interactive row, then the hints bar (always last = submit). The three form
+    // rows sit in the form column; the destination row is the list pane itself.
+    let mut rects: Vec<Rect> = (0..ex_focus::DEST as u16)
+        .map(|i| Rect { x: form.x, y: form.y + i, width: form.width, height: 1 })
+        .collect();
+    rects.push(list_area.unwrap_or_default());
+    rects.push(Rect {
+        x: popup.x + 1,
+        y: popup.y + height - 2,
+        width: popup.width.saturating_sub(2),
+        height: 1,
+    });
+    rects
 }
 
 /// Export Channels. Unlike every other dialog in the app this one is *not* a fixed-height
@@ -18227,7 +18943,8 @@ fn render_export_channels_dialog(
     let files = channel_export::plan(modes);
     // Wide enough that a long stem plus a `_chNN-MM.wav` suffix still fits beside the mode
     // selector without the Output file column running into the border.
-    let width = 84u16.min(area.width);
+    // The form's own width plus the destination column beside it.
+    let width = (84 + crate::ui::dest_picker::WIDTH).min(area.width);
     let visible = ec_visible_rows(area, modes.len());
     let scroll_top = ec_scroll_top(selected, visible, modes.len());
     let end = (scroll_top + visible).min(modes.len());
@@ -18237,7 +18954,12 @@ fn render_export_channels_dialog(
     // to the rows actually drawn, so a list that needs no scroll indicators doesn't leave two
     // blank rows above the bottom border.
     let indicator_rows = u16::from(hidden_above > 0) + u16::from(hidden_below > 0);
-    let height = (visible as u16 + indicator_rows + EC_FIXED_ROWS).min(area.height);
+    // Also floored by the destination list, so a two-channel file still gets a browsable
+    // folder pane rather than a three-row one. `visible` already grows with the terminal, so
+    // a long channel list keeps setting the height as it always did.
+    let height = (visible as u16 + indicator_rows + EC_FIXED_ROWS)
+        .max(1 + 1 + crate::ui::dest_picker::LIST_ROWS + crate::ui::dest_picker::PATH_ROWS + 1 + 2)
+        .min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -18391,10 +19113,40 @@ fn render_export_channels_dialog(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(Style::default().bg(theme::SURFACE0));
-    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    frame.render_widget(block, popup);
 
-    row_rects.push(folder_row);
-    row_rects.push(hints_row);
+    let (list_area, form) = crate::ui::dest_picker::split(popup);
+    // The path row and the hints bar span the whole dialog beneath both columns.
+    let columns_height = form.height.saturating_sub(crate::ui::dest_picker::PATH_ROWS + 1);
+    // The hints line is the last one pushed; float it to the bottom, since the popup is now
+    // floored by the destination list rather than sized to this content.
+    let hints_line = lines.pop().expect("the hints line is always the last pushed");
+    while (lines.len() as u16) < columns_height {
+        lines.push(Line::raw(""));
+    }
+    frame.render_widget(Paragraph::new(lines), Rect { height: columns_height, ..form });
+    frame.render_widget(
+        Paragraph::new(hints_line),
+        Rect { x: popup.x + 1, y: popup.y + height - 2, width: popup.width.saturating_sub(2), height: 1 },
+    );
+
+    // The form's own rows are confined to its column, so their click rects must be too.
+    let narrow = |r: Rect| Rect { x: form.x, width: form.width, ..r };
+    for rect in &mut row_rects {
+        *rect = narrow(*rect);
+    }
+    row_rects.push(narrow(folder_row));
+    // The destination pane, then the hints bar — the order
+    // `App::render_dest_picker_column` relies on. The hints row moved to the popup's
+    // bottom above, so its rect follows rather than using `hints_row`'s stale position.
+    row_rects.push(list_area.unwrap_or_default());
+    row_rects.push(Rect {
+        x: popup.x + 1,
+        y: popup.y + height - 2,
+        width: popup.width.saturating_sub(2),
+        height: 1,
+    });
+    let _ = hints_row;
     row_rects
 }
 
@@ -18622,10 +19374,19 @@ fn render_export_regions_dialog(
     fade_out_input: &TextInput,
     focused: usize,
 ) -> Vec<Rect> {
-    let width = 54u16.min(area.width);
+    // The form's own width plus the destination column beside it.
+    let width = (54 + crate::ui::dest_picker::WIDTH).min(area.width);
     // header spacer + subfolder + basename + blank + format + dither + blank + limit_length
-    // + normalize + blank + fade_in + fade_out + blank + hints = 14 inner rows + 2 border
-    const FULL_HEIGHT: u16 = 16;
+    // + normalize + blank + fade_in + fade_out + blank + hints = 14 inner rows + 2 border,
+    // floored by the destination list beside it (top pad + label + rows + path + hints + 2).
+    const FORM_HEIGHT: u16 = 16;
+    const FULL_HEIGHT: u16 = if FORM_HEIGHT
+        > 1 + 1 + crate::ui::dest_picker::LIST_ROWS + crate::ui::dest_picker::PATH_ROWS + 1 + 2
+    {
+        FORM_HEIGHT
+    } else {
+        1 + 1 + crate::ui::dest_picker::LIST_ROWS + crate::ui::dest_picker::PATH_ROWS + 1 + 2
+    };
     let height = FULL_HEIGHT.min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -18747,16 +19508,25 @@ fn render_export_regions_dialog(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
+    frame.render_widget(block, popup);
+
+    let (list_area, form) = crate::ui::dest_picker::split(popup);
+    // The path row and the hints bar span the whole dialog beneath both columns.
+    let columns_height = form.height.saturating_sub(crate::ui::dest_picker::PATH_ROWS + 1);
+    let mut form_lines = vec![
+        Line::raw(""),
+        folder_line, base_line, Line::raw(""),
+        format_line, dither_line, Line::raw(""),
+        limit_length_line, normalize_line, Line::raw(""),
+        fade_in_line, fade_out_line,
+    ];
+    while (form_lines.len() as u16) < columns_height {
+        form_lines.push(Line::raw(""));
+    }
+    frame.render_widget(Paragraph::new(form_lines), Rect { height: columns_height, ..form });
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::raw(""),
-            folder_line, base_line, Line::raw(""),
-            format_line, dither_line, Line::raw(""),
-            limit_length_line, normalize_line, Line::raw(""),
-            fade_in_line, fade_out_line, Line::raw(""),
-            hints,
-        ]).block(block),
-        popup,
+        Paragraph::new(hints),
+        Rect { x: popup.x + 1, y: popup.y + height - 2, width: popup.width.saturating_sub(2), height: 1 },
     );
 
     // Each interactive row's Rect is clipped to the popup's inner area: on a terminal
@@ -18770,8 +19540,9 @@ fn render_export_regions_dialog(
         width: popup.width.saturating_sub(2),
         height: popup.height.saturating_sub(2),
     };
+    // Confined to the form column, since that is where the rows are now drawn.
     let row = |y_offset: u16| {
-        Rect { x: popup.x + 1, y: popup.y + y_offset, width: inner.width, height: 1 }.intersection(inner)
+        Rect { x: form.x, y: popup.y + y_offset, width: form.width, height: 1 }.intersection(inner)
     };
     vec![
         row(2),  // subfolder (row 0) -- +1 for the header spacer row
@@ -18782,6 +19553,9 @@ fn render_export_regions_dialog(
         row(9),  // normalize (row 5)
         row(11), // fade in (row 6)
         row(12), // fade out (row 7)
+        // The destination pane, immediately before the hints bar — the order
+        // `App::render_dest_picker_column` relies on.
+        list_area.unwrap_or_default(),
         // Hints/apply bar — clicking it (or anywhere past row 7) submits, matching
         // handle_dialog_row_click's `row >= dialog_n_interactive` convention. Only
         // present when the popup is full-height: when clamped, the row at
@@ -21013,6 +21787,22 @@ fn truncate_to_width(text: &str, width: usize) -> String {
 /// the picker overlay's title all have to agree on it.
 const VARIADIC_INPUT_LABEL: &str = "input buffers";
 
+/// The extra-input row's label for an `IoKind::Photo` process. A *file* picker, like
+/// `Dialog::CdpParams.file_picker` and unlike the variadic row's buffer picker — the image is
+/// something on disk, never an open document. Named as a constant for the same reason
+/// `VARIADIC_INPUT_LABEL` is: the width calculation, the row renderer and the picker's title
+/// all have to agree on it.
+const PHOTO_INPUT_LABEL: &str = "image";
+
+/// The file name to show for a picked image, or the whole string when it has no path
+/// separator. Display only — the full path is what actually runs.
+fn photo_file_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
 fn cdp_params_column_widths(def: &crate::model::cdp::ProcessDef) -> (usize, usize, usize) {
     use crate::model::cdp::ParamKind;
     // The floor covers the extra-input row's own label, which is chrome rather than a param
@@ -21023,6 +21813,7 @@ fn cdp_params_column_widths(def: &crate::model::cdp::ProcessDef) -> (usize, usiz
         crate::model::cdp::IoKind::VariadicWav | crate::model::cdp::IoKind::GroupedWav => {
             VARIADIC_INPUT_LABEL.chars().count()
         }
+        crate::model::cdp::IoKind::Photo => PHOTO_INPUT_LABEL.chars().count(),
         _ => 9,
     };
     let label_width = def
@@ -21211,6 +22002,7 @@ fn render_cdp_params_dialog(
     fields: &[CdpField],
     second_input: Option<&CdpSecondInput>,
     variadic_input: Option<&CdpVariadicInput>,
+    photo_input: Option<&CdpPhotoInput>,
     focus: usize,
     error: &Option<String>,
     preview: &Option<CdpPreview>,
@@ -21233,7 +22025,7 @@ fn render_cdp_params_dialog(
     // so a narrow terminal behaves exactly as before.
     let width = (14 + label_width + range_width + value_width).max(50) as u16;
     let width = width.min(area.width);
-    let has_extra_input = cdp_has_extra_input(second_input, variadic_input) as usize;
+    let has_extra_input = cdp_has_extra_input(second_input, variadic_input, photo_input) as usize;
     // The inline error is the one piece of content that can be far wider than the form —
     // "found 0 Head/Tail pair(s) inside the selection…" is ~150 characters — so it wraps onto
     // as many lines as it needs and the dialog reserves height for them. Widening instead
@@ -21598,9 +22390,35 @@ fn render_cdp_params_dialog(
             Span::styled(value, base),
         ]));
     }
+    // The third and last occupant of that same row. Enter opens the picker, as the variadic
+    // row does, so it takes the same bare-summary shape rather than a cycle affordance.
+    //
+    // Shows the **file name**, not the path: a path long enough to be worth reading does not
+    // fit the row anyway, and the name is what distinguishes one candidate from another once
+    // you have browsed to the folder. The unpicked state says so in words rather than showing
+    // an empty value, which would read as a rendering fault on a row that has no other content.
+    if let Some(photo) = photo_input {
+        let is_focused = focus == cdp_params_focus_extra_input(fields.len());
+        let label = format!(" {:<label_width$}  ", PHOTO_INPUT_LABEL);
+        let value_width = (inner.width as usize)
+            .saturating_sub(label.chars().count())
+            .saturating_sub(range_width);
+        let summary = match photo.path.as_deref() {
+            Some(path) => photo_file_name(path),
+            None => "(none picked \u{2014} Enter to browse)".to_string(),
+        };
+        let value = truncate_to_width(&format!(" {summary}"), value_width);
+        lines.push(Line::from(vec![
+            Span::styled(label, if is_focused { cursor_style } else { label_style }),
+            Span::styled(format!("{:<range_width$}", ""), range_style),
+            // Dimmed while unpicked, matching how `CdpField::FilePath` renders its own
+            // never-picked state — the row is not an error, it is an unfinished step.
+            Span::styled(value, if photo.path.is_some() { base } else { dim_style }),
+        ]));
+    }
     lines.push(Line::raw(""));
 
-    let has_extra = cdp_has_extra_input(second_input, variadic_input);
+    let has_extra = cdp_has_extra_input(second_input, variadic_input, photo_input);
     let preview_focus = cdp_params_focus_preview(fields.len(), has_extra);
     let apply_focus = cdp_params_focus_apply(fields.len(), has_extra);
     // The checkmark means "Apply will splice exactly what you last heard" — so it must
@@ -22147,6 +22965,176 @@ fn render_file_picker_popup(
         ]))
         .style(Style::default().bg(theme::SURFACE0)),
         hints_area,
+    );
+}
+
+/// Geometry for the image picker: the popup, the file list on the left, the preview pane on the
+/// right, and the hints row along the bottom.
+///
+/// Returned as a struct from one function — rather than computed twice — for the same reason
+/// `praat_picture_layout` is: the text renderer and the bitmap blit must agree on exactly where
+/// the image goes, and two copies of this arithmetic would be two chances to disagree by a cell.
+struct PhotoPickerLayout {
+    popup: Rect,
+    list: Rect,
+    /// Where the bitmap is blitted, inset from `preview_pane` by its border and with the
+    /// metadata lines at the bottom already reserved.
+    image: Rect,
+    /// The whole right-hand pane, border included.
+    preview_pane: Rect,
+    hints: Rect,
+}
+
+/// Rows of metadata under the preview image: name, then dimensions/size.
+const PHOTO_PREVIEW_META_ROWS: u16 = 2;
+
+fn photo_picker_layout(area: Rect) -> PhotoPickerLayout {
+    // Wider than the plain file picker's 60, because this one carries a second pane. Capped at
+    // the terminal so a narrow one degrades to "as wide as there is" rather than overflowing.
+    let width = 92u16.min(area.width);
+    let height = 24u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let body_height = popup.height.saturating_sub(1);
+    // The list keeps a fixed, generous share rather than an even split: file names are the
+    // thing being read, and a preview that is a few cells narrower costs nothing, while a
+    // truncated name costs the ability to tell two files apart. Floored so a very narrow
+    // terminal gives the preview nothing rather than giving the list nothing.
+    let list_width = (popup.width * 45 / 100).max(20).min(popup.width);
+    let list = Rect { x: popup.x, y: popup.y, width: list_width, height: body_height };
+    let preview_pane = Rect {
+        x: popup.x + list_width,
+        y: popup.y,
+        width: popup.width.saturating_sub(list_width),
+        height: body_height,
+    };
+    // Inside the pane's own border, with the metadata rows carved off the bottom.
+    let inner_w = preview_pane.width.saturating_sub(2);
+    let inner_h = preview_pane.height.saturating_sub(2);
+    let image = Rect {
+        x: preview_pane.x + 1,
+        y: preview_pane.y + 1,
+        width: inner_w,
+        height: inner_h.saturating_sub(PHOTO_PREVIEW_META_ROWS),
+    };
+    let hints = Rect { x: popup.x, y: popup.y + body_height, width: popup.width, height: 1 };
+    PhotoPickerLayout { popup, list, image, preview_pane, hints }
+}
+
+/// The image picker popup: `FilePanel` on the left, preview on the right.
+///
+/// The preview pane's *body* is left blank in graphics mode, exactly as
+/// `render_praat_picture_dialog` leaves its own: the bitmap `App::render` blits over
+/// `layout.image` covers it, so anything drawn underneath would only be something to flicker.
+/// In text mode the same space carries the metadata panel instead — name, true pixel
+/// dimensions and file size, which are the facts that actually bear on the sonification (the
+/// scripts read a column per time slice, so the width is what the analysis resolution is
+/// sampling), rather than a picture the terminal cannot show.
+fn render_photo_picker_popup(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &mut FilePanel,
+    preview: Option<&crate::ui::photo::PhotoPreview>,
+    graphics_mode: bool,
+) {
+    let layout = photo_picker_layout(area);
+    frame.render_widget(ratatui::widgets::Clear, layout.popup);
+
+    panel.render(frame, layout.list);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(dim_style)
+            .title(" Preview ")
+            .title_style(label_style)
+            .style(Style::default().bg(theme::SURFACE0)),
+        layout.preview_pane,
+    );
+
+    let inner_w = layout.image.width as usize;
+    // The body: blank under a bitmap, otherwise a reason or an invitation.
+    let mut body: Vec<Line> = Vec::new();
+    let show_bitmap = graphics_mode && preview.is_some_and(|p| p.image.is_some());
+    if !show_bitmap {
+        let message = match preview {
+            Some(p) => match (&p.error, p.image.is_some()) {
+                (Some(error), _) => vec![" Cannot preview:".to_string(), format!(" {error}")],
+                // A decoded image with graphics off — say why it isn't on screen, and what
+                // would put it there, the same way the Praat picture popup does.
+                (None, true) => vec![
+                    " Terminal graphics are off.".to_string(),
+                    " Turn them on in a kitty or Sixel".to_string(),
+                    " terminal to see the image.".to_string(),
+                ],
+                (None, false) => vec![" Nothing to preview.".to_string()],
+            },
+            None => vec![" Select an image file.".to_string()],
+        };
+        // Vertically centred in the pane, so a two-line message doesn't sit against the top
+        // border with the rest of the pane empty below it.
+        let pad = (layout.image.height as usize).saturating_sub(message.len()) / 2;
+        for _ in 0..pad {
+            body.push(Line::raw(""));
+        }
+        for line in message {
+            body.push(Line::from(Span::styled(truncate_to_width(&line, inner_w), dim_style)));
+        }
+    }
+    if !body.is_empty() {
+        frame.render_widget(Paragraph::new(body), layout.image);
+    }
+
+    // Metadata, always — in both modes. Under a bitmap it is the caption; without one it is
+    // the whole content. Either way "which file, how big" is what a picker is being asked.
+    let meta = match preview {
+        Some(p) => {
+            let name = photo_file_name(&p.path.to_string_lossy());
+            let facts = match p.dimensions {
+                Some((w, h)) => {
+                    format!("{w}x{h} \u{b7} {}", crate::ui::photo::format_bytes(p.file_bytes))
+                }
+                None => crate::ui::photo::format_bytes(p.file_bytes),
+            };
+            vec![
+                Line::from(Span::styled(truncate_to_width(&format!(" {name}"), inner_w), base)),
+                Line::from(Span::styled(truncate_to_width(&format!(" {facts}"), inner_w), dim_style)),
+            ]
+        }
+        None => vec![Line::raw(""), Line::raw("")],
+    };
+    frame.render_widget(
+        Paragraph::new(meta),
+        Rect {
+            x: layout.image.x,
+            y: layout.image.y + layout.image.height,
+            width: layout.image.width,
+            height: PHOTO_PREVIEW_META_ROWS,
+        },
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" \u{2191}\u{2193}", hint_style),
+            Span::styled(":move  ", label_style),
+            Span::styled("Enter", hint_style),
+            Span::styled(":open/pick  ", label_style),
+            Span::styled("/", hint_style),
+            Span::styled(":filter  ", label_style),
+            Span::styled("Esc", hint_style),
+            Span::styled(":cancel", label_style),
+        ]))
+        .style(Style::default().bg(theme::SURFACE0)),
+        layout.hints,
     );
 }
 
@@ -26913,7 +27901,7 @@ mod tests {
         app.buffer_panel.selected = app.documents.len(); // the curve
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
 
-        let Some(Dialog::SaveCurveAs { curve_index, input }) = &app.dialog else {
+        let Some(Dialog::SaveCurveAs { curve_index, input, .. }) = &app.dialog else {
             panic!("expected the Save Curve dialog to open for a never-saved curve")
         };
         assert_eq!(*curve_index, 0);
@@ -28699,6 +29687,7 @@ mod tests {
             fields: Vec::new(),
             second_input: None,
             variadic_input: None,
+            photo_input: None,
             focus: 0,
             presets: Vec::new(),
             preset_selected: None,
@@ -28782,6 +29771,7 @@ mod tests {
             fields: Vec::new(),
             second_input: None,
             variadic_input: None,
+            photo_input: None,
             focus: 0,
             presets: Vec::new(),
             preset_selected: None,
@@ -30820,7 +31810,7 @@ mod tests {
         };
         assert!(second_input.is_none(), "a variadic process has no dual second-input row");
         let variadic_input = variadic_input.as_ref().expect("a variadic process gets a picker");
-        assert!(cdp_has_extra_input(second_input.as_ref(), Some(variadic_input)));
+        assert!(cdp_has_extra_input(second_input.as_ref(), Some(variadic_input), None));
         let field_count = fields.len();
         assert_eq!(cdp_params_focus_extra_input(field_count), field_count + 1);
         assert_eq!(cdp_params_focus_preview(field_count, true), field_count + 2);
@@ -30838,12 +31828,12 @@ mod tests {
         let app = new_app(Some(doc(0.1, 100)), None);
         let find = |key: &str| app.cdp_catalog.processes.iter().position(|p| p.key == key).expect(key);
 
-        let (_, _, flat) = app.cdp_fields_for(find("tesselate_tesselate"));
+        let (_, _, flat, _) = app.cdp_fields_for(find("tesselate_tesselate"));
         let flat = flat.expect("tesselate is variadic");
         assert_eq!(flat.groups.len(), 1);
         assert_eq!(flat.group_labels, vec!["extra".to_string()]);
 
-        let (_, _, grouped) = app.cdp_fields_for(find("repair_repair"));
+        let (_, _, grouped, _) = app.cdp_fields_for(find("repair_repair"));
         let grouped = grouped.expect("repair is grouped-variadic");
         assert_eq!(grouped.groups.len(), 2);
         assert_eq!(grouped.group_labels, vec!["ch1".to_string(), "ch2".to_string()]);
@@ -32155,6 +33145,7 @@ mod tests {
             fields: Vec::new(),
             second_input: None,
             variadic_input: None,
+            photo_input: None,
             focus: 0,
             presets: Vec::new(),
             preset_selected: None,
@@ -32245,6 +33236,7 @@ mod tests {
             fields: fields.clone(),
             second_input: None,
             variadic_input: None,
+            photo_input: None,
             focus: 0,
             presets: Vec::new(),
             preset_selected: None,
@@ -32600,11 +33592,14 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Tab must cycle through all 12 Export Regions fields (subfolder, base name, format,
+    /// Tab must cycle through every Export Regions stop (subfolder, base name, format,
     /// dither, limit-length checkbox + ms, normalize checkbox + dB, fade-in checkbox + ms,
-    /// fade-out checkbox + ms) and wrap back to 0.
+    /// fade-out checkbox + ms, then the destination list) and wrap back to 0.
+    ///
+    /// Written against `er_focus::COUNT` rather than a literal, so adding a stop updates the
+    /// expectation with the constant instead of failing here for a reason that is not a bug.
     #[test]
-    fn export_regions_dialog_tab_cycles_through_all_twelve_fields() {
+    fn export_regions_dialog_tab_cycles_through_every_field() {
         let mut app = new_app(Some(doc(0.1, 200)), None);
         app.dialog = Some(Dialog::ExportRegions {
             folder_input: TextInput::new("out"),
@@ -32625,7 +33620,7 @@ mod tests {
             Some(Dialog::ExportRegions { focused, .. }) => *focused,
             _ => panic!("expected Dialog::ExportRegions to be open"),
         };
-        for expected in 1..=11 {
+        for expected in 1..er_focus::COUNT {
             app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
             assert_eq!(focused(&app), expected);
         }
@@ -36631,6 +37626,381 @@ mod tests {
         assert!(app.curve_histories.is_empty());
     }
 
+    /// An image sonifier must run with **no buffer open at all** — the picture is the input, so
+    /// requiring a document first is as arbitrary as requiring one before you could record.
+    ///
+    /// Regression (user report, 2026-08-07): Apply reported "no audio to process". Three
+    /// separate places treated any input kind other than `IoKind::None` as needing audio — the
+    /// placeholder document, the range, and the input collection — and the fix to the first two
+    /// is invisible without a test that opens the dialog with `documents` genuinely empty.
+    ///
+    /// Asserts on the *absence* of that one message rather than on a successful run, so it
+    /// holds whether or not Praat is installed on the machine running the suite.
+    #[test]
+    fn an_image_process_runs_with_no_buffer_open() {
+        let mut app = new_app(None, None);
+        assert!(app.documents.is_empty(), "this test is only meaningful with no document");
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.input == crate::model::cdp::IoKind::Photo)
+            .expect("the catalog ships four image sonifiers");
+        app.open_cdp_params(index);
+        if let Some(Dialog::CdpParams { photo_input: Some(photo), .. }) = app.dialog.as_mut() {
+            photo.path = Some("/tmp/whatever.png".into());
+        }
+        assert!(app.cdp_params_blocker().is_none(), "a picked image must not block");
+
+        app.cdp_run(crate::cdp::JobPurpose::Apply);
+
+        if let Some(Dialog::CdpParams { error: Some(error), .. }) = &app.dialog {
+            assert!(
+                !error.contains("no audio"),
+                "an image sonifier must not demand audio it never reads: {error}"
+            );
+        }
+    }
+
+    /// Opens `Dialog::CdpParams` for the first image sonifier in the catalog.
+    fn photo_params_app() -> App {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.input == crate::model::cdp::IoKind::Photo)
+            .expect("the catalog ships four image sonifiers");
+        app.open_cdp_params(index);
+        app
+    }
+
+    /// A PNG on disk for the picker to find. Written rather than checked in — the picker only
+    /// cares that the extension matches and the bytes decode.
+    fn write_test_png(dir: &std::path::Path, name: &str) -> PathBuf {
+        std::fs::create_dir_all(dir).expect("dir");
+        let path = dir.join(name);
+        image::RgbImage::from_fn(24, 16, |x, y| image::Rgb([x as u8 * 8, y as u8 * 8, 100]))
+            .save(&path)
+            .expect("png");
+        path
+    }
+
+    /// An image process opens with nothing picked, and that must block the run *inline* rather
+    /// than letting Apply appear to work: the script would `exitScript` on its own missing-Photo
+    /// check and the only thing surfaced would be the driver's "produced no Sound object", which
+    /// names neither the cause nor the fix.
+    #[test]
+    fn an_image_process_blocks_apply_until_a_picture_is_picked() {
+        let mut app = photo_params_app();
+        let Some(Dialog::CdpParams { photo_input, .. }) = &app.dialog else {
+            panic!("expected the params dialog");
+        };
+        assert!(photo_input.is_some(), "an IoKind::Photo process gets the image row");
+        let blocker = app.cdp_params_blocker().expect("an unpicked image must block");
+        assert!(blocker.contains("image"), "{blocker}");
+
+        // ...and stops blocking once one is set.
+        if let Some(Dialog::CdpParams { photo_input: Some(photo), .. }) = app.dialog.as_mut() {
+            photo.path = Some("/tmp/x.png".into());
+        }
+        assert!(app.cdp_params_blocker().is_none(), "a picked image must clear the blocker");
+    }
+
+    /// The image row is the *same* focus slot the dual-input and variadic rows use, so its
+    /// presence must not shift Preview or Apply. Getting this wrong would send Enter on Apply
+    /// to the row above it.
+    #[test]
+    fn the_image_row_shares_the_one_extra_input_slot() {
+        let app = photo_params_app();
+        let Some(Dialog::CdpParams { fields, second_input, variadic_input, photo_input, .. }) =
+            &app.dialog
+        else {
+            panic!("expected the params dialog");
+        };
+        assert!(second_input.is_none() && variadic_input.is_none(), "an IoKind is one of three");
+        assert!(cdp_has_extra_input(second_input.as_ref(), variadic_input.as_ref(), photo_input.as_ref()));
+        // Exactly one row's worth, not two.
+        assert_eq!(
+            cdp_params_focus_apply(fields.len(), true),
+            cdp_params_focus_extra_input(fields.len()) + 2,
+            "Preview and Apply must sit directly after the single extra-input row"
+        );
+    }
+
+    /// Enter on the image row opens the browser, Enter on a file commits its absolute path and
+    /// closes it — the whole pick, driven through the real key handler rather than by setting
+    /// the field directly.
+    #[test]
+    fn picking_an_image_commits_its_path_and_remembers_the_folder() {
+        let dir = std::env::temp_dir()
+            .join(format!("tui-wave-photo-pick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let png = write_test_png(&dir, "forest.png");
+
+        let mut app = photo_params_app();
+        let field_count = match &app.dialog {
+            Some(Dialog::CdpParams { fields, .. }) => fields.len(),
+            _ => panic!("expected the params dialog"),
+        };
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = cdp_params_focus_extra_input(field_count);
+        }
+        app.last_photo_dir = Some(dir.clone());
+        assert!(app.open_cdp_photo_picker(), "Enter on the image row must open the browser");
+
+        // Land on the PNG, wherever the directory listing put it.
+        let Some(Dialog::CdpParams { photo_picker: Some(picker), .. }) = app.dialog.as_mut() else {
+            panic!("the picker should be open");
+        };
+        let found = (0..picker.panel.filtered_count()).find(|&i| {
+            picker.panel.selected = i;
+            picker.panel.selected_entry().is_some_and(|(p, _)| p.file_name() == png.file_name())
+        });
+        assert!(found.is_some(), "the picker did not list the PNG it was pointed at");
+
+        app.handle_cdp_photo_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { photo_input: Some(photo), photo_picker, .. }) = &app.dialog
+        else {
+            panic!("expected the params dialog");
+        };
+        assert!(photo_picker.is_none(), "committing must close the picker");
+        assert_eq!(photo.path.as_deref(), Some(png.to_string_lossy().as_ref()));
+        assert_eq!(app.last_photo_dir.as_deref(), Some(dir.as_path()), "folder is remembered");
+        assert!(app.cdp_params_blocker().is_none(), "a committed pick clears the blocker");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Esc must leave the pick exactly as it was and drop the preview bitmap with the pane —
+    /// a cancelled browse that changed the pick, or that leaked megabytes of RGBA, would both
+    /// be invisible until much later.
+    #[test]
+    fn cancelling_the_image_picker_changes_nothing_and_frees_the_preview() {
+        let dir = std::env::temp_dir()
+            .join(format!("tui-wave-photo-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_test_png(&dir, "a.png");
+
+        let mut app = photo_params_app();
+        let field_count = match &app.dialog {
+            Some(Dialog::CdpParams { fields, .. }) => fields.len(),
+            _ => panic!("expected the params dialog"),
+        };
+        if let Some(Dialog::CdpParams { focus, photo_input: Some(photo), .. }) = app.dialog.as_mut() {
+            *focus = cdp_params_focus_extra_input(field_count);
+            photo.path = Some("/previously/chosen.png".into());
+        }
+        app.last_photo_dir = Some(dir.clone());
+        assert!(app.open_cdp_photo_picker());
+
+        app.handle_cdp_photo_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { photo_input: Some(photo), photo_picker, .. }) = &app.dialog
+        else {
+            panic!("expected the params dialog");
+        };
+        assert!(photo_picker.is_none(), "Esc must close the picker");
+        assert_eq!(photo.path.as_deref(), Some("/previously/chosen.png"), "the pick must survive");
+        assert!(app.photo_preview.is_none(), "the preview must not outlive the pane");
+        assert!(app.photo_preview_graphics_protocol.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Renders the Save As dialog and returns the screen as text, for the layout assertions
+    /// below. `dir` is what the destination list opens on.
+    fn render_save_as_to_text(dir: &std::path::Path, focused: usize) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 10)), Some(dir.to_path_buf()));
+        app.handle_action(Action::SaveAs);
+        app.save_as_focused = focused;
+        assert!(app.save_as_active, "Save As should be open");
+
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The destination is **visible without a keystroke** — that is the whole point of putting
+    /// the list inline rather than behind an overlay. Before this, a bare filename resolved
+    /// against the Files panel's directory and the dialog said nothing about where the file
+    /// would land (user report, 2026-08-07).
+    #[test]
+    fn save_as_shows_its_destination_directory_and_the_folders_beside_it() {
+        let base = std::env::temp_dir().join(format!("tui-wave-saveas-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("stems")).unwrap();
+        std::fs::create_dir_all(base.join("bounces")).unwrap();
+        std::fs::create_dir_all(base.join(".hidden")).unwrap();
+
+        let screen = render_save_as_to_text(&base, 0);
+        assert!(screen.contains("Save As"), "{screen}");
+        assert!(screen.contains("Filename:"), "{screen}");
+        // The list, with its real subdirectories...
+        assert!(screen.contains("stems"), "the destination list is missing:\n{screen}");
+        assert!(screen.contains("bounces"), "{screen}");
+        assert!(screen.contains(".."), "the parent row must be offered:\n{screen}");
+        // ...minus the hidden one, and plus the current path spelled out.
+        assert!(!screen.contains(".hidden"), "hidden folders must stay out:\n{screen}");
+        let tail = base.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(screen.contains(&tail), "the current directory should be shown:\n{screen}");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The list is a focus stop like any other, and Enter on it **navigates** rather than
+    /// saving — a picker whose Enter committed could only ever reach one level below where it
+    /// opened, and worse, would write into whatever folder the highlight was resting on.
+    #[test]
+    fn save_as_enter_on_the_destination_list_navigates_instead_of_saving() {
+        let base = std::env::temp_dir().join(format!("tui-wave-saveas-nav-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("stems")).unwrap();
+
+        let mut app = new_app(Some(doc(0.1, 10)), Some(base.clone()));
+        app.handle_action(Action::SaveAs);
+        app.save_as_focused = SAVE_AS_DEST_FOCUS;
+
+        // Land on `stems` and descend into it. Probed through `resolve`, which is the only
+        // thing the rest of the app asks this component — where a bare filename ends up.
+        let target = base.join("stems").join("take.wav");
+        let dest = app.dest_picker.as_mut().expect("the picker exists while the dialog is up");
+        // Down *then* Enter, in that order: the list opens on `..`, and pressing Enter first
+        // would navigate to the parent rather than into the subdirectory.
+        for _ in 0..8 {
+            if dest.resolve("take.wav") == target {
+                break;
+            }
+            dest.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            dest.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        }
+        assert_eq!(dest.resolve("take.wav"), target, "never reached the stems folder");
+
+        // Still open — Enter navigated, it did not save.
+        assert!(app.save_as_active, "Enter on the list must not close the dialog");
+        assert!(app.documents[0].path.is_none(), "Enter on the list must not write a file");
+
+        // And a bare filename now resolves into the folder that was chosen.
+        assert_eq!(app.dest_picker.as_ref().unwrap().resolve("take.wav"), target);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Every file-writing dialog shows where it will write, and offers the folders beside it.
+    /// The destination used to be invisible — a bare name resolved against the Files panel and
+    /// nothing in the dialog said so (user report, 2026-08-07).
+    #[test]
+    fn the_export_dialog_shows_its_destination_directory() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let base = std::env::temp_dir().join(format!("tui-wave-export-dest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("bounces")).unwrap();
+        std::fs::create_dir_all(base.join(".hidden")).unwrap();
+
+        let mut app = new_app(Some(doc(0.1, 10)), Some(base.clone()));
+        app.handle_action(Action::Export);
+        assert!(matches!(app.dialog, Some(Dialog::Export { .. })), "Export should be open");
+        assert!(app.dest_picker.is_some(), "the dialog must seed a destination picker");
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 34)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let screen: String = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(screen.contains("Save in"), "the destination column is missing:\n{screen}");
+        assert!(screen.contains("bounces"), "{screen}");
+        assert!(!screen.contains(".hidden"), "hidden folders must stay out:\n{screen}");
+        // The footer path is truncated from the *left* (`dest_picker::truncate_left`), so the
+        // tail is what survives — asserting on the whole directory name would fail for a
+        // reason that has nothing to do with the destination being shown.
+        assert!(
+            screen.contains("export-dest"),
+            "the current directory should be shown:\n{screen}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Every dialog that writes a file shows where it will write, and offers the folders
+    /// beside it. One test over all of them, because the value of the shared
+    /// `ui::dest_picker` is precisely that they cannot drift apart — and because the two
+    /// export dialogs report more row rects than they have focus stops, which is exactly the
+    /// case a per-dialog index would get wrong (see `App::render_dest_picker_column`).
+    #[test]
+    fn every_file_writing_dialog_shows_its_destination() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let base = std::env::temp_dir().join(format!("tui-wave-dest-all-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("bounces")).unwrap();
+        std::fs::create_dir_all(base.join(".hidden")).unwrap();
+
+        // Export Regions needs a marker; Export Channels needs more than one channel.
+        // `Document` is not `Clone`, so each pass builds its own.
+        let document = || {
+            let mut doc = stereo_doc(0.2, 0.3, 400);
+            doc.markers.push(crate::model::document::Marker {
+                position: 100,
+                label: "a".into(),
+            });
+            doc
+        };
+
+        for action in [
+            Action::SaveAs,
+            Action::Export,
+            Action::ExportChannels,
+            Action::ExportRegions,
+        ] {
+            let mut app = new_app(Some(document()), Some(base.clone()));
+            app.handle_action(action);
+            assert!(
+                app.dest_picker.is_some(),
+                "{action:?} did not seed a destination picker"
+            );
+
+            let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let screen: String = (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            assert!(screen.contains("Save in"), "{action:?} has no destination column:\n{screen}");
+            assert!(screen.contains("bounces"), "{action:?} lists no folders:\n{screen}");
+            assert!(
+                !screen.contains(".hidden"),
+                "{action:?} shows hidden folders:\n{screen}"
+            );
+            assert!(
+                screen.contains("dest-all"),
+                "{action:?} does not show the current directory:\n{screen}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// Ctrl+W on a `[f]`/`[s]` row closes it immediately — no dirty/save
     /// concept, so no confirm — and clamps the selection to a still-valid row (FR-6).
     #[test]
@@ -36946,6 +38316,7 @@ mod tests {
             fields: vec![field],
             second_input: None,
             variadic_input: None,
+            photo_input: None,
             focus: 1,
             error: None,
             preview: None,
@@ -36954,7 +38325,7 @@ mod tests {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None, file_picker: None, variadic_picker: None,
+            formant_picker: None, file_picker: None, variadic_picker: None, photo_picker: None,
             presets: Vec::new(),
             preset_selected: None,
             custom_values: None,
@@ -37186,7 +38557,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut app = new_app(None, Some(dir.clone()));
 
-        app.dialog = Some(Dialog::SaveMatrixAs { bytes: b"fake matrix bytes".to_vec(), input: TextInput::new("mysine") });
+        app.dialog = Some(Dialog::SaveMatrixAs { bytes: b"fake matrix bytes".to_vec(), input: TextInput::new("mysine"), dest_focused: false });
         app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
         assert!(app.dialog.is_none(), "Esc should close the dialog");
@@ -37238,6 +38609,7 @@ mod tests {
             ],
             second_input: None,
             variadic_input: None,
+            photo_input: None,
             focus: CDP_PRESET_FOCUS,
             error: None,
             preview: None,
@@ -37246,7 +38618,7 @@ mod tests {
             table_edit: None,
             marker_time_list_edit: None,
             hilite_band_edit: None,
-            formant_picker: None, file_picker: None, variadic_picker: None,
+            formant_picker: None, file_picker: None, variadic_picker: None, photo_picker: None,
             presets: Vec::new(),
             preset_selected: None,
             custom_values: None,

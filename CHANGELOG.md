@@ -1,5 +1,53 @@
 # Changelog
 
+## 2026-08-07 (2.5.2)
+
+- **Prebuilt packages are back, built by CI rather than by hand.** Tagging a release now
+  produces macOS builds for both Intel and Apple Silicon, plus `.deb`, `.rpm` and AppImage for
+  Linux. None of them bundle Praat or CDP — tui-wave runs those as external programs and you
+  install them yourself; `install.sh` still does that for you.
+
+  The `.deb` depends on `libasound2t64 | libasound2`, which is what lets one package install on
+  both Ubuntu 22.04 and 24.04+: ALSA was renamed in the 64-bit `time_t` transition and the new
+  package does not provide the old name. CI installs the package and runs it on both releases
+  before publishing, because a package that installs on one and not the other looks perfectly
+  healthy from either side.
+
+- **Every dialog that writes a file now shows you where it will write, and lets you change it.**
+  Save As, Export, Export Channels, Export Regions, Save Curve As and Save Matrix As previously
+  resolved a bare filename against whatever folder the Files panel happened to be showing — a
+  destination that was invisible in the dialog and unknowable without closing it. Each now
+  carries a browsable folder list down its left side, with the chosen path spelled out in full
+  along the bottom. Tab reaches it, Enter opens a folder, and typing a full path still works and
+  still wins.
+
+  The two that create a subfolder (Export Channels, Export Regions) keep their Subfolder field —
+  the list chooses the parent it goes in, so the two compose rather than compete.
+
+- **File and folder browsers no longer list hidden entries** — dotfiles *and* dot-directories.
+  A home directory is mostly `.config`, `.cache` and `.local`, and burying the two folders you
+  actually keep audio in among thirty of them made every picker harder to read. The `..` row is
+  unaffected.
+
+- **The four image sonifiers now ship.** Percussive Image Sonification, Photo Sonification,
+  Photo Brightness-Controlled Pitch Sonification and Spectral Image Sonification turn a picture
+  into sound — scanning it column by column and mapping brightness and the red/blue balance to
+  pitch, click rate, harmonic content and stereo position. They were excluded until now because
+  they read a Praat *Photo* object rather than a sound, which nothing in the app could supply.
+
+  Pick the image on the process dialog's own `image` row: Enter opens a browser with a **live
+  preview** of whatever is highlighted, so you can choose by looking rather than by filename.
+  Terminals without graphics show the file's dimensions and size instead. Apply stays dimmed,
+  and says why, until a picture is chosen — these scripts otherwise fail with a message that
+  names neither the cause nor the fix.
+
+  They need no open file: a sonified image is new material, so the result arrives in a new
+  buffer, the same way Record's does.
+
+  **PNG only**, which is Praat's own limit rather than a choice made here — it reads no other
+  image format. The browser therefore offers no other, so a file it lists is a file that will
+  actually run.
+
 ## 2026-08-05 (2.5.1)
 
 - **The `py` process group now works on macOS.** Those 34 scripts pick their own Python

@@ -80,6 +80,15 @@ pub struct PraatJob {
     /// `inputs[0]` is always the selection being processed; a `DualWav` process adds a second
     /// whole buffer the user picked.
     pub inputs: Vec<Vec<Vec<f32>>>,
+    /// The PNG an `IoKind::Photo` process reads, as the user picked it. `Some` exactly when
+    /// `planned.photo_input` is set.
+    ///
+    /// Passed straight through to Praat rather than staged into the job's temp directory like
+    /// the input WAVs are, because there is nothing to convert: Praat reads PNG natively and
+    /// the picker only offers PNGs, so a copy would be pure I/O on a file that may be tens of
+    /// megabytes. It is therefore the one input path the runner does not own — and the one it
+    /// must not delete, which `TempDirGuard` never sees.
+    pub photo_path: Option<PathBuf>,
     pub input_sample_rate: u32,
     pub purpose: JobPurpose,
     pub timeout: Duration,
@@ -433,7 +442,14 @@ fn run_praat(
     if let Some(path) = path_with_venv(job.python_venv_bin.as_deref()) {
         command.env("PATH", path);
     }
-    command.arg(driver_path).args(input_paths).arg(output_path);
+    command.arg(driver_path).args(input_paths);
+    // Between the inputs and the output, matching where `driver_script` puts `infile
+    // Photo_file` in the form. Same lockstep rule as the picture below — Praat fills a form
+    // strictly by position *and count*.
+    if let Some(path) = &job.photo_path {
+        command.arg(path);
+    }
+    command.arg(output_path);
     // Conditional in lockstep with the driver's own `outfile Picture_file` field: Praat fills a
     // form strictly by position *and count*, so one without the other is an immediate exit 255.
     if let Some(path) = picture_path {
@@ -700,6 +716,7 @@ mod tests {
                 input_names: vec![input_wav_name(1)],
                 output_name: OUTPUT_WAV.into(),
                 picture_name: None,
+                photo_input: false,
                 script_path: PathBuf::from("/unused"),
                 pause_rewrite: None,
                 builtin_source: None,
@@ -707,6 +724,7 @@ mod tests {
                 label: "test".into(),
             },
             inputs: vec![vec![vec![0.0f32; 1000], vec![0.0f32; 1000]]],
+            photo_path: None,
             input_sample_rate: 44_100,
             purpose: JobPurpose::Apply,
             timeout,
@@ -1038,6 +1056,34 @@ mod tests {
         (vec![samples], RATE)
     }
 
+    /// A PNG for the `IoKind::Photo` processes to sonify, written under `state` and returned by
+    /// path.
+    ///
+    /// Deliberately generated rather than checked in as a fixture: the four scripts read
+    /// brightness and the red/blue balance per column, so what matters is that both vary
+    /// across the image — a flat or grey picture would sonify to something the smoke test could
+    /// not tell apart from a broken run. The gradients here put a different value in every
+    /// column and a red→blue sweep across the width, which exercises the pan mapping too.
+    ///
+    /// Small on purpose (160x120). These scripts scan every pixel of every analysis column, and
+    /// the sweep runs them at their catalog defaults on a timeout.
+    fn smoke_photo_fixture(state: &Path) -> PathBuf {
+        let (width, height) = (160u32, 120u32);
+        let image = image::RgbImage::from_fn(width, height, |x, y| {
+            let across = x as f32 / width as f32;
+            let down = y as f32 / height as f32;
+            image::Rgb([
+                (255.0 * (1.0 - across)) as u8,
+                (255.0 * down) as u8,
+                (255.0 * across) as u8,
+            ])
+        });
+        let path = state.join("photo.png");
+        std::fs::create_dir_all(state).expect("photo fixture dir");
+        image.save(&path).expect("photo fixture");
+        path
+    }
+
     /// Runs every Praat catalog entry once at its declared defaults and reports which fail.
     ///
     /// This is what turns "82.5% of a 120-script sample worked" into a known-good shipped set.
@@ -1089,6 +1135,7 @@ mod tests {
                 .expect("corpus clip");
         }
         let corpus_path = corpus.to_string_lossy().into_owned();
+        let photo = smoke_photo_fixture(&state);
 
         // Narrows the sweep to entries whose key contains this substring, e.g.
         // `TUI_WAVE_PRAAT_SMOKE_FILTER=praat_py_` for the Python group alone. The full sweep is
@@ -1142,8 +1189,12 @@ mod tests {
             let job = PraatJob {
                 id: ran as u64,
                 praat_bin: praat_bin_for(""),
-                planned,
                 inputs: vec![channels.clone(); input_count],
+                // An `IoKind::Photo` process `exitScript`s without one, so the sweep would
+                // report four confusing "produced no Sound object" failures rather than
+                // covering them at all — the same reasoning as the corpus folder above.
+                photo_path: planned.photo_input.then(|| photo.clone()),
+                planned,
                 input_sample_rate: sample_rate,
                 purpose: JobPurpose::Apply,
                 timeout: Duration::from_secs(60),
@@ -1207,6 +1258,7 @@ mod tests {
 
         let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
         let (channels, sample_rate) = smoke_fixture();
+        let photo = smoke_photo_fixture(&state);
 
         let (mut drew, mut blank) = (0usize, 0usize);
         let mut failures: Vec<String> = Vec::new();
@@ -1259,8 +1311,11 @@ mod tests {
             let job = PraatJob {
                 id: 0,
                 praat_bin: praat_bin_for(""),
-                planned,
                 inputs: vec![channels.clone(); input_count],
+                // The image sonifiers all draw, so they reach this sweep too and need the same
+                // fixture the main one supplies.
+                photo_path: planned.photo_input.then(|| photo.clone()),
+                planned,
                 input_sample_rate: sample_rate,
                 purpose: JobPurpose::Apply,
                 // Not `DRAWING_TIMEOUT`. That figure is headroom for one interactive run the

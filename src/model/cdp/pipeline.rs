@@ -1138,6 +1138,12 @@ fn plan_job_inner(
         IoKind::Curve => Err(PlanError::UnsupportedInV1 {
             reason: "Curve processes must be planned via plan_curve_job, not plan_job".into(),
         }),
+        // Praat-only, and planned by `praat::plan::plan_praat_job_with` — no CDP binary reads
+        // an image. Reaching this is a catalog bug (a `photo` input on a CDP entry), not a
+        // plan to build, so it is refused for the same reason `WavGlob` is.
+        IoKind::Photo => Err(PlanError::UnsupportedInV1 {
+            reason: "Photo input is a Praat-only kind and cannot be planned as a CDP job".into(),
+        }),
     }
 }
 
