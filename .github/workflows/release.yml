@@ -31,6 +31,13 @@ on:
 permissions:
   contents: read
 
+# Action versions are pinned to the lowest major that runs on Node.js 24: GitHub's runners now
+# force Node 20 actions onto Node 24 and warn, and will eventually stop. checkout moved at v5,
+# upload-artifact at v6. download-artifact is v8 (its v4-v7 are Node 20) and reads anything
+# uploaded by upload-artifact v4 or newer, so the pair below is compatible despite the version
+# gap. Deliberately not the newest major of each: checkout v7 adds fork-PR restrictions this
+# workflow has no use for, and a bigger jump is a bigger surface for a surprise.
+
 env:
   CARGO_TERM_COLOR: always
   # A release build that fails is worth more than a fast one that hides why.
@@ -59,7 +66,7 @@ jobs:
             runner: macos-15-intel
             target: x86_64-apple-darwin
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # Load-bearing: praat_catalog.toml is include_str!'d from third_party/praat-audiotools,
           # so without the submodule the build fails outright rather than degrading.
@@ -92,7 +99,7 @@ jobs:
           shasum -a 256 "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
           echo "ASSET=${staging}.tar.gz" >> "$GITHUB_ENV"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: macos-${{ matrix.target }}
           path: |
@@ -113,7 +120,7 @@ jobs:
     name: Linux packages
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -211,7 +218,7 @@ jobs:
             sha256sum "$f" > "$f.sha256"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: linux-packages
           path: |
@@ -235,7 +242,7 @@ jobs:
       # The only job that writes anything.
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
