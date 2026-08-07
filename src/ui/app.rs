@@ -1834,6 +1834,14 @@ struct FormantBufferPicker {
     selected: usize,
 }
 
+/// What clicking a hint in a dialog's bottom bar does. Only the two keys that name an outcome
+/// rather than a motion are mouse-actionable — see `App::hint_segment_at`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HintAction {
+    Submit,
+    Cancel,
+}
+
 /// Which embedded file browser is currently on screen. At most one ever is, so this is a
 /// plain tag rather than a set.
 ///
@@ -2800,6 +2808,12 @@ pub struct App {
     pub save_as_dither: bool,
     /// Which row has keyboard focus in the Save As dialog (0=filename, 1=format, 2=dither).
     save_as_focused: usize,
+    /// The hints bar's rendered text, captured from the frame each time a dialog draws.
+    ///
+    /// Read back from the terminal buffer rather than threaded out of ~20 renderers, which is
+    /// what makes clicking a hint work in *every* dialog — including the ones still building
+    /// their rows by hand. See `hint_segment_at`.
+    dialog_hints_text: String,
     /// Where the open file-writing dialog will write, browsable inline (`ui::dest_picker`).
     ///
     /// **One field for all six** — Save As, Export, Export Channels, Export Regions, Save Curve
@@ -3557,6 +3571,7 @@ impl App {
             save_as_dither: false,
             save_as_focused: 0,
             dest_picker: None,
+            dialog_hints_text: String::new(),
             dialog_row_rects: Vec::new(),
             dialog_n_interactive: 0,
             last_frame_area: Rect::default(),
@@ -6526,14 +6541,25 @@ impl App {
     }
 
     fn handle_dialog_row_click_inner(&mut self, row: usize, x_in_row: u16) {
-        // The hints/apply bar is appended as the last element of dialog_row_rects.
-        // Clicking it (or anything past the interactive rows) submits the dialog.
+        // The hints bar is the last element of `dialog_row_rects`. A click on it does what the
+        // hint under the pointer says — and *only* that.
+        //
+        // It used to send Enter regardless of where in the bar the click landed, so clicking
+        // "Esc:cancel" applied the dialog (user report, 2026-08-08): the precise opposite of the
+        // word being clicked. Anything that is not a hint — the gaps between them, and the
+        // motion keys (`Tab`, `←→`, `Space`) that name no outcome — now does nothing, which is
+        // the right answer when there is nothing under the pointer to act on.
         if row >= self.dialog_n_interactive {
-            let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+            let key = match self.hint_segment_at(x_in_row) {
+                Some(HintAction::Submit) => KeyCode::Enter,
+                Some(HintAction::Cancel) => KeyCode::Esc,
+                None => return,
+            };
+            let event = KeyEvent::new(key, KeyModifiers::NONE);
             if self.save_as_active {
-                self.handle_save_as_key(enter);
+                self.handle_save_as_key(event);
             } else {
-                self.handle_dialog_key(enter);
+                self.handle_dialog_key(event);
             }
             return;
         }
@@ -17469,6 +17495,7 @@ impl App {
             self.dialog_row_rects.clear();
         }
         self.render_dest_picker_column(frame);
+        self.capture_dialog_hints(frame);
 
         // `Dialog::LoadCurve` renders separately from the generic `render_dialog` above
         // (which only ever gets `&Dialog`) because `FilePanel::render` needs `&mut self` for
@@ -17651,6 +17678,64 @@ impl App {
                     protocol,
                 );
             }
+        }
+    }
+
+    /// Reads the hints bar's rendered text out of the frame, for `hint_segment_at`.
+    ///
+    /// Taken from the terminal buffer rather than passed out of each renderer because there are
+    /// about twenty of them, several still building their rows by hand — reading what was
+    /// actually drawn makes hint clicks work everywhere at once and cannot fall out of step with
+    /// what the user is looking at.
+    fn capture_dialog_hints(&mut self, frame: &mut Frame) {
+        self.dialog_hints_text.clear();
+        let Some(&rect) = self.dialog_row_rects.last() else { return };
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+        let buffer = frame.buffer_mut();
+        let (max_x, max_y) = (buffer.area.width, buffer.area.height);
+        if rect.y >= max_y {
+            return;
+        }
+        for x in rect.x..(rect.x + rect.width).min(max_x) {
+            self.dialog_hints_text.push_str(buffer[(x, rect.y)].symbol());
+        }
+    }
+
+    /// What the hint under column `x_in_row` of the hints bar means.
+    ///
+    /// The bar reads `Enter:apply  Esc:cancel` — and clicking *anywhere* on it used to press
+    /// Enter, so clicking the word "cancel" applied the dialog (user report, 2026-08-08). A
+    /// click has to do what the label under it says.
+    ///
+    /// Hints are separated by two or more spaces, which every renderer in this file already
+    /// does (`":next  "`, `":change  "`, `":apply"`), so the bar splits into segments without
+    /// any renderer having to describe itself. Only `Enter`/`Ret` and `Esc` are actionable:
+    /// the rest (`Tab`, `←→`, `Space`, `/`) name keyboard motions with no target under the
+    /// pointer, and inventing one would be guessing. Those, and the gaps between segments,
+    /// return `None` and do nothing at all — which is the point, since doing nothing is
+    /// vastly better than doing the opposite of what the label says.
+    fn hint_segment_at(&self, x_in_row: u16) -> Option<HintAction> {
+        let chars: Vec<char> = self.dialog_hints_text.chars().collect();
+        let index = x_in_row as usize;
+        if index >= chars.len() || chars[index] == ' ' {
+            return None;
+        }
+        // Walk out to the segment's bounds: a run of 2+ spaces is the separator, so a single
+        // space inside a label ("save & continue") does not split it.
+        let is_break = |i: usize| chars.get(i) == Some(&' ') && chars.get(i + 1) == Some(&' ');
+        let mut start = index;
+        while start > 0 && !is_break(start - 1) {
+            start -= 1;
+        }
+        let segment: String = chars[start..].iter().collect();
+        let segment = segment.split("  ").next().unwrap_or("").trim();
+        // The key is the leading word, before its `:label`.
+        match segment.split(':').next().unwrap_or("").trim() {
+            "Enter" | "Ret" => Some(HintAction::Submit),
+            "Esc" => Some(HintAction::Cancel),
+            _ => None,
         }
     }
 
@@ -18118,7 +18203,9 @@ fn render_save_as_dialog(
         Span::styled("Space", hint_style),
         Span::styled(":check  ", label_style),
         Span::styled("Enter", hint_style),
-        Span::styled(":apply", label_style),
+        Span::styled(":apply  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
     ]);
 
     // The outer border first, then the two panes inside it — so the block's own background
@@ -18227,7 +18314,10 @@ fn render_mix_to_mono_dialog(
     // (plus 2 for border)
     let inner_h = (n as u16) + 5;
     let height = (inner_h + 2).min(area.height);
-    let width = 48u16.min(area.width);
+    // Sized to the hints bar, which at " Tab:next  Space:check  Del:-inf  Enter:apply
+    // Esc:cancel" (57 columns) is the widest row here. At 48 the Esc hint was clipped off the
+    // edge and the dialog could not be cancelled by mouse.
+    let width = 59u16.min(area.width);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -18279,7 +18369,9 @@ fn render_mix_to_mono_dialog(
         Span::styled("Del", hint_style),
         Span::styled(":-inf  ", label_style),
         Span::styled("Enter", hint_style),
-        Span::styled(":apply", label_style),
+        Span::styled(":apply  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
     ]);
 
     let block = Block::default()
@@ -18351,7 +18443,11 @@ fn render_gain_dialog(
 ) -> Vec<Rect> {
     let rows = GainRows::new(is_stereo, per_channel);
     let height = (if is_stereo { 11 } else { 8 }).min(area.height);
-    let width = 38u16.min(area.width);
+    // 49, not 38: the hints bar is the widest thing in this dialog once it offers a way out
+    // (" Tab:next  Space:check  Enter:apply  Esc:cancel" is 47 columns plus the border), and at
+    // 38 the Esc hint was silently clipped — leaving a dialog that could not be cancelled by
+    // mouse because the label to click was off the edge.
+    let width = 49u16.min(area.width);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -18395,7 +18491,9 @@ fn render_gain_dialog(
         Span::styled("Space", hint_style),
         Span::styled(":check  ", label_style),
         Span::styled("Enter", hint_style),
-        Span::styled(":apply", label_style),
+        Span::styled(":apply  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
     ]);
 
     // Rects are keyed by *role*, not packed sequentially: on stereo the Right row is reserved
@@ -18437,7 +18535,9 @@ fn render_gain_dialog(
 }
 
 fn render_fade_dialog(frame: &mut Frame, area: Rect, title: &str, curve: FadeCurve) -> Vec<Rect> {
-    let width = 32u16.min(area.width);
+    // Sized to the hints bar (" ←→:change  Enter:apply  Esc:cancel", 35 columns) rather than
+    // to the one field above it — see `render_mix_to_mono_dialog`.
+    let width = 37u16.min(area.width);
     // header spacer + curve selector + blank + hints = 4 inner rows + 2 border
     let height = 6u16.min(area.height);
     let popup = Rect {
@@ -18465,7 +18565,9 @@ fn render_fade_dialog(frame: &mut Frame, area: Rect, title: &str, curve: FadeCur
         Span::styled(" ←→", hint_style),
         Span::styled(":change  ", label_style),
         Span::styled("Enter", hint_style),
-        Span::styled(":apply", label_style),
+        Span::styled(":apply  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
     ]);
 
     let block = Block::default()
@@ -19180,7 +19282,9 @@ fn render_export_channels_dialog(
         Span::styled("Tab", hint_style),
         Span::styled(":next  ", label_style),
         Span::styled("Enter", go_style),
-        Span::styled(":Export", label_style),
+        Span::styled(":Export  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
     ]));
     let hints_row = Rect {
         x: popup.x + 1,
@@ -19268,7 +19372,9 @@ fn render_mix_to_stereo_dialog(
     let n = dests.len();
     // Wide enough for the hints bar, which is the longest fixed line here — the header's
     // filename tail and the channel rows both sit comfortably inside it.
-    let width = 68u16.min(area.width);
+    // Sized to the hints bar (75 columns with its Esc hint), for the reason given in
+    // `render_mix_to_mono_dialog`: a bar wider than its popup loses its tail silently.
+    let width = 77u16.min(area.width);
     let visible = ms_visible_rows(area, n);
     let scroll_top = ms_scroll_top(selected, visible, n);
     let end = (scroll_top + visible).min(n);
@@ -19417,7 +19523,9 @@ fn render_mix_to_stereo_dialog(
         Span::styled("Tab", hint_style),
         Span::styled(":next  ", label_style),
         Span::styled("Enter", go_style),
-        Span::styled(":Mix", label_style),
+        Span::styled(":Mix  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
     ]));
     let hints_row = Rect {
         x: popup.x + 1,
@@ -19581,7 +19689,9 @@ fn render_export_regions_dialog(
         Span::styled("Space", hint_style),
         Span::styled(":check  ", label_style),
         Span::styled("Enter", do_style),
-        Span::styled(":Do!", label_style),
+        Span::styled(":Do!  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
     ]);
 
     let block = Block::default()
@@ -38557,6 +38667,196 @@ mod tests {
         // Derived from the rect list itself: the hints bar always spans the popup's full inner
         // width, so its `x` is the inner left edge.
         app.dialog_row_rects.last().copied().unwrap_or_default()
+    }
+
+    /// Clicking a hint does what that hint says, and clicking anything else in the bar does
+    /// nothing.
+    ///
+    /// Regression (user report, 2026-08-08): the hints bar was one full-width rect and every
+    /// click on it sent Enter, so clicking the word "cancel" **applied** the dialog. The worst
+    /// possible outcome — the click did the exact opposite of the label under the pointer.
+    #[test]
+    fn clicking_a_hint_does_what_the_hint_says() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        // Normalize is the dialog from the report: one field, then `Enter:apply  Esc:cancel`.
+        let open = |app: &mut App| {
+            app.dialog = Some(Dialog::Normalize { input: TextInput::fresh("0.0".to_string()) });
+        };
+        let render = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+        };
+
+        let mut app = new_app(Some(doc(0.5, 400)), None);
+        open(&mut app);
+        render(&mut app);
+
+        // The bar's own text, and where each hint sits in it.
+        let hints = app.dialog_hints_text.clone();
+        let col = |needle: &str| {
+            hints.chars().collect::<String>().find(needle).map(|byte_idx| {
+                hints[..byte_idx].chars().count() as u16
+            }).unwrap_or_else(|| panic!("no {needle:?} in hints bar {hints:?}"))
+        };
+
+        // --- clicking Esc cancels: the dialog closes and the document is untouched.
+        let before = app.documents[0].channels[0][0];
+        app.handle_dialog_row_click(app.dialog_n_interactive, col("Esc"));
+        assert!(app.dialog.is_none(), "clicking Esc should close the dialog");
+        assert_eq!(
+            app.documents[0].channels[0][0], before,
+            "clicking Esc must not apply the dialog — this is the reported bug"
+        );
+
+        // ...and the label beside it, not just the key itself.
+        open(&mut app);
+        render(&mut app);
+        app.handle_dialog_row_click(app.dialog_n_interactive, col("cancel"));
+        assert!(app.dialog.is_none());
+        assert_eq!(app.documents[0].channels[0][0], before, "\"cancel\" must cancel");
+
+        // --- clicking Enter still applies.
+        open(&mut app);
+        render(&mut app);
+        app.handle_dialog_row_click(app.dialog_n_interactive, col("Enter"));
+        assert!(app.dialog.is_none(), "clicking Enter should close the dialog");
+        assert_ne!(
+            app.documents[0].channels[0][0], before,
+            "clicking Enter should still apply — normalizing 0.5 to 0 dBFS changes the samples"
+        );
+
+        // --- clicking dead space between hints does nothing at all.
+        let after_apply = app.documents[0].channels[0][0];
+        open(&mut app);
+        render(&mut app);
+        let gap = col("Esc") - 1; // the separator before "Esc"
+        app.handle_dialog_row_click(app.dialog_n_interactive, gap);
+        assert!(app.dialog.is_some(), "a click on empty bar space must do nothing");
+        assert_eq!(app.documents[0].channels[0][0], after_apply);
+    }
+
+    /// A motion key names no outcome, so clicking it does nothing rather than guessing one.
+    #[test]
+    fn clicking_a_motion_hint_does_nothing() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        // Export Regions' bar carries `Tab:next` and `←→:change` alongside the two actionable
+        // hints — the widest variety in the app.
+        let mut app = new_app(Some(doc(0.1, 400)), None);
+        app.documents[0].markers.push(crate::model::document::Marker {
+            position: 100,
+            label: "a".into(),
+        });
+        app.handle_action(Action::ExportRegions);
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let hints = app.dialog_hints_text.clone();
+        let tab = hints.find("Tab").map(|b| hints[..b].chars().count() as u16)
+            .unwrap_or_else(|| panic!("no Tab in {hints:?}"));
+        app.handle_dialog_row_click(app.dialog_n_interactive, tab);
+        assert!(
+            matches!(app.dialog, Some(Dialog::ExportRegions { .. })),
+            "clicking a motion hint must not submit or cancel"
+        );
+    }
+
+    /// Every dialog with a hints bar, swept: clicking "Esc" closes it, clicking a motion key
+    /// does not, and no click on the bar ever does the opposite of its label.
+    ///
+    /// The fix reads the bar's text back out of the rendered frame rather than being threaded
+    /// through each renderer, which is what makes it uniform across dialogs built every
+    /// different way — including the ones still assembling their rows by hand. This sweep is
+    /// what turns that from a claim into a fact.
+    #[test]
+    fn every_dialog_with_hints_treats_clicks_on_them_consistently() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        // Each entry opens one dialog on a fresh app. A closure rather than a `Dialog` value so
+        // dialogs that need documents, markers or channels can set them up.
+        type Open = (&'static str, fn(&mut App));
+        let cases: Vec<Open> = vec![
+            ("Normalize", |a| a.handle_action(Action::Normalize)),
+            ("Resample", |a| a.handle_action(Action::Resample)),
+            ("Gain", |a| a.handle_action(Action::Gain)),
+            ("FadeIn", |a| a.handle_action(Action::FadeIn)),
+            ("FadeOut", |a| a.handle_action(Action::FadeOut)),
+            ("MixToMono", |a| a.handle_action(Action::MixToMono)),
+            ("MixToStereo", |a| a.handle_action(Action::MixToStereo)),
+            ("Export", |a| a.handle_action(Action::Export)),
+            ("ExportChannels", |a| a.handle_action(Action::ExportChannels)),
+            ("RemoveEmptyChannels", |a| a.handle_action(Action::RemoveEmptyChannels)),
+            ("ExportRegions", |a| {
+                a.documents[0].markers.push(crate::model::document::Marker {
+                    position: 100,
+                    label: "a".into(),
+                });
+                a.handle_action(Action::ExportRegions);
+            }),
+            ("CdpSetup", |a| {
+                a.dialog = Some(Dialog::CdpSetup {
+                    input: TextInput::new("/opt/cdp"),
+                    error: None,
+                });
+            }),
+            ("RenameBuffer", |a| a.handle_action(Action::RenameBuffer)),
+        ];
+
+        let mut checked = 0;
+        for (name, open) in cases {
+            // Four channels so the multichannel dialogs are willing to open.
+            let mut app = new_app(
+                Some(Document {
+                    channels: (0..4).map(|c| vec![0.4 - c as f32 * 0.05; 400]).collect(),
+                    ..Document::default()
+                }),
+                None,
+            );
+            open(&mut app);
+            let Some(kind) = app.dialog.as_ref().map(std::mem::discriminant) else {
+                continue; // declined to open on this fixture; nothing to check
+            };
+            let mut terminal = Terminal::new(TestBackend::new(150, 46)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+
+            let hints = app.dialog_hints_text.clone();
+            // Every dialog must offer a way out. Seven did not until 2026-08-08 (Gain, both
+            // Fades, Mix to Mono, Mix to Stereo, Export Channels, Export Regions): Esc worked
+            // but was never advertised, so there was no label to click and no mouse route to
+            // cancelling them at all.
+            let esc_byte = hints.find("Esc").unwrap_or_else(|| {
+                panic!("{name}: hints bar offers no way out: {hints:?}")
+            });
+            let esc = hints[..esc_byte].chars().count() as u16;
+            checked += 1;
+
+            // A motion key, where the bar has one, must leave the dialog alone.
+            for motion in ["Tab", "Space"] {
+                if let Some(b) = hints.find(motion) {
+                    let col = hints[..b].chars().count() as u16;
+                    app.handle_dialog_row_click(app.dialog_n_interactive, col);
+                    assert_eq!(
+                        app.dialog.as_ref().map(std::mem::discriminant),
+                        Some(kind),
+                        "{name}: clicking {motion:?} should do nothing, but the dialog changed"
+                    );
+                }
+            }
+
+            // Esc closes it. That it *cancels* rather than applies is what the Normalize test
+            // pins precisely; here the point is that every dialog agrees Esc means Esc.
+            app.handle_dialog_row_click(app.dialog_n_interactive, esc);
+            assert_ne!(
+                app.dialog.as_ref().map(std::mem::discriminant),
+                Some(kind),
+                "{name}: clicking Esc should close the dialog, but it is still open"
+            );
+        }
+        assert!(checked >= 10, "expected to sweep at least 10 dialogs, swept {checked}");
     }
 
     /// Ctrl+W on a `[f]`/`[s]` row closes it immediately — no dirty/save
