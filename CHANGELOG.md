@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-08 (2.5.3)
 
 - **`setup-environment.sh` makes a downloaded build actually work.** The release packages carry
   the tui-wave binary and nothing else, and about 439 of its processes are *scripts* from the
@@ -17,6 +17,11 @@
 
   The "no scripts" message now names the remedy and where to find it, instead of naming a config
   key.
+
+- **praatAudioTools updated to `0de18db`** — 442 processes, up from 439. New: Dynamic Formant
+  Sweeper (2), Harmonic Formant Locking, Gizmo Pitch Shift. Rich Formant Grains was reworked
+  upstream into a pure generator and is back after being briefly dropped. All four were run
+  against the real Praat binary and produce audio, not silence.
 
 - **No more AppImage.** It is a single self-contained file with nowhere to put the scripts or the
   setup script, and tui-wave without its Praat and CDP integrations is not worth shipping.
