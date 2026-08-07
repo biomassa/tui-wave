@@ -18373,65 +18373,42 @@ fn render_gain_dialog(
         Span::styled(":apply", label_style),
     ]);
 
-    // Hit-test rects are placed at fixed lines per role (not packed sequentially), so the
-    // reserved-but-blank Right/checkbox lines don't shift the tanh row's position — only
-    // whether the Right rect exists in the list depends on `per_channel`. The `+2` (not
-    // `+1`) accounts for the header spacer row prepended to `lines` below.
-    let row_w = popup.width.saturating_sub(2);
-    let rect_at = |line: u16| Rect { x: popup.x + 1, y: popup.y + 2 + line, width: row_w, height: 1 };
-
-    let (lines, mut rects): (Vec<Line>, Vec<Rect>) = if is_stereo {
-        let right_line = if per_channel {
-            field_line(
-                gain_row_label(is_stereo, per_channel, true),
-                right_input,
-                rows.right.expect("right is focusable when per_channel is on"),
-            )
-        } else {
-            Line::raw("")
-        };
-        let checkbox_label = if per_channel { " [X] Per-channel gain" } else { " [ ] Per-channel gain" };
-        let checkbox_style = if Some(focused) == rows.checkbox { cursor_style } else { label_style };
-        let checkbox_line = Line::from(Span::styled(checkbox_label, checkbox_style));
-
-        let mut rects = vec![rect_at(0)];
-        if per_channel {
-            rects.push(rect_at(1));
-        }
-        rects.push(rect_at(3)); // "Per-channel gain" checkbox — always focusable on stereo.
-        rects.push(rect_at(5)); // Tanh limiter checkbox.
-
-        (
-            vec![
-                Line::raw(""),
-                gain_line,
-                right_line,
-                Line::raw(""),
-                checkbox_line,
-                Line::raw(""),
-                tanh_line,
-                Line::raw(""),
-                hints,
-            ],
-            rects,
-        )
-    } else {
-        (
-            vec![Line::raw(""), gain_line, Line::raw(""), tanh_line, Line::raw(""), hints],
-            vec![rect_at(0), rect_at(2)],
-        )
-    };
-
+    // Rects are keyed by *role*, not packed sequentially: on stereo the Right row is reserved
+    // even when per-channel gain is off, so the rows below it never shift — only whether Right
+    // claims a click target changes. `DialogRows` expresses that directly, because a `blank`
+    // takes its row without claiming a target while a `field` takes both.
     let block = Block::default()
         .title("Gain")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
-    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    frame.render_widget(block, popup);
 
-    // Apply (hints bar) rect — index == dialog_n_interactive triggers Enter.
-    rects.push(hints_bar_rect(popup, row_w));
-    rects
+    let mut dialog_rows = crate::ui::dialog_rows::DialogRows::new(block_inner(popup));
+    dialog_rows.blank();
+    dialog_rows.field(gain_line);
+    if is_stereo {
+        if per_channel {
+            dialog_rows.field(field_line(
+                gain_row_label(is_stereo, per_channel, true),
+                right_input,
+                rows.right.expect("right is focusable when per_channel is on"),
+            ));
+        } else {
+            // Reserved, so the checkbox and limiter below keep their rows either way.
+            dialog_rows.blank();
+        }
+        dialog_rows.blank();
+        let checkbox_label =
+            if per_channel { " [X] Per-channel gain" } else { " [ ] Per-channel gain" };
+        let checkbox_style =
+            if Some(focused) == rows.checkbox { cursor_style } else { label_style };
+        dialog_rows.field(Line::from(Span::styled(checkbox_label, checkbox_style)));
+    }
+    dialog_rows.blank();
+    dialog_rows.field(tanh_line);
+    dialog_rows.blank();
+    dialog_rows.finish(frame, hints)
 }
 
 fn render_fade_dialog(frame: &mut Frame, area: Rect, title: &str, curve: FadeCurve) -> Vec<Rect> {
@@ -18471,16 +18448,15 @@ fn render_fade_dialog(frame: &mut Frame, area: Rect, title: &str, curve: FadeCur
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
-    frame.render_widget(
-        Paragraph::new(vec![Line::raw(""), curve_line, Line::raw(""), hints]).block(block),
-        popup,
-    );
+    frame.render_widget(block, popup);
 
-    let row_w = popup.width.saturating_sub(2);
-    vec![
-        Rect { x: popup.x + 1, y: popup.y + 2, width: row_w, height: 1 },
-        hints_bar_rect(popup, row_w),
-    ]
+    // One field, one spacer either side — but even here the rect comes from the row rather than
+    // from a counted offset, so the two cannot drift. See `ui::dialog_rows`.
+    let mut rows = crate::ui::dialog_rows::DialogRows::new(block_inner(popup));
+    rows.blank();
+    rows.field(curve_line);
+    rows.blank();
+    rows.finish(frame, hints)
 }
 
 fn render_dialog(
@@ -38437,6 +38413,46 @@ mod tests {
                 rows[0]
             );
         }
+    }
+
+    /// Gain's rects are keyed by role, not packed sequentially: on stereo the Right row is
+    /// reserved even when per-channel gain is off, so the checkbox and limiter below keep their
+    /// rows either way. Both configurations are checked, because that reservation is exactly
+    /// the sort of thing a conversion can quietly collapse.
+    #[test]
+    fn gain_click_rects_land_on_the_rows_they_name() {
+        // Mono: gain, then the limiter.
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.handle_action(Action::Gain);
+        assert_rect_labels(&mut app, "Gain (mono)", &[(0, "Gain"), (1, "limiter")]);
+
+        // Stereo, per-channel off: the Right row is reserved but claims no target, so the
+        // checkbox and limiter follow immediately in the rect list.
+        let mut app = new_app(Some(stereo_doc(0.2, 0.3, 200)), None);
+        app.handle_action(Action::Gain);
+        assert_rect_labels(
+            &mut app,
+            "Gain (stereo)",
+            &[(0, "Gain"), (1, "Per-channel"), (2, "limiter")],
+        );
+
+        // Stereo, per-channel on: Right claims a target and everything after it shifts by one.
+        if let Some(Dialog::Gain { per_channel, .. }) = app.dialog.as_mut() {
+            *per_channel = true;
+        }
+        assert_rect_labels(
+            &mut app,
+            "Gain (stereo, per-channel)",
+            &[(0, "Left"), (1, "Right"), (2, "Per-channel"), (3, "limiter")],
+        );
+    }
+
+    /// Fade's single field, after conversion.
+    #[test]
+    fn fade_click_rect_lands_on_its_curve_row() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.handle_action(Action::FadeIn);
+        assert_rect_labels(&mut app, "Fade In", &[(0, "Curve")]);
     }
 
     /// Ctrl+W on a `[f]`/`[s]` row closes it immediately — no dirty/save
