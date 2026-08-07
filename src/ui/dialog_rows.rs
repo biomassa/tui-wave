@@ -16,8 +16,8 @@
 //! column's top padding and its three rects stayed where they were.
 //!
 //! [`DialogRows`] removes the arithmetic. A row is pushed with [`DialogRows::field`] when it is
-//! interactive and [`DialogRows::blank`] when it is not, and the rect is derived from where the
-//! line *actually* landed. Adding, removing or reordering rows cannot
+//! interactive and [`DialogRows::text`]/[`DialogRows::blank`] when it is not, and the rect is
+//! derived from where the line *actually* landed. Adding, removing or reordering rows cannot
 //! desynchronise the two, because there is only one of them.
 //!
 //! ## The rect list's contract
@@ -48,6 +48,13 @@ impl<'a> DialogRows<'a> {
     /// A blank spacer row. Takes a line, claims no click target.
     pub fn blank(&mut self) {
         self.lines.push(Line::raw(""));
+    }
+
+    /// A row that displays something but cannot be interacted with — a wrapped explanation, a
+    /// section heading, a summary line. Takes a line, claims no click target, so it can never
+    /// be clicked into focus and can never shift the meaning of a later index.
+    pub fn text(&mut self, line: Line<'a>) {
+        self.lines.push(line);
     }
 
     /// An interactive row: rendered *and* given a click target covering the full width.
@@ -125,6 +132,16 @@ mod tests {
         assert_eq!(rows.rects[0].y, 5 + 1, "filename was the second line");
         assert_eq!(rows.rects[1].y, 5 + 2, "format was the third");
         assert_eq!(rows.rects[2].y, 5 + 4, "dither was the fifth, after a spacer");
+    }
+
+    /// Non-interactive rows take space but claim no target.
+    #[test]
+    fn text_rows_take_space_without_claiming_a_target() {
+        let mut rows = DialogRows::new(area());
+        rows.text(Line::raw("--- Section ---"));
+        rows.field(Line::raw("only field"));
+        assert_eq!(rows.rects.len(), 1, "the heading must not claim a click target");
+        assert_eq!(rows.rects[0].y, 5 + 1);
     }
 
     /// A pane sits in focus order among the rows without occupying one.

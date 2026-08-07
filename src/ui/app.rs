@@ -18955,23 +18955,8 @@ fn render_export_dialog(
         ExportFormat::Mp3 => ("Bitrate:", format!("{mp3_bitrate} kbps")),
     };
 
-    let mut lines = vec![
-        name_line,
-        value_row("Format:", format.label().to_string(), focused == ex_focus::FORMAT),
-        value_row(setting_label, setting_value, focused == ex_focus::SETTING),
-        Line::from(""),
-    ];
-    // Always `EXPORT_BLOCKER_ROWS` rows, blank when unblocked, so the dialog never changes size.
-    // Wrapped here rather than by `Paragraph` so the row count is known and bounded — letting the
-    // paragraph reflow is what made the height depend on the text in the first place.
-    let blocker_lines = wrap_to_rows(blocked.unwrap_or(""), inner_width.saturating_sub(1), EXPORT_BLOCKER_ROWS);
-    for line in blocker_lines {
-        lines.push(Line::from(Span::styled(format!(" {line}"), dim_style)));
-    }
-    lines.push(Line::from(""));
-
     let go_style = if blocked.is_none() { hint_style } else { dim_style };
-    lines.push(Line::from(vec![
+    let hints = Line::from(vec![
         Span::styled(" Tab", hint_style),
         Span::styled(":next  ", label_style),
         Span::styled("←→", hint_style),
@@ -18980,7 +18965,7 @@ fn render_export_dialog(
         Span::styled(":Export  ", label_style),
         Span::styled("Esc", hint_style),
         Span::styled(":cancel", label_style),
-    ]));
+    ]);
 
     let block = Block::default()
         .title("Export")
@@ -18993,33 +18978,28 @@ fn render_export_dialog(
     frame.render_widget(block, popup);
 
     let (list_area, form) = crate::ui::dest_picker::split(popup);
-    // The popup is sized by the destination list, which is taller than the form's own content
-    // — so the hints line is pushed to the bottom rather than sitting wherever the content
-    // happens to end. Its click rect below claims the bottom row, and the two must agree.
-    let hints_line = lines.pop().expect("the hints line is always the last pushed");
-    while (lines.len() as u16) < form.height.saturating_sub(1) {
-        lines.push(Line::raw(""));
-    }
-    lines.push(hints_line);
-    frame.render_widget(Paragraph::new(lines), form);
-    // The destination column itself is drawn by `App::render_dest_picker_column`, from the
-    // `Rect` reported below — `render_dialog` only ever gets `&Dialog`, and a `DestPicker`
-    // needs `&mut` for its own scroll bookkeeping. Same split `Dialog::LoadCurve` and the CDP
-    // file picker already use, and the reason the pane is reported rather than drawn here.
 
-    // One rect per interactive row, then the hints bar (always last = submit). The three form
-    // rows sit in the form column; the destination row is the list pane itself.
-    let mut rects: Vec<Rect> = (0..ex_focus::DEST as u16)
-        .map(|i| Rect { x: form.x, y: form.y + i, width: form.width, height: 1 })
-        .collect();
-    rects.push(list_area.unwrap_or_default());
-    rects.push(Rect {
-        x: popup.x + 1,
-        y: popup.y + height - 2,
-        width: popup.width.saturating_sub(2),
-        height: 1,
-    });
-    rects
+    // Rows and their click targets from one statement each — see `ui::dialog_rows`. The
+    // destination column itself is drawn by `App::render_dest_picker_column` from the pane rect
+    // reported here: `render_dialog` only ever gets `&Dialog`, and a `DestPicker` needs `&mut`
+    // for its own scroll bookkeeping. Same split `Dialog::LoadCurve` and the CDP file picker use.
+    let mut rows = crate::ui::dialog_rows::DialogRows::new(form);
+    rows.field(name_line);
+    rows.field(value_row("Format:", format.label().to_string(), focused == ex_focus::FORMAT));
+    rows.field(value_row(setting_label, setting_value, focused == ex_focus::SETTING));
+    rows.blank();
+    // Always `EXPORT_BLOCKER_ROWS` rows, blank when unblocked, so the dialog never changes
+    // size. Wrapped here rather than by `Paragraph` so the row count is known and bounded —
+    // letting the paragraph reflow is what made the height depend on the text in the first
+    // place. Not fields: a blocker explains, it cannot be clicked into focus.
+    for line in wrap_to_rows(blocked.unwrap_or(""), inner_width.saturating_sub(1), EXPORT_BLOCKER_ROWS) {
+        rows.text(Line::from(Span::styled(format!(" {line}"), dim_style)));
+    }
+    // The popup is sized by the destination list, which is taller than the form's own content,
+    // so the hints line is pushed to the bottom rather than sitting where the content ends.
+    rows.pad_to(form.height.saturating_sub(1));
+    rows.pane(list_area.unwrap_or_default());
+    rows.finish(frame, hints)
 }
 
 /// Export Channels. Unlike every other dialog in the app this one is *not* a fixed-height
@@ -38352,6 +38332,109 @@ mod tests {
             assert!(
                 row.contains(expected),
                 "rect {index} should sit on the {expected:?} row, but it reads {row:?}"
+            );
+        }
+    }
+
+    /// Renders `app` and returns the text under each of its dialog click rects, in rect order.
+    ///
+    /// The shared half of every "rect lands on the row it names" test. Reading the *rendered
+    /// buffer* is the whole point: a test asserting expected coordinates would be updated in
+    /// lockstep with a bug that moved the rows, and catch nothing. See `ui::dialog_rows`.
+    fn dialog_rect_text(app: &mut App) -> Vec<String> {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut terminal = Terminal::new(TestBackend::new(140, 44)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        app.dialog_row_rects
+            .iter()
+            .map(|r| {
+                // A multi-row target (an embedded pane) contributes all its rows, so a caller
+                // can look for a label anywhere inside it.
+                (r.y..r.y + r.height.max(1))
+                    .map(|y| {
+                        (r.x..r.x + r.width)
+                            .map(|x| buffer[(x.min(buffer.area.width - 1), y.min(buffer.area.height - 1))].symbol())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect()
+    }
+
+    /// Asserts each `(rect index, expected label)` pair lands on the right row.
+    fn assert_rect_labels(app: &mut App, what: &str, expected: &[(usize, &str)]) {
+        let rows = dialog_rect_text(app);
+        for (index, label) in expected {
+            let row = rows.get(*index).map(String::as_str).unwrap_or("<missing>");
+            assert!(
+                row.contains(label),
+                "{what}: click rect {index} should sit on the {label:?} row, but it reads {row:?}"
+            );
+        }
+    }
+
+    /// Export's rects, after its conversion to `DialogRows`.
+    #[test]
+    fn export_click_rects_land_on_the_rows_they_name() {
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.handle_action(Action::Export);
+        assert_rect_labels(
+            &mut app,
+            "Export",
+            &[
+                (ex_focus::NAME, "File name"),
+                (ex_focus::FORMAT, "Format"),
+                (ex_focus::SETTING, "Depth"),
+                (ex_focus::DEST, "Save in"),
+            ],
+        );
+    }
+
+    /// The three scrolling dialogs keep their hand-written rect lists — `DialogRows` cannot
+    /// express a scroll-offset mapping or the zero-size placeholders CDP Params emits for
+    /// scrolled-out fields, and converting them mechanically would trade a latent fault for a
+    /// live one. A guard costs nothing either way, so they get one.
+    #[test]
+    fn scrolling_dialogs_click_rects_land_on_the_rows_they_name() {
+        // --- Export Channels: a channel list plus a Subfolder field and a destination pane.
+        let mut app = new_app(Some(stereo_doc(0.2, 0.3, 400)), None);
+        app.handle_action(Action::ExportChannels);
+        assert!(matches!(app.dialog, Some(Dialog::ExportChannels { .. })));
+        let rows = dialog_rect_text(&mut app);
+        // Channel rows first (one per visible channel), then Subfolder, then the pane.
+        assert!(
+            rows[0].contains('1'),
+            "the first rect should be channel 1's row, but it reads {:?}",
+            rows[0]
+        );
+        let subfolder = rows.len() - 3;
+        assert!(
+            rows[subfolder].to_lowercase().contains("subfolder"),
+            "rect {subfolder} should be the Subfolder row, but it reads {:?}",
+            rows[subfolder]
+        );
+        assert!(
+            rows[rows.len() - 2].contains("Save in"),
+            "the penultimate rect should be the destination pane, but it reads {:?}",
+            rows[rows.len() - 2]
+        );
+
+        // --- Mix to Stereo: a per-channel routing list plus a gain field.
+        let mut app = new_app(Some(Document {
+            channels: (0..4).map(|c| vec![0.3 - c as f32 * 0.05; 200]).collect(),
+            ..Document::default()
+        }), None);
+        app.handle_action(Action::MixToStereo);
+        if matches!(app.dialog, Some(Dialog::MixToStereo { .. })) {
+            let rows = dialog_rect_text(&mut app);
+            assert!(
+                rows[0].contains('1'),
+                "the first rect should be channel 1's routing row, but it reads {:?}",
+                rows[0]
             );
         }
     }
