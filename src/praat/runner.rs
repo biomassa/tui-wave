@@ -1303,7 +1303,14 @@ mod tests {
             // scripts call `Play` unconditionally, so the sweep audibly plays audio and there
             // was no way to tell which process was responsible. stderr is unbuffered, so the
             // name is on screen before the sound starts.
-            eprintln!("[{:>3}/{total}] {}", index + 1, def.key);
+            // Name, then elapsed time and a running failure count once it returns. Printed in
+            // two halves on purpose: the name has to be on screen *before* the run, because 32
+            // of these scripts call `Play` unconditionally and there was otherwise no way to
+            // tell which one was making noise. The timing has to come after, and without it a
+            // slow process and a wedged one look identical for however long the timeout is —
+            // which is exactly how a sweep reads as a hang.
+            eprint!("[{:>3}/{total}] {:<58}", index + 1, def.key);
+            let started = std::time::Instant::now();
             let planned = match crate::model::praat::plan_praat_job_with(def, &values, &checkout, python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref()) {
                 Ok(planned) => planned,
                 Err(err) => {
@@ -1333,7 +1340,9 @@ mod tests {
                 python_venv_bin: python_venv_bin(&state_dir()),
             };
             ran += 1;
-            if let Err(err) = run(&job) {
+            let outcome = run(&job);
+            let elapsed = started.elapsed();
+            if let Err(err) = outcome {
                 let detail = match &err {
                     PraatError::NonZeroExit { output, .. } => output
                         .lines()
@@ -1343,6 +1352,9 @@ mod tests {
                     other => other.to_string(),
                 };
                 failures.push(format!("{}: {detail}", def.key));
+                eprintln!(" {:>6.1}s  FAIL ({} so far)", elapsed.as_secs_f32(), failures.len());
+            } else {
+                eprintln!(" {:>6.1}s  ok", elapsed.as_secs_f32());
             }
         }
         let _ = std::fs::remove_dir_all(&state);

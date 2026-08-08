@@ -270,9 +270,9 @@ fi
 # app runs a copy with those assignments repointed at this venv (see `model::praat::python`) --
 # a PATH-only mechanism worked on Linux and silently did nothing on macOS, where they resolve an
 # absolute path.
-step "Python backend (optional — the 34 processes in the 'py' group)"
+step "Python backend (optional — the 45 processes in the 'py' group)"
 VENV="${XDG_CONFIG_HOME:-$HOME/.config}/tui-wave/praat/pyenv"
-info "34 praatAudioTools scripts drive a Python helper and need numpy, scipy and soundfile"
+info "45 praatAudioTools scripts drive a Python helper; all need numpy, scipy and soundfile"
 info "(plus sounddevice and pillow for three interactive editors). They go in a virtual"
 info "environment this app owns — your system Python is not touched."
 info "Everything else in tui-wave works without them."
@@ -339,6 +339,40 @@ else
       warn "Eraser will report missing dependencies; everything else is unaffected"
     fi
   fi
+  # --- Optional tiers -------------------------------------------------------------------
+  #
+  # Same bargain as everything above: a process whose library is missing still appears in the
+  # browser, and the helper's own dependency check names what is absent — so declining costs
+  # nothing except the process failing if you run it.
+  #
+  # Two prompts rather than one, because the sizes are not comparable. Bundling them would make
+  # "yes" mean a 2.5 GB download for someone who only wanted timbre analysis.
+  info ""
+  info "Optional: analysis libraries (~150 MB) — librosa, scikit-learn, OpenCV, nara-wpe, mido"
+  info "  enables AI Conductor Mix, Dereverberation, IdentitySeparation, MotionControl,"
+  info "  Recomposer (x2), ThermodynamicTransform, AcousticDNAResonator"
+  if confirm "Install the analysis libraries?"; then
+    for pkg in librosa scikit-learn opencv-python-headless nara-wpe mido; do
+      run_with_progress "installing $pkg" "$PIP" install --disable-pip-version-check \
+        --progress-bar off "$pkg" || warn "$pkg failed; the processes needing it will say so"
+    done
+  else
+    info "skipped; those processes stay listed and name the missing library if run"
+  fi
+
+  info ""
+  info "Optional: machine-learning libraries (~2.5 GB) — torch, torchaudio, encodec, DAC"
+  info "  enables HierarchicalRecomposition and NeuralResynthesisVocoder"
+  info "  some ML processes additionally need model files you supply yourself"
+  if confirm "Install the machine-learning libraries? (large download)"; then
+    for pkg in torch torchaudio encodec descript-audio-codec; do
+      run_with_progress "installing $pkg" "$PIP" install --disable-pip-version-check \
+        --progress-bar off "$pkg" || warn "$pkg failed; the processes needing it will say so"
+    done
+  else
+    info "skipped; those processes stay listed and name the missing library if run"
+  fi
+
   # `pedalboard` is deliberately not installed: wheel 0.9.24 aborts with SIGILL on import on
   # some x86-64 CPUs, so VST_Effect_from_Praat is excluded from the catalog regardless.
 fi
