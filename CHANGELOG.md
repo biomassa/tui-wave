@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Python package names are coloured in the setup scripts**, light blue against the green already
+  used for process names. The Python section talks about both at once — "librosa enables AI
+  Conductor Mix" names a package and a process in one line — and which half is the thing you
+  install is exactly what the line is there to say. Applied to the tier lists, every `installing
+  <pkg>` line and the confirmations that follow them; the remedy text (`sudo apt install
+  python3-tk`) stays plain, being a command to type rather than a name to recognise.
+
 ## 2026-08-08 (2.5.6)
 
 - **The setup scripts no longer ask about optional libraries you already have.** Each tier's

@@ -46,8 +46,12 @@ done
 if [ -t 1 ]; then
   BOLD=$(printf '\033[1m'); DIM=$(printf '\033[2m'); RED=$(printf '\033[31m')
   GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m'); RESET=$(printf '\033[0m')
+  # Python package names, as GREEN is process names. A distinct colour because the two appear in
+  # the same sentence all through the Python section — "librosa enables AI Conductor Mix" names
+  # one of each, and which half is the thing you install is the whole point of that line.
+  BLUE=$(printf '\033[94m')
 else
-  BOLD=""; DIM=""; RED=""; GREEN=""; YELLOW=""; RESET=""
+  BOLD=""; DIM=""; RED=""; GREEN=""; YELLOW=""; BLUE=""; RESET=""
 fi
 
 step()  { printf '\n%s==>%s %s%s%s\n' "$BOLD" "$RESET" "$BOLD" "$*" "$RESET"; }
@@ -124,7 +128,13 @@ run_with_progress() {
     return 0
   fi
   [ -n "$LOGDIR" ] || LOGDIR=$(mktemp -d 2>/dev/null || echo /tmp)
-  log="$LOGDIR/$(echo "$label" | tr -c 'A-Za-z0-9' '_').log"
+  # Colour codes stripped before the label becomes a filename: `tr -c` would otherwise turn the
+  # escapes into underscores, and the path printed on failure is the one thing here a user has
+  # to read back to us. A regex rather than a shell glob, because in a glob `[0-9;]*` is one
+  # class character followed by an unbounded wildcard — it matches straight through `94mnumpy`
+  # to the *last* `m` and takes the package name with it.
+  esc=$(printf '\033')
+  log="$LOGDIR/$(printf '%s' "$label" | sed "s/${esc}\[[0-9;]*m//g" | tr -c 'A-Za-z0-9' '_').log"
 
   "$@" >"$log" 2>&1 &
   pid=$!
@@ -333,7 +343,7 @@ else
     run "$PYBIN" -m venv "$VENV"
     ok "venv created"
   fi
-  info "installing numpy, scipy, soundfile, sounddevice and pillow (about 60 MB)"
+  info "installing ${BLUE}numpy, scipy, soundfile, sounddevice${RESET} and ${BLUE}pillow${RESET} (about 60 MB)"
   info "each step prints its own elapsed time; nothing here is silent"
   # One package per call so a stall names the package it is stalled on. `--progress-bar off`
   # because pip's bar and the elapsed timer would fight over the same line.
@@ -341,12 +351,12 @@ else
   run_with_progress "upgrading pip" "$PIP" install --disable-pip-version-check --progress-bar off --upgrade pip \
     || warn "could not upgrade pip; continuing with the version the venv shipped"
   for pkg in numpy scipy soundfile; do
-    run_with_progress "installing $pkg" "$PIP" install --disable-pip-version-check --progress-bar off "$pkg" \
-      || die "$pkg failed to install — see the log above; the 'py' group needs all three"
+    run_with_progress "installing ${BLUE}$pkg${RESET}" "$PIP" install --disable-pip-version-check --progress-bar off "$pkg" \
+      || die "${BLUE}$pkg${RESET} failed to install — see the log above; the 'py' group needs all three"
   done
   if [ "$DRY_RUN" = 0 ]; then
     "$VENV/bin/python3" -c 'import numpy, scipy, soundfile' \
-      && ok "numpy, scipy, soundfile import cleanly" \
+      && ok "${BLUE}numpy, scipy, soundfile${RESET} import cleanly" \
       || die "the venv was created but the packages did not import"
   fi
   # Needed only by the three interactive editors (Arranger, Performance Launcher, Spectral
@@ -355,14 +365,14 @@ else
   # unavailable on a headless machine, which costs three processes and nothing else.
   extras_ok=1
   for pkg in sounddevice pillow; do
-    run_with_progress "installing $pkg (interactive editors)" \
+    run_with_progress "installing ${BLUE}$pkg${RESET} (interactive editors)" \
       "$PIP" install --disable-pip-version-check --progress-bar off "$pkg" || extras_ok=0
   done
   if [ "$DRY_RUN" = 0 ]; then
     if [ "$extras_ok" = 1 ] && "$VENV/bin/python3" -c 'import sounddevice, PIL' 2>/dev/null; then
-      ok "sounddevice, pillow ready — ${GREEN}Arranger, Performance Launcher, Spectral Eraser${RESET}"
+      ok "${BLUE}sounddevice, pillow${RESET} ready — ${GREEN}Arranger, Performance Launcher, Spectral Eraser${RESET}"
     else
-      warn "sounddevice/pillow unavailable — ${GREEN}Arranger${RESET}, ${GREEN}Performance Launcher${RESET}"
+      warn "${BLUE}sounddevice/pillow${RESET} unavailable — ${GREEN}Arranger${RESET}, ${GREEN}Performance Launcher${RESET}"
       warn "and ${GREEN}Spectral Eraser${RESET} will report missing dependencies; everything else works"
     fi
   fi
@@ -397,7 +407,7 @@ else
     info "pip cannot install it; it is part of the base Python this venv was built from."
     info "Installing it takes effect immediately — no need to recreate the venv or re-run this."
   elif [ "$DRY_RUN" = 0 ]; then
-    ok "tkinter present — ${GREEN}Arranger, Performance Launcher, Spatial Panner${RESET}"
+    ok "${BLUE}tkinter${RESET} present — ${GREEN}Arranger, Performance Launcher, Spatial Panner${RESET}"
   fi
 
   # --- Optional tiers -------------------------------------------------------------------
@@ -415,16 +425,16 @@ else
     ok "analysis libraries already installed — nothing to download"
   else
     if [ "$missing" = "librosa scikit-learn nara-wpe mido" ]; then
-      info "Optional: analysis libraries (~60 MB) — $missing"
+      info "Optional: analysis libraries (~60 MB) — ${BLUE}$missing${RESET}"
     else
-      info "Optional: analysis libraries — $missing (the rest are already installed)"
+      info "Optional: analysis libraries — ${BLUE}$missing${RESET} (the rest are already installed)"
     fi
     info "  enables ${GREEN}AI Conductor Mix, Dereverberation, IdentitySeparation, Recomposer (x2),${RESET}"
     info "  ${GREEN}ThermodynamicTransform, AcousticDNAResonator${RESET}"
     if confirm "Install the analysis libraries?"; then
       for pkg in $missing; do
-        run_with_progress "installing $pkg" "$PIP" install --disable-pip-version-check \
-          --progress-bar off "$pkg" || warn "$pkg failed; the processes needing it will say so"
+        run_with_progress "installing ${BLUE}$pkg${RESET}" "$PIP" install --disable-pip-version-check \
+          --progress-bar off "$pkg" || warn "${BLUE}$pkg${RESET} failed; the processes needing it will say so"
       done
     else
       info "skipped; those processes stay listed and name the missing library if run"
@@ -438,16 +448,16 @@ else
     ok "machine-learning libraries already installed — nothing to download"
   else
     if [ "$missing" = "torch torchaudio encodec descript-audio-codec" ]; then
-      info "Optional: machine-learning libraries (~2.5 GB) — $missing"
+      info "Optional: machine-learning libraries (~2.5 GB) — ${BLUE}$missing${RESET}"
     else
-      info "Optional: machine-learning libraries — $missing (the rest are already installed)"
+      info "Optional: machine-learning libraries — ${BLUE}$missing${RESET} (the rest are already installed)"
     fi
     info "  enables ${GREEN}HierarchicalRecomposition${RESET} and ${GREEN}NeuralResynthesisVocoder${RESET}"
     info "  some ML processes additionally need model files you supply yourself"
     if confirm "Install the machine-learning libraries? (large download)"; then
       for pkg in $missing; do
-        run_with_progress "installing $pkg" "$PIP" install --disable-pip-version-check \
-          --progress-bar off "$pkg" || warn "$pkg failed; the processes needing it will say so"
+        run_with_progress "installing ${BLUE}$pkg${RESET}" "$PIP" install --disable-pip-version-check \
+          --progress-bar off "$pkg" || warn "${BLUE}$pkg${RESET} failed; the processes needing it will say so"
       done
     else
       info "skipped; those processes stay listed and name the missing library if run"
