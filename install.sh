@@ -548,6 +548,24 @@ else
   #
   # Two prompts rather than one, because the sizes are not comparable. Bundling them would make
   # "yes" mean a 2.5 GB download for someone who only wanted timbre analysis.
+  #
+  # torch comes from PyTorch's CPU index on Linux, not from PyPI. The default `pip install torch`
+  # wheel drags in the whole CUDA runtime as hard dependencies — cuDNN, cuBLAS, NCCL and the rest,
+  # measured at 2.7 GB of `nvidia/*` in a venv on a laptop with no NVIDIA GPU at all, more than
+  # doubling it to 6.0 GB. Nothing here can use them: the two ML processes run a speech vocoder
+  # and a codec at 16-24 kHz, which is CPU work, and a GPU would be idle-to-marginal even where
+  # one exists. The CPU wheels are the same torch, minus a runtime for hardware this application
+  # does not address.
+  #
+  # Linux only, since that is where the split exists: macOS wheels on PyPI are already CPU/MPS
+  # builds with no CUDA to avoid, and pointing them at this index would be a change with no
+  # benefit. `--index-url` (not `--extra-index-url`) is what PyTorch's own instructions use — it
+  # replaces PyPI for that one command, which is the point: the CUDA variant must not be
+  # reachable, or pip may resolve back to it.
+  TORCH_INDEX=""
+  if [ "$PLATFORM" = linux ]; then
+    TORCH_INDEX="--index-url https://download.pytorch.org/whl/cpu"
+  fi
   info ""
   ANALYSIS_TIER="librosa:librosa scikit-learn:sklearn nara-wpe:nara_wpe mido:mido"
   missing=$(missing_from_tier $ANALYSIS_TIER)
@@ -584,10 +602,19 @@ else
     fi
     info "  enables ${GREEN}HierarchicalRecomposition${RESET} and ${GREEN}NeuralResynthesisVocoder${RESET}"
     info "  some ML processes additionally need model files you supply yourself"
+    [ -n "$TORCH_INDEX" ] && info "  CPU builds of ${BLUE}torch${RESET}/${BLUE}torchaudio${RESET} — the CUDA ones add 2.7 GB nothing here uses"
     if confirm "Install the machine-learning libraries? (large download)"; then
+      # torch and torchaudio must come from the CPU index *before* the two packages that depend
+      # on them: pip stops at "already satisfied", so a CPU torch installed first is what
+      # encodec and descript-audio-codec then build on. Installed the other way around, their
+      # dependency resolution pulls the CUDA torch from PyPI and the saving is lost.
       for pkg in $missing; do
+        case "$pkg" in
+          torch|torchaudio) index="$TORCH_INDEX" ;;
+          *)                index="" ;;
+        esac
         run_with_progress "installing ${BLUE}$pkg${RESET}" "$PIP" install --disable-pip-version-check \
-          --progress-bar off "$pkg" || warn "${BLUE}$pkg${RESET} failed; the processes needing it will say so"
+          --progress-bar off $index "$pkg" || warn "${BLUE}$pkg${RESET} failed; the processes needing it will say so"
       done
     else
       info "skipped; those processes stay listed and name the missing library if run"
