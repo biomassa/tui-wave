@@ -1305,10 +1305,36 @@ mod tests {
         // Fixed name rather than timestamped, because it has to be typed into a *second* terminal,
         // often before this one has printed anything. Truncated on open, so a `tail -f` started
         // beforehand follows the new run rather than showing the last one's tail.
-        let log_path = std::env::var("TUI_WAVE_PRAAT_SMOKE_LOG")
+        // A fixed name is only safe because the sweep holds an exclusive lock on it. Two sweeps at
+        // once used to shred each other silently: the second one's truncate reset the length to
+        // zero while the first still held a descriptor positioned tens of kilobytes in, so the
+        // kernel filled the gap with a sparse hole. The result was a log interleaving both runs
+        // and carrying thousands of NUL bytes — which makes `grep` treat it as binary and print
+        // *nothing at all*, so the file looked empty of failures it plainly contained.
+        //
+        // Lock first, truncate second, and never the other way around: `File::create` truncates
+        // as it opens, which is the destructive half happening before anyone has established the
+        // right to do it. A loser falls back to a pid-suffixed path rather than refusing to run,
+        // since a sweep is thirteen minutes and failing it over a log file would be the more
+        // annoying outcome — the banner names whichever path won.
+        let requested = std::env::var("TUI_WAVE_PRAAT_SMOKE_LOG")
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::temp_dir().join("tui-wave-praat-smoke.log"));
-        let mut log = std::fs::File::create(&log_path).ok();
+        let open_locked = |path: &Path| {
+            let file = std::fs::OpenOptions::new().write(true).create(true).open(path).ok()?;
+            file.try_lock().ok()?;
+            let _ = file.set_len(0);
+            Some(file)
+        };
+        let (mut log, log_path, contended) = match open_locked(&requested) {
+            Some(file) => (Some(file), requested, false),
+            None => {
+                let stem = requested.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                let busy = requested.with_file_name(format!("{stem}.{}.log", std::process::id()));
+                let file = open_locked(&busy);
+                (file, busy, true)
+            }
+        };
         // Every line goes to both, and the file is flushed per line — a buffered log is exactly
         // the failure being fixed, only one directory further along.
         macro_rules! sweep_log {
@@ -1333,9 +1359,15 @@ mod tests {
                {}\n\
              follow it from another terminal with:\n  \
                tail -f {}\n\
+             {}\
              ==================================================================\n",
             log_path.display(),
             log_path.display(),
+            if contended {
+                "NOTE: another sweep holds the usual log, so this run took the path above\n"
+            } else {
+                ""
+            },
         );
         println!("{banner}");
         eprintln!("{banner}");
