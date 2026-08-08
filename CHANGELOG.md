@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **A preset now moves every field it sets.** Praat drops a trailing unit from a form label when
+  it derives the variable name — `real Lock_strength_(%) 35` declares `lock_strength` — and the
+  catalog converter did not know that. So it could not match a preset branch's `lock_strength = 20`
+  back to the parameter it belongs to, and **20 processes** shipped preset tables listing only the
+  fields whose labels happened to carry no unit. Picking Harmonic Formant Locking's "Strong Metal
+  (85%)" moved `Max_shape_dB` and left the strength field showing 35 — a number the run would not
+  use. Wah Wah Effect gained 5 to 8 fields per preset, Self-Similarity Spectral Resynthesis 5.
+
+  Audio is unchanged either way: the scripts assign those variables inside their own preset
+  branches, so runs were always correct. What was wrong is what the dialog told you afterwards.
+  Found from a report that Harmonic Formant Locking sounded unchanged — it is not, but at its
+  default preset it moves the signal by about −32 dB, which is invisible on a waveform.
+
+  A catalog-wide audit now runs as a test: of 5199 parameters, exactly one derives a variable its
+  script never reads, and upstream's own changelog marks that field reserved.
+
 - **A Praat script that asks for a folder now asks *you* for it.** Eight praatAudioTools scripts
   call `chooseDirectory$`, which opens a modal Praat cannot show under `--run` — it segfaults
   outright, the same failure a `beginPause` dialog causes. The converter's detector was missing

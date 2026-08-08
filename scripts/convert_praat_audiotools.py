@@ -738,9 +738,31 @@ CUSTOM_OPTION_RE = re.compile(r"custom|manual|none|user", re.I)
 ASSIGNMENT_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*=\s*(-?\d+(?:\.\d+)?)\s*$")
 
 
+# A unit or range in parentheses at the end of a form label: `(%)`, `(Hz)`, `(0-1)`,
+# `(0_=_original)`. Praat drops it when deriving the variable name, along with the `_` before it.
+UNIT_SUFFIX_RE = re.compile(r"_?\([^)]*\)\s*$")
+
+
 def praat_variable(label: str) -> str:
-    """The script variable Praat derives from a form label: the label with its first letter
-    lowercased. `Hysteresis_Memory` is read back as `hysteresis_Memory`."""
+    """The script variable Praat derives from a form label.
+
+    Two rules, and only the first is obvious. The first letter is lowercased, so
+    `Hysteresis_Memory` is read back as `hysteresis_Memory` -- note that *only* the first letter
+    moves. And a trailing unit or range in parentheses is **dropped**: `real Lock_strength_(%) 35`
+    declares `lock_strength`, which is what `Harmonic_Formant_Locking` goes on to read.
+
+    The second rule is not a guess. Across every catalog param whose label carries a
+    parenthetical, the stripped name is the one its own script uses -- 92 of 92, the raw name
+    never -- and `no_form_label_derives_a_variable_its_script_never_reads` keeps it that way.
+
+    Getting it wrong was silent rather than fatal, because nothing passes *arguments* by name:
+    Praat fills a form positionally. What it broke was everything that matches a label back to
+    the script's own code. `extract_script_presets` could not see `lock_strength = 20` inside a
+    preset branch, so 24 processes shipped preset tables listing only the fields whose labels
+    happened to carry no unit -- picking "Strong Metal (85%)" moved `Max_shape_dB` and left the
+    strength field sitting at a value the run would not use.
+    """
+    label = UNIT_SUFFIX_RE.sub("", label)
     return label[:1].lower() + label[1:] if label else label
 
 
