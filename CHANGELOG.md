@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **The setup scripts no longer ask about optional libraries you already have.** Each tier's
+  packages are probed in the venv first; a complete tier reports itself and asks nothing, and a
+  partial one lists and installs only what is actually missing.
+
+  Nothing was ever re-*downloaded* — no tier package is installed with `--upgrade`, so pip
+  short-circuits on "Requirement already satisfied" in about half a second. The problem was what
+  a re-run looked like: it asked again whether you wanted 2.5 GB of machine-learning libraries,
+  then printed "installing torch" while pip decided there was nothing to do, which reads exactly
+  like the download starting over. The check is by **import**, not `pip show`, because a package
+  can be recorded as installed and still fail to load.
+
 - **The setup scripts now check for tkinter, and say what to do on a Mac.** Arranger, Performance
   Launcher and Spatial Panner open a Tk window, and tkinter is standard library — which is exactly
   why nothing checked for it and exactly why it goes missing. It is a *compiled* module linked
