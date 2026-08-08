@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-09 (2.5.8)
 
 - **praatAudioTools updated to `cc4e8b4`, adding three processes.** Hilbert Audio Processor
   (Modulation), Fuzzy Time Recomposer (Time & Granular) and RF Concatenative (py) — 456 processes
