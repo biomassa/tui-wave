@@ -1291,8 +1291,59 @@ mod tests {
         let mut failures: Vec<String> = Vec::new();
         let mut ran = 0usize;
         let total = catalog.processes.iter().filter(|d| matches(d)).count();
+
+        // The sweep writes its own log, at a fixed path announced before the first entry runs.
+        //
+        // stderr alone was not enough. The per-entry name exists so that whoever is listening can
+        // tell which of the 32 unconditionally-playing scripts is making the noise — and that only
+        // works if the line is visible *while* it plays. Any wrapper that pipes the run (a CI
+        // capture, `| tail`, a test harness collecting output) buffers it to the end and the names
+        // arrive after every sound has already played, which defeats the entire point of printing
+        // them early. A file the sweep writes itself cannot be intercepted that way: `tail -f` on
+        // it shows each name as it happens no matter how the run was launched.
+        //
+        // Fixed name rather than timestamped, because it has to be typed into a *second* terminal,
+        // often before this one has printed anything. Truncated on open, so a `tail -f` started
+        // beforehand follows the new run rather than showing the last one's tail.
+        let log_path = std::env::var("TUI_WAVE_PRAAT_SMOKE_LOG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("tui-wave-praat-smoke.log"));
+        let mut log = std::fs::File::create(&log_path).ok();
+        // Every line goes to both, and the file is flushed per line — a buffered log is exactly
+        // the failure being fixed, only one directory further along.
+        macro_rules! sweep_log {
+            ($($arg:tt)*) => {{
+                let line = format!($($arg)*);
+                eprint!("{line}");
+                if let Some(f) = log.as_mut() {
+                    use std::io::Write;
+                    let _ = write!(f, "{line}");
+                    let _ = f.flush();
+                }
+            }};
+        }
+        // Announced on **both** streams, before anything else runs. stdout as well as stderr
+        // because the two get captured independently — a harness that swallows one usually still
+        // shows the other, and this banner is worthless if it is the half that went missing. It
+        // is the one line whose whole job is to be read by a person before the sweep gets going.
+        let banner = format!(
+            "\n\
+             ==================================================================\n\
+             praat smoke sweep: {total} entries — live log:\n  \
+               {}\n\
+             follow it from another terminal with:\n  \
+               tail -f {}\n\
+             ==================================================================\n",
+            log_path.display(),
+            log_path.display(),
+        );
+        println!("{banner}");
+        eprintln!("{banner}");
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+        sweep_log!("praat smoke sweep: {total} entries\n");
         if !filter.is_empty() {
-            eprintln!("filter {filter:?}: {total} of {} Praat entries", catalog.processes.iter().filter(|d| d.backend() == crate::model::cdp::def::Backend::Praat).count());
+            sweep_log!("filter {filter:?}: {total} of {} Praat entries\n", catalog.processes.iter().filter(|d| d.backend() == crate::model::cdp::def::Backend::Praat).count());
         }
         for (index, def) in catalog.processes.iter().filter(|d| matches(d)).enumerate() {
             let values: Vec<_> = def
@@ -1309,7 +1360,7 @@ mod tests {
             // timeout (see `ProcessDef::interactive`) and would hang this sweep forever. There
             // is nothing to check automatically about one anyway.
             if def.interactive {
-                eprintln!("[{:>3}/{total}] {} — skipped (interactive)", index + 1, def.key);
+                sweep_log!("[{:>3}/{total}] {} — skipped (interactive)\n", index + 1, def.key);
                 continue;
             }
             // Printed *before* the run, not after, and that ordering is the point: 32 of these
@@ -1322,7 +1373,7 @@ mod tests {
             // tell which one was making noise. The timing has to come after, and without it a
             // slow process and a wedged one look identical for however long the timeout is —
             // which is exactly how a sweep reads as a hang.
-            eprint!("[{:>3}/{total}] {:<58}", index + 1, def.key);
+            sweep_log!("[{:>3}/{total}] {:<58}", index + 1, def.key);
             let started = std::time::Instant::now();
             let planned = match crate::model::praat::plan_praat_job_with(def, &values, &checkout, python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref()) {
                 Ok(planned) => planned,
@@ -1365,16 +1416,16 @@ mod tests {
                     other => other.to_string(),
                 };
                 failures.push(format!("{}: {detail}", def.key));
-                eprintln!(" {:>6.1}s  FAIL ({} so far)", elapsed.as_secs_f32(), failures.len());
+                sweep_log!(" {:>6.1}s  FAIL ({} so far)\n", elapsed.as_secs_f32(), failures.len());
             } else {
-                eprintln!(" {:>6.1}s  ok", elapsed.as_secs_f32());
+                sweep_log!(" {:>6.1}s  ok\n", elapsed.as_secs_f32());
             }
         }
         let _ = std::fs::remove_dir_all(&state);
 
-        eprintln!("praat smoke: {} ran, {} failed", ran, failures.len());
+        sweep_log!("praat smoke: {} ran, {} failed\n", ran, failures.len());
         for failure in &failures {
-            eprintln!("  {failure}");
+            sweep_log!("  {failure}\n");
         }
         assert!(ran > 0, "no Praat entries found in the catalog");
     }
