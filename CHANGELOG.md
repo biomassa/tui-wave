@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **The setup scripts now check for tkinter, and say what to do on a Mac.** Arranger, Performance
+  Launcher and Spatial Panner open a Tk window, and tkinter is standard library — which is exactly
+  why nothing checked for it and exactly why it goes missing. It is a *compiled* module linked
+  against Tcl/Tk that Homebrew and several distributions package separately, so a venv built from
+  Homebrew's `python@3.x` inherits the gap: the same process opens on Linux and dies on macOS with
+  `No module named 'tkinter'` and no hint as to why. All three import it lazily, so nothing
+  surfaced until the moment the window would have appeared.
+
+  `install.sh` and `setup-environment.sh` now probe for it after building the venv and, if it is
+  absent, name the exact remedy for the platform — `brew install python-tk@3.13` on macOS, the
+  distribution package elsewhere. A warning, not a failure: it costs three processes out of 453.
+  They also say the two things that are least obvious — that `pip` cannot supply it, since it
+  belongs to the base Python rather than the venv, and that installing it works on an existing
+  venv with no need to re-run anything.
+
 - **A process that changes a buffer's channel count no longer plays back at the wrong speed.**
   CDP Pan takes mono in and emits stereo, and after applying it the result played at half speed,
   an octave down — while saving the file and reloading it played correctly. That difference is
