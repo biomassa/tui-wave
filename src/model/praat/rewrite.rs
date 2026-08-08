@@ -92,13 +92,28 @@ impl std::fmt::Display for RewriteError {
 
 /// The Praat variable name a field labelled `label` creates.
 ///
-/// Two rules, and both bite. Only the **first character** is lowercased — `Output_Gain` becomes
-/// `output_Gain`, not `output_gain`. And **spaces become underscores**: a pause field may be
+/// Three rules, and all of them bite. Only the **first character** is lowercased — `Output_Gain`
+/// becomes `output_Gain`, not `output_gain`. **Spaces become underscores**: a pause field may be
 /// declared `positive: "Frame length s", frame_length_s`, and Praat makes that
 /// `frame_length_s`. The first scripts hoisted here happened to use underscore-only labels, so
 /// the space rule was unexercised until a block with spaced labels needed it.
+///
+/// And a **trailing unit or range in parentheses is dropped**, along with any `_` before it:
+/// `real Lock_strength_(%) 35` declares `lock_strength`. That rule was missing here and in the
+/// converter's `praat_variable` until a user reported `Harmonic_Formant_Locking` sounding
+/// unchanged — which it was not, but investigating it found the converter unable to match a
+/// preset branch's `lock_strength = 20` to the `Lock_strength_(%)` param, so 24 processes shipped
+/// preset tables that quietly listed fewer fields than the script sets.
+///
+/// No *hoisted* param carries a parenthetical today, so this half was latent rather than broken
+/// — and it is the half that would have been worse: a preset table can only mislabel a dialog,
+/// while an assignment to a variable the script never reads changes what the run does, silently.
 pub fn variable_name(label: &str) -> String {
-    let underscored = label.replace(' ', "_");
+    let trimmed = match (label.rfind('('), label.ends_with(')')) {
+        (Some(open), true) => label[..open].trim_end_matches('_').trim_end(),
+        _ => label,
+    };
+    let underscored = trimmed.replace(' ', "_");
     let mut chars = underscored.chars();
     match chars.next() {
         Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
@@ -399,6 +414,87 @@ mod tests {
         assert_eq!(variable_name("Frame length s"), "frame_length_s");
         assert_eq!(variable_name("Use percentile mapping"), "use_percentile_mapping");
         assert_eq!(variable_name("K max"), "k_max");
+    }
+
+    /// A trailing unit or range in parentheses is dropped, `_` and all.
+    #[test]
+    fn a_trailing_unit_is_not_part_of_the_variable_name() {
+        assert_eq!(variable_name("Lock_strength_(%)"), "lock_strength");
+        assert_eq!(variable_name("Start_frequency_(Hz)"), "start_frequency");
+        assert_eq!(variable_name("Threshold_(0-1)"), "threshold");
+        assert_eq!(variable_name("Duration_(0_=_original)"), "duration");
+        assert_eq!(variable_name("Grain density (grains/sec)"), "grain_density");
+        // Not a *trailing* parenthetical, so nothing is dropped — the rule is about a unit
+        // written after the name, not about parentheses anywhere in it.
+        assert_eq!(variable_name("Rule_(a)_weight"), "rule_(a)_weight");
+    }
+
+    /// The audit behind that rule, over the whole catalog: a label whose derived variable the
+    /// script never mentions means this function and Praat disagree about that label, and the
+    /// consequences are silent either way — arguments are matched positionally, so nothing errors.
+    ///
+    /// It is what found the unit-parenthetical rule in the first place (a user report that
+    /// `Harmonic_Formant_Locking` sounded unchanged; it did not, but the investigation found the
+    /// converter unable to see `lock_strength = 20` inside a preset branch). 80 params failed
+    /// this before the fix, 1 after.
+    ///
+    /// Params the converter *invents* are excluded, having no form field to correspond to: a
+    /// hoisted folder, a number split out of a `key=value` field, and the renamed preset menu.
+    /// A `$`-variable counts as a match, since a `sentence`/`text`/`optionmenu` field declares
+    /// one.
+    #[test]
+    fn no_form_label_derives_a_variable_its_script_never_reads() {
+        use crate::model::cdp::def::Backend;
+        let checkout = checkout();
+        if !checkout.is_dir() {
+            return; // submodule not initialised
+        }
+        // Upstream's own changelog: "FORM: Processing_chunk_s and Crossfade_ms were never read
+        // by any code path -- marked '(reserved)' pending a chunked implementation." A dead form
+        // field is upstream's to fix, and dropping the param would change the argument count.
+        const RESERVED: &[(&str, &str)] =
+            &[("praat_analysis_climax_profile_matcher", "Processing_chunk_s")];
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let mut unread = Vec::new();
+        for def in catalog.processes.iter().filter(|d| d.backend() == Backend::Praat) {
+            let Ok(source) = std::fs::read_to_string(checkout.join(&def.bin)) else { continue };
+            for param in &def.params {
+                if param.name == "Internal Preset"
+                    || param.praat_directory_var.is_some()
+                    || param.key_value_group.is_some()
+                    || RESERVED.contains(&(def.key.as_str(), param.name.as_str()))
+                {
+                    continue;
+                }
+                let variable = variable_name(&param.name);
+                if !mentions_variable(&source, &variable) {
+                    unread.push(format!("{}: {:?} -> {variable}", def.key, param.name));
+                }
+            }
+        }
+        assert!(
+            unread.is_empty(),
+            "labels whose derived variable no script reads:\n  {}",
+            unread.join("\n  ")
+        );
+    }
+
+    /// Whether `source` uses `variable` (or its `$` form) as a whole identifier. Praat identifiers
+    /// are alphanumerics and `_`, with `$` and `#` as type suffixes — so the character before must
+    /// not be part of a name, and the character after must not extend it.
+    fn mentions_variable(source: &str, variable: &str) -> bool {
+        let bytes = source.as_bytes();
+        let name = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+        source.match_indices(variable).any(|(at, _)| {
+            if at > 0 && (name(bytes[at - 1]) || bytes[at - 1] == b'$' || bytes[at - 1] == b'.') {
+                return false;
+            }
+            match bytes.get(at + variable.len()) {
+                Some(&next) => !name(next),
+                None => true,
+            }
+        })
     }
 
     /// An optionmenu sets both variables, because scripts read both.
