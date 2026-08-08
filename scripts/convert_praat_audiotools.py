@@ -233,6 +233,20 @@ GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
     "AI & Adaptive/Timbral_Similarity_Browser.praat": {
         "why": "chooseFolder$ is a fallback for a blank Folder field, which cannot be blank",
     },
+    # The same shape again, one spelling along: `chooseDirectory$` rather than `chooseFolder$`,
+    # and so caught by `folder_chooser` rather than `gui_blocking`. Both already ship -- the call
+    # was simply never detected, the regex having missed this spelling -- and in both the chooser
+    # is the fallback for a blank folder field that `cdp_validate_fields` will not let be blank.
+    # `Sound_atom_composer` names the idiom in its own comment ("use the typed Folder path, or
+    # fall back to a dialog when it is left blank"); `KL_Divergence` guards each of its two
+    # corpora with `if dirA$ = ""`. Overridden rather than hoisted: there is nothing to hoist, the
+    # folders are already ordinary form params.
+    "AI & Adaptive/KL_Divergence_Corpus_Resynthesis.praat": {
+        "why": "chooseDirectory$ is a fallback for blank Corpus_A/B_folder fields, which cannot be blank",
+    },
+    "Time & Granular/Sound_atom_composer.praat": {
+        "why": "chooseDirectory$ is a fallback for a blank Folder field, which cannot be blank",
+    },
     # The only `View & Edit` here, and it sits under one option of one menu: pan mode 8 is a
     # two-pass "draw the pan curve by hand" workflow that opens a RealTier editor and asks the
     # user to come back. The other seven modes never touch it. Dropping that option leaves a
@@ -313,6 +327,49 @@ PAUSE_HOISTS: dict[str, dict] = {
             "Stereo Fibonacci": "Settings: Stereo Fibonacci",
             "Swing": "Settings: Swing",
         },
+    },
+}
+
+# Scripts that ask for a folder with `chooseDirectory$`, hoisted into a `ParamKind::FolderPath`
+# param. Keyed by path relative to the plugin root.
+#
+# The same treatment `PAUSE_HOISTS` gives a `beginPause` block, and needed for the same reason: a
+# modal under `--run` does not merely block, it segfaults. It is the *better* answer here than an
+# exclusion, because this app can already answer the question the dialog asks -- a `FolderPath`
+# param has a real folder picker, and `cdp_validate_fields` blocks Apply until one is chosen, so
+# the value can never arrive empty.
+#
+#   vars  -- (variable as the script spells it, `$` included) -> the parameter label it becomes.
+#            An ordered dict, so a script choosing two folders gets its two params in that order.
+#
+# Every variable must be assigned by a `chooseDirectory$` call in the script, checked below: a
+# stale one means upstream moved the thing this points at, and shipping the entry anyway would
+# ship a script that still opens the modal.
+#
+# Note what is *not* here. Four other scripts call `chooseDirectory$` only as a fallback for a
+# blank folder field (`if dir$ == ""`), and their fields are already `FolderPath` -- unreachable,
+# so they take a `GUI_BLOCKING_OVERRIDES` entry instead. Two more are excluded for reasons this
+# does not touch, and `Wave_Gesture_Path_Performer` has live `beginPause` blocks besides.
+DIRECTORY_HOISTS: dict[str, dict] = {
+    # The one that already ships, and the reason this was worth building rather than adding
+    # `chooseDirectory$` to the `gui_blocking` regex and moving on: the call sits in the `else`
+    # of `optionmenu GEN_mode`, so the entry works in its default Neighbor-GEN mode and
+    # segfaults the moment anyone picks Pair-corpus. A latent crash, not a missing feature.
+    #
+    # The folder is therefore required on *every* run, including the mode that never reads it.
+    # Accepted deliberately: an unpicked `FolderPath` blocks Apply and there is no per-param
+    # "may be empty", and inventing one would re-open the very hole this closes -- a blank field
+    # reaches the chooser.
+    "Analysis/OT_Grammar_Learning_from_Audio.praat": {
+        "vars": {"pairRoot$": "Pair_corpus_folder"},
+        "why": "Pair-corpus GEN mode picks a folder holding good/ and bad/ subfolders",
+    },
+    # Unconditional, on the main path -- every run reached it. Excluded by hand until now.
+    # Also a `py`-group script, so it is the first to need the interpreter rewrite and a dialog
+    # rewrite at once; `praat::runner` applies both passes to one copy.
+    "py/Semantic_timbre_retrieval.praat": {
+        "vars": {"corpusDir$": "Corpus_folder"},
+        "why": "picks the corpus to retrieve from; unconditional, on the main path",
     },
 }
 
@@ -398,6 +455,29 @@ def code_only(source: str) -> str:
 # whatever detector happened to fire next.
 CODE = "code"    # match against code_only(source)
 RAW = "raw"      # match against the source as written
+
+# `<var>$ = chooseDirectory$` as a *statement*. Matched against `code_only`, so a script that
+# discusses the call in its changelog -- `CorpusMap` does, twice -- is not read as making it.
+# All three spellings the plugin uses (`: "x"`, `("x")`, ` ("x")`) share this prefix; the Rust
+# side re-derives the same set in `rewrite::directory_chooser_target`.
+DIRECTORY_CHOOSER_RE = re.compile(r"^[ \t]*(\w+\$)[ \t]*=[ \t]*chooseDirectory\$", re.M)
+
+
+def build_directory_params(source: str, hoist: dict) -> list | str:
+    """The `folder_path` params a directory-hoisted script gains, or a problem string.
+
+    Appended *after* the form's own params, the order `build_hoisted_processes` already uses: the
+    dialog reads as everything the form asked, then everything the chooser did.
+    """
+    assigned = set(DIRECTORY_CHOOSER_RE.findall(code_only(source)))
+    out = []
+    for variable, label in hoist["vars"].items():
+        if variable not in assigned:
+            return (f"{variable} is not assigned by a chooseDirectory$ call "
+                    f"(upstream renamed or removed it?)")
+        out.append(Param(name=label, kind="folder_path", default=0.0, directory_var=variable))
+    return out
+
 
 def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: list,
                             hoist: dict, inputs: int, description: str = ""):
@@ -576,6 +656,21 @@ EXCLUSIONS: list[tuple[str, re.Pattern, str, str]] = [
                    r"chooseWriteFile\$|chooseFolder\$)|^\s*demo\s|"
                    r"^\s*(View & Edit|Edit)\s*$", re.M),
         "uses an interactive/GUI construct that segfaults or hangs under --run",
+        CODE,
+    ),
+    (
+        # A folder chooser is exactly as fatal as a `beginPause` -- a modal under `--run`
+        # segfaults -- but it gets a slug of its own rather than joining the regex above, and the
+        # separation is what keeps the two exemptions honest. A `DIRECTORY_HOISTS` entry rewrites
+        # this call out of the copy that runs and says nothing about anything else, so a script
+        # that *also* opens an editor window is still caught by `gui_blocking`. Folded into one
+        # slug, hoisting one construct would have excused the other.
+        #
+        # Listed after `gui_blocking` so a script tripping both reports the harder obstacle: the
+        # first match wins, and a live `beginPause` is not something a folder param answers.
+        "folder_chooser",
+        re.compile(r"\bchooseDirectory\$", re.M),
+        "asks for a folder with chooseDirectory$, a modal that cannot be answered under --run",
         CODE,
     ),
     (
@@ -781,6 +876,10 @@ class Param:
     # Index of the `beginPause` block this param was hoisted out of, in the *original* script's
     # source order. None for an ordinary `form` param, which travels as a runScript: argument.
     pause_block: int | None = None
+    # The `$`-variable a `chooseDirectory$` call assigns, for a param hoisted out of that call.
+    # Like `pause_block`, it means "not a runScript: argument" -- the script asked for this with
+    # a dialog, so its form has no slot for it. See DIRECTORY_HOISTS.
+    directory_var: str = ""
     # `comment` lines the form placed immediately *before* this field, in source order, and --
     # for the last field of a body only -- the ones placed after it. See `note_rows`, which
     # flattens both into the (index, note) pairs the catalog stores; keeping "after" separate
@@ -1319,22 +1418,15 @@ OUT_OF_SCOPE: dict[str, str] = {
     # to offer, and leaving it out by policy is clearer than leaving it out by omission.
     "py/VST_Effect_from_Praat.praat":
         "hosts VST plugins through pedalboard, whose wheel aborts with SIGILL on import",
-    # These two became importable when librosa/sklearn/PySide6 joined PY_ALLOWED_IMPORTS, which
-    # only revealed a harder blocker: both call `chooseDirectory$` **unconditionally** on their
-    # main path ("Pick the corpus folder"), and a directory chooser cannot be answered under
-    # `--run` any more than `chooseFolder$` or `beginPause` can.
-    #
-    # Listed by hand rather than by adding `chooseDirectory$` to the `gui_blocking` regex, and
-    # that is deliberate but temporary: the regex is genuinely missing it, and adding it would
-    # *also* drop `Analysis/OT_Grammar_Learning_from_Audio`, which ships today and works in its
-    # default mode. The real fix is to hoist the chooser into a `ParamKind::FolderPath` param
-    # the way `PAUSE_HOISTS` hoists a `beginPause` block — one rewrite that rescues both of
-    # these, makes OT Grammar safe in *both* its modes, and may recover four more scripts
-    # excluded for the same call. See PRAAT-DIRECTORY-HOIST-TODO.md.
-    "py/Semantic_timbre_retrieval.praat":
-        "calls chooseDirectory$ on its main path, which cannot be answered under --run",
+    # Its `chooseDirectory$` call is hoistable and now hoisted for its sibling
+    # `Semantic_timbre_retrieval` -- but the chooser was never this one's real obstacle. It
+    # writes a launch JSON, starts `corpus_map.py` **detached** (`runSystem_nocheck ... &`) and
+    # returns, so the Qt window it opens outlives the run and no Sound object ever comes back:
+    # the process would report "produced no Sound object" every time, correctly. Excluded for
+    # what it is rather than for the call, which is why PySide6/pyqtgraph/sounddevice stay out
+    # of PY_ALLOWED_IMPORTS -- installing them cannot bring this back.
     "py/CorpusMap.praat":
-        "calls chooseDirectory$ on its main path, which cannot be answered under --run",
+        "launches a detached Qt window and returns no Sound; nothing comes back to the editor",
 }
 
 # Below this many entries, a "list" is more likely a word that happens to be numeric ("8") or
@@ -1643,6 +1735,7 @@ def check_stale_keys() -> list[str]:
     stale = []
     for label, table in (
         ("PAUSE_HOISTS", PAUSE_HOISTS),
+        ("DIRECTORY_HOISTS", DIRECTORY_HOISTS),
         ("GENERATORS", GENERATORS),
         ("PHOTO_INPUTS", PHOTO_INPUTS),
         ("OUT_OF_SCOPE", OUT_OF_SCOPE),
@@ -1703,12 +1796,20 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
         # construct rather than by arguing it is unreachable -- the block is rewritten out of
         # the copy that actually runs. See PAUSE_HOISTS.
         hoist = PAUSE_HOISTS.get(rel_key)
+        # And a directory hoist answers it the same way again, for `chooseDirectory$`: the call
+        # is rewritten out of the copy that runs. See DIRECTORY_HOISTS.
+        dir_hoist = DIRECTORY_HOISTS.get(rel_key)
         hit = next(
             ((slug, why) for slug, pattern, why, over in EXCLUSIONS
              if pattern.search(scannable[over])
              # An override answers `gui_blocking` only. A script that also trips
              # `hardcoded_path` or `non_sound_input` is still excluded for that.
              and not (slug == "gui_blocking" and (override or hoist))
+             # ...and a directory hoist answers `folder_chooser` alone, the same narrow way: the
+             # call is rewritten out of the copy that runs, which says nothing about a `demo`
+             # window or an editor. An override may answer it too -- four scripts reach the
+             # chooser only as a fallback for a blank `FolderPath` field, which cannot be blank.
+             and not (slug == "folder_chooser" and (dir_hoist or override))
              # ...except a listed image sonifier, whose Photo input this app *can* supply.
              # Deliberately narrow: it answers `non_sound_input` alone, so one of these that
              # also opened a GUI or hardcoded a path would still be excluded for that.
@@ -1739,6 +1840,19 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
         if isinstance(params, str):
             excluded.append((str(rel), "unparseable_form", params))
             continue
+
+        # Appended before anything downstream reads `params`, so the folder lands after the
+        # form's own fields on both the ordinary and the pause-hoisted path. No script needs both
+        # hoists today; if one ever does, its folder sits between the form's params and the
+        # pause block's, which is the order the two dialogs would have asked in anyway.
+        if dir_hoist:
+            built = build_directory_params(source, dir_hoist)
+            # Loud, exactly as a stale override is: a variable that no longer exists means the
+            # call this param stands in for has moved, and the entry would ship the modal.
+            if isinstance(built, str):
+                excluded.append((str(rel), "folder_chooser", f"directory hoist failed: {built}"))
+                continue
+            params.extend(built)
 
         if override:
             problem = apply_gui_override(params, override)
@@ -1984,6 +2098,8 @@ def render_catalog(processes: list[Process], sha: str) -> str:
             out.append(f"name = {toml_string(param.name)}")
             if param.pause_block is not None:
                 out.append(f"praat_pause_block = {param.pause_block}")
+            if param.directory_var:
+                out.append(f"praat_directory_var = {toml_string(param.directory_var)}")
             if param.key_value_group:
                 out.append(f"key_value_group = {toml_string(param.key_value_group)}")
                 out.append(f"key_value_key = {toml_string(param.key_value_key)}")

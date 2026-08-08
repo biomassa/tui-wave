@@ -103,6 +103,10 @@ pub struct PauseRewrite {
     /// app's dialog the switch controls nothing, so it is removed rather than shown as a
     /// checkbox that refuses to be clicked.
     pub form_locks: Vec<(String, f64)>,
+    /// Folders picked in this app's own dialog, standing in for the `chooseDirectory$` modals the
+    /// script would otherwise open, as (variable including its `$`, absolute path). See
+    /// `rewrite::rewrite_directory_choosers`.
+    pub directories: Vec<(String, String)>,
 }
 
 /// The assignment standing in for one hoisted param, or `None` for a param that travels as an
@@ -289,6 +293,9 @@ pub fn plan_praat_job_with(
     // what the script's own form declares, which is what Praat matches by position and count.
     let mut args = Vec::new();
     let mut blocks: BTreeMap<usize, Vec<Assignment>> = BTreeMap::new();
+    // Same split, for the folder a script would otherwise ask for with `chooseDirectory$`: the
+    // form has no slot for it either, so it is assigned in the copy rather than passed.
+    let mut directories: Vec<(String, String)> = Vec::new();
     // Numbers split out of one `key=value` field rejoin into a single argument at the position
     // of the first — see `ParamDef::key_value_group`. They are emitted consecutively by the
     // converter, so tracking just the run in progress is enough.
@@ -316,6 +323,13 @@ pub fn plan_praat_job_with(
             continue;
         }
         open_group = None;
+        if let Some(variable) = &param.praat_directory_var {
+            let ParamValue::Text(path) = value else {
+                return Err(PraatPlanError::ParamTypeMismatch { param: param.name.clone() });
+            };
+            directories.push((variable.clone(), path.clone()));
+            continue;
+        }
         match param.praat_pause_block {
             Some(block) => blocks.entry(block).or_default().push(assignment_for(param, value)?),
             None => args.push(argument_for(def, i, value)?),
@@ -328,11 +342,13 @@ pub fn plan_praat_job_with(
         .iter()
         .map(|(label, on)| (label.clone(), if *on { 1.0 } else { 0.0 }))
         .collect();
-    let pause_rewrite = (!blocks.is_empty() || !form_locks.is_empty()).then(|| PauseRewrite {
-        script_name: REWRITTEN_SCRIPT.to_string(),
-        blocks,
-        form_locks,
-    });
+    let pause_rewrite = (!blocks.is_empty() || !form_locks.is_empty() || !directories.is_empty())
+        .then(|| PauseRewrite {
+            script_name: REWRITTEN_SCRIPT.to_string(),
+            blocks,
+            form_locks,
+            directories,
+        });
     let input_count = praat_input_count(def);
     let save_picture = draws_picture(def, values);
     // A built-in ships with the app rather than living in the submodule, so there is nothing at
@@ -349,9 +365,10 @@ pub fn plan_praat_job_with(
         });
     // A `py`-group script resolves its own interpreter, and on macOS resolves it to an absolute
     // path that `PATH` cannot influence — so the venv the app installed is bypassed and every
-    // import fails. Repointing happens in a copy, like the pause rewrite. The two never co-occur
-    // (no py-group script has a pause dialog, asserted in this module's tests), so they share
-    // the copy's filename without any need to compose.
+    // import fails. Repointing happens in a copy, like the pause rewrite, and under the same
+    // filename: the runner applies whichever passes are asked for to **one** copy, in sequence.
+    // That composition is not hypothetical — `Semantic_timbre_retrieval` is a `py`-group script
+    // whose corpus folder is hoisted out of a `chooseDirectory$` call, so it needs both.
     let python_rewrite = def
         .praat_python_rewrite
         .then_some(python_interpreter)
@@ -483,6 +500,7 @@ mod tests {
             list_is_time_sequence: false,
             before_outfile: false,
             praat_pause_block: None,
+            praat_directory_var: None,
             key_value_group: None,
             key_value_key: None,
             range_scales_with_input_duration: false,
@@ -821,6 +839,47 @@ mod pause_hoist_tests {
         assert!(
             !job.driver_source.contains("0.375"),
             "a hoisted value must travel in the script, not on the argument list"
+        );
+    }
+
+    /// The same end-to-end check for a hoisted *folder*, and it needs to be its own test for the
+    /// same reason: a rewrite that dropped the path would still exit 0. It would just run
+    /// against whatever `pairRoot$` happened to be — the empty string, so
+    /// `Create Strings as file list: … "/good/*.wav"` would find nothing and the run would fail
+    /// somewhere far from the cause.
+    #[test]
+    fn a_hoisted_folder_reaches_the_script_that_will_run() {
+        let Ok(source) = std::fs::read_to_string(
+            checkout().join("Analysis/OT_Grammar_Learning_from_Audio.praat"),
+        ) else {
+            return; // submodule not initialised
+        };
+        let (catalog, _) = CdpCatalog::load(None);
+        let def = catalog
+            .find("praat_analysis_ot_grammar_learning_from_audio")
+            .expect("entry exists");
+
+        let folder = def
+            .params
+            .iter()
+            .position(|p| p.praat_directory_var.as_deref() == Some("pairRoot$"))
+            .expect("the folder must be a hoisted param, or this test proves nothing");
+        let mut values: Vec<ParamValue> =
+            def.params.iter().map(|p| p.kind.default_value()).collect();
+        values[folder] = ParamValue::Text("/corpora/ot pairs".into());
+
+        let job = plan_praat_job(def, &values, &checkout()).expect("plans");
+        let rewrite = job.pause_rewrite.as_ref().expect("this entry rewrites");
+        let script =
+            crate::model::praat::rewrite::rewrite_directory_choosers(&source, &rewrite.directories)
+                .expect("rewrites");
+
+        assert!(script.contains("pairRoot$ = \"/corpora/ot pairs\""), "the folder must be assigned");
+        // And, like a hoisted pause param, must not *also* travel as a runScript: argument —
+        // the script's form has no slot for it, and Praat matches arguments by position.
+        assert!(
+            !job.driver_source.contains("/corpora/ot pairs"),
+            "a hoisted folder must travel in the script, not on the argument list"
         );
     }
 
