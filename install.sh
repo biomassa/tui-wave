@@ -309,8 +309,8 @@ fi
 # absolute path.
 step "Python backend (optional — the 45 processes in the 'py' group)"
 VENV="${XDG_CONFIG_HOME:-$HOME/.config}/tui-wave/praat/pyenv"
-info "45 praatAudioTools scripts drive a Python helper; all need numpy, scipy and soundfile"
-info "(plus sounddevice and pillow for three interactive editors). They go in a virtual"
+info "45 praatAudioTools scripts drive a Python helper; all need ${BLUE}numpy, scipy${RESET} and ${BLUE}soundfile${RESET}"
+info "(plus ${BLUE}sounddevice${RESET} and ${BLUE}pillow${RESET} for three interactive editors). They go in a virtual"
 info "environment this app owns — your system Python is not touched."
 info "Everything else in tui-wave works without them."
 if [ "$WANT_PYTHON" = 0 ]; then
@@ -325,7 +325,7 @@ else
   info "venv: $VENV"
   info "interpreter: $PYBIN ($("$PYBIN" -V 2>&1))"
   if [ "$PYBIN" = python3 ]; then
-    info "(no 3.10-3.13 found; if numpy/scipy have no wheel for this version pip will build"
+    info "(no 3.10-3.13 found; if ${BLUE}numpy/scipy${RESET} have no wheel for this version pip will build"
     info "them from source, which is slow but works — the timer below will say so)"
   fi
   if [ -x "$VENV/bin/python3" ]; then
@@ -389,7 +389,7 @@ else
   #
   # A warning rather than a failure: it costs three processes out of 453 and nothing else.
   if [ "$DRY_RUN" = 0 ] && ! "$VENV/bin/python3" -c 'import tkinter' 2>/dev/null; then
-    warn "this Python has no tkinter — ${GREEN}Arranger${RESET}, ${GREEN}Performance Launcher${RESET}"
+    warn "this Python has no ${BLUE}tkinter${RESET} — ${GREEN}Arranger${RESET}, ${GREEN}Performance Launcher${RESET}"
     warn "and ${GREEN}Spatial Panner${RESET} will fail with \"No module named 'tkinter'\""
     info "every other process is unaffected"
     pyver=$("$VENV/bin/python3" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)

@@ -204,8 +204,8 @@ fi
 # repointed at this venv — a PATH-only mechanism worked on Linux and silently did nothing on
 # macOS, where they pick an absolute path before consulting PATH.
 step "Python backend (optional — the 45 processes in the 'py' group)"
-info "these scripts drive a Python helper and need numpy, scipy and soundfile"
-info "(plus sounddevice and pillow for three interactive editors)"
+info "these scripts drive a Python helper and need ${BLUE}numpy, scipy${RESET} and ${BLUE}soundfile${RESET}"
+info "(plus ${BLUE}sounddevice${RESET} and ${BLUE}pillow${RESET} for three interactive editors)"
 info "everything else in tui-wave works without them"
 
 if [ "$WANT_PYTHON" = 0 ]; then
@@ -256,7 +256,7 @@ else
   #
   # A warning rather than a failure: it costs three processes out of 453 and nothing else.
   if [ "$DRY_RUN" = 0 ] && ! "$VENV/bin/python3" -c 'import tkinter' 2>/dev/null; then
-    warn "this Python has no tkinter — ${GREEN}Arranger${RESET}, ${GREEN}Performance Launcher${RESET}"
+    warn "this Python has no ${BLUE}tkinter${RESET} — ${GREEN}Arranger${RESET}, ${GREEN}Performance Launcher${RESET}"
     warn "and ${GREEN}Spatial Panner${RESET} will fail with \"No module named 'tkinter'\""
     info "every other process is unaffected"
     pyver=$("$VENV/bin/python3" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)
