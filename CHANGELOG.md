@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **The exclusion list now says which refusals are permanent.** Six more scripts joined
+  `never_planned` alongside MotionControl: the two live-capture ones (`Live_1` records from the
+  microphone), the three whose product is a folder of files or an HRIR library rather than
+  anything the editor can hold, the VST host, and CorpusMap. `out_of_scope` keeps only what a
+  change elsewhere could recover — `SSMComposer` needs one file upstream has never shipped, and
+  `Composition_1` is pure Praat that reads the selected Sound and is excluded only for living in
+  `py/`, where the converter requires a Python helper.
+
 ## 2026-08-08 (2.5.5)
 
 - **MotionControl is gone, and OpenCV with it.** It captures ten seconds of free-hand motion

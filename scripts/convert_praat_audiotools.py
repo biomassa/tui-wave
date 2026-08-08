@@ -1451,9 +1451,16 @@ NEVER_PLANNED: dict[str, str] = {
     # entry and was pulled the same day; `cv2` went with it, being imported by nothing else.
     "py/MotionControl.praat":
         "captures ten seconds of webcam hand motion as its control input",
-}
-
-OUT_OF_SCOPE: dict[str, str] = {
+    # The other live-capture one, and the same reason in a different sense: it opens the
+    # microphone and records for a fixed number of seconds *before* processing. Its input is not
+    # the buffer you have open, so there is nothing for a process to apply to.
+    "py/Live_1.praat":
+        "records from the microphone as its input; the open selection is never read",
+    # These four write files somewhere other than the editor, or need something the editor has
+    # no way to hold. That is not the same as `out_of_scope`'s "does not fit the app as it
+    # stands": a process whose product is a folder on disk has no result to splice back into a
+    # buffer, whatever else gets built, and one that wants an HRIR library or a VST host is
+    # asking this app to manage an installation it has no business managing.
     "Analysis/Batch_Channel_Format_Exporter.praat":
         "writes a folder of files elsewhere; nothing returns to the editor",
     "Spatial & Surround/22_2_Stem_Renderer.praat":
@@ -1462,11 +1469,11 @@ OUT_OF_SCOPE: dict[str, str] = {
         "reads a folder of B-format WAVs and writes another; neither is the open selection",
     # Excluded outright rather than by its dependency, so that installing `pedalboard` cannot
     # bring it back: wheel 0.9.24 aborts the interpreter with SIGILL on import (reproducible, on
-    # a 13th-gen Intel Core i7-1355U). A process that crashes Python before it runs has nothing
-    # to offer, and leaving it out by policy is clearer than leaving it out by omission.
+    # a 13th-gen Intel Core i7-1355U). Hosting VST plugins is also not something a terminal
+    # editor can offer a UI for -- the plugin's own window is the whole interface.
     "py/VST_Effect_from_Praat.praat":
-        "hosts VST plugins through pedalboard, whose wheel aborts with SIGILL on import",
-    # Its `chooseDirectory$` call is hoistable and now hoisted for its sibling
+        "hosts VST plugins, whose own windows are the entire interface",
+    # Its `chooseDirectory$` call is hoistable and hoisted for its sibling
     # `Semantic_timbre_retrieval` -- but the chooser was never this one's real obstacle. It
     # writes a launch JSON, starts `corpus_map.py` **detached** (`runSystem_nocheck ... &`) and
     # returns, so the Qt window it opens outlives the run and no Sound object ever comes back:
@@ -1475,6 +1482,17 @@ OUT_OF_SCOPE: dict[str, str] = {
     # of PY_ALLOWED_IMPORTS -- installing them cannot bring this back.
     "py/CorpusMap.praat":
         "launches a detached Qt window and returns no Sound; nothing comes back to the editor",
+}
+
+OUT_OF_SCOPE: dict[str, str] = {
+    # Deliberately near-empty now: everything it used to hold moved to `NEVER_PLANNED`, this
+    # table being for scripts blocked by *the app's current shape* rather than by their own.
+    # What is left is reached dynamically rather than listed here -- `Max-MSP/` is skipped as a
+    # directory, and `py/SSMComposer` and `py/Composition_1` fall out of the py-group rule that
+    # a script there must drive a Python helper. Both of those are recoverable without anything
+    # being built: upstream has simply never shipped `ssm_morph_engine.py`, and `Composition_1`
+    # is pure Praat that reads the selected Sound and would work today but for living in `py/`.
+    # Keeping them here rather than in `NEVER_PLANNED` is what keeps them findable.
 }
 
 # Below this many entries, a "list" is more likely a word that happens to be numeric ("8") or
