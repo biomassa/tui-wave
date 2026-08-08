@@ -516,7 +516,7 @@ python_command$ = \"py\"
         // same day, when `Semantic_timbre_retrieval`'s corpus folder was hoisted out of its
         // `chooseDirectory$` call — see `DIRECTORY_HOISTS` — and back to 45 when `MotionControl`
         // was moved to `NEVER_PLANNED`, taking OpenCV out of the light tier with it.
-        assert_eq!(flagged, 45, "the py group is 45 processes");
+        assert_eq!(flagged, 46, "the py group is 46 processes");
     }
 
     /// End to end through the planner: a py-group process must come out asking for a rewritten
