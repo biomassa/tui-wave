@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-08 (2.5.7)
 
 - **`install.sh` offers to reclaim the build directory.** `cargo install --path .` builds in the
   checkout's own `target/` rather than a temporary one — that is what `--path` changes about it —
