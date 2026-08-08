@@ -69,9 +69,28 @@ impl FilePanel {
         Self::new_with(directory, extensions, label)
     }
 
+    /// Resolves a directory to an absolute, `.`/`..`-free path.
+    ///
+    /// Every directory this panel holds goes through here, because `Path::parent` is purely
+    /// lexical: `Path::new(".").parent()` is `Some("")`, not the containing directory. Launched
+    /// as `tui-wave .`, the panel's directory was the literal `"."`, so the `..` row pointed at
+    /// the empty path — `read_dir("")` fails, giving zero entries, and `"".parent()` is `None`,
+    /// so no `..` row was synthesised either. One press of Enter on `..` from `~/Desktop` left
+    /// the panel showing `Files (0)` with no way back out (user report).
+    ///
+    /// `canonicalize` rather than `current_dir().join(path)` because joining leaves the `.`
+    /// component in place — `~/Desktop/.` has parent `~/Desktop`, so `..` would appear to do
+    /// nothing at all. It also resolves symlinks, which is the honest answer for a browser whose
+    /// whole job is to say where you are. Falling back to the path as given keeps a directory
+    /// that cannot be resolved (deleted mid-session, or a permissions hole) behaving as before
+    /// rather than silently becoming the process's cwd.
+    fn resolve_dir(directory: PathBuf) -> PathBuf {
+        std::fs::canonicalize(&directory).unwrap_or(directory)
+    }
+
     fn new_with(directory: PathBuf, extensions: &'static [&'static str], label: &'static str) -> Self {
         let mut panel = Self {
-            directory,
+            directory: Self::resolve_dir(directory),
             entries: Vec::new(),
             selected: 0,
             scroll_offset: 0,
@@ -145,7 +164,7 @@ impl FilePanel {
 
     /// Repoints the panel at a new directory and rescans, resetting selection/scroll/filter.
     pub fn set_directory(&mut self, path: PathBuf) {
-        self.directory = path;
+        self.directory = Self::resolve_dir(path);
         self.selected = 0;
         self.scroll_offset = 0;
         self.filter.clear();
@@ -450,6 +469,55 @@ mod tests {
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["..", "sounds", "visible.wav"]);
         assert!(matches!(entries[0].kind, EntryKind::Parent), "the parent row must come first");
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// `tui-wave .` used to strand the panel: `"."`'s lexical parent is `""`, which lists
+    /// nothing and has no parent of its own, so one press of Enter on `..` reached a dead end
+    /// with no row to leave by (user report). Going up from a directory must reach the
+    /// directory that contains it, whatever spelling the panel was handed.
+    #[test]
+    fn a_relative_starting_directory_still_walks_up_to_its_real_parent() {
+        use std::fs;
+        let base = std::env::temp_dir().join(format!("tui_wave_relative_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let child = base.join("desktop");
+        fs::create_dir_all(&child).unwrap();
+        // A trailing `.` component, which is what `tui-wave .` leaves the panel holding once the
+        // path is made absolute. Deliberately not `set_current_dir` plus a bare `"."`: cwd is
+        // process-wide and these tests run in parallel, so moving it would sabotage any test
+        // resolving a relative path at that moment. The `.` reproduces the same lexical fault —
+        // `~/Desktop/.` has parent `~/Desktop`, so `..` appears to do nothing.
+        let mut panel = FilePanel::new(child.join("."));
+
+        assert_eq!(
+            panel.directory,
+            fs::canonicalize(&child).unwrap(),
+            "the panel must resolve `.` to the directory it actually names",
+        );
+
+        let parent = panel.entries.first().expect("a `..` row must exist").clone();
+        assert!(matches!(parent.kind, EntryKind::Parent));
+        panel.set_directory(parent.path);
+        assert_eq!(
+            panel.directory,
+            fs::canonicalize(&base).unwrap(),
+            "going up from a directory must land in the directory containing it",
+        );
+        assert!(
+            !panel.entries.is_empty(),
+            "the directory above must list its contents, not read as empty",
+        );
+
+        // And the bare relative case the report came from, read from cwd rather than by moving
+        // it: whatever directory the process is in, `.` names that directory and not `""`.
+        let here = FilePanel::resolve_dir(PathBuf::from("."));
+        assert_eq!(here, fs::canonicalize(std::env::current_dir().unwrap()).unwrap());
+        assert!(
+            here.parent().is_some_and(|p| p.is_dir()),
+            "the resolved directory's parent must be a real directory, not the empty path",
+        );
 
         fs::remove_dir_all(&base).unwrap();
     }
