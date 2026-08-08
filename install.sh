@@ -78,6 +78,33 @@ confirm() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Which of a tier's packages are absent from the venv, as a space-separated list of pip names.
+#
+# Takes `pip-name:module-name` pairs because the two disagree more often than not
+# (scikit-learn/sklearn, nara-wpe/nara_wpe, descript-audio-codec/dac). Importing is the honest
+# test rather than `pip show`: a package can be recorded as installed and still fail to import,
+# which for a compiled wheel on the wrong CPU is exactly the case worth catching.
+#
+# Nothing was ever re-*downloaded* without this — no tier package is installed with `--upgrade`,
+# so pip short-circuits on "Requirement already satisfied" in about half a second. What this
+# avoids is being asked again about a 2.5 GB tier you already have, and then watching the script
+# print "installing torch" while pip decides there is nothing to do. On a re-run that reads
+# exactly like the download starting over.
+#
+# No venv yet (a first run, or --dry-run) means everything counts as missing, which is both true
+# and the right thing to show.
+missing_from_tier() {
+  local missing="" spec pkg mod have=1
+  [ -x "$VENV/bin/python3" ] || have=0
+  for spec in "$@"; do
+    pkg=${spec%%:*}; mod=${spec##*:}
+    if [ "$have" = 0 ] || ! "$VENV/bin/python3" -c "import $mod" 2>/dev/null; then
+      missing="$missing $pkg"
+    fi
+  done
+  printf '%s' "${missing# }"
+}
+
 # --- long-running command with live feedback ----------------------------------------------
 #
 # Every pip install below goes through this. It exists because `pip install --quiet` printed
@@ -382,29 +409,49 @@ else
   # Two prompts rather than one, because the sizes are not comparable. Bundling them would make
   # "yes" mean a 2.5 GB download for someone who only wanted timbre analysis.
   info ""
-  info "Optional: analysis libraries (~60 MB) — librosa, scikit-learn, nara-wpe, mido"
-  info "  enables ${GREEN}AI Conductor Mix, Dereverberation, IdentitySeparation, Recomposer (x2),${RESET}"
-  info "  ${GREEN}ThermodynamicTransform, AcousticDNAResonator${RESET}"
-  if confirm "Install the analysis libraries?"; then
-    for pkg in librosa scikit-learn nara-wpe mido; do
-      run_with_progress "installing $pkg" "$PIP" install --disable-pip-version-check \
-        --progress-bar off "$pkg" || warn "$pkg failed; the processes needing it will say so"
-    done
+  ANALYSIS_TIER="librosa:librosa scikit-learn:sklearn nara-wpe:nara_wpe mido:mido"
+  missing=$(missing_from_tier $ANALYSIS_TIER)
+  if [ -z "$missing" ]; then
+    ok "analysis libraries already installed — nothing to download"
   else
-    info "skipped; those processes stay listed and name the missing library if run"
+    if [ "$missing" = "librosa scikit-learn nara-wpe mido" ]; then
+      info "Optional: analysis libraries (~60 MB) — $missing"
+    else
+      info "Optional: analysis libraries — $missing (the rest are already installed)"
+    fi
+    info "  enables ${GREEN}AI Conductor Mix, Dereverberation, IdentitySeparation, Recomposer (x2),${RESET}"
+    info "  ${GREEN}ThermodynamicTransform, AcousticDNAResonator${RESET}"
+    if confirm "Install the analysis libraries?"; then
+      for pkg in $missing; do
+        run_with_progress "installing $pkg" "$PIP" install --disable-pip-version-check \
+          --progress-bar off "$pkg" || warn "$pkg failed; the processes needing it will say so"
+      done
+    else
+      info "skipped; those processes stay listed and name the missing library if run"
+    fi
   fi
 
   info ""
-  info "Optional: machine-learning libraries (~2.5 GB) — torch, torchaudio, encodec, DAC"
-  info "  enables ${GREEN}HierarchicalRecomposition${RESET} and ${GREEN}NeuralResynthesisVocoder${RESET}"
-  info "  some ML processes additionally need model files you supply yourself"
-  if confirm "Install the machine-learning libraries? (large download)"; then
-    for pkg in torch torchaudio encodec descript-audio-codec; do
-      run_with_progress "installing $pkg" "$PIP" install --disable-pip-version-check \
-        --progress-bar off "$pkg" || warn "$pkg failed; the processes needing it will say so"
-    done
+  ML_TIER="torch:torch torchaudio:torchaudio encodec:encodec descript-audio-codec:dac"
+  missing=$(missing_from_tier $ML_TIER)
+  if [ -z "$missing" ]; then
+    ok "machine-learning libraries already installed — nothing to download"
   else
-    info "skipped; those processes stay listed and name the missing library if run"
+    if [ "$missing" = "torch torchaudio encodec descript-audio-codec" ]; then
+      info "Optional: machine-learning libraries (~2.5 GB) — $missing"
+    else
+      info "Optional: machine-learning libraries — $missing (the rest are already installed)"
+    fi
+    info "  enables ${GREEN}HierarchicalRecomposition${RESET} and ${GREEN}NeuralResynthesisVocoder${RESET}"
+    info "  some ML processes additionally need model files you supply yourself"
+    if confirm "Install the machine-learning libraries? (large download)"; then
+      for pkg in $missing; do
+        run_with_progress "installing $pkg" "$PIP" install --disable-pip-version-check \
+          --progress-bar off "$pkg" || warn "$pkg failed; the processes needing it will say so"
+      done
+    else
+      info "skipped; those processes stay listed and name the missing library if run"
+    fi
   fi
 
   # `pedalboard` is deliberately not installed: wheel 0.9.24 aborts with SIGILL on import on
