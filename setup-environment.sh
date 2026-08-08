@@ -173,7 +173,7 @@ fi
 # The `py` scripts resolve their own interpreter, so tui-wave runs a copy with those assignments
 # repointed at this venv — a PATH-only mechanism worked on Linux and silently did nothing on
 # macOS, where they pick an absolute path before consulting PATH.
-step "Python backend (optional — the 34 processes in the 'py' group)"
+step "Python backend (optional — the 45 processes in the 'py' group)"
 info "these scripts drive a Python helper and need numpy, scipy and soundfile"
 info "(plus sounddevice and pillow for three interactive editors)"
 info "everything else in tui-wave works without them"
@@ -211,6 +211,42 @@ else
     "$VENV/bin/python3" -c 'import numpy, scipy, soundfile' \
       && ok "numpy, scipy, soundfile import cleanly" \
       || die "the venv was created but the packages did not import"
+  fi
+
+  # --- Optional tiers -------------------------------------------------------------------
+  #
+  # Same bargain as the base packages: a process whose library is missing still appears in the
+  # browser, and the helper's own dependency check names what is absent — declining costs
+  # nothing except that process failing if you run it.
+  #
+  # Two prompts rather than one, because the sizes are not comparable: bundling them would make
+  # "yes" mean a 2.5 GB download for someone who only wanted timbre analysis.
+  info ""
+  info "Optional: analysis libraries (~150 MB) — librosa, scikit-learn, OpenCV, nara-wpe, mido"
+  info "  enables AI Conductor Mix, Dereverberation, IdentitySeparation, MotionControl,"
+  info "  Recomposer (x2), ThermodynamicTransform, AcousticDNAResonator"
+  if confirm "Install the analysis libraries?"; then
+    for pkg in librosa scikit-learn opencv-python-headless nara-wpe mido; do
+      info "installing $pkg"
+      run "$PIP" install --quiet --disable-pip-version-check "$pkg" \
+        || warn "$pkg failed; the processes needing it will say so when run"
+    done
+  else
+    info "skipped; those processes stay listed and name the missing library if run"
+  fi
+
+  info ""
+  info "Optional: machine-learning libraries (~2.5 GB) — torch, torchaudio, encodec, DAC"
+  info "  enables HierarchicalRecomposition and NeuralResynthesisVocoder"
+  info "  some ML processes additionally need model files you supply yourself"
+  if confirm "Install the machine-learning libraries? (large download)"; then
+    for pkg in torch torchaudio encodec descript-audio-codec; do
+      info "installing $pkg"
+      run "$PIP" install --quiet --disable-pip-version-check "$pkg" \
+        || warn "$pkg failed; the processes needing it will say so when run"
+    done
+  else
+    info "skipped; those processes stay listed and name the missing library if run"
   fi
 
   # Only the three interactive editors need these, and sounddevice wants PortAudio at run time,

@@ -101,6 +101,35 @@ PY_ALLOWED_IMPORTS = {
     # Praat` could not work even with it installed.
     "sounddevice",
     "PIL",
+    # ---- The optional tiers `install.sh` and `setup-environment.sh` offer -----------------
+    #
+    # Same bargain as `sounddevice`/`PIL` above, and for the same reason: a process listed here
+    # appears in the browser whether or not its library was installed, and if it was not, the
+    # helper's own dependency check reports the missing module *by name* (verified across
+    # these helpers -- every one guards its imports). `praat_error_lines` never truncates
+    # stderr, so even a helper without a guard surfaces a `ModuleNotFoundError` naming the
+    # module. That is strictly better than hiding the process, which left a user unable to
+    # discover that the capability exists at all.
+    #
+    # Split into two tiers because the sizes are not comparable and the installers ask about
+    # them separately: the light tier is ~150 MB of ordinary wheels, the ML tier is ~2.5 GB.
+    #
+    # Light tier -- librosa (6 processes), scikit-learn (4), OpenCV (1), nara_wpe (1), mido (1).
+    "librosa",
+    "sklearn",
+    "cv2",
+    "nara_wpe",
+    "mido",
+    # ML tier -- torch (5 processes), and the codec/synthesis stacks built on it. Kept behind
+    # its own prompt: `torch` alone is roughly 2.5 GB, and several of these additionally need
+    # model files the library install does not provide (IRCAM's RAVE wants a `.ts` the user
+    # supplies), so installing the tier does not by itself make every process usable.
+    "torch",
+    "torchaudio",
+    "dac",
+    "encodec",
+    "ddsp",
+    "gin",
 }
 
 # Standard-library modules that mean the helper opens a window and waits for the user.
@@ -1290,6 +1319,22 @@ OUT_OF_SCOPE: dict[str, str] = {
     # to offer, and leaving it out by policy is clearer than leaving it out by omission.
     "py/VST_Effect_from_Praat.praat":
         "hosts VST plugins through pedalboard, whose wheel aborts with SIGILL on import",
+    # These two became importable when librosa/sklearn/PySide6 joined PY_ALLOWED_IMPORTS, which
+    # only revealed a harder blocker: both call `chooseDirectory$` **unconditionally** on their
+    # main path ("Pick the corpus folder"), and a directory chooser cannot be answered under
+    # `--run` any more than `chooseFolder$` or `beginPause` can.
+    #
+    # Listed by hand rather than by adding `chooseDirectory$` to the `gui_blocking` regex, and
+    # that is deliberate but temporary: the regex is genuinely missing it, and adding it would
+    # *also* drop `Analysis/OT_Grammar_Learning_from_Audio`, which ships today and works in its
+    # default mode. The real fix is to hoist the chooser into a `ParamKind::FolderPath` param
+    # the way `PAUSE_HOISTS` hoists a `beginPause` block — one rewrite that rescues both of
+    # these, makes OT Grammar safe in *both* its modes, and may recover four more scripts
+    # excluded for the same call. See PRAAT-DIRECTORY-HOIST-TODO.md.
+    "py/Semantic_timbre_retrieval.praat":
+        "calls chooseDirectory$ on its main path, which cannot be answered under --run",
+    "py/CorpusMap.praat":
+        "calls chooseDirectory$ on its main path, which cannot be answered under --run",
 }
 
 # Below this many entries, a "list" is more likely a word that happens to be numeric ("8") or

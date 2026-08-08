@@ -68901,6 +68901,277 @@ stereo_native = true
 output_is_stereo = false
 
 [[process]]
+key = "praat_py_ai_conductor_mix"
+bin = "py/AI_Conductor_Mix.praat"
+title = "AI Conductor Mix"
+category = "praat"
+subcategory = "py"
+short_description = "Algorithmic Conductor Mix - descriptor-driven ensemble mixer"
+description = "Algorithmic Conductor Mix - descriptor-driven ensemble mixer. Selects 2+ Sound objects, exports WAVs, sends them to a Python backend which builds a role-based plan and renders a stereo mix at sample level. Praat reads the result back and visualises.\n\nRoles: leader, shadow, resonance, noise fringe, pulse carrier, interruption, sustain bed, contrast voice, memory trace, silence.\n\nStates: sparse, balanced, agitated, saturated, suspended, released."
+praat_python_rewrite = true
+input = "dual_wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Segmentation", section = true },
+  { before = 4, text = "Conductor Behaviour", section = true },
+  { before = 4, text = "Memory = how much past energy influences current decisions" },
+  { before = 4, text = "Tension = how reactive to energy contrasts" },
+  { before = 9, text = "Output", section = true },
+]
+
+[[process.params]]
+name = "Segment_mode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Fixed frames", "Onset-based", "Hybrid (onset + fixed)"]
+default = 1
+
+[[process.params]]
+name = "Frame_size_ms"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 500.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Frame_hop_ms"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 250.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min_onset_gap_ms"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 50.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Conductor_style"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Neutral (balanced — uses custom params below)", "Dramatic (high contrast)", "Minimal (sparse, slow transitions)", "Dense (layered, complex)"]
+default = 1
+
+[[process.params]]
+name = "Memory_weight"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.4
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Allow_silence"
+description = ""
+automatable = false
+kind = "toggle"
+default = true
+
+[[process.params]]
+name = "Nonlinear_reactions"
+description = ""
+automatable = false
+kind = "toggle"
+default = true
+
+[[process.params]]
+name = "Tension_sensitivity"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 0.6
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Export_mix_plan"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_py_acousticdnaresonator"
+bin = "py/AcousticDNAResonator.praat"
+title = "AcousticDNAResonator"
+category = "praat"
+subcategory = "py"
+short_description = "Acoustic DNA Resonator (Differentiable FDN)"
+description = "Acoustic DNA Resonator (Differentiable FDN)\n\nAnalyzes the selected Sound's spectral envelope, per-band decay rates, and modal peaks - its \"acoustic DNA\" - then trains a small differentiable Feedback Delay Network (PyTorch) whose impulse response approximates those features. The same input sound is then passed through the trained FDN as a self-derived resonator / spectral feedback chamber, dry/wet mixed, and returned as a new (optionally multichannel) Sound.\n\nOptionally, if a TextGrid is also selected, non-empty intervals on its first tier are exported as analysis-window hints (events.csv) for the Python backend; this is informational only in v0.1 (not yet used to drive a time-varying target)."
+praat_python_rewrite = true
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+
+[[process.script_presets]]
+option = 1
+params = [1, 2, 3, 4]
+values = [10.0, 2.0, 600.0, 0.55]
+
+[[process.script_presets]]
+option = 2
+params = [1, 2, 3, 4]
+values = [24.0, 6.0, 1000.0, 0.45]
+
+[[process.script_presets]]
+option = 3
+params = [1, 2, 3, 4]
+values = [12.0, 2.5, 500.0, 0.18]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Bright shimmer chamber", "Dark long decay", "Subtle enhancement"]
+default = 0
+
+[[process.params]]
+name = "Fdn_size"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 16.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Ir_duration"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Epochs"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 800.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Dry_wet"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.35
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Normalize_mode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["none", "peak", "rms", "loudness"]
+default = 2
+
+[[process.params]]
+name = "Out_channels"
+description = ""
+automatable = false
+kind = "choice"
+options = ["match input", "mono", "stereo", "4 channels", "6 channels", "8 channels"]
+default = 0
+
+[[process.params]]
+name = "Seed"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 42.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Use_textgrid_events"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
 key = "praat_py_arranger"
 bin = "py/Arranger.praat"
 title = "Arranger"
@@ -68914,6 +69185,104 @@ input = "wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
+
+[[process]]
+key = "praat_py_dereverberation"
+bin = "py/Dereverberation.praat"
+title = "Dereverberation"
+category = "praat"
+subcategory = "py"
+short_description = "Blind dereverberation using WPE (Weighted Prediction Error)"
+description = "Blind dereverberation using WPE (Weighted Prediction Error). Removes room reverberation without knowing the room acoustics. Powered by nara_wpe (pip install nara_wpe soundfile).\n\nParameters: - Iterations:    more = stronger dereverberation (5-20) - Delay:         WPE frame delay (2-5, default 3) - Filter length: prediction filter size (10-30, longer = more reverb removed)"
+praat_python_rewrite = true
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Parameters", section = true },
+  { before = 4, text = "Output", section = true },
+]
+
+[[process.script_presets]]
+option = 1
+params = [1, 2, 3]
+values = [5.0, 2.0, 10.0]
+
+[[process.script_presets]]
+option = 2
+params = [1, 2, 3]
+values = [10.0, 3.0, 15.0]
+
+[[process.script_presets]]
+option = 3
+params = [1, 2, 3]
+values = [15.0, 3.0, 20.0]
+
+[[process.script_presets]]
+option = 4
+params = [1, 2, 3]
+values = [20.0, 4.0, 30.0]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Light room (small reverb)", "Medium room", "Large hall (heavy reverb)", "Maximum (very wet signal)"]
+default = 0
+
+[[process.params]]
+name = "Iterations"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 10.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Delay"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 3.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Filter_length"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 15.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
 
 [[process]]
 key = "praat_py_formantswarmgranulator"
@@ -69215,6 +69584,182 @@ step = 0.01
 default = 3.0
 exponential = false
 scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_py_hierarchicalrecomposition"
+bin = "py/HierarchicalRecomposition.praat"
+title = "HierarchicalRecomposition"
+category = "praat"
+subcategory = "py"
+short_description = "Hierarchical Neural Recomposition"
+description = "Hierarchical Neural Recomposition. Segments audio into events -> phrases -> sections. A PyTorch three-level hierarchical model (EventEncoder, PhraseEncoder, SectionPlanner) generates a recomposition plan. Audio is re-rendered from the original source material."
+praat_python_rewrite = true
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+param_notes = [
+  { before = 1, text = "Target", section = true },
+  { before = 2, text = "Event / Phrase Level", section = true },
+  { before = 5, text = "Section Level", section = true },
+  { before = 8, text = "Rendering", section = true },
+  { before = 11, text = "Output", section = true },
+]
+
+[[process.params]]
+name = "Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Latent Counterpoint", "Memory Spiral", "Fragmented Litany", "Formal Braiding", "Collapsing Refrain", "Echo Architecture", "Recursive Speech Choir", "Hidden Sonata"]
+default = 0
+
+[[process.params]]
+name = "Target_duration"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Density"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Phrase_coherence"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Fragmentation"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Section_contrast"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Memory_strength"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Repetition"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Overlap_amount"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.3
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Source_trace"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.85
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Formal_surprise"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.2
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Random_seed"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 42.0
+exponential = false
+scale = "plain"
+integer = true
 
 [[process.params]]
 name = "Draw_visualization"
@@ -69873,6 +70418,229 @@ default = false
 
 [[process.params]]
 name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_py_ircam_rave_model"
+bin = "py/IRCAM_rave_model.praat"
+title = "IRCAM rave model"
+category = "praat"
+subcategory = "py"
+short_description = "Loads a TorchScript RAVE .ts model and processes an input Sound object, writing the result back into Praat"
+description = "Loads a TorchScript RAVE .ts model and processes an input Sound object, writing the result back into Praat. Supports IRCAM RAVE models shipped with nn_tilde.\n\nVisualization includes: - Input / output waveforms - Side-by-side spectrograms - Latent space walking path (PCA-proxy 2-D projection of frame-level features: brightness × tonalness) - Summary panel"
+praat_python_rewrite = true
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+param_notes = [
+  { before = 0, text = "Model", section = true },
+  { before = 4, text = "Output", section = true },
+  { before = 6, text = "Latent walk", section = true },
+  { before = 7, text = "(number of analysis frames projected into latent space; 8–256)" },
+  { before = 9, text = "Model input shape", section = true },
+  { before = 10, text = "Output channels", section = true },
+]
+
+[[process.params]]
+name = "RAVE_model"
+description = ""
+automatable = false
+kind = "choice"
+options = ["break.ts", "darbouka_onnx.ts", "engine.ts", "InstantAlbania.ts", "isis.ts", "percussion.ts", "wheel.ts", "Custom (type name below)"]
+default = 0
+
+[[process.params]]
+name = "Custom_model_name"
+description = ""
+automatable = false
+kind = "text"
+default = "mymodel.ts"
+
+[[process.params]]
+name = "Models_directory"
+description = ""
+automatable = false
+kind = "folder_path"
+
+[[process.params]]
+name = "Output_prefix"
+description = ""
+automatable = false
+kind = "text"
+default = "rave_out"
+
+[[process.params]]
+name = "Gain_dB"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Normalize"
+description = ""
+automatable = false
+kind = "choice"
+options = ["none", "peak", "rms"]
+default = 1
+
+[[process.params]]
+name = "Walk_frames"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 64.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Input_shape"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Auto-detect", "[batch, channels, samples]", "[batch, 1, samples] mono", "[channels, samples] no batch"]
+default = 0
+
+[[process.params]]
+name = "Output_channels"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Same as model output", "Force mono", "Force stereo"]
+default = 0
+
+[[process]]
+key = "praat_py_identityseparation"
+bin = "py/IdentitySeparation.praat"
+title = "IdentitySeparation"
+category = "praat"
+subcategory = "py"
+short_description = "Acoustic Identity Separation & Resynthesis"
+description = "Acoustic Identity Separation & Resynthesis. Discovers latent acoustic identities inside a recording via AI clustering, then reorganizes material by identity. Powered by Python (numpy, scipy, scikit-learn, soundfile).\n\nModes: A — Layered reconstruction (spatial separation) B — Identity alternation (one at a time) C — Identity recomposition (grouped by identity, harmonic->noisy) D — Identity morphing (confidence-weighted blend) E — Hybridization (spectral envelope shaping)\n\nNOTE: With \"Multi-channel\" output format the audio is a raw per-identity separation (one identity per channel) and the resynthesis Mode is NOT applied to the audio."
+praat_python_rewrite = true
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+
+[[process.script_presets]]
+option = 1
+params = [1, 2, 3]
+values = [3.0, 1.0, 1.0]
+
+[[process.script_presets]]
+option = 2
+params = [1, 2, 3]
+values = [5.0, 1.0, 1.0]
+
+[[process.script_presets]]
+option = 3
+params = [1, 2, 3]
+values = [4.0, 2.0, 1.0]
+
+[[process.script_presets]]
+option = 4
+params = [1, 2, 3]
+values = [4.0, 3.0, 1.0]
+
+[[process.script_presets]]
+option = 5
+params = [1, 2, 3]
+values = [3.0, 4.0, 1.0]
+
+[[process.script_presets]]
+option = 6
+params = [1, 2, 3]
+values = [3.0, 5.0, 1.0]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Gentle (3 identities, layered)", "Detailed (5 identities, layered)", "Alternating voices (4 identities)", "Recomposition (4 identities, grouped)", "Morphing blend (3 identities)", "Hybrid filter (3 identities)"]
+default = 0
+
+[[process.params]]
+name = "Number_of_identities"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 4.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Mode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["A - Layered reconstruction", "B - Identity alternation", "C - Identity recomposition", "D - Identity morphing", "E - Hybridization"]
+default = 0
+
+[[process.params]]
+name = "Output_format"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Stereo mix", "Multi-channel (1 identity per channel)"]
+default = 0
+
+[[process.params]]
+name = "Seed"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 42.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
 description = ""
 automatable = false
 kind = "toggle"
@@ -71600,6 +72368,263 @@ kind = "toggle"
 default = false
 
 [[process]]
+key = "praat_py_motioncontrol"
+bin = "py/MotionControl.praat"
+title = "MotionControl"
+category = "praat"
+subcategory = "py"
+short_description = "Motion-Controlled Sound Transformation"
+description = "Motion-Controlled Sound Transformation\n\nLaunches a Python worker that opens the webcam, captures 10 seconds of free-hand motion (after a 2-second background calibration), and extracts three normalised control channels via frame differencing and centroid tracking.  Praat reads the returned CSV and applies three parallel offline transformations to the selected Sound:\n\nmotion energy       →  amplitude envelope  (AmplitudeTier) vertical position   →  pitch contour        (Manipulation + PitchTier) horizontal position →  spectral brightness  (HPF modulation)\n\nThe pipeline is entirely file-based — no sockets, no OSC, no realtime streaming between Praat and Python.\n\nPython dependencies: numpy, opencv-python Install:  pip install numpy opencv-python\n\nBrightness method: A high-pass filtered copy of the sound (above ~2 kHz) is added or subtracted in proportion to the horizontal position. Right hand → add HPF → brighter; Left → subtract HPF → darker; Centre → no change.  This is time-varying and artifact-free."
+praat_python_rewrite = true
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+
+[[process.script_presets]]
+option = 1
+params = [1, 2, 3, 4, 5, 6]
+values = [3.0, 0.5, 1.0, 0.4, 9.0, 25.0]
+
+[[process.script_presets]]
+option = 2
+params = [1, 2, 3, 4, 5, 6]
+values = [6.0, 0.2, 1.0, 0.8, 5.0, 25.0]
+
+[[process.script_presets]]
+option = 3
+params = [1, 2, 3, 4, 5, 6]
+values = [12.0, 0.08, 1.0, 1.2, 3.0, 25.0]
+
+[[process.script_presets]]
+option = 4
+params = [1, 2, 3, 4, 5, 6]
+values = [2.0, 0.55, 0.9, 0.3, 18.0, 15.0]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Subtle gesture", "Expressive performer", "Wild motion", "Meditative"]
+default = 2
+
+[[process.params]]
+name = "Pitch_range_st"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 6.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Amplitude_min"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.2
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Amplitude_max"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Brightness_range"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.8
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Smooth_frames"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 5.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Control_fps"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 25.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_py_neuralresynthesisvocoder"
+bin = "py/NeuralResynthesisVocoder.praat"
+title = "NeuralResynthesisVocoder"
+category = "praat"
+subcategory = "py"
+short_description = "Neural Resynthesis Vocoder - latent-space speech resynthesis"
+description = "Neural Resynthesis Vocoder - latent-space speech resynthesis. Selects one Sound object, exports a WAV, and sends it to a Python backend running a three-stage neural pipeline (HuBERT-Soft units -> acoustic model -> HiFi-GAN). The latent unit vector is intercepted and perturbed before resynthesis. Praat reads the result back, plays it, and visualises waveform + spectrogram.\n\nLatent operations: temperature - scales unit-vector magnitude (not sampling temp), quantization - rounds soft units to q levels (unit bitcrush), noise - injects Gaussian noise into the units.\n\nNote: the pipeline is speech-trained and runs at 16 kHz internally (output band-limited to 8 kHz). Non-speech input is \"speech-ified\" - a creative effect, not a general-purpose vocoder."
+praat_python_rewrite = true
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+param_notes = [
+  { before = 0, text = "Synthesis Configuration", section = true },
+  { before = 1, text = "Latent Unit Operations (applied to HuBERT-Soft units)", section = true },
+  { before = 1, text = "(Temperature: 1.0 = unchanged. 0.3-0.9 = softer/darker," },
+  { before = 1, text = "1.1-1.5 = brighter/pushed, 2.0+ = extreme/unstable)" },
+  { before = 2, text = "(Quantization: 0 = off. Low values crush hard (4-16)," },
+  { before = 2, text = "high values are subtle (64-256))" },
+  { before = 3, text = "(Noise: 0.0 = off. 0.02-0.1 = subtle texture, 0.3-0.6 = stormy)" },
+  { before = 4, text = "Audio Playback", section = true },
+]
+
+[[process.script_presets]]
+option = 1
+params = [1, 2, 3]
+values = [1.0, 0.0, 0.0]
+
+[[process.script_presets]]
+option = 2
+params = [1, 2, 3]
+values = [1.4, 0.0, 0.02]
+
+[[process.script_presets]]
+option = 3
+params = [1, 2, 3]
+values = [0.8, 64.0, 0.0]
+
+[[process.script_presets]]
+option = 4
+params = [1, 2, 3]
+values = [1.2, 128.0, 0.05]
+
+[[process.script_presets]]
+option = 5
+params = [1, 2, 3]
+values = [1.0, 4.0, 0.0]
+
+[[process.script_presets]]
+option = 6
+params = [1, 2, 3]
+values = [2.5, 0.0, 0.0]
+
+[[process.script_presets]]
+option = 7
+params = [1, 2, 3]
+values = [0.5, 0.0, 0.4]
+
+[[process.script_presets]]
+option = 8
+params = [1, 2, 3]
+values = [0.1, 128.0, 0.5]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom Settings", "Standard Resynthesis", "Unit Gain x1.4 (brighter/pushed)", "Soft-Unit Rounding (q=64)", "Pushed + Heavy Rounding (q=128)", "Coarse Rounding (q=4, crush)", "Extreme Unit Gain x2.5 (off-manifold)", "Noise Injection (high noise, low gain)", "Combined Extreme (gain 0.1, q=128, noise 0.5)"]
+default = 1
+
+[[process.params]]
+name = "Temperature"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Codebook_Quantization_Steps"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 0.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Noise_injection_scale"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
 key = "praat_py_paulstretch"
 bin = "py/Paulstretch.praat"
 title = "Paulstretch"
@@ -72531,6 +73556,95 @@ description = ""
 automatable = false
 kind = "toggle"
 default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_py_recomposer"
+bin = "py/Recomposer.praat"
+title = "Recomposer"
+category = "praat"
+subcategory = "py"
+short_description = "CNN Event Recomposer — Morphological Compositional Engine"
+description = "CNN Event Recomposer — Morphological Compositional Engine\n\nAn event-based acoustic recomposition system for Praat. The script automatically segments a selected Sound into events, extracts feature trajectories, and sends them to a self-supervised CNN engine in Python.\n\nThe CNN learns a latent morphology space of events, clusters them, computes dramaturgical scores, and returns a montage plan.\n\nPraat then reassembles the original audio by cutting and concatenating events in the new order (no pitch manipulation or spectral processing).\n\nThe system functions as a structural AI engine for event-based acoustic form."
+praat_python_rewrite = true
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Compositional_form"
+description = ""
+automatable = false
+kind = "choice"
+options = ["sorted", "braid", "phase", "walk"]
+default = 0
+
+[[process.params]]
+name = "Silence_threshold_db"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = -25.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min_event_dur_s"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.03
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch_floor_hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 60.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch_ceiling_hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 600.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Fade_ms"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 5.0
+exponential = false
+scale = "plain"
 
 [[process.params]]
 name = "Play_result"
@@ -73799,6 +74913,156 @@ kind = "toggle"
 default = false
 
 [[process]]
+key = "praat_py_thermodynamictransform"
+bin = "py/ThermodynamicTransform.praat"
+title = "ThermodynamicTransform"
+category = "praat"
+subcategory = "py"
+short_description = "Thermodynamic audio transformation with AI state discovery"
+description = "Thermodynamic audio transformation with AI state discovery. Analyzes acoustic structure → discovers phase regimes via ML → applies regime-dependent spectral transforms (Crystal/Fluid/Gas/Plasma). Powered by Python (numpy, scipy, scikit-learn, soundfile).\n\nParameters: - Macro intensity: overall transformation strength (0-1) - Memory:          state machine inertia/hysteresis (0-1) - Diffusion:       spectral smearing in Fluid regime (0-1) - Crystallization: bias toward stable/Crystal regimes (0-1) - AI mode:         A=clustering  B=predictive  C=learned-entropy - AI strength:     AI influence on regime assignment (0-1) - Seed:            for full deterministic reproducibility"
+praat_python_rewrite = true
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+preset_param = 0
+preset_custom_option = 0
+param_notes = [
+  { before = 1, text = "Thermodynamic Controls", section = true },
+  { before = 5, text = "AI Layer", section = true },
+  { before = 7, text = "Reproducibility", section = true },
+  { before = 8, text = "Output", section = true },
+]
+
+[[process.script_presets]]
+option = 1
+params = [1, 2, 3, 6]
+values = [0.3, 0.7, 0.0, 0.4]
+
+[[process.script_presets]]
+option = 2
+params = [1, 2, 3, 6]
+values = [0.5, 0.5, 0.0, 0.5]
+
+[[process.script_presets]]
+option = 3
+params = [1, 2, 3, 6]
+values = [0.7, 0.3, 0.0, 0.6]
+
+[[process.script_presets]]
+option = 4
+params = [1, 2, 3, 6]
+values = [0.85, 0.2, 0.0, 0.7]
+
+[[process.script_presets]]
+option = 5
+params = [1, 2, 3, 6]
+values = [0.6, 0.4, 0.0, 0.9]
+
+[[process.script_presets]]
+option = 6
+params = [1, 2, 3, 6]
+values = [0.6, 0.3, 0.7, 0.5]
+
+[[process.params]]
+name = "Internal Preset"
+description = ""
+automatable = false
+kind = "choice"
+options = ["Custom", "Gentle crystallization", "Balanced flow", "Volatile atmosphere", "Deep plasma", "AI explorer", "Convection flow"]
+default = 0
+
+[[process.params]]
+name = "Thermo_intensity"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.6
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Memory"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Convection"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Preserve_duration"
+description = ""
+automatable = false
+kind = "toggle"
+default = true
+
+[[process.params]]
+name = "AI_mode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["A — Unsupervised clustering", "B — Predictive instability", "C — Learned entropy (PCA)"]
+default = 0
+
+[[process.params]]
+name = "AI_strength"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Seed"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 1.0
+default = 42.0
+exponential = false
+scale = "plain"
+integer = true
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
 key = "praat_py_tinysol_retrieval"
 bin = "py/TinySOL_Retrieval.praat"
 title = "TinySOL Retrieval"
@@ -74174,6 +75438,95 @@ description = ""
 automatable = false
 kind = "toggle"
 default = false
+
+[[process.params]]
+name = "Play_result"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process]]
+key = "praat_py_recomposer_2"
+bin = "py/recomposer.praat"
+title = "recomposer (2)"
+category = "praat"
+subcategory = "py"
+short_description = "CNN Event Recomposer — Morphological Compositional Engine"
+description = "CNN Event Recomposer — Morphological Compositional Engine\n\nAn event-based acoustic recomposition system for Praat. The script automatically segments a selected Sound into events, extracts feature trajectories, and sends them to a self-supervised CNN engine in Python.\n\nThe CNN learns a latent morphology space of events, clusters them, computes dramaturgical scores, and returns a montage plan.\n\nPraat then reassembles the original audio by cutting and concatenating events in the new order (no pitch manipulation or spectral processing).\n\nThe system functions as a structural AI engine for event-based acoustic form."
+praat_python_rewrite = true
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Compositional_form"
+description = ""
+automatable = false
+kind = "choice"
+options = ["sorted", "braid", "phase", "walk"]
+default = 0
+
+[[process.params]]
+name = "Silence_threshold_db"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = -25.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min_event_dur_s"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.03
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch_floor_hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 60.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Pitch_ceiling_hz"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 600.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Fade_ms"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 5.0
+exponential = false
+scale = "plain"
 
 [[process.params]]
 name = "Play_result"

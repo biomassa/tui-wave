@@ -498,7 +498,11 @@ python_command$ = \"py\"
             );
             flagged += usize::from(def.praat_python_rewrite);
         }
-        assert_eq!(flagged, 34, "the py group is 34 processes");
+        // A canary on the group's size, not a property of it: the number moves whenever
+        // `PY_ALLOWED_IMPORTS` changes, and the point is that such a change is noticed rather
+        // than absorbed silently. 34 -> 45 on 2026-08-08, when librosa/scikit-learn/OpenCV/
+        // nara_wpe/mido and the torch stack were admitted in two optional tiers.
+        assert_eq!(flagged, 45, "the py group is 45 processes");
     }
 
     /// End to end through the planner: a py-group process must come out asking for a rewritten
