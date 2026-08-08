@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **The setup scripts credit praatAudioTools where they fetch it** — by Shai Cohen (Department of
+  Music, Bar-Ilan University, Israel), MIT-licensed, with the upstream URL. About 439 of the
+  catalog's processes are that project's work, and the scripts are run as-is and never modified;
+  the credit belongs at the moment they are downloaded rather than only in `THIRD_PARTY_NOTICES.md`.
+
 - **Python package names are coloured in the setup scripts**, light blue against the green already
   used for process names. The Python section talks about both at once — "librosa enables AI
   Conductor Mix" names a package and a process in one line — and which half is the thing you
