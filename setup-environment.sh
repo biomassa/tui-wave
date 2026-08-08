@@ -60,7 +60,10 @@ for arg in "$@"; do
     -y|--yes)     ASSUME_YES=1 ;;
     --dry-run)    DRY_RUN=1 ;;
     --no-python)  WANT_PYTHON=0 ;;
-    -h|--help)    sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # Stops at line 29: what follows is the commit-pin rationale, which is a note to whoever
+    # maintains this file rather than to whoever runs it. Ending at 31 printed its heading with
+    # nothing under it.
+    -h|--help)    sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)            echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done

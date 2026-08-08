@@ -11,6 +11,10 @@
 #     ./install.sh --no-praat      # skip installing Praat itself
 #     ./install.sh --dry-run       # print every command it would run, change nothing
 #
+# At the end it offers to delete ./target, which `cargo install --path .` fills with ~500MB the
+# installed binary does not need. `--yes` does not answer that one: an unattended run must not
+# delete a build cache nobody asked it to touch.
+#
 # What it will NOT do, deliberately:
 #
 #   * Install CDP. Those ~250 binaries are a separate download from
@@ -37,7 +41,7 @@ for arg in "$@"; do
     --no-python)   WANT_PYTHON=0 ;;
     --no-praat)    WANT_PRAAT=0 ;;
     --dry-run)     DRY_RUN=1 ;;
-    -h|--help)     sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)     sed -n '3,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)             echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -81,6 +85,16 @@ confirm() {
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# `confirm` for a question `--yes` must not answer on the user's behalf. The only caller is the
+# offer to delete the build directory, where a wrong yes costs a rebuild and a wrong no costs
+# nothing — so an unattended run has to take the cheap side rather than the convenient one.
+confirm_explicitly() {
+  [ -t 0 ] || return 1
+  printf '    %s? %s [y/N] ' "$YELLOW$RESET" "$1"
+  read -r reply
+  case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
+}
 
 # Which of a tier's packages are absent from the venv, as a space-separated list of pip names.
 #
@@ -480,6 +494,32 @@ run cargo install --path . --locked
 if [ "$DRY_RUN" = 0 ]; then
   have tui-wave && ok "installed: $(command -v tui-wave)" \
     || warn "installed to ~/.cargo/bin, which is not on your PATH — add it to your shell profile"
+fi
+
+# --- 6b. The build artifacts ---------------------------------------------------------------
+#
+# `cargo install --path .` builds in *this checkout's* target directory, not a temporary one --
+# that is what `--path` changes about it -- and leaves it behind. The installed binary lives in
+# ~/.cargo/bin and does not need any of it, so for someone who cloned only to install, it is
+# half a gigabyte of nothing.
+#
+# Offered rather than done, because the same directory is a build cache worth minutes per
+# rebuild to anyone who is actually working on this. And deliberately *not* answered by --yes:
+# that flag exists so CI and scripted setups can run unattended, and neither should discover it
+# has deleted a cache nobody asked it to touch. The prompt is skipped entirely when there is no
+# terminal to ask, which is the same outcome as answering no.
+if [ "$DRY_RUN" = 0 ] && [ -d target ]; then
+  size=$(du -sh target 2>/dev/null | cut -f1)
+  if [ -n "$size" ]; then
+    step "Build artifacts"
+    info "./target holds $size of build files; the installed binary does not need them"
+    info "keeping them makes a later rebuild much faster"
+    if confirm_explicitly "Remove them with \`cargo clean\`?"; then
+      cargo clean && ok "removed; ./target will be rebuilt from scratch next time"
+    else
+      info "kept; remove them yourself any time with: cargo clean"
+    fi
+  fi
 fi
 
 # --- 7. What is left for the user ---------------------------------------------------------

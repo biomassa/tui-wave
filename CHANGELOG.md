@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **`install.sh` offers to reclaim the build directory.** `cargo install --path .` builds in the
+  checkout's own `target/` rather than a temporary one — that is what `--path` changes about it —
+  and leaves roughly half a gigabyte there. The installed binary lives in `~/.cargo/bin` and needs
+  none of it, so the last step now reports the real size and offers `cargo clean`.
+
+  Offered, not done: the same directory is a build cache worth minutes per rebuild to anyone
+  working on the source. And deliberately not answered by `--yes` — that flag exists so CI and
+  scripted setups can run unattended, and neither should find it has deleted a cache nobody asked
+  it to touch. With no terminal to ask, the prompt is skipped, which is the same outcome as no.
+
+  Also fixed: `--help` truncated its own last paragraph in `install.sh`, and ended on an empty
+  heading in `setup-environment.sh`.
+
 - **Fixed: launching with a relative path stranded the Files panel one level up.** Started as
   `tui-wave .`, the panel held the literal `"."` — and `Path::parent` is purely lexical, so the
   `..` row pointed at the empty path rather than at the containing directory. Entering it listed
