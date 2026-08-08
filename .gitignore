@@ -23,3 +23,6 @@ __pycache__/
 # Local convenience wrapper for the env-gated Praat sweep (see praat::runner's
 # catalog_smoke_test) — a personal shortcut, not part of the build
 /run-praat-smoke-test.sh
+
+# Tails the sweep's live log from a second terminal while it runs — same reason
+/observe.sh
