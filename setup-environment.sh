@@ -68,8 +68,11 @@ done
 if [ -t 1 ]; then
   BOLD=$(printf '\033[1m'); DIM=$(printf '\033[2m'); RED=$(printf '\033[31m')
   GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m'); RESET=$(printf '\033[0m')
+  # Python package names, as GREEN is process names — the two share a sentence throughout the
+  # Python section, and which half is the thing you install is what the line is telling you.
+  BLUE=$(printf '\033[94m')
 else
-  BOLD=""; DIM=""; RED=""; GREEN=""; YELLOW=""; RESET=""
+  BOLD=""; DIM=""; RED=""; GREEN=""; YELLOW=""; BLUE=""; RESET=""
 fi
 
 step() { printf '\n%s==>%s %s%s%s\n' "$BOLD" "$RESET" "$BOLD" "$*" "$RESET"; }
@@ -230,13 +233,13 @@ else
   run "$PIP" install --quiet --disable-pip-version-check --upgrade pip \
     || warn "could not upgrade pip; continuing with the version the venv shipped"
   for pkg in numpy scipy soundfile; do
-    info "installing $pkg (this can take a few minutes if no wheel matches your Python)"
+    info "installing ${BLUE}$pkg${RESET} (this can take a few minutes if no wheel matches your Python)"
     run "$PIP" install --quiet --disable-pip-version-check "$pkg" \
-      || die "$pkg failed to install — the 'py' group needs all three"
+      || die "${BLUE}$pkg${RESET} failed to install — the 'py' group needs all three"
   done
   if [ "$DRY_RUN" = 0 ]; then
     "$VENV/bin/python3" -c 'import numpy, scipy, soundfile' \
-      && ok "numpy, scipy, soundfile import cleanly" \
+      && ok "${BLUE}numpy, scipy, soundfile${RESET} import cleanly" \
       || die "the venv was created but the packages did not import"
   fi
 
@@ -271,7 +274,7 @@ else
     info "pip cannot install it; it is part of the base Python this venv was built from."
     info "Installing it takes effect immediately — no need to recreate the venv or re-run this."
   elif [ "$DRY_RUN" = 0 ]; then
-    ok "tkinter present — ${GREEN}Arranger, Performance Launcher, Spatial Panner${RESET}"
+    ok "${BLUE}tkinter${RESET} present — ${GREEN}Arranger, Performance Launcher, Spatial Panner${RESET}"
   fi
 
   # --- Optional tiers -------------------------------------------------------------------
@@ -289,17 +292,17 @@ else
     ok "analysis libraries already installed — nothing to download"
   else
     if [ "$missing" = "librosa scikit-learn nara-wpe mido" ]; then
-      info "Optional: analysis libraries (~60 MB) — $missing"
+      info "Optional: analysis libraries (~60 MB) — ${BLUE}$missing${RESET}"
     else
-      info "Optional: analysis libraries — $missing (the rest are already installed)"
+      info "Optional: analysis libraries — ${BLUE}$missing${RESET} (the rest are already installed)"
     fi
     info "  enables ${GREEN}AI Conductor Mix, Dereverberation, IdentitySeparation, Recomposer (x2),${RESET}"
     info "  ${GREEN}ThermodynamicTransform, AcousticDNAResonator${RESET}"
     if confirm "Install the analysis libraries?"; then
       for pkg in $missing; do
-        info "installing $pkg"
+        info "installing ${BLUE}$pkg${RESET}"
         run "$PIP" install --quiet --disable-pip-version-check "$pkg" \
-          || warn "$pkg failed; the processes needing it will say so when run"
+          || warn "${BLUE}$pkg${RESET} failed; the processes needing it will say so when run"
       done
     else
       info "skipped; those processes stay listed and name the missing library if run"
@@ -313,17 +316,17 @@ else
     ok "machine-learning libraries already installed — nothing to download"
   else
     if [ "$missing" = "torch torchaudio encodec descript-audio-codec" ]; then
-      info "Optional: machine-learning libraries (~2.5 GB) — $missing"
+      info "Optional: machine-learning libraries (~2.5 GB) — ${BLUE}$missing${RESET}"
     else
-      info "Optional: machine-learning libraries — $missing (the rest are already installed)"
+      info "Optional: machine-learning libraries — ${BLUE}$missing${RESET} (the rest are already installed)"
     fi
     info "  enables ${GREEN}HierarchicalRecomposition${RESET} and ${GREEN}NeuralResynthesisVocoder${RESET}"
     info "  some ML processes additionally need model files you supply yourself"
     if confirm "Install the machine-learning libraries? (large download)"; then
       for pkg in $missing; do
-        info "installing $pkg"
+        info "installing ${BLUE}$pkg${RESET}"
         run "$PIP" install --quiet --disable-pip-version-check "$pkg" \
-          || warn "$pkg failed; the processes needing it will say so when run"
+          || warn "${BLUE}$pkg${RESET} failed; the processes needing it will say so when run"
       done
     else
       info "skipped; those processes stay listed and name the missing library if run"
@@ -339,9 +342,9 @@ else
   done
   if [ "$DRY_RUN" = 0 ]; then
     if [ "$extras_ok" = 1 ] && "$VENV/bin/python3" -c 'import sounddevice, PIL' 2>/dev/null; then
-      ok "sounddevice, pillow ready — ${GREEN}Arranger, Performance Launcher, Spectral Eraser${RESET}"
+      ok "${BLUE}sounddevice, pillow${RESET} ready — ${GREEN}Arranger, Performance Launcher, Spectral Eraser${RESET}"
     else
-      warn "sounddevice/pillow unavailable — ${GREEN}Arranger${RESET}, ${GREEN}Performance Launcher${RESET}"
+      warn "${BLUE}sounddevice/pillow${RESET} unavailable — ${GREEN}Arranger${RESET}, ${GREEN}Performance Launcher${RESET}"
       warn "and ${GREEN}Spectral Eraser${RESET} will report missing dependencies; everything else works"
     fi
   fi
