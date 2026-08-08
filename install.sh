@@ -339,6 +339,39 @@ else
       warn "Eraser will report missing dependencies; everything else is unaffected"
     fi
   fi
+  # tkinter is standard library, which is exactly why nothing checks for it and exactly why it
+  # goes missing: it is a *compiled* module (`_tkinter`, linked against Tcl/Tk) that several
+  # distributions and Homebrew split into a separate package. `pip install` cannot supply it —
+  # it belongs to the base interpreter, not to this venv.
+  #
+  # It bites on macOS specifically. Homebrew's `python@3.x` ships without it, and a venv built
+  # from that base inherits the gap, so Arranger opens on Linux and fails on a Mac with
+  # `ModuleNotFoundError: No module named 'tkinter'` and no hint as to why (user report,
+  # 2026-08-08). The three processes that need it import it *lazily*, so nothing surfaces until
+  # the moment the window would have opened.
+  #
+  # A warning rather than a failure: it costs three processes out of 453 and nothing else.
+  if [ "$DRY_RUN" = 0 ] && ! "$VENV/bin/python3" -c 'import tkinter' 2>/dev/null; then
+    warn "this Python has no tkinter — Arranger, Performance Launcher and Spatial Panner"
+    warn "will fail with \"No module named 'tkinter'\"; every other process is unaffected"
+    pyver=$("$VENV/bin/python3" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)
+    case "$(uname -s)" in
+      Darwin)
+        info "macOS: Homebrew ships Python without it. Install it with"
+        info "    brew install python-tk@${pyver}"
+        ;;
+      *)
+        info "Debian/Ubuntu:  sudo apt install python3-tk"
+        info "Fedora:         sudo dnf install python3-tkinter"
+        info "Arch:           sudo pacman -S tk"
+        ;;
+    esac
+    info "pip cannot install it; it is part of the base Python this venv was built from."
+    info "Installing it takes effect immediately — no need to recreate the venv or re-run this."
+  elif [ "$DRY_RUN" = 0 ]; then
+    ok "tkinter present (Arranger, Performance Launcher, Spatial Panner)"
+  fi
+
   # --- Optional tiers -------------------------------------------------------------------
   #
   # Same bargain as everything above: a process whose library is missing still appears in the
