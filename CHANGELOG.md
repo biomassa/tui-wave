@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Fixed: launching with a relative path stranded the Files panel one level up.** Started as
+  `tui-wave .`, the panel held the literal `"."` — and `Path::parent` is purely lexical, so the
+  `..` row pointed at the empty path rather than at the containing directory. Entering it listed
+  nothing (`read_dir("")` fails) *and* synthesised no `..` row of its own (`"".parent()` is
+  `None`), so one keypress from `~/Desktop` reached `Files (0)` with no way back out.
+
+  Every directory the panel takes is now resolved to an absolute, `.`-free path, so going up from
+  a directory lands in the directory that contains it whatever spelling the panel was handed.
+  `canonicalize` rather than joining onto the cwd, because joining leaves the `.` in place —
+  `~/Desktop/.` has parent `~/Desktop`, which would make `..` appear to do nothing at all.
+
 - **The setup scripts credit praatAudioTools where they fetch it** — by Shai Cohen (Department of
   Music, Bar-Ilan University, Israel), MIT-licensed, with the upstream URL. About 439 of the
   catalog's processes are that project's work, and the scripts are run as-is and never modified;
