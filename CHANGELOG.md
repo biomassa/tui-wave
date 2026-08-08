@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **A process that changes a buffer's channel count no longer plays back at the wrong speed.**
+  CDP Pan takes mono in and emits stereo, and after applying it the result played at half speed,
+  an octave down — while saving the file and reloading it played correctly. That difference is
+  the whole diagnosis: loading builds a new audio engine, and an in-place edit did not.
+
+  rodio's mixer bootstraps a format converter from the source's channel count **once**, and
+  re-reads it only when the source reports the end of a span. Our sources report no span at all,
+  which is the honest answer for a document that is one continuous run of samples — so the
+  converter stayed frozen at the old width, took two samples per frame where it expected one, and
+  read them as consecutive frames. The engine already rebuilt itself when the *sample rate*
+  changed, for the same class of reason; the channel count is now on that condition too.
+
+  Affects any edit that changes the width in place, in either direction: 34 CDP processes that
+  can emit more channels than they were given, Remove Empty Channels, and the undo of any of
+  them. Buffers whose width changes by *becoming a new buffer* (Mix Multichannel to Stereo, Copy
+  to New) were never affected — they get a new engine as a matter of course.
+
 - **The exclusion list now says which refusals are permanent.** Six more scripts joined
   `never_planned` alongside MotionControl: the two live-capture ones (`Live_1` records from the
   microphone), the three whose product is a folder of files or an HRIR library rather than

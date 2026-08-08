@@ -2699,6 +2699,27 @@ pub struct App {
     /// construction, so an operation that changes `Document.sample_rate` (resample, and its
     /// undo/redo) must rebuild the engine rather than just `reload` it.
     audio_sample_rate: Option<u32>,
+    /// Channel count the current audio engine was built with, for the same reason and with a
+    /// subtler mechanism: the *engine* would cope, since every `Play` builds a fresh source that
+    /// derives its channel count from the data it is handed — but rodio's mixer would not.
+    ///
+    /// `Player::connect_new` wraps the player's queue in a `UniformSourceIterator`, whose
+    /// `bootstrap` reads the inner source's `channels()`, `sample_rate()` and `current_span_len()`
+    /// **once** and then only re-reads them when that span runs out. Our sources report no span
+    /// (`current_span_len() -> None`, which is the honest answer for a document that is one
+    /// continuous run of samples), so the span never runs out and the channel-count converter
+    /// stays frozen at whatever the format was the first time it looked.
+    ///
+    /// So a `reload` that widens a mono document to stereo leaves a converter still set to mono,
+    /// taking two samples per frame where it expects one and reading them as consecutive frames:
+    /// the result plays at exactly half speed, an octave down (user report, 2026-08-08, via CDP
+    /// Pan — mono in, stereo out, spliced in place). Saving and reloading the file "fixed" it
+    /// because that builds a new engine, which is what this now does directly.
+    ///
+    /// [`Document::channel_count`] rather than `channels.len()` so a streamed buffer is covered:
+    /// Remove Empty Channels edits its channel *map*, which changes what the next source declares
+    /// without any sample data moving at all.
+    audio_channels: Option<usize>,
     /// One undo/redo stack per open document, kept index-parallel to `documents`. Undo
     /// must never cross buffers — each `Command` stores sample data from the document it
     /// was applied to, so replaying it against a different document would corrupt it.
@@ -3504,6 +3525,7 @@ impl App {
         let document_count = documents.len();
         let audio = documents.first().and_then(engine_for);
         let audio_sample_rate = documents.first().map(|doc| doc.sample_rate);
+        let audio_channels = documents.first().map(|doc| doc.channel_count());
         let waveform_caches: Vec<Vec<WaveformCache>> = documents
             .iter()
             .map(|doc| doc.channels.iter().map(|c| WaveformCache::build(c)).collect())
@@ -3537,6 +3559,7 @@ impl App {
             viewport: None,
             audio,
             audio_sample_rate,
+            audio_channels,
             histories,
             curves: Vec::new(),
             curve_histories: Vec::new(),
@@ -7192,17 +7215,24 @@ impl App {
             }
         }
         // A rate change (resample, or its undo/redo) needs a fresh engine since the rate is
-        // captured at construction; otherwise a cheap data reload is enough.
+        // captured at construction — and so does a **channel-count** change, for a reason that
+        // lives one layer down in rodio rather than in our engine: see `App::audio_channels`.
+        // Short version: the mixer's format converter is bootstrapped once and never re-inspects
+        // a source that reports no span, so a mono→stereo `reload` plays at half speed. Both
+        // conditions are checked before the cheap data reload below.
         //
-        // A streamed document has neither to do: its rate cannot change (nothing that resamples
-        // is allowed near one) and there is nothing to reload, since the engine reads the same
-        // file rather than a copy — a channel-map edit is simply picked up by the next read. The
-        // guard matters because such a document's `channels` is *empty*, so the reload below
-        // would hand the engine nothing and leave the buffer silent.
-        if self.documents[idx].is_streaming() {
-            // Nothing to do.
-        } else if self.audio_sample_rate != Some(self.documents[idx].sample_rate) {
+        // A streamed document has no reload to do — the engine reads the same file rather than a
+        // copy, so a channel-map edit is picked up by the next read — but it *does* need the
+        // rebuild, since what that next source declares is exactly what the frozen converter got
+        // wrong. Hence the check spans both storages via `channel_count()` while the reload stays
+        // resident-only: such a document's `channels` is deliberately *empty*, so reloading from
+        // it would hand the engine nothing and leave the buffer silent.
+        let rate_changed = self.audio_sample_rate != Some(self.documents[idx].sample_rate);
+        let channels_changed = self.audio_channels != Some(self.documents[idx].channel_count());
+        if rate_changed || channels_changed {
             self.rebuild_audio();
+        } else if self.documents[idx].is_streaming() {
+            // Nothing to do.
         } else if let Some(audio) = &self.audio {
             audio.reload(self.documents[idx].channels.clone());
         }
@@ -14672,11 +14702,14 @@ impl App {
     fn rebuild_audio(&mut self) {
         if let Some(document) = self.active_doc() {
             let rate = document.sample_rate;
+            let channels = document.channel_count();
             self.audio = engine_for(document);
             self.audio_sample_rate = Some(rate);
+            self.audio_channels = Some(channels);
         } else {
             self.audio = None;
             self.audio_sample_rate = None;
+            self.audio_channels = None;
         }
         self.refresh_fold_gains();
     }
@@ -23950,6 +23983,49 @@ mod tests {
 
     fn new_app(document: Option<Document>, directory: Option<PathBuf>) -> App {
         App::new_with_config(document, directory, Config::default())
+    }
+
+    /// A process that changes the channel count in place must get a **new** audio engine, not a
+    /// data reload.
+    ///
+    /// The engine itself would cope — every `Play` builds a fresh source that derives its channel
+    /// count from the data it is handed. rodio's mixer is what does not: `Player::connect_new`
+    /// bootstraps a format converter from the source's `channels()` once and re-reads it only
+    /// when the source's span runs out, and our sources report no span at all (the honest answer
+    /// for a document that is one continuous run of samples). So the converter stays frozen at
+    /// the old width, takes two samples per frame where it expects one, and plays the result at
+    /// half speed an octave down — reported against CDP Pan, which is mono in and stereo out
+    /// (2026-08-08). Saving and reloading the file appeared to cure it, because loading builds a
+    /// new engine; this makes the edit do that directly.
+    ///
+    /// Asserted through `audio_channels` rather than by listening: it is what selects rebuild
+    /// over reload, and it is set whether or not a device exists, so this runs on a headless CI
+    /// box exactly as it does here. Both directions are checked — widening plays slow, and the
+    /// narrowing Remove Empty Channels does the same thing in reverse.
+    #[test]
+    fn a_channel_count_change_rebuilds_the_audio_engine() {
+        let mut app = new_app(Some(doc(0.5, 1000)), None);
+        assert_eq!(app.audio_channels, Some(1), "starts mono");
+
+        // Widen, as a stereo-emitting CDP process spliced into a mono buffer does.
+        app.histories[0].apply(
+            crate::commands::cdp::cdp_process_command(
+                "CDP: Pan".into(),
+                (0, 1000),
+                vec![vec![0.25; 1000], vec![0.75; 1000]],
+                0,
+            ),
+            &mut app.documents[0],
+        );
+        app.after_sample_mutation(0);
+        assert_eq!(app.documents[0].channels.len(), 2, "the splice widened the document");
+        assert_eq!(app.audio_channels, Some(2), "the engine must have been rebuilt at the new width");
+
+        // ...and back again on undo, which is the same hazard mirrored.
+        app.histories[0].undo(&mut app.documents[0]);
+        app.after_sample_mutation(0);
+        assert_eq!(app.documents[0].channels.len(), 1);
+        assert_eq!(app.audio_channels, Some(1), "undo must rebuild too");
     }
 
     fn doc(val: f32, len: usize) -> Document {
