@@ -114,10 +114,14 @@ PY_ALLOWED_IMPORTS = {
     # Split into two tiers because the sizes are not comparable and the installers ask about
     # them separately: the light tier is ~150 MB of ordinary wheels, the ML tier is ~2.5 GB.
     #
-    # Light tier -- librosa (6 processes), scikit-learn (4), OpenCV (1), nara_wpe (1), mido (1).
+    # Light tier -- librosa (6 processes), scikit-learn (4), nara_wpe (1), mido (1).
+    #
+    # OpenCV (`cv2`) was here for one process, `MotionControl`, and left with it: that script is
+    # now `NEVER_PLANNED`, and cv2 is imported by no other helper in the plugin. A dependency
+    # kept for a process nobody can reach is ~90 MB of wheel that buys nothing, so the light
+    # tier lost it rather than carrying it against some future script that might want it.
     "librosa",
     "sklearn",
-    "cv2",
     "nara_wpe",
     "mido",
     # ML tier -- torch (5 processes), and the codec/synthesis stacks built on it. Kept behind
@@ -1427,6 +1431,28 @@ PHOTO_INPUTS: dict[str, str] = {
         "additive synthesis; R/G/B drive interleaved harmonic groups",
 }
 
+# Scripts this app will not offer, as a decision rather than as an obstacle.
+#
+# Distinct from `OUT_OF_SCOPE`, which reads as "this does not fit the shape of the app" and
+# invites a re-look whenever the app's shape changes -- a folder-of-files writer becomes
+# thinkable the day batch export exists. These will not, whatever gets built: the reason is in
+# the *script*, not in what tui-wave happens to support this month.
+#
+# Being here also settles the dependency question. A library kept for a process nobody can reach
+# is pure install cost, so anything imported by these helpers and nothing else comes back out of
+# `PY_ALLOWED_IMPORTS` -- see `cv2` there.
+NEVER_PLANNED: dict[str, str] = {
+    # Opens the webcam, calibrates for 2 seconds against the background, then records 10 seconds
+    # of free-hand motion and derives three control channels from frame differencing. It is a
+    # live performance instrument that happens to write a CSV: the transformation afterwards is
+    # ordinary offline Praat, but the input is a person waving at a camera for ten seconds.
+    # There is no version of a keyboard-driven terminal editor that asks for that, and no camera
+    # in a batch `praat --run`. Arrived in the catalog on 2026-08-08 with the OpenCV allowlist
+    # entry and was pulled the same day; `cv2` went with it, being imported by nothing else.
+    "py/MotionControl.praat":
+        "captures ten seconds of webcam hand motion as its control input",
+}
+
 OUT_OF_SCOPE: dict[str, str] = {
     "Analysis/Batch_Channel_Format_Exporter.praat":
         "writes a folder of files elsewhere; nothing returns to the editor",
@@ -1761,6 +1787,7 @@ def check_stale_keys() -> list[str]:
         ("GENERATORS", GENERATORS),
         ("PHOTO_INPUTS", PHOTO_INPUTS),
         ("OUT_OF_SCOPE", OUT_OF_SCOPE),
+        ("NEVER_PLANNED", NEVER_PLANNED),
     ):
         for key in table:
             if key not in present:
@@ -1785,6 +1812,13 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
             continue
 
         source = read_script(path)
+
+        # Checked before `OUT_OF_SCOPE` only so the two tables cannot both claim a script and
+        # have the answer depend on order; nothing is in both.
+        never_planned = NEVER_PLANNED.get(str(rel).replace("\\", "/"))
+        if never_planned:
+            excluded.append((str(rel), "never_planned", never_planned))
+            continue
 
         out_of_scope = OUT_OF_SCOPE.get(str(rel).replace("\\", "/"))
         if out_of_scope:
