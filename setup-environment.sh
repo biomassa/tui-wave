@@ -226,8 +226,9 @@ else
   #
   # A warning rather than a failure: it costs three processes out of 453 and nothing else.
   if [ "$DRY_RUN" = 0 ] && ! "$VENV/bin/python3" -c 'import tkinter' 2>/dev/null; then
-    warn "this Python has no tkinter — Arranger, Performance Launcher and Spatial Panner"
-    warn "will fail with \"No module named 'tkinter'\"; every other process is unaffected"
+    warn "this Python has no tkinter — ${GREEN}Arranger${RESET}, ${GREEN}Performance Launcher${RESET}"
+    warn "and ${GREEN}Spatial Panner${RESET} will fail with \"No module named 'tkinter'\""
+    info "every other process is unaffected"
     pyver=$("$VENV/bin/python3" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)
     case "$(uname -s)" in
       Darwin)
@@ -243,7 +244,7 @@ else
     info "pip cannot install it; it is part of the base Python this venv was built from."
     info "Installing it takes effect immediately — no need to recreate the venv or re-run this."
   elif [ "$DRY_RUN" = 0 ]; then
-    ok "tkinter present (Arranger, Performance Launcher, Spatial Panner)"
+    ok "tkinter present — ${GREEN}Arranger, Performance Launcher, Spatial Panner${RESET}"
   fi
 
   # --- Optional tiers -------------------------------------------------------------------
@@ -291,10 +292,10 @@ else
   done
   if [ "$DRY_RUN" = 0 ]; then
     if [ "$extras_ok" = 1 ] && "$VENV/bin/python3" -c 'import sounddevice, PIL' 2>/dev/null; then
-      ok "sounddevice, pillow ready (the interactive editors)"
+      ok "sounddevice, pillow ready — ${GREEN}Arranger, Performance Launcher, Spectral Eraser${RESET}"
     else
-      warn "sounddevice/pillow unavailable — Arranger, Performance Launcher and Spectral"
-      warn "Eraser will report missing dependencies; everything else is unaffected"
+      warn "sounddevice/pillow unavailable — ${GREEN}Arranger${RESET}, ${GREEN}Performance Launcher${RESET}"
+      warn "and ${GREEN}Spectral Eraser${RESET} will report missing dependencies; everything else works"
     fi
   fi
 fi
