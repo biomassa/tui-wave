@@ -222,11 +222,11 @@ else
   # Two prompts rather than one, because the sizes are not comparable: bundling them would make
   # "yes" mean a 2.5 GB download for someone who only wanted timbre analysis.
   info ""
-  info "Optional: analysis libraries (~150 MB) — librosa, scikit-learn, OpenCV, nara-wpe, mido"
-  info "  enables AI Conductor Mix, Dereverberation, IdentitySeparation, MotionControl,"
-  info "  Recomposer (x2), ThermodynamicTransform, AcousticDNAResonator"
+  info "Optional: analysis libraries (~60 MB) — librosa, scikit-learn, nara-wpe, mido"
+  info "  enables AI Conductor Mix, Dereverberation, IdentitySeparation, Recomposer (x2),"
+  info "  ThermodynamicTransform, AcousticDNAResonator"
   if confirm "Install the analysis libraries?"; then
-    for pkg in librosa scikit-learn opencv-python-headless nara-wpe mido; do
+    for pkg in librosa scikit-learn nara-wpe mido; do
       info "installing $pkg"
       run "$PIP" install --quiet --disable-pip-version-check "$pkg" \
         || warn "$pkg failed; the processes needing it will say so when run"

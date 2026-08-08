@@ -514,8 +514,9 @@ python_command$ = \"py\"
         // than absorbed silently. 34 -> 45 on 2026-08-08, when librosa/scikit-learn/OpenCV/
         // nara_wpe/mido and the torch stack were admitted in two optional tiers. 45 -> 46 the
         // same day, when `Semantic_timbre_retrieval`'s corpus folder was hoisted out of its
-        // `chooseDirectory$` call — see `DIRECTORY_HOISTS`.
-        assert_eq!(flagged, 46, "the py group is 46 processes");
+        // `chooseDirectory$` call — see `DIRECTORY_HOISTS` — and back to 45 when `MotionControl`
+        // was moved to `NEVER_PLANNED`, taking OpenCV out of the light tier with it.
+        assert_eq!(flagged, 45, "the py group is 45 processes");
     }
 
     /// End to end through the planner: a py-group process must come out asking for a rewritten

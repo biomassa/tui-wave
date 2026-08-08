@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **MotionControl is gone, and OpenCV with it.** It captures ten seconds of free-hand motion
+  through the webcam and derives its control channels from that — a live performance instrument,
+  not something a keyboard-driven terminal editor can ask for, and nothing a batch `praat --run`
+  has a camera for. It gets a new exclusion category, `never_planned`, distinct from
+  `out_of_scope`: the latter reads as "does not fit the app as it stands" and deserves a re-look
+  when the app changes shape, while this will not become reachable whatever gets built.
+
+  `cv2` was in the light optional tier for that one process and is imported by no other helper,
+  so the tier drops it — the analysis-libraries prompt in `install.sh` and
+  `setup-environment.sh` is now ~60 MB rather than ~150 MB.
+
 - **A preset now moves every field it sets.** Praat drops a trailing unit from a form label when
   it derives the variable name — `real Lock_strength_(%) 35` declares `lock_strength` — and the
   catalog converter did not know that. So it could not match a preset branch's `lock_strength = 20`
