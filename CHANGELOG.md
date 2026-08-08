@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **praatAudioTools updated to `cc4e8b4`, adding three processes.** Hilbert Audio Processor
+  (Modulation), Fuzzy Time Recomposer (Time & Granular) and RF Concatenative (py) — 456 processes
+  now, from 453. The `py` group is 46.
+
+  Upstream also rewrote twenty Modulation scripts, which renamed roughly two dozen parameters
+  (`Doppler_Depth` → `Doppler_delay_depth_ms`, `KS_mod_rate` → `KS_mod_rate_Hz`, and so on). That
+  is exactly why the catalog is regenerated with the pin rather than after it: Praat fills a
+  script's form positionally and does not reject a mismatch, so a bumped submodule with a stale
+  catalog produces plausible, wrong audio rather than an error.
+
 - **Fixed: the tkinter remedy named the wrong Python, and the venv was built on a Tk-less one.**
   A Mac with pyenv ahead of Homebrew on `PATH` builds the venv from pyenv's interpreter, which is
   compiled without Tcl/Tk unless Tk happened to be present at build time — so Arranger,

@@ -202,7 +202,7 @@ PYTHON_CANDIDATES="python3.13 python3.12 python3.11 python3.10 python3
 # build a venv at all.
 #
 # Tk capability is a preference rather than a requirement because it costs three processes out of
-# 453 — but it has to be considered here, at the moment the base interpreter is chosen, since a
+# 456 — but it has to be considered here, at the moment the base interpreter is chosen, since a
 # venv cannot acquire Tk afterwards. `pip install` cannot supply `_tkinter`: it is a compiled
 # module belonging to the base Python. A Mac with pyenv first on PATH is the case that matters —
 # pyenv builds without Tcl/Tk unless it was present at compile time, and the resulting venv fails
@@ -387,9 +387,9 @@ fi
 
 # --- 4. The praatAudioTools submodule -----------------------------------------------------
 step "praatAudioTools scripts"
-# Same credit setup-environment.sh prints where it clones them: about 439 of the catalog's
+# Same credit setup-environment.sh prints where it clones them: about 456 of the catalog's
 # processes are this project's work, run as-is and never modified.
-info "about 439 of tui-wave's processes are scripts from praatAudioTools, by Shai Cohen"
+info "about 456 of tui-wave's processes are scripts from praatAudioTools, by Shai Cohen"
 info "(Department of Music, Bar-Ilan University, Israel), MIT-licensed"
 info "https://github.com/ShaiCohen-ops/Praat-plugin_AudioTools"
 if [ -f third_party/praat-audiotools/setup.praat ] || [ -n "$(ls -A third_party/praat-audiotools 2>/dev/null)" ]; then
@@ -406,9 +406,9 @@ fi
 # app runs a copy with those assignments repointed at this venv (see `model::praat::python`) --
 # a PATH-only mechanism worked on Linux and silently did nothing on macOS, where they resolve an
 # absolute path.
-step "Python backend (optional — the 45 processes in the 'py' group)"
+step "Python backend (optional — the 46 processes in the 'py' group)"
 VENV="${XDG_CONFIG_HOME:-$HOME/.config}/tui-wave/praat/pyenv"
-info "45 praatAudioTools scripts drive a Python helper; all need ${BLUE}numpy, scipy${RESET} and ${BLUE}soundfile${RESET}"
+info "46 praatAudioTools scripts drive a Python helper; all need ${BLUE}numpy, scipy${RESET} and ${BLUE}soundfile${RESET}"
 info "(plus ${BLUE}sounddevice${RESET} and ${BLUE}pillow${RESET} for three interactive editors). They go in a virtual"
 info "environment this app owns — your system Python is not touched."
 info "Everything else in tui-wave works without them."
@@ -486,7 +486,7 @@ else
   # 2026-08-08). The three processes that need it import it *lazily*, so nothing surfaces until
   # the moment the window would have opened.
   #
-  # A warning rather than a failure: it costs three processes out of 453 and nothing else.
+  # A warning rather than a failure: it costs three processes out of 456 and nothing else.
   if [ "$DRY_RUN" = 0 ] && ! "$VENV/bin/python3" -c 'import tkinter' 2>/dev/null; then
     warn "this Python has no ${BLUE}tkinter${RESET} — ${GREEN}Arranger${RESET}, ${GREEN}Performance Launcher${RESET}"
     warn "and ${GREEN}Spatial Panner${RESET} will fail with \"No module named 'tkinter'\""

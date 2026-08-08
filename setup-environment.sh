@@ -42,7 +42,7 @@ set -euo pipefail
 
 # The praatAudioTools commit this build's catalog was generated from. Kept in step with
 # src/model/cdp/praat_catalog.toml's header by a test — see the note above.
-PINNED_COMMIT="0de18dbd17187dc711a09eb5465c6d72c05c1fdb"
+PINNED_COMMIT="cc4e8b4f4e6ce4f119d4e81f49ac9c0086cac2c8"
 UPSTREAM="https://github.com/ShaiCohen-ops/Praat-plugin_AudioTools"
 
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -238,7 +238,7 @@ fi
 # --- 2. The praatAudioTools scripts ----------------------------------------------------------
 step "praatAudioTools scripts"
 have git || die "git is required to fetch the scripts — install it and re-run"
-info "about 439 of tui-wave's processes are scripts from this project"
+info "about 456 of tui-wave's processes are scripts from this project"
 # Whose work this is, at the moment it is being downloaded. The scripts are run as-is by
 # absolute path and never modified, so the credit belongs where the fetch happens rather than
 # buried in a notices file nobody opens.
@@ -300,7 +300,7 @@ fi
 # The `py` scripts resolve their own interpreter, so tui-wave runs a copy with those assignments
 # repointed at this venv — a PATH-only mechanism worked on Linux and silently did nothing on
 # macOS, where they pick an absolute path before consulting PATH.
-step "Python backend (optional — the 45 processes in the 'py' group)"
+step "Python backend (optional — the 46 processes in the 'py' group)"
 info "these scripts drive a Python helper and need ${BLUE}numpy, scipy${RESET} and ${BLUE}soundfile${RESET}"
 info "(plus ${BLUE}sounddevice${RESET} and ${BLUE}pillow${RESET} for three interactive editors)"
 info "everything else in tui-wave works without them"
@@ -353,7 +353,7 @@ else
   # 2026-08-08). The three processes that need it import it *lazily*, so nothing surfaces until
   # the moment the window would have opened.
   #
-  # A warning rather than a failure: it costs three processes out of 453 and nothing else.
+  # A warning rather than a failure: it costs three processes out of 456 and nothing else.
   if [ "$DRY_RUN" = 0 ] && ! "$VENV/bin/python3" -c 'import tkinter' 2>/dev/null; then
     warn "this Python has no ${BLUE}tkinter${RESET} — ${GREEN}Arranger${RESET}, ${GREEN}Performance Launcher${RESET}"
     warn "and ${GREEN}Spatial Panner${RESET} will fail with \"No module named 'tkinter'\""
