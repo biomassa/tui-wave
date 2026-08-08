@@ -256,8 +256,8 @@ else
   # "yes" mean a 2.5 GB download for someone who only wanted timbre analysis.
   info ""
   info "Optional: analysis libraries (~60 MB) — librosa, scikit-learn, nara-wpe, mido"
-  info "  enables AI Conductor Mix, Dereverberation, IdentitySeparation, Recomposer (x2),"
-  info "  ThermodynamicTransform, AcousticDNAResonator"
+  info "  enables ${GREEN}AI Conductor Mix, Dereverberation, IdentitySeparation, Recomposer (x2),${RESET}"
+  info "  ${GREEN}ThermodynamicTransform, AcousticDNAResonator${RESET}"
   if confirm "Install the analysis libraries?"; then
     for pkg in librosa scikit-learn nara-wpe mido; do
       info "installing $pkg"
@@ -270,7 +270,7 @@ else
 
   info ""
   info "Optional: machine-learning libraries (~2.5 GB) — torch, torchaudio, encodec, DAC"
-  info "  enables HierarchicalRecomposition and NeuralResynthesisVocoder"
+  info "  enables ${GREEN}HierarchicalRecomposition${RESET} and ${GREEN}NeuralResynthesisVocoder${RESET}"
   info "  some ML processes additionally need model files you supply yourself"
   if confirm "Install the machine-learning libraries? (large download)"; then
     for pkg in torch torchaudio encodec descript-audio-codec; do
