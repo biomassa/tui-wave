@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **The setup scripts install CPU builds of torch, saving 2.7 GB.** `pip install torch` hard-depends
+  on the whole CUDA runtime — cuDNN, cuBLAS, NCCL and the rest — which measured 2.7 GB of `nvidia/*`
+  in a venv on a laptop with no NVIDIA GPU at all, taking it from 2.3 GB to 6.0 GB. Nothing in this
+  app can use any of it: the two ML processes are a speech vocoder and a codec running at 16-24 kHz,
+  which is CPU work, and the weights they load are a few hundred MB by comparison.
+
+  `torch` and `torchaudio` now come from PyTorch's CPU index, and before the two packages that
+  depend on them — pip stops at "already satisfied", so a CPU torch installed first is what encodec
+  and descript-audio-codec build on; the other order lets their resolution pull the CUDA build back
+  from PyPI. Linux only, since that is where the split exists: macOS wheels on PyPI are already
+  CPU/MPS builds. `--index-url` rather than `--extra-index-url`, as PyTorch's own instructions have
+  it — it replaces PyPI for that one command, so the CUDA variant is not reachable to resolve back
+  to.
+
 - **Fixed: two concurrent Praat sweeps shredded each other's log, silently.** The sweep writes to
   a fixed path and truncated it on open, so a second run reset the length to zero while the first
   still held a descriptor positioned tens of kilobytes in — the kernel filled the gap with a

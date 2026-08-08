@@ -412,6 +412,17 @@ else
   #
   # Two prompts rather than one, because the sizes are not comparable: bundling them would make
   # "yes" mean a 2.5 GB download for someone who only wanted timbre analysis.
+  #
+  # torch comes from PyTorch's CPU index on Linux rather than PyPI. The default wheel hard-depends
+  # on the entire CUDA runtime — cuDNN, cuBLAS, NCCL and the rest, measured at 2.7 GB of `nvidia/*`
+  # in a venv on a laptop with no NVIDIA GPU, taking it from 2.3 GB to 6.0 GB. Nothing here can
+  # use any of it: the two ML processes are a speech vocoder and a codec running at 16-24 kHz,
+  # which is CPU work. Linux only, because that is where the split exists — macOS wheels on PyPI
+  # are already CPU/MPS builds. `--index-url` rather than `--extra-index-url`, as PyTorch's own
+  # instructions have it: it replaces PyPI for that command so the CUDA build is not reachable at
+  # all, which is the point — left reachable, resolution can wander back to it.
+  TORCH_INDEX=""
+  [ "$(uname -s)" = Linux ] && TORCH_INDEX="--index-url https://download.pytorch.org/whl/cpu"
   info ""
   ANALYSIS_TIER="librosa:librosa scikit-learn:sklearn nara-wpe:nara_wpe mido:mido"
   missing=$(missing_from_tier $ANALYSIS_TIER)
@@ -449,10 +460,19 @@ else
     fi
     info "  enables ${GREEN}HierarchicalRecomposition${RESET} and ${GREEN}NeuralResynthesisVocoder${RESET}"
     info "  some ML processes additionally need model files you supply yourself"
+    [ -n "$TORCH_INDEX" ] && info "  CPU builds of ${BLUE}torch${RESET}/${BLUE}torchaudio${RESET} — the CUDA ones add 2.7 GB nothing here uses"
     if confirm "Install the machine-learning libraries? (large download)"; then
+      # torch and torchaudio first, from the CPU index, *before* the two packages that depend on
+      # them: pip stops at "already satisfied", so a CPU torch installed first is what encodec and
+      # descript-audio-codec then build on. The other order lets their resolution pull the CUDA
+      # torch from PyPI, and the saving is gone.
       for pkg in $missing; do
+        case "$pkg" in
+          torch|torchaudio) index="$TORCH_INDEX" ;;
+          *)                index="" ;;
+        esac
         info "installing ${BLUE}$pkg${RESET}"
-        run "$PIP" install --quiet --disable-pip-version-check "$pkg" \
+        run "$PIP" install --quiet --disable-pip-version-check $index "$pkg" \
           || warn "${BLUE}$pkg${RESET} failed; the processes needing it will say so when run"
       done
     else
