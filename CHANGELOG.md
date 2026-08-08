@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed: the tkinter remedy named the wrong Python, and the venv was built on a Tk-less one.**
+  A Mac with pyenv ahead of Homebrew on `PATH` builds the venv from pyenv's interpreter, which is
+  compiled without Tcl/Tk unless Tk happened to be present at build time — so Arranger,
+  Performance Launcher and Spatial Panner still failed after `brew install python-tk`, with a
+  traceback pointing into `~/.pyenv` (user report). That advice is correct for *Homebrew's*
+  Python and does nothing for pyenv's, which has to be recompiled.
+
+  Both setup scripts now choose the base interpreter with this in mind: `pick_python` prefers one
+  that imports `tkinter` as well as `venv`, falling back to the old behaviour when none does, and
+  `setup-environment.sh` gained the same selection (it used plain `python3`). A venv cannot
+  acquire Tk afterwards — `_tkinter` is a compiled module of the base interpreter — so the moment
+  it is created is the only moment the choice exists.
+
+  When a venv already exists on a Tk-less base, the warning now reads `sys.base_prefix` and gives
+  the remedy for that interpreter's *flavour* — rebuild instructions for pyenv, `python-tk@X.Y`
+  for Homebrew, the distribution package on Linux — and, if a Tk-capable interpreter is present
+  on the machine, offers to rebuild the venv on it. Offered, never automatic and never answered
+  by `--yes`: it re-downloads everything in the venv, so what is installed and how much disk it
+  occupies are listed before the question. Packages are reinstalled by name rather than by pinned
+  version, since a version chosen for one interpreter may have no wheel for another.
+
 ## 2026-08-08 (2.5.7)
 
 - **`install.sh` offers to reclaim the build directory.** `cargo install --path .` builds in the
