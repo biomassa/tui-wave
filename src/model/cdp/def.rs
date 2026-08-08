@@ -818,6 +818,22 @@ pub struct ParamDef {
     /// entry never satisfies.
     #[serde(default)]
     pub praat_pause_block: Option<usize>,
+    /// `Some(var)` for a param **hoisted out of a Praat `chooseDirectory$` call** — `var` is the
+    /// variable that call assigns, spelled as the script spells it, `$` included (`corpusDir$`).
+    ///
+    /// The same treatment [`praat_pause_block`](Self::praat_pause_block) gives a pause dialog,
+    /// and for the same reason: a modal under `--run` segfaults Praat. The difference is that
+    /// this app can answer *this* dialog's question properly — [`ParamKind::FolderPath`] has a
+    /// real folder picker, and `cdp_validate_fields` blocks Apply until one is chosen, so the
+    /// value can never arrive empty and the fallback the scripts guard with `if dir$ = ""` is
+    /// unreachable.
+    ///
+    /// Like a hoisted pause param it is never passed as a `runScript:` argument — the script's
+    /// `form` has no slot for it, the whole point being that the script asked for it with a
+    /// dialog instead. `praat::runner` assigns it in the rewritten copy. See
+    /// `praat::rewrite::rewrite_directory_choosers`.
+    #[serde(default)]
+    pub praat_directory_var: Option<String>,
     /// `Some(field)` for a number split out of a Praat `key=value` field — `field` names the
     /// script parameter the value rejoins, and [`key_value_key`](Self::key_value_key) is its key
     /// inside it.
@@ -1415,6 +1431,7 @@ mod tests {
             rows_match_input_count: false,
             before_outfile: false,
             praat_pause_block: None,
+            praat_directory_var: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::Number {
@@ -1485,6 +1502,7 @@ mod tests {
             rows_match_input_count: false,
             before_outfile: false,
             praat_pause_block: None,
+            praat_directory_var: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::Toggle { default: false },
@@ -1502,6 +1520,7 @@ mod tests {
             rows_match_input_count: false,
             before_outfile: false,
             praat_pause_block: None,
+            praat_directory_var: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::Choice {
@@ -1568,6 +1587,7 @@ mod tests {
             rows_match_input_count: false,
             before_outfile: false,
             praat_pause_block: None,
+            praat_directory_var: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::Table {
@@ -1665,6 +1685,7 @@ mod tests {
             rows_match_input_count: false,
             before_outfile: false,
             praat_pause_block: None,
+            praat_directory_var: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::MarkerTimeList {
@@ -1743,6 +1764,7 @@ mod tests {
             rows_match_input_count: false,
             before_outfile: false,
             praat_pause_block: None,
+            praat_directory_var: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::HiliteBand {
@@ -1808,6 +1830,7 @@ mod tests {
             // sits *after* the outfile, so this is the ordinary (default) placement.
             before_outfile: false,
             praat_pause_block: None,
+            praat_directory_var: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::CrystalVdat,

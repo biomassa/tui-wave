@@ -28281,6 +28281,7 @@ mod tests {
                 list_is_time_sequence: false,
                 before_outfile: false,
             praat_pause_block: None,
+            praat_directory_var: None,
             key_value_group: None,
             key_value_key: None,
                 kind: ParamKind::Number {
@@ -31269,6 +31270,7 @@ mod tests {
                 list_is_time_sequence: false,
                 before_outfile: true,
             praat_pause_block: None,
+            praat_directory_var: None,
             key_value_group: None,
             key_value_key: None,
                 kind: ParamKind::FormantBufferRef {
@@ -31360,6 +31362,7 @@ mod tests {
                 list_is_time_sequence: false,
                 before_outfile: true,
             praat_pause_block: None,
+            praat_directory_var: None,
             key_value_group: None,
             key_value_key: None,
                 kind: ParamKind::FormantBufferRef {
@@ -39244,6 +39247,7 @@ mod tests {
                 list_is_time_sequence: false,
                 before_outfile: true,
             praat_pause_block: None,
+            praat_directory_var: None,
             key_value_group: None,
             key_value_key: None,
                 kind: ParamKind::FormantBufferRef {

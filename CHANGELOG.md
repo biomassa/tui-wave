@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **A Praat script that asks for a folder now asks *you* for it.** Eight praatAudioTools scripts
+  call `chooseDirectory$`, which opens a modal Praat cannot show under `--run` — it segfaults
+  outright, the same failure a `beginPause` dialog causes. The converter's detector was missing
+  that spelling, so nothing had ever noticed. Where the folder is the point of the process it is
+  hoisted into an ordinary folder field in tui-wave's own dialog, picked with the file browser
+  and rewritten into the copy of the script that runs.
+
+  **OT Grammar Learning from Audio** was the reason this was worth building rather than excluding:
+  it shipped working, and crashed the moment anyone chose its Pair-corpus GEN mode. Both modes now
+  run, and are tested against the real binary. **Semantic Timbre Retrieval** joins the catalog
+  (454 processes, up from 453), having been excluded by hand for the same call.
+
+  **KL Divergence Corpus Resynthesis** and **Sound Atom Composer** turned out to be safe already —
+  their chooser is only a fallback for a blank folder field, and an unpicked folder field blocks
+  Apply — so they keep working with the detector now looking. **CorpusMap** stays out, but for
+  what it actually is rather than for the call: it launches a detached Qt window and returns no
+  audio to the editor.
+
 ## 2026-08-08 (2.5.4)
 
 - **Clicking a dialog's bottom hint bar now does what the hint under the pointer says.** It was

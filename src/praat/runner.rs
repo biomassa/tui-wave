@@ -298,68 +298,81 @@ fn run_job_body(
         })?;
     }
 
-    // A `py`-group script picks its own interpreter, and on macOS picks an absolute path that
-    // `PATH` cannot influence — so the app-owned venv is bypassed and numpy/scipy/soundfile are
-    // simply not there. Run a copy with every interpreter assignment repointed. See
-    // `model::praat::python`; the count is checked because a script that resolves its
-    // interpreter some way the rewriter does not recognise would otherwise fail later, on an
-    // import, with nothing pointing at the cause.
-    if let Some(rewrite) = &job.planned.python_rewrite {
-        let source = std::fs::read_to_string(&job.planned.script_path).map_err(|e| {
+    // Two independent reasons to run a rewritten *copy* of the script rather than the submodule's
+    // own file, and a script may need both — `Semantic_timbre_retrieval` is a `py`-group script
+    // whose corpus folder is hoisted out of a `chooseDirectory$` call. So the passes are applied
+    // in sequence to one text, written once, under the one filename both plans name. They touch
+    // disjoint lines (interpreter assignments; dialog statements), so the order is immaterial;
+    // what would not be immaterial is writing the file twice and having the second copy win.
+    if job.planned.python_rewrite.is_some() || job.planned.pause_rewrite.is_some() {
+        let mut source = std::fs::read_to_string(&job.planned.script_path).map_err(|e| {
             PraatError::OutputRead {
                 path: job.planned.script_path.display().to_string(),
                 message: e.to_string(),
             }
         })?;
-        // `defaultDirectory$` is pinned to the original script's folder as well, because the
-        // copy runs from the job's temp directory and 33 of these scripts locate their `.py`
-        // helper relative to themselves — `defaultDirectory$ + "/spat_binaural_bridge.py"`.
-        // Without it the copy runs and then reports the helper missing.
-        let original_dir = job
-            .planned
-            .script_path
-            .parent()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let (rewritten, replaced) = crate::model::praat::python::rewrite_for_venv(
-            &source,
-            &rewrite.interpreter,
-            &original_dir,
-        );
-        if replaced == 0 {
-            return Err(PraatError::OutputRead {
-                path: job.planned.script_path.display().to_string(),
-                message: "this script was expected to select a Python interpreter but none was \
-                          found to repoint; it may need numpy/scipy/soundfile on the system \
-                          interpreter instead"
-                    .to_string(),
-            });
-        }
-        let path = temp_dir.join(&rewrite.script_name);
-        std::fs::write(&path, rewritten).map_err(|e| PraatError::OutputRead {
-            path: path.display().to_string(),
-            message: e.to_string(),
-        })?;
-    }
+        let fail = |message: String| PraatError::OutputRead {
+            path: job.planned.script_path.display().to_string(),
+            message,
+        };
 
-    // A process whose settings live in a Praat `beginPause` dialog runs against a rewritten
-    // *copy* of the script, written here beside the driver — the dialog cannot be shown under
-    // `--run` at all, it segfaults Praat outright. The original in the submodule is only read.
-    // See `model::praat::rewrite` for the substitution rules.
-    if let Some(rewrite) = &job.planned.pause_rewrite {
-        let source = std::fs::read_to_string(&job.planned.script_path).map_err(|e| {
-            PraatError::OutputRead {
-                path: job.planned.script_path.display().to_string(),
-                message: e.to_string(),
+        // A `py`-group script picks its own interpreter, and on macOS picks an absolute path that
+        // `PATH` cannot influence — so the app-owned venv is bypassed and numpy/scipy/soundfile
+        // are simply not there. See `model::praat::python`; the count is checked because a script
+        // that resolves its interpreter some way the rewriter does not recognise would otherwise
+        // fail later, on an import, with nothing pointing at the cause.
+        if let Some(rewrite) = &job.planned.python_rewrite {
+            // `defaultDirectory$` is pinned to the original script's folder as well, because the
+            // copy runs from the job's temp directory and 33 of these scripts locate their `.py`
+            // helper relative to themselves — `defaultDirectory$ + "/spat_binaural_bridge.py"`.
+            // Without it the copy runs and then reports the helper missing.
+            let original_dir = job
+                .planned
+                .script_path
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let (rewritten, replaced) = crate::model::praat::python::rewrite_for_venv(
+                &source,
+                &rewrite.interpreter,
+                &original_dir,
+            );
+            if replaced == 0 {
+                return Err(fail(
+                    "this script was expected to select a Python interpreter but none was \
+                     found to repoint; it may need numpy/scipy/soundfile on the system \
+                     interpreter instead"
+                        .to_string(),
+                ));
             }
-        })?;
-        let rewritten = crate::model::praat::rewrite::rewrite_pause_blocks(&source, &rewrite.blocks, &rewrite.form_locks)
-            .map_err(|e| PraatError::OutputRead {
-                path: job.planned.script_path.display().to_string(),
-                message: e.to_string(),
-            })?;
-        let path = temp_dir.join(&rewrite.script_name);
-        std::fs::write(&path, rewritten).map_err(|e| PraatError::OutputRead {
+            source = rewritten;
+        }
+
+        // A process whose settings live in a Praat `beginPause` dialog, or whose folder it would
+        // ask for with `chooseDirectory$`, runs against the copy instead — neither modal can be
+        // shown under `--run` at all, they segfault Praat outright. See `model::praat::rewrite`
+        // for the substitution rules.
+        if let Some(rewrite) = &job.planned.pause_rewrite {
+            source = crate::model::praat::rewrite::rewrite_pause_blocks(
+                &source,
+                &rewrite.blocks,
+                &rewrite.form_locks,
+            )
+            .map_err(|e| fail(e.to_string()))?;
+            source = crate::model::praat::rewrite::rewrite_directory_choosers(
+                &source,
+                &rewrite.directories,
+            )
+            .map_err(|e| fail(e.to_string()))?;
+        }
+
+        let name = match (&job.planned.pause_rewrite, &job.planned.python_rewrite) {
+            (Some(rewrite), _) => &rewrite.script_name,
+            (None, Some(rewrite)) => &rewrite.script_name,
+            (None, None) => unreachable!("guarded by the condition above"),
+        };
+        let path = temp_dir.join(name);
+        std::fs::write(&path, source).map_err(|e| PraatError::OutputRead {
             path: path.display().to_string(),
             message: e.to_string(),
         })?;
@@ -1364,6 +1377,118 @@ mod tests {
             eprintln!("  {failure}");
         }
         assert!(ran > 0, "no Praat entries found in the catalog");
+    }
+
+    /// A melody of discrete pitched notes — what the note-extracting scripts actually need, and
+    /// what `smoke_fixture`'s steady 220 Hz tone with tremolo deliberately is not (it is there to
+    /// exercise every entry cheaply, and a script that refuses it on its merits is not a defect).
+    ///
+    /// Eight notes over a major-ish scale, each 300 ms — comfortably past the 80 ms minimum note
+    /// duration `OT_Grammar` defaults to — with a short raised-cosine fade on each so Praat's
+    /// pitch tracker sees note boundaries rather than one continuous glide.
+    fn melody_fixture(offset: usize) -> (Vec<Vec<f32>>, u32) {
+        const RATE: u32 = 44_100;
+        const NOTE: usize = RATE as usize * 3 / 10;
+        let steps = [0i32, 2, 4, 5, 7, 9, 11, 12];
+        let mut samples = Vec::with_capacity(NOTE * steps.len());
+        for (n, step) in steps.iter().enumerate() {
+            // The offset walks the melody through the scale, so the good/ and bad/ corpora hold
+            // genuinely different files rather than eight copies of one.
+            let semitones = step + ((n + offset) % 3) as i32;
+            let freq = 220.0 * 2f32.powf(semitones as f32 / 12.0);
+            let fade = RATE as usize / 200;
+            for i in 0..NOTE {
+                let t = i as f32 / RATE as f32;
+                let envelope = if i < fade {
+                    i as f32 / fade as f32
+                } else if i > NOTE - fade {
+                    (NOTE - i) as f32 / fade as f32
+                } else {
+                    1.0
+                };
+                // Two harmonics: a pure sine is tracked fine, but the overtone makes the
+                // fixture's spectrum less degenerate for anything measuring timbre.
+                let tone = (t * freq * std::f32::consts::TAU).sin()
+                    + 0.3 * (t * freq * 2.0 * std::f32::consts::TAU).sin();
+                samples.push(tone * envelope * 0.5);
+            }
+        }
+        (vec![samples], RATE)
+    }
+
+    /// `OT_Grammar_Learning_from_Audio` in **both** GEN modes, against the real binary.
+    ///
+    /// This is the test the directory hoist exists for. The entry shipped before it with a
+    /// `chooseDirectory$` call sitting in the `else` of its GEN-mode menu: mode 1 worked, and
+    /// mode 2 opened a modal under `--run`, which does not block — it **segfaults** (exit 139).
+    /// So the mode was not merely unusable, it took Praat down, and nothing in the catalog said
+    /// so. Both modes are run because passing in mode 1 proves nothing about the branch that
+    /// changed, and running only mode 2 would not notice the hoist breaking the other one.
+    ///
+    /// The corpus is built here rather than reusing the sweep's: this script extracts a *melody*,
+    /// and eight discrete notes are the minimum it will accept.
+    #[test]
+    fn ot_grammar_runs_in_both_gen_modes() {
+        require_praat!();
+        let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/praat-audiotools");
+        if validate_audiotools_dir(&checkout).is_err() {
+            return; // submodule not initialised
+        }
+        let state = std::env::temp_dir().join(format!("praat-otgrammar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        let prefs = prepare_prefs_dir(&state, &checkout);
+
+        // `pairRoot$ + "/good"` and `+ "/bad"` — the script names both subfolders itself, so the
+        // hoisted param is the folder *holding* them, not either one.
+        let pairs = state.join("pairs");
+        for (kind, base) in [("good", 0usize), ("bad", 1usize)] {
+            let dir = pairs.join(kind);
+            std::fs::create_dir_all(&dir).expect("corpus dir");
+            for i in 0..3 {
+                let (channels, sample_rate) = melody_fixture(base * 3 + i);
+                let doc = Document { channels, sample_rate, ..Default::default() };
+                save_wav_with(&doc, &dir.join(format!("m{i}.wav")), BitDepth::Int16, false)
+                    .expect("corpus clip");
+            }
+        }
+
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog
+            .find("praat_analysis_ot_grammar_learning_from_audio")
+            .expect("entry exists");
+        let gen_mode = def.params.iter().position(|p| p.name == "GEN_mode").expect("GEN_mode");
+        let folder = def
+            .params
+            .iter()
+            .position(|p| p.praat_directory_var.as_deref() == Some("pairRoot$"))
+            .expect("the hoisted folder param");
+        let (channels, sample_rate) = melody_fixture(0);
+
+        for (mode, label) in [(0usize, "Neighbor-GEN"), (1, "Pair-corpus")] {
+            let mut values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+            values[gen_mode] = crate::model::cdp::ParamValue::Choice(mode);
+            values[folder] =
+                crate::model::cdp::ParamValue::Text(pairs.to_string_lossy().into_owned());
+            let planned = crate::model::praat::plan::plan_praat_job(def, &values, &checkout)
+                .unwrap_or_else(|e| panic!("{label}: plan failed: {e}"));
+            let job = PraatJob {
+                id: mode as u64,
+                praat_bin: praat_bin_for(""),
+                inputs: vec![channels.clone(); planned.input_names.len()],
+                photo_path: None,
+                planned,
+                input_sample_rate: sample_rate,
+                purpose: JobPurpose::Apply,
+                timeout: Duration::from_secs(120),
+                prefs_dir: prefs.clone(),
+                python_venv_bin: None,
+            };
+            match run(&job) {
+                Ok(out) => assert!(!out.result[0].is_empty(), "{label}: empty output"),
+                Err(err) => panic!("{label}: {err}"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&state);
     }
 
     /// The same sweep, but with every drawing toggle turned **on** — the number that says

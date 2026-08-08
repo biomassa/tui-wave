@@ -7912,6 +7912,13 @@ automatable = false
 kind = "toggle"
 default = true
 
+[[process.params]]
+name = "Pair_corpus_folder"
+praat_directory_var = "pairRoot$"
+description = ""
+automatable = false
+kind = "folder_path"
+
 [[process]]
 key = "praat_analysis_pitch_and_loudness_comparison_two_sounds"
 bin = "Analysis/Pitch_and_Loudness_Comparison_Two_Sounds.praat"
@@ -74012,6 +74019,179 @@ description = ""
 automatable = false
 kind = "toggle"
 default = false
+
+[[process]]
+key = "praat_py_semantic_timbre_retrieval"
+bin = "py/Semantic_timbre_retrieval.praat"
+title = "Semantic timbre retrieval"
+category = "praat"
+subcategory = "py"
+short_description = "Semantic Timbre Retrieval"
+description = "Semantic Timbre Retrieval. Type a free-text timbre prompt (e.g. \"dark airy swelling scrape\") and retrieve the best-matching files or segments from a corpus. A Python engine performs segmentation, feature extraction, rule-based tagging, prompt parsing, and hybrid scoring. An optional preview montage is returned as a Praat Sound object."
+praat_python_rewrite = true
+input = "wav"
+output = "wav"
+stereo_native = true
+output_is_stereo = false
+
+[[process.params]]
+name = "Prompt"
+description = ""
+automatable = false
+kind = "text"
+default = "dark airy swelling scrape"
+
+[[process.params]]
+name = "Preset_prompt"
+description = ""
+automatable = false
+kind = "choice"
+options = ["— type your own above —", "dark airy sustained drone", "bright metallic burst", "warm smooth tonal sustained", "noisy rough scrape", "pure glassy wide sustained", "piercing unstable burst", "breathy narrow gesture", "dense cloud reverberant", "dry percussive wooden pulse", "frictional rough gliding stream", "vowel-like warm sustained", "dark rough distant drone", "mellow silky held tone", "shiny bell-like hit", "deep hissy scratch", "round clear long drone-like", "harsh gritty impact", "whispery far away swarm", "soft textured spacious flow", "steel quiver rise", "wood-like plucked close beat", "crystalline clean fade", "bowed coarse movement", "voice-like mellow long held", "slightly dark airy cloud", "a bit rough breathy gesture", "somewhat bright metallic stream", "moderately warm sustained drone", "quite piercing unstable burst", "very pure glassy sustained", "really noisy dense cloud", "strongly frictional scrape", "intensely reverberant distant drone", "extremely bright sharp hit", "touch of airy smooth tone", "hint of metallic roughness", "dark airy but not noisy", "bright without piercing", "warm sustained not rough", "metallic but less bright", "pure not glassy", "rough scrape without reverb", "wide cloud not distant", "breathy gesture less unstable", "drone without rough edge", "not bright, more warm, sustained", "no harsh hit, more wooden pulse", "without hissy noise, more tonal", "dark airy slowly swelling texture", "bright short percussive bursts", "warm sustained drone with rough edge", "far away breathy cloud", "dry wooden pulse", "glassy pure wide tone", "rough bowed stream", "metallic unstable gesture", "dense reverberant swarm", "soft mellow voice-like sustain", "sharp bright impact", "coarse noisy distant scrape", "bright percussive burst", "sharp metallic hit", "wooden dry pulse", "piercing rough impact", "dark sustained drone", "warm wide reverberant drone", "pure glassy sustained", "airy distant cloud", "frictional rough scrape", "bowed noisy gesture", "coarse scratch stream", "breathy rough scrape", "vowel-like warm sustained", "voice-like pure tone", "ah mellow held sound", "clear gliding vowel-like stream", "dark airy drone", "bright metallic burst", "rough frictional scrape", "warm vowel-like sustained", "pure glassy wide tone", "dry wooden pulse", "noisy dense cloud", "unstable gliding gesture", "distant reverberant airy texture", "not bright, more warm, sustained"]
+default = 0
+
+[[process.params]]
+name = "Retrieval_mode"
+description = ""
+automatable = false
+kind = "choice"
+options = ["files", "segments"]
+default = 1
+
+[[process.params]]
+name = "Top_matches"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 8.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Build_preview_montage"
+description = ""
+automatable = false
+kind = "toggle"
+default = true
+
+[[process.params]]
+name = "Crossfade_ms"
+description = ""
+automatable = false
+kind = "number"
+min = 0.0
+max = inf
+step = 0.01
+default = 30.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Min_segment_sec"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.25
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Max_segment_sec"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 4.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Segment_gate_dB"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = -35.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Weight_semantic"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 1.0
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Weight_tag"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.5
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Weight_keyword"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.25
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Diversity_penalty"
+description = ""
+automatable = false
+kind = "number"
+min = -inf
+max = inf
+step = 0.01
+default = 0.15
+exponential = false
+scale = "plain"
+
+[[process.params]]
+name = "Draw_visualization"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Play_preview"
+description = ""
+automatable = false
+kind = "toggle"
+default = false
+
+[[process.params]]
+name = "Corpus_folder"
+praat_directory_var = "corpusDir$"
+description = ""
+automatable = false
+kind = "folder_path"
 
 [[process]]
 key = "praat_py_spatial_panner"

@@ -34,6 +34,23 @@
 //! `if clicked = 1 … exitScript`, so a rewrite that assumed button 1 would turn every run into
 //! a silent no-op. The value used is the dialog's **default** button — the first number after
 //! the labels — i.e. the run behaves as though the user accepted the dialog as presented.
+//!
+//! ## The second rewrite: `chooseDirectory$`
+//!
+//! [`rewrite_directory_choosers`] does the same trick for a *folder chooser*. A script that asks
+//! `corpusDir$ = chooseDirectory$("Select Corpus Folder")` is asking a question this app can
+//! already answer better than Praat can — `ParamKind::FolderPath` has a real folder picker, and
+//! `cdp_validate_fields` blocks Apply until one is chosen, so the value can never arrive empty.
+//! So the assignment is replaced by the picked path and the modal never opens.
+//!
+//! It is the *same* class of failure as a pause dialog, not a milder one: a modal under `--run`
+//! segfaults Praat outright. Two scripts call it unconditionally, and one
+//! (`OT_Grammar_Learning_from_Audio`) calls it inside the branch of a mode it otherwise ships
+//! working — a latent crash for anyone picking that mode.
+//!
+//! Unlike a pause block, a missing chooser is an **error** rather than a no-op: the param exists
+//! precisely because that call does, so a script that no longer makes it is a script the catalog
+//! entry was generated against and no longer describes.
 
 use std::collections::BTreeMap;
 
@@ -46,6 +63,10 @@ pub enum RewriteError {
     MissingBlock { index: usize, found: usize },
     /// A `beginPause` with no `endPause` after it.
     UnterminatedBlock { line: usize },
+    /// The script no longer assigns `variable` from `chooseDirectory$`. Unlike a pause block
+    /// with no assignments — which is deleted, and rightly so — a hoisted folder param exists
+    /// *because* of that call, so its absence means the entry no longer describes the script.
+    MissingDirectoryChooser { variable: String },
 }
 
 impl std::fmt::Display for RewriteError {
@@ -60,6 +81,11 @@ impl std::fmt::Display for RewriteError {
             RewriteError::UnterminatedBlock { line } => {
                 write!(f, "beginPause on line {line} has no matching endPause")
             }
+            RewriteError::MissingDirectoryChooser { variable } => write!(
+                f,
+                "script no longer assigns {variable} from chooseDirectory$; \
+                 the plugin may have been updated — regenerate the catalog"
+            ),
         }
     }
 }
@@ -234,6 +260,87 @@ pub fn rewrite_pause_blocks(
     Ok(text)
 }
 
+/// Replace every `<var>$ = chooseDirectory$ …` assignment named in `directories` with the folder
+/// the user picked, so the modal that statement would open never opens.
+///
+/// `directories` pairs the variable **as the script spells it, `$` included** with an absolute
+/// path. Every named variable must actually be assigned that way — see
+/// [`RewriteError::MissingDirectoryChooser`] for why that is an error and a missing pause block's
+/// assignments are not.
+///
+/// A variable assigned more than once (`KL_Divergence_Corpus_Resynthesis` chooses two corpora)
+/// gets **every** occurrence replaced, since each is a modal of its own; the pairs are keyed by
+/// variable, so the two corpora are two entries.
+pub fn rewrite_directory_choosers(
+    source: &str,
+    directories: &[(String, String)],
+) -> Result<String, RewriteError> {
+    if directories.is_empty() {
+        return Ok(source.to_string());
+    }
+    let lines: Vec<&str> = source.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut seen: Vec<&str> = Vec::new();
+    let mut i = 0usize;
+
+    while i < lines.len() {
+        let line = lines[i];
+        match directory_chooser_target(line)
+            .and_then(|var| directories.iter().find(|(name, _)| name == var))
+        {
+            Some((var, path)) => {
+                let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+                out.push(format!("{indent}{var} = {}", string_literal(path)));
+                seen.push(var);
+                // Praat continues a statement with a leading `...`, and the chooser's prompt may
+                // well be split that way. Skipping the continuation is what makes this replace
+                // the *statement* rather than leave a dangling fragment behind it.
+                i += 1;
+                while i < lines.len() && lines[i].trim_start().starts_with("...") {
+                    i += 1;
+                }
+                continue;
+            }
+            None => out.push(line.to_string()),
+        }
+        i += 1;
+    }
+
+    if let Some((variable, _)) = directories.iter().find(|(name, _)| !seen.contains(&name.as_str()))
+    {
+        return Err(RewriteError::MissingDirectoryChooser { variable: variable.clone() });
+    }
+
+    let mut text = out.join("\n");
+    if source.ends_with('\n') {
+        text.push('\n');
+    }
+    Ok(text)
+}
+
+/// The `$`-variable a line assigns from `chooseDirectory$`, if it does.
+///
+/// Deliberately strict about the left-hand side: a bare variable name ending in `$` and nothing
+/// else. That is what keeps `if corpusDir$ == ""` (lhs `if corpusDir$`, which has a space in it)
+/// and a comment mentioning the call — `CorpusMap` has two — from being read as assignments.
+fn directory_chooser_target(line: &str) -> Option<&str> {
+    let (lhs, rhs) = line.split_once('=')?;
+    let name = lhs.trim();
+    if !name.ends_with('$')
+        || !name[..name.len() - 1]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        || name.len() < 2
+    {
+        return None;
+    }
+    // Praat spells the call `chooseDirectory$: "…"`, `chooseDirectory$("…")` and
+    // `chooseDirectory$ ("…")` — all three appear in this plugin. Requiring a delimiter after
+    // the name keeps a longer identifier that merely starts the same way from matching.
+    let rest = rhs.trim_start().strip_prefix("chooseDirectory$")?;
+    (rest.is_empty() || rest.starts_with([':', '(', ' ', '\t'])).then_some(name)
+}
+
 /// Whether a line closes a pause block: `endPause: …` or `clicked = endPause: …`.
 fn is_end_pause(line: &str) -> bool {
     let trimmed = line.trim_start();
@@ -401,6 +508,147 @@ mod tests {
         let err = rewrite_pause_blocks("beginPause: \"a\"\nendPause: \"ok\", 1\n", &blocks, &[])
             .expect_err("must refuse");
         assert_eq!(err, RewriteError::MissingBlock { index: 3, found: 1 });
+    }
+}
+
+#[cfg(test)]
+mod directory_tests {
+    use super::*;
+
+    fn checkout() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/praat-audiotools")
+    }
+
+    /// Whether any line still *executes* a folder chooser. `CorpusMap` discusses the call twice
+    /// in its changelog comments, so a plain `contains` would fail on a correct rewrite — the
+    /// same distinction `has_live_pause` draws.
+    fn has_live_chooser(source: &str) -> bool {
+        source.lines().any(|l| directory_chooser_target(l).is_some())
+    }
+
+    /// The statement is replaced, not merely preceded by an assignment — a surviving
+    /// `chooseDirectory$` would open a modal and take Praat down with it.
+    #[test]
+    fn the_chooser_statement_is_replaced_rather_than_appended() {
+        let source = "x = 1\ncorpusDir$ = chooseDirectory$(\"Select Corpus Folder\")\ny = 2\n";
+        let out = rewrite_directory_choosers(&source.to_string(), &[(
+            "corpusDir$".into(),
+            "/home/me/corpus".into(),
+        )])
+        .expect("rewrites");
+        assert_eq!(out, "x = 1\ncorpusDir$ = \"/home/me/corpus\"\ny = 2\n");
+        assert!(!has_live_chooser(&out));
+    }
+
+    /// All three spellings this plugin uses. `chooseDirectory$ (` with a space is what
+    /// `Batch_Channel_Format_Exporter` writes, and a prefix match without the delimiter check
+    /// would be the easy way to get this subtly wrong.
+    #[test]
+    fn every_spelling_of_the_call_is_recognised() {
+        for call in [
+            "chooseDirectory$: \"pick\"",
+            "chooseDirectory$(\"pick\")",
+            "chooseDirectory$ (\"pick\")",
+        ] {
+            let out = rewrite_directory_choosers(
+                &format!("dir$ = {call}\n"),
+                &[("dir$".into(), "/tmp/x".into())],
+            )
+            .unwrap_or_else(|e| panic!("{call}: {e}"));
+            assert_eq!(out, "dir$ = \"/tmp/x\"\n");
+        }
+    }
+
+    /// A comparison against the same variable is not an assignment, and a comment is not code.
+    /// Both shapes sit within a few lines of the real call in the scripts this rewrites.
+    #[test]
+    fn a_comparison_or_a_comment_is_not_mistaken_for_the_assignment() {
+        let source = "# raw backslashes from chooseDirectory$, producing invalid JSON\n\
+                      if corpusDir$ == \"\"\n    exitScript: \"cancelled\"\nendif\n\
+                      corpusDir$ = chooseDirectory$: \"pick\"\n";
+        let out = rewrite_directory_choosers(source, &[("corpusDir$".into(), "/c".into())])
+            .expect("rewrites");
+        assert!(out.contains("# raw backslashes from chooseDirectory$"), "the comment survives");
+        assert!(out.contains("if corpusDir$ == \"\""), "the comparison survives");
+        assert!(out.contains("corpusDir$ = \"/c\""));
+        assert!(!has_live_chooser(&out));
+    }
+
+    /// Praat escapes a `"` by doubling it and has no backslash escape at all, which is what lets
+    /// a Windows path survive unmangled. Both halves matter here — this value is a filesystem
+    /// path, where a `\` is ordinary and a stray one would silently change the folder.
+    #[test]
+    fn a_path_with_a_quote_or_a_backslash_round_trips() {
+        let out = rewrite_directory_choosers(
+            "d$ = chooseDirectory$: \"pick\"\n",
+            &[("d$".into(), "C:\\Users\\me\\my \"best\" corpus".into())],
+        )
+        .expect("rewrites");
+        assert_eq!(out, "d$ = \"C:\\Users\\me\\my \"\"best\"\" corpus\"\n");
+    }
+
+    /// Two choosers, two variables, both replaced — the shape
+    /// `KL_Divergence_Corpus_Resynthesis` has.
+    #[test]
+    fn two_choosers_are_both_replaced() {
+        let source = "a$ = chooseDirectory$: \"A\"\nb$ = chooseDirectory$: \"B\"\n";
+        let out = rewrite_directory_choosers(
+            source,
+            &[("a$".into(), "/a".into()), ("b$".into(), "/b".into())],
+        )
+        .expect("rewrites");
+        assert_eq!(out, "a$ = \"/a\"\nb$ = \"/b\"\n");
+    }
+
+    /// A prompt split across Praat's `...` continuation lines is one statement, and leaving the
+    /// tail behind would be a syntax error rather than a stray comment.
+    #[test]
+    fn a_continued_statement_is_consumed_whole() {
+        let source = "d$ = chooseDirectory$:\n    ... \"a very long prompt\"\nnext = 1\n";
+        let out = rewrite_directory_choosers(source, &[("d$".into(), "/d".into())])
+            .expect("rewrites");
+        assert_eq!(out, "d$ = \"/d\"\nnext = 1\n");
+    }
+
+    /// Nothing to do means nothing done: every other process must be unaffected.
+    #[test]
+    fn without_directories_the_script_is_returned_unchanged() {
+        let source = "d$ = chooseDirectory$: \"pick\"\n";
+        assert_eq!(rewrite_directory_choosers(source, &[]).expect("rewrites"), source);
+    }
+
+    /// A param naming a chooser the script no longer makes must fail the run loudly. The
+    /// alternative is running a script whose folder variable is now whatever Praat left it as.
+    #[test]
+    fn naming_a_chooser_that_does_not_exist_is_an_error() {
+        let err = rewrite_directory_choosers("x = 1\n", &[("gone$".into(), "/g".into())])
+            .expect_err("must refuse");
+        assert_eq!(err, RewriteError::MissingDirectoryChooser { variable: "gone$".into() });
+    }
+
+    /// The real script, in the mode that made this worth building: `OT_Grammar` ships today and
+    /// segfaults the moment anyone picks its pair-corpus GEN mode.
+    #[test]
+    fn ot_grammar_pair_corpus_loses_its_chooser() {
+        let path = checkout().join("Analysis/OT_Grammar_Learning_from_Audio.praat");
+        let Ok(source) = std::fs::read_to_string(&path) else { return }; // submodule not init'd
+        let out = rewrite_directory_choosers(&source, &[("pairRoot$".into(), "/corpora/ot".into())])
+            .expect("rewrites");
+        assert!(!has_live_chooser(&out), "a surviving chooser would segfault Praat");
+        assert!(out.contains("pairRoot$ = \"/corpora/ot\""));
+        // The branch that reads it is untouched, so the mode still does its own work.
+        assert!(out.contains("goodDir$ = pairRoot$ + \"/good\""));
+    }
+
+    /// The other real one, whose call is unconditional — every run reached it.
+    #[test]
+    fn semantic_timbre_retrieval_loses_its_chooser() {
+        let path = checkout().join("py/Semantic_timbre_retrieval.praat");
+        let Ok(source) = std::fs::read_to_string(&path) else { return };
+        let out = rewrite_directory_choosers(&source, &[("corpusDir$".into(), "/corpora/t".into())])
+            .expect("rewrites");
+        assert!(!has_live_chooser(&out));
+        assert!(out.contains("corpusDir$ = \"/corpora/t\""));
     }
 }
 

@@ -467,20 +467,31 @@ python_command$ = \"py\"
         assert!(total > 300, "only {total} assignments rewritten across {scripts} scripts");
     }
 
-    /// The design shares one temp filename between the pause rewrite and the Python rewrite,
-    /// which is only safe while no script needs both. It holds today — no `py`-group script has
-    /// a `beginPause` dialog — and this is what says so if that ever changes.
+    /// The pause rewrite and the Python rewrite share one temp filename, which was safe only
+    /// while no script needed both — and one now does: `Semantic_timbre_retrieval` is a
+    /// `py`-group script whose corpus folder is hoisted out of a `chooseDirectory$` call. The
+    /// runner therefore applies the passes in sequence to one text and writes it once. This
+    /// checks the composition on the real script, because the failure it guards against is
+    /// silent: whichever pass wrote last would simply win, and the run would fail on an import
+    /// or open a modal with nothing pointing at why.
     #[test]
-    fn no_process_needs_both_a_pause_rewrite_and_a_python_rewrite() {
-        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
-        for def in &catalog.processes {
-            let hoisted = def.params.iter().any(|p| p.praat_pause_block.is_some());
-            assert!(
-                !(hoisted && def.praat_python_rewrite),
-                "{} needs both rewrites; they would fight over the same copy",
-                def.key
-            );
-        }
+    fn a_script_needing_both_rewrites_gets_both() {
+        let checkout =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/praat-audiotools");
+        let path = checkout.join("py/Semantic_timbre_retrieval.praat");
+        let Ok(source) = std::fs::read_to_string(&path) else { return }; // submodule not init'd
+
+        let (out, replaced) =
+            super::rewrite_for_venv(&source, "/venv/bin/python3", "/plugin/py");
+        assert!(replaced > 0, "the Python pass must find interpreter assignments to repoint");
+        let out = crate::model::praat::rewrite::rewrite_directory_choosers(
+            &out,
+            &[("corpusDir$".to_string(), "/corpora/timbre".to_string())],
+        )
+        .expect("the directory pass must still apply after the Python one");
+
+        assert!(out.contains("/venv/bin/python3"), "the interpreter survives the second pass");
+        assert!(out.contains("corpusDir$ = \"/corpora/timbre\""), "the folder is assigned");
     }
 
     /// Every `py`-group entry is flagged, and nothing else is — the converter's detection and
@@ -501,8 +512,10 @@ python_command$ = \"py\"
         // A canary on the group's size, not a property of it: the number moves whenever
         // `PY_ALLOWED_IMPORTS` changes, and the point is that such a change is noticed rather
         // than absorbed silently. 34 -> 45 on 2026-08-08, when librosa/scikit-learn/OpenCV/
-        // nara_wpe/mido and the torch stack were admitted in two optional tiers.
-        assert_eq!(flagged, 45, "the py group is 45 processes");
+        // nara_wpe/mido and the torch stack were admitted in two optional tiers. 45 -> 46 the
+        // same day, when `Semantic_timbre_retrieval`'s corpus folder was hoisted out of its
+        // `chooseDirectory$` call — see `DIRECTORY_HOISTS`.
+        assert_eq!(flagged, 46, "the py group is 46 processes");
     }
 
     /// End to end through the planner: a py-group process must come out asking for a rewritten
