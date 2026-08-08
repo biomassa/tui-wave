@@ -191,15 +191,95 @@ run_with_progress() {
 # 3.14) has no wheels yet, so pip compiles scipy from source and the install takes tens of
 # minutes instead of seconds. Nothing here is pinned or installed — it only picks among the
 # interpreters already present.
+# Interpreters are tried in this order by both passes below. Absolute paths trail the bare names
+# so PATH still decides first; they are there because pyenv's shim directory precedes Homebrew's
+# on a normal macOS PATH, and pyenv's interpreters are the ones most likely to lack Tk.
+PYTHON_CANDIDATES="python3.13 python3.12 python3.11 python3.10 python3
+/opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3
+/usr/local/bin/python3 /usr/bin/python3"
+
+# The newest interpreter that can build a venv *and* import tkinter, else the newest that can
+# build a venv at all.
+#
+# Tk capability is a preference rather than a requirement because it costs three processes out of
+# 453 — but it has to be considered here, at the moment the base interpreter is chosen, since a
+# venv cannot acquire Tk afterwards. `pip install` cannot supply `_tkinter`: it is a compiled
+# module belonging to the base Python. A Mac with pyenv first on PATH is the case that matters —
+# pyenv builds without Tcl/Tk unless it was present at compile time, and the resulting venv fails
+# at the moment a window would have opened, with a traceback pointing into ~/.pyenv (user report,
+# 2026-08-08). The advice printed then named `brew install python-tk`, which is correct for
+# Homebrew's interpreter and does nothing whatever for pyenv's.
 pick_python() {
-  for candidate in python3.13 python3.12 python3.11 python3.10; do
+  fallback=""
+  for candidate in $PYTHON_CANDIDATES; do
     # Must actually *run*, not merely exist on PATH. A pyenv install leaves a shim for every
     # version it knows about, so `command -v python3.12` succeeds on a machine where running it
     # prints "command not found" and exits non-zero — found by dry-running this on a box with
     # pyenv. Creating the venv is the thing that would have failed, several steps later.
-    if "$candidate" -c 'import venv' >/dev/null 2>&1; then echo "$candidate"; return 0; fi
+    "$candidate" -c 'import venv' >/dev/null 2>&1 || continue
+    if "$candidate" -c 'import tkinter' >/dev/null 2>&1; then echo "$candidate"; return 0; fi
+    [ -n "$fallback" ] || fallback="$candidate"
   done
-  echo python3
+  echo "${fallback:-python3}"
+}
+
+# The first interpreter that can build a venv with working Tk, or nothing. Used only to offer a
+# repair for a venv that already exists on a Tk-less base — `pick_python` covers new ones.
+find_tkinter_python() {
+  for candidate in $PYTHON_CANDIDATES; do
+    if "$candidate" -c 'import venv, tkinter' >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Which packaging a venv's *base* interpreter came from, since that alone decides how Tk is
+# added to it — and getting this wrong is how the previous advice sent a pyenv user to `brew
+# install python-tk`, which targets a different interpreter entirely.
+python_flavour() {
+  case "$1" in
+    */.pyenv/*|*/pyenv/versions/*) echo pyenv ;;
+    */Cellar/*|/opt/homebrew/*|/usr/local/opt/*) echo homebrew ;;
+    /Library/Frameworks/Python.framework/*) echo python-org ;;
+    /System/*|/usr|/usr/bin/*|*/CommandLineTools/*|/Applications/Xcode.app/*) echo system ;;
+    *) echo other ;;
+  esac
+}
+
+# What it takes to give that interpreter Tk. Prints the remedy and nothing else; the caller
+# decides whether a rebuild is also on offer.
+tkinter_remedy() {
+  base="$1" flavour="$2" pyver="$3"
+  case "$flavour" in
+    pyenv)
+      info "the venv is built on pyenv's Python ($base), which was compiled without Tcl/Tk."
+      info "${BOLD}brew install python-tk will not fix this${RESET} — that targets Homebrew's Python."
+      info "pyenv links Tk at build time, so the interpreter has to be rebuilt:"
+      info "    brew install tcl-tk"
+      info "    pyenv install --force ${pyver:-3.13}"
+      info "then delete $VENV and re-run this script."
+      ;;
+    homebrew)
+      info "macOS: Homebrew ships Python without it. Install it with"
+      info "    brew install python-tk@${pyver}"
+      ;;
+    python-org)
+      info "this is a python.org build, which normally bundles Tk — reinstall it from"
+      info "https://www.python.org/downloads/ and pick the Tcl/Tk option."
+      ;;
+    *)
+      if [ "$(uname -s)" = Darwin ]; then
+        info "install a Python built with Tcl/Tk (Homebrew's python@${pyver} plus"
+        info "python-tk@${pyver} is the usual route), then delete $VENV and re-run this."
+      else
+        info "Debian/Ubuntu:  sudo apt install python3-tk"
+        info "Fedora:         sudo dnf install python3-tkinter"
+        info "Arch:           sudo pacman -S tk"
+      fi
+      ;;
+  esac
 }
 
 # --- platform -----------------------------------------------------------------------------
@@ -412,19 +492,50 @@ else
     warn "and ${GREEN}Spatial Panner${RESET} will fail with \"No module named 'tkinter'\""
     info "every other process is unaffected"
     pyver=$("$VENV/bin/python3" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)
-    case "$(uname -s)" in
-      Darwin)
-        info "macOS: Homebrew ships Python without it. Install it with"
-        info "    brew install python-tk@${pyver}"
-        ;;
-      *)
-        info "Debian/Ubuntu:  sudo apt install python3-tk"
-        info "Fedora:         sudo dnf install python3-tkinter"
-        info "Arch:           sudo pacman -S tk"
-        ;;
-    esac
+    base=$("$VENV/bin/python3" -c 'import sys; print(sys.base_prefix)' 2>/dev/null)
+    tkinter_remedy "$base" "$(python_flavour "$base")" "$pyver"
     info "pip cannot install it; it is part of the base Python this venv was built from."
-    info "Installing it takes effect immediately — no need to recreate the venv or re-run this."
+
+    # A venv's base interpreter is fixed when it is created, so the only in-place repair is to
+    # build it again on a different one. Offered when such an interpreter is actually present,
+    # rather than described in the abstract — but never taken automatically, and never by
+    # `--yes`: the packages have to come down again, and the machine-learning tier alone is
+    # 2.5 GB. What is currently installed is listed first, so the size is visible before the
+    # question rather than after it.
+    if tkpy=$(find_tkinter_python); then
+      info ""
+      info "found ${BLUE}$tkpy${RESET}, which does have tkinter"
+      # `|| true` because `set -o pipefail` would otherwise abort the script on an empty venv:
+      # grep exits 1 when it filters everything out, and that is a legitimate answer here.
+      installed=$("$VENV/bin/pip" list --format=freeze --disable-pip-version-check 2>/dev/null \
+        | cut -d= -f1 | grep -Ev '^(pip|setuptools|wheel|pkg_resources)$' | tr '\n' ' ' || true)
+      venvsize=$(du -sh "$VENV" 2>/dev/null | cut -f1)
+      info "rebuilding the venv on it re-downloads what is in it now (${venvsize:-unknown} on disk):"
+      info "  ${BLUE}${installed:-nothing}${RESET}"
+      if confirm_explicitly "Rebuild the venv on $tkpy?"; then
+        # The freeze is taken by *name*, not name==version: a version pinned for one interpreter
+        # may have no wheel for another, and building numpy from source is exactly the wait this
+        # script exists to avoid. Reinstalling by name gets whatever is current and has a wheel.
+        rm -rf "$VENV"
+        run_with_progress "creating the venv on $tkpy" "$tkpy" -m venv "$VENV" \
+          || die "could not create the venv with $tkpy"
+        PIP="$VENV/bin/pip"
+        run_with_progress "upgrading pip" "$PIP" install --disable-pip-version-check \
+          --progress-bar off --upgrade pip || warn "could not upgrade pip; continuing"
+        for pkg in $installed; do
+          run_with_progress "installing ${BLUE}$pkg${RESET}" "$PIP" install \
+            --disable-pip-version-check --progress-bar off "$pkg" \
+            || warn "${BLUE}$pkg${RESET} failed; the processes needing it will say so"
+        done
+        if "$VENV/bin/python3" -c 'import tkinter' 2>/dev/null; then
+          ok "rebuilt — ${GREEN}Arranger, Performance Launcher, Spatial Panner${RESET} will open now"
+        else
+          warn "the rebuilt venv still has no tkinter; the remedy above is the remaining route"
+        fi
+      else
+        info "kept as it is; the three Tk processes stay unavailable"
+      fi
+    fi
   elif [ "$DRY_RUN" = 0 ]; then
     ok "${BLUE}tkinter${RESET} present — ${GREEN}Arranger, Performance Launcher, Spatial Panner${RESET}"
   fi
