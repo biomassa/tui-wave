@@ -147,6 +147,11 @@ fi
 step "praatAudioTools scripts"
 have git || die "git is required to fetch the scripts — install it and re-run"
 info "about 439 of tui-wave's processes are scripts from this project"
+# Whose work this is, at the moment it is being downloaded. The scripts are run as-is by
+# absolute path and never modified, so the credit belongs where the fetch happens rather than
+# buried in a notices file nobody opens.
+info "by Shai Cohen (Department of Music, Bar-Ilan University, Israel), MIT-licensed"
+info "$UPSTREAM"
 info "target: $SCRIPTS"
 info "commit: $PINNED_COMMIT"
 

@@ -293,6 +293,11 @@ fi
 
 # --- 4. The praatAudioTools submodule -----------------------------------------------------
 step "praatAudioTools scripts"
+# Same credit setup-environment.sh prints where it clones them: about 439 of the catalog's
+# processes are this project's work, run as-is and never modified.
+info "about 439 of tui-wave's processes are scripts from praatAudioTools, by Shai Cohen"
+info "(Department of Music, Bar-Ilan University, Israel), MIT-licensed"
+info "https://github.com/ShaiCohen-ops/Praat-plugin_AudioTools"
 if [ -f third_party/praat-audiotools/setup.praat ] || [ -n "$(ls -A third_party/praat-audiotools 2>/dev/null)" ]; then
   ok "submodule present"
 else
