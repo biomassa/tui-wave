@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-08 (2.5.6)
 
 - **The setup scripts no longer ask about optional libraries you already have.** Each tier's
   packages are probed in the venv first; a complete tier reports itself and asks nothing, and a
