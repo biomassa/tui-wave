@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed: two concurrent Praat sweeps shredded each other's log, silently.** The sweep writes to
+  a fixed path and truncated it on open, so a second run reset the length to zero while the first
+  still held a descriptor positioned tens of kilobytes in — the kernel filled the gap with a
+  sparse hole. The log then interleaved both runs and carried thousands of NUL bytes, which makes
+  `grep` treat it as binary and print **nothing at all**: a file plainly containing `FAIL` lines
+  answered a `grep FAIL` with silence.
+
+  The log is now opened, locked (`File::try_lock`) and only then truncated — never `File::create`,
+  whose truncate happens as it opens, before anyone has established the right to do it. A second
+  sweep takes a pid-suffixed path instead of refusing to start, since a sweep is thirteen minutes
+  and failing it over a log file is the worse outcome; the banner names whichever path won.
+
 ## 2026-08-09 (2.5.8)
 
 - **praatAudioTools updated to `cc4e8b4`, adding three processes.** Hilbert Audio Processor
