@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-08 (2.5.5)
 
 - **MotionControl is gone, and OpenCV with it.** It captures ten seconds of free-hand motion
   through the webcam and derives its control channels from that — a live performance instrument,
