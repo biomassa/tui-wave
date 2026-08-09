@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- **New: Process ▸ Remove DC Offset and Process ▸ High-Pass Filter.** Two ways to put a signal back
+  on the zero line, kept as separate commands because they answer different questions. Remove DC
+  Offset subtracts a constant — right for the fixed bias a capture chain contributes, useless
+  against a baseline that wanders — measured **per channel** and over the **whole file**, never the
+  selection (a constant subtracted across part of a file is a step edge, and an audible click, at
+  each boundary). High-Pass Filter is the drifting-baseline counterpart and honours the selection
+  like Normalize and Gain do.
+
+  Remove DC Offset's one real decision is what "the level" means, and it opens on the **median**.
+  The mean is the DC component by definition, but on real material it is dominated by the
+  waveform's own asymmetry: on a file with *no* offset at all — short positive lobes against long,
+  deep negative ones — the mean reads -0.045, and "removing" that lifts the whole file, silence
+  included, off the zero line. This is the same reading the CDP "Remove DC Offset" process was
+  already fixed to avoid, and both now measure through one shared `dsp::median` so their answers
+  cannot drift apart. Tab switches to the mean for when the strict average is what's wanted.
+
+  The whole undo state is one f32 per channel — 224 bytes on a 56-channel take, against the range
+  copies Normalize and Gain store — which is what makes a subtraction worth having as its own
+  command rather than as a filter preset.
+
+  The filter is a 2nd-order Butterworth run forward *then backward*, so the two passes' phase
+  responses cancel exactly (24 dB/oct, no phase distortion). That matters on a 30-mic rig, where a
+  phase shift applied to each channel independently smears the array's imaging even though every
+  channel got the "same" filter. Its state is primed from the first sample rather than from
+  silence, so a range that opens on a DC bias doesn't answer with a decaying thump at its head.
+
+  Both are menu-only, and both are refused on a streamed read-only buffer.
+
 - **The setup scripts install CPU builds of torch, saving 2.7 GB.** `pip install torch` hard-depends
   on the whole CUDA runtime — cuDNN, cuBLAS, NCCL and the rest — which measured 2.7 GB of `nvidia/*`
   in a venv on a laptop with no NVIDIA GPU at all, taking it from 2.3 GB to 6.0 GB. Nothing in this

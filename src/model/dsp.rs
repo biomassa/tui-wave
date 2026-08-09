@@ -34,6 +34,196 @@ pub fn channel_peak(channel: &[f32]) -> f32 {
     channel.iter().fold(0.0f32, |p, &s| p.max(s.abs()))
 }
 
+/// Arithmetic mean of one channel — the DC offset Remove DC Offset subtracts.
+///
+/// Accumulated in `f64` and only narrowed at the end. An f32 accumulator loses the whole
+/// point of the measurement on the material this exists for: a 30-minute take is ~86M
+/// samples per channel, and once the running sum is large relative to a single sample, each
+/// addition rounds that sample away entirely. The bias being measured is small — often
+/// below -60 dBFS — so the error would swamp the answer.
+///
+/// An empty channel has no mean; 0.0 is the value that makes the subtraction a no-op.
+pub fn channel_mean(channel: &[f32]) -> f32 {
+    if channel.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = channel.iter().map(|&s| s as f64).sum();
+    (sum / channel.len() as f64) as f32
+}
+
+/// Median of `values`, which it **reorders in place**.
+///
+/// `select_nth_unstable_by` is O(n) and needs no full sort — this runs over every sample in a
+/// range, which for a long file is tens of millions of them. Taking `&mut` rather than a copy
+/// is what lets the caller decide whether the scratch buffer is worth reusing.
+///
+/// Empty input has no median; 0.0 is the value that makes a DC subtraction a no-op.
+pub fn median(values: &mut [f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mid = values.len() / 2;
+    values.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
+    let upper = values[mid];
+    if values.len() % 2 == 1 {
+        return upper;
+    }
+    // Even count: the median is the mean of the two central values. The lower one is the
+    // largest of the partition `select_nth_unstable_by` already left below `mid`.
+    let lower = values[..mid].iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    ((lower as f64 + upper as f64) / 2.0) as f32
+}
+
+/// How Remove DC Offset decides what level a signal is centred on.
+///
+/// Two genuinely different questions, which is why this is a choice rather than a constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DcEstimator {
+    /// The level the signal is *centred on*. The default, and the one that is right on real
+    /// material: the mean is dominated by the waveform's own asymmetry rather than by any
+    /// offset. Reported by a user whose file had no DC offset at all — short positive lobes
+    /// with long, deep negative ones — where the mean read -0.045 and "removing" it lifted the
+    /// whole file, silence included, off the zero line. On synthetic audio of that shape with
+    /// exactly zero offset: mean -0.163, median 0.000; add a real +0.03 offset and the median
+    /// reports +0.030 while the mean still reports -0.133.
+    #[default]
+    Median,
+    /// The DC component in the strict sense. Subtracting it drives the file's average to
+    /// exactly zero, which is occasionally the thing actually wanted (a measurement, or a
+    /// downstream tool that checks for it) — but see [`DcEstimator::Median`] for why it is a
+    /// poor description of where audio sits.
+    Mean,
+}
+
+impl DcEstimator {
+    pub fn next(&self) -> Self {
+        match self {
+            DcEstimator::Median => DcEstimator::Mean,
+            DcEstimator::Mean => DcEstimator::Median,
+        }
+    }
+
+    /// Two variants, so stepping back is stepping forward. Kept as its own method anyway so
+    /// the dialog's Shift+Tab reads the same as every other cycling dialog's.
+    pub fn prev(&self) -> Self {
+        self.next()
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            DcEstimator::Median => "Median",
+            DcEstimator::Mean => "Mean",
+        }
+    }
+}
+
+/// The level one channel is centred on, by whichever measure `estimator` names — the value
+/// Remove DC Offset subtracts.
+///
+/// [`DcEstimator::Median`] needs a scratch copy of the channel, since finding a median means
+/// reordering the data; `scratch` is passed in so a caller sweeping 56 channels reuses one
+/// allocation instead of making 56.
+pub fn channel_dc_offset(channel: &[f32], estimator: DcEstimator, scratch: &mut Vec<f32>) -> f32 {
+    match estimator {
+        DcEstimator::Mean => channel_mean(channel),
+        DcEstimator::Median => {
+            scratch.clear();
+            scratch.extend_from_slice(channel);
+            median(scratch)
+        }
+    }
+}
+
+/// Default cutoff for the High-Pass Filter dialog, in Hz. Below the bottom of hearing, so
+/// the default is a rumble/drift remover rather than an audible tone control.
+pub const HIGH_PASS_DEFAULT_HZ: f32 = 20.0;
+
+/// Butterworth Q for a single biquad section — `1/√2`, the value that makes a 2nd-order
+/// section maximally flat in the passband.
+const BUTTERWORTH_Q: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
+/// A 2nd-order high-pass section's coefficients, normalized so `a0 == 1`.
+///
+/// Split out from [`high_pass_zero_phase`] so the forward and backward passes provably run
+/// the *same* filter — computing the coefficients twice is how a zero-phase filter quietly
+/// stops being one.
+#[derive(Debug, Clone, Copy)]
+struct HighPassCoeffs {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+}
+
+impl HighPassCoeffs {
+    /// RBJ Audio EQ Cookbook high-pass. `None` when the cutoff is not a usable fraction of
+    /// the rate — at or above Nyquist there is no passband left, and at or below zero there
+    /// is nothing to remove.
+    fn new(cutoff_hz: f32, sample_rate: u32) -> Option<Self> {
+        let nyquist = sample_rate as f32 / 2.0;
+        if !cutoff_hz.is_finite() || cutoff_hz <= 0.0 || cutoff_hz >= nyquist {
+            return None;
+        }
+        let w0 = 2.0 * std::f32::consts::PI * cutoff_hz / sample_rate as f32;
+        let (sin_w0, cos_w0) = w0.sin_cos();
+        let alpha = sin_w0 / (2.0 * BUTTERWORTH_Q);
+        let a0 = 1.0 + alpha;
+        Some(Self {
+            b0: ((1.0 + cos_w0) / 2.0) / a0,
+            b1: (-(1.0 + cos_w0)) / a0,
+            b2: ((1.0 + cos_w0) / 2.0) / a0,
+            a1: (-2.0 * cos_w0) / a0,
+            a2: (1.0 - alpha) / a0,
+        })
+    }
+
+    /// One pass in place, transposed Direct Form II.
+    ///
+    /// The state is **primed to the steady state for a constant input equal to the first
+    /// sample** rather than started at zero. Zero state asserts that the signal was silent
+    /// until the range began, so a buffer that opens on a DC bias — exactly what this filter
+    /// is pointed at — would see that bias as a step edge and answer with a decaying thump at
+    /// the head of every channel. Priming makes the first sample's output the steady-state
+    /// answer (0, since a high-pass rejects DC) with nothing transient attached.
+    fn run(&self, samples: &mut [f32]) {
+        let Some(&first) = samples.first() else { return };
+        // Steady state for constant input `first` and output 0. `b0 + b1 + b2 == 0` for a
+        // high-pass (its DC gain), which is what makes these two consistent with each other.
+        let mut s1 = -self.b0 * first;
+        let mut s2 = self.b2 * first;
+        for sample in samples.iter_mut() {
+            let x = *sample;
+            let y = self.b0 * x + s1;
+            s1 = self.b1 * x - self.a1 * y + s2;
+            s2 = self.b2 * x - self.a2 * y;
+            *sample = y;
+        }
+    }
+}
+
+/// Zero-phase 2nd-order Butterworth high-pass, in place.
+///
+/// Filters forward, then backward over the result. The backward pass applies the conjugate
+/// of the forward pass's phase response, so the two cancel **exactly** and no frequency is
+/// delayed relative to any other — which is the property that matters on a 30-mic rig, where
+/// a phase shift applied to each channel independently would smear the array's imaging even
+/// though every channel got the "same" filter. It also squares the magnitude response, so the
+/// effective slope is 24 dB/oct and the -3 dB point sits slightly above `cutoff_hz`.
+///
+/// Non-causal by construction — it reads the whole channel before deciding the first output
+/// sample — which is why this is an offline edit and not something the playback path can do.
+///
+/// A cutoff at or above Nyquist (or at or below zero) leaves `samples` untouched: there is no
+/// filter to build, and silently zeroing the audio would be a far worse answer than declining.
+pub fn high_pass_zero_phase(samples: &mut [f32], cutoff_hz: f32, sample_rate: u32) {
+    let Some(coeffs) = HighPassCoeffs::new(cutoff_hz, sample_rate) else { return };
+    coeffs.run(samples);
+    samples.reverse();
+    coeffs.run(samples);
+    samples.reverse();
+}
+
 /// Indices of the channels whose peak is *strictly below* `threshold_db`, ascending — the
 /// channels Remove Empty Channels drops.
 ///
@@ -284,6 +474,88 @@ impl Fold {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn median_handles_both_parities_and_emptiness() {
+        assert_eq!(median(&mut [3.0, 1.0, 2.0]), 2.0, "odd: the middle value");
+        assert_eq!(median(&mut [4.0, 1.0, 3.0, 2.0]), 2.5, "even: the mean of the two central");
+        assert_eq!(median(&mut []), 0.0, "no median, and 0.0 makes a DC subtraction a no-op");
+        assert_eq!(median(&mut [-1.0, -1.0, -1.0]), -1.0);
+    }
+
+    /// The `f64` accumulator is not decoration: a long take is tens of millions of samples, and
+    /// once an f32 running sum is large relative to one sample, each addition rounds that sample
+    /// away entirely — which is fatal here, since the bias being measured is small.
+    #[test]
+    fn channel_mean_survives_a_long_channel() {
+        // 4M samples alternating around a small +0.001 bias. An f32 accumulator drifts badly
+        // well before the end; the f64 one lands on the bias.
+        let samples: Vec<f32> = (0..4_000_000)
+            .map(|i| if i % 2 == 0 { 0.501 } else { -0.499 })
+            .collect();
+        let mean = channel_mean(&samples);
+        assert!((mean - 0.001).abs() < 1e-5, "expected ~0.001, got {mean}");
+        assert_eq!(channel_mean(&[]), 0.0);
+    }
+
+    /// The two estimators must disagree exactly where they are supposed to, and `channel_dc_offset`
+    /// must route to the one it was asked for.
+    #[test]
+    fn the_dc_estimators_measure_different_things() {
+        // Mostly zero, one tall positive spike per period, a long shallow negative lobe.
+        let period = [0.9f32, 0.0, 0.0, 0.0, 0.0, 0.0, -0.5, -0.5, -0.5, -0.5];
+        let samples: Vec<f32> = period.iter().cycle().take(10_000).copied().collect();
+        let mut scratch = Vec::new();
+
+        let median_offset = channel_dc_offset(&samples, DcEstimator::Median, &mut scratch);
+        let mean_offset = channel_dc_offset(&samples, DcEstimator::Mean, &mut scratch);
+        assert_eq!(median_offset, 0.0, "the signal is centred on zero");
+        assert!(mean_offset < -0.05, "while its mean is dragged well negative: {mean_offset}");
+    }
+
+    /// The scratch buffer is reused across channels rather than reallocated per channel — the
+    /// property that keeps a 56-channel sweep to one allocation.
+    #[test]
+    fn channel_dc_offset_reuses_its_scratch_buffer() {
+        let mut scratch = Vec::new();
+        channel_dc_offset(&[0.0; 1000], DcEstimator::Median, &mut scratch);
+        let capacity = scratch.capacity();
+        assert!(capacity >= 1000);
+        channel_dc_offset(&[0.0; 500], DcEstimator::Median, &mut scratch);
+        assert_eq!(scratch.capacity(), capacity, "a shorter channel must not reallocate");
+    }
+
+    /// Zero-phase means the forward pass's phase shift is cancelled by the backward one. Tested
+    /// on an impulse: the filter's overall response must come out **symmetric** about the input
+    /// impulse, which is exactly what having no phase distortion means and what a single-pass
+    /// (causal) filter can never produce.
+    #[test]
+    fn the_high_pass_response_is_symmetric_about_the_impulse() {
+        let mut samples = vec![0.0f32; 2001];
+        samples[1000] = 1.0;
+        high_pass_zero_phase(&mut samples, 500.0, 48_000);
+
+        for offset in 1..500 {
+            let before = samples[1000 - offset];
+            let after = samples[1000 + offset];
+            assert!(
+                (before - after).abs() < 1e-6,
+                "the response must mirror at ±{offset}: {before} vs {after}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_high_pass_cutoff_outside_the_usable_range_is_declined() {
+        for cutoff in [0.0, -1.0, 24_000.0, 48_000.0, f32::NAN, f32::INFINITY] {
+            let mut samples = vec![0.25f32; 64];
+            high_pass_zero_phase(&mut samples, cutoff, 48_000);
+            assert!(
+                samples.iter().all(|&s| s == 0.25),
+                "cutoff {cutoff} should leave the audio alone rather than zero it"
+            );
+        }
+    }
 
     #[test]
     fn channel_peak_of_silence_and_of_nothing_is_zero() {

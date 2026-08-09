@@ -34,6 +34,16 @@ pub enum Action {
     /// default key: it's a once-per-file cleanup step on a freshly opened multichannel
     /// capture, not something reached for mid-edit.
     RemoveEmptyChannels,
+    /// Subtracts the level each channel is centred on, over the whole file, correcting a fixed
+    /// capture-chain bias. Menu-only: like Remove Empty Channels it is a once-per-file step on
+    /// a fresh capture rather than a mid-edit reach. Its dialog holds one choice — median or
+    /// mean (`dsp::DcEstimator`) — which is a real decision on asymmetric material, not a
+    /// formality.
+    RemoveDcOffset,
+    /// Zero-phase 2nd-order Butterworth high-pass over the operation range. The drifting-
+    /// baseline counterpart to [`Action::RemoveDcOffset`]; menu-only, since it opens a dialog
+    /// for the cutoff anyway and free Ctrl letters are nearly gone.
+    HighPass,
     Resample,
     Delete,
     ClearSelection,
@@ -451,6 +461,8 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "Reverse" => Some(Action::Reverse),
         "Normalize" => Some(Action::Normalize),
         "RemoveEmptyChannels" => Some(Action::RemoveEmptyChannels),
+        "RemoveDcOffset" => Some(Action::RemoveDcOffset),
+        "HighPass" => Some(Action::HighPass),
         "Resample" => Some(Action::Resample),
         "Gain" => Some(Action::Gain),
         "FadeIn" => Some(Action::FadeIn),
