@@ -17,6 +17,9 @@ use crate::commands::cut::cut_command;
 use crate::commands::delete::delete_command;
 use crate::commands::fade::{fade_command, technical_fades_command, FadeCurve};
 use crate::commands::gain::gain_command;
+use crate::commands::high_pass::high_pass_command;
+use crate::commands::remove_dc::remove_dc_command;
+use crate::model::dsp::DcEstimator;
 use crate::commands::head_tail_mark::{
     delete_head_tail_mark_command, insert_head_tail_mark_command, move_head_tail_mark_command,
 };
@@ -1227,6 +1230,15 @@ enum Dialog {
     /// and Ctrl+Z puts the channels back (`RemoveChannelsCommand`), so there is nothing a
     /// preview would protect against. `-48.0` is the default.
     RemoveEmptyChannels { input: TextInput },
+    /// Remove DC Offset: a choice-only dialog, shaped like `FadeIn`/`FadeOut` rather than like
+    /// the text-field dialogs — there is one decision and it is a pick from two, not something
+    /// typed. Tab cycles the estimator, Enter applies.
+    RemoveDc { estimator: DcEstimator },
+    /// High-Pass Filter: one numeric field, the cutoff in Hz. Shaped like
+    /// `RemoveEmptyChannels` rather than like `Gain` because there is exactly one decision to
+    /// make — the filter order is fixed (see `dsp::high_pass_zero_phase`), so an order field
+    /// would be a second control that only ever holds one value.
+    HighPass { input: TextInput },
     /// Export Regions to Subfolder — chops file at markers and saves each region.
     /// `focused` is one of the [`er_focus`] indices (subfolder, base name, format, dither,
     /// then a checkbox + value-field pair for each of limit length/normalize/fade in/fade
@@ -5319,6 +5331,7 @@ impl App {
                 (*focused == ex_focus::NAME).then_some(name_input)
             }
             Dialog::RemoveEmptyChannels { input }
+            | Dialog::HighPass { input }
             | Dialog::Normalize { input }
             | Dialog::Resample { input, .. }
             | Dialog::RenameMarker { input, .. }
@@ -5338,7 +5351,7 @@ impl App {
                     None
                 }
             }
-            Dialog::FadeIn { .. } | Dialog::FadeOut { .. } => None,
+            Dialog::FadeIn { .. } | Dialog::FadeOut { .. } | Dialog::RemoveDc { .. } => None,
             Dialog::MixToMono { inputs, focused, .. } => {
                 let f = *focused;
                 inputs.get_mut(f)
@@ -5407,6 +5420,9 @@ impl App {
             Some(Dialog::Normalize { .. })
             | Some(Dialog::Gain { .. })
             | Some(Dialog::RemoveEmptyChannels { .. }) => c.is_ascii_digit() || c == '-' || c == '.',
+            // A cutoff is a frequency, so no sign — unlike the dB fields above, where the
+            // useful values are the negative ones.
+            Some(Dialog::HighPass { .. }) => c.is_ascii_digit() || c == '.',
             Some(Dialog::Resample { .. }) => c.is_ascii_digit(),
             // Same character set as Mix to Mono: a signed decimal, plus the letters that spell
             // the "-inf" this dialog also accepts for silence.
@@ -5673,6 +5689,18 @@ impl App {
                         Err(_) => self.dialog = Some(Dialog::RemoveEmptyChannels { input }),
                     }
                 }
+                Some(Dialog::HighPass { input }) => {
+                    // Re-opened with what was typed still in it, exactly as Remove Empty
+                    // Channels does, rather than falling back to the default: a cutoff the
+                    // app picked is a different edit from the one that was asked for, and
+                    // filtering is the kind of change that is hard to spot after the fact.
+                    // The command itself refuses anything at or above Nyquist, so only the
+                    // parse is checked here.
+                    match input.value().trim().parse::<f32>() {
+                        Ok(cutoff_hz) => self.apply_high_pass(cutoff_hz),
+                        Err(_) => self.dialog = Some(Dialog::HighPass { input }),
+                    }
+                }
                 Some(Dialog::Gain { input, right_input, tanh_clip, per_channel, is_stereo, .. }) => {
                     let gains = if is_stereo && per_channel {
                         let left = input.value().parse::<f32>().unwrap_or(0.0);
@@ -5685,6 +5713,7 @@ impl App {
                     };
                     self.apply_gain(gains, tanh_clip);
                 }
+                Some(Dialog::RemoveDc { estimator }) => self.apply_remove_dc_offset(estimator),
                 Some(Dialog::FadeIn { curve }) => self.apply_fade(true, 100.0, curve),
                 Some(Dialog::FadeOut { curve }) => self.apply_fade(false, 100.0, curve),
                 Some(Dialog::Resample { input, current_rate }) => {
@@ -6427,6 +6456,9 @@ impl App {
         if let Some(Dialog::FadeIn { curve }) | Some(Dialog::FadeOut { curve }) = self.dialog.as_mut() {
             *curve = if forward { curve.next() } else { curve.prev() };
         }
+        if let Some(Dialog::RemoveDc { estimator }) = self.dialog.as_mut() {
+            *estimator = if forward { estimator.next() } else { estimator.prev() };
+        }
     }
 
     /// Moves dialog focus to the next (`forward`) or previous field, wrapping. Shared by Tab
@@ -6445,6 +6477,10 @@ impl App {
             // Tab cycles the curve here (←→ is the documented way); Shift+Tab steps it back.
             Some(Dialog::FadeIn { curve }) | Some(Dialog::FadeOut { curve }) => {
                 *curve = if forward { curve.next() } else { curve.prev() };
+            }
+            // Same shape, same keys: the only field is the choice itself.
+            Some(Dialog::RemoveDc { estimator }) => {
+                *estimator = if forward { estimator.next() } else { estimator.prev() };
             }
             Some(Dialog::ExportRegions { focused, .. }) => *focused = step(*focused, er_focus::COUNT),
             Some(Dialog::ExportChannels { focused, .. }) => *focused = step(*focused, ec_focus::COUNT),
@@ -6997,6 +7033,7 @@ impl App {
             Some(
                 Dialog::CdpSetup { input, .. }
                 | Dialog::RemoveEmptyChannels { input }
+                | Dialog::HighPass { input }
                 | Dialog::Normalize { input }
                 | Dialog::Resample { input, .. }
                 | Dialog::RenameMarker { input, .. }
@@ -13493,6 +13530,47 @@ impl App {
         self.after_sample_mutation(idx);
     }
 
+    /// Subtracts each channel's own mean from the active document.
+    ///
+    /// Operates on the **whole file**, deliberately ignoring `operation_range` — the second
+    /// command to do so after Remove Empty Channels. `RemoveDcCommand::execute` carries the
+    /// full reasoning; in short, a capture-chain bias is not a property of a moment, and
+    /// correcting only a selection would leave an audible step at each boundary.
+    fn apply_remove_dc_offset(&mut self, estimator: DcEstimator) {
+        let idx = self.active_document;
+        // Guarded on there being audio at all: a command that changed nothing would still
+        // occupy an undo slot, making a later Ctrl+Z appear to do nothing.
+        let has_samples = self
+            .documents
+            .get(idx)
+            .is_some_and(|doc| doc.len_samples() > 0 && !doc.channels.is_empty());
+        if !has_samples {
+            return;
+        }
+        self.histories[idx].apply(remove_dc_command(estimator), &mut self.documents[idx]);
+        self.after_sample_mutation(idx);
+    }
+
+    fn apply_high_pass(&mut self, cutoff_hz: f32) {
+        let idx = self.active_document;
+        let Some((start, end)) = self.operation_range(idx, self.snap_to_zero) else { return };
+        // A cutoff the filter can't build would splice an undo entry for an edit that changed
+        // nothing, so it is refused here with a reason rather than silently dropped by the
+        // command. Half the rate is Nyquist — above it there is no passband left.
+        let nyquist = self.documents[idx].sample_rate as f32 / 2.0;
+        if !cutoff_hz.is_finite() || cutoff_hz <= 0.0 || cutoff_hz >= nyquist {
+            self.dialog = Some(Dialog::Info {
+                message: format!(
+                    "Cutoff must be between 0 and {nyquist:.0} Hz (half this file's {} Hz rate).",
+                    self.documents[idx].sample_rate
+                ),
+            });
+            return;
+        }
+        self.histories[idx].apply(high_pass_command(start, end, cutoff_hz), &mut self.documents[idx]);
+        self.after_sample_mutation(idx);
+    }
+
     fn apply_gain(&mut self, gains_db: Vec<f32>, tanh_clip: bool) {
         let idx = self.active_document;
         let Some((start, end)) = self.operation_range(idx, self.snap_to_zero) else { return };
@@ -15949,6 +16027,22 @@ impl App {
             return;
         }
 
+        if action == Action::RemoveDcOffset {
+            if self.active_doc().is_some() {
+                self.dialog = Some(Dialog::RemoveDc { estimator: DcEstimator::default() });
+            }
+            return;
+        }
+
+        if action == Action::HighPass {
+            if self.active_doc().is_some() {
+                self.dialog = Some(Dialog::HighPass {
+                    input: TextInput::fresh(&format!("{:.0}", dsp::HIGH_PASS_DEFAULT_HZ)),
+                });
+            }
+            return;
+        }
+
         if action == Action::Gain {
             if let Some(doc) = self.active_doc() {
                 let is_stereo = doc.channels.len() == 2;
@@ -16393,6 +16487,8 @@ impl App {
             | Action::ExportChannels
             | Action::Export
             | Action::RemoveEmptyChannels
+            | Action::RemoveDcOffset
+            | Action::HighPass
             | Action::ScrollChannelsUp
             | Action::ScrollChannelsDown
             | Action::ScrollChannelsPageUp
@@ -17958,15 +18054,14 @@ fn nearest_marker(markers: &[Marker], pos: usize) -> Option<usize> {
 /// pools every channel, which is right when the process shifts the whole file by a single
 /// value. Returns 0.0 for an empty range.
 ///
-/// The **median**, not the mean. The mean is the DC component by definition, and subtracting
-/// it does drive the file's average to exactly zero — but on real material it is dominated by
-/// the waveform's own asymmetry rather than by any offset. Reported by a user whose file had
-/// no DC offset at all: short positive lobes with long, deep negative ones (a shape plainly
-/// visible in the waveform) made the mean read -0.045, and "removing" that lifted the whole
-/// file — silence included — off the zero line. Reproduced on synthetic audio of the same
-/// shape with exactly zero offset: mean -0.163, median 0.000; add a real +0.03 offset and the
-/// median reports +0.030 while the mean reports -0.133. The median asks "what level is this
-/// signal centred on", which is the question the process exists to answer.
+/// The **median**, not the mean — see [`dsp::DcEstimator::Median`], which carries the user
+/// report behind that choice and is the single definition this and the native Remove DC
+/// Offset command both measure through, so the CDP process's pre-filled shift and the native
+/// command's correction cannot disagree about where a file sits.
+///
+/// Unlike the native command, this pools every channel's samples into one measurement when
+/// `channel` is `None`, because the CDP process it seeds shifts the whole file by a single
+/// value.
 fn dc_offset_estimate(doc: &Document, start: usize, end: usize, channel: Option<usize>) -> f64 {
     let mut values: Vec<f32> = Vec::new();
     for (i, samples) in doc.channels.iter().enumerate() {
@@ -17977,21 +18072,7 @@ fn dc_offset_estimate(doc: &Document, start: usize, end: usize, channel: Option<
         let start = start.min(end);
         values.extend_from_slice(&samples[start..end]);
     }
-    if values.is_empty() {
-        return 0.0;
-    }
-    // `select_nth_unstable` is O(n) and needs no full sort — this runs over every sample in
-    // the selection, which for a long file is tens of millions of them.
-    let mid = values.len() / 2;
-    values.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
-    let upper = values[mid];
-    if values.len() % 2 == 1 {
-        return upper as f64;
-    }
-    // Even count: the median is the mean of the two central values. The lower one is the
-    // largest of the partition `select_nth_unstable_by` already left below `mid`.
-    let lower = values[..mid].iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    (lower as f64 + upper as f64) / 2.0
+    dsp::median(&mut values) as f64
 }
 
 /// Which channel's DC offset param `index` should be pre-filled from: `None` (average of all
@@ -18567,7 +18648,16 @@ fn render_gain_dialog(
     dialog_rows.finish(frame, hints)
 }
 
-fn render_fade_dialog(frame: &mut Frame, area: Rect, title: &str, curve: FadeCurve) -> Vec<Rect> {
+/// A popup whose only control is a pick from a short list — ←→ (or Tab) cycles it, Enter
+/// applies. Shared by Fade In/Out's curve and Remove DC Offset's estimator, which are the same
+/// dialog with a different word in it; `field_label` and `value` are all that differ.
+fn render_choice_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    field_label: &str,
+    value: &str,
+) -> Vec<Rect> {
     // Sized to the hints bar (" ←→:change  Enter:apply  Esc:cancel", 35 columns) rather than
     // to the one field above it — see `render_mix_to_mono_dialog`.
     let width = 37u16.min(area.width);
@@ -18586,10 +18676,10 @@ fn render_fade_dialog(frame: &mut Frame, area: Rect, title: &str, curve: FadeCur
     let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
     let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
 
-    // Row 0: curve selector
+    // Row 0: the selector
     let curve_line = Line::from(vec![
-        Span::styled(" Curve:  ◄ ", label_style),
-        Span::styled(curve.label(), cursor_style),
+        Span::styled(format!(" {field_label}  ◄ "), label_style),
+        Span::styled(value, cursor_style),
         Span::styled(" ►  ", label_style),
     ]);
 
@@ -18644,11 +18734,20 @@ fn render_dialog(
         Dialog::Gain { input, right_input, tanh_clip, per_channel, is_stereo, focused } => {
             return render_gain_dialog(frame, area, input, right_input, *focused, *tanh_clip, *per_channel, *is_stereo);
         }
+        Dialog::RemoveDc { estimator } => {
+            return render_choice_dialog(
+                frame,
+                area,
+                "Remove DC Offset",
+                "Measure:",
+                estimator.label(),
+            );
+        }
         Dialog::FadeIn { curve } => {
-            return render_fade_dialog(frame, area, "Fade In", *curve);
+            return render_choice_dialog(frame, area, "Fade In", "Curve:", curve.label());
         }
         Dialog::FadeOut { curve } => {
-            return render_fade_dialog(frame, area, "Fade Out", *curve);
+            return render_choice_dialog(frame, area, "Fade Out", "Curve:", curve.label());
         }
         Dialog::ExportRegions {
             folder_input, base_name_input, depth, dither,
@@ -18761,6 +18860,9 @@ fn render_dialog(
         Dialog::RemoveEmptyChannels { input } => {
             ("Remove Empty Channels", " Threshold: ".into(), Some(input), " dBFS ".into())
         }
+        Dialog::HighPass { input } => {
+            ("High-Pass Filter", " Cutoff: ".into(), Some(input), " Hz ".into())
+        }
         Dialog::Resample { input, current_rate } => {
             ("Resample", format!(" New rate (current {current_rate} Hz): "), Some(input), " ".into())
         }
@@ -18771,6 +18873,7 @@ fn render_dialog(
         Dialog::SaveCurveAs { input, .. } => ("Save Curve", " File name: ".into(), Some(input), " ".into()),
         Dialog::SaveMatrixAs { input, .. } => ("Save Matrix", " File name: ".into(), Some(input), " ".into()),
         Dialog::Gain { .. }
+        | Dialog::RemoveDc { .. }
         | Dialog::FadeIn { .. }
         | Dialog::FadeOut { .. }
         | Dialog::MixToMono { .. }
@@ -24026,6 +24129,160 @@ mod tests {
         app.after_sample_mutation(0);
         assert_eq!(app.documents[0].channels.len(), 1);
         assert_eq!(app.audio_channels, Some(1), "undo must rebuild too");
+    }
+
+    /// Remove DC Offset is the second command in the app to deliberately ignore
+    /// `operation_range`, after Remove Empty Channels. A selection must not narrow it: a
+    /// capture-chain bias is a property of the file, and correcting only part of it would
+    /// leave a step — an audible click — at each selection edge.
+    #[test]
+    fn remove_dc_offset_ignores_the_selection() {
+        let mut app = new_app(Some(doc(0.5, 1000)), None);
+        app.documents[0].selection = Some(Selection { start: 100, end: 200 });
+        app.handle_action(Action::RemoveDcOffset);
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let channel = &app.documents[0].channels[0];
+        assert!(
+            channel.iter().all(|s| s.abs() < 1e-6),
+            "the whole file should be centred, not just the selection"
+        );
+    }
+
+    /// The dialog opens on the median — the estimator the CDP process of the same name was
+    /// already fixed to use, for the reasons on `dsp::DcEstimator::Median`. Tab reaches the
+    /// mean; Enter applies whichever is showing, and the result is undoable.
+    #[test]
+    fn remove_dc_offset_defaults_to_the_median_and_tab_reaches_the_mean() {
+        let mut app = new_app(Some(doc(0.5, 1000)), None);
+        app.handle_action(Action::RemoveDcOffset);
+        assert!(
+            matches!(app.dialog, Some(Dialog::RemoveDc { estimator: DcEstimator::Median })),
+            "the safe estimator is the one it opens on"
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::RemoveDc { estimator: DcEstimator::Mean })));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(
+            matches!(app.dialog, Some(Dialog::RemoveDc { estimator: DcEstimator::Median })),
+            "two variants, so Tab wraps"
+        );
+
+        // The label the shared choice renderer puts on screen must name this dialog's own
+        // field, not Fade's — the one thing `render_choice_dialog` could get wrong by being
+        // shared.
+        {
+            use ratatui::backend::TestBackend;
+            use ratatui::Terminal;
+            let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let screen: String = (0..30)
+                .map(|y| (0..110).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                .collect();
+            assert!(screen.contains("Remove DC Offset"), "the popup carries its own title");
+            assert!(screen.contains("Measure:"), "and its own field label, not Fade's 'Curve:'");
+            assert!(screen.contains("Median"), "showing the current estimator");
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "Enter applies and closes");
+        assert!(app.histories[0].can_undo(), "and it must be undoable");
+
+        app.handle_action(Action::Undo);
+        for &s in &app.documents[0].channels[0] {
+            assert!((s - 0.5).abs() < 1e-6, "undo should restore the bias, got {s}");
+        }
+    }
+
+    /// An empty buffer would produce a command that changed nothing — and an undo entry that
+    /// makes a later Ctrl+Z appear broken. Same reasoning as the guards in
+    /// `apply_remove_empty_channels`.
+    #[test]
+    fn remove_dc_offset_on_an_empty_buffer_pushes_no_history() {
+        let mut app = new_app(Some(doc(0.0, 0)), None);
+        app.handle_action(Action::RemoveDcOffset);
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.histories[0].can_undo(), "nothing to correct, nothing to undo");
+    }
+
+    /// The filter, unlike the DC correction beside it, is an ordinary range operation and
+    /// honours a selection the way Normalize/Gain/Fade do.
+    #[test]
+    fn high_pass_honours_the_selection() {
+        let mut app = new_app(Some(doc(0.5, 4000)), None);
+        app.documents[0].selection = Some(Selection { start: 1000, end: 3000 });
+        app.handle_action(Action::HighPass);
+        // The dialog prefills the default cutoff; Enter applies it.
+        assert!(matches!(app.dialog, Some(Dialog::HighPass { .. })), "it asks for a cutoff");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let channel = &app.documents[0].channels[0];
+        assert!(channel[..1000].iter().all(|&s| s == 0.5), "before the selection is untouched");
+        assert!(channel[3000..].iter().all(|&s| s == 0.5), "after the selection is untouched");
+        assert!(channel[2000].abs() < 1e-2, "inside it the bias is filtered away");
+    }
+
+    /// A cutoff at or above Nyquist has no passband. It must be refused with a reason and push
+    /// nothing onto the undo stack, rather than recording an edit that did nothing.
+    #[test]
+    fn high_pass_refuses_a_cutoff_at_or_above_nyquist() {
+        let mut app = new_app(Some(doc(0.5, 1000)), None);
+        app.handle_action(Action::HighPass);
+        // 44100 Hz doc, so Nyquist is 22050.
+        app.dialog = Some(Dialog::HighPass { input: TextInput::fresh("30000") });
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(app.dialog, Some(Dialog::Info { .. })), "it must say why");
+        assert!(!app.histories[0].can_undo(), "and record no edit");
+        assert!(app.documents[0].channels[0].iter().all(|&s| s == 0.5), "audio untouched");
+    }
+
+    /// An unparseable cutoff re-opens the dialog with what was typed still in it, rather than
+    /// quietly substituting the default — a filter applied at a frequency the user did not ask
+    /// for is hard to notice after the fact.
+    #[test]
+    fn high_pass_reopens_on_an_unparseable_cutoff() {
+        let mut app = new_app(Some(doc(0.5, 1000)), None);
+        app.dialog = Some(Dialog::HighPass { input: TextInput::fresh("") });
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        match &app.dialog {
+            Some(Dialog::HighPass { input }) => assert_eq!(input.value(), ""),
+            _ => panic!("expected the High-Pass dialog back"),
+        }
+        assert!(!app.histories[0].can_undo());
+    }
+
+    /// Both are edits, so the streamed read-only allowlist must refuse them. Asserted because
+    /// the list is an allowlist by design — a new command is refused until someone has thought
+    /// about it — and this is the assertion that proves nobody added them to it by reflex.
+    ///
+    /// Against a genuinely streamed buffer, not a stand-in: `action_allowed_on_streamed_buffer`
+    /// returns `true` outright when the active document is resident, so a resident document
+    /// would make this pass no matter what the list said.
+    #[test]
+    fn the_new_process_commands_are_refused_on_a_streamed_buffer() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_dc_streamed_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.wav");
+        multichannel_float_wav(&path, 4, 5_000);
+
+        let mut app = streaming_app();
+        app.load_file(path);
+        assert!(app.documents[0].is_streaming(), "the fixture must actually open streamed");
+
+        assert!(!app.action_allowed_on_streamed_buffer(Action::RemoveDcOffset));
+        assert!(!app.action_allowed_on_streamed_buffer(Action::HighPass));
+
+        // And the refusal is real, not only advisory: dispatching must leave the buffer's
+        // history untouched.
+        app.handle_action(Action::RemoveDcOffset);
+        app.handle_action(Action::HighPass);
+        assert!(!app.histories[0].can_undo(), "neither may reach the document");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn doc(val: f32, len: usize) -> Document {

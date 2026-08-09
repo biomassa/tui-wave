@@ -125,6 +125,8 @@ impl MenuBar {
                     entry("Mix to Mono...",     Action::MixToMono,     "Ctrl+m"),
                     entry("Mix Multichannel to Stereo...", Action::MixToStereo, ""),
                     entry("Remove Empty Channels...", Action::RemoveEmptyChannels, ""),
+                    entry("Remove DC Offset...", Action::RemoveDcOffset, ""),
+                    entry("High-Pass Filter...", Action::HighPass, ""),
                 ],
             },
             MenuItem {
