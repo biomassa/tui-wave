@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-09 (2.6.0)
 
 - **New: a Windows release archive, and it carries the Praat scripts.** Releases now build a
   `tui-wave-<ver>-x86_64-pc-windows-msvc.zip` alongside the macOS tarballs and the Linux
