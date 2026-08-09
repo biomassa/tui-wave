@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-09 (2.5.9)
 
 - **New: Process ▸ Remove DC Offset and Process ▸ High-Pass Filter.** Two ways to put a signal back
   on the zero line, kept as separate commands because they answer different questions. Remove DC
