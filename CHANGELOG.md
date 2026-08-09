@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed: 46 Praat synthesis processes silently did nothing with no file open.** Everything in the
+  Generative group builds its sound from its own parameters — Formant Synthesis, GENDYN, the
+  Xenakis and Risset engines, the Karplus-Strong and waveguide generators — so none of them needs a
+  buffer. All of them demanded one anyway, and gave no reason: with nothing loaded, Preview and
+  Apply simply did nothing at all (user report, against Formant Synthesis, whose own header reads
+  "Run this script (no input sound required)").
+
+  The catalog was the culprit, and by omission rather than by a wrong entry: the converter derives
+  a Praat script's input kind by falling back to "one sound" whenever nothing says otherwise, and
+  nothing said otherwise for the synthesis folder. That folder is now the rule — a script under
+  `Generative & Synthesis/` declares no input — with the two members that genuinely read a Sound
+  named as exceptions: Pulsar Synthesis Engine, whose selected Sound *is* the convolution kernel
+  every grain is made of, and Waveguide Klangmaschine, which analyses one when its own
+  `use_selected_sound` toggle is on. Every other script in the folder was read to confirm it
+  references an input nowhere at all.
+
+  CDP's own SYNTH processes (`synth`, `clicknew`, `impulse`, `multiosc`, `synfilt`, `synspline`)
+  already declared this correctly and were unaffected; they now have a test saying so.
+
+- **A process that does need audio now says so instead of doing nothing.** The silence above was
+  reachable by any process at all: the submit path looked for the active document, found none, and
+  returned. It now states "no buffer open — this process reads audio" the moment the dialog opens,
+  with Preview and Apply dimmed — the same treatment a missing image or a missing set of head/tail
+  marks already got, and for the same reason: it is a property of the session rather than of any
+  field, so nothing in the dialog looks wrong to explain it.
+
 ## 2026-08-09 (2.5.9)
 
 - **New: Process ▸ Remove DC Offset and Process ▸ High-Pass Filter.** Two ways to put a signal back

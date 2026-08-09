@@ -550,6 +550,11 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
                         title=title_for(stem), group=GROUP_DIRS[top], params=params,
                         inputs=inputs, description=description,
                         short_description=short_description_from(description, title_for(stem)),
+                        # Same rule as the generic path below -- a pause-hoisted script is still
+                        # whatever kind of process it was, and omitting this is how
+                        # `FM_Texture_Generator` alone stayed `wav` when the folder went
+                        # zero-input.
+                        input_kind=zero_or_photo_input_kind(str(rel).replace("\\", "/")),
                         form_locks=form_locks)]
 
     # --- split: one entry per option of a hoisted optionmenu ------------------------------
@@ -605,6 +610,7 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
             # Names the variant, since nine entries otherwise share one description.
             short_description=f"{label} — "
                               + short_description_from(description, title_for(stem)),
+            input_kind=zero_or_photo_input_kind(str(rel).replace("\\", "/")),
         ))
     return built
 
@@ -1405,6 +1411,57 @@ GENERATORS: dict[str, str] = {
         "synthesises formant grains from its own parameters; reads no input sound",
 }
 
+# The plugin folder whose scripts *synthesise* rather than transform: they build a Sound from
+# their own parameters and read no input at all. Emitted as `input = "none"`, which is what lets
+# them run with **no buffer open**, the way Record already does -- and they are already sent to a
+# new buffer by `App::praat_opens_new_buffer`, which files the whole group that way.
+#
+# Catalogued as ordinary `wav` processes until 2026-08-09, which meant every one of them needed
+# some unrelated file loaded before it would do anything: with nothing open the app's submit path
+# hit its "no document to read" return and gave up in silence (user report, against Formant
+# Synthesis -- whose own header says "Run this script (no input sound required)"). The mistake was
+# invisible in the catalog because the default is applied by omission: nothing said "wav", the
+# emitter simply had nowhere else to fall back to.
+#
+# A directory rule rather than a per-script allowlist: this folder *is* the claim, upstream adds
+# generators to it regularly, and a new one should work on arrival rather than wait for someone to
+# list it. The cost is the inverse mistake -- a transforming script dropped in here would ignore
+# its input rather than erroring -- which is what the exception table below is for, and why every
+# script in the folder was read before this shipped rather than the group being taken on trust.
+ZERO_INPUT_DIR = "Generative & Synthesis"
+
+# The scripts in `ZERO_INPUT_DIR` that genuinely read the selected Sound, and so must keep
+# requiring a buffer. Verified by reading every script in the folder for a form infile, a
+# `Read from file`, or a `numberOfSelected("Sound")` guard: 47 of the 50 non-photo scripts
+# reference an input nowhere at all, and these are the ones that do.
+def zero_or_photo_input_kind(rel_key: str) -> str:
+    """The `input =` value for a script that reads something other than the selected Sound.
+
+    `""` for everything else, which lets the emitter fall back to its wav/dual_wav default.
+    Photo wins over the directory rule: the four image sonifiers live in `ZERO_INPUT_DIR` too,
+    and they *do* take an input -- a picture -- which the driver has to select before the run.
+    """
+    if rel_key in PHOTO_INPUTS:
+        return "photo"
+    in_zero_input_dir = rel_key.split("/")[0] == ZERO_INPUT_DIR
+    if in_zero_input_dir and rel_key not in ZERO_INPUT_EXCEPTIONS:
+        return "none"
+    return ""
+
+
+ZERO_INPUT_EXCEPTIONS: dict[str, str] = {
+    # Hard-requires exactly one Sound and `exitScript`s without it -- the Sound *is* the
+    # pulsaret, the convolution kernel every grain is made of, so there is no run without one.
+    "Generative & Synthesis/Pulsar_Synthesis_Engine.praat":
+        "requires exactly one selected Sound as the convolution kernel; exitScripts without it",
+    # Reads a selected Sound only when its own `use_selected_sound` toggle is on, and logs
+    # "[Analysis] No Sound selected -- using manual parameters." otherwise, so it *would* run
+    # bufferless. Kept requiring one anyway: the toggle is a real feature of the process, and a
+    # zero-input declaration would make the app never hand it the Sound the toggle asks for.
+    "Generative & Synthesis/Waveguide_Klangmaschine.praat":
+        "optionally analyses a selected Sound (`use_selected_sound`); keeping the input reachable",
+}
+
 # Scripts that read a Praat **Photo** object rather than a Sound -- the image sonifiers. They
 # trip `non_sound_input` by design (they say "Please select a Photo object first."), and that
 # exclusion is still right for every other script it catches: a TextGrid or Table process has no
@@ -1804,6 +1861,10 @@ def check_stale_keys() -> list[str]:
         ("DIRECTORY_HOISTS", DIRECTORY_HOISTS),
         ("GENERATORS", GENERATORS),
         ("PHOTO_INPUTS", PHOTO_INPUTS),
+        # Stale here is the dangerous direction: a renamed exception stops matching, the
+        # directory rule then claims the script reads nothing, and a process that needs a
+        # Sound would run without one instead of failing.
+        ("ZERO_INPUT_EXCEPTIONS", ZERO_INPUT_EXCEPTIONS),
         ("OUT_OF_SCOPE", OUT_OF_SCOPE),
         ("NEVER_PLANNED", NEVER_PLANNED),
     ):
@@ -1966,9 +2027,10 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
                 description=described,
                 short_description=short_description_from(described, title_for(path.stem)),
                 interactive=py_interactive,
-                # An image sonifier reads a Photo and no Sound at all -- see PHOTO_INPUTS.
-                # `""` elsewhere lets the emitter fall back to its wav/dual_wav default.
-                input_kind="photo" if rel_key in PHOTO_INPUTS else "",
+                # An image sonifier reads a Photo and no Sound at all -- see PHOTO_INPUTS; a
+                # synthesis script reads neither -- see ZERO_INPUT_DIR. `""` elsewhere lets the
+                # emitter fall back to its wav/dual_wav default.
+                input_kind=zero_or_photo_input_kind(rel_key),
             ))
         for proc in processes[first_new:]:
             proc.python_rewrite = needs_python_rewrite

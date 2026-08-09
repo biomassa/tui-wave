@@ -8154,6 +8154,28 @@ impl App {
             return None;
         };
         let def = self.cdp_catalog.processes.get(*catalog_index)?;
+        // No buffer at all, for a process that reads one. Checked first because it is the most
+        // fundamental of these: with nothing open there is no selection to demand channels of
+        // and no document to hold marks, so every check below would be answering a question
+        // that cannot arise.
+        //
+        // This is a *property of the session*, not of any field — the same shape as the missing
+        // photo and the missing marklist — and until 2026-08-09 it was the one such property
+        // that said nothing at all: the submit path resolved the active document, found none,
+        // and returned in silence, so Apply and Preview appeared to do nothing whatsoever
+        // (user report, against a Generative Praat process that in fact needed no input and
+        // was merely catalogued as though it did). The catalog side of that is fixed, which is
+        // what makes this reachable only by processes that genuinely do read audio.
+        if !matches!(
+            def.input,
+            crate::model::cdp::IoKind::None | crate::model::cdp::IoKind::Photo
+        ) && self.active_doc().is_none()
+        {
+            return Some(
+                "no buffer open — this process reads audio, so open or record a file first"
+                    .to_string(),
+            );
+        }
         // Same class of blocker as the marklist below: the image is a property of the *run*,
         // not of any field, so nothing in the dialog looks wrong and Apply would otherwise
         // appear to do nothing (the script `exitScript`s with "Please select a Photo object
@@ -38189,6 +38211,118 @@ mod tests {
             assert!(
                 !error.contains("no audio"),
                 "an image sonifier must not demand audio it never reads: {error}"
+            );
+        }
+    }
+
+    /// Every Praat process in the **Generative** group synthesises from its own parameters, so
+    /// it must run with no buffer open — the same claim `Record` has always made, extended to
+    /// the rest of the group it lives in.
+    ///
+    /// Regression (user report, 2026-08-09, against Formant Synthesis): the converter defaults
+    /// every Praat script to one sound input, and nothing overrode it for the synthesis folder,
+    /// so 46 generators were catalogued as `input = "wav"`. With nothing open the submit path
+    /// resolved the active document, found none, and returned in **silence** — Preview and
+    /// Apply appearing to do nothing at all. Asserted on the catalog rather than on a run, so
+    /// it holds whether or not Praat is installed on the machine running the suite.
+    #[test]
+    fn generative_praat_processes_declare_no_input() {
+        let app = new_app(None, None);
+        let generative: Vec<_> = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .filter(|p| p.bin.starts_with("Generative & Synthesis/"))
+            .collect();
+        assert!(generative.len() > 40, "the group should be large: {}", generative.len());
+
+        // The two that genuinely read the selected Sound, and so keep requiring a buffer —
+        // `ZERO_INPUT_EXCEPTIONS` in the converter. Named here so that removing one there
+        // without meaning to shows up as a failure rather than as a silently widened rule.
+        let reads_audio = [
+            "Generative & Synthesis/Pulsar_Synthesis_Engine.praat",
+            "Generative & Synthesis/Waveguide_Klangmaschine.praat",
+        ];
+        for def in &generative {
+            let expected_zero_input = !reads_audio.contains(&def.bin.as_str());
+            let is_zero_input = matches!(
+                def.input,
+                crate::model::cdp::IoKind::None | crate::model::cdp::IoKind::Photo
+            );
+            assert_eq!(
+                is_zero_input, expected_zero_input,
+                "{} ({}) has input {:?}",
+                def.title, def.bin, def.input
+            );
+        }
+    }
+
+    /// ...and the dialog for one of them must not block, which is what actually makes Apply
+    /// live. The blocker is checked with `documents` genuinely empty — the state the report
+    /// was filed from.
+    #[test]
+    fn a_generative_praat_process_runs_with_no_buffer_open() {
+        let mut app = new_app(None, None);
+        assert!(app.documents.is_empty(), "this test is only meaningful with no document");
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.title == "Formant Synthesis")
+            .expect("Formant Synthesis in the catalog");
+        app.open_cdp_params(index);
+        assert_eq!(
+            app.cdp_params_blocker(),
+            None,
+            "a synthesis process must not demand a buffer it never reads"
+        );
+
+        app.cdp_run(crate::cdp::JobPurpose::Apply);
+        if let Some(Dialog::CdpParams { error: Some(error), .. }) = &app.dialog {
+            assert!(!error.contains("no audio"), "it reads no audio: {error}");
+        }
+    }
+
+    /// The other half of the same report: a process that *does* read audio must say so rather
+    /// than returning in silence. `Pulsar_Synthesis_Engine` is the one member of its own group
+    /// that hard-requires a Sound (it is the convolution kernel), which makes it the honest
+    /// case to check — the blocker has to distinguish it from its 47 neighbours.
+    #[test]
+    fn a_process_that_needs_audio_says_so_with_no_buffer_open() {
+        let mut app = new_app(None, None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.bin == "Generative & Synthesis/Pulsar_Synthesis_Engine.praat")
+            .expect("Pulsar Synthesis Engine in the catalog");
+        app.open_cdp_params(index);
+
+        let blocker = app.cdp_params_blocker().expect("it reads audio, so it must block");
+        assert!(blocker.contains("no buffer open"), "and say why: {blocker}");
+    }
+
+    /// CDP's own SYNTH group has always declared `input = "none"`; this pins that, since the
+    /// Praat side proves how easily a generator acquires a phantom input requirement.
+    #[test]
+    fn cdp_synth_processes_declare_no_input() {
+        let app = new_app(None, None);
+        let synth: Vec<_> = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .filter(|p| {
+                crate::model::cdp::cdp_group(p).is_some_and(|g| g.name == "SYNTH")
+            })
+            .collect();
+        assert!(!synth.is_empty(), "the catalog ships a SYNTH group");
+        for def in &synth {
+            assert_eq!(
+                def.input,
+                crate::model::cdp::IoKind::None,
+                "{} ({}) synthesises and must run with no buffer open",
+                def.title,
+                def.bin
             );
         }
     }
