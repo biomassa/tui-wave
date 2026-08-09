@@ -20,6 +20,15 @@
   the 46 processes in the `py` group need. The archive drops `Max-MSP/` from the bundled
   checkout — 7.2 MB of Max/MSP patches this program never reads.
 
+  The Windows job can never block a release: macOS and Linux publish whether or not it succeeds.
+
+  **One known limitation, now in README's *Known issues*.** praatAudioTools contains four pairs
+  of scripts whose names differ only in case, in the same folder, and a case-insensitive
+  filesystem can hold only one of each. DYNAMIC FORMANT SWEEPER, Stereo Shimmer, Paulstretch and
+  Recomposer therefore run their case-twin's script on Windows instead of their own — no error,
+  but not the process asked for. It is not something the packaging chooses: `git clone` collapses
+  the pairs the same way, on a default macOS volume as much as on Windows.
+
 - **Fixed: on Windows, settings would have followed you around the filesystem.** The config path
   and the whole Praat state directory (the venv, the preferences folder) resolved
   `XDG_CONFIG_HOME`, then `$HOME/.config`, then the current directory. `HOME` is a Unix variable

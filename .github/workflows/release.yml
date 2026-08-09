@@ -134,6 +134,13 @@ jobs:
   windows:
     name: Windows x64
     runs-on: windows-latest
+    # Windows must never hold up a macOS or Linux release: those are the platforms this is built
+    # for, and the zip is a convenience. A job that fails with this flag still counts as
+    # satisfied for `needs`, so `release` proceeds either way — but it does still *wait*, which
+    # is the point: dropping this job from `needs` entirely would let publishing start before the
+    # zip exists (Windows takes ~5m against macOS's ~3m), so the artifact would go missing from
+    # most releases rather than only from broken ones.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
         with:
@@ -330,6 +337,10 @@ jobs:
   # essentially never works on the first attempt.
   release:
     name: Publish release
+    # `windows` is here only so publishing waits long enough to pick its zip up; it cannot block
+    # the release, because that job carries `continue-on-error` — see the comment there. A
+    # Windows failure therefore publishes the other five artifacts and `download-artifact` with
+    # `merge-multiple` simply finds one fewer directory.
     needs: [macos, windows, linux]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest

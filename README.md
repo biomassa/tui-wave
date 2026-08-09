@@ -321,6 +321,47 @@ Four of these open a window of their own — a spatial trajectory painter, a ste
 performance launcher, a spectrogram eraser. They run with no time limit, since you are the one
 deciding when they are finished; `Esc` cancels.
 
+## Known issues
+
+### Windows: four Praat processes run the wrong script
+
+praatAudioTools contains four pairs of scripts whose filenames differ **only in case**, in the
+same folder:
+
+| | |
+| --- | --- |
+| `Filter & Color/DYNAMIC_FORMANT_SWEEPER.praat` | `Filter & Color/Dynamic_Formant_Sweeper.praat` |
+| `Reverb/Stereo_Shimmer.praat` | `Reverb/stereo_shimmer.praat` |
+| `py/Paulstretch.praat` | `py/paulstretch.praat` |
+| `py/Recomposer.praat` | `py/recomposer.praat` |
+
+The Windows filesystem is case-insensitive, so only one file of each pair can exist there. This
+is not something the packaging chooses: `git clone` on Windows cannot check the pairs out
+either, so the limit applies however the scripts arrive.
+
+Both members of every pair are separate entries in tui-wave's process catalog, and a
+case-insensitive lookup resolves both names to the one surviving file. So on Windows these four
+processes —
+
+- **DYNAMIC FORMANT SWEEPER**
+- **Stereo Shimmer**
+- **Paulstretch**
+- **Recomposer**
+
+— do not report an error. They run their case-twin's script instead: **Dynamic Formant
+Sweeper (2)**, **stereo shimmer (2)**, **paulstretch (2)** and **recomposer (2)** respectively.
+Praat fills a script's form by position, so the parameters you set are handed to a script that
+may expect different ones. The result is audio, and it may sound plausible, but it is not the
+process you asked for.
+
+The four `(2)` entries themselves are unaffected — they are the scripts that survive.
+
+macOS is case-insensitive by default too, so the same applies to a default APFS volume there;
+Linux, and any case-sensitive volume, is unaffected. Everything else in the catalog works
+normally on all three.
+
+If you need one of the four, run it on Linux, or on a case-sensitive volume.
+
 ## Development
 
 ```sh
