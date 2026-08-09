@@ -108,6 +108,16 @@ the user's Praat setup, and tui-wave never writes to the Praat preferences folde
 additionally carries, per process, the parameter values each script defines for its own presets,
 extracted from the same sources by the converter above.
 
+**The Windows release archive redistributes these scripts**, which the source repository and
+every other release artifact do not: the macOS and Linux packages carry only the binary and
+leave `setup-environment.sh` to fetch the scripts from upstream, but that script is bash and
+Windows has no bash, so the `.zip` bundles the checkout beside the executable. The MIT licence
+below permits this, and it is reproduced in the archive by shipping this file alongside the
+binary. Two directories of the checkout are omitted as irrelevant to this program: `.git` (a
+submodule gitlink meaningful only inside this repository) and `Max-MSP` (Max/MSP patches, which
+tui-wave never reads). Nothing is modified — the scripts are the ones at the pinned commit the
+bundled catalog was generated against.
+
 ```
 MIT License
 
