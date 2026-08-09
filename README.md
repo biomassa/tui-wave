@@ -84,14 +84,25 @@ hear nothing.
 
 ## Installing a released build
 
-Each release carries a macOS build for Intel and Apple Silicon, plus a `.deb` and an `.rpm` for
-Linux — [github.com/biomassa/tui-wave/releases](https://github.com/biomassa/tui-wave/releases).
+Each release carries a macOS build for Intel and Apple Silicon, a `.zip` for Windows, plus a
+`.deb` and an `.rpm` for Linux —
+[github.com/biomassa/tui-wave/releases](https://github.com/biomassa/tui-wave/releases).
 
-**Run `setup-environment.sh` afterwards.** The packages contain the tui-wave binary and nothing
-else, and about 439 of its processes are *scripts* from the praatAudioTools project, which no
-package bundles. Without them tui-wave lists every Praat process and can run none. The script
-fetches them, points tui-wave at them, and optionally sets up the Python environment the 34
-processes in the `py` group need.
+**On Windows there is no setup step for the scripts.** The `.zip` bundles praatAudioTools beside
+`tui-wave.exe`, and the program finds it there on its own — unzip it anywhere and every Praat
+process is available (once Praat itself is installed; see below). Only the `py` process group
+needs anything further, and `setup-python.ps1` in the archive covers it:
+
+```powershell
+.\setup-python.ps1              # create the venv and install numpy, scipy, soundfile
+.\setup-python.ps1 -DryRun      # print what it would run, change nothing
+```
+
+**On macOS and Linux, run `setup-environment.sh` afterwards.** Those packages contain the
+tui-wave binary and nothing else, and about 439 of its processes are *scripts* from the
+praatAudioTools project, which they do not bundle. Without them tui-wave lists every Praat
+process and can run none. The script fetches them, points tui-wave at them, and optionally sets
+up the Python environment the `py` group needs.
 
 You will find it:
 
@@ -99,6 +110,7 @@ You will find it:
 | --- | --- |
 | `.deb` or `.rpm` | `/usr/share/tui-wave/setup-environment.sh` |
 | macOS tarball | beside the binary, where you unpacked it |
+| Windows `.zip` | not needed — the scripts are bundled; `setup-python.ps1` is beside the binary |
 | any release | attached to the release page on its own |
 | source checkout | the repository root |
 

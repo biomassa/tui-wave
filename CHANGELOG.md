@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- **New: a Windows release archive, and it carries the Praat scripts.** Releases now build a
+  `tui-wave-<ver>-x86_64-pc-windows-msvc.zip` alongside the macOS tarballs and the Linux
+  packages. Unlike every other artifact it bundles praatAudioTools beside `tui-wave.exe`, so
+  there is no setup step to reach the Praat processes at all — unzip it and they work.
+
+  That is not generosity, it is the absence of bash. The other platforms leave
+  `setup-environment.sh` to clone the scripts at the exact commit the built-in catalog was
+  generated from, and porting 511 lines of shell was the wrong trade against shipping the
+  scripts themselves. Bundling also makes the pin structurally correct rather than something a
+  script is trusted to get right: the scripts in the archive *are* the ones the catalog
+  describes. No code was needed for the app to find them — it already walks up from the
+  executable looking for `third_party/praat-audiotools`, which is how a `cargo run` development
+  build has always resolved them.
+
+  `setup-python.ps1` in the archive covers the one piece that remains, the Python environment
+  the 46 processes in the `py` group need. The archive drops `Max-MSP/` from the bundled
+  checkout — 7.2 MB of Max/MSP patches this program never reads.
+
+- **Fixed: on Windows, settings would have followed you around the filesystem.** The config path
+  and the whole Praat state directory (the venv, the preferences folder) resolved
+  `XDG_CONFIG_HOME`, then `$HOME/.config`, then the current directory. `HOME` is a Unix variable
+  and is normally unset on Windows, so both landed in `.\.config\tui-wave\` **relative to
+  wherever the program was launched from** — settings appearing to vanish when started from
+  another directory, and a Python venv rebuilt per directory. They now use `APPDATA` (then
+  `USERPROFILE`) there. `XDG_CONFIG_HOME` still wins first on every platform, Windows included,
+  which the test suite depends on to redirect all of this into a temp directory.
+
+- **Fixed: the Praat plugin link needed Developer Mode on Windows.** The `plugin_AudioTools`
+  entry that makes `preferencesDirectory$` resolve was created as a symlink, which Windows
+  refuses without `SeCreateSymbolicLinkPrivilege` — so on a default install it failed silently
+  and took the Vector Chain processes with it, those being the ones that locate their sibling
+  scripts through that variable. It now falls back to a directory junction, which needs no
+  privilege and which Praat cannot tell apart from a symlink.
+
 - **Fixed: 46 Praat synthesis processes silently did nothing with no file open.** Everything in the
   Generative group builds its sound from its own parameters — Formant Synthesis, GENDYN, the
   Xenakis and Risset engines, the Karplus-Strong and waveguide generators — so none of them needs a

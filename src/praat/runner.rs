@@ -594,10 +594,10 @@ const PLUGIN_DIR_NAME: &str = "plugin_AudioTools";
 /// needs the very same venv, or every `py` process fails there on missing imports while working
 /// perfectly in the app.
 pub fn state_dir() -> PathBuf {
-    let config_home = std::env::var("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|_| {
-        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string())).join(".config")
-    });
-    config_home.join("tui-wave").join("praat")
+    // Shared with `Config::path` rather than resolved again here. The two had identical copies
+    // of this, which is exactly the shape that lets a platform fix land in one of them: see
+    // `config::config_home` for why Windows needs a branch at all.
+    crate::config::config_home().join("tui-wave").join("praat")
 }
 
 /// The app-owned Python virtual environment the `py` process group runs in, if it exists.
@@ -657,8 +657,27 @@ pub fn prepare_prefs_dir(state_dir: &Path, audiotools_dir: &Path) -> Option<Path
 
     #[cfg(unix)]
     let created = std::os::unix::fs::symlink(audiotools_dir, &link).is_ok();
+    // A *symlink* on Windows needs `SeCreateSymbolicLinkPrivilege` — Developer Mode on, or an
+    // elevated process — so on a default install this fails and the whole prefs directory is
+    // abandoned, silently costing the Vector Chain family (the processes that locate their
+    // sibling scripts through `preferencesDirectory$`). A directory **junction** needs no
+    // privilege at all and Praat cannot tell the two apart: it resolves either one when it opens
+    // `preferencesDirectory$ + "/plugin_AudioTools/..."`.
+    //
+    // `mklink` is a `cmd` builtin rather than an executable, hence `cmd /c`, and there is no
+    // std API for junctions. Tried second, not first: where a symlink *is* permitted it is the
+    // more faithful thing to create, and it costs no process spawn.
     #[cfg(windows)]
-    let created = std::os::windows::fs::symlink_dir(audiotools_dir, &link).is_ok();
+    let created = std::os::windows::fs::symlink_dir(audiotools_dir, &link).is_ok()
+        || StdCommand::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(audiotools_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
     #[cfg(not(any(unix, windows)))]
     let created = false;
 
@@ -1721,6 +1740,45 @@ mod tests {
         }
         assert!(validate_audiotools_dir(&dir).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Windows release archive **bundles** the scripts beside the executable rather than
+    /// leaving a setup script to clone them, so `Config::praat_audiotools_path` finds them with
+    /// no configuration at all — see `config::default_praat_audiotools_dir`, whose walk up from
+    /// the executable is what makes that work without a line of new code.
+    ///
+    /// Two properties are pinned here because the packaging step depends on both. That the walk
+    /// resolves a sibling `third_party/praat-audiotools`, and that `validate_audiotools_dir`
+    /// needs only `Distortion/` and `Reverb/` — which is what lets the archive drop `Max-MSP/`
+    /// (7.2 MB of Max patches this app never reads) and still ship a checkout the app accepts.
+    #[test]
+    fn a_bundled_checkout_beside_the_executable_validates() {
+        let root = std::env::temp_dir().join(format!("praat-bundle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bundled = root.join("third_party").join("praat-audiotools");
+        // Every category directory the real submodule has except Max-MSP, abbreviated to the
+        // two the validator actually looks for plus one more, so this is not merely the
+        // sentinel pair echoed back.
+        for c in ["Distortion", "Reverb", "Generative & Synthesis"] {
+            std::fs::create_dir_all(bundled.join(c)).unwrap();
+        }
+        assert!(
+            validate_audiotools_dir(&bundled).is_ok(),
+            "a checkout without Max-MSP/ must still validate"
+        );
+
+        // And the executable-relative walk finds it from where the archive puts the binary:
+        // `<staging>/tui-wave.exe` alongside `<staging>/third_party/praat-audiotools`.
+        let exe = root.join("tui-wave.exe");
+        let found = exe
+            .ancestors()
+            .skip(1)
+            .take(4)
+            .map(|a| a.join("third_party/praat-audiotools"))
+            .find(|c| c.is_dir());
+        assert_eq!(found.as_deref(), Some(bundled.as_path()), "the bundled layout must resolve");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

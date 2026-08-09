@@ -175,15 +175,54 @@ fn default_praat_audiotools_dir() -> String {
     String::new()
 }
 
+/// The per-user configuration root everything this app persists lives under — `config.toml`
+/// itself, the CDP presets, and (via `praat::runner::state_dir`) the whole Praat state
+/// directory: the venv, the preferences folder, a downloaded scripts checkout.
+///
+/// `XDG_CONFIG_HOME` is honoured **first on every platform, Windows included**, and not only
+/// because it is the Unix convention: the test suite sets it to redirect this whole tree into a
+/// temp directory, serialized by `XDG_CONFIG_HOME_TEST_LOCK`, so a platform that ignored it
+/// would quietly write a developer's real config during `cargo test`.
+///
+/// The Windows branch is what makes a Windows build usable at all. `HOME` is a Unix variable
+/// and is normally unset there outside Git Bash, so the old `HOME`-or-`"."` fallback resolved to
+/// `.\.config\tui-wave\` — **relative to whatever directory the user happened to launch from**,
+/// which means settings appear to vanish when you start the app from somewhere else, and the
+/// Praat venv would be rebuilt per directory. `APPDATA` is the roaming per-user config root
+/// Windows itself uses; `USERPROFILE` backs it up for the rare environment that clears it.
+///
+/// `"."` remains the last resort on every platform, unchanged: a config path that cannot be
+/// resolved must never stop the editor from starting.
+pub(crate) fn config_home() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg);
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            if !appdata.is_empty() {
+                return PathBuf::from(appdata);
+            }
+        }
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            if !profile.is_empty() {
+                return PathBuf::from(profile).join("AppData").join("Roaming");
+            }
+        }
+        PathBuf::from(".")
+    }
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home).join(".config")
+    }
+}
+
 impl Config {
     fn path() -> PathBuf {
-        let config_home = std::env::var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                PathBuf::from(home).join(".config")
-            });
-        config_home.join("tui-wave").join("config.toml")
+        config_home().join("tui-wave").join("config.toml")
     }
 
     /// Loads the persisted config, falling back to defaults on any error (missing file,
@@ -332,6 +371,45 @@ mod tests {
     fn malformed_toml_falls_back_to_default() {
         let parsed: Option<Config> = toml::from_str("not valid toml {{{").ok();
         assert!(parsed.is_none());
+    }
+
+    /// `XDG_CONFIG_HOME` must win on **every** platform, Windows included. This is not a style
+    /// preference: the whole suite redirects this tree into a temp directory by setting that
+    /// variable, so a platform that consulted `APPDATA` first would write a developer's real
+    /// config during `cargo test`.
+    #[test]
+    fn config_home_prefers_xdg_on_every_platform() {
+        let _guard = XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("tui_wave_home_xdg_{}", std::process::id()));
+        // SAFETY: the lock above serializes every test in the crate that mutates this var.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
+        assert_eq!(config_home(), dir);
+        assert_eq!(Config::path(), dir.join("tui-wave").join("config.toml"));
+        // ...and the Praat state directory, which used to resolve this a second time of its own.
+        assert_eq!(
+            crate::praat::runner::state_dir(),
+            dir.join("tui-wave").join("praat"),
+            "both roots must come from the same resolution"
+        );
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+    }
+
+    /// An *empty* `XDG_CONFIG_HOME` must fall through rather than resolving the whole config
+    /// tree to the current directory — the same relative-path trap the Windows branch exists to
+    /// avoid, reachable on Unix too by a shell that exports the variable as blank.
+    #[test]
+    fn an_empty_xdg_config_home_falls_through() {
+        let _guard = XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: as above.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", "") };
+        let resolved = config_home();
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        assert_ne!(resolved, std::path::Path::new(""), "an empty value is not a path");
+        assert!(
+            resolved.is_absolute() || resolved == std::path::Path::new("."),
+            "expected a real root or the documented last resort, got {}",
+            resolved.display()
+        );
     }
 
     /// `save` then `load` against a real (temp) XDG_CONFIG_HOME must round-trip exactly —
