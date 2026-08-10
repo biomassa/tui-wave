@@ -134,6 +134,22 @@ pub enum PraatError {
     TimedOut { seconds: u64 },
 }
 
+/// Turns a spawn failure into something actionable rather than an OS-phrased error. `praat`
+/// (the default `praat_bin`, resolved by a bare-name PATH lookup — see `praat_bin_for`) is by
+/// far the most common cause: nothing here installs Praat itself on any platform, only the
+/// praatAudioTools scripts and, for the `py` group, a Python venv. Unlike `NotFound`, every
+/// other `io::Error` kind (permission denied, not executable, ...) names something concrete
+/// enough that the raw OS message is already the useful answer.
+fn spawn_error_message(e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        "Praat not found. Install it (https://www.fon.hum.uva.nl/praat/) and either add it to \
+         your PATH or set praat_bin in your config to point at it."
+            .to_string()
+    } else {
+        e.to_string()
+    }
+}
+
 impl std::fmt::Display for PraatError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -476,7 +492,7 @@ fn run_praat(
         .spawn()
         .map_err(|e| PraatError::Spawn {
             bin: job.praat_bin.display().to_string(),
-            message: e.to_string(),
+            message: spawn_error_message(&e),
         })?;
 
     // Drained on helper threads so a chatty script can't deadlock us by filling a pipe buffer
@@ -855,6 +871,28 @@ mod tests {
         match run(&job) {
             Err(PraatError::Spawn { bin, .. }) => {
                 assert!(bin.contains("praat-does-not-exist"), "{bin}");
+            }
+            other => panic!("expected Spawn, got {other:?}"),
+        }
+    }
+
+    /// A missing binary is an `io::ErrorKind::NotFound`, and by far the most likely cause is
+    /// that Praat itself was never installed — nothing here installs it on any platform, only
+    /// the scripts and (for `py`) a venv. The message should say so and name the fix rather
+    /// than surface the raw OS string ("No such file or directory (os error 2)" on Unix,
+    /// "The system cannot find the file specified. (os error 2)" on Windows), which names a
+    /// symptom a user who has never heard of `praat_bin` can't act on.
+    #[test]
+    fn a_missing_binary_names_praat_and_the_fix_not_a_raw_os_error() {
+        let mut job = job_with("writeInfoLine: 1\n", DEFAULT_TIMEOUT);
+        job.praat_bin = PathBuf::from("/nonexistent/praat-does-not-exist");
+        match run(&job) {
+            Err(err @ PraatError::Spawn { .. }) => {
+                let text = err.to_string();
+                assert!(text.contains("Install it"), "{text}");
+                assert!(text.contains("fon.hum.uva.nl"), "{text}");
+                assert!(text.contains("praat_bin"), "{text}");
+                assert!(!text.contains("os error"), "should not leak the raw OS message: {text}");
             }
             other => panic!("expected Spawn, got {other:?}"),
         }

@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-08-10 (2.6.5)
+
+- **Fixed: a CDP synthesis process (the SYNTH group — clicknew, impulse, multiosc, synfilt,
+  synspline, synth) could not run at all**, on every platform, reported "Output is 44100 Hz but
+  the document is 0 Hz — set the process's sample rate to match" even though there was nothing
+  to match against. These processes read no audio and are meant to run with no buffer open, the
+  same way a generative Praat process does — but `tick_cdp`'s Apply handler only ever knew about
+  Praat's generative routing (`praat_opens_new_buffer` bails out immediately for a CDP-backend
+  process) and fell through to the plain splice arm, which looked up a document that never
+  existed. It now checks `input == IoKind::None` directly and opens a new buffer instead, mirroring
+  the generative-Praat path. A second, worse instance of the same gap — the "unchanged-parameter
+  Apply straight after a matching Preview" fast path in `cdp_run` — indexed `self.documents[idx]`
+  unconditionally and would have panicked outright with no document open; fixed the same way.
+
+- **Fixed: Praat itself not being installed reported a raw OS error** ("could not start Praat
+  (praat): No such file or directory (os error 2)") instead of saying what to do about it. Now
+  names the fix directly, linking the official download and `praat_bin`. Also documented: nothing
+  in tui-wave installs Praat on any platform, Windows included — the Windows zip only bundles the
+  praatAudioTools scripts and (via `setup-python.ps1`) the `py` group's Python environment. README
+  gained a Windows install section; none existed before.
+
+## 2026-08-10 (2.6.4)
+
+- **Fixed: the Windows zip put the bundled Praat scripts where nothing could find them**, so
+  every Praat process reported no scripts installed on a real Windows machine (reported against
+  2.6.1). `Compress-Archive -Path $staging` made the staging folder itself the zip's root entry;
+  since that folder shares the zip's name, Windows Explorer's "Extract All" (which extracts into
+  a *new* folder named after the zip) nested it twice —
+  `tui-wave-<ver>-...\tui-wave-<ver>-...\tui-wave.exe` — and `default_praat_audiotools_dir`'s
+  walk up from the executable never reached `third_party\praat-audiotools`. Packaging now zips
+  `$staging\*`, the folder's contents, so extraction lands the files directly in the one folder
+  Explorer creates. CI-only; no application code changed.
+
 ## 2026-08-10 (2.6.3)
 
 - **Fixed: the CDP directory dialog rejected a real, correctly-installed Windows CDP folder**,

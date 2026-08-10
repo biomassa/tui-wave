@@ -11117,6 +11117,42 @@ impl App {
         if matches!(purpose, crate::cdp::JobPurpose::Apply) {
             if let Some(cached) = &preview {
                 if Self::cdp_preview_matches(cached, &values, range, doc.sample_rate, second_doc_index, &variadic_docs, &formant_field_selections(&fields)) {
+                    // A zero-input process (SYNTH, or a Photo sonifier) has nothing to splice
+                    // into — same reasoning as the completion-side arm in `tick_cdp` — and may
+                    // have been previewed with no document open at all, in which case `idx`
+                    // names nothing in `self.documents` and `self.documents[idx]` below would
+                    // panic rather than merely mis-splice. The cached result becomes a new
+                    // buffer instead, exactly like a fresh run would.
+                    if matches!(def.input, IoKind::None | IoKind::Photo) {
+                        let bits_per_sample = self
+                            .documents
+                            .get(idx)
+                            .map(|d| d.bits_per_sample)
+                            .unwrap_or(32);
+                        self.push_generated_document(Document {
+                            head_tail_marks: Vec::new(),
+                            channels: cached.channels.clone(),
+                            sample_rate: cached.sample_rate,
+                            bits_per_sample,
+                            selection: None,
+                            cursor: 0,
+                            dirty: true,
+                            path: None,
+                            markers: Vec::new(),
+                            bext: None,
+                            stream: None,
+                        });
+                        self.viewport = None;
+                        self.rebuild_audio();
+                        self.rebuild_waveform_caches();
+                        self.stop_cdp_preview_audio();
+                        let buffers = variadic_input
+                            .as_ref()
+                            .map(|v| self.variadic_input_buffer_refs(v))
+                            .unwrap_or_default();
+                        Self::record_process_applied(&def.key, &values, &buffers);
+                        return;
+                    }
                     let label = format!("CDP: {}", def.title);
                     let channels = cached.channels.clone();
                     let tolerance = crate::commands::cdp::timing_tolerance(
@@ -12965,6 +13001,47 @@ impl App {
 
                     match result {
                         Ok(mut output) => match purpose {
+                            crate::cdp::JobPurpose::Apply
+                                if process_def
+                                    .is_some_and(|d| d.input == crate::model::cdp::IoKind::None) =>
+                            {
+                                // A zero-input process (CDP's own SYNTH group: clicknew,
+                                // impulse, multiosc, synfilt, synspline, synth) reads no audio,
+                                // so — the same reasoning as `praat_opens_new_buffer` for a
+                                // generative Praat process — there is nothing to splice into and
+                                // nothing to refuse over a rate mismatch: the buffer simply
+                                // appears. `App::cdp_run` may have submitted this with no
+                                // document open at all, in which case `pending.doc_index` names
+                                // nothing; the plain splice arm below used to be reached anyway
+                                // and reported the placeholder's 0 Hz against the process's
+                                // real output rate as if it were a genuine mismatch to fix.
+                                let bits_per_sample = self
+                                    .documents
+                                    .get(pending.doc_index)
+                                    .map(|d| d.bits_per_sample)
+                                    .unwrap_or(32);
+                                let channels = output.results.into_iter().next().unwrap_or_default();
+                                self.push_generated_document(Document {
+                                    head_tail_marks: Vec::new(),
+                                    channels,
+                                    sample_rate: output.sample_rate,
+                                    bits_per_sample,
+                                    selection: None,
+                                    cursor: 0,
+                                    dirty: true,
+                                    path: None,
+                                    markers: Vec::new(),
+                                    bext: None,
+                                    stream: None,
+                                });
+                                self.viewport = None;
+                                self.rebuild_audio();
+                                self.rebuild_waveform_caches();
+                                self.dialog = None;
+                                if let Some(key) = &recent_key {
+                                    Self::record_process_applied(key, &last_process_values, &last_process_input_buffers);
+                                }
+                            }
                             crate::cdp::JobPurpose::Apply
                                 if output.results.len() > 1 || output_new_buffer =>
                             {
@@ -30307,6 +30384,145 @@ mod tests {
             assert_eq!(doc.channels[0].len(), 4, "each new buffer should hold the copied 4 samples");
             assert!(doc.dirty, "a never-saved new buffer should start dirty");
         }
+    }
+
+    /// A zero-input CDP process (`cdp_synth_processes_declare_no_input`'s SYNTH group) run with
+    /// **no document open at all** used to reach `tick_cdp`'s plain splice arm, which looked up
+    /// `self.documents[pending.doc_index]` — nothing, since there is no document — and reported
+    /// the process's real output rate against a fabricated "document is 0 Hz", refusing to do
+    /// anything (screenshot, 2026-08-10, `pvoc`-style directory report's sibling bug). It should
+    /// behave like a generative Praat process instead: nothing to splice into, so the result
+    /// becomes a new buffer. Exercises the fix end-to-end through the real `cdp_runner`, same
+    /// "fake /bin/sh step" precedent as `glob_output_apply_opens_one_new_buffer_per_result`.
+    #[test]
+    fn zero_input_apply_with_no_document_open_creates_a_new_buffer() {
+        let mut app = new_app(None, None);
+        assert_eq!(app.documents.len(), 0, "starts with nothing open");
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.input == crate::model::cdp::IoKind::None)
+            .expect("the catalog ships a zero-input SYNTH process");
+
+        app.cdp_pending = Some(CdpPending {
+            doc_index: 0,
+            range: (0, 0),
+            label: "CDP: Fake Synth".into(),
+            catalog_index,
+            fields: Vec::new(),
+            second_input: None,
+            variadic_input: None,
+            photo_input: None,
+            focus: 0,
+            presets: Vec::new(),
+            preset_selected: None,
+            custom_values: None,
+        });
+        app.dialog = Some(Dialog::CdpRunning {
+            job_id: 42,
+            title: "Fake Synth".into(),
+            step_label: String::new(),
+            step_index: 0,
+            step_total: 1,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let planned = crate::model::cdp::pipeline::PlannedJob {
+            steps: vec![crate::model::cdp::pipeline::Invocation {
+                bin: "sh".into(),
+                args: vec!["-c".into(), "cp in.wav out.wav".into()],
+                label: "fake synth".into(),
+                expected_output: "out.wav".into(),
+            }],
+            input_files: vec![crate::model::cdp::pipeline::TempWavSpec {
+                relative_name: "in.wav".into(),
+                input_index: 0,
+                source_channels: vec![0], gain: None }],
+            output_files: vec![crate::model::cdp::pipeline::OutputWavSpec {
+                relative_name: "out.wav".into(),
+                dest_channels: vec![0],
+            }],
+            glob_output: None,
+            output_curve: None,
+            output_curve_binary_template: None, output_formant_buffer: None, output_sidecar: None, matrix_gain_calibration: None,
+            brk_files: Vec::new(),
+            binary_input_files: Vec::new(),
+            deferred_window_params: Vec::new(),
+            needs_simple_wav_input: false, clip_headroom_restore: None,
+        };
+        app.cdp_runner.submit(crate::cdp::Job {
+            id: 42,
+            cdp_dir: std::path::PathBuf::from("/bin"),
+            planned,
+            // The 44100 here stands in for the process's own synthesised rate — with no document
+            // open there is nothing for it to match, which is exactly the case that used to
+            // report a spurious "document is 0 Hz" mismatch.
+            inputs: vec![vec![vec![0.1, 0.2, 0.3, 0.4]]],
+            input_sample_rate: 44100,
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.dialog.is_some() && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(app.dialog.is_none(), "the CdpRunning dialog should close once the job finishes, not show an Info error");
+        assert_eq!(app.documents.len(), 1, "the result should land in a brand-new buffer");
+        assert_eq!(app.documents[0].channels[0].len(), 4, "the new buffer should hold the synthesised samples");
+        assert!(app.documents[0].dirty, "a never-saved new buffer should start dirty");
+        assert!(app.undo_closes_buffer[0], "undoing a generated buffer should close it, like a generative Praat process");
+    }
+
+    /// The other place a zero-input process with no document open used to break:
+    /// `App::cdp_run`'s "unchanged-parameter Apply after a successful Preview" fast path
+    /// spliced straight into `self.documents[idx]` without checking whether `idx` named
+    /// anything, which is an out-of-bounds panic rather than a mere mis-splice when
+    /// `self.documents` is empty. It must take the same "new buffer" branch as a fresh run.
+    #[test]
+    fn zero_input_apply_after_matching_preview_with_no_document_open_creates_a_new_buffer() {
+        let mut app = new_app(None, None);
+        assert_eq!(app.documents.len(), 0, "starts with nothing open");
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.input == crate::model::cdp::IoKind::None)
+            .expect("the catalog ships a zero-input SYNTH process");
+        app.open_cdp_params(catalog_index);
+
+        let fields = match &app.dialog {
+            Some(Dialog::CdpParams { fields, .. }) => fields.clone(),
+            _ => panic!("expected CdpParams to open"),
+        };
+        let values: Vec<_> = fields.iter().map(CdpField::to_value).collect();
+        let formant_selections = formant_field_selections(&fields);
+
+        if let Some(Dialog::CdpParams { preview, .. }) = app.dialog.as_mut() {
+            *preview = Some(CdpPreview {
+                values,
+                // A zero-input process's range is always `(cursor, cursor)` off the
+                // placeholder document `cdp_run` substitutes when nothing is open — see its
+                // own doc comment — and that placeholder's cursor is always 0.
+                range: (0, 0),
+                channels: vec![vec![0.1, 0.2, 0.3, 0.4]],
+                // Must match `Document::default().sample_rate`, what `cdp_run` compares
+                // against for the same placeholder-document reason.
+                sample_rate: 44100,
+                second_input_doc: None,
+                variadic_docs: Vec::new(),
+                formant_selections,
+            });
+        }
+
+        app.cdp_run(crate::cdp::JobPurpose::Apply);
+
+        assert_eq!(app.documents.len(), 1, "the cached preview should become a new buffer instead of panicking on an empty documents Vec");
+        assert_eq!(app.documents[0].channels[0].len(), 4);
+        assert!(app.undo_closes_buffer[0]);
     }
 
     /// A normal (non-glob) Apply whose process declares `sidecar_extension` (e.g. `matrix
