@@ -258,6 +258,14 @@ tui-wave finds it on your `PATH`, so there is usually nothing to configure. Set 
 your config file if yours lives elsewhere — on macOS the executable sits inside the app bundle,
 at `/Applications/Praat.app/Contents/MacOS/Praat`.
 
+**On Windows**, there is no package-manager one-liner: download the installer from
+[fon.hum.uva.nl/praat](https://www.fon.hum.uva.nl/praat/) and run it. The installer does not
+add Praat to `PATH`, so either add its install directory yourself or set `praat_bin` in your
+config to the full path to `Praat.exe`. Nothing here installs Praat for you on any platform —
+the Windows `.zip` bundles the praatAudioTools *scripts* and, via `setup-python.ps1`, the `py`
+group's Python environment, but Praat itself is always a separate install. Running a Praat
+process without it now says exactly that, naming the fix, instead of a raw OS error.
+
 **The scripts**, which ship with tui-wave as a git submodule. Clone with them:
 
 ```sh

@@ -211,7 +211,14 @@ jobs:
             }
           }
 
-          Compress-Archive -Path $staging -DestinationPath "$staging.zip"
+          # `-Path $staging` (the folder itself) would make the folder the zip's own root entry.
+          # Since the folder and the zip share a name, Windows Explorer's "Extract All" -- which
+          # extracts into a new folder named after the zip -- would then nest it twice:
+          # `tui-wave-<ver>-...\tui-wave-<ver>-...\tui-wave.exe`, and `default_praat_audiotools_dir`'s
+          # walk up from the executable would never reach `third_party\praat-audiotools` (reported
+          # against 2.6.1). `$staging\*` zips the *contents*, so extraction lands the files
+          # directly in the one folder Explorer creates.
+          Compress-Archive -Path "$staging\*" -DestinationPath "$staging.zip"
           (Get-FileHash "$staging.zip" -Algorithm SHA256).Hash.ToLower() + "  $staging.zip" |
             Out-File -Encoding ascii "$staging.zip.sha256"
 
