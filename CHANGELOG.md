@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-08-10 (2.7.0)
+
+- **Windows support is dropped. tui-wave targets Linux and macOS only.** The terminal on Windows
+  cannot give this program the graphics-protocol image output or the mouse reporting the editor is
+  built around, and a waveform editor without either is not worth shipping — so rather than carry
+  a build nobody can properly use, it is gone.
+
+  The release workflow no longer builds `tui-wave-<ver>-x86_64-pc-windows-msvc.zip`; releases now
+  carry five artifacts (two macOS tarballs, `.deb`, `.rpm`, `setup-environment.sh`) instead of six.
+  `setup-python.ps1` is deleted. Every platform-conditional path is gone with it: `config_home`
+  resolves `XDG_CONFIG_HOME` then `$HOME/.config` with no `APPDATA`/`USERPROFILE` branch,
+  `prepare_prefs_dir` creates a plain Unix symlink with no `mklink /J` junction fallback, the CDP
+  runner joins a bare binary name with no `.exe` logic, and the Praat venv resolves `bin/python3`
+  directly. No behaviour on Linux or macOS changes.
+
+  Praat *script content* that mentions Windows is untouched and still handled: several upstream
+  praatAudioTools scripts hardcode the author's own `C:/Users/.../python.exe`, which
+  `praat::python::rewrite_for_venv` still rewrites, and the driver still passes backslashes through
+  unmangled.
+
+- **The four case-colliding Praat scripts are now documented as a macOS issue**, which is what they
+  always were. `DYNAMIC_FORMANT_SWEEPER`/`Dynamic_Formant_Sweeper`, `Stereo_Shimmer`/`stereo_shimmer`,
+  `Paulstretch`/`paulstretch` and `Recomposer`/`recomposer` differ only in case, and **APFS is
+  case-insensitive by default** — so a stock Mac keeps one of each and the losers silently run their
+  twin's script. README's *Known issues* had filed this under Windows with the macOS consequence in a
+  trailing sentence; it now leads with the Mac, since that is the platform still shipping.
+
 ## 2026-08-10 (2.6.5)
 
 - **Fixed: the Windows zip put the bundled Praat scripts where nothing could find them**, so

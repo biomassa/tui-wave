@@ -179,45 +179,22 @@ fn default_praat_audiotools_dir() -> String {
 /// itself, the CDP presets, and (via `praat::runner::state_dir`) the whole Praat state
 /// directory: the venv, the preferences folder, a downloaded scripts checkout.
 ///
-/// `XDG_CONFIG_HOME` is honoured **first on every platform, Windows included**, and not only
-/// because it is the Unix convention: the test suite sets it to redirect this whole tree into a
-/// temp directory, serialized by `XDG_CONFIG_HOME_TEST_LOCK`, so a platform that ignored it
-/// would quietly write a developer's real config during `cargo test`.
+/// `XDG_CONFIG_HOME` is honoured first, and not only because it is the Unix convention: the test
+/// suite sets it to redirect this whole tree into a temp directory, serialized by
+/// `XDG_CONFIG_HOME_TEST_LOCK`, so ignoring it would quietly write a developer's real config
+/// during `cargo test`. macOS has no `XDG_CONFIG_HOME` by convention and falls through to
+/// `$HOME/.config`, which is where this program has always put it there.
 ///
-/// The Windows branch is what makes a Windows build usable at all. `HOME` is a Unix variable
-/// and is normally unset there outside Git Bash, so the old `HOME`-or-`"."` fallback resolved to
-/// `.\.config\tui-wave\` — **relative to whatever directory the user happened to launch from**,
-/// which means settings appear to vanish when you start the app from somewhere else, and the
-/// Praat venv would be rebuilt per directory. `APPDATA` is the roaming per-user config root
-/// Windows itself uses; `USERPROFILE` backs it up for the rare environment that clears it.
-///
-/// `"."` remains the last resort on every platform, unchanged: a config path that cannot be
-/// resolved must never stop the editor from starting.
+/// `"."` remains the last resort: a config path that cannot be resolved must never stop the
+/// editor from starting.
 pub(crate) fn config_home() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
             return PathBuf::from(xdg);
         }
     }
-    #[cfg(windows)]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            if !appdata.is_empty() {
-                return PathBuf::from(appdata);
-            }
-        }
-        if let Ok(profile) = std::env::var("USERPROFILE") {
-            if !profile.is_empty() {
-                return PathBuf::from(profile).join("AppData").join("Roaming");
-            }
-        }
-        PathBuf::from(".")
-    }
-    #[cfg(not(windows))]
-    {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".config")
-    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".config")
 }
 
 impl Config {
@@ -373,9 +350,9 @@ mod tests {
         assert!(parsed.is_none());
     }
 
-    /// `XDG_CONFIG_HOME` must win on **every** platform, Windows included. This is not a style
-    /// preference: the whole suite redirects this tree into a temp directory by setting that
-    /// variable, so a platform that consulted `APPDATA` first would write a developer's real
+    /// `XDG_CONFIG_HOME` must win over `$HOME/.config`, on macOS as much as on Linux. This is not
+    /// a style preference: the whole suite redirects this tree into a temp directory by setting
+    /// that variable, so a resolution that reached `$HOME` first would write a developer's real
     /// config during `cargo test`.
     #[test]
     fn config_home_prefers_xdg_on_every_platform() {
@@ -395,7 +372,7 @@ mod tests {
     }
 
     /// An *empty* `XDG_CONFIG_HOME` must fall through rather than resolving the whole config
-    /// tree to the current directory — the same relative-path trap the Windows branch exists to
+    /// tree to the current directory — the relative-path trap the `"."` last resort exists to
     /// avoid, reachable on Unix too by a shell that exports the variable as blank.
     #[test]
     fn an_empty_xdg_config_home_falls_through() {

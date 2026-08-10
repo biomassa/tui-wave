@@ -507,7 +507,7 @@ fn run_step(
     temp_dir: &Path,
     cancel: &AtomicBool,
 ) -> Result<(), CdpError> {
-    let bin_path = cdp_dir.join(super::bin_filename(bin));
+    let bin_path = cdp_dir.join(bin);
     let mut child = StdCommand::new(&bin_path)
         .args(args)
         .current_dir(temp_dir)

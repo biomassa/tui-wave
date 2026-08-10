@@ -611,8 +611,7 @@ const PLUGIN_DIR_NAME: &str = "plugin_AudioTools";
 /// perfectly in the app.
 pub fn state_dir() -> PathBuf {
     // Shared with `Config::path` rather than resolved again here. The two had identical copies
-    // of this, which is exactly the shape that lets a platform fix land in one of them: see
-    // `config::config_home` for why Windows needs a branch at all.
+    // of this, which is exactly the shape that lets a fix land in one of them and not the other.
     crate::config::config_home().join("tui-wave").join("praat")
 }
 
@@ -629,8 +628,8 @@ pub fn state_dir() -> PathBuf {
 /// keep working. Verified both directions — with only the venv on `PATH` a py-group process
 /// runs, and with the venv absent and `~/.local` hidden the same process fails.
 pub fn python_venv_bin(state_dir: &Path) -> Option<PathBuf> {
-    // `bin` on Unix, `Scripts` on Windows — the same layout `python -m venv` produces.
-    let bin = state_dir.join("pyenv").join(if cfg!(windows) { "Scripts" } else { "bin" });
+    // The layout `python -m venv` produces.
+    let bin = state_dir.join("pyenv").join("bin");
     bin.is_dir().then_some(bin)
 }
 
@@ -643,7 +642,7 @@ pub fn python_venv_bin(state_dir: &Path) -> Option<PathBuf> {
 /// itself shells out to.
 pub fn python_venv_interpreter(state_dir: &Path) -> Option<PathBuf> {
     let bin = python_venv_bin(state_dir)?;
-    let exe = bin.join(if cfg!(windows) { "python.exe" } else { "python3" });
+    let exe = bin.join("python3");
     exe.is_file().then_some(exe)
 }
 
@@ -673,28 +672,7 @@ pub fn prepare_prefs_dir(state_dir: &Path, audiotools_dir: &Path) -> Option<Path
 
     #[cfg(unix)]
     let created = std::os::unix::fs::symlink(audiotools_dir, &link).is_ok();
-    // A *symlink* on Windows needs `SeCreateSymbolicLinkPrivilege` — Developer Mode on, or an
-    // elevated process — so on a default install this fails and the whole prefs directory is
-    // abandoned, silently costing the Vector Chain family (the processes that locate their
-    // sibling scripts through `preferencesDirectory$`). A directory **junction** needs no
-    // privilege at all and Praat cannot tell the two apart: it resolves either one when it opens
-    // `preferencesDirectory$ + "/plugin_AudioTools/..."`.
-    //
-    // `mklink` is a `cmd` builtin rather than an executable, hence `cmd /c`, and there is no
-    // std API for junctions. Tried second, not first: where a symlink *is* permitted it is the
-    // more faithful thing to create, and it costs no process spawn.
-    #[cfg(windows)]
-    let created = std::os::windows::fs::symlink_dir(audiotools_dir, &link).is_ok()
-        || StdCommand::new("cmd")
-            .args(["/c", "mklink", "/J"])
-            .arg(&link)
-            .arg(audiotools_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(unix))]
     let created = false;
 
     created.then_some(prefs)
@@ -879,8 +857,7 @@ mod tests {
     /// A missing binary is an `io::ErrorKind::NotFound`, and by far the most likely cause is
     /// that Praat itself was never installed — nothing here installs it on any platform, only
     /// the scripts and (for `py`) a venv. The message should say so and name the fix rather
-    /// than surface the raw OS string ("No such file or directory (os error 2)" on Unix,
-    /// "The system cannot find the file specified. (os error 2)" on Windows), which names a
+    /// than surface the raw OS string ("No such file or directory (os error 2)"), which names a
     /// symptom a user who has never heard of `praat_bin` can't act on.
     #[test]
     fn a_missing_binary_names_praat_and_the_fix_not_a_raw_os_error() {
@@ -1780,17 +1757,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The Windows release archive **bundles** the scripts beside the executable rather than
-    /// leaving a setup script to clone them, so `Config::praat_audiotools_path` finds them with
-    /// no configuration at all — see `config::default_praat_audiotools_dir`, whose walk up from
-    /// the executable is what makes that work without a line of new code.
+    /// A checkout sitting beside the executable is found with no configuration at all — see
+    /// `config::default_praat_audiotools_dir`, whose walk up from the executable is how a
+    /// `cargo run` or `cargo build` tree has always resolved the scripts (`target/release/tui-wave`
+    /// sits two levels below the repository root).
     ///
-    /// Two properties are pinned here because the packaging step depends on both. That the walk
-    /// resolves a sibling `third_party/praat-audiotools`, and that `validate_audiotools_dir`
-    /// needs only `Distortion/` and `Reverb/` — which is what lets the archive drop `Max-MSP/`
-    /// (7.2 MB of Max patches this app never reads) and still ship a checkout the app accepts.
+    /// Two properties are pinned. That the walk resolves a sibling `third_party/praat-audiotools`,
+    /// and that `validate_audiotools_dir` needs only `Distortion/` and `Reverb/` rather than the
+    /// full set of category directories — so a partial checkout that is missing, say, `Max-MSP/`
+    /// (7.2 MB of Max patches this app never reads) still validates.
     #[test]
-    fn a_bundled_checkout_beside_the_executable_validates() {
+    fn a_checkout_beside_the_executable_validates() {
         let root = std::env::temp_dir().join(format!("praat-bundle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let bundled = root.join("third_party").join("praat-audiotools");
@@ -1805,9 +1782,9 @@ mod tests {
             "a checkout without Max-MSP/ must still validate"
         );
 
-        // And the executable-relative walk finds it from where the archive puts the binary:
-        // `<staging>/tui-wave.exe` alongside `<staging>/third_party/praat-audiotools`.
-        let exe = root.join("tui-wave.exe");
+        // And the executable-relative walk finds it from a binary sitting beside it:
+        // `<root>/tui-wave` alongside `<root>/third_party/praat-audiotools`.
+        let exe = root.join("tui-wave");
         let found = exe
             .ancestors()
             .skip(1)
@@ -1855,7 +1832,7 @@ mod venv_tests {
         let _ = std::fs::remove_dir_all(&empty);
         assert_eq!(python_venv_bin(&empty), None);
 
-        let bin = empty.join("pyenv").join(if cfg!(windows) { "Scripts" } else { "bin" });
+        let bin = empty.join("pyenv").join("bin");
         std::fs::create_dir_all(&bin).expect("create probe venv");
         assert_eq!(python_venv_bin(&empty), Some(bin));
         let _ = std::fs::remove_dir_all(&empty);

@@ -48,7 +48,7 @@ Everything you may want to install lives in this section: tui-wave itself, and t
 external tool suites it can drive. Only tui-wave is required — it opens, edits, plays and saves
 files with neither of the others present.
 
-The rest of this section is what the script does, for anyone doing it by hand or on Windows.
+The rest of this section is what the script does, for anyone doing it by hand.
 
 ### tui-wave
 
@@ -83,7 +83,7 @@ Two things to know. The command builds in a temporary directory rather than `tar
 compiles from scratch even if you have just built the project. And it installs a copy: after
 pulling new changes, run it again to update.
 
-The program runs on Linux and macOS. Windows may work, but nobody has tested it.
+The program runs on Linux and macOS. Windows is not supported.
 
 Audio playback needs a working sound device. If the program finds no device, it still opens,
 draws, and edits files. Only playback stops working.
@@ -125,7 +125,7 @@ collection of sound-transformation scripts written for it by Shai Cohen. Section
 them.
 
 **`./install.sh` installs both of the things below.** If you ran it, skip to section 15. What
-follows is the manual route, and what Windows needs.
+follows is the manual route.
 
 You need two things.
 

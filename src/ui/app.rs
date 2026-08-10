@@ -4812,12 +4812,12 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
-        // Unix ttys (without the kitty keyboard protocol's REPORT_EVENT_TYPES, which this app
-        // never requests) only ever send Press. The Windows console API reports every physical
-        // key down *and* key up, and crossterm's Windows backend passes both through as distinct
-        // `Event::Key`s — so without this guard, every keystroke on Windows fired its action
-        // twice (once on press, once on release), making text entry (e.g. the CDP working
-        // directory field) produce doubled characters.
+        // Every action here fires once per *press*. A terminal that also reports key releases
+        // would otherwise run it twice per keystroke — doubling typed characters in every text
+        // field. Today that cannot happen: releases arrive only under the kitty keyboard
+        // protocol's `REPORT_EVENT_TYPES`, which `ui::terminal` deliberately does not request
+        // (it pushes `DISAMBIGUATE_ESCAPE_CODES` alone). This guard is what keeps that a local
+        // decision in one file rather than an invariant every handler below depends on.
         if key.kind != KeyEventKind::Press {
             return;
         }

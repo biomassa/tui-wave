@@ -1,8 +1,7 @@
-# Builds the six release artifacts and, for a tag, publishes them to a GitHub Release.
+# Builds the five release artifacts and, for a tag, publishes them to a GitHub Release.
 #
 #   macOS Intel          tui-wave-<ver>-x86_64-apple-darwin.tar.gz
 #   macOS Apple Silicon  tui-wave-<ver>-aarch64-apple-darwin.tar.gz
-#   Windows x64          tui-wave-<ver>-x86_64-pc-windows-msvc.zip
 #   Debian/Ubuntu        tui-wave_<ver>_amd64.deb
 #   Fedora/RHEL/SUSE     tui-wave-<ver>-1.x86_64.rpm
 #   Every release        setup-environment.sh (standalone, and inside each package)
@@ -10,14 +9,10 @@
 # No AppImage: it is a single self-contained file with no room for the praatAudioTools scripts
 # or a setup script, and tui-wave without its Praat and CDP integrations is not worth shipping.
 #
-# **The Windows archive is the one that carries the scripts.** Every other artifact ships the
-# binary alone and leaves setup-environment.sh to clone praatAudioTools at the pinned commit,
-# because that script is bash and Windows has no bash. Rather than port 511 lines of it, the zip
-# bundles the submodule beside the executable, where `config::default_praat_audiotools_dir`
-# already finds it by walking up from the binary. That needs no code and makes the commit pin
-# structurally correct — the scripts *are* the ones the catalog was generated from, rather than
-# ones a script was trusted to check out. Only the Python venv still needs a setup step there,
-# which setup-python.ps1 covers on its own.
+# **Linux and macOS only.** Windows is not a target: the terminal there cannot give this program
+# the graphics-protocol image output or the mouse reporting the editor is built around, and a
+# waveform editor without either is not worth shipping. Every artifact therefore ships the binary
+# alone and leaves setup-environment.sh to clone praatAudioTools at the pinned commit.
 #
 # Triggered by a `v*` tag, or by hand from the Actions tab (`workflow_dispatch`) — the manual
 # run builds and uploads artifacts but publishes no Release, which is what makes it safe to use
@@ -119,115 +114,6 @@ jobs:
           path: |
             *.tar.gz
             *.tar.gz.sha256
-          if-no-files-found: error
-
-  # ---- Windows: one zip, and it carries the scripts -----------------------------------------
-  #
-  # `windows-latest` is x86_64 and builds natively for `x86_64-pc-windows-msvc`, the default
-  # toolchain there — no `--target` needed, so the binary lands in the ordinary `target/release`.
-  # Nothing to install: cpal uses WASAPI, which is part of the system, so there is no equivalent
-  # of the Linux job's ALSA step.
-  #
-  # Deliberately x64 only. `windows-11-arm` runners exist, but Windows on ARM runs x64 binaries
-  # under emulation and this is a terminal app whose cost is a one-time waveform scan — the
-  # second artifact would buy very little for a second way to break the release.
-  windows:
-    name: Windows x64
-    runs-on: windows-latest
-    # Windows must never hold up a macOS or Linux release: those are the platforms this is built
-    # for, and the zip is a convenience. A job that fails with this flag still counts as
-    # satisfied for `needs`, so `release` proceeds either way — but it does still *wait*, which
-    # is the point: dropping this job from `needs` entirely would let publishing start before the
-    # zip exists (Windows takes ~5m against macOS's ~3m), so the artifact would go missing from
-    # most releases rather than only from broken ones.
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          # Doubly load-bearing here. praat_catalog.toml is include_str!'d from this submodule
-          # (so the build fails outright without it, as everywhere else), *and* the archive
-          # below ships the checkout itself.
-          submodules: recursive
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: x86_64-pc-windows-msvc
-
-      - name: Build
-        run: cargo build --release --locked
-
-      # Proves the MSVC build links and actually starts — the same thing the Linux job's
-      # install-and-run check proves for the .deb, and worth more here than anywhere else
-      # because this is the only target whose C dependency (mp3lame-sys, which compiles LAME)
-      # has never been built on this platform. `--version` exits without needing a TTY (see
-      # `parse_args`), so it is safe on a runner.
-      - name: Verify the binary runs
-        run: .\target\release\tui-wave.exe --version
-
-      # setup-python.ps1 ships in the archive but nothing here runs it — installing numpy and
-      # scipy to prove a setup script parses would cost minutes per release. Parsing it is the
-      # part that can be checked for free, and is the failure that would otherwise reach a user
-      # as a wall of red on first run. It is also the only thing in this repository that cannot
-      # be checked at all from the machine it is written on, which is a Linux one.
-      - name: Check setup-python.ps1 parses
-        run: |
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path setup-python.ps1), [ref]$null, [ref]$errors) | Out-Null
-          if ($errors) { $errors | ForEach-Object { Write-Host $_ }; throw "setup-python.ps1 has parse errors" }
-          Write-Host "setup-python.ps1 parses cleanly"
-
-      # PowerShell rather than bash: `shell: pwsh` is the runner's default on Windows, and
-      # Compress-Archive/Get-FileHash need no extra tooling.
-      #
-      # The bundled checkout drops two things. `.git` is a submodule gitlink pointing back into
-      # the parent repository's modules directory and means nothing outside it. `Max-MSP` is
-      # 7.2 MB of Max/MSP patches this app never reads — a third of the submodule, for a host
-      # program that has nothing to do with tui-wave. `validate_audiotools_dir` looks only for
-      # `Distortion/` and `Reverb/`, which is what makes dropping it safe; see
-      # `a_bundled_checkout_beside_the_executable_validates`.
-      - name: Package
-        run: |
-          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
-          $staging = "tui-wave-$version-x86_64-pc-windows-msvc"
-          New-Item -ItemType Directory -Path $staging | Out-Null
-          Copy-Item target\release\tui-wave.exe $staging\
-          Copy-Item README.md,CHANGELOG.md,LICENSE,THIRD_PARTY_NOTICES.md,setup-python.ps1 $staging\
-
-          # Beside the executable, exactly where the executable-relative walk looks.
-          $scripts = Join-Path $staging "third_party\praat-audiotools"
-          New-Item -ItemType Directory -Path $scripts -Force | Out-Null
-          Copy-Item "third_party\praat-audiotools\*" $scripts -Recurse -Exclude ".git"
-          Remove-Item (Join-Path $scripts "Max-MSP") -Recurse -Force -ErrorAction SilentlyContinue
-
-          # The bundle is the whole point of this artifact, so a silently empty one must fail
-          # the build rather than ship as a binary that reports its scripts missing.
-          foreach ($sentinel in "Distortion","Reverb") {
-            if (-not (Test-Path (Join-Path $scripts $sentinel))) {
-              throw "bundled checkout is missing $sentinel/ — was the submodule initialised?"
-            }
-          }
-
-          # `-Path $staging` (the folder itself) would make the folder the zip's own root entry.
-          # Since the folder and the zip share a name, Windows Explorer's "Extract All" -- which
-          # extracts into a new folder named after the zip -- would then nest it twice:
-          # `tui-wave-<ver>-...\tui-wave-<ver>-...\tui-wave.exe`, and `default_praat_audiotools_dir`'s
-          # walk up from the executable would never reach `third_party\praat-audiotools` (reported
-          # against 2.6.1). `$staging\*` zips the *contents*, so extraction lands the files
-          # directly in the one folder Explorer creates.
-          Compress-Archive -Path "$staging\*" -DestinationPath "$staging.zip"
-          (Get-FileHash "$staging.zip" -Algorithm SHA256).Hash.ToLower() + "  $staging.zip" |
-            Out-File -Encoding ascii "$staging.zip.sha256"
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: windows-x86_64
-          path: |
-            *.zip
-            *.zip.sha256
           if-no-files-found: error
 
   # ---- Linux: one build, three packages ----------------------------------------------------
@@ -344,11 +230,7 @@ jobs:
   # essentially never works on the first attempt.
   release:
     name: Publish release
-    # `windows` is here only so publishing waits long enough to pick its zip up; it cannot block
-    # the release, because that job carries `continue-on-error` — see the comment there. A
-    # Windows failure therefore publishes the other five artifacts and `download-artifact` with
-    # `merge-multiple` simply finds one fewer directory.
-    needs: [macos, windows, linux]
+    needs: [macos, linux]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -372,13 +254,11 @@ jobs:
           body: |
             See [CHANGELOG.md](https://github.com/biomassa/tui-wave/blob/master/CHANGELOG.md).
 
+            **Linux and macOS only.** Windows is not supported.
+
             **Praat and CDP are installed separately** and are not bundled in any of these
             packages — tui-wave shells out to them and reports what is missing at run time.
-            `install.sh` sets both up; the Linux packages carry only the editor.
-
-            The **Windows zip** is the exception in one respect: it bundles the praatAudioTools
-            *scripts* beside the executable, so no setup step is needed to reach the Praat
-            processes. Praat itself is still a separate install, and `setup-python.ps1` in the
-            archive sets up the Python environment the `py` process group needs.
+            `install.sh` sets both up; the packages carry only the editor. Run
+            `setup-environment.sh` after installing to fetch the praatAudioTools scripts.
 
             Verify a download with the matching `.sha256` file.
