@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-08-10 (2.6.1)
+
+- **praatAudioTools updated to `003e569`** — 457 processes, up from 456. New: Adaptive Pitch
+  Shifter (2), a v0.3 rewrite of the existing Adaptive Pitch Shifter fixing several real bugs
+  (modulation centering, a stereo-widening channel/sample transposition bug, double gain
+  normalization) behind the same form, so both are kept; and "flip or expand the F0 contours".
+  Dropped: Vector Chain/Composition_2, which now embeds a hardcoded absolute path that only
+  resolves on its author's machine and can no longer be driven headlessly.
+
 ## 2026-08-09 (2.6.0)
 
 - **New: a Windows release archive, and it carries the Praat scripts.** Releases now build a

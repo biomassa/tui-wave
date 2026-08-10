@@ -25298,7 +25298,7 @@ mod tests {
             .iter()
             .filter(|p| p.bin.starts_with("Vector Chain/"))
             .collect();
-        assert_eq!(chains.len(), 18, "every chain entry");
+        assert_eq!(chains.len(), 17, "every chain entry");
         for def in chains {
             assert!(App::praat_opens_new_buffer(def), "{}", def.key);
         }
