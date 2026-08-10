@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use ratatui::buffer::CellDiffOption;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
@@ -4811,6 +4812,15 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        // Unix ttys (without the kitty keyboard protocol's REPORT_EVENT_TYPES, which this app
+        // never requests) only ever send Press. The Windows console API reports every physical
+        // key down *and* key up, and crossterm's Windows backend passes both through as distinct
+        // `Event::Key`s — so without this guard, every keystroke on Windows fired its action
+        // twice (once on press, once on release), making text entry (e.g. the CDP working
+        // directory field) produce doubled characters.
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
         if self.confirm.is_some() {
             self.handle_confirm_key(key);
             return;

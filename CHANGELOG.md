@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-08-10 (2.6.2)
+
+- **Fixed: every keystroke landed twice on Windows**, making text entry (e.g. the CDP working
+  directory field) unusable. The Windows Console API reports a key press *and* its release as
+  separate events, and crossterm's Windows backend passes both through as distinct `Event::Key`s
+  — unlike Unix ttys, which (absent the kitty protocol's `REPORT_EVENT_TYPES`, never requested
+  here) only ever send the press. `App::handle_key` acted on both, so a key held for its normal
+  duration fired twice. It now ignores anything but `KeyEventKind::Press`. No effect on
+  Linux/macOS, where every event already arrives as `Press`. Present in every release to date,
+  Windows-only.
+
 ## 2026-08-10 (2.6.1)
 
 - **praatAudioTools updated to `003e569`** — 457 processes, up from 456. New: Adaptive Pitch
