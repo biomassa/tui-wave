@@ -86,7 +86,7 @@ fn publish(staging: &Path, path: &Path) -> io::Result<()> {
     }
     fs::rename(staging, path)?;
     // And the directory entry itself, so the rename survives a power loss. Unsupported on some
-    // platforms (notably Windows), hence best-effort.
+    // platforms, hence best-effort.
     if let Some(dir) = path.parent() {
         if let Ok(handle) = fs::File::open(dir) {
             let _ = handle.sync_all();

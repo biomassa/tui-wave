@@ -69,7 +69,7 @@ Bentley, Archer Endrich, Richard Orton, and Trevor Wishart — and has been free
 (LGPL-2.1+)](https://github.com/ComposersDesktop/CDP8/blob/main/LICENSE). Homepage:
 https://www.composersdesktop.com. Source: https://github.com/ComposersDesktop/CDP8 (current)
 and https://github.com/ComposersDesktop/CDP7 (previous release, also compatible). Prebuilt
-Windows/macOS downloads: https://www.unstablesound.net/cdp.html.
+macOS downloads: https://www.unstablesound.net/cdp.html.
 
 ## Praat
 
@@ -108,14 +108,8 @@ the user's Praat setup, and tui-wave never writes to the Praat preferences folde
 additionally carries, per process, the parameter values each script defines for its own presets,
 extracted from the same sources by the converter above.
 
-**The Windows release archive redistributes these scripts**, which the source repository and
-every other release artifact do not: the macOS and Linux packages carry only the binary and
-leave `setup-environment.sh` to fetch the scripts from upstream, but that script is bash and
-Windows has no bash, so the `.zip` bundles the checkout beside the executable. The MIT licence
-below permits this, and it is reproduced in the archive by shipping this file alongside the
-binary. Two directories of the checkout are omitted as irrelevant to this program: `.git` (a
-submodule gitlink meaningful only inside this repository) and `Max-MSP` (Max/MSP patches, which
-tui-wave never reads). Nothing is modified — the scripts are the ones at the pinned commit the
+**No release artifact redistributes these scripts.** Every package carries the binary alone and
+leaves `setup-environment.sh` to fetch the scripts from upstream, at the pinned commit the
 bundled catalog was generated against.
 
 ```

@@ -59,7 +59,7 @@ and it never touches your system Python. It deliberately does not install CDP: t
 are a separate licensed download (see below).
 
 Everything after this section is what that script automates, for anyone who would rather do it
-by hand or is on Windows.
+by hand.
 
 You need the Rust toolchain, version 1.85 or newer. The project uses the 2024 edition. Install
 it from <https://rustup.rs>:
@@ -67,8 +67,6 @@ it from <https://rustup.rs>:
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
-
-On Windows, download and run `rustup-init.exe` from the same site.
 
 An audio output device is optional. Without one you can still view and edit waveforms. You just
 hear nothing.
@@ -80,29 +78,17 @@ hear nothing.
   - Fedora: `sudo dnf install alsa-lib-devel pkg-config`
   - Arch: `sudo pacman -S alsa-lib pkgconf`
 - **macOS.** Nothing extra. The program uses the system CoreAudio framework.
-- **Windows.** Nothing extra. The program uses the system WASAPI backend.
 
 ## Installing a released build
 
-Each release carries a macOS build for Intel and Apple Silicon, a `.zip` for Windows, plus a
-`.deb` and an `.rpm` for Linux —
-[github.com/biomassa/tui-wave/releases](https://github.com/biomassa/tui-wave/releases).
+Each release carries a macOS build for Intel and Apple Silicon, plus a `.deb` and an `.rpm` for
+Linux — [github.com/biomassa/tui-wave/releases](https://github.com/biomassa/tui-wave/releases).
 
-**On Windows there is no setup step for the scripts.** The `.zip` bundles praatAudioTools beside
-`tui-wave.exe`, and the program finds it there on its own — unzip it anywhere and every Praat
-process is available (once Praat itself is installed; see below). Only the `py` process group
-needs anything further, and `setup-python.ps1` in the archive covers it:
-
-```powershell
-.\setup-python.ps1              # create the venv and install numpy, scipy, soundfile
-.\setup-python.ps1 -DryRun      # print what it would run, change nothing
-```
-
-**On macOS and Linux, run `setup-environment.sh` afterwards.** Those packages contain the
-tui-wave binary and nothing else, and about 439 of its processes are *scripts* from the
-praatAudioTools project, which they do not bundle. Without them tui-wave lists every Praat
-process and can run none. The script fetches them, points tui-wave at them, and optionally sets
-up the Python environment the `py` group needs.
+**Run `setup-environment.sh` afterwards.** The packages contain the tui-wave binary and nothing
+else, and about 439 of its processes are *scripts* from the praatAudioTools project, which they
+do not bundle. Without them tui-wave lists every Praat process and can run none. The script
+fetches them, points tui-wave at them, and optionally sets up the Python environment the `py`
+group needs.
 
 You will find it:
 
@@ -110,7 +96,6 @@ You will find it:
 | --- | --- |
 | `.deb` or `.rpm` | `/usr/share/tui-wave/setup-environment.sh` |
 | macOS tarball | beside the binary, where you unpacked it |
-| Windows `.zip` | not needed — the scripts are bundled; `setup-python.ps1` is beside the binary |
 | any release | attached to the release page on its own |
 | source checkout | the repository root |
 
@@ -129,13 +114,11 @@ CDP is separate again, and has no installer anywhere; see [Optional: CDP support
 
 ## Build and run
 
-**On macOS and Linux, `./install.sh` does all of this for you** — it clones nothing (run it from
-the repository) but handles the toolchain, the build dependencies, the submodule and the release
-build, then installs the binary. The rest of this section is the manual equivalent, and what
-Windows needs.
+**`./install.sh` does all of this for you** — it clones nothing (run it from the repository) but
+handles the toolchain, the build dependencies, the submodule and the release build, then installs
+the binary. The rest of this section is the manual equivalent.
 
-Clone the repository, then build with Cargo. The commands work the same on all three platforms.
-On Windows, use PowerShell or Windows Terminal.
+Clone the repository, then build with Cargo.
 
 ```sh
 git clone <this repository>
@@ -151,8 +134,6 @@ Run the binary directly:
 ```sh
 ./target/release/tui-wave path/to/audio.wav
 ```
-
-On Windows the path reads `.\target\release\tui-wave.exe`.
 
 The argument is optional: pass a file to open it, a directory to start the Files panel there,
 or nothing for an empty screen. `--version` (`-V`) and `--help` (`-h`) print and exit without
@@ -212,7 +193,7 @@ of hand-written entries covers CDP programs that SoundThread never reached.
 CDP does not go on your `PATH`, and no package manager carries it. Download it or build it
 yourself, then tell tui-wave where the binaries live.
 
-- **Windows and macOS.** Download a prebuilt release from
+- **macOS.** Download a prebuilt release from
   <https://www.unstablesound.net/cdp.html>, the official CDP download mirror. Unzip or mount it
   anywhere. The binaries land in a folder such as `_cdprogs` or `NewRelease`.
 - **Linux.** CDP offers no prebuilt Linux binaries. Build from source:
@@ -258,13 +239,10 @@ tui-wave finds it on your `PATH`, so there is usually nothing to configure. Set 
 your config file if yours lives elsewhere — on macOS the executable sits inside the app bundle,
 at `/Applications/Praat.app/Contents/MacOS/Praat`.
 
-**On Windows**, there is no package-manager one-liner: download the installer from
-[fon.hum.uva.nl/praat](https://www.fon.hum.uva.nl/praat/) and run it. The installer does not
-add Praat to `PATH`, so either add its install directory yourself or set `praat_bin` in your
-config to the full path to `Praat.exe`. Nothing here installs Praat for you on any platform —
-the Windows `.zip` bundles the praatAudioTools *scripts* and, via `setup-python.ps1`, the `py`
-group's Python environment, but Praat itself is always a separate install. Running a Praat
-process without it now says exactly that, naming the fix, instead of a raw OS error.
+Nothing here installs Praat for you: `install.sh` and `setup-environment.sh` set up the
+praatAudioTools *scripts* and the `py` group's Python environment, but Praat itself is always a
+separate install. Running a Praat process without it says exactly that, naming the fix, rather
+than reporting a raw OS error.
 
 **The scripts**, which ship with tui-wave as a git submodule. Clone with them:
 
@@ -331,7 +309,7 @@ deciding when they are finished; `Esc` cancels.
 
 ## Known issues
 
-### Windows: four Praat processes run the wrong script
+### macOS: four Praat processes run the wrong script
 
 praatAudioTools contains four pairs of scripts whose filenames differ **only in case**, in the
 same folder:
@@ -343,13 +321,14 @@ same folder:
 | `py/Paulstretch.praat` | `py/paulstretch.praat` |
 | `py/Recomposer.praat` | `py/recomposer.praat` |
 
-The Windows filesystem is case-insensitive, so only one file of each pair can exist there. This
-is not something the packaging chooses: `git clone` on Windows cannot check the pairs out
-either, so the limit applies however the scripts arrive.
+A case-insensitive filesystem can hold only one file of each pair, and **APFS is case-insensitive
+by default**, so a stock Mac keeps one of each. This is not something tui-wave or its packaging
+chooses: `git clone` collapses the pairs the same way, so the limit applies however the scripts
+arrive. Linux, and any case-sensitive volume, is unaffected.
 
 Both members of every pair are separate entries in tui-wave's process catalog, and a
-case-insensitive lookup resolves both names to the one surviving file. So on Windows these four
-processes —
+case-insensitive lookup resolves both names to the one surviving file. So on such a volume these
+four processes —
 
 - **DYNAMIC FORMANT SWEEPER**
 - **Stereo Shimmer**
@@ -362,13 +341,10 @@ Praat fills a script's form by position, so the parameters you set are handed to
 may expect different ones. The result is audio, and it may sound plausible, but it is not the
 process you asked for.
 
-The four `(2)` entries themselves are unaffected — they are the scripts that survive.
+The four `(2)` entries themselves are unaffected — they are the scripts that survive, and
+everything else in the catalog works normally.
 
-macOS is case-insensitive by default too, so the same applies to a default APFS volume there;
-Linux, and any case-sensitive volume, is unaffected. Everything else in the catalog works
-normally on all three.
-
-If you need one of the four, run it on Linux, or on a case-sensitive volume.
+If you need one of the four, run it on Linux, or put the checkout on a case-sensitive volume.
 
 ## Development
 

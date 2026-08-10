@@ -14,15 +14,6 @@ pub use runner::{CdpError, CdpEvent, CdpRunner, Job, JobPurpose};
 /// installs, making it a good canary for a partial/corrupt copy).
 const SENTINEL_BINARIES: &[&str] = &["pvoc", "modify", "blur", "housekeep"];
 
-/// The on-disk filename for a CDP binary: `catalog.toml`'s `bin` field carries no extension
-/// (CDP itself is cross-platform and its docs never mention one), but a real Windows install
-/// ships `pvoc.exe`, not a file literally named `pvoc`. `Path::is_file` does no PATHEXT-style
-/// resolution the way spawning a bare command name through the OS would, so every filesystem
-/// check against a `bin` name needs the extension appended explicitly on Windows.
-pub fn bin_filename(bin: &str) -> String {
-    if cfg!(windows) { format!("{bin}.exe") } else { bin.to_string() }
-}
-
 /// Checks that `dir` looks like a CDP binaries directory: it exists and contains the
 /// sentinel binaries. Returns a human-readable reason on failure, for display in the
 /// `CdpSetup` dialog.
@@ -31,10 +22,9 @@ pub fn validate_cdp_dir(dir: &Path) -> Result<(), String> {
         return Err(format!("{} is not a directory", dir.display()));
     }
     for bin in SENTINEL_BINARIES {
-        let name = bin_filename(bin);
-        let path = dir.join(&name);
+        let path = dir.join(bin);
         if !path.is_file() {
-            return Err(format!("{name} not found in {}", dir.display()));
+            return Err(format!("{bin} not found in {}", dir.display()));
         }
     }
     Ok(())
