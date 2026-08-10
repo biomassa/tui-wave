@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-08-10 (2.6.3)
+
+- **Fixed: the CDP directory dialog rejected a real, correctly-installed Windows CDP folder**,
+  reporting `pvoc not found in c:\cdp\` (or any other sentinel binary) regardless of slash
+  direction or trailing slash. `catalog.toml`'s `bin` field carries no extension, and CDP's own
+  binaries are cross-platform with none either — but a Windows install ships `pvoc.exe`, not a
+  file literally named `pvoc`, and `Path::is_file` does no PATHEXT-style resolution the way
+  spawning a bare command name does. The same `dir.join(bin)` pattern was also used to build the
+  path actually spawned to run a step, so this was not just a validation-message bug: no CDP
+  process could have run on Windows even past the dialog. New `cdp::bin_filename` appends `.exe`
+  on Windows only, used by both the validator and the spawn path.
+
 ## 2026-08-10 (2.6.2)
 
 - **Fixed: every keystroke landed twice on Windows**, making text entry (e.g. the CDP working
