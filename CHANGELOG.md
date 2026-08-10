@@ -2,6 +2,16 @@
 
 ## 2026-08-10 (2.6.5)
 
+- **Fixed: the Windows zip put the bundled Praat scripts where nothing could find them**, so
+  every Praat process reported no scripts installed on a real Windows machine (reported against
+  2.6.1). `Compress-Archive -Path $staging` made the staging folder itself the zip's root entry;
+  since that folder shares the zip's name, Windows Explorer's "Extract All" (which extracts into
+  a *new* folder named after the zip) nested it twice —
+  `tui-wave-<ver>-...\tui-wave-<ver>-...\tui-wave.exe` — and `default_praat_audiotools_dir`'s
+  walk up from the executable never reached `third_party\praat-audiotools`. Packaging now zips
+  `$staging\*`, the folder's contents, so extraction lands the files directly in the one folder
+  Explorer creates. CI-only; no application code changed.
+
 - **Fixed: a CDP synthesis process (the SYNTH group — clicknew, impulse, multiosc, synfilt,
   synspline, synth) could not run at all**, on every platform, reported "Output is 44100 Hz but
   the document is 0 Hz — set the process's sample rate to match" even though there was nothing
@@ -20,18 +30,6 @@
   in tui-wave installs Praat on any platform, Windows included — the Windows zip only bundles the
   praatAudioTools scripts and (via `setup-python.ps1`) the `py` group's Python environment. README
   gained a Windows install section; none existed before.
-
-## 2026-08-10 (2.6.4)
-
-- **Fixed: the Windows zip put the bundled Praat scripts where nothing could find them**, so
-  every Praat process reported no scripts installed on a real Windows machine (reported against
-  2.6.1). `Compress-Archive -Path $staging` made the staging folder itself the zip's root entry;
-  since that folder shares the zip's name, Windows Explorer's "Extract All" (which extracts into
-  a *new* folder named after the zip) nested it twice —
-  `tui-wave-<ver>-...\tui-wave-<ver>-...\tui-wave.exe` — and `default_praat_audiotools_dir`'s
-  walk up from the executable never reached `third_party\praat-audiotools`. Packaging now zips
-  `$staging\*`, the folder's contents, so extraction lands the files directly in the one folder
-  Explorer creates. CI-only; no application code changed.
 
 ## 2026-08-10 (2.6.3)
 
