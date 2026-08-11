@@ -1,5 +1,37 @@
 # Changelog
 
+## 2026-08-11 (2.7.1)
+
+- **praatAudioTools updated to `707d297`.** One upstream commit reworking all 25 scripts in
+  Time & Granular, every one with a version bump. No process added or removed (still 457), and the
+  exclusion set is unchanged — but four processes changed their **form field count and order**:
+  Harmonic Tension Sorted Grains (12 → 14), HFD-Driven Time Warping (21 → 22), L-Logic Symbolic
+  Granular Recomposition (19 → 20) and Magnetic Tape Degradation (20 → 17). Praat fills a form
+  positionally, so a catalog left unregenerated across this would have produced plausible, wrong
+  audio rather than an error; the pin and the regeneration moved together, as they must.
+
+  Upstream's own changelogs describe a correctness pass: source reads made zero-based (several
+  scripts extracted from the wrong region when a Sound's time domain did not start at 0), stereo
+  inputs keeping their own L/R channels through synthesis, and a Praat parser fix in Sound Atom
+  Composer, where a loop index named `fi` collided with the reserved token that closes an
+  `if … fi`.
+
+- **Three pause-dialog controls that did nothing now work.** The same rework renamed three field
+  labels without renaming the variables their scripts read — Magnetic Tape Degradation's *HF loss
+  per generation* and *Scale peak ceiling*, HFD-Driven Time Warping's *Silence gate dB relative
+  RMS*. Praat names a pause field's variable after its label, so the dialog wrote a name no later
+  line looked at and the script's hardcoded default survived; the controls were inert in stock
+  Praat too, not merely here.
+
+  The script copy tui-wave already runs (see `model::praat::rewrite`) now assigns the variable the
+  script actually reads. This is the one rewrite pass that repairs someone else's bug rather than
+  working around a Praat limitation, so it is built to **yield to upstream**: the defect is
+  re-derived from the script in front of it, and the fix applies only while the label-derived
+  variable is read nowhere and the named one is read. A script repaired in either direction stops
+  matching and runs exactly as written, with no edit here — and a test fails once an entry stops
+  applying, so a stale one gets deleted rather than carried forever. The submodule itself is never
+  touched.
+
 ## 2026-08-10 (2.7.0)
 
 - **Windows support is dropped. tui-wave targets Linux and macOS only.** The terminal on Windows

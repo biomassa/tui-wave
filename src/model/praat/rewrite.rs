@@ -127,6 +127,67 @@ fn string_literal(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
+/// Whether `source` reads `variable` as a whole identifier rather than as a substring of a
+/// longer one. `$` and `.` before the match rule out a string variable's tail and a field
+/// access, both of which are different names that merely end the same way.
+pub(crate) fn mentions_variable(source: &str, variable: &str) -> bool {
+    let bytes = source.as_bytes();
+    let name = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    source.match_indices(variable).any(|(at, _)| {
+        if at > 0 && (name(bytes[at - 1]) || bytes[at - 1] == b'$' || bytes[at - 1] == b'.') {
+            return false;
+        }
+        match bytes.get(at + variable.len()) {
+            Some(&next) => !name(next),
+            None => true,
+        }
+    })
+}
+
+/// Pause-dialog fields whose label does **not** derive the variable the script goes on to read,
+/// with the variable it actually reads.
+///
+/// Praat names a pause field's variable after its label — `"Wow rate Hz"` sets `wow_rate_Hz` —
+/// so a script that renames the label without renaming its reads shows a control that changes
+/// nothing. That is a defect in the script, not in this program: the field is equally inert in
+/// stock Praat, where the dialog writes a variable no later line looks at and the hardcoded
+/// default survives. It is worth repairing anyway, because the alternative is a parameter in
+/// our own dialog that silently does nothing.
+///
+/// **Upstream always wins.** Each entry is a claim that a specific defect is present, and
+/// [`corrected_variable`] re-checks that claim against the script in front of it: the fix is
+/// applied only while the label-derived variable is read *nowhere* and the named one *is* read.
+/// So a fixed script — whether upstream renames the reads to match the label or renames the
+/// label to match the reads — stops matching and runs exactly as written, with no edit here.
+/// `every_pause_variable_fix_is_still_needed` fails once an entry stops applying, so a stale
+/// one is deleted rather than left to rot.
+///
+/// Keyed by label rather than by script because the guard already carries the precision: a
+/// different script using the same label correctly fails the check and is left alone.
+const PAUSE_VARIABLE_FIXES: &[(&str, &str)] = &[
+    // Time & Granular/Magnetic_Tape_Degradation.praat, v0.3. Every other field in the same
+    // block matches its variable; these two were renamed in the 2026-08-10 rework.
+    ("HF loss per generation", "hf_loss_per_generation"),
+    ("Scale peak ceiling", "scale_peak"),
+    // Time & Granular/HFD-Driven_Time_Warping.praat, v2.3. Label gained " relative RMS".
+    ("Silence gate dB relative RMS", "silence_gate_dB"),
+];
+
+/// The variable an assignment for `label` must write, given the script it is being spliced into.
+///
+/// [`variable_name`]'s answer — what Praat itself would do — unless a [`PAUSE_VARIABLE_FIXES`]
+/// entry applies *and* `source` still shows the defect it describes.
+fn corrected_variable(label: &str, source: &str) -> String {
+    let derived = variable_name(label);
+    for (broken, reads) in PAUSE_VARIABLE_FIXES {
+        if *broken == label && !mentions_variable(source, &derived) && mentions_variable(source, reads)
+        {
+            return (*reads).to_string();
+        }
+    }
+    derived
+}
+
 /// One assignment line to stand in for a field the pause dialog would have set.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Assignment {
@@ -140,21 +201,24 @@ pub enum Assignment {
 }
 
 impl Assignment {
-    /// The Praat source line(s) this assignment becomes.
-    fn render(&self) -> Vec<String> {
+    /// The Praat source line(s) this assignment becomes, for splicing into `source`.
+    ///
+    /// `source` is consulted only by [`corrected_variable`], to decide whether this label is one
+    /// of the few whose script reads a different variable than Praat would set.
+    fn render_into(&self, source: &str) -> Vec<String> {
         match self {
             Assignment::Number { label, value } => {
-                vec![format!("{} = {}", variable_name(label), render_number(*value))]
+                vec![format!("{} = {}", corrected_variable(label, source), render_number(*value))]
             }
             Assignment::Choice { label, index, text } => {
-                let name = variable_name(label);
+                let name = corrected_variable(label, source);
                 vec![
                     format!("{name} = {index}"),
                     format!("{name}$ = {}", string_literal(text)),
                 ]
             }
             Assignment::Text { label, value } => {
-                vec![format!("{}$ = {}", variable_name(label), string_literal(value))]
+                vec![format!("{}$ = {}", corrected_variable(label, source), string_literal(value))]
             }
         }
     }
@@ -239,7 +303,10 @@ pub fn rewrite_pause_blocks(
                 "{indent}# --- pause dialog {block_index} replaced by tui-wave ---"
             ));
             for assignment in blocks.get(&block_index).map(Vec::as_slice).unwrap_or(&[]) {
-                for rendered in assignment.render() {
+                // Against the *original* source: the block being replaced is still present in it,
+                // which does not matter — `corrected_variable` asks whether the script reads a
+                // name, and the pause block itself contains no reads, only labels and defaults.
+                for rendered in assignment.render_into(source) {
                     out.push(format!("{indent}{rendered}"));
                 }
             }
@@ -468,6 +535,12 @@ mod tests {
                     continue;
                 }
                 let variable = variable_name(&param.name);
+                // A `PAUSE_VARIABLE_FIXES` label is unread *by design* — that mismatch is the
+                // defect the entry exists to repair, and `corrected_variable` has already
+                // confirmed against this very source that it is still present.
+                if corrected_variable(&param.name, &source) != variable {
+                    continue;
+                }
                 if !mentions_variable(&source, &variable) {
                     unread.push(format!("{}: {:?} -> {variable}", def.key, param.name));
                 }
@@ -480,21 +553,44 @@ mod tests {
         );
     }
 
-    /// Whether `source` uses `variable` (or its `$` form) as a whole identifier. Praat identifiers
-    /// are alphanumerics and `_`, with `$` and `#` as type suffixes — so the character before must
-    /// not be part of a name, and the character after must not extend it.
-    fn mentions_variable(source: &str, variable: &str) -> bool {
-        let bytes = source.as_bytes();
-        let name = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-        source.match_indices(variable).any(|(at, _)| {
-            if at > 0 && (name(bytes[at - 1]) || bytes[at - 1] == b'$' || bytes[at - 1] == b'.') {
-                return false;
+    /// Every [`PAUSE_VARIABLE_FIXES`] entry must still be repairing a live defect.
+    ///
+    /// The table compensates for a bug in someone else's script, so the moment upstream fixes it
+    /// the entry becomes a lie — and worse than a lie if the label is later reused for a field
+    /// that works, since `corrected_variable`'s guard would then be the only thing standing
+    /// between us and writing the wrong variable. Failing here is how a fixed script gets its
+    /// entry deleted instead of carried forever.
+    #[test]
+    fn every_pause_variable_fix_is_still_needed() {
+        let checkout = checkout();
+        if !checkout.is_dir() {
+            return; // submodule not initialised
+        }
+        let mut sources = Vec::new();
+        let mut stack = vec![checkout];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "praat") {
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        sources.push(text);
+                    }
+                }
             }
-            match bytes.get(at + variable.len()) {
-                Some(&next) => !name(next),
-                None => true,
-            }
-        })
+        }
+        assert!(!sources.is_empty(), "no scripts found in the checkout");
+
+        for (label, reads) in PAUSE_VARIABLE_FIXES {
+            let applies = sources.iter().any(|s| corrected_variable(label, s) == *reads);
+            assert!(
+                applies,
+                "PAUSE_VARIABLE_FIXES entry {label:?} -> {reads} no longer applies to any script \
+                 — upstream fixed it, so delete the entry"
+            );
+        }
     }
 
     /// An optionmenu sets both variables, because scripts read both.
@@ -505,7 +601,45 @@ mod tests {
             index: 2,
             text: "Stereo Wide".into(),
         };
-        assert_eq!(a.render(), vec!["spatial_Mode = 2", "spatial_Mode$ = \"Stereo Wide\""]);
+        assert_eq!(a.render_into(""), vec!["spatial_Mode = 2", "spatial_Mode$ = \"Stereo Wide\""]);
+    }
+
+    /// A script whose pause label does not name the variable it reads gets the value anyway —
+    /// and stops being touched the moment upstream repairs it, in either direction.
+    #[test]
+    fn a_mismatched_pause_label_writes_the_variable_the_script_reads() {
+        let broken = "hf_loss_per_generation = 0.10\n\
+                      beginPause: \"Advanced\"\n\
+                      real: \"HF loss per generation\", hf_loss_per_generation\n\
+                      clicked = endPause: \"Cancel\", \"OK\", 2, 1\n\
+                      if hf_loss_per_generation > 0\nendif\n";
+        let mut blocks = BTreeMap::new();
+        blocks.insert(
+            0,
+            vec![Assignment::Number { label: "HF loss per generation".into(), value: 0.42 }],
+        );
+        let out = rewrite_pause_blocks(broken, &blocks, &[]).expect("rewrites");
+        assert!(
+            out.contains("hf_loss_per_generation = 0.42"),
+            "the value must reach the variable the script actually reads:\n{out}"
+        );
+        assert!(
+            !out.contains("hF_loss_per_generation ="),
+            "and must not also write the inert one Praat would have set:\n{out}"
+        );
+
+        // Upstream fixes the reads to match the label: the guard sees the derived variable is
+        // read after all and stands aside, so the script runs exactly as written.
+        let fixed = broken.replace("if hf_loss_per_generation > 0", "if hF_loss_per_generation > 0");
+        let out = rewrite_pause_blocks(&fixed, &blocks, &[]).expect("rewrites");
+        assert!(out.contains("hF_loss_per_generation = 0.42"), "{out}");
+
+        // And a script that never mentions the corrected variable is never guessed at.
+        let unrelated = "beginPause: \"Advanced\"\n\
+                         real: \"HF loss per generation\", 0.1\n\
+                         clicked = endPause: \"OK\", 1\n";
+        let out = rewrite_pause_blocks(unrelated, &blocks, &[]).expect("rewrites");
+        assert!(out.contains("hF_loss_per_generation = 0.42"), "{out}");
     }
 
     /// The real script, rewritten: no dialog survives, every variable it read is assigned, and
