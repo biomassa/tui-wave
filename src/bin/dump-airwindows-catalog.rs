@@ -16,14 +16,7 @@
 //!
 //! Usage:  cargo run --release --bin dump-airwindows-catalog > src/model/cdp/airwindows_catalog.toml
 
-// The FFI is shared with the app by `#[path]` rather than through a lib target, so each
-// binary compiles the whole file and sees whatever *it* does not call as dead. This one
-// enumerates and interrogates; the app looks up and renders. Allowed wholesale here, and only
-// here, because a build tool using part of a binding is not a signal about anything — the app
-// side annotates each such item individually so its own dead-code warnings stay meaningful.
-#[allow(dead_code)]
-#[path = "../airwindows/ffi.rs"]
-mod ffi;
+use airwindows_sys as ffi;
 
 use std::fmt::Write as _;
 

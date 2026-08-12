@@ -1,10 +1,12 @@
-//! Safe Rust over the Airwindows C API in `shim.cpp`. This is the only module that touches
-//! the FFI; everything above it sees ordinary Rust types.
+//! Safe Rust over the Airwindows C API in `shim.cpp` — the only code in the project that
+//! touches that FFI. Everything above sees ordinary Rust types.
 //!
-//! **Depends on nothing else in this crate, deliberately.** `src/bin/dump-airwindows-catalog.rs`
-//! pulls this file in directly with `#[path]` to generate the catalog, and it can only do that
-//! while the file's dependencies are `std` alone — the moment it reaches for anything under
-//! `crate::`, that binary drags in the entire app to ask a plugin its parameter names.
+//! Depends on `std` alone. Two consumers share it: the editor, which looks a plugin up by name
+//! and renders with it, and `tui-wave`'s catalog generator, which enumerates the registry and
+//! interrogates each plugin. Both were previously served by `#[path]`-including one file into
+//! two binaries, which meant each saw the other half of the API as dead code and needed
+//! `#[allow(dead_code)]` scattered through it to stay quiet. A real library has no such
+//! problem: a `pub` item is API, not an unused local.
 
 use std::ffi::{c_char, c_float, c_int, c_void, CStr};
 use std::sync::Mutex;
@@ -18,14 +20,10 @@ unsafe extern "C" {
     fn aw_is_mono(i: c_int) -> c_int;
     fn aw_create(i: c_int, sample_rate: c_float) -> *mut c_void;
     fn aw_destroy(h: *mut c_void);
-    /// Catalog generator only — see the note on `Instance::param_name`.
-    #[allow(dead_code)]
     fn aw_param_name(h: *mut c_void, idx: c_int, buf: *mut c_char, len: c_int);
     fn aw_param_display(h: *mut c_void, idx: c_int, buf: *mut c_char, len: c_int);
     fn aw_param_label(h: *mut c_void, idx: c_int, buf: *mut c_char, len: c_int);
     fn aw_set_param(h: *mut c_void, idx: c_int, v: c_float);
-    /// Catalog generator only — see the note on `Instance::get_param`.
-    #[allow(dead_code)]
     fn aw_get_param(h: *mut c_void, idx: c_int) -> c_float;
     fn aw_process(
         h: *mut c_void,
@@ -67,11 +65,7 @@ pub struct PluginInfo {
     pub is_mono: bool,
 }
 
-/// Used by `src/bin/dump-airwindows-catalog.rs` and by the tests below. The app never
-/// enumerates the registry — it resolves a catalog entry straight to an index by name — so
-/// this is genuinely unreachable in an ordinary build of `tui-wave`, which is what the
-/// `allow` records rather than hides.
-#[allow(dead_code)]
+/// How many plugins the registry holds.
 pub fn plugin_count() -> usize {
     // SAFETY: reads a `std::vector`'s size; the registry is fully populated by static
     // initializers before `main` and never mutated afterwards.
@@ -99,8 +93,6 @@ pub fn plugin_info(index: usize) -> Option<PluginInfo> {
 /// Every plugin in registry order. The order is `ModuleAdd.h`'s, which is alphabetical by
 /// name -- stable across builds, which matters because the generated catalog is keyed by it.
 ///
-/// Generator and tests only, for the same reason as `plugin_count`.
-#[allow(dead_code)]
 pub fn plugins() -> impl Iterator<Item = PluginInfo> {
     (0..plugin_count()).filter_map(plugin_info)
 }
@@ -161,9 +153,8 @@ impl Instance {
     /// plugin's *default* — which exists nowhere else, since upstream sets defaults as bare
     /// assignments in the constructor body rather than declaring them.
     ///
-    /// Read by the catalog generator, which records exactly that; the app only ever *writes*
-    /// parameters, from values the catalog already holds.
-    #[allow(dead_code)]
+    /// Read by the catalog generator, which records exactly that; the editor only ever
+    /// *writes* parameters, from values the catalog already holds.
     pub fn get_param(&self, index: usize) -> f32 {
         if index >= self.n_params {
             return 0.0;
@@ -172,10 +163,9 @@ impl Instance {
         unsafe { aw_get_param(self.handle, index as c_int) }
     }
 
-    /// Read by the catalog generator, which bakes these into the catalog. The app reads the
-    /// name from the catalog rather than from the plugin, so it never calls this — only
-    /// `param_display`/`param_label`, whose values cannot be baked.
-    #[allow(dead_code)]
+    /// Read by the catalog generator, which bakes these into the catalog. The editor reads the
+    /// name from the catalog rather than from the plugin, so it uses only `param_display`/
+    /// `param_label` — whose values cannot be baked, since they depend on the current value.
     pub fn param_name(&self, index: usize) -> String {
         self.text(index, aw_param_name)
     }

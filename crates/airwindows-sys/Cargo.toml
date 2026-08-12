@@ -1,0 +1,23 @@
+[package]
+name = "airwindows-sys"
+# **Deliberately versioned independently of tui-wave, and rarely changed.**
+#
+# This is the whole reason the C++ lives in its own crate. Cargo bakes a package's version into
+# its build-script unit hash, so while `build.rs` belonged to tui-wave, every release bump gave
+# it a fresh `OUT_DIR` and recompiled all ~1040 Airwindows translation units from scratch —
+# measured at four full rebuilds across one afternoon's releases, ~8 minutes and ~28MB of
+# archive each. Here the version moves only when this crate's own sources or the vendored
+# submodule do, which is exactly when the C++ genuinely needs rebuilding.
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Rust bindings to the Airwindows effect suite, built from airwin2rack's consolidated sources"
+publish = false
+
+# Names the native library this crate provides. Cargo allows only one crate in a dependency
+# graph to claim a given `links` value, which is what stops two copies of the Airwindows
+# statics — and their ~517 global initializers — from ever being linked into one binary.
+links = "airwindows"
+
+[build-dependencies]
+cc = "1.2"
