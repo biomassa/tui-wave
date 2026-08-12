@@ -22655,6 +22655,76 @@ fn cdp_section_line(title: &str, width: usize, title_style: Style, rule_style: S
 /// The scrolling region holds more than fields: `cdp_params_rows` interleaves the source
 /// dialog's own section headings and per-field notes (`model::cdp::ParamNote`) between them, so
 /// every count and offset below is in *display rows* while `focus` stays in field indices.
+/// The Airwindows readouts for `fields` — one string per parameter, empty for every other
+/// backend.
+///
+/// An Airwindows parameter *is* a bare 0-to-1 number: that is what the plugin stores and what
+/// the catalog can describe. The figure a musician wants — the dB, the Hz, the ratio — exists
+/// only as arithmetic inside each plugin's own `getParameterDisplay`, in a form nothing can
+/// read off. Rather than derive it (airwin2rack's `import.pl` regex-parses that arithmetic and
+/// needs hardcoded exceptions where the regex fails), this asks the running plugin, which
+/// cannot be wrong about itself.
+///
+/// **Memoized on the values**, because the params dialog redraws on every tick and this
+/// otherwise constructs a plugin per frame — cheap for most, but the big reverbs zero hundreds
+/// of kilobytes of delay line on construction. A thread-local rather than an `App` field
+/// because the whole render path from `App::render` down to here is free functions taking a
+/// dozen arguments already, and threading a cache through all of them to serve one backend's
+/// display column is a worse trade than a cache scoped to the render thread.
+///
+/// The probe rate is fixed. Nearly every `getParameterDisplay` is pure arithmetic on the
+/// stored value, but a handful of frequency-valued ones scale by `getSampleRate()`, and those
+/// will read for 48kHz on a document at another rate. The audio is unaffected — the real run
+/// builds its instance at the document's own rate — so this is a display-only approximation,
+/// and the alternative is threading the rate through the same dozen signatures.
+fn airwindows_param_displays(
+    def: &crate::model::cdp::ProcessDef,
+    fields: &[CdpField],
+) -> Vec<String> {
+    use std::cell::RefCell;
+    if def.backend() != crate::model::cdp::def::Backend::Airwindows {
+        return Vec::new();
+    }
+    let name = def.bin.rsplit('/').next().unwrap_or(&def.bin).to_string();
+    let values: Vec<f32> = fields
+        .iter()
+        .map(|f| match f.to_value() {
+            crate::model::cdp::ParamValue::Number(n) => n as f32,
+            _ => 0.0,
+        })
+        .collect();
+
+    thread_local! {
+        static CACHE: RefCell<Option<(String, Vec<f32>, Vec<String>)>> = const { RefCell::new(None) };
+    }
+    CACHE.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if let Some((cached_name, cached_values, out)) = cell.as_ref() {
+            if *cached_name == name && *cached_values == values {
+                return out.clone();
+            }
+        }
+        let Some(index) = crate::airwindows::find_by_name(&name) else { return Vec::new() };
+        let Some(mut inst) = crate::airwindows::Instance::new(index, 48_000) else {
+            return Vec::new();
+        };
+        for (i, v) in values.iter().enumerate() {
+            inst.set_param(i, *v);
+        }
+        let out: Vec<String> = (0..inst.n_params())
+            .map(|i| {
+                let display = inst.param_display(i);
+                let label = inst.param_label(i);
+                // The label is a unit suffix and is empty on most plugins, so it is appended
+                // rather than given a column of its own.
+                if label.is_empty() { display } else { format!("{display} {label}") }
+            })
+            .collect();
+        *cell = Some((name, values, out.clone()));
+        out
+    })
+}
+
 fn render_cdp_params_dialog(
     frame: &mut Frame,
     area: Rect,
@@ -22678,6 +22748,8 @@ fn render_cdp_params_dialog(
 ) -> Vec<Rect> {
     let Some(def) = def else { return Vec::new() };
     let (label_width, range_width, value_width) = cdp_params_column_widths(def);
+    // Empty for every backend but Airwindows; indexed by param position when non-empty.
+    let aw_displays = airwindows_param_displays(def, fields);
 
     // The ceiling is the terminal itself rather than a fixed 110: a Praat process's option
     // labels are sentences, and clamping to 110 clipped them off the right edge even when there
@@ -22867,16 +22939,26 @@ fn render_cdp_params_dialog(
                         Span::styled(under, cursor_style),
                         Span::styled(after, base),
                     ];
+                    if let Some(display) = aw_displays.get(i).filter(|d| !d.is_empty()) {
+                        spans.push(Span::styled(format!("   = {display}"), dim_style));
+                    }
                     if param.automatable {
                         spans.push(Span::styled("  (e:envelope)", dim_style));
                     }
                     Line::from(spans)
                 } else {
-                    Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(label, label_style_here),
                         Span::styled(range, range_style),
                         Span::styled(format!(" {}", input.value()), base),
-                    ])
+                    ];
+                    // The plugin's own reading of this value, in its own units. Dimmed and
+                    // set off by `=` so it reads as a consequence of the number beside it
+                    // rather than as a second editable field.
+                    if let Some(display) = aw_displays.get(i).filter(|d| !d.is_empty()) {
+                        spans.push(Span::styled(format!("   = {display}"), dim_style));
+                    }
+                    Line::from(spans)
                 }
             }
             CdpField::Toggle { on } => {
@@ -32686,6 +32768,58 @@ mod tests {
             longest_domain + 2 <= CDP_DOMAIN_COL_WIDTH as usize,
             "longest domain label is {longest_domain} chars, which does not fit {CDP_DOMAIN_COL_WIDTH}"
         );
+    }
+
+    /// An Airwindows parameter row shows the plugin's own reading of the value beside the bare
+    /// 0-to-1 number, and that reading tracks the number.
+    ///
+    /// Density is the useful case to pin: its first parameter displays `(A * 5) - 1`, so the
+    /// mapping is visibly not the identity and a readout that merely echoed the stored value
+    /// would fail this. That arithmetic lives only inside the plugin's `getParameterDisplay` —
+    /// asking the plugin is the only way to get it, which is the whole reason this column
+    /// exists.
+    #[test]
+    fn an_airwindows_parameter_shows_the_plugins_own_reading_of_its_value() {
+        let (catalog, _) = crate::model::cdp::catalog::CdpCatalog::load(None);
+        let index = catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "airwindows_density")
+            .expect("Density in the catalog");
+        let def = &catalog.processes[index];
+
+        // Built directly rather than through `App::cdp_fields_for`, so the test needs no App:
+        // every Airwindows param is the same shape, a normalized 0-to-1 `Number`.
+        let read = |first: f64| {
+            let fields: Vec<CdpField> = def
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, _)| CdpField::Number {
+                    input: TextInput::new(if i == 0 { first.to_string() } else { "0".to_string() }),
+                    min: 0.0,
+                    max: 1.0,
+                    step: 0.01,
+                    integer: false,
+                    envelope: None,
+                })
+                .collect();
+            airwindows_param_displays(def, &fields)
+        };
+
+        // A = 0.2 (Density's own default) displays (0.2 * 5) - 1 = 0.0.
+        let at_default = read(0.2);
+        assert!(!at_default.is_empty(), "no readouts produced");
+        assert!(
+            at_default[0].starts_with('0') || at_default[0].starts_with("-0"),
+            "expected ~0 at A=0.2, got {:?}",
+            at_default[0]
+        );
+        // A = 1.0 displays (1.0 * 5) - 1 = 4.0 — so the column both tracks the field and
+        // applies the plugin's mapping rather than echoing the stored number.
+        let at_max = read(1.0);
+        assert!(at_max[0].starts_with('4'), "expected ~4 at A=1.0, got {:?}", at_max[0]);
+        assert_ne!(at_default[0], at_max[0]);
     }
 
     /// The Airwindows domain renders as a real, populated domain in the real dialog — its
