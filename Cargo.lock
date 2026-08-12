@@ -2836,7 +2836,7 @@ dependencies = [
 
 [[package]]
 name = "tui-wave"
-version = "2.7.1"
+version = "2.8.0"
 dependencies = [
  "cc",
  "color-eyre",

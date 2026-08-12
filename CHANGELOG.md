@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-12 (2.8.0)
 
 - **Airwindows: 500 effects, built in.** A third process backend beside CDP and Praat, in the
   same browser and chainable with both, under its own **Airwindows** domain. Unlike the other
