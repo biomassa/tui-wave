@@ -87,6 +87,47 @@ pub const PRAAT_GROUPS: &[&str] = &[
     "py",
 ];
 
+/// Airwindows groups — Chris Johnson's own categories, taken verbatim from the registry
+/// (`airwin2rack`'s `ModuleAdd.h`, itself derived from `Airwindopedia.txt`). Same principle as
+/// the CDP and Praat tables: the heading reads as the suite's own material names it, so
+/// someone reading the Airwindopedia finds the same bucket here.
+///
+/// Unlike `PRAAT_GROUPS` **none of these is shortened**, because none needs to be: the longest
+/// is `Unclassified` at 12 characters against `CDP_GROUP_COL_WIDTH`'s 13 usable columns. So
+/// there is no Airwindows counterpart to `PRAAT_DIRS` — the catalog's `bin` prefix and the
+/// heading are the same string, and `every_airwindows_process_maps_to_a_group` is what catches
+/// an upstream category that stops matching.
+///
+/// 23 groups, which with the `All` row above them is exactly `CDP_BROWSER_LIST_ROWS` (24). The
+/// Groups column deliberately never scrolls, so a 24th category arriving upstream is a real
+/// (if quiet) constraint — `airwindows_groups_fit_the_browser_list` fails rather than letting
+/// a group become unreachable.
+pub const AIRWINDOWS_GROUPS: &[&str] = &[
+    "Ambience",
+    "Amp Sims",
+    "Bass",
+    "Biquads",
+    "Brightness",
+    "Clipping",
+    "Consoles",
+    "Distortion",
+    "Dithers",
+    "Dynamics",
+    "Effects",
+    "Filter",
+    "Lo-Fi",
+    "Noise",
+    "Reverb",
+    "Saturation",
+    "Stereo",
+    "Subtlety",
+    "Tape",
+    "Tone Color",
+    "Unclassified",
+    "Utility",
+    "XYZ Filters",
+];
+
 /// praatAudioTools directory → group heading. The directory is the leading path component of a
 /// Praat entry's `bin` (e.g. `Distortion/Wavefolder__Foldback_.praat` → `Distortion`).
 ///
@@ -107,6 +148,7 @@ pub const PRAAT_GROUPS: &[&str] = &[
 /// need nothing beyond those three are catalogued at all — the converter derives that per
 /// script, so a helper that grows a `torch` import drops out with a reason rather than shipping
 /// a process that cannot run.
+
 const PRAAT_DIRS: &[(&str, &str)] = &[
     ("AI & Adaptive", "AI & Adaptive"),
     ("Analysis", "Analysis"),
@@ -271,17 +313,27 @@ pub fn cdp_group(def: &ProcessDef) -> Option<CdpGroup> {
         let name = PRAAT_DIRS.iter().find(|(d, _)| *d == dir).map(|(_, group)| *group)?;
         return Some(CdpGroup { category: def.category, name });
     }
+    // An Airwindows entry's group is Chris Johnson's own category, carried in `bin`'s leading
+    // component exactly as a Praat script's directory is (the catalog generator writes
+    // `<Category>/<Name>`). Unlike Praat it needs no directory-to-heading mapping table: every
+    // one of the 23 categories already fits the browser column, so the heading is the
+    // category verbatim and `AIRWINDOWS_GROUPS` is the whole story.
+    if def.category == Category::Airwindows {
+        let cat = def.bin.split('/').next()?;
+        let name = AIRWINDOWS_GROUPS.iter().find(|g| **g == cat).copied()?;
+        return Some(CdpGroup { category: def.category, name });
+    }
     let name = if def.bin == "fractal" {
         match def.category {
             Category::Time => "DISTORT",
             Category::Pvoc => "SPECNU",
-            Category::Praat => unreachable!("handled above"),
+            Category::Praat | Category::Airwindows => unreachable!("handled above"),
         }
     } else {
         let table = match def.category {
             Category::Time => TIME_BINS,
             Category::Pvoc => PVOC_BINS,
-            Category::Praat => unreachable!("handled above"),
+            Category::Praat | Category::Airwindows => unreachable!("handled above"),
         };
         table.iter().find(|(bin, _)| *bin == def.bin).map(|(_, group)| *group)?
     };
@@ -294,6 +346,7 @@ pub fn groups_for(category: Category) -> &'static [&'static str] {
         Category::Time => TIME_GROUPS,
         Category::Pvoc => PVOC_GROUPS,
         Category::Praat => PRAAT_GROUPS,
+        Category::Airwindows => AIRWINDOWS_GROUPS,
     }
 }
 
@@ -360,7 +413,9 @@ mod tests {
             let expected = match p.category {
                 Category::Time => "DISTORT",
                 Category::Pvoc => "SPECNU",
-                Category::Praat => unreachable!("no Praat entry has bin `fractal`"),
+                Category::Praat | Category::Airwindows => {
+                    unreachable!("no Praat or Airwindows entry has bin `fractal`")
+                }
             };
             assert_eq!(cdp_group(p).unwrap().name, expected, "{}", p.key);
         }

@@ -34,6 +34,12 @@ pub fn timing_tolerance(category: Category, pvoc_points: u32) -> usize {
     match category {
         Category::Time | Category::Praat => 256,
         Category::Pvoc => pvoc_points as usize * 2,
+        // Exact, not merely tight. An Airwindows plugin renders sample-for-sample — the
+        // runner writes one output frame per input frame and the result is spliced over the
+        // range it came from — so any difference at all would be a bug in this app rather
+        // than the wavecycle-alignment or analysis-window padding the allowances above exist
+        // to forgive. Zero says so, and keeps every in-range marker on its exact sample.
+        Category::Airwindows => 0,
     }
 }
 

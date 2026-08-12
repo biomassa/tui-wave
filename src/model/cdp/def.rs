@@ -21,6 +21,11 @@ pub enum Category {
     Time,
     Pvoc,
     Praat,
+    /// An Airwindows effect (`model::airwindows`), whose DSP is compiled into this binary
+    /// rather than invoked as an external program — the first backend that needs nothing
+    /// installed. Here for the same reason `Praat` is: the browser's Domain column is
+    /// literally `CdpDomainRow::Domain(Category)`, so a new variant *is* the new domain row.
+    Airwindows,
 }
 
 /// Which external program actually runs a `ProcessDef` — derived from `Category`, never
@@ -34,6 +39,11 @@ pub enum Category {
 pub enum Backend {
     Cdp,
     Praat,
+    /// Not an external program at all: the DSP is C++ compiled into this binary by
+    /// `build.rs`, so a run is a function call on a worker thread rather than a subprocess
+    /// with temp WAVs on either side. Nothing to install, nothing to configure, and a
+    /// preview that returns in the time a spawn alone would have cost.
+    Airwindows,
 }
 
 /// What kind of file a process reads/writes on one side. `Dual*` processes take two input
@@ -125,6 +135,20 @@ pub enum InputChannels {
     /// Every channel of the selection, and at least three of them (`pairex`'s "must have more
     /// than two channels", `mchshred` mode 2's "correct number of channels for this mode").
     Multichannel,
+    /// One channel or two, and never more — every Airwindows plugin (`Backend::Airwindows`).
+    ///
+    /// The distinction from [`Stereo`](Self::Stereo) is the *mono* end: an Airwindows plugin
+    /// always has two legs, so a mono document is not a shortfall to refuse but a source to
+    /// duplicate into both (see `airwindows::runner::run_job`), and the two-channel result is
+    /// kept rather than folded back down — which is right for the reverbs and wideners that
+    /// build a stereo field out of a mono source, and merely harmless for the rest.
+    ///
+    /// The distinction from [`Multichannel`](Self::Multichannel) is the *wide* end, and it is
+    /// a hard refusal rather than a lane-split. Upstream indexes `inputs[0]`/`inputs[1]`
+    /// literally, with no loop over a channel count and its state duplicated by hand as `L`/`R`
+    /// members; several plugins are also genuinely stereo-coupled, so running a 30-channel take
+    /// as 15 independent pairs would silently produce something defensible-looking and wrong.
+    MonoOrStereo,
 }
 
 /// Where a process's output channel count comes from, when it is neither the input's count
@@ -1306,6 +1330,7 @@ impl ProcessDef {
     pub fn backend(&self) -> Backend {
         match self.category {
             Category::Praat => Backend::Praat,
+            Category::Airwindows => Backend::Airwindows,
             Category::Time | Category::Pvoc => Backend::Cdp,
         }
     }
@@ -1370,6 +1395,13 @@ impl ProcessDef {
             InputChannels::Multichannel if channels > 2 => Ok((0..channels).collect()),
             InputChannels::Multichannel => Err(format!(
                 "this process needs more than 2 channels; the selection has {channels}"
+            )),
+            // Whatever the document has, up to two. A mono document yields `[0]` and the
+            // runner feeds channel 0 to both legs; the refusal above three is the point.
+            InputChannels::MonoOrStereo if channels == 2 => Ok(vec![0, 1]),
+            InputChannels::MonoOrStereo if channels == 1 => Ok(vec![0]),
+            InputChannels::MonoOrStereo => Err(format!(
+                "this process is mono or stereo only; the selection has {channels} channels"
             )),
         })
     }

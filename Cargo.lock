@@ -2838,6 +2838,7 @@ dependencies = [
 name = "tui-wave"
 version = "2.7.1"
 dependencies = [
+ "cc",
  "color-eyre",
  "cpal 0.18.1",
  "crossbeam-channel",

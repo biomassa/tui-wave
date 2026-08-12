@@ -2,3 +2,6 @@
 	path = third_party/praat-audiotools
 	url = https://github.com/ShaiCohen-ops/Praat-plugin_AudioTools
 	branch = main
+[submodule "third_party/airwin2rack"]
+	path = third_party/airwin2rack
+	url = https://github.com/baconpaul/airwin2rack
