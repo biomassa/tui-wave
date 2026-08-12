@@ -3468,12 +3468,31 @@ mod tests {
     /// def can't catch an entry losing `output_new_buffer` (splicing an 8-channel result over
     /// the source document) or pointing `output_channels` at the wrong param index — which
     /// would read back the wrong number of channels with no error at all.
+    ///
+    /// **CDP entries only.** This was originally every entry declaring `input_channels`,
+    /// because when the field existed solely for CDP's MULTICHANNEL family, declaring a width
+    /// and changing the channel count were the same thing — every member either narrows
+    /// (`pairex`, 8 in and 2 out) or fans out, so `output_new_buffer` was rightly demanded of
+    /// all of them. Airwindows separated the two: it declares
+    /// [`InputChannels::MonoOrStereo`](crate::model::cdp::def::InputChannels::MonoOrStereo) to
+    /// express a *constraint* — refuse anything past two channels — and for a stereo
+    /// selection, which is the ordinary case, the count does not change at all. The one case
+    /// that does change it widens 1 to 2, which is the direction `CdpProcessCommand` already
+    /// supports in place and reverses on undo via `channels_before`; the hazard
+    /// `output_new_buffer` exists to prevent is the *narrowing* splice, where `insert_range`
+    /// would fill the channels the data doesn't cover from channel 0 and smear it across the
+    /// rest. So the rule is narrowed here to the backend it was written about, rather than
+    /// forcing every saturator to spawn a buffer it has no reason to.
     #[test]
     fn the_real_multichannel_entries_declare_a_coherent_channel_shape() {
-        use crate::model::cdp::def::{InputChannels, OutputChannels};
+        use crate::model::cdp::def::{Backend, InputChannels, OutputChannels};
         let (catalog, _) = crate::model::cdp::catalog::CdpCatalog::load(None);
         let mut seen = 0;
-        for def in catalog.processes.iter().filter(|p| p.input_channels.is_some()) {
+        for def in catalog
+            .processes
+            .iter()
+            .filter(|p| p.input_channels.is_some() && p.backend() == Backend::Cdp)
+        {
             seen += 1;
             assert!(
                 def.output_new_buffer,
@@ -3506,6 +3525,45 @@ mod tests {
             );
         }
         assert!(seen >= 11, "expected the multichannel batch to be present, found {seen}");
+    }
+
+    /// The Airwindows half of the rule above, stated positively rather than left to the
+    /// carve-out. Every entry must declare the mono-or-stereo constraint, must accept both
+    /// widths it names, and must refuse anything wider — that refusal is the only thing
+    /// standing between a 56-channel take and a plugin that indexes `inputs[0]`/`inputs[1]`
+    /// literally and would silently process two channels of it as though that were the file.
+    #[test]
+    fn every_airwindows_entry_takes_mono_or_stereo_and_refuses_wider() {
+        use crate::model::cdp::def::{Backend, InputChannels};
+        let (catalog, _) = crate::model::cdp::catalog::CdpCatalog::load(None);
+        let mut seen = 0;
+        for def in catalog.processes.iter().filter(|p| p.backend() == Backend::Airwindows) {
+            seen += 1;
+            assert_eq!(
+                def.input_channels,
+                Some(InputChannels::MonoOrStereo),
+                "{}: every Airwindows plugin is hard-wired to two legs",
+                def.key
+            );
+            for width in [1, 2] {
+                assert!(
+                    def.input_source_channels(width).is_some_and(|r| r.is_ok()),
+                    "{}: rejects {width}-channel input",
+                    def.key
+                );
+            }
+            for width in [3, 6, 56] {
+                assert!(
+                    def.input_source_channels(width).is_some_and(|r| r.is_err()),
+                    "{}: accepts {width}-channel input",
+                    def.key
+                );
+            }
+            // Two channels out, always — a mono selection is duplicated into both legs and the
+            // stereo result kept, which is what widens the buffer.
+            assert!(def.output_is_stereo, "{}: must declare stereo output", def.key);
+        }
+        assert!(seen > 400, "expected the Airwindows catalog to be present, found {seen}");
     }
 
     #[test]

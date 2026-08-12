@@ -77,8 +77,17 @@ jobs:
       - uses: actions/checkout@v5
         with:
           # Load-bearing: praat_catalog.toml is include_str!'d from third_party/praat-audiotools,
-          # so without the submodule the build fails outright rather than degrading.
-          submodules: recursive
+          # and build.rs compiles third_party/airwin2rack — so without the submodules the build
+          # fails outright rather than degrading.
+          #
+          # `true`, not `recursive`, and that distinction is load-bearing too: airwin2rack
+          # declares two submodules of its own (`libs/airwindows`, the entire upstream
+          # Airwindows history, and `libs/sst-rackhelpers`) that this project never reads.
+          # build.rs compiles the *committed* `src/autogen_airwin/` tree, which is what
+          # airwin2rack's import.pl already generated from that upstream. Recursing would
+          # clone hundreds of megabytes on every one of the five release jobs to produce
+          # nothing. praat-audiotools declares no submodules, so one level covers both.
+          submodules: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -131,7 +140,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          submodules: recursive
+          # One level, not recursive — see the note on the macOS job above.
+          submodules: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

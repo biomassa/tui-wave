@@ -2472,6 +2472,7 @@ impl CdpDomainRow {
             CdpDomainRow::Domain(Category::Time) => "Time-domain",
             CdpDomainRow::Domain(Category::Pvoc) => "Spectral",
             CdpDomainRow::Domain(Category::Praat) => "Praat",
+            CdpDomainRow::Domain(Category::Airwindows) => "Airwindows",
         }
     }
 }
@@ -7980,6 +7981,10 @@ impl App {
             // reports what is missing — which is more discoverable than the domain silently
             // not existing.
             CdpDomainRow::Domain(Category::Praat),
+            // The Airwindows backend. Unlike every other domain here there is nothing to
+            // install and so nothing that can be missing — its DSP is compiled into this
+            // binary — which makes it the one domain guaranteed to work on a fresh install.
+            CdpDomainRow::Domain(Category::Airwindows),
         ]
     }
 
@@ -32383,9 +32388,9 @@ mod tests {
         assert_eq!(input.value(), "my new name");
     }
 
-    /// The Domain column is exactly All, Recent and the three domains — CDP's two plus Praat;
-    /// the Groups column is empty for the first two and, for a domain, `All` followed by that
-    /// domain's own groups in its tool's index order.
+    /// The Domain column is exactly All, Recent and the four domains — CDP's two, plus Praat
+    /// and Airwindows; the Groups column is empty for the first two and, for a domain, `All`
+    /// followed by that domain's own groups in its tool's index order.
     #[test]
     fn domain_column_lists_all_recent_and_every_domain() {
         use crate::model::cdp::Category;
@@ -32399,6 +32404,7 @@ mod tests {
                 CdpDomainRow::Domain(Category::Time),
                 CdpDomainRow::Domain(Category::Pvoc),
                 CdpDomainRow::Domain(Category::Praat),
+                CdpDomainRow::Domain(Category::Airwindows),
             ]
         );
 
@@ -32441,7 +32447,11 @@ mod tests {
             );
         }
         // The widths must still hold the longest label each column can show.
-        let longest_group = [Category::Time, Category::Pvoc]
+        // Airwindows joins the CDP domains here rather than getting its own test the way
+        // Praat did: its group names are Chris Johnson's categories taken verbatim, with no
+        // shortening table to get wrong, so the only thing that can break is upstream adding
+        // a longer one — which is exactly what this assertion is.
+        let longest_group = [Category::Time, Category::Pvoc, Category::Airwindows]
             .iter()
             .flat_map(|c| crate::model::cdp::groups_for(*c).iter())
             .map(|n| n.len())

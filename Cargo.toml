@@ -30,6 +30,11 @@ serde = { version = "1.0.228", features = ["derive"] }
 symphonia = { version = "0.5.5", default-features = false, features = ["flac", "aiff"] }
 toml = "1.1.2"
 
+# The Airwindows backend is C++ (see build.rs). This is the only build-time dependency and
+# the only compiler toolchain requirement this project has beyond Rust itself.
+[build-dependencies]
+cc = "1.2"
+
 # ---- Packaging ---------------------------------------------------------------------------
 #
 # Three Linux package formats, all built by .github/workflows/release.yml. None of them can
@@ -62,7 +67,7 @@ copyright = "2026 biomassa, MIT licensed"
 # The other two are the whole rest of the binary's `ldd` output (libc, libm, libgcc, ld — all
 # base-system); the floors match ubuntu-22.04, which is what the release workflow builds on and
 # the oldest glibc the binary is expected to run against.
-depends = "libasound2t64 | libasound2 (>= 1.0.16), libc6 (>= 2.35), libgcc-s1 (>= 3.0)"
+depends = "libasound2t64 | libasound2 (>= 1.0.16), libc6 (>= 2.35), libgcc-s1 (>= 3.0), libstdc++6 (>= 12)"
 # Praat is packaged by Debian, Ubuntu and Fedora alike, and roughly a third of this app's
 # processes need it. `Suggests` rather than `Recommends`: the editor is fully usable without it,
 # and a Recommends would install ~40 MB by default for a feature many users never open. CDP is
@@ -97,6 +102,11 @@ assets = [
 
 [package.metadata.generate-rpm.requires]
 alsa-lib = "*"
+# The Airwindows backend is C++ (see build.rs), so the binary now needs the C++ runtime.
+# cargo-deb's `$auto` picks this up from the ELF needs on that side; cargo-generate-rpm
+# resolves nothing by itself, so an omission here would produce a package that installs
+# cleanly and then fails to start.
+libstdc++ = "*"
 
 # See the `suggests` note on the deb above. Fedora ships Praat as `praat` too.
 [package.metadata.generate-rpm.recommends]
