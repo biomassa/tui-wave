@@ -1,3 +1,12 @@
+# The Airwindows C++ lives in its own crate so that bumping this package's version does not
+# recompile ~1040 translation units. See crates/airwindows-sys/Cargo.toml for the full reason.
+[workspace]
+members = ["crates/airwindows-sys"]
+# So a bare `cargo build`/`cargo test` still covers both crates. Without this, cargo operates on
+# the root package alone and the sys crate's tests -- including the whole-catalog smoke test that
+# instantiates and renders all 500 plugins -- silently stop running.
+default-members = [".", "crates/airwindows-sys"]
+
 [package]
 name = "tui-wave"
 version = "2.8.1"
@@ -29,11 +38,9 @@ rodio = "0.22.2"
 serde = { version = "1.0.228", features = ["derive"] }
 symphonia = { version = "0.5.5", default-features = false, features = ["flac", "aiff"] }
 toml = "1.1.2"
-
-# The Airwindows backend is C++ (see build.rs). This is the only build-time dependency and
-# the only compiler toolchain requirement this project has beyond Rust itself.
-[build-dependencies]
-cc = "1.2"
+# The Airwindows effects. A path dependency rather than code in this crate, so a version bump
+# here leaves its compiled archive alone -- see that crate's manifest.
+airwindows-sys = { path = "crates/airwindows-sys" }
 
 # ---- Packaging ---------------------------------------------------------------------------
 #

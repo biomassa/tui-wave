@@ -1,10 +1,19 @@
-//! Compiles the Airwindows DSP (via airwin2rack's consolidated sources) and the
-//! `src/airwindows/shim.cpp` C API over it into a static library linked into the binary.
+//! Compiles the Airwindows DSP (via airwin2rack's consolidated sources) and the `src/shim.cpp`
+//! C API over it into a static library.
 //!
 //! This is the only C++ in the project and the only reason a build script exists. It is also
 //! the first dependency whose *code* ships inside the release artifacts rather than being
 //! installed separately by the user, which is why `THIRD_PARTY_NOTICES.md` grew a section
 //! that CDP and Praat did not need.
+//!
+//! **Why this is its own crate.** Cargo bakes a package's version into its build-script unit
+//! hash, so while this file belonged to `tui-wave`, every release bump produced a fresh
+//! `OUT_DIR` and recompiled all ~1040 translation units from scratch -- four full rebuilds
+//! across a single afternoon of releases, around eight minutes and 28MB of archive apiece,
+//! for a version string that no C++ here can observe. Living in a separately-versioned crate
+//! means the archive is rebuilt when the vendored submodule or `shim.cpp` changes and not
+//! otherwise, which is what the `rerun-if-changed` list below has always *said*; the crate
+//! boundary is what finally makes it true.
 //!
 //! The plugin sources are taken from the submodule's committed `src/autogen_airwin/`, not
 //! generated here: airwin2rack's `scripts/import.pl` has already done the transformation from
@@ -15,11 +24,19 @@
 
 use std::path::PathBuf;
 
+/// Relative to the *workspace* root, which is two levels above this crate's manifest.
 const SUBMODULE: &str = "third_party/airwin2rack";
 
 fn main() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let aw = root.join(SUBMODULE);
+    // `CARGO_MANIFEST_DIR` is `crates/airwindows-sys`; the vendored submodule sits at the
+    // workspace root beside `third_party/praat-audiotools`, so climb out of the crate first.
+    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = crate_root
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("crates/airwindows-sys sits two levels below the workspace root")
+        .to_path_buf();
+    let aw = workspace_root.join(SUBMODULE);
     let src = aw.join("src");
     let autogen = src.join("autogen_airwin");
 
@@ -37,7 +54,7 @@ fn main() {
         .cpp(true)
         .std("c++17")
         .include(&src)
-        .file(root.join("src/airwindows/shim.cpp"))
+        .file(crate_root.join("src/shim.cpp"))
         .file(src.join("airwin_consolidated_base.cpp"));
 
     // Every `<Name>.cpp` and `<Name>Proc.cpp` in the autogen tree. Collected by walking the
@@ -77,7 +94,7 @@ fn main() {
     // Rebuild triggers. The autogen tree is deliberately watched as a *directory*: naming all
     // ~1000 files individually would make cargo re-stat every one of them on each build, and
     // the directory mtime moves whenever a submodule bump adds or removes a plugin.
-    println!("cargo:rerun-if-changed=src/airwindows/shim.cpp");
+    println!("cargo:rerun-if-changed=src/shim.cpp");
     println!("cargo:rerun-if-changed={}", autogen.display());
     println!("cargo:rerun-if-changed={}", src.join("ModuleAdd.h").display());
     println!(
