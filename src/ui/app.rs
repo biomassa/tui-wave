@@ -1034,6 +1034,24 @@ fn is_pitch_curve_param(param: &crate::model::cdp::ParamDef) -> bool {
 /// A process could in principle show more than one (none currently do, but nothing here
 /// assumes otherwise) — all returned in this fixed order so the badge order never depends
 /// on catalog param order.
+/// The pale tag naming which engine runs `p` — `[cdp]`, `[pr]` or `[air]`.
+///
+/// Its own function because two places show it and they must not drift: the process browser
+/// (via [`cdp_process_badges`]) and the chain editor's step rows, where a step keeps the tag
+/// it carried in the list it was picked from. Losing it on insertion made a chain the one
+/// place mixing all three backends where you could not see which was which — exactly where
+/// that matters most.
+///
+/// Always returns something. The `match` is exhaustive over `Backend`, so a fourth engine
+/// cannot be added without deciding what it is called here.
+fn cdp_backend_badge(p: &crate::model::cdp::ProcessDef) -> &'static str {
+    match p.backend() {
+        crate::model::cdp::def::Backend::Cdp => "[cdp]",
+        crate::model::cdp::def::Backend::Praat => "[pr]",
+        crate::model::cdp::def::Backend::Airwindows => "[air]",
+    }
+}
+
 fn cdp_process_badges(p: &crate::model::cdp::ProcessDef) -> Vec<&'static str> {
     use crate::model::cdp::ParamKind;
     use crate::model::formant::FormantBufferKind;
@@ -1049,11 +1067,7 @@ fn cdp_process_badges(p: &crate::model::cdp::ProcessDef) -> Vec<&'static str> {
         badges.push(if p.input_arity().0 > 1 { "N inputs (2+)" } else { "N inputs" });
     }
     // Every entry carries its backend, not just the non-CDP ones. See the doc comment.
-    badges.push(match p.backend() {
-        crate::model::cdp::def::Backend::Cdp => "[cdp]",
-        crate::model::cdp::def::Backend::Praat => "[pr]",
-        crate::model::cdp::def::Backend::Airwindows => "[air]",
-    });
+    badges.push(cdp_backend_badge(p));
     if p.category == crate::model::cdp::Category::Pvoc {
         badges.push("[pvoc]");
     }
@@ -11825,6 +11839,14 @@ impl App {
                         };
                         let step_count = run.pending_step_count;
                         if let Some(frame) = run.frames.last_mut() {
+                            // The tail is carried on, not trimmed. A decay that reaches the
+                            // next step gets processed by it — a reverb into a saturator
+                            // should saturate the tail — so trimming here would make a chain
+                            // sound unlike the same effects applied one at a time, which is
+                            // the one thing a chain must not do. The buffer therefore grows by
+                            // each decay, and the chain's final result can be longer than the
+                            // selection it started from; that is already ordinary here, since
+                            // the stretch and grain families change length routinely.
                             frame.running_buffer = output.result;
                             frame.running_rate = output.sample_rate;
                             frame.index += step_count;
@@ -12362,6 +12384,18 @@ impl App {
             return;
         }
 
+        // And an Airwindows step through its own. Missing this was a real bug (user report,
+        // 2026-08-12): the step fell through to the CDP tail below, which planned a job and
+        // tried to spawn the catalog's `bin` — `Reverb/kCosmos` — as a program inside
+        // `cdp_dir`, failing with "No such file or directory". Nothing about the *completion*
+        // side was wrong (`tick_airwindows` already advanced the frame), which is exactly why
+        // it survived review: the chain was backend-agnostic everywhere except the one place
+        // that decides who runs the step.
+        if def.backend() == crate::model::cdp::def::Backend::Airwindows {
+            self.submit_airwindows_chain_step(&def, &values, primary, primary_rate);
+            return;
+        }
+
         let mut input_specs = vec![crate::model::cdp::InputSpec {
             head_tail_marks: Vec::new(),
             channels: primary.len().max(1),
@@ -12574,6 +12608,93 @@ impl App {
             job_id,
             title: format!("ExtProcess Chain: {}", def.title),
             step_label: "Starting Praat…".into(),
+            step_index: 0,
+            step_total: 1,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+    }
+
+    /// Submits one Airwindows step of a chain — the counterpart of `submit_praat_chain_step`,
+    /// and the shortest of the three: nothing to validate, nothing to locate, no plan to
+    /// build.
+    ///
+    /// Takes the primary buffer alone. Airwindows processes are all single-input
+    /// (`IoKind::Wav`), so there is no secondary to thread through and no side-chain frame
+    /// this can be reached from.
+    ///
+    /// The tail rides on to the next step rather than being trimmed (see `tick_airwindows`'s
+    /// chain branch): a decay that reaches the next step is processed by it, which is the only
+    /// way a chain sounds like the same effects applied one at a time.
+    fn submit_airwindows_chain_step(
+        &mut self,
+        def: &crate::model::cdp::ProcessDef,
+        values: &[crate::model::cdp::ParamValue],
+        input: Vec<Vec<f32>>,
+        sample_rate: u32,
+    ) {
+        let Some(plugin_index) =
+            crate::airwindows::find_by_name(def.bin.rsplit('/').next().unwrap_or(&def.bin))
+        else {
+            self.cdp_pending_chain_run = None;
+            self.dialog = Some(Dialog::CdpOutput {
+                title: "ExtProcess Chain Error".into(),
+                lines: vec![format!(
+                    "{} is not in the Airwindows registry — the catalog and the compiled plugins disagree",
+                    def.bin
+                )],
+                scroll: 0,
+            });
+            return;
+        };
+
+        // Only the channels the plugin accepts. A chain's running buffer is whatever the
+        // previous step produced, so unlike the standalone path this has not been through
+        // `cdp_params_blocker` — a step upstream that widened past two channels would
+        // otherwise reach a plugin that indexes two of them literally.
+        let width = input.len();
+        let source = def.input_source_channels(width).and_then(Result::ok);
+        let Some(source) = source else {
+            self.cdp_pending_chain_run = None;
+            self.dialog = Some(Dialog::CdpOutput {
+                title: "ExtProcess Chain Error".into(),
+                lines: vec![format!(
+                    "{} is mono or stereo only, but this point in the chain carries {width} channels",
+                    def.title
+                )],
+                scroll: 0,
+            });
+            return;
+        };
+        let input: Vec<Vec<f32>> =
+            source.iter().filter_map(|&c| input.get(c).cloned()).collect();
+
+        if let Some(run) = self.cdp_pending_chain_run.as_mut() {
+            run.pending_secondary = None;
+            run.pending_step_count = 1;
+        }
+
+        let job_id = self.cdp_next_job_id;
+        self.cdp_next_job_id += 1;
+        self.airwindows_runner.submit(crate::airwindows::runner::Job {
+            id: job_id,
+            plugin_index,
+            values: values
+                .iter()
+                .map(|v| match v {
+                    crate::model::cdp::ParamValue::Number(n) => *n as f32,
+                    _ => 0.0,
+                })
+                .collect(),
+            input,
+            sample_rate,
+            purpose: crate::cdp::JobPurpose::Apply,
+            label: def.title.clone(),
+        });
+        self.dialog = Some(Dialog::CdpRunning {
+            job_id,
+            title: format!("ExtProcess Chain: {}", def.title),
+            step_label: def.title.clone(),
             step_index: 0,
             step_total: 1,
             started: std::time::Instant::now(),
@@ -23555,8 +23676,17 @@ fn render_cdp_chain_editor_dialog(
                 // pair, see `ana_run_length`), not a warning. Suppressed on the selected row,
                 // same "fold into one uniform highlight, don't layer a second accent" rule
                 // the Preset row's own hint text already follows.
-                if !selected && def.is_some_and(|d| d.category == crate::model::cdp::Category::Pvoc) {
-                    spans.push(Span::styled(" [pvoc]", disabled_style));
+                if !selected {
+                    if let Some(d) = def {
+                        // The engine tag the step carried in the browser, kept on the step —
+                        // a chain is the one place all three backends sit in one list, so it
+                        // is where knowing which is which matters most. Same order as the
+                        // browser (engine, then domain) so a row reads the same in both.
+                        spans.push(Span::styled(format!(" {}", cdp_backend_badge(d)), disabled_style));
+                        if d.category == crate::model::cdp::Category::Pvoc {
+                            spans.push(Span::styled(" [pvoc]", disabled_style));
+                        }
+                    }
                 }
                 spans
             }
@@ -32496,6 +32626,107 @@ mod tests {
         assert_eq!(pvoc_y, blur_row, "the [pvoc] badge must appear on the spectral step's own row");
         assert_ne!(pvoc_y, phase_row, "the [pvoc] badge must not appear on the time-domain step's row");
         assert_eq!(buffer[(pvoc_x, pvoc_y)].fg, theme::ANNOTATION, "the badge must render in the pale/muted color, not the normal row text color");
+    }
+
+    /// Regression test for a shipped bug (user report, 2026-08-12): an Airwindows step in a
+    /// chain fell through to the CDP tail of `submit_current_chain_stage`, which planned a job
+    /// and tried to spawn the catalog's `bin` as a program inside `cdp_dir` — "Failed to start
+    /// 'Reverb/kCosmos': No such file or directory".
+    ///
+    /// It survived review because only the *submit* side was wrong: `tick_airwindows` already
+    /// advanced the chain frame correctly, so the chain really was backend-agnostic everywhere
+    /// except the one line that decides who runs a step.
+    ///
+    /// Covers Preview as well as Run: both `run_cdp_chain` and `preview_chain_step` reach the
+    /// submit path through `start_chain_run`, so the finish mode is the only difference and it
+    /// is chosen after the step has already been dispatched.
+    #[test]
+    fn an_airwindows_chain_step_reaches_its_own_runner_not_a_cdp_binary() {
+        for finish in [ChainRunFinish::Splice, ChainRunFinish::PreviewWholeChain] {
+            let mut app = new_app(Some(doc(0.1, 4410)), None);
+            let chain = crate::model::cdp::CdpChain {
+                name: "t".into(),
+                steps: vec![chain_step("airwindows_density")],
+            };
+            // An Airwindows-only chain must not demand a CDP installation at all.
+            assert!(!app.chain_uses_cdp(&chain), "an Airwindows-only chain must not need CDP");
+
+            app.start_chain_run(
+                chain,
+                std::collections::HashMap::new(),
+                vec![vec![0.0; 4410], vec![0.0; 4410]],
+                44_100,
+                0,
+                (0, 4410),
+                finish,
+            );
+
+            // The bug showed up as a CdpOutput error dialog instead of a running one.
+            match &app.dialog {
+                Some(Dialog::CdpRunning { .. }) => {}
+                Some(Dialog::CdpOutput { lines, .. }) => {
+                    panic!("the step was dispatched to the wrong backend: {lines:?}")
+                }
+                _ => panic!("no run started for the Airwindows chain step"),
+            }
+        }
+    }
+
+    /// A step keeps the engine tag it carried in the browser (user report: they vanished the
+    /// moment a process was inserted into a chain). A chain is the one place all three
+    /// backends sit in a single list, so it is where the tag matters most — and the pale
+    /// colour has to survive the trip too, or it reads as part of the step's own title.
+    #[test]
+    fn chain_editor_keeps_the_backend_badge_on_every_step() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        // One step per backend, which is the case that motivates the badge at all.
+        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+            name: "t".into(),
+            steps: vec![
+                chain_step("phase_phase_1"),
+                chain_step("airwindows_density"),
+                chain_step("praat_distortion_chaos_distortion"),
+            ],
+        });
+        state.selected = ChainEditorRow::Run; // suppression applies only to a row's own badge
+        app.cdp_chain_editor = Some(state);
+        app.dialog = Some(Dialog::CdpChainEditor);
+
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+
+        let mut found: Vec<(&str, u16, u16)> = Vec::new();
+        for y in area.y..area.y + area.height {
+            let row: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
+            for tag in ["[cdp]", "[air]", "[pr]"] {
+                // `[pr]` is a prefix of nothing else here, but `find` on the row keeps this
+                // honest about which row each tag landed on.
+                if let Some(byte_col) = row.find(tag) {
+                    let col = row[..byte_col].chars().count();
+                    found.push((tag, area.x + col as u16, y));
+                }
+            }
+        }
+
+        for tag in ["[cdp]", "[air]", "[pr]"] {
+            let hit = found.iter().find(|(t, _, _)| *t == tag);
+            let (_, x, y) = hit.unwrap_or_else(|| panic!("{tag} is missing from the chain editor"));
+            assert_eq!(
+                buffer[(*x, *y)].fg,
+                theme::ANNOTATION,
+                "{tag} must render pale, not as part of the step title"
+            );
+        }
+        // Three steps, three distinct rows — no tag borrowed another step's row.
+        let mut rows: Vec<u16> = found.iter().map(|(_, _, y)| *y).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        assert_eq!(rows.len(), 3, "each step must carry its own badge on its own row");
     }
 
     /// Real bug (user report, screenshot): the CDP Chain editor's "Save chain as" prompt
