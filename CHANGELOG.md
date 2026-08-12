@@ -29,6 +29,21 @@
   the mapping from 0-to-1 to real units exists only as arithmetic inside each plugin's display
   routine, so deriving it into the catalog would mean guessing where a regex fails.
 
+  **Reverb tails ring out instead of being cut off.** An effect with a decay keeps sounding
+  after its input stops, and that decay is now rendered rather than truncated at the edge of the
+  selection. The length is worked out by following the decay until it falls 80 dB below the
+  output's own peak — past RT60, and relative rather than absolute so that the console and tape
+  emulations, which add a constant noise floor by design, terminate instead of appending half a
+  minute of hiss. Nothing to configure, and the effects with no tail (most of them) are
+  unaffected.
+
+  Where the tail goes depends on what follows: at the end of a file it is appended, and in the
+  middle it rings out *over* the following audio, mixed in, so the file length is unchanged and
+  nothing shifts in time — what an insert effect does in a DAW. Markers are correct either way,
+  which came free: `CdpProcessCommand` already restores in-range marks exactly when the length
+  delta is within its timing tolerance, so handing it the appended length as that tolerance says
+  precisely the right thing.
+
   Adds a C++ compiler to the build requirements, and roughly 14 MB to the binary.
 
 - **The CDP+Praat menu is now ExtProcess** (`Alt+X`), and the CDP+Praat Chain is ExtProcess

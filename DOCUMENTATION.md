@@ -864,7 +864,75 @@ window, needs a corpus of other files, or works on things that are not sounds.
 
 ---
 
-## 16. The Files panel
+## 16. Airwindows processes
+
+500 effects by Chris Johnson — saturation, console emulations, reverbs, tape, dithers, lo-fi
+colour. They live in the same browser as CDP and Praat (`Ctrl+P`), under the **Airwindows**
+domain, and can be mixed with either in an ExtProcess Chain.
+
+**There is nothing to install.** Unlike CDP and Praat, the processing is compiled into tui-wave
+itself, so this domain works on a fresh install with no configuration and cannot report a
+missing tool. It also means previews come back immediately: no program starts and no temporary
+file is written, which is most of what makes a CDP or Praat preview take as long as it does.
+Nothing round-trips through a file at all, so unlike Praat it cannot lose your cue points or
+`bext` metadata.
+
+The Groups column holds Chris Johnson's own categories, so anything written about an Airwindows
+plugin — the Airwindopedia, the videos, the forum posts — points at the same bucket here.
+
+### Parameters read 0 to 1
+
+Every Airwindows control is a number from 0.0 to 1.0. That is genuinely how the effects work,
+not a simplification made here.
+
+Beside each field, dimmed, is the effect's own reading of that value in its own units:
+
+```
+  Density     0.0 - 1.0    0.2      = 0.0000
+  Highpass    0.0 - 1.0    0.0      = 0.0000
+  Out Level   0.0 - 1.0    1.0      = 1.0000
+```
+
+Set Density to 1.0 and the readout becomes `4.0000`, because that plugin maps its control to
+`(value × 5) − 1`. The mapping differs per effect and per parameter, and it is asked of the
+running effect rather than stored — which is why the figure is always right, and why it is
+shown rather than the raw number alone.
+
+### Mono and stereo only
+
+Every Airwindows effect is built for exactly two channels, with several genuinely coupling them
+(the reverbs, the mid/side processors). So:
+
+- A **stereo** selection is processed as you would expect.
+- A **mono** selection is fed to both sides and comes back **stereo**. This is what lets the
+  reverbs and stereo wideners build a stereo image from a mono source. `Ctrl+Z` restores the
+  buffer to mono.
+- A selection of **three or more channels** is refused, stated in the dialog the moment it
+  opens, with Apply dimmed. Processing two channels of a 30-channel take and calling it done
+  would look plausible and be wrong. To use these on a multichannel file, split it first with
+  **File ▸ Export Channels**.
+
+### Reverb tails
+
+An effect with a decay keeps sounding after its input stops, and tui-wave renders that decay
+rather than cutting it off at the edge of the selection. It works out how long the tail is by
+following the decay until it falls away, so nothing has to be set and effects without a tail
+(most of them) are unaffected.
+
+Where the tail goes depends on what follows the selection:
+
+- Selection **at the end of the file**, or a whole file with nothing selected: the tail is
+  appended and the file gets longer.
+- Selection **in the middle**: the tail rings out over the audio that follows, mixed into it.
+  The file does not get longer and nothing shifts in time — the same thing that happens with an
+  insert effect in a DAW. If the tail outlasts what remains, the leftover is appended.
+
+Markers keep their positions through either case, and anything after a tail that lengthened the
+file moves along with the audio it was attached to.
+
+---
+
+## 17. The Files panel
 
 The Files panel lists the current directory. Give it focus with `Tab`.
 
@@ -888,7 +956,7 @@ starts after a short pause, so a fast scroll plays nothing.
 
 ---
 
-## 17. The Buffers panel
+## 18. The Buffers panel
 
 The Buffers panel lists every open file. Give it focus with `Tab` twice.
 
@@ -914,7 +982,7 @@ tui-wave asks first if the buffer has changes.
 
 ---
 
-## 18. Mouse
+## 19. Mouse
 
 The mouse works alongside the keyboard.
 
@@ -931,7 +999,7 @@ The mouse works alongside the keyboard.
 
 ---
 
-## 19. Display modes
+## 20. Display modes
 
 Press `g` to turn graphics mode on or off.
 
@@ -946,7 +1014,7 @@ Both modes draw an amplitude-zero line across the centre of each pane.
 
 ---
 
-## 20. Configuration
+## 21. Configuration
 
 tui-wave writes its settings to `~/.config/tui-wave/config.toml`. It saves the file whenever you
 change a toggle, so your settings come back on the next start.
@@ -976,7 +1044,7 @@ File then Reset Config to Defaults throws away your settings.
 
 ---
 
-## 21. Key reference
+## 22. Key reference
 
 The Waveform panel must have focus for these keys, unless the table says otherwise.
 

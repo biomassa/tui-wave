@@ -11856,16 +11856,54 @@ impl App {
 
                     match purpose {
                         crate::cdp::JobPurpose::Apply => {
+                            // The tail rings over whatever follows the selection rather than
+                            // pushing it later — an insert effect's decay spilling into the
+                            // next bar is what a reverb *is*, and inserting it instead would
+                            // shove the rest of the file out of time. So the splice reaches
+                            // past the selection by however much of the tail has somewhere to
+                            // land, and only the remainder (a selection at the end of the
+                            // file, or a tail longer than what follows) actually lengthens
+                            // the document.
+                            let (start, end) = pending.range;
+                            let doc_len = self.documents[pending.doc_index].len_samples();
+                            let overlap = output.tail_frames.min(doc_len.saturating_sub(end));
+                            let extend = output.tail_frames - overlap;
+
+                            let mut data = output.result;
+                            if overlap > 0 {
+                                let doc = &self.documents[pending.doc_index];
+                                let input_len = end - start;
+                                let widest = doc.channel_count().saturating_sub(1);
+                                for (c, channel) in data.iter_mut().enumerate() {
+                                    // A mono document against a stereo result: both legs of
+                                    // the tail ring over the one channel there is, which is
+                                    // the same content `CdpProcessCommand`'s widening step
+                                    // duplicates into the new channel anyway.
+                                    let Some(src) = doc.channels.get(c.min(widest)) else {
+                                        continue;
+                                    };
+                                    for i in 0..overlap {
+                                        if let Some(dry) = src.get(end + i) {
+                                            channel[input_len + i] += dry;
+                                        }
+                                    }
+                                }
+                            }
+
                             self.histories[pending.doc_index].apply(
                                 crate::commands::cdp::cdp_process_command(
                                     pending.label,
-                                    pending.range,
-                                    output.result,
-                                    // Sample-exact, so zero — see `timing_tolerance`.
-                                    crate::commands::cdp::timing_tolerance(
-                                        crate::model::cdp::Category::Airwindows,
-                                        0,
-                                    ),
+                                    (start, end + overlap),
+                                    data,
+                                    // The render itself is sample-exact, so the *only* length
+                                    // change is the part of the tail with nothing to ring
+                                    // into. Handing that figure over as the tolerance is what
+                                    // keeps markers right: the delta equals it exactly, so
+                                    // marks inside the range are restored to their own
+                                    // samples rather than scaled across a longer result, and
+                                    // marks after it shift by `extend` — which is true, since
+                                    // that audio really did move later by that much.
+                                    extend,
                                 ),
                                 &mut self.documents[pending.doc_index],
                             );
