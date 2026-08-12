@@ -34,6 +34,9 @@ Read [DOCUMENTATION.md](DOCUMENTATION.md) to learn how to use it.
 (hundreds) of processes implemented.
 - **Praat.** An optional front end to praatAudioTools, 352 sound-transformation scripts for
 Praat, in the same browser and chainable with CDP.
+- **Airwindows.** 500 of Chris Johnson's effects, built in. Nothing to install and nothing to
+configure — unlike CDP and Praat, the processing is compiled into tui-wave itself, so it works
+on a fresh install and previews return instantly.
 
 The CDP process browser, the parameter form with automatable green fields and presets, and the
 breakpoint envelope editor:
@@ -78,6 +81,10 @@ hear nothing.
   - Fedora: `sudo dnf install alsa-lib-devel pkg-config`
   - Arch: `sudo pacman -S alsa-lib pkgconf`
 - **macOS.** Nothing extra. The program uses the system CoreAudio framework.
+
+A C++ compiler is also needed, for the built-in Airwindows effects. You almost certainly have
+one already: it comes with `build-essential` on Debian and Ubuntu, `gcc-c++` on Fedora, `base-devel`
+on Arch, and the Xcode command line tools on macOS.
 
 ## Installing a released build
 
@@ -154,6 +161,30 @@ panels and the decibel gutters.
 
 [DOCUMENTATION.md](DOCUMENTATION.md) covers the rest.
 
+## Airwindows
+
+500 effects by [Chris Johnson](https://www.airwindows.com) — saturation, console emulations,
+reverbs, dithers, tape and lo-fi colour — under the **Airwindows** domain of the ExtProcess
+browser (`Ctrl+P`).
+
+Nothing to install. The DSP is compiled into tui-wave from the
+[airwin2rack](https://github.com/baconpaul/airwin2rack) consolidation of Chris Johnson's MIT
+sources, so this is the one process backend that always works. It also means previews come
+back immediately: there is no program to start and no temporary file to write, which is most
+of what makes a CDP or Praat preview take as long as it does.
+
+Two things behave differently from the rest of the browser:
+
+- **Mono or stereo only.** Every Airwindows effect is hard-wired to two channels, so a
+  selection wider than two is refused before Apply is enabled rather than being processed
+  two channels at a time. A **mono** buffer is fed to both sides and comes back stereo, which
+  is what lets the reverbs and stereo wideners do their job; undo restores it to mono.
+- **Parameters read 0 to 1**, and each field shows the effect's own reading of the value
+  beside it — the real figure in dB, Hz or whatever the effect uses. Airwindows works this way
+  natively; that display is the only place those units exist.
+
+See `THIRD_PARTY_NOTICES.md` for licensing. Everything is MIT.
+
 ## Optional: CDP support
 
 CDP is the Composer's Desktop Project, a large set of offline sound transformation programs.
@@ -167,7 +198,7 @@ CDP directory, and a first-use prompt explains why.
 
 tui-wave looks in `~/cdp` by default. Unpack or build CDP there and the program finds it with no
 setup. Anywhere else, answer the prompt with the real path. You can change the path later
-through CDP+Praat then Configure CDP Directory. tui-wave saves it as `cdp_dir` in your config
+through ExtProcess then Configure CDP Directory. tui-wave saves it as `cdp_dir` in your config
 file.
 
 ### About CDP

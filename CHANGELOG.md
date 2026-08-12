@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+- **Airwindows: 500 effects, built in.** A third process backend beside CDP and Praat, in the
+  same browser and chainable with both, under its own **Airwindows** domain. Unlike the other
+  two there is nothing to install and nothing to configure — the DSP is compiled into the
+  binary — so it is the one domain that works on a fresh install. Previews return immediately:
+  there is no program to launch and no temporary file to write, which is most of what makes a
+  CDP or Praat preview take as long as it does. Nothing round-trips through a file at all, so
+  unlike Praat it cannot lose a buffer's cue points or `bext` metadata.
+
+  Built from [airwin2rack](https://github.com/baconpaul/airwin2rack)'s consolidation of Chris
+  Johnson's MIT sources, vendored as a submodule. The Steinberg VST2 SDK is not involved:
+  upstream's one `#include "audioeffectx.h"` is already replaced there by a ~90-line shim, and
+  the converted sources are committed, so nothing is downloaded or generated at build time.
+  Both projects are MIT — see `THIRD_PARTY_NOTICES.md`, which grew a section because this is
+  the first DSP tui-wave *redistributes* rather than shells out to.
+
+  **Mono or stereo only.** Every Airwindows effect indexes two channels literally, with its
+  state written out by hand as separate L and R members, and several are genuinely
+  stereo-coupled. A selection wider than two channels is therefore refused inline before Apply
+  is enabled, rather than being processed two channels at a time into something that looks
+  defensible and is not. A mono buffer feeds both legs and keeps the stereo result — which is
+  the point for the reverbs and wideners — and undo narrows it back.
+
+  Parameters are Airwindows' native 0-to-1, with each field showing the effect's own reading of
+  the current value beside it. That reading is asked of the running effect rather than stored:
+  the mapping from 0-to-1 to real units exists only as arithmetic inside each plugin's display
+  routine, so deriving it into the catalog would mean guessing where a regex fails.
+
+  Adds a C++ compiler to the build requirements, and roughly 14 MB to the binary.
+
+- **The CDP+Praat menu is now ExtProcess** (`Alt+X`), and the CDP+Praat Chain is ExtProcess
+  Chain. The old name enumerated its backends, so a third one broke it — and it never covered
+  the pitch-curve and formant entries that already lived there. `Ctrl+P` and `Ctrl+H` are
+  unchanged.
+
 ## 2026-08-11 (2.7.1)
 
 - **praatAudioTools updated to `707d297`.** One upstream commit reworking all 25 scripts in
