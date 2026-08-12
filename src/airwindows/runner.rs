@@ -31,6 +31,35 @@ use crate::cdp::runner::JobPurpose;
 /// is ~11ms at 48kHz, well under a redraw tick.
 const BLOCK_FRAMES: usize = 512;
 
+/// How far below the rendered output's own peak the tail must fall before it counts as over.
+///
+/// -80 dB is deliberately past RT60, the standard definition of a reverb's decay time (60 dB),
+/// so a tail is carried well beyond the point it stops being musically present. Expressed
+/// *relative to the output* rather than as an absolute level because the alternative fails in
+/// both directions: an absolute floor cuts a loud reverb early and, worse, never terminates at
+/// all for the plugins that emit a constant noise floor by design (the console and tape
+/// emulations), which would append `TAIL_MAX_SECONDS` of hiss to every use of them.
+const TAIL_DECAY_DB: f32 = -80.0;
+
+/// Absolute floor for the threshold above, for the case the relative one degenerates: a
+/// selection that renders to silence would otherwise set a threshold of zero and never be
+/// under it. -100 dBFS, comfortably above the plugins' own dither floor (they seed `fpdL`/
+/// `fpdR` and dither at around the 24-bit LSB, near -140 dBFS) so dither alone never reads as
+/// tail.
+const TAIL_ABSOLUTE_FLOOR: f32 = 1e-5;
+
+/// How long the output must stay under the threshold *continuously* before the tail is
+/// declared finished. A delay line is not monotonic — it goes quiet between taps — so
+/// stopping at the first quiet block would cut everything after the first gap. Generous
+/// because it costs only render time and never output length: the tail is trimmed back to its
+/// last audible sample afterwards.
+const TAIL_QUIET_SECONDS: f32 = 1.0;
+
+/// Hard ceiling on tail rendering, whatever the decay says. A backstop against a plugin that
+/// self-oscillates or holds a drone rather than decaying, which would otherwise render until
+/// the cap anyway — this just makes the cap explicit and bounded.
+const TAIL_MAX_SECONDS: f32 = 30.0;
+
 /// Everything a render needs. `input` is deinterleaved, already narrowed to the selection.
 pub struct Job {
     pub id: u64,
@@ -52,7 +81,18 @@ pub struct JobOutput {
     /// input is duplicated into both legs and the stereo result is kept (which widens a mono
     /// buffer on Apply; `CdpProcessCommand` already tracks `channels_before` so undo shrinks
     /// it back).
+    ///
+    /// `input_frames + tail_frames` long: the processed selection followed by whatever the
+    /// effect went on emitting after the input stopped.
     pub result: Vec<Vec<f32>>,
+    /// How many frames at the end of `result` are decay past the end of the input. **0 for
+    /// most plugins** — a saturator or an EQ stops the instant its input does — and nonzero
+    /// only for the reverbs, delays and ambiences that have something to ring out.
+    ///
+    /// Kept separate rather than folded into `result` because the caller has to treat the two
+    /// halves differently: the processed part *replaces* the selection, while the tail rings
+    /// over whatever follows it (see `App::tick_airwindows`).
+    pub tail_frames: usize,
     pub sample_rate: u32,
 }
 
@@ -178,7 +218,61 @@ fn run_job(job: &Job, cancel: &AtomicBool) -> Result<JobOutput, Error> {
         pos += n;
     }
 
-    Ok(JobOutput { result: vec![out_l, out_r], sample_rate: job.sample_rate })
+    // ---- Tail ------------------------------------------------------------------------
+    //
+    // The input has stopped, but the effect has not: a reverb's decay, a delay's repeats and
+    // an ambience's room are all still to come, and rendering exactly `frames` frames chops
+    // them off mid-decay. So keep feeding the *same instance* silence — its state is the
+    // tail — and collect what comes out.
+    //
+    // Silence in and silence out is the common case: most of the catalog has no tail at all,
+    // the first quiet window ends this immediately, and `tail_frames` comes back 0.
+    let peak = out_l
+        .iter()
+        .chain(out_r.iter())
+        .fold(0.0f32, |m, s| m.max(s.abs()));
+    let threshold = (peak * 10f32.powf(TAIL_DECAY_DB / 20.0)).max(TAIL_ABSOLUTE_FLOOR);
+    let quiet_needed = (TAIL_QUIET_SECONDS * job.sample_rate as f32) as usize;
+    let tail_cap = (TAIL_MAX_SECONDS * job.sample_rate as f32) as usize;
+
+    let mut tail_l: Vec<f32> = Vec::new();
+    let mut tail_r: Vec<f32> = Vec::new();
+    // One past the last frame that was still audible; the tail is trimmed back to it, so the
+    // quiet stretch that proves the decay ended is never itself appended.
+    let mut last_audible = 0usize;
+    while tail_l.len() < tail_cap {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let n = BLOCK_FRAMES.min(tail_cap - tail_l.len());
+        in_l[..n].fill(0.0);
+        in_r[..n].fill(0.0);
+        let base = tail_l.len();
+        tail_l.resize(base + n, 0.0);
+        tail_r.resize(base + n, 0.0);
+        inst.process(
+            &mut in_l[..n],
+            &mut in_r[..n],
+            &mut tail_l[base..base + n],
+            &mut tail_r[base..base + n],
+        );
+        for i in 0..n {
+            if tail_l[base + i].abs() >= threshold || tail_r[base + i].abs() >= threshold {
+                last_audible = base + i + 1;
+            }
+        }
+        if tail_l.len() - last_audible >= quiet_needed {
+            break;
+        }
+    }
+    tail_l.truncate(last_audible);
+    tail_r.truncate(last_audible);
+
+    let tail_frames = tail_l.len();
+    out_l.extend_from_slice(&tail_l);
+    out_r.extend_from_slice(&tail_r);
+
+    Ok(JobOutput { result: vec![out_l, out_r], tail_frames, sample_rate: job.sample_rate })
 }
 
 #[cfg(test)]
@@ -205,9 +299,52 @@ mod tests {
         let j = job("Density", 5000, 2);
         let out = run_job(&j, &AtomicBool::new(false)).expect("render");
         assert_eq!(out.result.len(), 2);
-        assert_eq!(out.result[0].len(), 5000);
-        assert_eq!(out.result[1].len(), 5000);
+        // The processed part is sample-for-sample; anything past it is tail.
+        assert_eq!(out.result[0].len(), 5000 + out.tail_frames);
+        assert_eq!(out.result[1].len(), 5000 + out.tail_frames);
         assert!(out.result.iter().flatten().all(|s| s.is_finite()));
+    }
+
+    /// A saturator has nothing to ring out, so it must not lengthen the file. Density is not
+    /// quite a pure memoryless nonlinearity — it carries a highpass whose IIR state decays —
+    /// so this bounds the tail rather than demanding exactly zero.
+    #[test]
+    fn an_effect_without_a_tail_barely_lengthens_anything() {
+        let j = job("Density", 48_000, 2);
+        let out = run_job(&j, &AtomicBool::new(false)).expect("render");
+        assert!(
+            out.tail_frames < 4_800,
+            "Density rang on for {} frames, which is not a tail",
+            out.tail_frames
+        );
+    }
+
+    /// A reverb does, and that is the whole point of this: rendering exactly the input length
+    /// chopped Galactic's decay off mid-air.
+    #[test]
+    fn a_reverb_rings_out_past_the_end_of_its_input() {
+        let j = job("Galactic", 24_000, 2);
+        let out = run_job(&j, &AtomicBool::new(false)).expect("render");
+        assert!(
+            out.tail_frames > 12_000,
+            "Galactic produced only {} frames of tail",
+            out.tail_frames
+        );
+        assert_eq!(out.result[0].len(), 24_000 + out.tail_frames);
+        assert!(out.result.iter().flatten().all(|s| s.is_finite()));
+    }
+
+    /// The tail is trimmed back to its last audible sample, so the quiet stretch that proves
+    /// the decay finished is never itself appended — otherwise every reverb would add a
+    /// second of digital silence to the file.
+    #[test]
+    fn the_tail_does_not_end_in_appended_silence() {
+        let j = job("Galactic", 24_000, 2);
+        let out = run_job(&j, &AtomicBool::new(false)).expect("render");
+        assert!(out.tail_frames > 0);
+        let last = out.result[0].len() - 1;
+        let loud = out.result[0][last].abs().max(out.result[1][last].abs());
+        assert!(loud > 0.0, "the tail ends on exact silence, so it was not trimmed");
     }
 
     /// The block loop must produce the same audio as one long call would, or the split is
@@ -218,7 +355,7 @@ mod tests {
         let frames = BLOCK_FRAMES * 3 + 137;
         let j = job("Density", frames, 2);
         let out = run_job(&j, &AtomicBool::new(false)).expect("render");
-        assert_eq!(out.result[0].len(), frames);
+        assert_eq!(out.result[0].len(), frames + out.tail_frames);
         // A discontinuity at a boundary shows up as a sample-to-sample jump far larger than
         // the signal's own slew. The source is a slow sine at 0.25 amplitude.
         for ch in &out.result {
