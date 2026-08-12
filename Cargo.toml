@@ -1,12 +1,12 @@
 [package]
 name = "tui-wave"
-version = "2.8.0"
+version = "2.8.1"
 edition = "2024"
 license = "MIT"
 # Below this line: metadata the packagers read. `cargo-deb` and `cargo-generate-rpm` both
 # require `description` and `license`, and put `homepage`/`repository` in the package header —
 # a .deb or .rpm without them installs fine but tells the user nothing about what it is.
-description = "Keyboard-driven terminal waveform editor with CDP and Praat integration"
+description = "Keyboard-driven terminal waveform editor with 500 built-in Airwindows effects, plus CDP and Praat integration"
 homepage = "https://github.com/biomassa/tui-wave"
 repository = "https://github.com/biomassa/tui-wave"
 readme = "README.md"

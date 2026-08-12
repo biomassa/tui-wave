@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-08-12 (2.8.1)
+
+- **Airwindows processes work in an ExtProcess Chain.** In 2.8.0 they failed outright: the chain
+  dispatched every step to CDP, so an Airwindows step tried to run its catalog entry as a program
+  inside the CDP directory and stopped with `Failed to start 'Reverb/kCosmos': No such file or
+  directory`. Only the submit half was wrong — completion already handled these correctly, which
+  is why the tests missed it. Run and Preview are both covered now, and a chain made only of
+  Airwindows steps no longer asks for a CDP installation at all.
+
+- **A reverb's tail carries through the rest of a chain.** A decay reaching the next step is now
+  processed by it, so a reverb into a saturator saturates the tail. Without this a chain sounded
+  unlike the same effects applied one at a time, which is the one thing a chain must not do.
+
+- **Chain steps keep their `[cdp]` / `[pr]` / `[air]` tag.** The tags were dropped the moment a
+  process was inserted into a chain — the one place all three backends sit in a single list, and
+  so the place the tag matters most.
+
+- The ExtProcess menu's five CDP-only entries now say so: **CDP** Extract Pitch Curve, Load Pitch
+  Curve, both Extract Formants, and Freeze Formant Snapshot at Cursor. The rename to ExtProcess
+  had left them ambiguous about which backend they need.
+
+- The package description mentions Airwindows, so the `.deb` and `.rpm` headers no longer describe
+  tui-wave as CDP-and-Praat only.
+
 ## 2026-08-12 (2.8.0)
 
 - **Airwindows: 500 effects, built in.** A third process backend beside CDP and Praat, in the
