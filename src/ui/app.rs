@@ -1004,12 +1004,19 @@ fn is_pitch_curve_param(param: &crate::model::cdp::ParamDef) -> bool {
 ///   (`input_arity` returns `(2, Some(2))`). Read ">1 inputs" until 2026-08-03, which was
 ///   true but vaguer than the fact, and easy to mistake for the open-ended "N inputs" badge
 ///   sitting right next to it in the same list.
-/// - "[pr]": a praatAudioTools process rather than a CDP one (`Backend::Praat`). Mutually
-///   exclusive with "[pvoc]" — Praat entries are `Category::Praat` and so never `Pvoc` — and
-///   purely a provenance marker: it tells you which engine will run, which is why the two
-///   sit adjacent here rather than among the "you must go and pick something" badges above.
-///   Searching still works without it (every Praat `key` starts with `praat_`, and the
+/// - "[cdp]" / "[pr]" / "[air]": which engine will run this — CDP, praatAudioTools, or the
+///   built-in Airwindows effects. Purely a provenance marker, which is why they sit adjacent
+///   to "[pvoc]" here rather than among the "you must go and pick something" badges above.
+///   Searching still works without them (each backend's `key` carries its own prefix, and the
 ///   browser filter matches `key`); the badge is for reading the list, not finding in it.
+///
+///   **Exactly one is always present**, including on CDP entries, which carried no badge at
+///   all until Airwindows arrived. With two backends, marking only the minority read as "the
+///   unmarked ones are the default"; with three that stops being true — an unmarked row would
+///   mean CDP by elimination, which is a worse thing to ask of a reader than a five-character
+///   tag. It also makes an entry that resolves to no backend impossible to render silently.
+///   Only "[cdp]" can appear beside "[pvoc]": the spectral domain is a CDP subdivision, so
+///   Praat and Airwindows entries are never `Category::Pvoc`.
 /// - "[pvoc]": `category == Category::Pvoc` — a spectral (PVOC-domain) process, the same
 ///   classification `commands::cdp::timing_tolerance` and the CDP Chain execution engine's
 ///   `ana_run_length` (which merges a run of these into one shared anal/synth pair instead
@@ -1041,9 +1048,12 @@ fn cdp_process_badges(p: &crate::model::cdp::ProcessDef) -> Vec<&'static str> {
     if matches!(p.input, crate::model::cdp::IoKind::VariadicWav | crate::model::cdp::IoKind::GroupedWav) {
         badges.push(if p.input_arity().0 > 1 { "N inputs (2+)" } else { "N inputs" });
     }
-    if p.backend() == crate::model::cdp::def::Backend::Praat {
-        badges.push("[pr]");
-    }
+    // Every entry carries its backend, not just the non-CDP ones. See the doc comment.
+    badges.push(match p.backend() {
+        crate::model::cdp::def::Backend::Cdp => "[cdp]",
+        crate::model::cdp::def::Backend::Praat => "[pr]",
+        crate::model::cdp::def::Backend::Airwindows => "[air]",
+    });
     if p.category == crate::model::cdp::Category::Pvoc {
         badges.push("[pvoc]");
     }
@@ -32324,19 +32334,28 @@ mod tests {
     /// spectral one — a process cannot be both, since `Backend::Praat` is derived from
     /// `Category::Praat` and `[pvoc]` from `Category::Pvoc`.
     #[test]
-    fn cdp_process_badges_marks_every_praat_process_and_only_those() {
+    fn cdp_process_badges_marks_every_process_with_exactly_one_backend() {
         use crate::model::cdp::def::Backend;
         let app = new_app(Some(doc(0.1, 100)), None);
         let mut praat = 0;
         for p in &app.cdp_catalog.processes {
             let badges = cdp_process_badges(p);
-            let marked = badges.contains(&"[pr]");
+            let expected = match p.backend() {
+                Backend::Cdp => "[cdp]",
+                Backend::Praat => "[pr]",
+                Backend::Airwindows => "[air]",
+            };
+            // Exactly one, never two and never none — an entry showing no engine would read
+            // as "the default one" and there is no longer a default.
+            let carried: Vec<&&str> =
+                badges.iter().filter(|b| ["[cdp]", "[pr]", "[air]"].contains(b)).collect();
+            assert_eq!(carried, vec![&expected], "{}: wrong backend badges {badges:?}", p.key);
             if p.backend() == Backend::Praat {
                 praat += 1;
-                assert!(marked, "{}: a Praat process must carry [pr]", p.key);
                 assert!(!badges.contains(&"[pvoc]"), "{}: [pr] and [pvoc] are exclusive", p.key);
-            } else {
-                assert!(!marked, "{}: a CDP process must not carry [pr]", p.key);
+            }
+            if p.backend() == Backend::Airwindows {
+                assert!(!badges.contains(&"[pvoc]"), "{}: [air] and [pvoc] are exclusive", p.key);
             }
         }
         assert!(praat > 300, "expected the whole Praat catalog, found {praat}");
@@ -32371,13 +32390,16 @@ mod tests {
         assert!(!oneform_badges.contains(&"[f]"));
     }
 
+    /// A process with nothing to flag carries its backend badge and nothing else. It used to
+    /// carry none at all; the backend marker became unconditional when Airwindows made "no
+    /// badge" ambiguous rather than meaningful.
     #[test]
-    fn cdp_process_badges_is_empty_for_a_plain_process() {
+    fn cdp_process_badges_is_backend_only_for_a_plain_process() {
         let app = new_app(Some(doc(0.1, 100)), None);
         // Time-domain, single-input, no formant/pitch-curve params -- unlike blur_avrg (which
-        // now earns the "[pvoc]" badge below), this one has nothing to flag at all.
+        // now earns the "[pvoc]" badge below), this one has nothing else to flag.
         let p = app.cdp_catalog.processes.iter().find(|p| p.key == "phase_phase_1").expect("phase_phase_1 is a plain time-domain process");
-        assert!(cdp_process_badges(p).is_empty());
+        assert_eq!(cdp_process_badges(p), vec!["[cdp]"]);
     }
 
     #[test]

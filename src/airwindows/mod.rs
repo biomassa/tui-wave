@@ -8,4 +8,9 @@
 mod ffi;
 pub mod runner;
 
-pub use ffi::{find_by_name, plugin_count, plugin_info, plugins, Instance, PluginInfo};
+/// Exactly what the app reaches for: a name to look up (`cdp_run` and the parameter readout
+/// both resolve a catalog entry's `bin`), the registry entry behind an index, and an instance
+/// to render with. The rest of `ffi`'s surface exists for the catalog generator and stays
+/// private to the module — re-exporting it here would only produce unused-import warnings that
+/// say nothing about this app.
+pub use ffi::{find_by_name, plugin_info, Instance};

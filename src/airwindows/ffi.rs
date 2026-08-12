@@ -18,10 +18,14 @@ unsafe extern "C" {
     fn aw_is_mono(i: c_int) -> c_int;
     fn aw_create(i: c_int, sample_rate: c_float) -> *mut c_void;
     fn aw_destroy(h: *mut c_void);
+    /// Catalog generator only — see the note on `Instance::param_name`.
+    #[allow(dead_code)]
     fn aw_param_name(h: *mut c_void, idx: c_int, buf: *mut c_char, len: c_int);
     fn aw_param_display(h: *mut c_void, idx: c_int, buf: *mut c_char, len: c_int);
     fn aw_param_label(h: *mut c_void, idx: c_int, buf: *mut c_char, len: c_int);
     fn aw_set_param(h: *mut c_void, idx: c_int, v: c_float);
+    /// Catalog generator only — see the note on `Instance::get_param`.
+    #[allow(dead_code)]
     fn aw_get_param(h: *mut c_void, idx: c_int) -> c_float;
     fn aw_process(
         h: *mut c_void,
@@ -63,6 +67,11 @@ pub struct PluginInfo {
     pub is_mono: bool,
 }
 
+/// Used by `src/bin/dump-airwindows-catalog.rs` and by the tests below. The app never
+/// enumerates the registry — it resolves a catalog entry straight to an index by name — so
+/// this is genuinely unreachable in an ordinary build of `tui-wave`, which is what the
+/// `allow` records rather than hides.
+#[allow(dead_code)]
 pub fn plugin_count() -> usize {
     // SAFETY: reads a `std::vector`'s size; the registry is fully populated by static
     // initializers before `main` and never mutated afterwards.
@@ -89,6 +98,9 @@ pub fn plugin_info(index: usize) -> Option<PluginInfo> {
 
 /// Every plugin in registry order. The order is `ModuleAdd.h`'s, which is alphabetical by
 /// name -- stable across builds, which matters because the generated catalog is keyed by it.
+///
+/// Generator and tests only, for the same reason as `plugin_count`.
+#[allow(dead_code)]
 pub fn plugins() -> impl Iterator<Item = PluginInfo> {
     (0..plugin_count()).filter_map(plugin_info)
 }
@@ -148,6 +160,10 @@ impl Instance {
     /// The current normalized value. Read immediately after construction this is the
     /// plugin's *default* — which exists nowhere else, since upstream sets defaults as bare
     /// assignments in the constructor body rather than declaring them.
+    ///
+    /// Read by the catalog generator, which records exactly that; the app only ever *writes*
+    /// parameters, from values the catalog already holds.
+    #[allow(dead_code)]
     pub fn get_param(&self, index: usize) -> f32 {
         if index >= self.n_params {
             return 0.0;
@@ -156,6 +172,10 @@ impl Instance {
         unsafe { aw_get_param(self.handle, index as c_int) }
     }
 
+    /// Read by the catalog generator, which bakes these into the catalog. The app reads the
+    /// name from the catalog rather than from the plugin, so it never calls this — only
+    /// `param_display`/`param_label`, whose values cannot be baked.
+    #[allow(dead_code)]
     pub fn param_name(&self, index: usize) -> String {
         self.text(index, aw_param_name)
     }
