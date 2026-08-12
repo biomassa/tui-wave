@@ -1,5 +1,62 @@
 # Third-Party Notices
 
+## Airwindows (effect processing) — MIT, statically linked and redistributed
+
+The Airwindows processes in ExtProcess are **compiled into the tui-wave binary** and are
+therefore redistributed in every release artifact. This makes them unlike CDP, Praat and the
+praatAudioTools scripts below, none of which is bundled — and unlike LAME, the only other
+statically linked component, Airwindows is permissively licensed and imposes no relinking
+obligation. Attribution (this notice, retaining the copyright and permission text) is the
+whole of it.
+
+[Airwindows](https://www.airwindows.com) is by **Chris Johnson**, released under the MIT
+license — stated in the repository's `LICENSE` and repeated in the header comment of
+essentially every source file ("Airwindows uses the MIT license"). Source:
+https://github.com/airwindows/airwindows.
+
+The sources actually compiled come from **airwin2rack** ("Airwindows Consolidated") by
+**Paul Walker**, also MIT, vendored as the `third_party/airwin2rack` submodule and built by
+`build.rs`. That project's `scripts/import.pl` is what makes the DSP usable outside a VST
+host: upstream Airwindows includes the Steinberg VST2 SDK header `audioeffectx.h`, which is
+discontinued and not redistributable, and import.pl replaces it with airwin2rack's own
+~90-line `airwin_consolidated_base.h` shim, namespaces each plugin, and commits the result to
+`src/autogen_airwin/`. **No Steinberg SDK code is used, required, or distributed**, and
+nothing is downloaded at build time.
+
+Only airwin2rack's plugin sources, its shim header, and its `ModuleAdd.h` registry are
+compiled. Its DAW-plugin targets — which pull in JUCE and the VST3 SDK, and carry GPL
+obligations as a result — are **not** built and not present. Source:
+https://github.com/baconpaul/airwin2rack.
+
+`src/model/cdp/airwindows_catalog.toml` is generated from those compiled plugins by
+`src/bin/dump-airwindows-catalog.rs`, and its header records the exact airwin2rack commit it
+was generated against.
+
+```
+MIT License
+
+Copyright (c) Chris Johnson (Airwindows)
+Copyright (c) 2019-2026 Paul Walker (airwin2rack / Airwindows Consolidated)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## LAME (MP3 encoding) — LGPL-2.1+
 
 File ▸ Export's MP3 output uses [LAME](https://lame.sourceforge.io/) through the

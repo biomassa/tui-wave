@@ -130,11 +130,15 @@ impl MenuBar {
                 ],
             },
             MenuItem {
-                label: "CDP+Praat",
-                mnemonic: 'C',
+                label: "ExtProcess",
+                // `X`, because `E` is Edit's and `P` is Process's. Mnemonics are pure Alt+key
+                // lookups (`open_by_mnemonic`) and are not underlined in the rendered label,
+                // so any free letter would work — but one that appears in the label is the
+                // only kind a user can guess.
+                mnemonic: 'X',
                 entries: vec![
-                    entry("CDP+Praat Process...",       Action::CdpProcess,            "Ctrl+p"),
-                    entry("CDP+Praat Chain...",         Action::CdpChain,              "Ctrl+h"),
+                    entry("ExtProcess...",              Action::CdpProcess,            "Ctrl+p"),
+                    entry("ExtProcess Chain...",        Action::CdpChain,              "Ctrl+h"),
                     entry("Extract Pitch Curve",        Action::ExtractPitchCurve,     ""),
                     entry("Load Pitch Curve...",         Action::LoadPitchCurve,        ""),
                     entry("Extract Formants (Pitch-wise)", Action::ExtractFormants,       ""),

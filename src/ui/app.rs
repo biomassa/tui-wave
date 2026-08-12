@@ -2959,6 +2959,9 @@ pub struct App {
     /// the same `cdp_pending` slot, since only one job is ever in flight (the running dialog is
     /// hard-modal).
     praat_runner: crate::praat::PraatRunner,
+    /// The Airwindows worker. Owns no configuration and probes nothing — its DSP is compiled
+    /// into this binary — so unlike the two above it cannot be unavailable.
+    airwindows_runner: crate::airwindows::runner::Runner,
     /// Index-parallel with `documents`: whether Undo on this buffer, once its own history is
     /// exhausted, should close it.
     ///
@@ -3638,6 +3641,7 @@ impl App {
             cdp_catalog_warnings,
             cdp_runner: crate::cdp::CdpRunner::new(),
             praat_runner: crate::praat::PraatRunner::new(),
+            airwindows_runner: crate::airwindows::runner::Runner::new(),
             undo_closes_buffer: vec![false; document_count],
             cdp_next_job_id: 0,
             cdp_pending: None,
@@ -4795,6 +4799,9 @@ impl App {
             if self.tick_cdp() {
                 needs_redraw = true;
             }
+            if self.tick_airwindows() {
+                needs_redraw = true;
+            }
             if self.tick_praat() {
                 needs_redraw = true;
             }
@@ -5948,6 +5955,7 @@ impl App {
                     // an idle runner is a no-op — its flag is reset when it next picks up a job.
                     self.cdp_runner.cancel();
                     self.praat_runner.cancel();
+                    self.airwindows_runner.cancel();
                 } else if let Some(Dialog::PraatPicture { restore }) = self.dialog.take() {
                     // Its own arm, *before* the generic dismissal below, for one reason: that
                     // branch calls `stop_cdp_preview_audio`. A picture from a Preview is shown
@@ -11231,6 +11239,76 @@ impl App {
             });
         }
 
+        // Airwindows diverges at the same point and for the same reason as Praat below, and
+        // its branch is the shortest of the three: there is no plan to build, no binary to
+        // locate and no temp file to write, so "these values" become a job directly.
+        if def.backend() == crate::model::cdp::def::Backend::Airwindows {
+            let Some(plugin_index) =
+                crate::airwindows::find_by_name(def.bin.rsplit('/').next().unwrap_or(&def.bin))
+            else {
+                self.dialog = Some(reopen(focus, format!("{} is not in the Airwindows registry — the catalog and the compiled plugins disagree", def.bin), fields, second_input, variadic_input, preview, presets, preset_selected));
+                return;
+            };
+            let job_id = self.cdp_next_job_id;
+            self.cdp_next_job_id += 1;
+            if let Some(audio) = self.audio.as_ref() {
+                if audio.is_playing() {
+                    audio.pause();
+                }
+            }
+            // Only the channels the process declared it takes — `input_source_channels` has
+            // already refused anything past two by the time Apply was enabled, so this is one
+            // channel or two and the runner duplicates the mono case into both legs.
+            let source = def
+                .input_source_channels(doc.channel_count())
+                .and_then(Result::ok)
+                .unwrap_or_else(|| vec![0]);
+            let sliced = doc.slice(range.0..range.1);
+            let input: Vec<Vec<f32>> =
+                source.iter().filter_map(|&c| sliced.get(c).cloned()).collect();
+            self.cdp_pending = Some(CdpPending {
+                doc_index: idx,
+                range,
+                label: format!("Airwindows: {}", def.title),
+                catalog_index,
+                fields: fields.to_vec(),
+                second_input: second_input.clone(),
+                variadic_input: variadic_input.clone(),
+                photo_input: photo_input.clone(),
+                focus,
+                presets: presets.to_vec(),
+                preset_selected,
+                custom_values: custom_values.clone(),
+            });
+            self.airwindows_runner.submit(crate::airwindows::runner::Job {
+                id: job_id,
+                plugin_index,
+                // Every Airwindows parameter is a normalized 0..1 `Number`; anything else
+                // would be a hand-edited user catalog, and clamping is kinder than refusing.
+                values: values
+                    .iter()
+                    .map(|v| match v {
+                        crate::model::cdp::ParamValue::Number(n) => *n as f32,
+                        _ => 0.0,
+                    })
+                    .collect(),
+                input,
+                sample_rate: doc.sample_rate,
+                purpose,
+                label: def.title.clone(),
+            });
+            self.dialog = Some(Dialog::CdpRunning {
+                job_id,
+                title: def.title.clone(),
+                step_label: def.title.clone(),
+                step_index: 0,
+                step_total: 1,
+                started: Instant::now(),
+                purpose,
+            });
+            return;
+        }
+
         // Praat diverges here and not before: everything above — validation, the process range,
         // the second-input pick, the cached-preview fast path — is backend-independent, because
         // a Praat entry is an ordinary `ProcessDef`. Only the step from "these values" to
@@ -11481,7 +11559,7 @@ impl App {
                             Ok(output) => output,
                             Err(err) => {
                                 self.dialog = Some(Dialog::CdpOutput {
-                                    title: "CDP+Praat Chain Error".into(),
+                                    title: "ExtProcess Chain Error".into(),
                                     lines: praat_error_lines(&err),
                                     scroll: 0,
                                 });
@@ -11685,6 +11763,148 @@ impl App {
                             } else {
                                 self.dialog = Some(params);
                             }
+                        }
+                    }
+                }
+            }
+        }
+        processed_any
+    }
+
+    /// Drains the Airwindows runner's events, mirroring `tick_praat` — which is itself the
+    /// short version of `tick_cdp`. This is shorter still, and the omissions are the point:
+    /// an Airwindows job returns exactly two channels at exactly the document's sample rate
+    /// and exactly the length it was given, so there is no glob output, no pitch curve, no
+    /// picture, no new-buffer case and no sample-rate refusal to branch on. Apply versus
+    /// Preview is the whole decision.
+    fn tick_airwindows(&mut self) -> bool {
+        use crate::airwindows::runner::Event;
+        let mut processed_any = false;
+        while let Ok(event) = self.airwindows_runner.events.try_recv() {
+            processed_any = true;
+            match event {
+                Event::Started { job, label } => {
+                    if let Some(Dialog::CdpRunning { job_id, step_label, .. }) = self.dialog.as_mut()
+                    {
+                        if *job_id == job {
+                            *step_label = label;
+                        }
+                    }
+                }
+                Event::Finished { job, purpose, result } => {
+                    // Same guard as `tick_cdp`/`tick_praat`, and checked before taking the
+                    // pending so a stray event cannot consume one it does not own.
+                    if !matches!(self.dialog, Some(Dialog::CdpRunning { job_id, .. }) if job_id == job)
+                    {
+                        continue;
+                    }
+                    // A chain step. The frame stack is backend-agnostic, so an Airwindows step
+                    // advances it exactly as a CDP or Praat one does and the next step may
+                    // belong to any of the three.
+                    if let Some(mut run) = self.cdp_pending_chain_run.take() {
+                        let output = match result {
+                            Ok(output) => output,
+                            Err(err) => {
+                                self.dialog = Some(Dialog::CdpOutput {
+                                    title: "ExtProcess Chain Error".into(),
+                                    lines: vec![err.to_string()],
+                                    scroll: 0,
+                                });
+                                continue;
+                            }
+                        };
+                        let step_count = run.pending_step_count;
+                        if let Some(frame) = run.frames.last_mut() {
+                            frame.running_buffer = output.result;
+                            frame.running_rate = output.sample_rate;
+                            frame.index += step_count;
+                        }
+                        self.cdp_pending_chain_run = Some(run);
+                        self.submit_current_chain_stage();
+                        continue;
+                    }
+
+                    let Some(pending) = self.cdp_pending.take() else { continue };
+                    self.stop_cdp_preview_audio();
+
+                    let recent_key =
+                        self.cdp_catalog.processes.get(pending.catalog_index).map(|d| d.key.clone());
+                    let last_process_values: Vec<crate::model::cdp::ParamValue> =
+                        pending.fields.iter().map(CdpField::to_value).collect();
+
+                    let output = match result {
+                        Ok(output) => output,
+                        Err(err) => {
+                            self.dialog = Some(Dialog::CdpOutput {
+                                title: "Airwindows Error".into(),
+                                lines: vec![err.to_string()],
+                                scroll: 0,
+                            });
+                            continue;
+                        }
+                    };
+
+                    match purpose {
+                        crate::cdp::JobPurpose::Apply => {
+                            self.histories[pending.doc_index].apply(
+                                crate::commands::cdp::cdp_process_command(
+                                    pending.label,
+                                    pending.range,
+                                    output.result,
+                                    // Sample-exact, so zero — see `timing_tolerance`.
+                                    crate::commands::cdp::timing_tolerance(
+                                        crate::model::cdp::Category::Airwindows,
+                                        0,
+                                    ),
+                                ),
+                                &mut self.documents[pending.doc_index],
+                            );
+                            self.viewport = None;
+                            self.after_sample_mutation(pending.doc_index);
+                            self.dialog = None;
+                            if let Some(key) = &recent_key {
+                                // No input buffers: an Airwindows process takes exactly one
+                                // input, the selection itself, so there is never a variadic
+                                // pick to remember.
+                                Self::record_process_applied(key, &last_process_values, &Vec::new());
+                            }
+                        }
+                        crate::cdp::JobPurpose::Preview => {
+                            self.cdp_preview_audio =
+                                preview_engine(output.result.clone(), output.sample_rate);
+                            let values = pending.fields.iter().map(CdpField::to_value).collect();
+                            self.dialog = Some(Dialog::CdpParams {
+                                catalog_index: pending.catalog_index,
+                                fields: pending.fields,
+                                second_input: pending.second_input,
+                                variadic_input: pending.variadic_input,
+                                photo_input: pending.photo_input,
+                                focus: pending.focus,
+                                error: None,
+                                preview: Some(CdpPreview {
+                                    values,
+                                    range: pending.range,
+                                    channels: output.result,
+                                    sample_rate: output.sample_rate,
+                                    second_input_doc: None,
+                                    variadic_docs: Vec::new(),
+                                    formant_selections: Vec::new(),
+                                }),
+                                envelope: None,
+                                list_edit: None,
+                                table_edit: None,
+                                marker_time_list_edit: None,
+                                hilite_band_edit: None,
+                                formant_picker: None,
+                                file_picker: None,
+                                variadic_picker: None,
+                                photo_picker: None,
+                                presets: pending.presets,
+                                preset_selected: pending.preset_selected,
+                                custom_values: pending.custom_values,
+                                save_prompt: None,
+                                scroll: 0,
+                            });
                         }
                     }
                 }
@@ -12024,7 +12244,7 @@ impl App {
         let Some(def) = self.cdp_catalog.processes.iter().find(|p| p.key == step.process_key).cloned() else {
             self.cdp_pending_chain_run = None;
             self.dialog = Some(Dialog::CdpOutput {
-                title: "CDP+Praat Chain Error".into(),
+                title: "ExtProcess Chain Error".into(),
                 lines: vec![format!("Process \"{}\" no longer exists in the catalog", step.process_key)],
                 scroll: 0,
             });
@@ -12056,7 +12276,7 @@ impl App {
             let Some((buf, rate)) = self.chain_picked_buffer(&this_path) else {
                 self.cdp_pending_chain_run = None;
                 self.dialog = Some(Dialog::CdpOutput {
-                    title: "CDP+Praat Chain Error".into(),
+                    title: "ExtProcess Chain Error".into(),
                     lines: vec!["A side-chain's source buffer is no longer available".into()],
                     scroll: 0,
                 });
@@ -12117,7 +12337,7 @@ impl App {
             Err(err) => {
                 self.cdp_pending_chain_run = None;
                 self.dialog = Some(Dialog::CdpOutput {
-                    title: "CDP+Praat Chain Error".into(),
+                    title: "ExtProcess Chain Error".into(),
                     lines: vec![cdp_plan_error_message(&err)],
                     scroll: 0,
                 });
@@ -12146,7 +12366,7 @@ impl App {
         });
         self.dialog = Some(Dialog::CdpRunning {
             job_id,
-            title: format!("CDP+Praat Chain: {}", def.title),
+            title: format!("ExtProcess Chain: {}", def.title),
             step_label: "Starting…".into(),
             step_index: 0,
             step_total,
@@ -12257,7 +12477,7 @@ impl App {
         let fail = |app: &mut Self, message: String| {
             app.cdp_pending_chain_run = None;
             app.dialog = Some(Dialog::CdpOutput {
-                title: "CDP+Praat Chain Error".into(),
+                title: "ExtProcess Chain Error".into(),
                 lines: vec![message],
                 scroll: 0,
             });
@@ -12304,7 +12524,7 @@ impl App {
         });
         self.dialog = Some(Dialog::CdpRunning {
             job_id,
-            title: format!("CDP+Praat Chain: {}", def.title),
+            title: format!("ExtProcess Chain: {}", def.title),
             step_label: "Starting Praat…".into(),
             step_index: 0,
             step_total: 1,
@@ -12333,7 +12553,7 @@ impl App {
         else {
             self.cdp_pending_chain_run = None;
             self.dialog = Some(Dialog::CdpOutput {
-                title: "CDP+Praat Chain Error".into(),
+                title: "ExtProcess Chain Error".into(),
                 lines: vec!["A process in this chain no longer exists in the catalog".into()],
                 scroll: 0,
             });
@@ -12354,7 +12574,7 @@ impl App {
             Err(err) => {
                 self.cdp_pending_chain_run = None;
                 self.dialog = Some(Dialog::CdpOutput {
-                    title: "CDP+Praat Chain Error".into(),
+                    title: "ExtProcess Chain Error".into(),
                     lines: vec![cdp_plan_error_message(&err)],
                     scroll: 0,
                 });
@@ -12937,7 +13157,7 @@ impl App {
                         let Ok(output) = result else {
                             let Err(err) = result else { unreachable!() };
                             self.dialog = Some(Dialog::CdpOutput {
-                                title: "CDP+Praat Chain Error".into(),
+                                title: "ExtProcess Chain Error".into(),
                                 lines: cdp_error_lines(&err),
                                 scroll: 0,
                             });
@@ -21962,7 +22182,7 @@ fn render_cdp_browser_dialog(
     let soft_selected_style = Style::default().fg(theme::FOCUS).bg(theme::SURFACE0);
 
     let block = Block::default()
-        .title("CDP+Praat Process")
+        .title("ExtProcess")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
@@ -23057,7 +23277,7 @@ fn render_cdp_running_dialog(
     ];
 
     let block = Block::default()
-        .title("CDP+Praat")
+        .title("ExtProcess")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
@@ -23096,7 +23316,7 @@ fn render_cdp_chain_editor_dialog(
     let disabled_style = Style::default().fg(theme::ANNOTATION).bg(theme::SURFACE0);
 
     let block = Block::default()
-        .title("CDP+Praat Chain")
+        .title("ExtProcess Chain")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
@@ -32466,6 +32686,42 @@ mod tests {
             longest_domain + 2 <= CDP_DOMAIN_COL_WIDTH as usize,
             "longest domain label is {longest_domain} chars, which does not fit {CDP_DOMAIN_COL_WIDTH}"
         );
+    }
+
+    /// The Airwindows domain renders as a real, populated domain in the real dialog — its
+    /// groups in the Groups column and its processes in the list — rather than only being
+    /// correct in `cdp_domain_rows`/`cdp_group_choices`.
+    ///
+    /// This is the end-to-end check the pty harness cannot supply: the terminal-graphics
+    /// probe (`App::picker`) writes an APC query before any frame is drawn, which a virtual
+    /// terminal has no way to answer and pyte renders as literal text over the screen. A
+    /// `TestBackend` render bypasses the probe entirely and asserts the same thing.
+    #[test]
+    fn the_airwindows_domain_renders_with_its_groups_and_processes() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        app.open_cdp_browser();
+        // All, Recent, Time-domain, Spectral, Praat, Airwindows — the last row.
+        let last = app.cdp_domain_rows().len() as isize - 1;
+        app.cdp_browser_move_domain(last);
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text: Vec<String> = (0..buffer.area.height)
+            .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        let text = text.join("\n");
+
+        assert!(text.contains("Airwindows"), "the domain row must render\n{text}");
+        // Chris Johnson's own category headings, in the Groups column.
+        for group in ["Ambience", "Amp Sims", "Bass"] {
+            assert!(text.contains(group), "Groups column is missing {group:?}\n{text}");
+        }
+        // And a CDP group must *not* be offered, so the domain really is filtering.
+        assert!(!text.contains("DISTORT"), "an unselected domain's groups must not list\n{text}");
     }
 
     /// End-to-end render check: the Domain and Groups columns must actually render side by

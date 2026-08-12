@@ -106,7 +106,7 @@ alsa-lib = "*"
 # cargo-deb's `$auto` picks this up from the ELF needs on that side; cargo-generate-rpm
 # resolves nothing by itself, so an omission here would produce a package that installs
 # cleanly and then fails to start.
-libstdc++ = "*"
+"libstdc++" = "*"
 
 # See the `suggests` note on the deb above. Fedora ships Praat as `praat` too.
 [package.metadata.generate-rpm.recommends]
