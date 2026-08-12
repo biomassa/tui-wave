@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-08-12 (2.8.2)
+
+**No user-facing changes** — a build-system release, tagged so the packaged artifacts are built
+from the reorganised tree.
+
+- The Airwindows C++ moved to its own crate, `crates/airwindows-sys`. Cargo bakes a package's
+  version into its build-script unit hash, so while that code lived in the main crate every
+  release bump recompiled all ~1040 Airwindows translation units from scratch — around eight
+  minutes, for a version string no C++ there can observe. Bumping the version now takes 27
+  seconds and recompiles none of them. Building from source is otherwise unchanged: a bare
+  `cargo build --release` still builds everything, and the C++ toolchain requirement is the same.
+
 ## 2026-08-12 (2.8.1)
 
 - **Airwindows processes work in an ExtProcess Chain.** In 2.8.0 they failed outright: the chain
