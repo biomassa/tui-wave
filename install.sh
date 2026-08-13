@@ -385,19 +385,44 @@ else
   install_packages "Praat" praat || warn "install Praat yourself from https://www.fon.hum.uva.nl/praat/"
 fi
 
-# --- 4. The praatAudioTools submodule -----------------------------------------------------
-step "praatAudioTools scripts"
+# --- 4. Bundled sources (git submodules) --------------------------------------------------
+step "Bundled sources"
 # Same credit setup-environment.sh prints where it clones them: about 456 of the catalog's
 # processes are this project's work, run as-is and never modified.
 info "about 456 of tui-wave's processes are scripts from praatAudioTools, by Shai Cohen"
 info "(Department of Music, Bar-Ilan University, Israel), MIT-licensed"
 info "https://github.com/ShaiCohen-ops/Praat-plugin_AudioTools"
-if [ -f third_party/praat-audiotools/setup.praat ] || [ -n "$(ls -A third_party/praat-audiotools 2>/dev/null)" ]; then
-  ok "submodule present"
+info ""
+info "500 more are Airwindows effects by Chris Johnson, MIT-licensed, compiled into the"
+info "binary from baconpaul's airwin2rack consolidation of them"
+info "https://www.airwindows.com  |  https://github.com/baconpaul/airwin2rack"
+
+# Ask git which submodules are uninitialised rather than testing one directory for content.
+# The directory test was praatAudioTools-only, so an existing clone that already had *it*
+# reported "present" and skipped the rest -- which is how a `git pull` that introduced
+# airwin2rack left the build failing on a missing autogen_airwin (user report, 2026-08-12).
+# `git submodule status` prefixes an uninitialised entry with `-`, so this notices any
+# submodule added in the future without needing to be told about it.
+uninitialised_submodules() {
+  git submodule status 2>/dev/null | awk '$1 ~ /^-/ { print $2 }'
+}
+
+missing_subs="$(uninitialised_submodules)"
+if [ -z "$missing_subs" ]; then
+  ok "submodules present"
 else
-  info "the Praat catalog is inert without it"
-  run git submodule update --init --recursive
-  ok "submodule initialised"
+  for sub in $missing_subs; do
+    info "missing: $sub"
+  done
+  # `--init`, deliberately **not** `--recursive`: airwin2rack declares submodules of its own
+  # (`libs/airwindows`, the entire upstream Airwindows history) that nothing here reads --
+  # build.rs compiles the committed `src/autogen_airwin/` tree instead. Recursing would pull
+  # hundreds of megabytes to produce nothing. This mirrors the release workflow's own
+  # `submodules: true`.
+  run git submodule update --init
+  still_missing="$(uninitialised_submodules)"
+  [ -z "$still_missing" ] || die "submodules still uninitialised: $still_missing"
+  ok "submodules initialised"
 fi
 
 # --- 5. Python venv for the `py` process group --------------------------------------------

@@ -7332,22 +7332,18 @@ impl App {
     /// process browser. The menu entry is always enabled rather than conditionally greyed
     /// out — an invalid path is discovered here, on demand, instead of silently.
     fn open_cdp_entry(&mut self) {
-        let dir = std::path::PathBuf::from(&self.config.cdp_dir);
-        let cdp_ready =
-            !self.config.cdp_dir.is_empty() && crate::cdp::validate_cdp_dir(&dir).is_ok();
-        // The browser holds two backends now, so a missing CDP install must not lock it shut:
-        // someone with only Praat would otherwise be sent to a setup dialog for a tool they do
-        // not have and cannot get past. Running a CDP process with an invalid directory still
-        // falls back to this same setup dialog from inside `cdp_run`, so the CDP-only user
-        // loses nothing — the prompt just arrives when it is actually relevant.
-        if cdp_ready || self.praat_ready() {
-            self.open_cdp_browser();
-        } else {
-            self.dialog = Some(Dialog::CdpSetup {
-                input: TextInput::new(self.config.cdp_dir.clone()),
-                error: None,
-            });
-        }
+        // **Never gated on CDP.** The browser holds three backends, and Airwindows is compiled
+        // into this binary — it cannot be missing — so there is always something here to run.
+        // Gating on `cdp_dir` sent a user with no CDP install to a setup dialog for a tool they
+        // may not want, blocking the Praat and Airwindows processes that share this browser
+        // (user report, 2026-08-12). It was already half-fixed once, by also accepting a
+        // working Praat; the general form is simply not to ask.
+        //
+        // A CDP-only user loses nothing. Running a CDP process with an invalid directory still
+        // falls back to the setup dialog from inside `cdp_run`, and Options ▸ Configure CDP
+        // Directory opens it on demand — so the prompt still exists, it just arrives when it is
+        // actually relevant instead of standing in front of everything.
+        self.open_cdp_browser();
     }
 
     /// A note for the params dialog when the praatAudioTools checkout is on a different commit
@@ -7393,16 +7389,12 @@ impl App {
     /// as `open_cdp_entry`, opening the chain editor on a fresh draft instead of the plain
     /// process browser once `cdp_dir` checks out.
     fn open_cdp_chain_entry(&mut self) {
-        let dir = std::path::PathBuf::from(&self.config.cdp_dir);
-        if self.config.cdp_dir.is_empty() || crate::cdp::validate_cdp_dir(&dir).is_err() {
-            self.dialog = Some(Dialog::CdpSetup {
-                input: TextInput::new(self.config.cdp_dir.clone()),
-                error: None,
-            });
-        } else {
-            self.cdp_chain_editor = Some(ChainEditorState::fresh());
-            self.dialog = Some(Dialog::CdpChainEditor);
-        }
+        // Ungated for the same reason as `open_cdp_entry`: a chain may be built entirely from
+        // Airwindows or Praat steps, and refusing to open the editor without CDP blocked those
+        // outright. `run_cdp_chain` checks `chain_uses_cdp` before running and reports an
+        // invalid directory then, which is the point at which it matters.
+        self.cdp_chain_editor = Some(ChainEditorState::fresh());
+        self.dialog = Some(Dialog::CdpChainEditor);
     }
 
     /// Every key while `Dialog::CdpChainEditor` is showing — intercepted early in
@@ -8201,6 +8193,41 @@ impl App {
             return None;
         };
         let def = self.cdp_catalog.processes.get(*catalog_index)?;
+        // **Is the backend this process needs even available?** Checked before everything else,
+        // because nothing below matters if the tool cannot run at all.
+        //
+        // This is what the browser's own gate used to do by refusing to open (see
+        // `open_cdp_entry`) — which blocked the two backends that *were* available in order to
+        // warn about the one that was not. Stating it here instead keeps the browser open,
+        // dims Apply and Preview, and says which tool is missing and where to set it up. Same
+        // shape as the missing-photo and missing-marklist blockers: a property of the
+        // installation rather than of any field, so nothing in the dialog looks wrong and
+        // Apply would otherwise appear to do nothing (or, for CDP, replace the parameters
+        // you just filled in with a setup prompt).
+        //
+        // Airwindows has no arm: it is compiled into this binary and cannot be unavailable.
+        match def.backend() {
+            crate::model::cdp::def::Backend::Cdp => {
+                let dir = std::path::PathBuf::from(&self.config.cdp_dir);
+                if self.config.cdp_dir.is_empty()
+                    || crate::cdp::validate_cdp_dir(&dir).is_err()
+                {
+                    return Some(
+                        "CDP is not set up — this process needs the CDP binaries (Options ▸ Configure CDP Directory)"
+                            .to_string(),
+                    );
+                }
+            }
+            crate::model::cdp::def::Backend::Praat => {
+                if !self.praat_ready() {
+                    return Some(
+                        "Praat is not set up — this process needs the praat binary and the praatAudioTools scripts (see README)"
+                            .to_string(),
+                    );
+                }
+            }
+            crate::model::cdp::def::Backend::Airwindows => {}
+        }
         // No buffer at all, for a process that reads one. Checked first because it is the most
         // fundamental of these: with nothing open there is no selection to demand channels of
         // and no document to hold marks, so every check below would be answering a question
@@ -25520,21 +25547,23 @@ mod tests {
         assert!(app.confirm.is_none());
     }
 
-    /// `Action::CdpProcess` (Ctrl+p / Process menu) opens the setup prompt when **neither**
-    /// backend can run — there's nothing to browse until one of them is configured.
+    /// `Action::CdpProcess` (Ctrl+p / ExtProcess menu) opens the **browser** even with no CDP
+    /// directory and no Praat checkout, because there is a third backend that cannot be
+    /// missing: Airwindows is compiled into this binary.
     ///
-    /// Praat has to be disabled explicitly here: the browser now holds both backends, and on a
-    /// machine that has Praat installed an unset `cdp_dir` alone is no longer a reason to
-    /// block the browser.
+    /// This asserts the inverse of what it used to. The old behaviour — a setup prompt when
+    /// "no backend is available" — was written when that condition could actually hold. It
+    /// cannot any more, and leaving the gate in place meant an unconfigured CDP install hid
+    /// 500 working Airwindows processes behind a prompt for a tool the user might not want.
     #[test]
-    fn cdp_process_action_opens_setup_when_no_backend_is_available() {
+    fn cdp_process_action_opens_the_browser_even_with_no_external_backend() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
         app.config.cdp_dir = String::new();
         app.config.praat_audiotools_dir = "/nonexistent/audiotools".into();
         app.handle_action(Action::CdpProcess);
         assert!(
-            matches!(app.dialog, Some(Dialog::CdpSetup { .. })),
-            "expected CdpSetup when no backend is available, got {:?}",
+            matches!(app.dialog, Some(Dialog::CdpBrowser { .. })),
+            "expected the browser, got {:?}",
             std::mem::discriminant(app.dialog.as_ref().unwrap())
         );
     }
@@ -32626,6 +32655,66 @@ mod tests {
         assert_eq!(pvoc_y, blur_row, "the [pvoc] badge must appear on the spectral step's own row");
         assert_ne!(pvoc_y, phase_row, "the [pvoc] badge must not appear on the time-domain step's row");
         assert_eq!(buffer[(pvoc_x, pvoc_y)].fg, theme::ANNOTATION, "the badge must render in the pale/muted color, not the normal row text color");
+    }
+
+    /// The ExtProcess browser must open with **no CDP installation at all**, because two of its
+    /// three backends do not need one and Airwindows cannot be missing (user report,
+    /// 2026-08-12: an unset `cdp_dir` sent Ctrl+P to a setup prompt, locking out the Praat and
+    /// Airwindows processes that share the same browser). Same for the chain editor, which had
+    /// the identical gate — a chain may be built entirely from non-CDP steps.
+    #[test]
+    fn the_browser_and_chain_editor_open_without_a_cdp_installation() {
+        let mut config = Config::default();
+        config.cdp_dir = String::new();
+
+        let mut app = App::new_with_config(Some(doc(0.1, 100)), None, config.clone());
+        app.handle_action(Action::CdpProcess);
+        assert!(
+            matches!(app.dialog, Some(Dialog::CdpBrowser { .. })),
+            "Ctrl+P must open the browser, not a CDP setup prompt"
+        );
+
+        let mut app = App::new_with_config(Some(doc(0.1, 100)), None, config);
+        app.handle_action(Action::CdpChain);
+        assert!(
+            matches!(app.dialog, Some(Dialog::CdpChainEditor)),
+            "Ctrl+H must open the chain editor, not a CDP setup prompt"
+        );
+    }
+
+    /// Opening the browser regardless must not mean a CDP process silently fails later. The
+    /// params dialog states the missing backend inline and dims Apply — the same treatment a
+    /// missing image or marklist gets — rather than letting Apply replace the parameters the
+    /// user just filled in with a setup prompt.
+    #[test]
+    fn a_cdp_process_says_so_when_cdp_is_not_set_up() {
+        let mut config = Config::default();
+        config.cdp_dir = String::new();
+        let mut app = App::new_with_config(Some(doc(0.1, 44100)), None, config);
+
+        let cdp = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "phase_phase_1")
+            .expect("a plain CDP process");
+        app.open_cdp_params(cdp);
+        let blocker = app.cdp_params_blocker().expect("CDP is unset, so Apply must be blocked");
+        assert!(blocker.contains("CDP is not set up"), "unhelpful blocker: {blocker}");
+
+        // An Airwindows process in the same session is unaffected — it needs nothing installed.
+        let air = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "airwindows_density")
+            .expect("an Airwindows process");
+        app.open_cdp_params(air);
+        assert_eq!(
+            app.cdp_params_blocker(),
+            None,
+            "Airwindows is compiled in and must never be blocked on an install"
+        );
     }
 
     /// Regression test for a shipped bug (user report, 2026-08-12): an Airwindows step in a
