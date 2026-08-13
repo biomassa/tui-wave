@@ -23565,6 +23565,41 @@ fn cdp_params_column_widths(def: &crate::model::cdp::ProcessDef) -> (usize, usiz
     (label_width, range_width, cdp_params_value_width(def))
 }
 
+/// Columns reserved for a `Number` row's typed value, so whatever follows it — the Airwindows
+/// unit read-out, the `(e:envelope)` hint — starts at the same column on every row.
+///
+/// Without this the value column is however wide that row's number happens to be, so a slider
+/// step landing on `0.214` pushed its `= 0.2143` right while the rows above and below kept
+/// theirs (user report, with a screenshot of exactly that). Sized from what a value can
+/// actually print: the widest integer part either bound needs, a point, and
+/// `param_slider::DECIMALS` places — which is the most a slider stop can produce, and the reason
+/// that constant exists.
+///
+/// A *typed* value longer than this still overhangs, and is meant to: nothing may silently
+/// rewrite what the user typed, so the column gives way instead. Every value this app itself
+/// generates fits.
+fn cdp_params_number_width(def: &crate::model::cdp::ProcessDef) -> usize {
+    use crate::model::cdp::ParamKind;
+    def.params
+        .iter()
+        .filter_map(|p| match &p.kind {
+            ParamKind::Number { min, max, integer, .. } => {
+                let digits = |v: f64| {
+                    if !v.is_finite() {
+                        return 0;
+                    }
+                    format!("{}", v.trunc() as i64).chars().count()
+                };
+                let int_part = digits(*min).max(digits(*max));
+                // `+ 1` for the point. An integer field never prints one.
+                Some(if *integer { int_part } else { int_part + 1 + param_slider::DECIMALS as usize })
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 /// Columns the slider occupies on a row that has one: the track plus the single space that
 /// separates it from the range column to its left. Zero for a process where *no* parameter has
 /// a closed range, so a Praat form of one-sided numbers pays nothing for a column it can never
@@ -23942,6 +23977,7 @@ fn render_cdp_params_dialog(
     // the *number* — the slider sits to its left, so the field carrying the actual value is what
     // would fall off the right edge.
     let (slider_width, _) = cdp_params_slider_column(def, area.width);
+    let number_width = cdp_params_number_width(def);
     let width = (14 + label_width + range_width + slider_width + value_width).max(50) as u16;
     let width = width.min(area.width);
     let has_extra_input = cdp_has_extra_input(second_input, variadic_input, photo_input) as usize;
@@ -23993,6 +24029,9 @@ fn render_cdp_params_dialog(
     let error_style = Style::default().fg(theme::RED).bg(theme::SURFACE0);
     let range_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
     let point_style = Style::default().fg(theme::FOCUS).bg(theme::SURFACE0);
+    // The focused row's number: peach, the same accent every other "this is where you are"
+    // marker in the app uses — and the same one its slider knob is already wearing.
+    let focus_value_style = Style::default().fg(theme::FOCUS).bg(theme::SURFACE0);
 
     let block = Block::default()
         .title(def.title.as_str())
@@ -24135,19 +24174,45 @@ fn render_cdp_params_dialog(
                     out.extend(param_slider::spans(value, *min, *max, *integer, *exponential, focused));
                     out
                 };
+                // Blank columns padding the value out to `number_width`, so the read-out to its
+                // right starts in the same place on every row. Saturating, since a typed value
+                // may legitimately be longer than any value this app would generate.
+                let pad_to = |rendered: usize| " ".repeat(number_width.saturating_sub(rendered));
+                let value_pad = pad_to(input.value().chars().count());
                 if is_focused {
-                    let (before, under, after) = input.split_at_cursor();
                     let mut spans = vec![
                         Span::styled(label, label_style_here),
                         Span::styled(range, range_style),
                     ];
                     spans.extend(slider(true));
-                    spans.extend([
-                        Span::styled(" ", base),
-                        Span::styled(before, base),
-                        Span::styled(under, cursor_style),
-                        Span::styled(after, base),
-                    ]);
+                    spans.push(Span::styled(" ", base));
+                    // A row with a slider shows its value in peach and draws **no** block
+                    // cursor. There is no caret there to point at: Left/Right drive the slider
+                    // and typing replaces the value outright, so the caret can never leave the
+                    // end of the text — the block was marking a position that could not move,
+                    // and it cost a reserved column that shifted the row sideways the moment it
+                    // took focus. Colour says "this is the one you are changing" instead.
+                    //
+                    // A row *without* one keeps the cursor, because there Left/Right really do
+                    // move the caret (`cdp_params_cycle_left_right` falls through to it), and an
+                    // invisible caret that text is inserted at is worse than a visible one. So
+                    // the block now means exactly "this field is edited as text".
+                    if param_slider::applies(*min, *max) {
+                        spans.push(Span::styled(input.value().to_string(), focus_value_style));
+                        spans.push(Span::styled(value_pad, base));
+                    } else {
+                        let (before, under, after) = input.split_at_cursor();
+                        // Padded from the split, not from `value()`: with the caret past the end
+                        // `under` is a space the field does not otherwise contain.
+                        let rendered =
+                            before.chars().count() + under.chars().count() + after.chars().count();
+                        spans.extend([
+                            Span::styled(before, base),
+                            Span::styled(under, cursor_style),
+                            Span::styled(after, base),
+                            Span::styled(pad_to(rendered), base),
+                        ]);
+                    }
                     if let Some(display) = aw_displays.get(i).filter(|d| !d.is_empty()) {
                         spans.push(Span::styled(format!("   = {display}"), dim_style));
                     }
@@ -24161,7 +24226,7 @@ fn render_cdp_params_dialog(
                         Span::styled(range, range_style),
                     ];
                     spans.extend(slider(false));
-                    spans.push(Span::styled(format!(" {}", input.value()), base));
+                    spans.push(Span::styled(format!(" {}{value_pad}", input.value()), base));
                     // The plugin's own reading of this value, in its own units. Dimmed and
                     // set off by `=` so it reads as a consequence of the number beside it
                     // rather than as a second editable field.
@@ -30988,6 +31053,61 @@ mod tests {
             .map(|(b, _)| row[..b].chars().count() as u16)
             .unwrap_or_else(|| panic!("no slider track on the {label:?} row"));
         (first, y)
+    }
+
+    /// Whatever follows a number — the Airwindows unit read-out — must start at the same
+    /// column on every row, including the focused one.
+    ///
+    /// Regression (user report, with a screenshot): stepping Highpass's slider produced
+    /// `0.214286`, which was both wider than its neighbours' `0.2`/`1.0` and six decimals long,
+    /// so its `= 0.2143` sat further right than every other row's. Two fixes meet here — the
+    /// slider rounds to `param_slider::DECIMALS`, and the value column is padded to a reserved
+    /// width — and this pins both at once, since either alone still leaves the row crooked.
+    #[test]
+    fn the_read_out_after_a_number_starts_at_the_same_column_on_every_row() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.bin == "Distortion/Density")
+            .expect("Density is in the Airwindows catalog");
+        app.open_cdp_params(index);
+        // Focus one row and walk its slider onto a stop that does not divide evenly.
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = 2;
+        }
+        for _ in 0..3 {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        }
+
+        // That value must itself be short — the padding cannot rescue a number of any length.
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        let Some(CdpField::Number { input, .. }) = fields.get(1) else { panic!("expected a Number") };
+        let decimals = input.value().split('.').nth(1).map(|f| f.len()).unwrap_or(0);
+        assert!(decimals <= param_slider::DECIMALS as usize, "got {}", input.value());
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let columns: Vec<usize> = (0..area.height)
+            .filter_map(|y| {
+                let row: String = (0..area.width).map(|x| buffer[(x, y)].symbol()).collect();
+                // Only the parameter rows: they are the ones carrying a slider track.
+                row.contains(param_slider::TRACK_CHAR)
+                    .then(|| row.find(" = ").map(|b| row[..b].chars().count()))
+                    .flatten()
+            })
+            .collect();
+        assert!(columns.len() >= 4, "expected every param row to show a read-out, got {columns:?}");
+        assert!(
+            columns.windows(2).all(|w| w[0] == w[1]),
+            "the `=` read-out must start at one column on every row, got {columns:?}"
+        );
     }
 
     /// The geometry the click handler is given must be the geometry that was drawn.
@@ -43064,5 +43184,7 @@ mod folder_gate_tests {
         );
     }
 }
+
+
 
 

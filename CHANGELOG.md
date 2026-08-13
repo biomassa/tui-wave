@@ -23,6 +23,11 @@
     beneath the list acting on the selected cell rather than a track per cell.
   - On a terminal too narrow for the widened dialog the sliders are dropped and the rows render
     exactly as before, rather than clipping the number field off the right edge.
+  - Slider values are rounded to three decimals, and the value column has a reserved width, so a
+    stop landing on something like `0.214286` no longer prints six decimals *and* pushes the
+    read-out beside it out of line with every other row.
+  - The focused parameter's value is shown in peach rather than under a block cursor. Fields with
+    no slider keep the cursor, since their Left/Right still moves a caret.
 
 ## 2026-08-12 (2.8.2)
 
