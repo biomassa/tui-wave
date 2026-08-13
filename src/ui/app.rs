@@ -60,6 +60,7 @@ use super::widgets::braille::{braille_char, DOT_BITS};
 use super::widgets::db_scale::{DbScaleWidget, DB_GUTTER_WIDTH};
 use super::widgets::cdp_envelope_image::{self, interp_cdp_envelope};
 use super::widgets::formant_image;
+use super::widgets::param_slider;
 use super::widgets::statusbar::{format_sample_rate, StatusBar};
 use super::widgets::time_ruler::TimeRulerWidget;
 use super::widgets::waveform::WaveformWidget;
@@ -543,8 +544,8 @@ enum CdpFieldSetupKind {
 #[derive(Clone)]
 enum CdpField {
     /// `min`/`max`/`step` are cloned from the `ParamKind::Number` at construction time so
-    /// Up/Down nudging (`cdp_nudge_number`) never needs a catalog lookup — same rationale
-    /// as `Choice::options` below. `envelope` is `Some` exactly when this field has been
+    /// stepping the row's slider never needs a catalog lookup — same rationale as
+    /// `Choice::options` below. `envelope` is `Some` exactly when this field has been
     /// switched from a constant value to time-varying automation via the envelope editor
     /// (`Dialog::CdpParams.envelope`, `App::open_cdp_envelope_editor`) — `to_value` returns
     /// `ParamValue::Breakpoints` instead of parsing `input` whenever it's set. `input` keeps
@@ -554,9 +555,21 @@ enum CdpField {
     /// doc comment) — checked and rounded to the nearest whole number wherever a value is
     /// committed (typing here has no discrete "commit" moment the way the sub-editors do, so
     /// `App::cdp_validate_fields` blocks Apply/Preview on a non-integer value instead of
-    /// silently rounding while the user is still typing; `cdp_nudge_number` does round, since
-    /// Up/Down already is a discrete commit).
-    Number { input: TextInput, min: f64, max: f64, step: f64, integer: bool, envelope: Option<Vec<(f64, f64)>> },
+    /// silently rounding while the user is still typing; a slider step does round, since
+    /// landing on a stop already is a discrete commit).
+    /// `exponential` is cloned alongside the bounds for the same reason they are — it is what
+    /// spaces the row's slider stops (`widgets::param_slider`), and reaching back into the
+    /// catalog to redraw a knob would put a lookup in the render path. The catalog has carried
+    /// this flag on 85 CDP params since it was written; the slider is its first reader.
+    Number {
+        input: TextInput,
+        min: f64,
+        max: f64,
+        step: f64,
+        integer: bool,
+        exponential: bool,
+        envelope: Option<Vec<(f64, f64)>>,
+    },
     Toggle { on: bool },
     /// `options` is cloned from the `ParamKind::Choice` at construction time so cycling it
     /// (Left/Right) never needs a catalog lookup back through the current selection.
@@ -687,13 +700,14 @@ impl CdpField {
                 step: *step,
                 integer: *integer,
             },
-            ParamKind::Number { default, min, max, step, integer, .. } => {
+            ParamKind::Number { default, min, max, step, integer, exponential, .. } => {
                 CdpField::Number {
                     input: TextInput::fresh(format_cdp_number_for_display(*default, *integer)),
                     min: *min,
                     max: *max,
                     step: *step,
                     integer: *integer,
+                    exponential: *exponential,
                     envelope: None,
                 }
             }
@@ -768,7 +782,7 @@ impl CdpField {
             // Apply while reporting "value out of range" for a value that is in range and
             // merely not whole. Recalling a preset must not land the dialog somewhere the user
             // cannot type their way out of.
-            (ParamKind::Number { min, max, step, integer, .. }, ParamValue::Number(v)) => CdpField::Number {
+            (ParamKind::Number { min, max, step, integer, exponential, .. }, ParamValue::Number(v)) => CdpField::Number {
                 input: TextInput::fresh(format_cdp_number_for_display(
                     if *integer { v.round() } else { *v },
                     *integer,
@@ -777,9 +791,10 @@ impl CdpField {
                 max: *max,
                 step: *step,
                 integer: *integer,
+                exponential: *exponential,
                 envelope: None,
             },
-            (ParamKind::Number { min, max, step, integer, .. }, ParamValue::Breakpoints(points)) => CdpField::Number {
+            (ParamKind::Number { min, max, step, integer, exponential, .. }, ParamValue::Breakpoints(points)) => CdpField::Number {
                 input: TextInput::fresh(format_cdp_number_for_display(
                     points.first().map(|&(_, v)| v).unwrap_or(0.0),
                     *integer,
@@ -788,6 +803,7 @@ impl CdpField {
                 max: *max,
                 step: *step,
                 integer: *integer,
+                exponential: *exponential,
                 envelope: Some(points.clone()),
             },
             (ParamKind::Number { min, max, step, integer, .. }, ParamValue::List(values)) => {
@@ -928,8 +944,8 @@ fn format_cdp_number_for_display(v: f64, integer: bool) -> String {
 
 /// Rounds `v` to 6 decimal places — kills the binary-fraction noise (e.g.
 /// `73.35999999999999` instead of `73.36`) that repeatedly adding/subtracting a step like
-/// 0.01 in `f64` visibly accumulates, the same fix `cdp_nudge_number`'s own doc comment
-/// explains (CDP's own params are never meaningfully precise to more than a handful of
+/// 0.01 in `f64` visibly accumulates, the same fix `param_slider::value_for_stop` applies to
+/// a slider step (CDP's own params are never meaningfully precise to more than a handful of
 /// decimals, so this is lossless in practice). Used at every point a breakpoint envelope's
 /// own `points` get nudged, not just the main params dialog's flat number fields.
 fn round6(v: f64) -> f64 {
@@ -1081,34 +1097,6 @@ fn cdp_process_badges(p: &crate::model::cdp::ProcessDef) -> Vec<&'static str> {
         badges.push("[s]");
     }
     badges
-}
-
-/// Nudges a focused `CdpField::Number` by a flat `sign * (1.0, or 0.1 when `fine`)`,
-/// clamped to its range — Up/Down's role in the params dialog (Left/Right is reserved for
-/// the field's own text cursor, or for cycling a `Choice`). No-op for any other field kind.
-///
-/// Deliberately a fixed 1.0/0.1 rather than the catalog's own (per-param, often much finer)
-/// `step` — regression fix (user report): using `step` directly here made every plain Up
-/// press advance by e.g. 0.1 with no distinction from Shift+Up at all (nothing in this path
-/// checked the Shift modifier), and repeatedly re-parsing/re-adding a value like 0.1 in f64
-/// visibly accumulated binary-fraction noise on screen ("1.8000000000000003"). Rounding the
-/// result to 6 decimal places kills that noise outright (CDP's own params are never
-/// meaningfully precise to more than a handful of decimals) regardless of which flat step is
-/// used.
-fn cdp_nudge_number(field: Option<&mut CdpField>, sign: f64, fine: bool) {
-    let Some(CdpField::Number { input, min, max, integer, .. }) = field else { return };
-    let delta = if fine { 0.1 } else { 1.0 };
-    // Falling back to `min` on unparseable text is only sane while `min` is a real number. A
-    // Praat parameter whose script declares no floor carries `-inf` (see the converter's
-    // `make_number`), and arrowing an empty field would otherwise jump straight to negative
-    // infinity. Start from zero in that case — the nudge is then a plain ±1 from a value the
-    // user can see, which is what the key is for.
-    let fallback = if min.is_finite() { *min } else { 0.0 };
-    let current = input.value().trim().parse::<f64>().unwrap_or(fallback);
-    let next = ((current + sign * delta) * 1e6).round() / 1e6;
-    let next = if *integer { next.round() } else { next };
-    let next = next.clamp(*min, *max);
-    *input = TextInput::new(format_cdp_number_for_display(next, *integer));
 }
 
 /// Resolves which field a "smart" activation key (`b`:pick buffer, `e`:edit list/envelope/
@@ -2051,11 +2039,12 @@ fn cdp_table_column_widths(
 fn cdp_table_column_at(
     columns: &[crate::model::cdp::TableColumn],
     rows: &[Vec<f64>],
+    sliders: bool,
     x_in_row: u16,
 ) -> Option<usize> {
     let mut x = CDP_TABLE_GUTTER_WIDTH;
-    for (c, w) in cdp_table_column_widths(columns, rows).into_iter().enumerate() {
-        x += w as u16 + 2;
+    for (c, w) in cdp_table_cell_widths(columns, rows, sliders).into_iter().enumerate() {
+        x += w as u16;
         if x_in_row < x {
             return Some(c);
         }
@@ -2063,6 +2052,67 @@ fn cdp_table_column_at(
     // Past the last column — clicking the empty space to the right of a short final column
     // still means that column, which is friendlier than ignoring the click.
     columns.len().checked_sub(1)
+}
+
+/// Total on-screen width of each table cell: its value column plus the two spaces separating it
+/// from the next, and — when the editor is drawing sliders — the track and its trailing space.
+///
+/// The single statement of the table's horizontal layout, read by the renderer, by
+/// `cdp_table_column_at` and by `cdp_table_track_start`. A table has a variable number of
+/// variable-width columns, so this is the one editor where a click's column *and* its offset
+/// within that column both depend on arithmetic that must not be written twice.
+fn cdp_table_cell_widths(
+    columns: &[crate::model::cdp::TableColumn],
+    rows: &[Vec<f64>],
+    sliders: bool,
+) -> Vec<usize> {
+    cdp_table_column_widths(columns, rows)
+        .into_iter()
+        .zip(columns)
+        .map(|(w, col)| {
+            let track = if sliders && param_slider::applies(col.min, col.max) {
+                param_slider::CELLS + 1
+            } else {
+                0
+            };
+            track + w + 2
+        })
+        .collect()
+}
+
+/// Whether the table editor draws sliders at all when laid out into `area_width`.
+///
+/// A table pays for a track per *column*, so this is the narrow-terminal rule that bites
+/// hardest. Decided once here for the renderer and the click handler alike — a table drawn
+/// without tracks whose clicks still believed in them would set values from clicks landing on
+/// the numbers.
+fn cdp_table_draws_sliders(
+    columns: &[crate::model::cdp::TableColumn],
+    rows: &[Vec<f64>],
+    area_width: u16,
+) -> bool {
+    let table = 5 + cdp_table_cell_widths(columns, rows, true).iter().sum::<usize>();
+    table.max(CDP_TABLE_SLIDER_HINT_WIDTH) + 2 <= area_width as usize
+}
+
+/// Width of the table editor's hint line in its slider form — the other thing the popup has to
+/// be wide enough for, alongside the table itself.
+const CDP_TABLE_SLIDER_HINT_WIDTH: usize =
+    " \u{2190}\u{2192}:adjust  \u{2191}\u{2193}:row  Tab:column  type:edit value  n:insert  Del:remove".len();
+
+/// Where column `col`'s slider track starts within a table row, or `None` when that column has
+/// no track (a one-sided range, or the whole editor drawing none).
+fn cdp_table_track_start(
+    columns: &[crate::model::cdp::TableColumn],
+    rows: &[Vec<f64>],
+    sliders: bool,
+    col: usize,
+) -> Option<usize> {
+    if !sliders || !columns.get(col).is_some_and(|c| param_slider::applies(c.min, c.max)) {
+        return None;
+    }
+    let widths = cdp_table_cell_widths(columns, rows, sliders);
+    Some(CDP_TABLE_GUTTER_WIDTH as usize + widths.iter().take(col).sum::<usize>())
 }
 
 /// Width of the `" {:>3}: "` row-number gutter every table-shaped CDP editor renders.
@@ -2873,6 +2923,19 @@ pub struct App {
     /// what makes clicking a hint work in *every* dialog — including the ones still building
     /// their rows by hand. See `hint_segment_at`.
     dialog_hints_text: String,
+    /// Where the open params dialog drew its slider track this frame, or `None` when it drew
+    /// none. Written by `App::render`, read by the click/drag handlers.
+    cdp_slider_geometry: Option<CdpSliderGeometry>,
+    /// The field index whose slider a press grabbed, held until the button is released. `None`
+    /// when no drag is in progress.
+    cdp_slider_drag: Option<usize>,
+    /// Set while a press has grabbed a slider inside one of the grid sub-editors. Those have a
+    /// single slider column and always drag the *selected* row, so unlike `cdp_slider_drag`
+    /// there is no index to remember.
+    cdp_sub_editor_slider_drag: bool,
+    /// Whether the open table editor drew slider tracks this frame — the table's counterpart to
+    /// `cdp_slider_geometry`, since its whole column layout shifts depending on the answer.
+    cdp_table_drew_sliders: bool,
     /// Where the open file-writing dialog will write, browsable inline (`ui::dest_picker`).
     ///
     /// **One field for all six** — Save As, Export, Export Channels, Export Regions, Save Curve
@@ -3636,6 +3699,10 @@ impl App {
             save_as_focused: 0,
             dest_picker: None,
             dialog_hints_text: String::new(),
+            cdp_slider_geometry: None,
+            cdp_slider_drag: None,
+            cdp_sub_editor_slider_drag: false,
+            cdp_table_drew_sliders: false,
             dialog_row_rects: Vec::new(),
             dialog_n_interactive: 0,
             last_frame_area: Rect::default(),
@@ -4078,8 +4145,8 @@ impl App {
 
     /// All key handling while `CurveTransformPicker.params` is `Some` (and its own
     /// `list_edit` isn't) — Tab/Shift+Tab cycle `focus` across `fields.len() + 1` positions
-    /// (each field, then a trailing "Apply" row); Up/Down nudge the focused `Number` field
-    /// (`cdp_nudge_number`, same fn a normal `CdpParams` session's Number fields use); Space
+    /// (each field, then a trailing "Apply" row); Up/Down move between rows and Left/Right
+    /// step the focused `Number` field's slider, exactly as in `Dialog::CdpParams`; Space
     /// flips a focused `Toggle`; `e` opens `CurveParamListEdit` for a focused `List`; typing
     /// a digit/`-`/`.` edits a focused `Number`'s `TextInput` directly (no discrete "commit"
     /// moment, same as `CdpParams`'s own Number fields — `cdp_validate_fields` is what
@@ -4117,11 +4184,30 @@ impl App {
             KeyCode::Tab | KeyCode::Down => {
                 params.focus = (params.focus + 1).min(field_count);
             }
+            // Up now moves between rows rather than nudging, matching the main params dialog:
+            // Left/Right below drive the slider, so a nudge on the vertical axis would be a
+            // second, coarser way to change the same number.
             KeyCode::Up => {
-                if params.focus < field_count {
-                    cdp_nudge_number(params.fields.get_mut(params.focus), 1.0, key.modifiers.contains(KeyModifiers::SHIFT));
-                } else {
-                    params.focus = params.focus.saturating_sub(1);
+                params.focus = params.focus.saturating_sub(1);
+            }
+            KeyCode::Left | KeyCode::Right if params.focus < field_count => {
+                if let Some(CdpField::Number {
+                    input, min, max, integer, exponential, envelope: None, ..
+                }) = params.fields.get_mut(params.focus)
+                {
+                    if param_slider::applies(*min, *max) {
+                        let (min, max, integer, exponential) = (*min, *max, *integer, *exponential);
+                        let stops = param_slider::stop_count(min, max, integer);
+                        let current = input.value().trim().parse::<f64>().unwrap_or(min);
+                        let at = param_slider::stop_for_value(current, min, max, integer, exponential);
+                        let next = if key.code == KeyCode::Right {
+                            (at + 1).min(stops.saturating_sub(1))
+                        } else {
+                            at.saturating_sub(1)
+                        };
+                        let value = param_slider::value_for_stop(next, min, max, integer, exponential);
+                        *input = TextInput::fresh(format_cdp_number_for_display(value, integer));
+                    }
                 }
             }
             KeyCode::Char(' ') if params.focus < field_count => {
@@ -6100,8 +6186,15 @@ impl App {
                         *selected = selected.saturating_sub(1);
                         *desc_scroll = 0;
                     }
-                    Some(Dialog::CdpParams { fields, focus, .. }) if *focus != CDP_PRESET_FOCUS => {
-                        cdp_nudge_number(fields.get_mut(*focus - 1), 1.0, key.modifiers.contains(KeyModifiers::SHIFT));
+                    // Up/Down move between rows, matching Shift+Tab/Tab. They used to nudge the
+                    // focused number by ±1 (±0.1 with Shift), which the slider replaces: Left/
+                    // Right now step the value in units of the parameter's own range, where a
+                    // flat ±1 meant a fourteenth of one param's range and a thousandth of the
+                    // next. Moving down a form with the down arrow is also what every other
+                    // list in this app already does.
+                    Some(Dialog::CdpParams { .. }) => {
+                        self.cycle_dialog_focus(false);
+                        return;
                     }
                     Some(Dialog::CdpOutput { scroll, .. }) => *scroll = scroll.saturating_sub(1),
                     _ => {}
@@ -6126,8 +6219,10 @@ impl App {
                         }
                         *desc_scroll = 0;
                     }
-                    Some(Dialog::CdpParams { fields, focus, .. }) if *focus != CDP_PRESET_FOCUS => {
-                        cdp_nudge_number(fields.get_mut(*focus - 1), -1.0, key.modifiers.contains(KeyModifiers::SHIFT));
+                    // See the Up arm above: row movement, not a value nudge.
+                    Some(Dialog::CdpParams { .. }) => {
+                        self.cycle_dialog_focus(true);
+                        return;
                     }
                     Some(Dialog::CdpOutput { scroll, lines, .. }) => {
                         *scroll = (*scroll + 1).min(lines.len().saturating_sub(1));
@@ -6636,6 +6731,147 @@ impl App {
     /// by rows that hold both a checkbox and a value field to tell the two targets apart.
     /// Row-click dispatch, wrapped for the same reason `handle_dialog_key` is: a click can flip
     /// a toggle, which is an edit and must move the Internal Preset row to Custom.
+    /// Continues an in-progress slider drag at screen column `column`.
+    ///
+    /// The pointer is clamped to the track rather than being required to stay on it: dragging
+    /// past either end means "all the way to that end", and letting the value stall the moment
+    /// the pointer slipped one cell too far would make the extremes the hardest values to
+    /// reach. Vertical position is ignored for the same reason — the grabbed slider is the one
+    /// being dragged, whatever row the pointer has wandered onto.
+    fn drag_cdp_slider(&mut self, column: u16) {
+        let (Some(index), Some(geometry)) = (self.cdp_slider_drag, self.cdp_slider_geometry) else {
+            return;
+        };
+        // The track's absolute left edge: the row rects share the dialog's own x origin.
+        let Some(origin) = self.dialog_row_rects.first().map(|r| r.x) else { return };
+        let track_x = origin as usize + geometry.track_start;
+        let cell = (column as usize).saturating_sub(track_x).min(param_slider::CELLS - 1);
+        let Some(Dialog::CdpParams { fields, .. }) = self.dialog.as_mut() else { return };
+        let Some(CdpField::Number { min, max, integer, envelope: None, .. }) = fields.get(index)
+        else {
+            return;
+        };
+        let stop = param_slider::stop_for_cell(cell, param_slider::stop_count(*min, *max, *integer));
+        cdp_set_slider_stop(fields.get_mut(index), stop);
+    }
+
+    /// Continues an in-progress slider drag inside a grid sub-editor. Same clamping rule as
+    /// `drag_cdp_slider`: past either end of the track means that end.
+    fn drag_cdp_sub_editor_slider(&mut self, column: u16) {
+        let Some(origin) = self.dialog_row_rects.first().map(|r| r.x) else { return };
+        let x_in_row = (column as usize).saturating_sub(origin as usize);
+        let sliders = self.cdp_table_drew_sliders;
+
+        // The table drags the selected *cell*, whose track start depends on which column it is.
+        if let Some(Dialog::CdpParams { table_edit: Some(edit), fields, .. }) = self.dialog.as_mut()
+        {
+            let Some(columns) = cdp_table_columns(fields, edit) else { return };
+            let col = edit.selected_col;
+            let Some(start) = cdp_table_track_start(&columns, &edit.rows, sliders, col) else {
+                return;
+            };
+            let c = &columns[col];
+            let cell = x_in_row.saturating_sub(start).min(param_slider::CELLS - 1);
+            let stops = param_slider::stop_count(c.min, c.max, c.integer);
+            let (r, min, max, integer) = (edit.selected_row, c.min, c.max, c.integer);
+            edit.rows[r][col] = param_slider::value_for_stop(
+                param_slider::stop_for_cell(cell, stops),
+                min,
+                max,
+                integer,
+                false,
+            );
+            Self::clamp_cdp_table_cell(edit, &columns);
+            return;
+        }
+
+        if let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), fields, .. }) =
+            self.dialog.as_mut()
+        {
+            let Some(CdpField::HiliteBand { lofrq, hifrq, amp1, amp2, transpose, .. }) =
+                fields.get(edit.field_index)
+            else {
+                return;
+            };
+            let selected = edit.selected_col;
+            let r = edit.selected_row;
+            let Some((col, _)) =
+                hb_numeric_cell(&edit.rows[r], selected, lofrq, hifrq, amp1, amp2, transpose)
+                    .filter(|(c, _)| param_slider::applies(c.min, c.max))
+            else {
+                return;
+            };
+            let col = col.clone();
+            let cell = x_in_row
+                .saturating_sub(HB_SLIDER_TRACK_START)
+                .min(param_slider::CELLS - 1);
+            let stops = param_slider::stop_count(col.min, col.max, col.integer);
+            let value = param_slider::value_for_stop(
+                param_slider::stop_for_cell(cell, stops),
+                col.min,
+                col.max,
+                col.integer,
+                false,
+            );
+            hb_set_numeric_cell(&mut edit.rows[r], selected, &col, value);
+            return;
+        }
+
+        if let Some(Dialog::CdpParams { marker_time_list_edit: Some(edit), fields, .. }) =
+            self.dialog.as_mut()
+        {
+            let Some(CdpField::MarkerTimeList { min, max, .. }) = fields.get(edit.field_index)
+            else {
+                return;
+            };
+            let (min, max) = (*min, *max);
+            let slider_max = max.min(edit.time_max);
+            if !param_slider::applies(min, slider_max) {
+                return;
+            }
+            let cell = x_in_row
+                .saturating_sub(CDP_MARKER_TIME_TRACK_START)
+                .min(param_slider::CELLS - 1);
+            let stops = param_slider::stop_count(min, slider_max, false);
+            let r = edit.selected_row;
+            edit.entries[r].1 = param_slider::value_for_stop(
+                param_slider::stop_for_cell(cell, stops),
+                min,
+                slider_max,
+                false,
+                false,
+            );
+            Self::clamp_cdp_marker_time_entry(edit, min, max);
+            return;
+        }
+
+        let cell = x_in_row
+            .saturating_sub(CDP_LIST_ROW_TRACK_START)
+            .min(param_slider::CELLS - 1);
+        let Some(Dialog::CdpParams { list_edit: Some(edit), fields, .. }) = self.dialog.as_mut()
+        else {
+            return;
+        };
+        let Some(CdpField::List { min, max, integer, .. }) = fields.get(edit.field_index) else {
+            return;
+        };
+        let (min, max, integer) = (*min, *max, *integer);
+        let slider_max = if edit.is_time_sequence { max.min(edit.time_max) } else { max };
+        if !param_slider::applies(min, slider_max) {
+            return;
+        }
+        let stops = param_slider::stop_count(min, slider_max, integer);
+        let index = edit.selected;
+        edit.values[index] = param_slider::value_for_stop(
+            param_slider::stop_for_cell(cell, stops),
+            min,
+            slider_max,
+            integer,
+            false,
+        );
+        Self::clamp_cdp_list_entry(edit, min, max, slider_max);
+    }
+
     fn handle_dialog_row_click(&mut self, row: usize, x_in_row: u16) {
         let before = self.cdp_params_value_snapshot();
         self.handle_dialog_row_click_inner(row, x_in_row);
@@ -6702,6 +6938,21 @@ impl App {
         // The same deferral for the CDP params form: opening a sub-editor / running a job
         // needs `&mut self`, which can't be taken while `self.dialog` is borrowed below.
         let mut cdp_sync_table_rows = false;
+        // Read before `self.dialog` is borrowed below, since it lives on `self` too.
+        let slider_geometry = self.cdp_slider_geometry;
+        // Set when a click landed on a slider track: the field it belongs to, which subsequent
+        // drag events then keep writing to. Held on `self` so a drag that wanders off the track
+        // (or off the row) keeps moving the slider it grabbed rather than silently stopping or,
+        // worse, grabbing a neighbour — which is what dragging a slider means everywhere else.
+        let mut cdp_slider_drag_field: Option<usize> = None;
+        // The sub-editors' equivalent: they drag whichever cell is selected, so only the fact
+        // of the drag needs recording, not which one.
+        let mut cdp_list_slider_drag = false;
+        let mut cdp_table_slider_drag = false;
+        let mut cdp_marker_time_slider_drag = false;
+        let mut cdp_hilite_slider_drag = false;
+        // Read before the borrow below, like `slider_geometry`.
+        let table_drew_sliders = self.cdp_table_drew_sliders;
         // Same deferral as the rest: the re-seed needs `&mut self` after the dialog borrow ends.
         let mut cdp_flipped_toggle = false;
         let mut cdp_open_focused_editor = false;
@@ -6926,37 +7177,131 @@ impl App {
             // These arms come first because while an overlay is open `dialog_row_rects`
             // describes *it*, not the params form underneath (whose own arm is guarded on no
             // overlay being open).
-            Some(Dialog::CdpParams { list_edit: Some(edit), .. }) => {
+            Some(Dialog::CdpParams { list_edit: Some(edit), fields, .. }) => {
                 if row < edit.values.len() {
                     // Moving off a half-typed entry discards it, exactly as the arrow keys do
                     // — otherwise the buffer would follow the cursor onto a different row.
                     edit.editing = None;
                     edit.selected = row;
+                    // A click landing on the track also sets the value, exactly as it does on
+                    // the params form.
+                    if let Some(CdpField::List { min, max, integer, .. }) = fields.get(edit.field_index) {
+                        let slider_max =
+                            if edit.is_time_sequence { max.min(edit.time_max) } else { *max };
+                        if let Some(cell) = cdp_track_cell_at(CDP_LIST_ROW_TRACK_START, x_in_row) {
+                            if param_slider::applies(*min, slider_max) {
+                                let stops = param_slider::stop_count(*min, slider_max, *integer);
+                                edit.values[row] = param_slider::value_for_stop(
+                                    param_slider::stop_for_cell(cell, stops),
+                                    *min,
+                                    slider_max,
+                                    *integer,
+                                    false,
+                                );
+                                Self::clamp_cdp_list_entry(edit, *min, *max, slider_max);
+                                cdp_list_slider_drag = true;
+                            }
+                        }
+                    }
                 }
             }
             Some(Dialog::CdpParams { fields, table_edit: Some(edit), .. }) => {
                 if row < edit.rows.len() {
                     edit.editing = None;
                     edit.selected_row = row;
-                    // Column widths depend on the rendered values, so the hit-test reads
-                    // them from the same helper the renderer does.
+                    // Column widths depend on the rendered values *and* on whether tracks were
+                    // drawn, so the hit-test reads both from the same helpers the renderer does.
                     if let Some(columns) = cdp_table_columns(fields, edit) {
-                        if let Some(col) = cdp_table_column_at(&columns, &edit.rows, x_in_row) {
+                        let sliders = table_drew_sliders;
+                        if let Some(col) = cdp_table_column_at(&columns, &edit.rows, sliders, x_in_row) {
                             edit.selected_col = col;
+                            // Landing inside that column's track also sets the value, exactly
+                            // as it does on the params form and in the list editor.
+                            if let Some(start) =
+                                cdp_table_track_start(&columns, &edit.rows, sliders, col)
+                            {
+                                if let Some(cell) = cdp_track_cell_at(start, x_in_row) {
+                                    let c = &columns[col];
+                                    let stops = param_slider::stop_count(c.min, c.max, c.integer);
+                                    edit.rows[row][col] = param_slider::value_for_stop(
+                                        param_slider::stop_for_cell(cell, stops),
+                                        c.min,
+                                        c.max,
+                                        c.integer,
+                                        false,
+                                    );
+                                    Self::clamp_cdp_table_cell(edit, &columns);
+                                    cdp_table_slider_drag = true;
+                                }
+                            }
                         }
                     }
                 }
             }
-            Some(Dialog::CdpParams { marker_time_list_edit: Some(edit), .. }) => {
+            Some(Dialog::CdpParams { marker_time_list_edit: Some(edit), fields, .. }) => {
                 if row < edit.entries.len() {
                     edit.editing = None;
                     edit.selected_row = row;
+                    if let Some(CdpField::MarkerTimeList { min, max, .. }) =
+                        fields.get(edit.field_index)
+                    {
+                        let slider_max = max.min(edit.time_max);
+                        // The Marker column sits before the track, so a click landing inside
+                        // the track is also a click on the Time column — selected here so the
+                        // hint line and the range readout follow the pointer.
+                        if let Some(cell) =
+                            cdp_track_cell_at(CDP_MARKER_TIME_TRACK_START, x_in_row)
+                        {
+                            if param_slider::applies(*min, slider_max) {
+                                edit.selected_col = 1;
+                                let stops = param_slider::stop_count(*min, slider_max, false);
+                                edit.entries[row].1 = param_slider::value_for_stop(
+                                    param_slider::stop_for_cell(cell, stops),
+                                    *min,
+                                    slider_max,
+                                    false,
+                                    false,
+                                );
+                                Self::clamp_cdp_marker_time_entry(edit, *min, *max);
+                                cdp_marker_time_slider_drag = true;
+                            }
+                        }
+                    }
                 }
             }
-            Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) => {
+            Some(Dialog::CdpParams { hilite_band_edit: Some(edit), fields, .. }) => {
                 if row < edit.rows.len() {
                     edit.editing = None;
                     edit.selected_row = row;
+                } else if row == edit.rows.len() {
+                    // The dedicated slider line, which acts on whichever cell is selected —
+                    // so a click here never changes *which* cell, only its value.
+                    if let Some(CdpField::HiliteBand { lofrq, hifrq, amp1, amp2, transpose, .. }) =
+                        fields.get(edit.field_index)
+                    {
+                        if let Some(cell) = cdp_track_cell_at(HB_SLIDER_TRACK_START, x_in_row) {
+                            let selected = edit.selected_col;
+                            let band = &edit.rows[edit.selected_row];
+                            if let Some((col, _)) =
+                                hb_numeric_cell(band, selected, lofrq, hifrq, amp1, amp2, transpose)
+                                    .filter(|(c, _)| param_slider::applies(c.min, c.max))
+                            {
+                                let col = col.clone();
+                                let stops =
+                                    param_slider::stop_count(col.min, col.max, col.integer);
+                                let value = param_slider::value_for_stop(
+                                    param_slider::stop_for_cell(cell, stops),
+                                    col.min,
+                                    col.max,
+                                    col.integer,
+                                    false,
+                                );
+                                let r = edit.selected_row;
+                                hb_set_numeric_cell(&mut edit.rows[r], selected, &col, value);
+                                cdp_hilite_slider_drag = true;
+                            }
+                        }
+                    }
                 }
             }
             Some(Dialog::CdpParams { formant_picker: Some(picker), .. }) => {
@@ -7042,6 +7387,14 @@ impl App {
                     *focus = CDP_PRESET_FOCUS;
                 } else if row <= field_count {
                     *focus = row;
+                    // A click inside the track sets the value to the stop it landed on, as
+                    // well as focusing the row — pointing at a position on a slider *is* the
+                    // instruction, and making it a two-step (focus, then drag) would be the
+                    // one control in the app that ignored where you clicked it.
+                    if let Some(stop) = cdp_slider_stop_at(slider_geometry, fields.get(row - 1), x_in_row) {
+                        cdp_set_slider_stop(fields.get_mut(row - 1), stop);
+                        cdp_slider_drag_field = Some(row - 1);
+                    }
                     // A Toggle flips in place (it has no editor); everything else with a
                     // dedicated overlay opens it. A plain Number/Choice just takes focus.
                     match fields.get_mut(row - 1) {
@@ -7096,6 +7449,16 @@ impl App {
         // `open_cdp_focused_editor` self-checks which field kind is focused, and
         // `open_cdp_variadic_picker` self-checks that focus really is on a variadic process's
         // extra-input row, so neither needs the click arm to re-establish that here.
+        if cdp_slider_drag_field.is_some() {
+            self.cdp_slider_drag = cdp_slider_drag_field;
+        }
+        if cdp_list_slider_drag
+            || cdp_table_slider_drag
+            || cdp_marker_time_slider_drag
+            || cdp_hilite_slider_drag
+        {
+            self.cdp_sub_editor_slider_drag = true;
+        }
         if cdp_flipped_toggle {
             self.reseed_channel_split_defaults();
         }
@@ -8803,19 +9166,30 @@ impl App {
     /// backspacing everything) silently discards the edit, leaving the previous value
     /// untouched — there is no separate per-cell error state to show.
     fn commit_cdp_list_cell_edit(edit: &mut CdpListEdit, min: f64, max: f64, effective_max: f64, integer: bool) {
-        const MIN_GAP: f64 = 0.001;
         let Some(input) = edit.editing.take() else { return };
         let Ok(parsed) = input.value().trim().parse::<f64>() else { return };
         // Rounded before the range/ordering clamp below, so an integer field's neighbor gap
         // (`MIN_GAP`) still measures against the value it'll actually be clamped to.
-        let parsed = if integer { parsed.round() } else { parsed };
+        edit.values[edit.selected] = if integer { parsed.round() } else { parsed };
+        Self::clamp_cdp_list_entry(edit, min, max, effective_max);
+    }
+
+    /// Clamps the selected entry into range, and — on a time sequence — between its
+    /// neighbours, since CDP rejects a list whose times are not strictly ascending.
+    ///
+    /// Shared by the typed commit above and by a slider step, which can walk an entry past its
+    /// neighbour just as readily as typing can. `MIN_GAP` is the separation the commit path has
+    /// always used.
+    fn clamp_cdp_list_entry(edit: &mut CdpListEdit, min: f64, max: f64, effective_max: f64) {
+        const MIN_GAP: f64 = 0.001;
         let i = edit.selected;
+        let value = edit.values[i];
         edit.values[i] = if edit.is_time_sequence {
             let lower = if i == 0 { min } else { edit.values[i - 1] + MIN_GAP };
             let upper = if i + 1 == edit.values.len() { effective_max } else { edit.values[i + 1] - MIN_GAP };
-            parsed.clamp(lower.min(upper), upper.max(lower))
+            value.clamp(lower.min(upper), upper.max(lower))
         } else {
-            parsed.clamp(min, max)
+            value.clamp(min, max)
         };
     }
 
@@ -8869,12 +9243,32 @@ impl App {
                 edit.editing.as_mut().unwrap().backspace();
                 return;
             }
-            KeyCode::Left | KeyCode::Up => {
+            // Up/Down keep moving between entries; Left/Right now drive the selected entry's
+            // slider instead of doing the same thing as Up/Down. This list has one column, so
+            // wiring all four arrows to it was only ever a convenience — the two axes now mean
+            // two different things, matching the table editor beside it.
+            KeyCode::Up => {
                 edit.selected = edit.selected.saturating_sub(1);
                 return;
             }
-            KeyCode::Right | KeyCode::Down => {
+            KeyCode::Down => {
                 edit.selected = (edit.selected + 1).min(edit.values.len().saturating_sub(1));
+                return;
+            }
+            KeyCode::Left | KeyCode::Right if param_slider::applies(min, effective_max) => {
+                let value = edit.values[edit.selected];
+                let stops = param_slider::stop_count(min, effective_max, integer);
+                let at = param_slider::stop_for_value(value, min, effective_max, integer, false);
+                let next = if key.code == KeyCode::Right {
+                    (at + 1).min(stops.saturating_sub(1))
+                } else {
+                    at.saturating_sub(1)
+                };
+                edit.values[edit.selected] =
+                    param_slider::value_for_stop(next, min, effective_max, integer, false);
+                // A time sequence must stay strictly ascending, which a free slider step can
+                // break — clamped against the neighbours exactly as a typed value is.
+                Self::clamp_cdp_list_entry(edit, min, max, effective_max);
                 return;
             }
             KeyCode::Char('n') => {
@@ -8998,20 +9392,33 @@ impl App {
     /// range) and, when that column is `edit.time_column`, clamping between neighboring
     /// *rows*' values in that same column.
     fn commit_cdp_table_cell_edit(edit: &mut CdpTableEdit, columns: &[crate::model::cdp::TableColumn]) {
-        const MIN_GAP: f64 = 0.001;
         let Some(input) = edit.editing.take() else { return };
         let Ok(parsed) = input.value().trim().parse::<f64>() else { return };
+        let col = &columns[edit.selected_col];
+        edit.rows[edit.selected_row][edit.selected_col] =
+            if col.integer { parsed.round() } else { parsed };
+        Self::clamp_cdp_table_cell(edit, columns);
+    }
+
+    /// Clamps the selected cell into its column's range, and — in a time column — between the
+    /// rows either side, which CDP requires to stay strictly ascending.
+    ///
+    /// Shared by the typed commit above with slider steps and drags, for the same reason
+    /// `clamp_cdp_list_entry` is: a slider can walk a cell past its neighbour exactly as
+    /// readily as typing can.
+    fn clamp_cdp_table_cell(edit: &mut CdpTableEdit, columns: &[crate::model::cdp::TableColumn]) {
+        const MIN_GAP: f64 = 0.001;
         let r = edit.selected_row;
         let c = edit.selected_col;
         let col = &columns[c];
-        let parsed = if col.integer { parsed.round() } else { parsed };
+        let value = edit.rows[r][c];
         edit.rows[r][c] = if edit.time_column == Some(c) {
             let effective_max = col.max.min(edit.time_max);
             let lower = if r == 0 { col.min } else { edit.rows[r - 1][c] + MIN_GAP };
             let upper = if r + 1 == edit.rows.len() { effective_max } else { edit.rows[r + 1][c] - MIN_GAP };
-            parsed.clamp(lower.min(upper), upper.max(lower))
+            value.clamp(lower.min(upper), upper.max(lower))
         } else {
-            parsed.clamp(col.min, col.max)
+            value.clamp(col.min, col.max)
         };
     }
 
@@ -9059,12 +9466,40 @@ impl App {
                 edit.editing.as_mut().unwrap().backspace();
                 return;
             }
-            KeyCode::Left => {
+            // Tab/Shift+Tab took over column movement so Left/Right could drive the selected
+            // cell's slider. Tab is already this app's "next control" key everywhere else,
+            // which is what makes it the one to give the displaced job to.
+            KeyCode::BackTab => {
                 edit.selected_col = edit.selected_col.saturating_sub(1);
                 return;
             }
-            KeyCode::Right => {
+            KeyCode::Tab => {
                 edit.selected_col = (edit.selected_col + 1).min(columns.len().saturating_sub(1));
+                return;
+            }
+            KeyCode::Left | KeyCode::Right => {
+                let Some(col) = columns.get(edit.selected_col) else { return };
+                // A column with a one-sided range keeps the old meaning: with no track to
+                // step along, Left/Right stay column movement rather than doing nothing.
+                if !param_slider::applies(col.min, col.max) {
+                    edit.selected_col = if key.code == KeyCode::Right {
+                        (edit.selected_col + 1).min(columns.len().saturating_sub(1))
+                    } else {
+                        edit.selected_col.saturating_sub(1)
+                    };
+                    return;
+                }
+                let value = edit.rows[edit.selected_row][edit.selected_col];
+                let stops = param_slider::stop_count(col.min, col.max, col.integer);
+                let at = param_slider::stop_for_value(value, col.min, col.max, col.integer, false);
+                let next = if key.code == KeyCode::Right {
+                    (at + 1).min(stops.saturating_sub(1))
+                } else {
+                    at.saturating_sub(1)
+                };
+                edit.rows[edit.selected_row][edit.selected_col] =
+                    param_slider::value_for_stop(next, col.min, col.max, col.integer, false);
+                Self::clamp_cdp_table_cell(edit, &columns);
                 return;
             }
             KeyCode::Up => {
@@ -9332,17 +9767,26 @@ impl App {
     /// Marker column is selected — there's nothing to commit there, since 'a'/'b' set the
     /// marker directly rather than through a typed buffer.
     fn commit_cdp_marker_time_list_cell_edit(edit: &mut CdpMarkerTimeListEdit, min: f64, max: f64) {
-        const MIN_GAP: f64 = 0.001;
         if edit.selected_col != 1 {
             return;
         }
         let Some(input) = edit.editing.take() else { return };
         let Ok(parsed) = input.value().trim().parse::<f64>() else { return };
+        edit.entries[edit.selected_row].1 = parsed;
+        Self::clamp_cdp_marker_time_entry(edit, min, max);
+    }
+
+    /// Clamps the selected entry's time between its neighbours — always applied here, unlike
+    /// the table's optional time column, since these entries are required to ascend.
+    ///
+    /// Shared with slider steps and drags, for the reason `clamp_cdp_list_entry` is.
+    fn clamp_cdp_marker_time_entry(edit: &mut CdpMarkerTimeListEdit, min: f64, max: f64) {
+        const MIN_GAP: f64 = 0.001;
         let r = edit.selected_row;
         let effective_max = max.min(edit.time_max);
         let lower = if r == 0 { min } else { edit.entries[r - 1].1 + MIN_GAP };
         let upper = if r + 1 == edit.entries.len() { effective_max } else { edit.entries[r + 1].1 - MIN_GAP };
-        edit.entries[r].1 = parsed.clamp(lower.min(upper), upper.max(lower));
+        edit.entries[r].1 = edit.entries[r].1.clamp(lower.min(upper), upper.max(lower));
     }
 
     /// All key handling while `Dialog::CdpParams.marker_time_list_edit` is `Some` — the
@@ -9402,12 +9846,38 @@ impl App {
                 edit.editing.as_mut().unwrap().backspace();
                 return;
             }
-            KeyCode::Left => {
+            // Tab moves between the Marker and Time columns, freeing Left/Right for the Time
+            // column's slider — the same split the table editor uses.
+            KeyCode::BackTab => {
                 edit.selected_col = edit.selected_col.saturating_sub(1);
                 return;
             }
-            KeyCode::Right => {
+            KeyCode::Tab => {
                 edit.selected_col = (edit.selected_col + 1).min(1);
+                return;
+            }
+            KeyCode::Left | KeyCode::Right => {
+                // The Marker column holds a character, not a number, so there is nothing to
+                // slide there: Left/Right keep their old column-movement meaning on it.
+                if edit.selected_col != 1 || !param_slider::applies(min, effective_max) {
+                    edit.selected_col = if key.code == KeyCode::Right {
+                        (edit.selected_col + 1).min(1)
+                    } else {
+                        edit.selected_col.saturating_sub(1)
+                    };
+                    return;
+                }
+                let value = edit.entries[edit.selected_row].1;
+                let stops = param_slider::stop_count(min, effective_max, false);
+                let at = param_slider::stop_for_value(value, min, effective_max, false, false);
+                let next = if key.code == KeyCode::Right {
+                    (at + 1).min(stops.saturating_sub(1))
+                } else {
+                    at.saturating_sub(1)
+                };
+                edit.entries[edit.selected_row].1 =
+                    param_slider::value_for_stop(next, min, effective_max, false, false);
+                Self::clamp_cdp_marker_time_entry(edit, min, max);
                 return;
             }
             KeyCode::Up => {
@@ -9621,14 +10091,43 @@ impl App {
                 // `transpose_additive`, never `transpose_bit`.
                 return;
             }
-            KeyCode::Left => {
+            // Tab took over cell movement so Left/Right could drive the dedicated slider line
+            // under the list — the same split the other grid editors use, except that here the
+            // track is one shared line rather than one per cell (see the renderer).
+            KeyCode::BackTab => {
                 let row = &edit.rows[edit.selected_row];
                 edit.selected_col = hb_prev_visible_col(row, edit.selected_col);
                 return;
             }
-            KeyCode::Right => {
+            KeyCode::Tab => {
                 let row = &edit.rows[edit.selected_row];
                 edit.selected_col = hb_next_visible_col(row, edit.selected_col);
+                return;
+            }
+            KeyCode::Left | KeyCode::Right => {
+                let row = &edit.rows[edit.selected_row];
+                let slider = hb_numeric_cell(row, edit.selected_col, &lofrq, &hifrq, &amp1, &amp2, &transpose)
+                    .filter(|(col, _)| param_slider::applies(col.min, col.max));
+                // A checkbox cell has no track, so Left/Right keep their old cell-movement
+                // meaning there rather than doing nothing.
+                let Some((col, value)) = slider else {
+                    edit.selected_col = if key.code == KeyCode::Right {
+                        hb_next_visible_col(row, edit.selected_col)
+                    } else {
+                        hb_prev_visible_col(row, edit.selected_col)
+                    };
+                    return;
+                };
+                let stops = param_slider::stop_count(col.min, col.max, col.integer);
+                let at = param_slider::stop_for_value(value, col.min, col.max, col.integer, false);
+                let next = if key.code == KeyCode::Right {
+                    (at + 1).min(stops.saturating_sub(1))
+                } else {
+                    at.saturating_sub(1)
+                };
+                let value = param_slider::value_for_stop(next, col.min, col.max, col.integer, false);
+                let cell = edit.selected_col;
+                hb_set_numeric_cell(&mut edit.rows[edit.selected_row], cell, col, value);
                 return;
             }
             KeyCode::Up => {
@@ -10654,6 +11153,37 @@ impl App {
             // straight away rather than making the user tab off the row to see them.
             self.apply_script_preset(chosen.0, chosen.1);
             return;
+        }
+        // A bounded number's Left/Right drive its slider rather than its caret. That trade is
+        // the point of the control: stepping a value you can see is the common act, and moving
+        // a caret inside a six-character number is not — `TextInput`'s own `fresh` flag means
+        // typing a digit replaces the value outright, and Backspace/Home/End still edit in
+        // place, so nothing that mattered is actually gone.
+        //
+        // A field switched to an envelope is skipped: its value is a curve, and there is no
+        // single number for a knob to point at. So is an unbounded one, which has no track.
+        if let Some(CdpField::Number {
+            input, min, max, integer, exponential, envelope: None, ..
+        }) = fields.get_mut(focus_val - 1)
+        {
+            if param_slider::applies(*min, *max) {
+                let (min, max, integer, exponential) = (*min, *max, *integer, *exponential);
+                let stops = param_slider::stop_count(min, max, integer);
+                let current = input.value().trim().parse::<f64>().unwrap_or(min);
+                let at = param_slider::stop_for_value(current, min, max, integer, exponential);
+                // Saturating at both ends rather than wrapping: a slider that jumped from full
+                // to zero on one more keypress would be a trap on a parameter feeding audio.
+                let next = if forward {
+                    (at + 1).min(stops.saturating_sub(1))
+                } else {
+                    at.saturating_sub(1)
+                };
+                let value = param_slider::value_for_stop(next, min, max, integer, exponential);
+                // `fresh` so the next digit typed replaces this value instead of appending to
+                // it — the same contract a field carries when the dialog first opens.
+                *input = TextInput::fresh(format_cdp_number_for_display(value, integer));
+                return;
+            }
         }
         if let Some(input) = self.dialog_input() {
             if forward { input.right(); } else { input.left(); }
@@ -15428,6 +15958,28 @@ impl App {
             if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
                 self.handle_cdp_browser_scroll(mouse);
             }
+            // A slider grabbed by a press keeps following the pointer until it is released,
+            // which is what makes it a slider rather than a row of click targets. Handled here
+            // (before the Down-only routing below) for the same reason the envelope editor's
+            // mouse is: Drag and Up never reach that path at all.
+            if self.cdp_slider_drag.is_some() || self.cdp_sub_editor_slider_drag {
+                match mouse.kind {
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if self.cdp_slider_drag.is_some() {
+                            self.drag_cdp_slider(mouse.column);
+                        } else {
+                            self.drag_cdp_sub_editor_slider(mouse.column);
+                        }
+                        return;
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        self.cdp_slider_drag = None;
+                        self.cdp_sub_editor_slider_drag = false;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 let pos = Position::new(mouse.column, mouse.row);
                 let hit = self
@@ -18153,6 +18705,25 @@ impl App {
             self.dialog_n_interactive = 0;
             self.dialog_row_rects.clear();
         }
+        // Recorded from the same decision the renderer just made, for the click handler — see
+        // `CdpSliderGeometry` and `cdp_table_draws_sliders`.
+        self.cdp_table_drew_sliders = match self.dialog.as_ref() {
+            Some(Dialog::CdpParams { table_edit: Some(edit), fields, .. }) => {
+                cdp_table_columns(fields, edit)
+                    .is_some_and(|c| cdp_table_draws_sliders(&c, &edit.rows, area.width))
+            }
+            _ => false,
+        };
+        self.cdp_slider_geometry = match self.dialog.as_ref() {
+            Some(Dialog::CdpParams { catalog_index, .. }) => self
+                .cdp_catalog
+                .processes
+                .get(*catalog_index)
+                .map(|def| cdp_params_slider_column(def, area.width))
+                .filter(|(width, _)| *width > 0)
+                .map(|(width, track_start)| CdpSliderGeometry { track_start, width }),
+            _ => None,
+        };
         self.render_dest_picker_column(frame);
         self.capture_dialog_hints(frame);
 
@@ -21297,6 +21868,22 @@ fn render_cdp_variadic_picker(
 /// it off the terminal beyond a sane fixed cap.
 const CDP_LIST_EDITOR_ROWS: usize = 16;
 
+/// Column, within a list-editor row, where the slider track begins — the width of the `" NNN: "`
+/// index prefix each row opens with. Shared by that renderer and the click handler, for the same
+/// reason `cdp_params_slider_start` is.
+const CDP_LIST_ROW_TRACK_START: usize = 6;
+
+/// The same, for the marker-time-list editor, whose rows carry a fixed-width Marker column
+/// (`MARKER_WIDTH` 6, plus two spaces) between the index gutter and the Time column's track.
+const CDP_MARKER_TIME_TRACK_START: usize = CDP_LIST_ROW_TRACK_START + 6 + 2;
+
+/// Width of the label naming the selected cell on the hilite-band editor's dedicated slider
+/// line — wide enough for its longest column name ("Transpose").
+const HB_SLIDER_LABEL_WIDTH: usize = 11;
+
+/// Where that line's track begins: one leading space plus the label.
+const HB_SLIDER_TRACK_START: usize = 1 + HB_SLIDER_LABEL_WIDTH;
+
 /// The plain-list editor: one number per row, no time axis or interpolated curve — the
 /// `required_list` counterpart to `render_cdp_envelope_editor`, much simpler since there's
 /// nothing to interpolate between entries (`CdpListEdit`'s doc comment has the key
@@ -21322,13 +21909,28 @@ fn render_cdp_list_editor(
     let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
     let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
 
+    // A time-sequence list's practical ceiling is the selection's duration, not the catalog's
+    // safety-cap `max` — the same `effective_max` the key handler steps against, so the track
+    // the user drags spans the range the value is actually allowed to take.
+    let slider_max = if edit.is_time_sequence { max.min(edit.time_max) } else { max };
+    let slider_applies = param_slider::applies(min, slider_max);
+
     // Sized to fit the widest hint line, not a fixed guess — a fixed 50 cols cut off "n:insert"
     // (and would cut off the range text too, for a process whose min/max are wide enough) on
     // any terminal, not just narrow ones, since `Paragraph` here has no wrap set.
-    let hint_line_1 = " \u{2190}\u{2192}\u{2191}\u{2193}:select  type:edit value  n:insert  Del:remove";
+    let hint_line_1 = if slider_applies {
+        " \u{2190}\u{2192}:adjust  \u{2191}\u{2193}:select  type:edit value  n:insert  Del:remove"
+    } else {
+        " \u{2191}\u{2193}:select  type:edit value  n:insert  Del:remove"
+    };
     let hint_line_2 = format!(" Enter:save  Esc:cancel  range {}", format_cdp_range(min, max, integer));
     let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()) as u16;
-    let width = (content_width + 2).max(50).min(area.width);
+    // Room for the index prefix, the track, and a number beside it.
+    let row_width = (CDP_LIST_ROW_TRACK_START + param_slider::CELLS + 2 + 12) as u16;
+    let width = (content_width + 2)
+        .max(if slider_applies { row_width } else { 0 })
+        .max(50)
+        .min(area.width);
     // header spacer + LIST_ROWS + blank + 2 hint lines, + 2 border.
     let height = (1 + CDP_LIST_EDITOR_ROWS as u16 + 1 + 2 + 2).min(area.height);
     let popup = Rect {
@@ -21356,6 +21958,17 @@ fn render_cdp_list_editor(
     for (i, &v) in edit.values.iter().enumerate().skip(scroll_top).take(list_rows) {
         let style = if i == edit.selected { selected_style } else { base };
         let prefix = format!(" {:>3}: ", i + 1);
+        // The track sits between the index and the value, the same order the params form uses
+        // — slider first, number to its right. `edit.editing`'s in-progress text drives it too,
+        // so the knob tracks what is being typed rather than freezing at the committed value.
+        let track = |value: f64| -> Vec<Span<'static>> {
+            if !slider_applies {
+                return Vec::new();
+            }
+            let mut out = param_slider::spans(value, min, slider_max, integer, false, i == edit.selected);
+            out.push(Span::styled("  ", style));
+            out
+        };
         // The selected row shows the in-progress typed buffer (with a cursor) instead of
         // the committed value while `edit.editing` is `Some` — the same
         // before/cursor/after cursor rendering every other `TextInput` field in this app
@@ -21363,26 +21976,37 @@ fn render_cdp_list_editor(
         if i == edit.selected {
             if let Some(input) = &edit.editing {
                 let (before, under, after) = input.split_at_cursor();
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, style),
+                let mut spans = vec![Span::styled(prefix, style)];
+                spans.extend(track(input.value().trim().parse::<f64>().unwrap_or(v)));
+                spans.extend([
                     Span::styled(before, style),
                     Span::styled(under, cursor_style),
                     Span::styled(after, style),
-                ]));
+                ]);
+                lines.push(Line::from(spans));
                 rendered_rows += 1;
                 continue;
             }
         }
-        let text = format!("{prefix}{}", format_cdp_float_for_display(v));
-        lines.push(Line::from(Span::styled(text, style)));
+        let mut spans = vec![Span::styled(prefix, style)];
+        spans.extend(track(v));
+        spans.push(Span::styled(format_cdp_float_for_display(v), style));
+        lines.push(Line::from(spans));
         rendered_rows += 1;
     }
     for _ in rendered_rows..list_rows {
         lines.push(Line::raw(""));
     }
     lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::styled(" \u{2190}\u{2192}\u{2191}\u{2193}", hint_style),
+    let mut nav_hint = Vec::new();
+    if slider_applies {
+        nav_hint.push(Span::styled(" \u{2190}\u{2192}", hint_style));
+        nav_hint.push(Span::styled(":adjust  ", label_style));
+        nav_hint.push(Span::styled("\u{2191}\u{2193}", hint_style));
+    } else {
+        nav_hint.push(Span::styled(" \u{2191}\u{2193}", hint_style));
+    }
+    nav_hint.extend([
         Span::styled(":select  ", label_style),
         Span::styled("type", hint_style),
         Span::styled(":edit value  ", label_style),
@@ -21390,7 +22014,8 @@ fn render_cdp_list_editor(
         Span::styled(":insert  ", label_style),
         Span::styled("Del", hint_style),
         Span::styled(":remove", label_style),
-    ]));
+    ]);
+    lines.push(Line::from(nav_hint));
     lines.push(Line::from(vec![
         Span::styled(" Enter", hint_style),
         Span::styled(":save  ", label_style),
@@ -21666,6 +22291,21 @@ fn render_curve_transform_params(
     let param_names: Vec<&str> = def.map(|d| d.params.iter().map(|p| p.name.as_str()).collect()).unwrap_or_default();
 
     let name_width = param_names.iter().map(|n| n.chars().count()).max().unwrap_or(0).max(4);
+    // This form gets the same sliders the main params dialog does — it is a process params
+    // form, just reached from the curve editor instead of the browser. Reserved for the whole
+    // form so the values line up, and dropped entirely on a terminal too narrow, exactly as
+    // `cdp_params_slider_column` decides it there.
+    let wants_sliders = params.fields.iter().any(|f| {
+        matches!(f, CdpField::Number { min, max, envelope: None, .. } if param_slider::applies(*min, *max))
+    });
+    let slider_width = if wants_sliders
+        && 4 + name_width + param_slider::CELLS + 1 + 20 <= area.width as usize
+    {
+        param_slider::CELLS + 1
+    } else {
+        0
+    };
+    let slider_pad = " ".repeat(slider_width);
     let mut lines = Vec::new();
     for (i, field) in params.fields.iter().enumerate() {
         let name = param_names.get(i).copied().unwrap_or("?");
@@ -21678,29 +22318,53 @@ fn render_curve_transform_params(
             }
             _ => "?".to_string(),
         };
+        // The row's track, or the blank that keeps a sliderless row's value in the same column.
+        let track = |field: &CdpField| -> Vec<Span<'static>> {
+            if slider_width == 0 {
+                return Vec::new();
+            }
+            let CdpField::Number { input, min, max, integer, exponential, envelope: None, .. } = field
+            else {
+                return vec![Span::styled(slider_pad.clone(), base)];
+            };
+            if !param_slider::applies(*min, *max) {
+                return vec![Span::styled(slider_pad.clone(), base)];
+            }
+            let value = input.value().trim().parse::<f64>().unwrap_or(*min);
+            let mut out =
+                param_slider::spans(value, *min, *max, *integer, *exponential, i == params.focus);
+            out.push(Span::styled(" ", base));
+            out
+        };
         if i == params.focus {
             if let CdpField::Number { input, .. } = field {
                 let (before, under, after) = input.split_at_cursor();
-                lines.push(Line::from(vec![
-                    Span::styled(format!(" {name:<name_width$}  "), label_style),
+                let mut spans = vec![Span::styled(format!(" {name:<name_width$}  "), label_style)];
+                spans.extend(track(field));
+                spans.extend([
                     Span::styled(before.clone(), row_style),
                     Span::styled(under, cursor_style),
                     Span::styled(after.clone(), row_style),
-                ]));
+                ]);
+                lines.push(Line::from(spans));
                 continue;
             }
         }
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {name:<name_width$}  "), label_style),
-            Span::styled(value_text, row_style),
-        ]));
+        let mut spans = vec![Span::styled(format!(" {name:<name_width$}  "), label_style)];
+        spans.extend(track(field));
+        spans.push(Span::styled(value_text, row_style));
+        lines.push(Line::from(spans));
     }
     let apply_style = if params.focus == params.fields.len() { selected_style } else { base };
     lines.push(Line::from(Span::styled(" Apply", apply_style)));
 
-    let hint_line_1 = " Tab/Shift+Tab:field  \u{2191}\u{2193}:nudge  space:toggle  e/Enter:edit list";
+    let hint_line_1 = if slider_width > 0 {
+        " \u{2190}\u{2192}:adjust  \u{2191}\u{2193}/Tab:field  space:toggle  e/Enter:edit list"
+    } else {
+        " Tab/Shift+Tab:field  \u{2191}\u{2193}:nudge  space:toggle  e/Enter:edit list"
+    };
     let hint_line_2 = " Enter:edit list / apply  click:select  Esc:back";
-    let header_width = 4 + name_width + 20;
+    let header_width = 4 + name_width + slider_width + 20;
     let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()).max(header_width);
     let width = (content_width as u16 + 4).max(40).min(area.width);
     let height = (lines.len() as u16 + 1 + 2 + 2 + if params.error.is_some() { 1 } else { 0 }).min(area.height);
@@ -21732,10 +22396,10 @@ fn render_curve_transform_params(
     // click rect that submits.
     let hints_line_index = field_count + 2 + params.error.is_some() as usize;
     out.push(Line::from(vec![
-        Span::styled(" Tab/Shift+Tab", hint_style),
+        Span::styled(" \u{2190}\u{2192}", hint_style),
+        Span::styled(":adjust  ", label_style),
+        Span::styled("\u{2191}\u{2193}/Tab", hint_style),
         Span::styled(":field  ", label_style),
-        Span::styled("\u{2191}\u{2193}", hint_style),
-        Span::styled(":nudge  ", label_style),
         Span::styled("space", hint_style),
         Span::styled(":toggle  ", label_style),
         Span::styled("e/Enter", hint_style),
@@ -21903,10 +22567,23 @@ fn render_cdp_table_editor(
     // guess is exactly what let a long label collide with its own range there).
     let col_widths: Vec<usize> = cdp_table_column_widths(columns, &edit.rows);
 
-    let hint_line_1 = " \u{2190}\u{2192}\u{2191}\u{2193}:select  type:edit value  n:insert  Del:remove";
+    // Sliders are drawn only if the whole table still fits — the same rule the params form
+    // follows, and it bites harder here because a table pays for a track per *column*. Dropped
+    // wholesale rather than per column, so the header and every row keep one shared layout.
     let hint_line_2 = " Enter:save  Esc:cancel";
-    let header_width: usize = 5 + col_widths.iter().map(|w| w + 2).sum::<usize>();
-    let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()).max(header_width) as u16;
+    let sliders = cdp_table_draws_sliders(columns, &edit.rows, area.width);
+    let hint_line_1 = if sliders {
+        " \u{2190}\u{2192}:adjust  \u{2191}\u{2193}:row  Tab:column  type:edit value  n:insert  Del:remove"
+    } else {
+        " \u{2190}\u{2192}\u{2191}\u{2193}:select  type:edit value  n:insert  Del:remove"
+    };
+    let cell_widths = cdp_table_cell_widths(columns, &edit.rows, sliders);
+    let header_width: usize = 5 + cell_widths.iter().sum::<usize>();
+    let content_width = hint_line_1
+        .chars()
+        .count()
+        .max(hint_line_2.chars().count())
+        .max(header_width) as u16;
     let width = (content_width + 2).max(50).min(area.width);
     // header spacer + column-header row + TABLE_ROWS + blank + 2 hint lines, + 2 border.
     let height = (1 + 1 + CDP_TABLE_EDITOR_ROWS as u16 + 1 + 2 + 2).min(area.height);
@@ -21928,10 +22605,11 @@ fn render_cdp_table_editor(
 
     let mut lines = vec![Line::raw("")];
 
-    // Column header row.
+    // Column header row. Each name is padded to the *whole* cell (track included) so a heading
+    // still sits above the column it names once sliders widen them.
     let mut header = String::from("      ");
-    for (col, &w) in columns.iter().zip(&col_widths) {
-        header.push_str(&format!("{:<w$}  ", col.name));
+    for (col, &w) in columns.iter().zip(&cell_widths) {
+        header.push_str(&format!("{:<w$}", col.name));
     }
     lines.push(Line::from(Span::styled(header, label_style)));
 
@@ -21943,10 +22621,26 @@ fn render_cdp_table_editor(
         let row_style = if r == edit.selected_row { selected_style } else { base };
         let mut spans = vec![Span::styled(format!(" {:>3}: ", r + 1), row_style)];
         for (c, (&v, &w)) in row.iter().zip(&col_widths).enumerate() {
+            // This cell's track, if its column has one. The selected cell's knob takes the
+            // focus accent; every other row's is dim, so the grid reads as one active cell
+            // among many rather than a wall of equally-lit controls.
+            let is_selected_cell = r == edit.selected_row && c == edit.selected_col;
+            if let Some(col) = columns.get(c).filter(|_| cdp_table_track_start(columns, &edit.rows, sliders, c).is_some()) {
+                let shown = edit
+                    .editing
+                    .as_ref()
+                    .filter(|_| is_selected_cell)
+                    .and_then(|i| i.value().trim().parse::<f64>().ok())
+                    .unwrap_or(v);
+                spans.extend(param_slider::spans(
+                    shown, col.min, col.max, col.integer, false, is_selected_cell,
+                ));
+                spans.push(Span::styled(" ", row_style));
+            }
             // The selected cell shows the in-progress typed buffer (with a cursor) instead
             // of the committed value while `edit.editing` is `Some` — same
             // before/cursor/after rendering every other `TextInput` field in this app uses.
-            if r == edit.selected_row && c == edit.selected_col {
+            if is_selected_cell {
                 if let Some(input) = &edit.editing {
                     let (before, under, after) = input.split_at_cursor();
                     spans.push(Span::styled(before.clone(), row_style));
@@ -21969,16 +22663,31 @@ fn render_cdp_table_editor(
         lines.push(Line::raw(""));
     }
     lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::styled(" \u{2190}\u{2192}\u{2191}\u{2193}", hint_style),
-        Span::styled(":select  ", label_style),
+    let mut nav_hint = Vec::new();
+    if sliders {
+        nav_hint.extend([
+            Span::styled(" \u{2190}\u{2192}", hint_style),
+            Span::styled(":adjust  ", label_style),
+            Span::styled("\u{2191}\u{2193}", hint_style),
+            Span::styled(":row  ", label_style),
+            Span::styled("Tab", hint_style),
+            Span::styled(":column  ", label_style),
+        ]);
+    } else {
+        nav_hint.extend([
+            Span::styled(" \u{2190}\u{2192}\u{2191}\u{2193}", hint_style),
+            Span::styled(":select  ", label_style),
+        ]);
+    }
+    nav_hint.extend([
         Span::styled("type", hint_style),
         Span::styled(":edit value  ", label_style),
         Span::styled("n", hint_style),
         Span::styled(":insert  ", label_style),
         Span::styled("Del", hint_style),
         Span::styled(":remove", label_style),
-    ]));
+    ]);
+    lines.push(Line::from(nav_hint));
     let mut closing_hints = vec![Span::styled(" Enter", hint_style), Span::styled(":save  ", label_style)];
     // Only a compound crystal field has a second section to switch to — the same key the
     // params dialog uses to open an editor at all, reused here for "the other half."
@@ -22034,11 +22743,27 @@ fn render_cdp_marker_time_list_editor(
     const MARKER_WIDTH: usize = 6;
     let time_width = edit.entries.iter().map(|(_, t)| format_cdp_float_for_display(*t).len()).max().unwrap_or(0).max(4);
 
+    // The Time column's practical ceiling is the selection's duration, matching the key
+    // handler's own `effective_max`.
+    let slider_max = max.min(edit.time_max);
     let marker_keys: String = edit.markers.iter().collect();
-    let hint_line_1 = format!(" \u{2190}\u{2192}\u{2191}\u{2193}:select  {marker_keys}:set marker  type:edit time  n:insert  Del:remove");
     let hint_line_2 = " Enter:save  Esc:cancel";
-    let header_width = 5 + MARKER_WIDTH + 2 + time_width + 2;
-    let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()).max(header_width) as u16;
+    let hint_for = |with_sliders: bool| {
+        if with_sliders {
+            format!(" \u{2190}\u{2192}:adjust  \u{2191}\u{2193}:row  Tab:column  {marker_keys}:set marker  type:edit time  n:insert  Del:remove")
+        } else {
+            format!(" \u{2190}\u{2192}\u{2191}\u{2193}:select  {marker_keys}:set marker  type:edit time  n:insert  Del:remove")
+        }
+    };
+    let row_width = |with_sliders: bool| {
+        let track = if with_sliders { param_slider::CELLS + 1 } else { 0 };
+        5 + MARKER_WIDTH + 2 + track + time_width + 2
+    };
+    // Same narrow-terminal rule as everywhere else: the track is what yields.
+    let sliders = param_slider::applies(min, slider_max)
+        && row_width(true).max(hint_for(true).chars().count()) + 2 <= area.width as usize;
+    let hint_line_1 = hint_for(sliders);
+    let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()).max(row_width(sliders)) as u16;
     let width = (content_width + 2).max(50).min(area.width);
     let height = (1 + 1 + CDP_TABLE_EDITOR_ROWS as u16 + 1 + 2 + 2).min(area.height);
     let popup = Rect {
@@ -22059,7 +22784,13 @@ fn render_cdp_marker_time_list_editor(
 
     let mut lines = vec![Line::raw("")];
     lines.push(Line::from(Span::styled(
-        format!("      {:<MARKER_WIDTH$}  {:<time_width$}", "Marker", "Time"),
+        format!(
+            "      {:<MARKER_WIDTH$}  {:<pad$}{:<time_width$}",
+            "Marker",
+            "",
+            "Time",
+            pad = if sliders { param_slider::CELLS + 1 } else { 0 }
+        ),
         label_style,
     )));
 
@@ -22078,10 +22809,24 @@ fn render_cdp_marker_time_list_editor(
             spans.push(Span::styled(format!("{:<MARKER_WIDTH$}  ", marker), row_style));
         }
 
+        // The Time column's track, when there is room for one. The knob follows the typed
+        // buffer as well as the committed value, like every other slider in the app.
+        let time_selected = r == edit.selected_row && edit.selected_col == 1;
+        if sliders {
+            let shown = edit
+                .editing
+                .as_ref()
+                .filter(|_| time_selected)
+                .and_then(|i| i.value().trim().parse::<f64>().ok())
+                .unwrap_or(time);
+            spans.extend(param_slider::spans(shown, min, slider_max, false, false, time_selected));
+            spans.push(Span::styled(" ", row_style));
+        }
+
         // Time column (1) — shows the in-progress typed buffer (with a cursor) instead of
         // the committed value while `edit.editing` is `Some`, same convention every other
         // `TextInput`-backed field in this app uses.
-        if r == edit.selected_row && edit.selected_col == 1 {
+        if time_selected {
             if let Some(input) = &edit.editing {
                 let (before, under, after) = input.split_at_cursor();
                 spans.push(Span::styled(before.clone(), row_style));
@@ -22105,9 +22850,23 @@ fn render_cdp_marker_time_list_editor(
         lines.push(Line::raw(""));
     }
     lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::styled(" \u{2190}\u{2192}\u{2191}\u{2193}", hint_style),
-        Span::styled(":select  ", label_style),
+    let mut nav_hint = Vec::new();
+    if sliders {
+        nav_hint.extend([
+            Span::styled(" \u{2190}\u{2192}", hint_style),
+            Span::styled(":adjust  ", label_style),
+            Span::styled("\u{2191}\u{2193}", hint_style),
+            Span::styled(":row  ", label_style),
+            Span::styled("Tab", hint_style),
+            Span::styled(":column  ", label_style),
+        ]);
+    } else {
+        nav_hint.extend([
+            Span::styled(" \u{2190}\u{2192}\u{2191}\u{2193}", hint_style),
+            Span::styled(":select  ", label_style),
+        ]);
+    }
+    nav_hint.extend([
         Span::styled(marker_keys.clone(), hint_style),
         Span::styled(":set marker  ", label_style),
         Span::styled("type", hint_style),
@@ -22116,7 +22875,8 @@ fn render_cdp_marker_time_list_editor(
         Span::styled(":insert  ", label_style),
         Span::styled("Del", hint_style),
         Span::styled(":remove", label_style),
-    ]));
+    ]);
+    lines.push(Line::from(nav_hint));
     lines.push(Line::from(vec![
         Span::styled(" Enter", hint_style),
         Span::styled(":save  ", label_style),
@@ -22139,6 +22899,50 @@ fn render_cdp_marker_time_list_editor(
 /// shows its own short label plus `[X]`/`[ ]` (self-descriptive, since unlike
 /// `render_cdp_table_editor`'s fixed columns there's no per-row-constant header this variable
 /// shape could use instead); a numeric cell shows its formatted value alone.
+/// The bounds and current value of a hilite-band row's numeric `cell`, or `None` for a
+/// checkbox/sign cell.
+///
+/// The one mapping from a cell index to the `TableColumn` governing it, shared by the dedicated
+/// slider (render, keys and mouse alike) so those three cannot disagree about which column a
+/// cell belongs to. `commit_cdp_hilite_band_cell_edit` keeps its own `match` because it writes
+/// back rather than reads, and the two shapes do not usefully unify.
+fn hb_numeric_cell<'a>(
+    row: &crate::model::cdp::HiliteBandRow,
+    cell: usize,
+    lofrq: &'a crate::model::cdp::TableColumn,
+    hifrq: &'a crate::model::cdp::TableColumn,
+    amp1: &'a crate::model::cdp::TableColumn,
+    amp2: &'a crate::model::cdp::TableColumn,
+    transpose: &'a crate::model::cdp::TableColumn,
+) -> Option<(&'a crate::model::cdp::TableColumn, f64)> {
+    match cell {
+        HB_LOFRQ => Some((lofrq, row.lofrq)),
+        HB_HIFRQ => Some((hifrq, row.hifrq)),
+        HB_AMP1 => Some((amp1, row.amp1)),
+        HB_AMP2 => Some((amp2, row.amp2)),
+        HB_TRANSPOSE => Some((transpose, row.transpose_value)),
+        _ => None,
+    }
+}
+
+/// Writes `value` into a hilite-band row's numeric `cell`, clamped to that cell's own column.
+fn hb_set_numeric_cell(
+    row: &mut crate::model::cdp::HiliteBandRow,
+    cell: usize,
+    col: &crate::model::cdp::TableColumn,
+    value: f64,
+) {
+    let value = if col.integer { value.round() } else { value }.clamp(col.min, col.max);
+    match cell {
+        HB_LOFRQ => row.lofrq = value,
+        HB_HIFRQ => row.hifrq = value,
+        HB_AMP1 => row.amp1 = value,
+        HB_AMP2 => row.amp2 = value,
+        HB_TRANSPOSE => row.transpose_value = value,
+        _ => {}
+    }
+}
+
 fn hb_cell_text(row: &crate::model::cdp::HiliteBandRow, cell: usize) -> String {
     match cell {
         HB_LOFRQ => format_cdp_float_for_display(row.lofrq),
@@ -22169,7 +22973,9 @@ fn render_cdp_hilite_band_editor(
     edit: &CdpHiliteBandEdit,
     def: Option<&crate::model::cdp::ProcessDef>,
 ) -> Vec<Rect> {
-    let Some(CdpField::HiliteBand { .. }) = fields.get(edit.field_index) else {
+    let Some(CdpField::HiliteBand { lofrq, hifrq, amp1, amp2, transpose, .. }) =
+        fields.get(edit.field_index)
+    else {
         return Vec::new();
     };
     let param = def.and_then(|d| d.params.get(edit.field_index));
@@ -22181,11 +22987,31 @@ fn render_cdp_hilite_band_editor(
     let selected_style = Style::default().fg(theme::SURFACE0).bg(theme::FOCUS);
     let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
 
-    let hint_line_1 = " \u{2190}\u{2192}\u{2191}\u{2193}:select  Space:toggle  type:edit value  n:insert  Del:remove";
+    // The selected cell's own track, on its own line under the list.
+    //
+    // Unlike the other three grids this editor does *not* put a track in every cell. Its rows
+    // are variable-shape — which of the five numeric cells is visible depends on that row's own
+    // bitflags — so inline tracks would sit at a different column on every row and cost some 80
+    // columns of width. One track for the cell you are on has a single fixed position, fits any
+    // terminal, and says the same thing.
+    let selected_cell = edit
+        .rows
+        .get(edit.selected_row)
+        .and_then(|row| {
+            hb_numeric_cell(row, edit.selected_col, lofrq, hifrq, amp1, amp2, transpose)
+        })
+        .filter(|(col, _)| param_slider::applies(col.min, col.max));
+
+    let hint_line_1 = if selected_cell.is_some() {
+        " \u{2190}\u{2192}:adjust  \u{2191}\u{2193}:row  Tab:cell  Space:toggle  type:edit value  n:insert  Del:remove"
+    } else {
+        " \u{2190}\u{2192}\u{2191}\u{2193}:select  Space:toggle  type:edit value  n:insert  Del:remove"
+    };
     let hint_line_2 = " Enter:save  Esc:cancel";
     let content_width = hint_line_1.chars().count().max(hint_line_2.chars().count()) as u16;
     let width = (content_width + 2).max(60).min(area.width);
-    let height = (1 + CDP_TABLE_EDITOR_ROWS as u16 + 1 + 2 + 2).min(area.height);
+    // + 2 for the blank line and the slider line beneath the list.
+    let height = (1 + CDP_TABLE_EDITOR_ROWS as u16 + 1 + 2 + 2 + 2).min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -22235,9 +23061,47 @@ fn render_cdp_hilite_band_editor(
         lines.push(Line::raw(""));
     }
     lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::styled(" \u{2190}\u{2192}\u{2191}\u{2193}", hint_style),
-        Span::styled(":select  ", label_style),
+    // The selected cell's track. Rendered even when the cell has no slider, as a blank line, so
+    // moving between cells does not make the list jump up and down a row.
+    lines.push(Line::raw(""));
+    match selected_cell {
+        Some((col, value)) => {
+            let shown = edit
+                .editing
+                .as_ref()
+                .and_then(|i| i.value().trim().parse::<f64>().ok())
+                .unwrap_or(value);
+            let mut spans = vec![Span::styled(
+                format!(" {:<w$}", col.name, w = HB_SLIDER_LABEL_WIDTH),
+                label_style,
+            )];
+            spans.extend(param_slider::spans(shown, col.min, col.max, col.integer, false, true));
+            spans.push(Span::styled(
+                format!("  {}", format_cdp_float_for_display(shown)),
+                base,
+            ));
+            lines.push(Line::from(spans));
+        }
+        None => lines.push(Line::raw("")),
+    }
+
+    let mut nav_hint = Vec::new();
+    if selected_cell.is_some() {
+        nav_hint.extend([
+            Span::styled(" \u{2190}\u{2192}", hint_style),
+            Span::styled(":adjust  ", label_style),
+            Span::styled("\u{2191}\u{2193}", hint_style),
+            Span::styled(":row  ", label_style),
+            Span::styled("Tab", hint_style),
+            Span::styled(":cell  ", label_style),
+        ]);
+    } else {
+        nav_hint.extend([
+            Span::styled(" \u{2190}\u{2192}\u{2191}\u{2193}", hint_style),
+            Span::styled(":select  ", label_style),
+        ]);
+    }
+    nav_hint.extend([
         Span::styled("Space", hint_style),
         Span::styled(":toggle  ", label_style),
         Span::styled("type", hint_style),
@@ -22246,7 +23110,8 @@ fn render_cdp_hilite_band_editor(
         Span::styled(":insert  ", label_style),
         Span::styled("Del", hint_style),
         Span::styled(":remove", label_style),
-    ]));
+    ]);
+    lines.push(Line::from(nav_hint));
     lines.push(Line::from(vec![
         Span::styled(" Enter", hint_style),
         Span::styled(":save  ", label_style),
@@ -22260,6 +23125,15 @@ fn render_cdp_hilite_band_editor(
     // from `x_in_row`, since a whole row is one rect here (columns are rendered inline, not
     // as separate areas). Scrolled-out rows are unhittable, so `row` is the row index.
     let mut rects = list_row_rects(inner, edit.rows.len(), scroll_top, table_rows, 1);
+    // Then the dedicated slider line, at index `rows.len()` — one more target, immediately
+    // after the rows, which is what lets the click handler tell it apart by index alone.
+    // Header spacer (1) + the row block + the blank line above it.
+    rects.push(Rect {
+        x: inner.x,
+        y: inner.y + 1 + table_rows as u16 + 1,
+        width: inner.width,
+        height: 1,
+    });
     rects.push(dialog_submit_rect(inner));
     rects
 }
@@ -22691,6 +23565,115 @@ fn cdp_params_column_widths(def: &crate::model::cdp::ProcessDef) -> (usize, usiz
     (label_width, range_width, cdp_params_value_width(def))
 }
 
+/// Columns the slider occupies on a row that has one: the track plus the single space that
+/// separates it from the range column to its left. Zero for a process where *no* parameter has
+/// a closed range, so a Praat form of one-sided numbers pays nothing for a column it can never
+/// draw in.
+///
+/// Reserved for the whole dialog rather than per row, since a row without a slider still has to
+/// leave the gap — the number fields down the right-hand side must line up, and the reason one
+/// row lacks a slider (an unbounded range, a toggle, a choice) is not a reason to move its value
+/// somewhere else.
+fn cdp_params_slider_width(def: &crate::model::cdp::ProcessDef) -> usize {
+    use crate::model::cdp::ParamKind;
+    let any = def.params.iter().any(|p| match &p.kind {
+        ParamKind::Number { min, max, .. } => param_slider::applies(*min, *max),
+        _ => false,
+    });
+    if any { param_slider::CELLS + 1 } else { 0 }
+}
+
+/// The column, measured from the inside of the dialog's border, where a row's slider track
+/// starts.
+///
+/// The one statement of that arithmetic. The renderer lays the row out by concatenating spans
+/// and the click handler has to find the track by counting columns, so without a shared
+/// definition the two drift and a click sets a value one cell from where it landed. Mirrors the
+/// label format `" {:<label_width$}  "` (one leading space, the label, two trailing) followed by
+/// the range column and the slider's own leading space.
+fn cdp_params_slider_start(label_width: usize, range_width: usize) -> usize {
+    1 + label_width + 2 + range_width + 1
+}
+
+/// Where this process's params dialog puts its slider track when drawn into `area_width`, as
+/// `(slider_width, track_start)`. `slider_width` is 0 when there is no slider column at all —
+/// either no parameter has a closed range, or the terminal is too narrow for the widened dialog.
+///
+/// Shared by the renderer and by the geometry the click handler is given, so "is there a track,
+/// and where does it begin" is answered once. The narrow-terminal rule in particular must not be
+/// evaluated twice: a dialog that dropped its sliders while the click handler still believed in
+/// them would set values from clicks that landed on the number field.
+fn cdp_params_slider_column(
+    def: &crate::model::cdp::ProcessDef,
+    area_width: u16,
+) -> (usize, usize) {
+    let (label_width, range_width, value_width) = cdp_params_column_widths(def);
+    let full = cdp_params_slider_width(def);
+    let fits = (14 + label_width + range_width + full + value_width).max(50) <= area_width as usize;
+    let slider_width = if fits { full } else { 0 };
+    (slider_width, cdp_params_slider_start(label_width, range_width))
+}
+
+/// The params dialog's slider geometry as last drawn — `(track_start, slider_width)` measured
+/// from the inside of the dialog's border.
+///
+/// Captured from the render rather than recomputed at click time for the same reason
+/// `dialog_hints_text` is scraped off the rendered buffer: the click handler has no frame area
+/// to consult, and the one thing it must never do is disagree with what is on screen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CdpSliderGeometry {
+    track_start: usize,
+    width: usize,
+}
+
+/// The stop a click at `x_in_row` lands on, or `None` when the pointer is not over a track this
+/// field actually has.
+///
+/// Deliberately answers `None` rather than clamping to an end for a click outside the track:
+/// the columns either side hold the range label and the number field, and a click on the number
+/// meaning "set this parameter to its maximum" would be a trap.
+fn cdp_slider_stop_at(
+    geometry: Option<CdpSliderGeometry>,
+    field: Option<&CdpField>,
+    x_in_row: u16,
+) -> Option<usize> {
+    let geometry = geometry?;
+    let CdpField::Number { min, max, integer, envelope: None, .. } = field? else { return None };
+    if !param_slider::applies(*min, *max) {
+        return None;
+    }
+    // `width` counts the separating space the track does not occupy.
+    let cell = (x_in_row as usize).checked_sub(geometry.track_start)?;
+    if cell >= param_slider::CELLS || geometry.width == 0 {
+        return None;
+    }
+    Some(param_slider::stop_for_cell(cell, param_slider::stop_count(*min, *max, *integer)))
+}
+
+/// The track cell a click at `x_in_row` lands on, given the column the track starts at, or
+/// `None` when the pointer is outside it.
+///
+/// The sub-editors' counterpart to `cdp_slider_stop_at`, which additionally has to consult the
+/// params form's own variable-width label column; here the track always starts at a fixed offset
+/// into the row, so a column is all it takes.
+fn cdp_track_cell_at(track_start: usize, x_in_row: u16) -> Option<usize> {
+    let cell = (x_in_row as usize).checked_sub(track_start)?;
+    (cell < param_slider::CELLS).then_some(cell)
+}
+
+/// Writes the value at `stop` into a `Number` field. A no-op on any other field kind, so the
+/// caller need not re-establish what it already checked.
+fn cdp_set_slider_stop(field: Option<&mut CdpField>, stop: usize) {
+    let Some(CdpField::Number { input, min, max, integer, exponential, envelope: None, .. }) = field
+    else {
+        return;
+    };
+    let value = param_slider::value_for_stop(stop, *min, *max, *integer, *exponential);
+    // `fresh` for the same reason a keyboard slider step is: the next digit typed replaces
+    // this value rather than appending to it.
+    *input = TextInput::fresh(format_cdp_number_for_display(value, *integer));
+}
+
 /// Widest rendered *value* any of `def`'s params can show.
 ///
 /// Split out because the value column used to be a flat 24 columns, which was ample for CDP —
@@ -22951,7 +23934,15 @@ fn render_cdp_params_dialog(
     // labels are sentences, and clamping to 110 clipped them off the right edge even when there
     // was plenty of room. The `min(area.width)` below still keeps the dialog inside the screen,
     // so a narrow terminal behaves exactly as before.
-    let width = (14 + label_width + range_width + value_width).max(50) as u16;
+    //
+    // The slider column is the one part of the row that yields on a narrow terminal: if the
+    // widened dialog would not fit, it is dropped entirely and the rows render exactly as they
+    // did before sliders existed. Narrowing the track instead would make the same arrow press
+    // mean a different amount on a different screen, and letting the dialog overhang would clip
+    // the *number* — the slider sits to its left, so the field carrying the actual value is what
+    // would fall off the right edge.
+    let (slider_width, _) = cdp_params_slider_column(def, area.width);
+    let width = (14 + label_width + range_width + slider_width + value_width).max(50) as u16;
     let width = width.min(area.width);
     let has_extra_input = cdp_has_extra_input(second_input, variadic_input, photo_input) as usize;
     // The inline error is the one piece of content that can be far wider than the form —
@@ -23026,6 +24017,12 @@ fn render_cdp_params_dialog(
         CdpParamsRow::Field(_) => Line::raw(""),
     };
 
+    // A row with no slider — a toggle, a choice, a datafile, a number whose range runs to
+    // infinity — still leaves the slider's columns blank, so every value on the form lines up
+    // down one edge. Blank rather than absent: the reason a given row has no slider is a
+    // property of that parameter, not a licence to move its value left of everyone else's.
+    let range_and_slider_pad = format!("{:<w$}", "", w = range_width + slider_width);
+
     let mut lines = vec![Line::raw("")];
 
     // ---- Notes the form placed above every field (see `cdp_params_leading_rows`) ----
@@ -23096,22 +24093,22 @@ fn render_cdp_params_dialog(
         let line = match field {
             CdpField::Text { input } => Line::from(vec![
                 Span::styled(label, label_style_here),
-                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(range_and_slider_pad.clone(), range_style),
                 Span::styled(format!(" {}", input.value()), base),
             ]),
             CdpField::FolderPath { path: None } => Line::from(vec![
                 Span::styled(label, label_style_here),
-                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(range_and_slider_pad.clone(), range_style),
                 Span::styled(" (not set — b to pick a folder)", dim_style),
             ]),
             CdpField::FolderPath { path: Some(path) } => Line::from(vec![
                 Span::styled(label, label_style_here),
-                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(range_and_slider_pad.clone(), range_style),
                 Span::styled(format!(" {path}"), base),
             ]),
             CdpField::Number { envelope: Some(points), .. } => Line::from(vec![
                 Span::styled(label, label_style_here),
-                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(range_and_slider_pad.clone(), range_style),
                 Span::styled(format!(" envelope ({} pts, e to edit)", points.len()), point_style),
             ]),
             // A `required_envelope` param has no constant representation at all — showing
@@ -23120,21 +24117,37 @@ fn render_cdp_params_dialog(
             // Apply/Preview until the user has actually opened the editor once.
             CdpField::Number { envelope: None, .. } if param.required_envelope => Line::from(vec![
                 Span::styled(label, label_style_here),
-                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(range_and_slider_pad.clone(), range_style),
                 Span::styled(" (not set — e to edit)", dim_style),
             ]),
-            CdpField::Number { input, min, max, integer, .. } => {
+            CdpField::Number { input, min, max, integer, exponential, .. } => {
                 let range = format!("{:<range_width$}", format_cdp_range(*min, *max, *integer));
+                // The knob tracks whatever is *in the field*, including a half-typed number:
+                // the slider is a read-out of the value as much as a control over it, and one
+                // that froze while you typed would be reporting a value that is no longer there.
+                // Unparseable text (an empty field, a lone "-") leaves it at the floor.
+                let slider = |focused: bool| -> Vec<Span<'static>> {
+                    if slider_width == 0 || !param_slider::applies(*min, *max) {
+                        return vec![Span::styled(" ".repeat(slider_width), range_style)];
+                    }
+                    let value = input.value().trim().parse::<f64>().unwrap_or(*min);
+                    let mut out = vec![Span::styled(" ", base)];
+                    out.extend(param_slider::spans(value, *min, *max, *integer, *exponential, focused));
+                    out
+                };
                 if is_focused {
                     let (before, under, after) = input.split_at_cursor();
                     let mut spans = vec![
                         Span::styled(label, label_style_here),
                         Span::styled(range, range_style),
+                    ];
+                    spans.extend(slider(true));
+                    spans.extend([
                         Span::styled(" ", base),
                         Span::styled(before, base),
                         Span::styled(under, cursor_style),
                         Span::styled(after, base),
-                    ];
+                    ]);
                     if let Some(display) = aw_displays.get(i).filter(|d| !d.is_empty()) {
                         spans.push(Span::styled(format!("   = {display}"), dim_style));
                     }
@@ -23146,8 +24159,9 @@ fn render_cdp_params_dialog(
                     let mut spans = vec![
                         Span::styled(label, label_style_here),
                         Span::styled(range, range_style),
-                        Span::styled(format!(" {}", input.value()), base),
                     ];
+                    spans.extend(slider(false));
+                    spans.push(Span::styled(format!(" {}", input.value()), base));
                     // The plugin's own reading of this value, in its own units. Dimmed and
                     // set off by `=` so it reads as a consequence of the number beside it
                     // rather than as a second editable field.
@@ -23172,7 +24186,7 @@ fn render_cdp_params_dialog(
                 };
                 Line::from(vec![
                     Span::styled(label, label_style_here),
-                    Span::styled(format!("{:<range_width$}", ""), range_style),
+                    Span::styled(range_and_slider_pad.clone(), range_style),
                     Span::styled(format!(" {text}"), value_style),
                 ])
             }
@@ -23181,7 +24195,7 @@ fn render_cdp_params_dialog(
                 let value = if is_focused { format!(" \u{25c4} {text} \u{25ba}") } else { format!(" {text}") };
                 Line::from(vec![
                     Span::styled(label, label_style_here),
-                    Span::styled(format!("{:<range_width$}", ""), range_style),
+                    Span::styled(range_and_slider_pad.clone(), range_style),
                     Span::styled(value, base),
                 ])
             }
@@ -23190,31 +24204,31 @@ fn render_cdp_params_dialog(
             // list editor (`App::open_cdp_list_editor`) instead of the envelope editor.
             CdpField::List { values, .. } if values.is_empty() => Line::from(vec![
                 Span::styled(label, label_style_here),
-                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(range_and_slider_pad.clone(), range_style),
                 Span::styled(" (not set — e to edit)", dim_style),
             ]),
             CdpField::List { values, .. } => Line::from(vec![
                 Span::styled(label, label_style_here),
-                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(range_and_slider_pad.clone(), range_style),
                 Span::styled(format!(" list ({} items, e to edit)", values.len()), point_style),
             ]),
             // A table field always has at least one seeded row (`CdpField::Table`'s doc
             // comment) — unlike List/required_envelope there's no "not set" state to show.
             CdpField::Table { rows, .. } => Line::from(vec![
                 Span::styled(label, label_style_here),
-                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(range_and_slider_pad.clone(), range_style),
                 Span::styled(format!(" table ({} rows, e to edit)", rows.len()), point_style),
             ]),
             // Same "always has at least one seeded entry" rationale as `Table`.
             CdpField::MarkerTimeList { entries, .. } => Line::from(vec![
                 Span::styled(label, label_style_here),
-                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(range_and_slider_pad.clone(), range_style),
                 Span::styled(format!(" marked list ({} entries, e to edit)", entries.len()), point_style),
             ]),
             // Same "always has at least one seeded row" rationale as `Table`.
             CdpField::HiliteBand { rows, .. } => Line::from(vec![
                 Span::styled(label, label_style_here),
-                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(range_and_slider_pad.clone(), range_style),
                 Span::styled(format!(" bands ({} rows, e to edit)", rows.len()), point_style),
             ]),
             // No catalog default exists to show (`CdpField::FormantBufferRef`'s doc
@@ -23222,7 +24236,7 @@ fn render_cdp_params_dialog(
             // above, just opened with 'b' (`FormantBufferPicker`) instead of 'e'.
             CdpField::FormantBufferRef { selected: None, .. } => Line::from(vec![
                 Span::styled(label, label_style_here),
-                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(range_and_slider_pad.clone(), range_style),
                 Span::styled(" (not set — b to pick)", dim_style),
             ]),
             CdpField::FormantBufferRef { selected: Some(idx), buffer_kind } => {
@@ -23233,7 +24247,7 @@ fn render_cdp_params_dialog(
                     .unwrap_or_else(|| "(missing — b to pick)".to_string());
                 Line::from(vec![
                     Span::styled(label, label_style_here),
-                    Span::styled(format!("{:<range_width$}", ""), range_style),
+                    Span::styled(range_and_slider_pad.clone(), range_style),
                     Span::styled(format!(" {name}"), base),
                 ])
             }
@@ -23242,7 +24256,7 @@ fn render_cdp_params_dialog(
             // (`Dialog::CdpParams.file_picker`) instead of a buffer list.
             CdpField::FilePath { path: None, .. } => Line::from(vec![
                 Span::styled(label, label_style_here),
-                Span::styled(format!("{:<range_width$}", ""), range_style),
+                Span::styled(range_and_slider_pad.clone(), range_style),
                 Span::styled(" (not set — b to pick)", dim_style),
             ]),
             // Both halves in one row, since they're one field — the vertex count is always
@@ -23255,14 +24269,14 @@ fn render_cdp_params_dialog(
                 if envelope.is_empty() {
                     Line::from(vec![
                         Span::styled(label, label_style_here),
-                        Span::styled(format!("{:<range_width$}", ""), range_style),
+                        Span::styled(range_and_slider_pad.clone(), range_style),
                         Span::styled(vertex_text, point_style),
                         Span::styled(", no envelope, e to edit", dim_style),
                     ])
                 } else {
                     Line::from(vec![
                         Span::styled(label, label_style_here),
-                        Span::styled(format!("{:<range_width$}", ""), range_style),
+                        Span::styled(range_and_slider_pad.clone(), range_style),
                         Span::styled(
                             format!("{vertex_text}, {} env pts, e to edit", envelope.len()),
                             point_style,
@@ -23277,7 +24291,7 @@ fn render_cdp_params_dialog(
                     .unwrap_or_else(|| path.clone());
                 Line::from(vec![
                     Span::styled(label, label_style_here),
-                    Span::styled(format!("{:<range_width$}", ""), range_style),
+                    Span::styled(range_and_slider_pad.clone(), range_style),
                     Span::styled(format!(" {name}"), base),
                 ])
             }
@@ -23301,7 +24315,7 @@ fn render_cdp_params_dialog(
         let value = if is_focused { format!(" \u{25c4} {name} \u{25ba}") } else { format!(" {name}") };
         lines.push(Line::from(vec![
             Span::styled(label, if is_focused { cursor_style } else { label_style }),
-            Span::styled(format!("{:<range_width$}", ""), range_style),
+            Span::styled(range_and_slider_pad.clone(), range_style),
             Span::styled(value, base),
         ]));
     }
@@ -23324,7 +24338,7 @@ fn render_cdp_params_dialog(
         let value = truncate_to_width(&format!(" {}", variadic.summary()), value_width);
         lines.push(Line::from(vec![
             Span::styled(label, if is_focused { cursor_style } else { label_style }),
-            Span::styled(format!("{:<range_width$}", ""), range_style),
+            Span::styled(range_and_slider_pad.clone(), range_style),
             Span::styled(value, base),
         ]));
     }
@@ -23348,7 +24362,7 @@ fn render_cdp_params_dialog(
         let value = truncate_to_width(&format!(" {summary}"), value_width);
         lines.push(Line::from(vec![
             Span::styled(label, if is_focused { cursor_style } else { label_style }),
-            Span::styled(format!("{:<range_width$}", ""), range_style),
+            Span::styled(range_and_slider_pad.clone(), range_style),
             // Dimmed while unpicked, matching how `CdpField::FilePath` renders its own
             // never-picked state — the row is not an error, it is an unfinished step.
             Span::styled(value, if photo.path.is_some() { base } else { dim_style }),
@@ -23398,10 +24412,10 @@ fn render_cdp_params_dialog(
         variadic_input.is_some() && focus == cdp_params_focus_extra_input(fields.len());
     let enter_hint = if variadic_row_focused { ":pick  " } else { ":run  " };
     lines.push(Line::from(vec![
-        Span::styled(" \u{2191}\u{2193}", hint_style),
-        Span::styled(":nudge  ", label_style),
-        Span::styled("Tab", hint_style),
-        Span::styled(":next  ", label_style),
+        Span::styled(" \u{2190}\u{2192}", hint_style),
+        Span::styled(":adjust  ", label_style),
+        Span::styled("\u{2191}\u{2193}", hint_style),
+        Span::styled(":field  ", label_style),
         Span::styled("Enter", hint_style),
         Span::styled(enter_hint, label_style),
         Span::styled("Esc", hint_style),
@@ -25144,6 +26158,7 @@ mod tests {
             max: 10_000.0,
             step: 1.0,
             integer: false,
+            exponential: false,
             envelope: Some(vec![(0.0, 220.0), (1.0, 9000.0), (2.0, 220.0)]),
         }];
         let edit = CdpEnvelopeEdit {
@@ -26792,25 +27807,6 @@ mod tests {
         assert_eq!(format_cdp_range(f64::NEG_INFINITY, f64::INFINITY, true), "[int]", "`integer`");
     }
 
-    /// An unbounded field's arrow keys must nudge from something a user can see. The fallback
-    /// for unparseable text is the field's `min`, which is `-inf` for a Praat parameter whose
-    /// script declares no floor — arrowing an empty field would otherwise land on negative
-    /// infinity.
-    #[test]
-    fn nudging_an_empty_unbounded_field_starts_from_zero() {
-        let mut field = CdpField::Number {
-            input: TextInput::new(""),
-            min: f64::NEG_INFINITY,
-            max: f64::INFINITY,
-            step: 0.01,
-            integer: false,
-            envelope: None,
-        };
-        cdp_nudge_number(Some(&mut field), 1.0, false);
-        let CdpField::Number { input, .. } = &field else { panic!("still a number") };
-        assert_eq!(input.value(), "1.0", "one step up from zero, not from -inf");
-    }
-
     /// The real generated catalog, not a fixture: the converter must not reintroduce a
     /// synthesised range. Only a bound a script actually declares may be finite on both sides,
     /// and there are far more parameters than declarations.
@@ -26914,46 +27910,79 @@ mod tests {
         }
     }
 
-    /// Regression test (user report): plain Up/Down in the main params dialog must nudge a
-    /// `Number` field by a flat 1.0, and Shift+Up/Down by a flat 0.1 — not the catalog's own
-    /// (often much finer) `step`, which previously applied to plain Up/Down with no
-    /// distinction from Shift at all (both nudged by the same `step`).
+    /// Left/Right step the focused number's slider, and Up/Down move between rows.
+    ///
+    /// This replaced a flat ±1 / ±0.1 Up/Down nudge. The nudge's own regression history is why
+    /// the replacement is worth stating plainly: a fixed step is a different fraction of every
+    /// parameter's range (a fourteenth of `blur avrg`'s Channels, a thousandth of a `[0-1]`
+    /// Airwindows control), where a stop is the same fraction of all of them.
     #[test]
-    fn plain_updown_nudges_by_one_shift_updown_by_a_tenth() {
+    fn left_right_step_the_slider_and_up_down_move_between_fields() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
-        open_blur_avrg_with_field_focused(&mut app); // "Channels", default 6.0
+        open_blur_avrg_with_field_focused(&mut app); // "Channels", [1-200], default 6.0
 
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
-        let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected a Number field") };
-        assert_eq!(input.value(), "7.0", "plain Up should nudge by a flat 1.0");
+        // `blur avrg`'s Channels declares `exponential = true`, so this also pins that the
+        // catalog's flag actually reaches the stops: the default 6.0 sits nearest stop 5 of a
+        // *geometric* [1, 200], and one step right is stop 6 — about 9.7, not the ~20 that
+        // even spacing would give.
+        let value = |app: &App| -> f64 {
+            let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+            let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected a Number") };
+            input.value().parse().expect("a number")
+        };
+        let geometric_stop = |n: usize| param_slider::value_for_stop(n, 1.0, 200.0, false, true);
+        assert_eq!(param_slider::stop_for_value(6.0, 1.0, 200.0, false, true), 5);
 
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
-        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
-        let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected a Number field") };
-        assert_eq!(input.value(), "7.1", "Shift+Up should nudge by a flat 0.1");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(
+            (value(&app) - geometric_stop(6)).abs() < 1e-6,
+            "Right steps to the next stop, got {}",
+            value(&app)
+        );
 
+        // ...and Left comes back. The default 6.0 was not itself on a stop, so this also pins
+        // that a step counts from the *nearest* stop rather than from the raw value.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(
+            (value(&app) - geometric_stop(5)).abs() < 1e-6,
+            "Left steps back, got {}",
+            value(&app)
+        );
+
+        // Down moves off the field rather than changing its value.
+        let before = {
+            let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!() };
+            let Some(CdpField::Number { input, .. }) = fields.first() else { panic!() };
+            input.value().to_string()
+        };
         app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
-        let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected a Number field") };
-        assert_eq!(input.value(), "6.1", "plain Down should nudge by a flat 1.0");
+        let Some(Dialog::CdpParams { fields, focus, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_ne!(*focus, 1, "Down leaves the field it was on");
+        let Some(CdpField::Number { input, .. }) = fields.first() else { panic!() };
+        assert_eq!(input.value(), before, "and changes nothing on the way");
     }
 
-    /// Regression test (user report): repeated Shift+Up/Down nudges must not accumulate
-    /// binary-fraction noise in the displayed value (e.g. "1.8000000000000003") — the fix
-    /// rounds the result to 6 decimal places after every nudge.
+    /// A slider step never lands on a value carrying binary-fraction noise ("1.8000000000000003").
+    ///
+    /// Inherited from the Up/Down nudge this replaced, which had exactly that bug reported
+    /// against it. The mechanism is the same 1e6 rounding, now in `param_slider::value_for_stop`,
+    /// so the guard moves with it rather than being retired along with the keys.
     #[test]
-    fn repeated_fine_nudges_do_not_accumulate_floating_point_noise() {
+    fn repeated_slider_steps_do_not_accumulate_floating_point_noise() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
-        open_blur_avrg_with_field_focused(&mut app); // "Channels", default 6.0
+        open_blur_avrg_with_field_focused(&mut app);
 
         for _ in 0..7 {
-            app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         }
 
         let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
         let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected a Number field") };
-        assert_eq!(input.value(), "6.7", "7 fine nudges of 0.1 from 6.0 should read exactly 6.7, no float noise");
+        let text = input.value();
+        assert!(
+            text.split('.').nth(1).is_none_or(|frac| frac.len() <= 6),
+            "no float noise in the displayed value, got {text}"
+        );
     }
 
     /// Tab from the preset row moves focus into the first field (or straight to
@@ -27038,9 +28067,9 @@ mod tests {
     /// Up/Down showed "v=73.35999999999999" instead of "73.36" — the coarse step for
     /// `blur_avrg`'s real "Channels" field is `(200.0 - 1.0) / 40.0 = 4.975`, and repeated
     /// f64 addition of a step like that visibly accumulates binary-fraction noise (the same
-    /// class of bug `cdp_nudge_number`'s own doc comment already documents for the main
-    /// params dialog's flat number fields — this is the envelope editor's point-value
-    /// counterpart, fixed the same way: round to 6 decimal places after every nudge).
+    /// class of bug `param_slider::value_for_stop` guards against for the main params
+    /// dialog's flat number fields — this is the envelope editor's point-value counterpart,
+    /// fixed the same way: round to 6 decimal places after every nudge).
     #[test]
     fn envelope_point_value_nudge_never_accumulates_binary_fraction_noise() {
         let mut app = new_app(Some(doc(0.1, 44100)), None);
@@ -27888,6 +28917,104 @@ mod tests {
         }
     }
 
+    /// Every grid sub-editor's slider is driven by Left/Right and by the mouse.
+    ///
+    /// One test across all four rather than four near-identical ones: what is actually at risk
+    /// is that each editor wires up the shared `param_slider` helpers *at all*, and that its
+    /// track sits where its click handler looks for it. The mapping itself is covered by
+    /// `param_slider`'s own tests.
+    #[test]
+    fn every_grid_sub_editor_adjusts_its_value_with_left_right_and_with_the_mouse() {
+        // The plain list editor: one value per row, track after the index gutter.
+        {
+            let mut app = new_app(Some(doc(1.0, 441_000)), None);
+            open_grain_reposition_with_field_focused(&mut app);
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+            let before = {
+                let Some(Dialog::CdpParams { list_edit: Some(e), .. }) = &app.dialog else { panic!() };
+                e.values[0]
+            };
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+            let Some(Dialog::CdpParams { list_edit: Some(e), .. }) = &app.dialog else { panic!() };
+            assert!(e.values[0] > before, "Right steps the list entry's slider");
+
+            // And a click on the track, through a real render.
+            let (col, row) = rendered_sub_editor_track(&mut app, "  1:");
+            app.handle_mouse(cdp_mouse_at(col, row, MouseEventKind::Down(MouseButton::Left), KeyModifiers::NONE));
+            let Some(Dialog::CdpParams { list_edit: Some(e), .. }) = &app.dialog else { panic!() };
+            assert_eq!(e.values[0], 0.0, "clicking the leftmost cell means the floor");
+        }
+
+        // The table editor: a track per column, so the click has to find the right one.
+        {
+            let mut app = new_app(Some(doc(1.0, 441_000)), None);
+            open_tapdelay_with_taps_field_focused(&mut app);
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // -> Amp
+            let before = {
+                let Some(Dialog::CdpParams { table_edit: Some(e), .. }) = &app.dialog else { panic!() };
+                e.rows[0][1]
+            };
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+            let Some(Dialog::CdpParams { table_edit: Some(e), .. }) = &app.dialog else { panic!() };
+            assert!(e.rows[0][1] > before, "Right steps the selected cell's slider");
+            assert_eq!(e.selected_col, 1, "and does not move the cursor");
+        }
+
+        // The marker-time list: a track on the Time column only, past the Marker column.
+        {
+            let mut app = new_app(Some(doc(1.0, 441_000)), None);
+            open_focus_freeze_with_field_focused(&mut app);
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+            let before = {
+                let Some(Dialog::CdpParams { marker_time_list_edit: Some(e), .. }) = &app.dialog else { panic!() };
+                e.entries[0].1
+            };
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+            let Some(Dialog::CdpParams { marker_time_list_edit: Some(e), .. }) = &app.dialog else { panic!() };
+            assert!(e.entries[0].1 > before, "Right steps the time's slider");
+            assert_eq!(e.selected_col, 1, "and stays on the Time column");
+        }
+
+        // The hilite-band editor: one shared track under the list, acting on the selected cell.
+        {
+            let mut app = new_app(Some(doc(1.0, 441_000)), None);
+            open_hilite_band_with_field_focused(&mut app);
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+            let before = {
+                let Some(Dialog::CdpParams { hilite_band_edit: Some(e), .. }) = &app.dialog else { panic!() };
+                (e.rows[0].lofrq, e.selected_col)
+            };
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+            let Some(Dialog::CdpParams { hilite_band_edit: Some(e), .. }) = &app.dialog else { panic!() };
+            assert!(e.rows[0].lofrq > before.0, "Right steps the selected cell's value");
+            assert_eq!(e.selected_col, before.1, "and leaves the selected cell alone");
+        }
+    }
+
+    /// Renders one frame and reports `(track_column, row)` of the first slider track on the
+    /// row containing `label` — found from the drawn glyphs, so a click driven from it is
+    /// checking the editor's own layout rather than a number this test picked.
+    fn rendered_sub_editor_track(app: &mut App, label: &str) -> (u16, u16) {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let row_text = |y: u16| -> String { (0..area.width).map(|x| buffer[(x, y)].symbol()).collect() };
+        let y = (0..area.height)
+            .find(|&y| row_text(y).contains(label))
+            .unwrap_or_else(|| panic!("{label:?} is not on screen"));
+        let row = row_text(y);
+        let x = row
+            .char_indices()
+            .find(|(_, c)| *c == param_slider::TRACK_CHAR || *c == param_slider::KNOB_CHAR)
+            .map(|(b, _)| row[..b].chars().count() as u16)
+            .unwrap_or_else(|| panic!("no track on the {label:?} row"));
+        (x, y)
+    }
+
     /// A fresh `required_list` field starts with an empty list (not a constant, not a
     /// pre-seeded entry) — genuinely "not configured yet" until the user opens the editor
     /// once, matching the render-side "(not set — e to edit)" display.
@@ -28190,26 +29317,45 @@ mod tests {
         assert_eq!(edit.selected_col, 0);
     }
 
-    /// Left/Right move between columns in the current row; Up/Down move between rows — the
-    /// two real axes a table has, unlike `CdpListEdit`'s single-column list where all four
-    /// arrows do the same thing.
+    /// Tab moves between columns, Up/Down between rows, and Left/Right adjust the selected
+    /// cell's slider.
+    ///
+    /// Left/Right used to be the column keys. They were displaced when every bounded number in
+    /// the app gained a slider: a table's cells are exactly such numbers, and the alternative —
+    /// a grid whose arrows meant something different from every other slider's — would have
+    /// been the inconsistency.
     #[test]
-    fn arrows_navigate_rows_and_columns_independently() {
+    fn tab_navigates_columns_up_down_navigates_rows_and_left_right_adjust() {
         let mut app = new_app(Some(doc(1.0, 441_000)), None);
         open_tapdelay_with_taps_field_focused(&mut app);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)); // now 2 rows
 
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         let Some(Dialog::CdpParams { table_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
-        assert_eq!(edit.selected_col, 2, "Right should advance the column, not the row");
+        assert_eq!(edit.selected_col, 2, "Tab should advance the column, not the row");
         assert_eq!(edit.selected_row, 1, "row must stay wherever 'n' left it");
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         let Some(Dialog::CdpParams { table_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
         assert_eq!(edit.selected_row, 0, "Up should move the row, not the column");
-        assert_eq!(edit.selected_col, 2, "column must stay wherever Right left it");
+        assert_eq!(edit.selected_col, 2, "column must stay wherever Tab left it");
+
+        // Shift+Tab steps back.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        let Some(Dialog::CdpParams { table_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_eq!(edit.selected_col, 1, "Shift+Tab steps the column back");
+
+        // Left/Right move the value, leaving the cursor where it is.
+        let before = {
+            let Some(Dialog::CdpParams { table_edit: Some(edit), .. }) = &app.dialog else { panic!() };
+            edit.rows[0][1]
+        };
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { table_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+        assert_ne!(edit.rows[0][1], before, "Right adjusts the selected cell");
+        assert_eq!((edit.selected_row, edit.selected_col), (0, 1), "and moves the cursor nowhere");
     }
 
     /// Typing into a cell overwrites its previous value, exactly like `CdpListEdit` — the
@@ -28219,7 +29365,7 @@ mod tests {
         let mut app = new_app(Some(doc(1.0, 441_000)), None);
         open_tapdelay_with_taps_field_focused(&mut app);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)); // -> Amp column
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // -> Amp column
 
         type_str(&mut app, "0.9");
         app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -28260,8 +29406,8 @@ mod tests {
         let mut app = new_app(Some(doc(1.0, 441_000)), None);
         open_tapdelay_with_taps_field_focused(&mut app);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)); // -> Pan column
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // -> Pan column
 
         type_str(&mut app, "5");
         app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -28617,22 +29763,32 @@ mod tests {
         assert_eq!(curve_transform_params(&app).focus, 1);
     }
 
+    /// This form follows the main params dialog: Left/Right step the focused number's slider,
+    /// Up/Down move between rows. Up used to nudge by a flat 1.0 here, which went the same way
+    /// it did there — see `left_right_step_the_slider_and_up_down_move_between_fields`.
     #[test]
-    fn up_down_nudge_the_focused_number_field() {
+    fn left_right_step_the_slider_and_up_moves_between_fields() {
         let mut app = app_with_one_curve();
         app.open_curve_editor(0);
         open_curve_transform_params_for(&mut app, "repitch_exag_1"); // focus 0 = Mean Pitch
 
-        let before: f64 = {
-            let Some(CdpField::Number { input, .. }) = curve_transform_params(&app).fields.first() else { panic!() };
+        let value = |app: &App| -> f64 {
+            let Some(CdpField::Number { input, .. }) = curve_transform_params(app).fields.first() else { panic!() };
             input.value().parse().unwrap()
         };
+        let before = value(&app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(value(&app) > before, "Right steps the slider up");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        let back = value(&app);
+
+        // Up moves off the field instead of changing it.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(curve_transform_params(&app).focus, 1);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        let after: f64 = {
-            let Some(CdpField::Number { input, .. }) = curve_transform_params(&app).fields.first() else { panic!() };
-            input.value().parse().unwrap()
-        };
-        assert_eq!(after, before + 1.0, "Up should nudge by 1.0, matching every other Number field's convention");
+        assert_eq!(curve_transform_params(&app).focus, 0, "Up steps back a field");
+        assert_eq!(value(&app), back, "and leaves the value alone");
     }
 
     #[test]
@@ -29121,8 +30277,8 @@ mod tests {
             *focus = 1; // "Segments" table
         }
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)); // -> Repeat Count column
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // -> Repeat Count column
 
         type_str(&mut app, "2.7");
         app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -29334,7 +30490,7 @@ mod tests {
         let mut app = new_app(Some(doc(1.0, 441_000)), None);
         open_focus_freeze_with_field_focused(&mut app);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)); // -> Marker column
+        app.handle_dialog_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)); // -> Marker column
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
 
@@ -29396,7 +30552,7 @@ mod tests {
         let mut app = new_app(Some(doc(1.0, 441_000)), None);
         open_focus_freeze_with_field_focused(&mut app);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)); // row 0 marker = 'b'
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
@@ -29493,11 +30649,11 @@ mod tests {
         assert!(!rows[0].ramp_bit && !rows[0].transpose_bit && !rows[0].add_bit);
     }
 
-    /// Left/Right skip cells that don't currently apply (e.g. Amp1 while `amp_bit` is off) —
-    /// the one genuinely new navigation behavior this editor has over `CdpTableEdit`'s fixed
-    /// columns.
+    /// Tab skips cells that don't currently apply (e.g. Amp1 while `amp_bit` is off) — the one
+    /// genuinely new navigation behavior this editor has over `CdpTableEdit`'s fixed columns.
+    /// (Tab rather than Left/Right since the arrows now drive the selected cell's slider.)
     #[test]
-    fn arrows_skip_cells_that_do_not_currently_apply() {
+    fn tab_skips_cells_that_do_not_currently_apply() {
         let mut app = new_app(Some(doc(1.0, 441_000)), None);
         open_hilite_band_with_field_focused(&mut app);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
@@ -29507,14 +30663,14 @@ mod tests {
         // skipping Amp2/Sign/Transpose entirely (their bits are off).
         let expected = [HB_HIFRQ, HB_AMP_BIT, HB_RAMP_BIT, HB_TRANSPOSE_BIT, HB_ADD_BIT, HB_AMP1];
         for &want in &expected {
-            app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
             let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else {
                 panic!("no editor")
             };
             assert_eq!(edit.selected_col, want, "expected to land on cell {want}");
         }
         // One more Right should stay put (Amp1 is the last visible cell on this row).
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
         assert_eq!(edit.selected_col, HB_AMP1);
     }
@@ -29526,8 +30682,8 @@ mod tests {
         let mut app = new_app(Some(doc(1.0, 441_000)), None);
         open_hilite_band_with_field_focused(&mut app);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)); // HiFreq
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)); // AmpBit
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // HiFreq
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // AmpBit
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
 
@@ -29545,18 +30701,18 @@ mod tests {
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
         // Navigate to TransposeBit and turn it on, then to AddBit and turn it on too.
         for _ in 0..4 {
-            app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         }
         let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
         assert_eq!(edit.selected_col, HB_TRANSPOSE_BIT);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)); // transpose_bit on
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)); // AddBit
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // AddBit
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)); // add_bit on
         let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
         assert!(edit.rows[0].transpose_bit && edit.rows[0].add_bit);
 
         // Navigate back to TransposeBit and turn it off.
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
 
         let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
@@ -29573,7 +30729,7 @@ mod tests {
         open_hilite_band_with_field_focused(&mut app);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
         for _ in 0..5 {
-            app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         }
         let Some(Dialog::CdpParams { hilite_band_edit: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
         assert_eq!(edit.selected_col, HB_ADD_BIT);
@@ -29808,6 +30964,134 @@ mod tests {
         });
         let (col, row) = hit.unwrap_or_else(|| panic!("{find:?} is not on screen below the anchor"));
         app.handle_mouse(cdp_mouse_at(col, row, MouseEventKind::Down(MouseButton::Left), KeyModifiers::NONE));
+    }
+
+    /// Renders one frame and reports where the slider track really is on screen, as
+    /// `(track_column, row)` — found by looking for the track glyphs themselves rather than by
+    /// recomputing the layout, so it can be checked against the geometry the click handler was
+    /// handed.
+    fn rendered_slider_track(app: &mut App, label: &str) -> (u16, u16) {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let row_text = |y: u16| -> String { (0..area.width).map(|x| buffer[(x, y)].symbol()).collect() };
+        let y = (0..area.height)
+            .find(|&y| row_text(y).contains(label))
+            .unwrap_or_else(|| panic!("{label:?} is not on screen"));
+        let row = row_text(y);
+        let first = row
+            .char_indices()
+            .find(|(_, c)| *c == param_slider::TRACK_CHAR || *c == param_slider::KNOB_CHAR)
+            .map(|(b, _)| row[..b].chars().count() as u16)
+            .unwrap_or_else(|| panic!("no slider track on the {label:?} row"));
+        (first, y)
+    }
+
+    /// The geometry the click handler is given must be the geometry that was drawn.
+    ///
+    /// These are computed in two different places from one shared helper, which is exactly the
+    /// arrangement that silently drifts — a click one cell off sets a value the user did not
+    /// point at, and nothing about the screen looks wrong.
+    #[test]
+    fn the_recorded_slider_geometry_matches_where_the_track_is_drawn() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        open_blur_avrg_with_field_focused(&mut app);
+        let (track_col, _) = rendered_slider_track(&mut app, "Channels");
+
+        let geometry = app.cdp_slider_geometry.expect("a process with a bounded param has a track");
+        let origin = app.dialog_row_rects.first().expect("rendered rows").x;
+        assert_eq!(
+            origin as usize + geometry.track_start,
+            track_col as usize,
+            "the recorded track start is where the dots actually begin"
+        );
+    }
+
+    /// Clicking a cell of the track sets the value to that stop, and dragging keeps setting it.
+    #[test]
+    fn clicking_and_dragging_the_track_sets_the_value() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        open_blur_avrg_with_field_focused(&mut app);
+        let (track_col, row) = rendered_slider_track(&mut app, "Channels");
+        let value = |app: &App| -> f64 {
+            let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+            let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected a Number") };
+            input.value().parse().expect("a number")
+        };
+        let stop = |n: usize| param_slider::value_for_stop(n, 1.0, 200.0, false, true);
+
+        // A click on the last cell is the parameter's maximum, exactly.
+        app.handle_mouse(cdp_mouse_at(
+            track_col + param_slider::CELLS as u16 - 1,
+            row,
+            MouseEventKind::Down(MouseButton::Left),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(value(&app), 200.0, "clicking the right-hand cell means the declared max");
+
+        // Dragging back along the track keeps writing the cell under the pointer.
+        app.handle_mouse(cdp_mouse_at(
+            track_col + 3,
+            row,
+            MouseEventKind::Drag(MouseButton::Left),
+            KeyModifiers::NONE,
+        ));
+        assert!((value(&app) - stop(3)).abs() < 1e-6, "drag follows the pointer, got {}", value(&app));
+
+        // Dragging *past* the left end pins it to the floor rather than stalling where the
+        // pointer left the track.
+        app.handle_mouse(cdp_mouse_at(0, row, MouseEventKind::Drag(MouseButton::Left), KeyModifiers::NONE));
+        assert_eq!(value(&app), 1.0, "dragging off the left end reaches the minimum");
+
+        // Release ends the drag, so later motion over the dialog no longer moves the slider.
+        app.handle_mouse(cdp_mouse_at(0, row, MouseEventKind::Up(MouseButton::Left), KeyModifiers::NONE));
+        assert!(app.cdp_slider_drag.is_none(), "the release lets go");
+        app.handle_mouse(cdp_mouse_at(
+            track_col + 9,
+            row,
+            MouseEventKind::Drag(MouseButton::Left),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(value(&app), 1.0, "a drag with nothing grabbed changes nothing");
+    }
+
+    /// A click on the number field beside the track must not be read as a slider position.
+    ///
+    /// The columns either side of the track hold the range label and the value, and "set this
+    /// parameter to its maximum" is the last thing a click on the number should mean.
+    #[test]
+    fn clicking_beside_the_track_does_not_move_the_slider() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        open_blur_avrg_with_field_focused(&mut app);
+        let (track_col, row) = rendered_slider_track(&mut app, "Channels");
+        let value = |app: &App| -> String {
+            let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+            let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("expected a Number") };
+            input.value().to_string()
+        };
+        let before = value(&app);
+
+        // One column past the right-hand end of the track — the number field's own space.
+        app.handle_mouse(cdp_mouse_at(
+            track_col + param_slider::CELLS as u16,
+            row,
+            MouseEventKind::Down(MouseButton::Left),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(value(&app), before, "a click past the track leaves the value alone");
+        assert!(app.cdp_slider_drag.is_none(), "and grabs nothing to drag");
+
+        // ...and one column before its left-hand end, which is the range label.
+        app.handle_mouse(cdp_mouse_at(
+            track_col - 1,
+            row,
+            MouseEventKind::Down(MouseButton::Left),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(value(&app), before, "nor does a click before it");
     }
 
     /// The reported bug in plain terms: the "input buffers" row could only be opened with
@@ -33181,6 +34465,7 @@ mod tests {
                     max: 1.0,
                     step: 0.01,
                     integer: false,
+                    exponential: false,
                     envelope: None,
                 })
                 .collect();
@@ -36812,6 +38097,7 @@ mod tests {
                 max: 1.0,
                 step: 0.001,
                 integer: false,
+                exponential: false,
                 envelope: None,
             };
             *focus = 3;
@@ -41778,3 +43064,5 @@ mod folder_gate_tests {
         );
     }
 }
+
+

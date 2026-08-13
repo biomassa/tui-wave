@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- **Every bounded process parameter now has a slider.** Any parameter whose range is closed on
+  both sides — all of Airwindows, most of CDP — gets a 15-stop horizontal track to the left of its
+  number field, in the params dialog and in the list, table, marker-time and hilite-band editors.
+  The number field is unchanged and still accepts a typed value; the slider is a second way in,
+  not a replacement. Parameters bounded on one side only (Praat's `[>0]`, `[≥20]`) are untouched
+  and stay number-only, since a slider has no honest end to put the knob against.
+
+  - **Typed values are never rounded.** The stops are what the arrow keys step through; a typed
+    0.4271 is submitted as 0.4271 and simply drawn at the nearest stop.
+  - **Left/Right** step the slider, **Up/Down** now move between fields. This replaces the old
+    flat ±1 / ±0.1 Up/Down nudge, which was a different fraction of every parameter's range — a
+    fourteenth of one, a thousandth of the next. Typing a digit still replaces the value outright.
+  - **Click or drag the track** to set a value; dragging past either end pins it there.
+  - Stops follow a parameter's own scale, so a frequency control declared exponential steps 20,
+    34, 58, 100 rather than putting the whole audible range in its last two cells. An integer
+    parameter with only a few legal values gets one stop each, so every press changes the number.
+  - In the grid editors **Tab/Shift+Tab** now move between columns, which is the job Left/Right
+    gave up. The hilite-band editor, whose rows change shape row to row, gets one shared track
+    beneath the list acting on the selected cell rather than a track per cell.
+  - On a terminal too narrow for the widened dialog the sliders are dropped and the rows render
+    exactly as before, rather than clipping the number field off the right edge.
+
 ## 2026-08-12 (2.8.2)
 
 **No user-facing changes** — a build-system release, tagged so the packaged artifacts are built
