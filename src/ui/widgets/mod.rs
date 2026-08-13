@@ -2,6 +2,7 @@ pub mod braille;
 pub mod cdp_envelope_image;
 pub mod db_scale;
 pub mod formant_image;
+pub mod param_slider;
 pub mod statusbar;
 pub mod time_ruler;
 pub mod waveform;
