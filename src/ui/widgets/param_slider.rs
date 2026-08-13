@@ -36,6 +36,20 @@ pub const TRACK_CHAR: char = '\u{00b7}';
 /// The knob.
 pub const KNOB_CHAR: char = '\u{25cf}';
 
+/// Decimal places a stop's value is rounded to.
+///
+/// A stop lands wherever the arithmetic puts it — one fifteenth of `[0-1]` is 0.0714285714… —
+/// and printing that raw gives a field like `0.214286` sitting beside neighbours reading `0.2`
+/// and `1.0`, which pushes everything right of it out of line (user report, with a screenshot of
+/// exactly that row). Three is enough for every parameter in all three catalogs: the narrowest
+/// range any of them declares still puts adjacent stops further than 0.001 apart, so no two stops
+/// can collapse onto the same number — `no_catalog_parameter_has_stops_closer_than_the_rounding`
+/// is what keeps that true as catalogs grow.
+///
+/// This rounds what the *slider* produces. A typed value is still submitted exactly as typed —
+/// see this module's header.
+pub const DECIMALS: i32 = 3;
+
 /// How many stops a parameter with this range gets.
 ///
 /// A float range always gets the full `CELLS`. An **integer** range gets one stop per legal
@@ -97,9 +111,11 @@ pub fn value_for_stop(stop: usize, min: f64, max: f64, integer: bool, exponentia
     } else if stop >= stops - 1 {
         max
     } else {
-        // Matches the 1e6 quantization the old Up/Down nudge used, so a slider step lands on a
-        // number of the same shape a nudge used to produce rather than on 0.30000000000000004.
-        (raw * 1e6).round() / 1e6
+        // Rounded to `DECIMALS` so a stop reads as a number someone might have typed, rather
+        // than as 0.214285714285714 — see that constant. This also kills the binary-fraction
+        // noise (0.30000000000000004) that the arithmetic above would otherwise leave behind.
+        let scale = 10f64.powi(DECIMALS);
+        (raw * scale).round() / scale
     }
 }
 
@@ -243,11 +259,13 @@ mod tests {
         // 20-20000 Hz: the geometric centre is ~632 Hz, not the linear 10010.
         let mid = value_for_stop(7, 20.0, 20000.0, false, true);
         assert!((mid - 632.0).abs() < 5.0, "geometric middle, got {mid}");
-        // Every step is the same ratio.
+        // Every step is the same ratio — to within the `DECIMALS` rounding, which perturbs it
+        // slightly and deliberately: a readable number beats a mathematically exact one on a
+        // control whose steps are already a coarse approximation of a continuous range.
         let a = value_for_stop(3, 20.0, 20000.0, false, true);
         let b = value_for_stop(4, 20.0, 20000.0, false, true);
         let c = value_for_stop(5, 20.0, 20000.0, false, true);
-        assert!(((b / a) - (c / b)).abs() < 1e-6);
+        assert!(((b / a) - (c / b)).abs() < 1e-3, "ratios {} vs {}", b / a, c / b);
     }
 
     #[test]
@@ -289,6 +307,45 @@ mod tests {
             let t = track(v, 0.0, 1.0, false, false);
             assert_eq!(t.chars().count(), CELLS);
             assert_eq!(t.chars().filter(|c| *c == KNOB_CHAR).count(), 1);
+        }
+    }
+
+    /// Rounding to `DECIMALS` must never make two adjacent stops the same number, or part of
+    /// the track would be dead — pressing Right would move the knob and change nothing.
+    #[test]
+    fn rounding_never_collapses_two_adjacent_stops() {
+        // A range whose stops sit exactly at the rounding limit, and one comfortably above it.
+        for &(min, max) in &[(0.0, 0.014), (0.0, 1.0), (2.0, 16.0), (20.0, 20000.0)] {
+            for exp in [false, true] {
+                let stops = stop_count(min, max, false);
+                let values: Vec<f64> =
+                    (0..stops).map(|s| value_for_stop(s, min, max, false, exp)).collect();
+                for pair in values.windows(2) {
+                    assert!(
+                        pair[1] > pair[0],
+                        "[{min}, {max}] exp={exp}: stops collapsed at {pair:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// No stop ever prints more than `DECIMALS` places — the alignment guarantee the params
+    /// dialog's column widths are built on.
+    #[test]
+    fn a_stop_never_prints_more_than_three_decimals() {
+        for &(min, max) in &[(0.0, 1.0), (2.0, 16.0), (-1.0, 1.0), (20.0, 20000.0)] {
+            for exp in [false, true] {
+                for s in 0..stop_count(min, max, false) {
+                    let v = value_for_stop(s, min, max, false, exp);
+                    let text = format!("{v}");
+                    let decimals = text.split('.').nth(1).map(|f| f.len()).unwrap_or(0);
+                    assert!(
+                        decimals <= DECIMALS as usize,
+                        "[{min}, {max}] exp={exp} stop {s} printed {text}"
+                    );
+                }
+            }
         }
     }
 
