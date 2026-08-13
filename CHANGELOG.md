@@ -1,6 +1,24 @@
 # Changelog
 
-## Unreleased
+## 2026-08-13 (2.9.0)
+
+- **The ExtProcess browser no longer requires a CDP installation.** An unset or invalid CDP
+  directory sent you to a setup prompt, which hid the Praat *and* Airwindows processes that share
+  that browser — 500 of which cannot fail to be available, since their DSP is compiled into the
+  binary. The chain editor had the same gate and the same fix: a chain may be built entirely from
+  non-CDP steps. A missing backend is now stated inline in the params dialog with Apply dimmed,
+  the same treatment a missing photo or DISTMORE marklist already gets, rather than being raised
+  before you have asked for it. Options ▸ Configure CDP Directory still opens the prompt on demand.
+  (Two user reports against 2.8.2.)
+
+- **`install.sh` no longer skips submodules on an existing clone.** It tested
+  `third_party/praat-audiotools` for content and reported "submodule present", so a checkout that
+  predated airwin2rack skipped the rest and the build failed on a missing `autogen_airwin` after a
+  `git pull`. It now asks git which submodules are uninitialised, so it also notices any added in
+  future. Every instruction is plain `--init`, never `--init --recursive` — airwin2rack declares
+  submodules of its own that nothing here reads. README's clone snippet is corrected and the
+  manual build instructions now mention submodules at all, plus a note that `git pull` does not
+  fetch a newly-added one, which is the case that actually bit. (User report, macOS.)
 
 - **Esc steps back one dialog instead of closing everything.** Cancelling a process's parameters
   returns to the browser with your search text and highlight intact, so picking the wrong process
