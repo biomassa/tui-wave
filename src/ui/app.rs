@@ -1324,11 +1324,16 @@ enum Dialog {
         /// every site that changes `selected` or re-filters `entries`, since a scroll
         /// position only makes sense relative to the description it was scrolled into.
         desc_scroll: u16,
+        /// Where Esc goes — see `CdpParams.restore`. Set when the chain editor opened the
+        /// browser to add a step, so cancelling the pick returns to the chain being built
+        /// rather than throwing the whole editor away.
+        restore: Option<CdpReturn>,
     },
     /// The parameter-editing form for one CDP process, opened from `Dialog::CdpBrowser`
-    /// (`App::open_cdp_params`). Esc closes this dialog outright — there is no "back to the
-    /// browser," cancelling means cancelling the whole flow, matching how every other CDP
-    /// dialog's Esc behaves. `catalog_index` is stable for this dialog's lifetime (the
+    /// (`App::open_cdp_params`). Esc steps *back* to whatever opened it (`restore`) — the
+    /// browser, with its search and highlight intact — rather than closing the whole flow.
+    /// One level per Esc: params, then the browser, then the chain editor if the browser came
+    /// from there, then the waveform. `catalog_index` is stable for this dialog's lifetime (the
     /// catalog doesn't change while it's open). `fields` are index-parallel to
     /// `catalog_processes[catalog_index].params`, built once at open time — there's no
     /// per-process rebuilding to worry about since this dialog only ever shows one process.
@@ -1436,6 +1441,14 @@ enum Dialog {
         custom_values: Option<Vec<crate::model::cdp::ParamValue>>,
         save_prompt: Option<TextInput>,
         scroll: usize,
+        /// The dialog Esc steps back to, or `None` when Esc closes to the waveform.
+        ///
+        /// Set when the browser opens a process: picking the wrong one out of 900-odd should
+        /// cost one key, not a reopen and a re-search. Left `None` when this form *is* the top
+        /// of the flow — "recall last process", or editing an existing chain step, where
+        /// `resume_after_chain_step_edit` owns the way back because it also knows about
+        /// suspended parent sessions.
+        restore: Option<CdpReturn>,
     },
     /// Hard-modal progress display while a `CdpRunner` job is in flight — deliberately
     /// blocks all other input (Esc cancels) because the job captured a snapshot of the
@@ -2470,6 +2483,59 @@ fn cdp_params_focus_apply(field_count: usize, has_extra_input: bool) -> usize {
 /// PageUp/PageDown step size for `Dialog::CdpBrowser`'s process list.
 const CDP_BROWSER_PAGE_SIZE: usize = 10;
 
+/// Where Esc steps back to from a CDP dialog, one level at a time.
+///
+/// A *description* of the parent rather than the parent `Dialog` itself, for three reasons.
+/// `Dialog` is not `Clone`, and a params session has to hand its parent to a `CdpPending` while
+/// keeping it, so the whole flow survives a Preview. The browser's `entries` are derived state
+/// that a just-applied process can invalidate (it rewrites the recents file), so replaying a
+/// stored list would restore a stale one. And this is small — a search string and four indices
+/// — where a stored `Dialog` would drag a whole nested session along behind it.
+#[derive(Debug, Clone, PartialEq)]
+enum CdpReturn {
+    /// The process browser, as `restore_cdp_browser` rebuilds it.
+    Browser(CdpBrowserReturn),
+    /// The chain editor, whose own state lives on `App.cdp_chain_editor` and so needs nothing
+    /// carried here.
+    ChainEditor,
+}
+
+/// Describes an open browser so Esc from a child can come back to it — `None` for any other
+/// dialog, so a caller need not re-establish what it is looking at.
+fn cdp_browser_return(dialog: &Dialog) -> Option<CdpReturn> {
+    let Dialog::CdpBrowser {
+        search, domain_selected, group_selected, focus, selected, restore, ..
+    } = dialog
+    else {
+        return None;
+    };
+    Some(CdpReturn::Browser(CdpBrowserReturn {
+        search: search.value().to_string(),
+        domain_selected: *domain_selected,
+        group_selected: *group_selected,
+        focus: *focus,
+        selected: *selected,
+        // The browser's own parent travels with it, so a chain-editor origin survives a trip
+        // down into the params form and back.
+        restore: restore.clone().map(Box::new),
+    }))
+}
+
+/// Enough of `Dialog::CdpBrowser` to put it back exactly as the user left it.
+#[derive(Debug, Clone, PartialEq)]
+struct CdpBrowserReturn {
+    search: String,
+    domain_selected: usize,
+    group_selected: usize,
+    focus: CdpBrowserColumn,
+    selected: usize,
+    /// The browser's *own* parent — the chain editor, when the browser was opened to add a
+    /// step. Boxed because `CdpReturn` contains this struct, and kept so Esc walks back one
+    /// level per press rather than skipping a level the user actually passed through.
+    restore: Option<Box<CdpReturn>>,
+}
+
+
 /// Which of `Dialog::CdpBrowser`'s three navigable list columns has focus. Was a bare
 /// `group_focus: bool` while there were only two; the Domain/Groups split made a third.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3151,6 +3217,9 @@ struct CdpPending {
     presets: Vec<crate::model::cdp::preset::CdpPreset>,
     preset_selected: Option<usize>,
     custom_values: Option<Vec<crate::model::cdp::ParamValue>>,
+    /// The params dialog's `restore` parent, carried across the job so a Preview that rebuilds
+    /// the form does not quietly turn its Esc into "close everything".
+    restore: Option<CdpReturn>,
 }
 
 /// Which slot in an in-progress `ChainEditorState` draft a `Dialog::CdpBrowser`/`CdpParams`
@@ -5955,14 +6024,18 @@ impl App {
                     // *process* row matters here, not which column currently has focus.
                     let Dialog::CdpBrowser { entries, selected, .. } = &dlg else { unreachable!() };
                     let catalog_index = entries.get(*selected).copied();
+                    // Described *before* the params form replaces it, so Esc there comes back
+                    // to this exact search and highlight rather than a fresh browser.
+                    let back = cdp_browser_return(&dlg);
                     self.dialog = Some(dlg);
                     if let Some(catalog_index) = catalog_index {
-                        self.open_cdp_params(catalog_index);
+                        self.open_cdp_params_returning_to(catalog_index, back);
                     }
                 }
                 Some(Dialog::CdpParams {
                     catalog_index, fields, second_input, variadic_input, photo_input, focus, error, preview, envelope, list_edit, table_edit,
                     marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, variadic_picker, photo_picker, presets, preset_selected, custom_values, save_prompt, scroll,
+                    restore,
                 }) => {
                     // Enter's default action is Apply (from anywhere, including the preset
                     // row — a highlighted preset's values, or the process's defaults, are
@@ -6006,6 +6079,7 @@ impl App {
                     // passed directly.
                     self.dialog = Some(Dialog::CdpParams {
                         catalog_index, fields, second_input, variadic_input, photo_input, focus, error, preview, envelope, list_edit, table_edit,
+                        restore,
                         marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, variadic_picker, photo_picker, presets, preset_selected, custom_values, save_prompt, scroll,
                     });
                     // `open_cdp_variadic_picker` self-checks that focus is actually on the
@@ -6066,12 +6140,38 @@ impl App {
                     self.cdp_runner.cancel();
                     self.praat_runner.cancel();
                     self.airwindows_runner.cancel();
-                } else if let Some(Dialog::PraatPicture { restore }) = self.dialog.take() {
+                } else if matches!(self.dialog, Some(Dialog::PraatPicture { .. })) {
                     // Its own arm, *before* the generic dismissal below, for one reason: that
                     // branch calls `stop_cdp_preview_audio`. A picture from a Preview is shown
                     // while its audition is playing, and dismissing the picture must not also
                     // stop the sound you are listening to in order to judge it.
+                    //
+                    // The `matches!` test is load-bearing: this used to read `if let ... =
+                    // self.dialog.take()`, and `take()` runs whether or not the pattern matches,
+                    // so *every* Esc destroyed the open dialog before any later branch could look
+                    // at it. Harmless while every later branch also cleared it; not harmless once
+                    // one of them wants to step back to a parent instead.
+                    let Some(Dialog::PraatPicture { restore }) = self.dialog.take() else {
+                        unreachable!("just matched")
+                    };
                     self.close_praat_picture(restore);
+                } else if let Some(back) = self.cdp_dialog_return() {
+                    // One level per Esc: params -> browser -> chain editor -> waveform. The
+                    // audition is stopped either way, since stepping back still abandons
+                    // whatever was being previewed.
+                    self.stop_cdp_preview_audio();
+                    self.step_back_to(back);
+                } else if self.cdp_chain_edit_target.is_some()
+                    && matches!(self.dialog, Some(Dialog::CdpParams { .. }))
+                {
+                    // A chain step's params reached directly from the editor (Replace), which
+                    // names no `restore` because `resume_after_chain_step_edit` owns the way
+                    // back — it also knows about a suspended parent step's own session, which a
+                    // flat description could not express. Abandoning the edit drops the target
+                    // so a later browser session does not inherit chain-mode filtering.
+                    self.stop_cdp_preview_audio();
+                    self.cdp_chain_edit_target = None;
+                    self.resume_after_chain_step_edit();
                 } else {
                     self.stop_cdp_preview_audio();
                     self.dialog = None;
@@ -7982,7 +8082,8 @@ impl App {
             Some(step) => self.open_cdp_chain_step_params(&step, target),
             None => {
                 self.cdp_chain_edit_target = Some(target);
-                self.open_cdp_browser();
+                // Esc in the browser goes back to the chain being built, not to the waveform.
+                self.open_cdp_browser_returning_to(Some(CdpReturn::ChainEditor));
             }
         }
     }
@@ -8020,6 +8121,7 @@ impl App {
         let presets = crate::model::cdp::preset::load_presets(&def.key, def.params.len());
         self.dialog = Some(Dialog::CdpParams {
             catalog_index,
+            restore: None,
             fields,
             second_input,
             variadic_input,
@@ -8063,6 +8165,7 @@ impl App {
             self.cdp_chain_edit_target = Some(target);
             self.dialog = Some(Dialog::CdpParams {
                 catalog_index,
+                restore: None,
                 fields,
                 second_input,
                 variadic_input,
@@ -8144,6 +8247,7 @@ impl App {
         self.cdp_chain_edit_target = Some(parent.target);
         self.dialog = Some(Dialog::CdpParams {
             catalog_index: parent.catalog_index,
+            restore: None,
             fields: parent.fields,
             second_input: parent.second_input,
             variadic_input: parent.variadic_input,
@@ -8408,6 +8512,12 @@ impl App {
     /// with the process list focused, matching the pre-Phase-7 behavior for anyone who never
     /// touches the groups column.
     fn open_cdp_browser(&mut self) {
+        self.open_cdp_browser_returning_to(None);
+    }
+
+    /// As `open_cdp_browser`, but Esc steps back to `restore` instead of closing to the
+    /// waveform — used when the chain editor opens the browser to add a step.
+    fn open_cdp_browser_returning_to(&mut self, restore: Option<CdpReturn>) {
         let domains = self.cdp_domain_rows();
         let groups = self.cdp_group_choices(CdpDomainRow::All);
         let recent = crate::model::cdp::recent::load_recent();
@@ -8424,18 +8534,85 @@ impl App {
             entries,
             selected: 0,
             desc_scroll: 0,
+            restore,
+        });
+    }
+
+    /// The parent of whichever CDP dialog is open, taken out of it so Esc consumes it.
+    ///
+    /// Taking rather than cloning is what makes a second Esc step to the *next* level up
+    /// instead of bouncing back into the same parent forever.
+    fn cdp_dialog_return(&mut self) -> Option<CdpReturn> {
+        match self.dialog.as_mut() {
+            Some(Dialog::CdpParams { restore, .. }) => restore.take(),
+            Some(Dialog::CdpBrowser { restore, .. }) => restore.take(),
+            _ => None,
+        }
+    }
+
+    /// Replaces the open dialog with the one `back` describes.
+    fn step_back_to(&mut self, back: CdpReturn) {
+        match back {
+            CdpReturn::Browser(saved) => self.restore_cdp_browser(saved),
+            CdpReturn::ChainEditor => {
+                // Leaving the pick behind: the target only means anything while a step is
+                // actually being chosen, and a stale one puts the *next* browser session into
+                // chain mode (`cdp_chain_edit_target.is_some()` filters the process list).
+                self.cdp_chain_edit_target = None;
+                self.dialog = Some(Dialog::CdpChainEditor);
+            }
+        }
+    }
+
+    /// Reopens the browser as `saved` left it — same search text, domain, group and highlight.
+    ///
+    /// Rebuilt from a description rather than restored from a stored `Dialog`, which is what
+    /// `CdpReturn` exists for: `entries` is derived state — it depends on the search, the
+    /// domain, the group *and* the recents file, which a process that just ran may have
+    /// changed — so recomputing it is both cheaper to carry and more correct than preserving a
+    /// list that has since gone stale. Every index is clamped against the lists this rebuild
+    /// produces, for the same reason.
+    fn restore_cdp_browser(&mut self, saved: CdpBrowserReturn) {
+        let domains = self.cdp_domain_rows();
+        let domain_selected = saved.domain_selected.min(domains.len().saturating_sub(1));
+        let domain = domains.get(domain_selected).copied().unwrap_or(CdpDomainRow::All);
+        let groups = self.cdp_group_choices(domain);
+        let group_selected = saved.group_selected.min(groups.len().saturating_sub(1));
+        let group = groups.get(group_selected).copied().unwrap_or(CdpGroupChoice::AllInDomain);
+        let recent = crate::model::cdp::recent::load_recent();
+        let entries = self.cdp_filter_entries(&saved.search, domain, group, &recent);
+        let selected = saved.selected.min(entries.len().saturating_sub(1));
+        self.dialog = Some(Dialog::CdpBrowser {
+            search: TextInput::new(saved.search),
+            domains,
+            domain_selected,
+            groups,
+            group_selected,
+            focus: saved.focus,
+            recent,
+            entries,
+            selected,
+            desc_scroll: 0,
+            restore: saved.restore.map(|r| *r),
         });
     }
 
     /// Opens `Dialog::CdpParams` for the process at `catalog_index`, building fresh
-    /// default-valued fields and loading any presets saved for it from disk.
+    /// default-valued fields and loading any presets saved for it from disk. Esc closes it
+    /// outright — see `open_cdp_params_returning_to` for the form that steps back instead.
     fn open_cdp_params(&mut self, catalog_index: usize) {
+        self.open_cdp_params_returning_to(catalog_index, None);
+    }
+
+    /// As `open_cdp_params`, but Esc steps back to `restore` rather than closing the flow.
+    fn open_cdp_params_returning_to(&mut self, catalog_index: usize, restore: Option<CdpReturn>) {
         let Some(def) = self.cdp_catalog.processes.get(catalog_index) else { return };
         let (fields, second_input, variadic_input, photo_input) = self.cdp_fields_for(catalog_index);
         let presets = crate::model::cdp::preset::load_presets(&def.key, def.params.len());
         let error = self.praat_checkout_staleness_note(def);
         self.dialog = Some(Dialog::CdpParams {
             catalog_index,
+            restore,
             fields,
             second_input,
             variadic_input,
@@ -11626,7 +11803,7 @@ impl App {
     fn cdp_run(&mut self, purpose: crate::cdp::JobPurpose) {
         use crate::model::cdp::IoKind;
         let Some(Dialog::CdpParams {
-            catalog_index, fields, second_input, variadic_input, photo_input, focus, preview, presets, preset_selected, custom_values, ..
+            catalog_index, fields, second_input, variadic_input, photo_input, focus, preview, presets, preset_selected, custom_values, restore, ..
         }) = self.dialog.take()
         else {
             return;
@@ -11643,6 +11820,7 @@ impl App {
         let reopen = |focus: usize, error: String, fields: Vec<CdpField>, second_input: Option<CdpSecondInput>, variadic_input: Option<CdpVariadicInput>, preview: Option<CdpPreview>, presets: Vec<crate::model::cdp::preset::CdpPreset>, preset_selected: Option<usize>| {
             Dialog::CdpParams {
                 catalog_index, fields, second_input, variadic_input, photo_input: photo_input.clone(), focus, error: Some(error), preview,
+                restore: restore.clone(),
                 envelope: None, list_edit: None, table_edit: None, marker_time_list_edit: None,
                 hilite_band_edit: None, formant_picker: None, file_picker: None, variadic_picker: None, photo_picker: None, presets, preset_selected,
                 custom_values: custom_values.clone(), save_prompt: None, scroll: 0,
@@ -11860,6 +12038,7 @@ impl App {
                 presets: presets.to_vec(),
                 preset_selected,
                 custom_values: custom_values.clone(),
+                restore: restore.clone(),
             });
             self.airwindows_runner.submit(crate::airwindows::runner::Job {
                 id: job_id,
@@ -11907,7 +12086,7 @@ impl App {
             if let Some(error) = self.praat_submit(
                 &def, catalog_index, &values, praat_inputs, sample_rate, range, idx, purpose,
                 &fields, &second_input, &variadic_input, &photo_input, focus, &presets, preset_selected,
-                &custom_values,
+                &custom_values, &restore,
             ) {
                 self.dialog = Some(reopen(focus, error, fields, second_input, variadic_input, preview, presets, preset_selected));
             }
@@ -11972,6 +12151,7 @@ impl App {
             presets,
             preset_selected,
             custom_values,
+            restore: restore.clone(),
         });
         self.cdp_runner.submit(crate::cdp::Job {
             id: job_id,
@@ -12017,6 +12197,7 @@ impl App {
         presets: &[crate::model::cdp::preset::CdpPreset],
         preset_selected: Option<usize>,
         custom_values: &Option<Vec<crate::model::cdp::ParamValue>>,
+        restore: &Option<CdpReturn>,
     ) -> Option<String> {
         let audiotools_dir = self.config.praat_audiotools_path();
         if let Err(message) = crate::praat::validate_audiotools_dir(&audiotools_dir) {
@@ -12055,6 +12236,7 @@ impl App {
             presets: presets.to_vec(),
             preset_selected,
             custom_values: custom_values.clone(),
+            restore: restore.clone(),
         });
         self.praat_runner.submit(crate::praat::PraatJob {
             id: job_id,
@@ -12304,6 +12486,7 @@ impl App {
                                 .and_then(CdpSecondInput::selected_doc_index);
                             let params = Dialog::CdpParams {
                                 catalog_index: pending.catalog_index,
+                                restore: pending.restore.clone(),
                                 fields: pending.fields,
                                 second_input: pending.second_input,
                                 variadic_input: pending.variadic_input,
@@ -12502,6 +12685,7 @@ impl App {
                             let values = pending.fields.iter().map(CdpField::to_value).collect();
                             self.dialog = Some(Dialog::CdpParams {
                                 catalog_index: pending.catalog_index,
+                                restore: pending.restore.clone(),
                                 fields: pending.fields,
                                 second_input: pending.second_input,
                                 variadic_input: pending.variadic_input,
@@ -12638,6 +12822,7 @@ impl App {
             self.cdp_chain_edit_target = Some(target);
             self.dialog = Some(Dialog::CdpParams {
                 catalog_index,
+                restore: None,
                 fields,
                 second_input,
                 variadic_input,
@@ -12727,6 +12912,7 @@ impl App {
         self.cdp_chain_edit_target = Some(resume.target);
         self.dialog = Some(Dialog::CdpParams {
             catalog_index: resume.catalog_index,
+            restore: None,
             fields: resume.fields,
             second_input: resume.second_input,
             variadic_input: resume.variadic_input,
@@ -13432,6 +13618,7 @@ impl App {
                 self.cdp_chain_edit_target = Some(resume.target);
                 self.dialog = Some(Dialog::CdpParams {
                     catalog_index: resume.catalog_index,
+                    restore: None,
                     fields: resume.fields,
                     second_input: resume.second_input,
                     variadic_input: resume.variadic_input,
@@ -14127,6 +14314,7 @@ impl App {
                                     .unwrap_or_default();
                                 self.dialog = Some(Dialog::CdpParams {
                                     catalog_index: pending.catalog_index,
+                                    restore: pending.restore.clone(),
                                     fields: pending.fields,
                                     second_input: pending.second_input,
                                     variadic_input: pending.variadic_input,
@@ -19887,6 +20075,7 @@ fn render_dialog(
         Dialog::CdpParams {
             catalog_index, fields, second_input, variadic_input, photo_input, focus, error, preview, envelope, list_edit, table_edit,
             marker_time_list_edit, hilite_band_edit, formant_picker, file_picker, variadic_picker, photo_picker: _, presets, preset_selected, custom_values: _, save_prompt, scroll,
+            restore: _,
         } => {
             let def = catalog.processes.get(*catalog_index);
             if let Some(edit) = envelope {
@@ -31214,6 +31403,114 @@ mod tests {
         assert_eq!(value(&app), before, "nor does a click before it");
     }
 
+    /// Esc walks back one level at a time instead of closing the whole flow.
+    ///
+    /// Picking the wrong process out of 900-odd used to cost a reopen *and* a re-search, since
+    /// Esc in the params form went straight to the waveform (user request). The browser it
+    /// returns to is rebuilt rather than stored, so this also pins that the search text, the
+    /// highlight and the column focus survive the trip.
+    #[test]
+    fn esc_from_params_returns_to_the_browser_it_was_opened_from() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_browser();
+
+        // Type a search and move the highlight, so a fresh browser would be visibly different.
+        for c in "blur".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { entries, selected, .. }) = &app.dialog else { panic!("no browser") };
+        assert!(entries.len() > 1, "the search should match several processes");
+        let (expected_selected, expected_entry) = (*selected, entries[*selected]);
+        assert_eq!(expected_selected, 1, "Down should have moved the highlight");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { catalog_index, .. }) = &app.dialog else {
+            panic!("Enter should open the params form")
+        };
+        assert_eq!(*catalog_index, expected_entry, "on the highlighted process");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let Some(Dialog::CdpBrowser { search, selected, entries, .. }) = &app.dialog else {
+            panic!("Esc should step back to the browser, not close")
+        };
+        assert_eq!(search.value(), "blur", "with the search still typed");
+        assert_eq!(*selected, expected_selected, "and the same row highlighted");
+        assert_eq!(entries[*selected], expected_entry);
+
+        // A second Esc leaves entirely — one level per press.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "a second Esc closes the browser");
+    }
+
+    /// Re-opening a process after Esc gives fresh defaults: Esc means cancel, so an abandoned
+    /// edit must not come back.
+    #[test]
+    fn esc_discards_the_values_that_were_being_edited() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_browser();
+        // Highlighted directly rather than by typing a search: this test is about what Esc
+        // does to the *values*, and a search string is one catalog rename away from matching
+        // something else.
+        let index = app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").unwrap();
+        let Some(Dialog::CdpBrowser { entries, selected, .. }) = app.dialog.as_mut() else {
+            panic!("browser")
+        };
+        *selected = entries.iter().position(|&e| e == index).expect("blur_avrg is listed");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let original = {
+            let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("params") };
+            let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("a Number") };
+            input.value().to_string()
+        };
+
+        // Move the slider off the default, then abandon with Esc.
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = 1;
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        {
+            let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("params") };
+            let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("a Number") };
+            assert_ne!(input.value(), original, "the edit landed");
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::CdpBrowser { .. })), "back at the browser");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("reopened") };
+        let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("a Number") };
+        assert_eq!(input.value(), original, "reopening gives the defaults back");
+    }
+
+    /// A browser opened *from the chain editor* returns there, and the chain-mode filtering
+    /// flag is dropped on the way out so the next plain browser is not stuck in chain mode.
+    #[test]
+    fn esc_from_a_chain_step_pick_returns_to_the_chain_editor() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.cdp_chain_editor = Some(ChainEditorState::fresh());
+        app.cdp_chain_edit_target = Some(ChainEditTarget::Append(Vec::new()));
+        app.open_cdp_browser_returning_to(Some(CdpReturn::ChainEditor));
+
+        // Down into a process, then all the way back out one level at a time.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::CdpParams { .. })), "opened a step's params");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::CdpBrowser { .. })), "first Esc: back to the picker");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(
+            matches!(app.dialog, Some(Dialog::CdpChainEditor)),
+            "second Esc: back to the chain being built, not the waveform"
+        );
+        assert!(
+            app.cdp_chain_edit_target.is_none(),
+            "abandoning the pick must clear chain mode, or the next browser inherits it"
+        );
+    }
+
     /// The reported bug in plain terms: the "input buffers" row could only be opened with
     /// Enter. Clicking it now opens the picker, and clicking a buffer row inside the picker
     /// toggles it into the pick — a mouse user has no Space to press.
@@ -32235,6 +32532,7 @@ mod tests {
             range: (0, 4),
             label: "CDP: Fake Glob".into(),
             catalog_index: 0,
+            restore: None,
             fields: Vec::new(),
             second_input: None,
             variadic_input: None,
@@ -32328,6 +32626,7 @@ mod tests {
             range: (0, 0),
             label: "CDP: Fake Synth".into(),
             catalog_index,
+            restore: None,
             fields: Vec::new(),
             second_input: None,
             variadic_input: None,
@@ -32458,6 +32757,7 @@ mod tests {
             range: (0, 4),
             label: "CDP: Fake Matrix".into(),
             catalog_index: 0,
+            restore: None,
             fields: Vec::new(),
             second_input: None,
             variadic_input: None,
@@ -36101,6 +36401,7 @@ mod tests {
             range: (0, 4),
             label: "CDP: Fake".into(),
             catalog_index,
+            restore: None,
             fields: Vec::new(),
             second_input: None,
             variadic_input: None,
@@ -36192,6 +36493,7 @@ mod tests {
             range: (0, 4),
             label: "CDP: Fake".into(),
             catalog_index,
+            restore: None,
             fields: fields.clone(),
             second_input: None,
             variadic_input: None,
@@ -42053,6 +42355,7 @@ mod tests {
         let field = CdpField::FormantBufferRef { selected: None, buffer_kind };
         app.dialog = Some(Dialog::CdpParams {
             catalog_index: 0,
+            restore: None,
             fields: vec![field],
             second_input: None,
             variadic_input: None,
@@ -42344,6 +42647,7 @@ mod tests {
         app.formant_buffers = vec![FormantBuffer::new(FormantBufferKind::Formant, "f", vec![], "t")];
         app.dialog = Some(Dialog::CdpParams {
             catalog_index: 0,
+            restore: None,
             fields: vec![
                 CdpField::FormantBufferRef { selected: Some(0), buffer_kind: FormantBufferKind::Formant },
                 CdpField::FormantBufferRef { selected: None, buffer_kind: FormantBufferKind::Formant },
@@ -43184,6 +43488,7 @@ mod folder_gate_tests {
         );
     }
 }
+
 
 
 

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Esc steps back one dialog instead of closing everything.** Cancelling a process's parameters
+  returns to the browser with your search text and highlight intact, so picking the wrong process
+  out of 900-odd costs one key rather than a reopen and a re-search. One level per press: params
+  → browser → chain editor (when the browser was opened to add a chain step) → waveform. Esc still
+  means cancel, so re-opening a process gives its defaults back rather than the values you
+  abandoned.
+
+  This also fixes a latent bug it uncovered: the Esc handler tested for the Praat picture dialog
+  with `if let ... = self.dialog.take()`, and `take()` runs whether or not the pattern matches, so
+  *every* Esc destroyed the open dialog before any later branch could look at it. Harmless while
+  every later branch also cleared it — not harmless once one of them wants to step back instead.
+
 - **Every bounded process parameter now has a slider.** Any parameter whose range is closed on
   both sides — all of Airwindows, most of CDP — gets a 15-stop horizontal track to the left of its
   number field, in the params dialog and in the list, table, marker-time and hilite-band editors.
