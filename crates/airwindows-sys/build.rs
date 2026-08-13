@@ -41,10 +41,18 @@ fn main() {
     let autogen = src.join("autogen_airwin");
 
     if !autogen.is_dir() {
+        // Reached by two routes, and the second is the one worth naming: a clone made without
+        // submodules, or -- far more often -- an existing clone updated with `git pull`, which
+        // does not fetch a submodule that was added since you cloned. The message says so
+        // because the first thing a user does with "directory is missing" is check whether the
+        // directory is missing, which tells them nothing.
         panic!(
             "{} is missing.\n\n\
-             The Airwindows backend is built from a git submodule. Run:\n\
-             \n    git submodule update --init {SUBMODULE}\n",
+             The Airwindows backend is compiled from a git submodule, which is not fetched by\n\
+             `git clone` or `git pull` on their own. From the repository root, run:\n\
+             \n    git submodule update --init\n\n\
+             (Plain `--init`, not `--init --recursive`: {SUBMODULE} declares submodules of its\n\
+             own that this project never reads.)\n",
             autogen.display()
         );
     }

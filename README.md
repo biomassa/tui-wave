@@ -125,12 +125,27 @@ CDP is separate again, and has no installer anywhere; see [Optional: CDP support
 handles the toolchain, the build dependencies, the submodule and the release build, then installs
 the binary. The rest of this section is the manual equivalent.
 
-Clone the repository, then build with Cargo.
+Clone the repository **with its submodules**, then build with Cargo.
 
 ```sh
 git clone <this repository>
 cd tui-wave
+git submodule update --init
 cargo build --release
+```
+
+The submodules are not optional: the Airwindows effects are compiled from
+`third_party/airwin2rack`, so without that step the build stops with
+`.../autogen_airwin is missing`. Use `--init` rather than `--init --recursive` — airwin2rack
+declares submodules of its own, several hundred megabytes of upstream history that tui-wave
+never reads.
+
+**Updating an existing clone**, note that `git pull` alone does not fetch a submodule that was
+added since you cloned. Run both:
+
+```sh
+git pull
+git submodule update --init
 ```
 
 Always build with `--release`. A debug build draws long files many times slower, because
@@ -275,17 +290,15 @@ praatAudioTools *scripts* and the `py` group's Python environment, but Praat its
 separate install. Running a Praat process without it says exactly that, naming the fix, rather
 than reporting a raw OS error.
 
-**The scripts**, which ship with tui-wave as a git submodule. Clone with them:
-
-```sh
-git clone --recursive https://github.com/biomassa/tui-wave
-```
-
-Or fetch them into an existing clone:
+**The scripts**, which ship with tui-wave as a git submodule. If you followed the build steps
+above you already have them; otherwise fetch them into an existing clone with:
 
 ```sh
 git submodule update --init
 ```
+
+(Not `--init --recursive`: that also pulls airwin2rack's own submodules, which are large and
+unused here.)
 
 If you forget, tui-wave says exactly that when you run a Praat process. Point
 `praat_audiotools_dir` at your own checkout if you would rather use one.
