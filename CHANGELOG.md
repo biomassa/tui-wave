@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-15 (2.9.1)
 
 - **Process previews now loop, and end with the dialog that started them.** A preview played its
   result once, which made a short selection almost unjudgeable; it now repeats until you are done
