@@ -2842,6 +2842,14 @@ enum Confirm {
     /// panel `Ctrl+L`), discarding in-memory edits — confirmed because it's a dirty
     /// document (an unmodified one just reloads immediately, nothing to lose).
     ReloadBuffer(usize),
+    /// Throw away the envelope being edited and put the parameter back to a single constant
+    /// ('c' in the envelope editor). The only confirm raised over an open dialog, and the
+    /// reason the modal is now drawn last and swallows the mouse.
+    ///
+    /// Confirmed because the key is one letter away from several harmless ones in that editor
+    /// and the loss is total — a hand-drawn shape of a dozen breakpoints is gone with no undo,
+    /// the editor having no history of its own.
+    RevertEnvelopeToConstant,
 }
 
 /// What to do once `App::save_as_queue` (buffers waiting for a filename before some other
@@ -5372,7 +5380,15 @@ impl App {
         if self.confirm.is_none() {
             return;
         }
-        let save = matches!(key.code, KeyCode::Char('s') | KeyCode::Char('S'));
+        // 's' means "save first, then do it" — and only where there is something to save.
+        // Scoped to those three because it is otherwise a second, unadvertised yes: every
+        // other confirm's text offers `(y)` alone, yet 's' proceeded there too, so a stray
+        // press deleted a file or discarded an envelope with nothing having said it would.
+        let save = matches!(key.code, KeyCode::Char('s') | KeyCode::Char('S'))
+            && matches!(
+                self.confirm,
+                Some(Confirm::Quit | Confirm::CloseBuffer(_) | Confirm::CloseCurve(_))
+            );
         let proceed = save || matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
         if !proceed {
             // Any other key cancels.
@@ -5427,6 +5443,9 @@ impl App {
             }
             Confirm::ReloadBuffer(idx) => {
                 self.reload_buffer_from_disk(idx);
+            }
+            Confirm::RevertEnvelopeToConstant => {
+                self.revert_cdp_envelope_to_constant();
             }
         }
     }
@@ -11037,6 +11056,21 @@ impl App {
     /// of `edit` to have ended before they touch `Dialog::CdpParams.envelope` itself
     /// (can't null out the `Option` while something still borrows its contents) — every
     /// value they need is captured into plain owned locals up front for exactly that reason.
+    /// Discards the envelope being edited and puts the parameter back to a plain constant —
+    /// what `Confirm::RevertEnvelopeToConstant` performs once the user has said yes.
+    ///
+    /// Writing `None` back is what clears the field's envelope; closing the editor after it is
+    /// the same step Enter takes, so the dialog underneath is left in exactly the state either
+    /// route produces.
+    fn revert_cdp_envelope_to_constant(&mut self) {
+        if let Some(Dialog::CdpParams { fields, envelope, .. }) = self.dialog.as_mut() {
+            if let Some(edit) = envelope.as_ref() {
+                cdp_envelope_write_back(fields, edit, None);
+            }
+            *envelope = None;
+        }
+    }
+
     fn handle_cdp_envelope_key(&mut self, key: KeyEvent) {
         let Some(Dialog::CdpParams { envelope: Some(edit), fields, catalog_index, .. }) = self.dialog.as_mut()
         else {
@@ -11152,13 +11186,11 @@ impl App {
                     edit.curve_picker = Some(EnvelopeCurvePicker { entries, selected: 0 });
                 }
             }
+            // Asks first, unlike every other key in this editor: it throws the whole drawn
+            // shape away and there is no undo behind it — the editor keeps no history, and the
+            // field it writes back to is a single number that cannot remember a curve.
             KeyCode::Char('c') if constant_key == CdpEnvelopeConstantKey::RevertToConstant => {
-                if let Some(Dialog::CdpParams { fields, envelope, .. }) = self.dialog.as_mut() {
-                    if let Some(edit) = envelope.as_ref() {
-                        cdp_envelope_write_back(fields, edit, None);
-                    }
-                    *envelope = None;
-                }
+                self.confirm = Some(Confirm::RevertEnvelopeToConstant);
             }
             // Switch to the *other* half of a compound crystal field, committing this half on
             // the way — the section-switch counterpart to the vertex table editor's own 'e'.
@@ -16365,6 +16397,14 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // A confirm modal absorbs the mouse exactly as it already absorbs the keyboard
+        // (`handle_key` checks it first, for the same reason). Nothing beneath a question may
+        // act while it is being asked — least of all the envelope editor under
+        // `Confirm::RevertEnvelopeToConstant`, where a click would edit the very points the
+        // modal is offering to discard.
+        if self.confirm.is_some() {
+            return;
+        }
         // Checked first since it needs Drag/Up events too, unlike the generic dialog-click
         // handling just below (which only ever reacts to Down) — returns `false` immediately
         // whenever the envelope editor isn't open, falling through to that generic handling
@@ -16832,9 +16872,30 @@ impl App {
                 };
                 if is_double {
                     self.last_cdp_envelope_click = None;
-                    let insert_at = edit.points.partition_point(|&(pt, _)| pt < t);
-                    edit.points.insert(insert_at, (round6(t), round6(v.clamp(min, max))));
-                    edit.selected = insert_at;
+                    // One gesture, both directions: on a breakpoint it removes that
+                    // breakpoint, anywhere else it adds one. Deleting used to be Shift+click,
+                    // which never fired — xterm and kitty both treat Shift as "this click is
+                    // mine" and use it to bypass mouse reporting for local text selection, so
+                    // the event never reached the app at all (user report). A gesture the
+                    // terminal cannot intercept is the only kind worth binding here.
+                    match cdp_envelope_nearest_point(&edit.points, grid, time_max, min, max, mouse.column, mouse.row)
+                        .filter(|&(_, cells)| cells <= ENVELOPE_POINT_HIT_CELLS)
+                    {
+                        // The floor of 2 is the envelope itself: a breakpoint curve with one
+                        // point is not a curve. Refusing beats silently redrawing it as a
+                        // constant the user did not ask for.
+                        Some((idx, _)) => {
+                            if edit.points.len() > 2 {
+                                edit.points.remove(idx);
+                                edit.selected = edit.selected.min(edit.points.len() - 1);
+                            }
+                        }
+                        None => {
+                            let insert_at = edit.points.partition_point(|&(pt, _)| pt < t);
+                            edit.points.insert(insert_at, (round6(t), round6(v.clamp(min, max))));
+                            edit.selected = insert_at;
+                        }
+                    }
                     return true;
                 }
                 self.last_cdp_envelope_click = Some((now, mouse.column, mouse.row));
@@ -16845,14 +16906,10 @@ impl App {
                     return true;
                 };
 
-                if mouse.modifiers.contains(KeyModifiers::SHIFT) {
-                    if edit.points.len() > 2 {
-                        edit.points.remove(nearest_idx);
-                        edit.selected = edit.selected.min(edit.points.len() - 1);
-                    }
-                    return true;
-                }
-
+                // No Shift arm here any more, and its absence is what makes Shift+drag
+                // usable: a Shift+press used to delete the nearest point instead of arming a
+                // drag, so "Shift+drag for fine movement" could never actually be started with
+                // the modifier already held.
                 edit.selected = nearest_idx;
                 let (pt, pv) = edit.points[nearest_idx];
                 self.dragging_cdp_point = Some(nearest_idx);
@@ -19054,33 +19111,6 @@ impl App {
     /// while no buffer is loaded (e.g. Files-panel rename) must still be drawn — otherwise it
     /// is invisible and the app looks frozen, escapable only by the Esc/Enter the user can't see.
     fn render_overlays(&mut self, frame: &mut Frame, area: Rect) {
-        if let Some(confirm) = &self.confirm {
-            let text = match confirm {
-                Confirm::Quit => {
-                    let n = self.dirty_buffer_count();
-                    let noun = if n == 1 { "buffer" } else { "buffers" };
-                    format!(" {n} unsaved {noun} — (s)ave all & quit · (y) quit anyway · (Esc) cancel ")
-                }
-                Confirm::CloseBuffer(_) => {
-                    " Unsaved buffer — (s)ave & close · (y) close anyway · (Esc) cancel ".to_string()
-                }
-                Confirm::CloseCurve(_) => {
-                    " Unsaved curve — (s)ave & close · (y) close anyway · (Esc) cancel ".to_string()
-                }
-                Confirm::ResetConfig => {
-                    " Reset all keybindings to defaults? (existing config saved as .bak) — (y) reset · (Esc) cancel ".to_string()
-                }
-                Confirm::DeleteFile(path) => {
-                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                    format!(" Delete \"{name}\" from disk? — (y) delete · (Esc) cancel ")
-                }
-                Confirm::ReloadBuffer(_) => {
-                    " Unsaved changes will be lost — (y) reload from disk · (Esc) cancel ".to_string()
-                }
-            };
-            render_confirm(frame, area, &text);
-        }
-
         if self.save_as_active {
             let rects = render_save_as_dialog(
                 frame, area,
@@ -19129,6 +19159,41 @@ impl App {
             self.dialog_n_interactive = 0;
             self.dialog_row_rects.clear();
         }
+        // The confirm modal, drawn *last* so it sits on top of everything above it.
+        //
+        // It used to be drawn first, which was invisible only because no confirm could be
+        // raised over a dialog — `Confirm::RevertEnvelopeToConstant` is, and the dialog
+        // beneath it would have painted straight over the question being asked.
+        if let Some(confirm) = &self.confirm {
+            let text = match confirm {
+                Confirm::Quit => {
+                    let n = self.dirty_buffer_count();
+                    let noun = if n == 1 { "buffer" } else { "buffers" };
+                    format!(" {n} unsaved {noun} — (s)ave all & quit · (y) quit anyway · (Esc) cancel ")
+                }
+                Confirm::CloseBuffer(_) => {
+                    " Unsaved buffer — (s)ave & close · (y) close anyway · (Esc) cancel ".to_string()
+                }
+                Confirm::CloseCurve(_) => {
+                    " Unsaved curve — (s)ave & close · (y) close anyway · (Esc) cancel ".to_string()
+                }
+                Confirm::ResetConfig => {
+                    " Reset all keybindings to defaults? (existing config saved as .bak) — (y) reset · (Esc) cancel ".to_string()
+                }
+                Confirm::DeleteFile(path) => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    format!(" Delete \"{name}\" from disk? — (y) delete · (Esc) cancel ")
+                }
+                Confirm::ReloadBuffer(_) => {
+                    " Unsaved changes will be lost — (y) reload from disk · (Esc) cancel ".to_string()
+                }
+                Confirm::RevertEnvelopeToConstant => {
+                    " Delete envelope and switch back to constant value? — (y) delete · (Esc) cancel ".to_string()
+                }
+            };
+            render_confirm(frame, area, &text);
+        }
+
         // Recorded from the same decision the renderer just made, for the click handler — see
         // `CdpSliderGeometry` and `cdp_table_draws_sliders`.
         self.cdp_table_drew_sliders = match self.dialog.as_ref() {
@@ -21589,6 +21654,14 @@ fn cdp_envelope_point_cell(grid: Rect, time_max: f64, min: f64, max: f64, point:
     (grid.x + col, grid.y + row)
 }
 
+/// How close a click must land to a breakpoint's rendered cell to count as being *on* it —
+/// Chebyshev cells, so one cell in any direction including diagonally. A double-click inside
+/// this radius removes that breakpoint; outside it, adds one.
+///
+/// One rather than zero because the grid quantizes: a breakpoint is drawn at a whole cell, and
+/// asking the user to hit that exact cell on a 16-row grid would make removal a matter of luck.
+const ENVELOPE_POINT_HIT_CELLS: u16 = 1;
+
 /// The index of the breakpoint whose rendered cell is closest (Chebyshev distance, matching
 /// how "closest" looks to the eye on a character grid better than Euclidean would) to
 /// `(col, row)`, plus that distance in cells — `None` only if `points` is empty, which
@@ -21936,7 +22009,10 @@ fn render_cdp_envelope_editor(
     // The Preset row's own keys (Tab/s/d) are hinted on their own line at the very top of
     // the popup instead — see `lines`' header block above.
     hint_spans.push(Span::styled("Enter", hint_style));
-    hint_spans.push(Span::styled(":save  ", label_style));
+    // "done", not "save": this commits the drawn shape into the field and closes the editor,
+    // where the 's' two hints away really does save — to a named preset on disk. Two different
+    // things called "save" in one bar is the reading the user actually had to correct.
+    hint_spans.push(Span::styled(":done  ", label_style));
     hint_spans.push(Span::styled("Esc", hint_style));
     hint_spans.push(Span::styled(":cancel", label_style));
     lines.push(Line::from(hint_spans));
@@ -21944,13 +22020,11 @@ fn render_cdp_envelope_editor(
         Span::styled(" Click", hint_style),
         Span::styled(":select  ", label_style),
         Span::styled("Dbl-click", hint_style),
-        Span::styled(":insert  ", label_style),
+        Span::styled(":add/remove point  ", label_style),
         Span::styled("Drag", hint_style),
         Span::styled(":move  ", label_style),
         Span::styled("Shift+drag", hint_style),
-        Span::styled(":fine move  ", label_style),
-        Span::styled("Shift+click", hint_style),
-        Span::styled(":delete", label_style),
+        Span::styled(":fine move", label_style),
     ]));
 
     // Wrapped (not truncated) so a genuinely narrow terminal reflows either hint line onto a
@@ -28858,7 +28932,8 @@ mod tests {
     /// Regression check: 'c' on a *non*-required_envelope automatable field must still mean
     /// "revert to constant" (its original behavior) even when curves are open — the
     /// repurposing only applies to a `required_envelope` field, which has no constant to
-    /// revert to in the first place.
+    /// revert to in the first place. It now asks before doing it, so the whole gesture is
+    /// 'c' then 'y'.
     #[test]
     fn c_on_a_non_required_envelope_field_still_reverts_to_constant() {
         let mut app = new_app(Some(doc(0.1, 44100)), None);
@@ -28876,9 +28951,20 @@ mod tests {
         }
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(
+            matches!(app.confirm, Some(Confirm::RevertEnvelopeToConstant)),
+            "'c' asks before discarding the envelope, rather than opening a curve picker"
+        );
+        {
+            let Some(Dialog::CdpParams { envelope, .. }) = &app.dialog else { panic!("no dialog") };
+            assert!(envelope.is_some(), "the editor stays open behind the question");
+        }
+        // Through `handle_key`, which is where the modal takes precedence over the dialog.
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
 
         let Some(Dialog::CdpParams { fields, envelope, .. }) = &app.dialog else { panic!("no dialog") };
-        assert!(envelope.is_none(), "'c' should close the editor and commit as a constant, not open a curve picker");
+        assert!(app.confirm.is_none(), "answering closes the modal");
+        assert!(envelope.is_none(), "'y' should close the editor and commit as a constant");
         let Some(CdpField::Number { envelope, .. }) = fields.first() else { panic!("expected a Number field") };
         assert!(envelope.is_none(), "should have reverted to a constant, not stayed in automation mode");
     }
@@ -32494,18 +32580,125 @@ mod tests {
         assert!(shift_delta < plain_delta, "Shift+drag ({shift_delta}) should move less than a plain drag ({plain_delta}) for the same mouse movement");
     }
 
-    /// Shift+click deletes the nearest breakpoint (down to the floor of 2 points).
+    /// Double-clicking an existing breakpoint removes it — the other half of the gesture that
+    /// adds one, so a single motion covers both directions.
+    ///
+    /// This replaced Shift+click, which never worked: xterm and kitty both claim Shift+click
+    /// for their own text selection and never forward it, so the app saw nothing (user report).
     #[test]
-    fn shift_click_deletes_nearest_point() {
+    fn double_clicking_a_point_removes_it() {
+        let (mut app, _grid, _cell0, cell1) = open_cdp_envelope_editor_for_mouse_tests();
+        let before = {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+            edit.points.len()
+        };
+        // Two clicks inside the double-click window, on the point itself.
+        for _ in 0..2 {
+            app.handle_mouse(cdp_mouse_at(cell1.0, cell1.1, MouseEventKind::Down(MouseButton::Left), KeyModifiers::NONE));
+            app.handle_mouse(cdp_mouse_at(cell1.0, cell1.1, MouseEventKind::Up(MouseButton::Left), KeyModifiers::NONE));
+        }
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(edit.points.len(), before - 1, "double-clicking a point should remove exactly it");
+    }
+
+    /// …and double-clicking away from every point still adds one, which is what makes it one
+    /// gesture rather than two that happen to share a name.
+    #[test]
+    fn double_clicking_empty_space_still_adds_a_point() {
+        let (mut app, grid, cell0, cell1) = open_cdp_envelope_editor_for_mouse_tests();
+        let before = {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+            edit.points.len()
+        };
+        // Between the two points horizontally, and well away from either vertically.
+        let col = (cell0.0 + cell1.0) / 2;
+        let row = grid.y + grid.height / 4;
+        assert!(
+            cell0.1.abs_diff(row) > ENVELOPE_POINT_HIT_CELLS && cell1.1.abs_diff(row) > ENVELOPE_POINT_HIT_CELLS,
+            "the fixture must give us somewhere that is genuinely not on a point"
+        );
+        for _ in 0..2 {
+            app.handle_mouse(cdp_mouse_at(col, row, MouseEventKind::Down(MouseButton::Left), KeyModifiers::NONE));
+            app.handle_mouse(cdp_mouse_at(col, row, MouseEventKind::Up(MouseButton::Left), KeyModifiers::NONE));
+        }
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(edit.points.len(), before + 1, "double-clicking empty grid should add a point");
+    }
+
+    /// The floor of two breakpoints holds: a curve with one point is not a curve, so the last
+    /// removable point refuses rather than silently collapsing the envelope to a constant.
+    #[test]
+    fn double_clicking_a_point_refuses_to_go_below_two() {
+        let (mut app, _grid, cell0, cell1) = open_cdp_envelope_editor_for_mouse_tests();
+        let double_click = |app: &mut App, cell: (u16, u16)| {
+            for _ in 0..2 {
+                app.handle_mouse(cdp_mouse_at(cell.0, cell.1, MouseEventKind::Down(MouseButton::Left), KeyModifiers::NONE));
+                app.handle_mouse(cdp_mouse_at(cell.0, cell.1, MouseEventKind::Up(MouseButton::Left), KeyModifiers::NONE));
+            }
+        };
+        double_click(&mut app, cell1);
+        {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+            assert_eq!(edit.points.len(), 2, "down to the two endpoints");
+        }
+        // One of the two survivors — there is nothing left to remove.
+        double_click(&mut app, cell0);
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(edit.points.len(), 2, "the envelope keeps its two endpoints whatever the pointer does");
+    }
+
+    /// A Shift+press now arms a drag like any other press, which is what makes the advertised
+    /// "Shift+drag: fine move" reachable at all — it used to delete the nearest point instead,
+    /// so the gesture could never be started with the modifier already held.
+    #[test]
+    fn shift_press_arms_a_drag_instead_of_deleting() {
         let (mut app, _grid, _cell0, cell1) = open_cdp_envelope_editor_for_mouse_tests();
         let before = {
             let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
             edit.points.len()
         };
         app.handle_mouse(cdp_mouse_at(cell1.0, cell1.1, MouseEventKind::Down(MouseButton::Left), KeyModifiers::SHIFT));
-        app.handle_mouse(cdp_mouse_at(cell1.0, cell1.1, MouseEventKind::Up(MouseButton::Left), KeyModifiers::SHIFT));
+        assert!(app.dragging_cdp_point.is_some(), "the press should arm a drag");
         let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no dialog") };
-        assert_eq!(edit.points.len(), before - 1, "shift+click should delete exactly one point");
+        assert_eq!(edit.points.len(), before, "and must not delete anything");
+    }
+
+    /// 'c' in the envelope editor throws away the whole drawn shape with no undo behind it, so
+    /// it asks first — and the question has to be drawn *over* the editor, which is the one
+    /// place in the app a confirm and a dialog are on screen together.
+    #[test]
+    fn c_asks_before_discarding_the_envelope_and_esc_keeps_it() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_blur_avrg_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let drawn = {
+            let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else { panic!("no editor") };
+            edit.points.clone()
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(matches!(app.confirm, Some(Confirm::RevertEnvelopeToConstant)));
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(
+            screen.contains("Delete envelope and switch back to constant value?"),
+            "the question must be visible on top of the editor, not painted over by it: {screen}"
+        );
+
+        // A click while the question is up must not reach the editor underneath.
+        app.handle_mouse(cdp_mouse_at(2, 2, MouseEventKind::Down(MouseButton::Left), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.confirm.is_none(), "Esc answers no");
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else {
+            panic!("saying no must leave the editor exactly as it was");
+        };
+        assert_eq!(edit.points, drawn, "and leave every breakpoint untouched");
     }
 
     #[test]

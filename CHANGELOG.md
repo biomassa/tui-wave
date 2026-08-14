@@ -14,6 +14,29 @@
   deliberate exception is unchanged: a picture produced by a Preview is shown *while* its audition
   plays, because the two are meant to be judged together.
 
+- **Envelope editor: double-click adds *or* removes a breakpoint.** Removing one was Shift+click,
+  which never actually worked — xterm and kitty both claim Shift+click for their own text
+  selection and never forward the event, so the app saw nothing (user report). Double-click on a
+  breakpoint now removes it and double-click anywhere else adds one, hinted as
+  `Dbl-click:add/remove point`; a curve keeps its two endpoints whatever the pointer does. As a
+  side effect the advertised `Shift+drag:fine move` is reachable for the first time: a Shift+press
+  used to delete the nearest point rather than arm the drag, so the gesture could not be started
+  with the modifier already held.
+
+- **`c` in the envelope editor asks first**: "Delete envelope and switch back to constant value?".
+  It throws away the whole drawn shape with no undo behind it — the editor keeps no history, and
+  the field it writes back to is a single number that cannot remember a curve. This is the first
+  confirmation raised over an open dialog, so the modal is now drawn last (it was painted over
+  otherwise) and swallows the mouse the same way it already swallowed the keyboard. Relatedly,
+  `s` no longer counts as a second, unadvertised "yes" on confirmations that never offered it —
+  it means "save first, then proceed" and now only applies where there is something to save, so a
+  stray press can no longer delete a file.
+
+- **The envelope editor's `Enter` hint reads `done`, not `save`.** It commits the drawn shape into
+  the parameter and closes the editor, while the `s` two hints away really does save — to a named
+  preset on disk. Two different things called "save" in one bar is the reading that had to be
+  corrected.
+
 - **`p` previews, from anywhere in a process dialog.** Preview is what you press repeatedly while
   turning a knob, so it no longer costs a trip down to the `[Preview]` button and back: `p` runs
   it from whatever row has focus. In the chain editor `p` previews the **whole chain** from any
