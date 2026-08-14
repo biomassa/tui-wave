@@ -258,8 +258,54 @@ impl Config {
 /// each other's expected state. Lives here (not e.g. a shared test-utils module) since this
 /// is the file the *first* such test was already in — every other module's test just imports
 /// it.
+///
+/// The rule is **reads and writes of the config tree, not just of the env var**. A test that
+/// merely inherits whatever `XDG_CONFIG_HOME` happens to be set to is not a bystander: a
+/// successful Apply writes `cdp_recent.toml` and `cdp_last_process.toml`, and an unguarded one
+/// running in parallel drops those files straight into a *guarded* test's private temp directory,
+/// where they read as state that test's own asserts believe it created. That is exactly what
+/// `applying_a_process_auto_saves_it_as_the_recallable_last_process` was failing on — reliably
+/// enough to reproduce two runs in three, and only ever in a full-suite run, since the collision
+/// needs the two tests overlapping in time.
 #[cfg(test)]
 pub(crate) static XDG_CONFIG_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Takes `XDG_CONFIG_HOME_TEST_LOCK` and points `XDG_CONFIG_HOME` at a private temp directory
+/// for as long as it is held — the whole "guard + temp dir + tear both down" preamble that a
+/// dozen tests were open-coding, with the teardown moved into `Drop` so a failing assert cannot
+/// skip it (every hand-written copy put its cleanup after the asserts, so a panic left the env
+/// var set for whichever test acquired the lock next).
+///
+/// Anything that touches the config tree wants this, not merely anything that sets the env var
+/// — see the lock's own comment.
+#[cfg(test)]
+pub(crate) struct TestConfigHome {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    dir: PathBuf,
+}
+
+#[cfg(test)]
+impl TestConfigHome {
+    /// `name` only distinguishes one test's directory from another's in `$TMPDIR`; the lock is
+    /// what actually keeps them apart.
+    pub(crate) fn new(name: &str) -> Self {
+        let lock = XDG_CONFIG_HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("tui_wave_{name}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
+        Self { _lock: lock, dir }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestConfigHome {
+    fn drop(&mut self) {
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&self.dir).ok();
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -308,19 +308,100 @@ struct RegionExportOptions {
     fade_out_ms: Option<f32>,
 }
 
-/// A throwaway engine for previewing loose samples — the Files-panel audition and the CDP
+/// A throwaway engine for playing loose samples — the Files-panel audition and the process
 /// previews — started from the beginning.
 ///
 /// These have no `Document` and no waveform pyramid behind them, so the fold-down gains are
 /// measured straight from the samples (one pass, next to a decode or a full clone that dominate
-/// it). Bundling that with construction is what keeps a fifth preview site from quietly getting a
+/// it). Bundling that with construction is what keeps a sixth preview site from quietly getting a
 /// raw multichannel sum: there is no order of calls left to remember.
-fn preview_engine(channels: Vec<Vec<f32>>, sample_rate: u32) -> Option<AudioEngine> {
+fn loose_sample_engine(channels: Vec<Vec<f32>>, sample_rate: u32, looped: bool) -> Option<AudioEngine> {
+    let frames = channels.first().map(|c| c.len()).unwrap_or(0);
     let fold = dsp::Fold::from_channels(&channels);
     let engine = AudioEngine::try_new(channels, sample_rate)?;
     engine.set_fold(fold);
-    engine.play(0);
+    // `play_looped` needs a non-empty range to wrap within; a zero-length result (a process that
+    // produced nothing) falls back to the one-shot path rather than to silence-with-no-end.
+    if looped && frames > 0 {
+        engine.play_looped(0, 0, frames);
+    } else {
+        engine.play(0);
+    }
     Some(engine)
+}
+
+/// A process preview: **looped**, because judging an effect means hearing it more than once and
+/// a one-shot pass makes a short selection unjudgeable. Every path that stops it goes through
+/// `App::stop_cdp_preview_audio`, and `App::sweep_cdp_preview_audio` is the backstop that ends it
+/// the moment its dialog leaves the screen — a loop that outlives its dialog never stops itself.
+fn preview_engine(channels: Vec<Vec<f32>>, sample_rate: u32) -> Option<AudioEngine> {
+    loose_sample_engine(channels, sample_rate, true)
+}
+
+/// The Files-panel audition: one pass, not a loop. It follows the highlight as the user skims a
+/// directory, so it ends on its own rather than needing to be dismissed.
+fn audition_engine(channels: Vec<Vec<f32>>, sample_rate: u32) -> Option<AudioEngine> {
+    loose_sample_engine(channels, sample_rate, false)
+}
+
+/// Whether a running preview's owning dialog is still the one on screen — the whole decision
+/// `App::sweep_cdp_preview_audio` makes, pulled out so it can be checked against every dialog
+/// without an audio device.
+///
+/// Deliberately an allowlist of *two* pairings plus one documented cover, so a dialog added later
+/// silences a preview rather than inheriting one it knows nothing about — the same reasoning as
+/// the streamed-buffer action allowlist.
+fn preview_owner_on_screen(dialog: Option<&Dialog>, owner: Option<PreviewOwner>) -> bool {
+    match (dialog, owner) {
+        (Some(Dialog::CdpParams { .. }), Some(PreviewOwner::Params)) => true,
+        (Some(Dialog::CdpChainEditor), Some(PreviewOwner::ChainEditor)) => true,
+        // A picture produced by a Preview is shown *while* its audition plays: the two are
+        // meant to be looked at and listened to together, so this one dialog may cover either
+        // owner without ending it. Mirrors the dedicated Esc arm `PraatPicture` already has.
+        (Some(Dialog::PraatPicture { .. }), Some(_)) => true,
+        _ => false,
+    }
+}
+
+/// Whether a running preview should still be playing at all — the whole decision
+/// `App::sweep_cdp_preview_audio` makes, pure so every case can be checked without an audio
+/// device.
+///
+/// Two ways for it to stop being current: its dialog left the screen, or the parameters moved on
+/// from the ones it was rendered with. The second matters *because* a preview loops — a single
+/// pass is over before an edit can make it wrong, where a loop would go on asserting a stale
+/// answer for as long as the dialog stayed open. Comparing values (rather than watching for
+/// keystrokes) covers every editing route at once: typing, a slider step, a cycled choice, a
+/// sub-editor committing, a preset loaded. The cache it compares against is the same one Apply
+/// consults to decide whether it may splice without re-running, so "the sound stopped" and "Apply
+/// will re-run" cannot disagree.
+fn preview_still_current(dialog: Option<&Dialog>, owner: Option<PreviewOwner>) -> bool {
+    if !preview_owner_on_screen(dialog, owner) {
+        return false;
+    }
+    if let (Some(Dialog::CdpParams { fields, preview: Some(cached), .. }), Some(PreviewOwner::Params)) =
+        (dialog, owner)
+    {
+        let current: Vec<crate::model::cdp::ParamValue> =
+            fields.iter().map(CdpField::to_value).collect();
+        return current == cached.values;
+    }
+    true
+}
+
+/// Which dialog a running preview belongs to.
+///
+/// A preview loops, so nothing about the audio itself ever ends it — the dialog it was started
+/// from is what bounds its life. Recording the owner (rather than merely "some dialog that may
+/// preview is open") is what makes `App::sweep_cdp_preview_audio` exact: stepping from a params
+/// dialog back to the chain editor, or opening a *different* params session, both land on a
+/// dialog that is allowed to own a preview but does not own *this* one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewOwner {
+    /// A process params dialog — its own Preview button, or a chain step previewed in place.
+    Params,
+    /// The chain editor — Preview/`p` on a whole chain or a chain truncated at one step.
+    ChainEditor,
 }
 
 /// The audio engine a document needs, whichever storage it uses.
@@ -3136,8 +3217,12 @@ pub struct App {
     /// (Preview), and the label for the eventual undo entry.
     cdp_pending: Option<CdpPending>,
     /// Second, independent audio engine for auditioning a `Preview` result without
-    /// disturbing whatever's loaded/playing — mirrors `audition_audio`.
+    /// disturbing whatever's loaded/playing — mirrors `audition_audio`. Loops until stopped
+    /// (see `preview_engine`), so it must never outlive the dialog that started it.
     cdp_preview_audio: Option<AudioEngine>,
+    /// Which dialog `cdp_preview_audio` belongs to, recorded when it starts and checked every
+    /// frame by `sweep_cdp_preview_audio`. `None` exactly when there is no preview playing.
+    cdp_preview_owner: Option<PreviewOwner>,
     /// `Some(source_name)` while an "Extract Pitch Curve" job (`App::extract_pitch_curve`)
     /// is in flight — deliberately separate from `cdp_pending` rather than folded into it:
     /// this action has no `ProcessDef`/`CdpParams` dialog behind it at all (it isn't a
@@ -3806,6 +3891,7 @@ impl App {
             cdp_next_job_id: 0,
             cdp_pending: None,
             cdp_preview_audio: None,
+            cdp_preview_owner: None,
             cdp_pending_curve_extraction: None,
             cdp_pending_curve_transform: None,
             cdp_pending_formant_extraction: None,
@@ -4984,6 +5070,10 @@ impl App {
             if self.tick_praat() {
                 needs_redraw = true;
             }
+            // After the ticks, since a finished Preview job starts its audition and opens the
+            // dialog that owns it in the same handler, and before the next draw: a preview
+            // loops, so the frame where its dialog left the screen is the frame it must end.
+            self.sweep_cdp_preview_audio();
             self.tick_viewport_follow();
             if self.playhead_position != playhead_before {
                 needs_redraw = true;
@@ -12476,8 +12566,11 @@ impl App {
                             }
                         }
                         crate::cdp::JobPurpose::Preview => {
-                            self.cdp_preview_audio =
-                                preview_engine(output.result.clone(), output.sample_rate);
+                            self.start_cdp_preview_audio(
+                                output.result.clone(),
+                                output.sample_rate,
+                                PreviewOwner::Params,
+                            );
                             let values =
                                 pending.fields.iter().map(CdpField::to_value).collect();
                             let second_input_doc = pending
@@ -12680,8 +12773,11 @@ impl App {
                             }
                         }
                         crate::cdp::JobPurpose::Preview => {
-                            self.cdp_preview_audio =
-                                preview_engine(output.result.clone(), output.sample_rate);
+                            self.start_cdp_preview_audio(
+                                output.result.clone(),
+                                output.sample_rate,
+                                PreviewOwner::Params,
+                            );
                             let values = pending.fields.iter().map(CdpField::to_value).collect();
                             self.dialog = Some(Dialog::CdpParams {
                                 catalog_index: pending.catalog_index,
@@ -13604,14 +13700,17 @@ impl App {
                 self.dialog = None;
             }
             ChainRunFinish::PreviewWholeChain => {
-                self.cdp_preview_audio =
-                    preview_engine(final_frame.running_buffer, final_frame.running_rate);
+                self.start_cdp_preview_audio(
+                    final_frame.running_buffer,
+                    final_frame.running_rate,
+                    PreviewOwner::ChainEditor,
+                );
                 self.dialog = Some(Dialog::CdpChainEditor);
             }
             ChainRunFinish::PreviewStepInProgress(resume) => {
                 let channels = final_frame.running_buffer;
                 let sample_rate = final_frame.running_rate;
-                self.cdp_preview_audio = preview_engine(channels.clone(), sample_rate);
+                self.start_cdp_preview_audio(channels.clone(), sample_rate, PreviewOwner::Params);
                 let values = resume.fields.iter().map(CdpField::to_value).collect();
                 let second_input_doc = resume.second_input.as_ref().and_then(CdpSecondInput::selected_doc_index);
                 let formant_selections = formant_field_selections(&resume.fields);
@@ -13873,10 +13972,59 @@ impl App {
         }
     }
 
+    /// Starts the looping preview audition for a result, tagged with the dialog it belongs to.
+    ///
+    /// The single entry point, so a preview cannot exist without an owner for
+    /// `sweep_cdp_preview_audio` to check it against — the failure this replaces was a preview
+    /// left playing over the editor because one of the many paths out of a dialog happened not
+    /// to call `stop_cdp_preview_audio`.
+    fn start_cdp_preview_audio(
+        &mut self,
+        channels: Vec<Vec<f32>>,
+        sample_rate: u32,
+        owner: PreviewOwner,
+    ) {
+        self.cdp_preview_audio = preview_engine(channels, sample_rate);
+        self.cdp_preview_owner = Some(owner);
+    }
+
     /// Drops the preview audition engine, if any — mirrors `stop_audition`. Called whenever
     /// the CDP dialog closes or a field edit invalidates the cached preview.
     fn stop_cdp_preview_audio(&mut self) {
         self.cdp_preview_audio = None;
+        self.cdp_preview_owner = None;
+    }
+
+    /// Ends the preview the moment the dialog that owns it is no longer on screen, whatever the
+    /// reason — Esc, Apply, a sub-editor opening over it, a new job's modal, an error dialog, a
+    /// path that simply set `self.dialog` and forgot.
+    ///
+    /// A preview *loops*, so nothing ends it by itself and every one of the paths above used to
+    /// be an individual obligation to remember. This is the one check that covers all of them:
+    /// run once per frame from `App::run`, it needs no cooperation from the code that changes
+    /// the dialog, which is exactly why leftover previews stop happening. The explicit
+    /// `stop_cdp_preview_audio` calls are kept — they stop the sound within the same keypress
+    /// rather than by the end of the frame — but nothing depends on their being complete.
+    ///
+    /// The one dialog that may cover a preview's owner is `PraatPicture`: a picture produced by
+    /// a Preview is shown *while* its audition plays, and is meant to be looked at and listened
+    /// to together.
+    /// It also ends a preview the parameters have moved on from. What is playing is the result
+    /// of the values the job ran with, so the first edit to any of them makes the loop a
+    /// recording of something the dialog no longer describes — and a loop, unlike a single pass,
+    /// would go on asserting that stale answer for as long as the dialog stayed open. The
+    /// comparison is against `CdpPreview.values`, the same cache Apply consults to decide whether
+    /// it may splice without re-running, so "the sound stopped" and "Apply will re-run" are
+    /// necessarily the same condition. Every editing route is covered at once — typing, a slider
+    /// step, a choice cycled, a sub-editor committing, a preset loaded — because this reads the
+    /// resulting values rather than the keystrokes.
+    fn sweep_cdp_preview_audio(&mut self) {
+        if self.cdp_preview_audio.is_none() {
+            return;
+        }
+        if !preview_still_current(self.dialog.as_ref(), self.cdp_preview_owner) {
+            self.stop_cdp_preview_audio();
+        }
     }
 
     /// Drains completed/in-progress events from `cdp_runner`, advancing `Dialog::CdpRunning`
@@ -14299,8 +14447,11 @@ impl App {
                                 // audio stream (there's no single "the result"); play the
                                 // first produced segment as a representative sample.
                                 let channels = output.results.into_iter().next().unwrap_or_default();
-                                self.cdp_preview_audio =
-                                    preview_engine(channels.clone(), output.sample_rate);
+                                self.start_cdp_preview_audio(
+                                    channels.clone(),
+                                    output.sample_rate,
+                                    PreviewOwner::Params,
+                                );
                                 let values = pending.fields.iter().map(CdpField::to_value).collect();
                                 let second_input_doc = pending
                                     .second_input
@@ -14976,14 +15127,33 @@ impl App {
             None
         };
 
-        let already_on_target = self.audition_playing_path == current
-            || self.audition_pending.as_ref().map(|(p, _)| p) == current.as_ref();
+        // Nothing under the highlight to audition — focus left the panel, or it settled on a
+        // directory. An audition belongs to that highlight and must not outlive it, playing on
+        // under whichever panel took over.
+        //
+        // Its own arm ahead of the target comparison below, because that comparison cannot state
+        // this case: with nothing pending, `audition_pending` and `current` are *both* `None`,
+        // which read as "already on target" and left a playing audition untouched. The bug that
+        // hid behind it needed no unusual sequence at all — Tab out of the Files panel while a
+        // file was playing, which is simply what you do next.
+        let Some(target) = current else {
+            if self.audition_audio.is_some()
+                || self.audition_playing_path.is_some()
+                || self.audition_pending.is_some()
+            {
+                self.stop_audition();
+            }
+            return;
+        };
+
+        let already_on_target = self.audition_playing_path.as_ref() == Some(&target)
+            || self.audition_pending.as_ref().map(|(p, _)| p) == Some(&target);
         if !already_on_target {
-            // Selection moved to a different file (or off the file panel entirely) — stop
-            // whatever was playing/pending right away; only the *new* target gets debounced.
+            // Selection moved to a different file — stop whatever was playing/pending right
+            // away; only the *new* target gets debounced.
             self.audition_audio = None;
             self.audition_playing_path = None;
-            self.audition_pending = current.clone().map(|path| (path, Instant::now()));
+            self.audition_pending = Some((target, Instant::now()));
         }
 
         if let Some((path, started)) = self.audition_pending.clone() {
@@ -15003,7 +15173,7 @@ impl App {
                 // up under the user's own Up/Down and make the list unusable.
                 if let Ok(document) = crate::model::io::load_audio(&path) {
                     self.audition_audio =
-                        preview_engine(document.channels, document.sample_rate);
+                        audition_engine(document.channels, document.sample_rate);
                     self.audition_playing_path = Some(path);
                 }
             }
@@ -26845,6 +27015,9 @@ mod tests {
     /// the history splice — none of which the unit tests exercise together.
     #[test]
     fn a_praat_process_applies_to_the_document_end_to_end() {
+        // A successful Apply writes `cdp_recent.toml`/`cdp_last_process.toml` into whatever
+        // `XDG_CONFIG_HOME` currently points at, so this needs its own — see `TestConfigHome`.
+        let _config_home = crate::config::TestConfigHome::new("a_praat_process_applies_to_the_document_");
         let mut app = new_app(Some(doc(0.25, 44_100)), None);
         // Deliberately blanked: an existing config written before this setting existed loads it
         // as an empty string, and the app must fall back to the bundled submodule rather than
@@ -27021,6 +27194,9 @@ mod tests {
     /// rather than replacing the selection it was launched from.
     #[test]
     fn a_generative_praat_process_opens_a_new_buffer() {
+        // A successful Apply writes `cdp_recent.toml`/`cdp_last_process.toml` into whatever
+        // `XDG_CONFIG_HOME` currently points at, so this needs its own — see `TestConfigHome`.
+        let _config_home = crate::config::TestConfigHome::new("a_generative_praat_process_opens_a_new_b");
         let mut app = new_app(Some(doc(0.25, 44_100)), None);
         if !app.praat_ready() {
             eprintln!("skipping: praat unavailable");
@@ -32524,6 +32700,9 @@ mod tests {
     /// own "no real CDP needed" precedent but one layer up, at the UI dispatch level.
     #[test]
     fn glob_output_apply_opens_one_new_buffer_per_result() {
+        // A successful Apply writes `cdp_recent.toml`/`cdp_last_process.toml` into whatever
+        // `XDG_CONFIG_HOME` currently points at, so this needs its own — see `TestConfigHome`.
+        let _config_home = crate::config::TestConfigHome::new("glob_output_apply_opens_one_new_buffer_p");
         let mut app = new_app(Some(doc(0.1, 4)), None);
         let starting_buffer_count = app.documents.len();
 
@@ -32612,6 +32791,9 @@ mod tests {
     /// "fake /bin/sh step" precedent as `glob_output_apply_opens_one_new_buffer_per_result`.
     #[test]
     fn zero_input_apply_with_no_document_open_creates_a_new_buffer() {
+        // A successful Apply writes `cdp_recent.toml`/`cdp_last_process.toml` into whatever
+        // `XDG_CONFIG_HOME` currently points at, so this needs its own — see `TestConfigHome`.
+        let _config_home = crate::config::TestConfigHome::new("zero_input_apply_with_no_document_open_c");
         let mut app = new_app(None, None);
         assert_eq!(app.documents.len(), 0, "starts with nothing open");
         let catalog_index = app
@@ -32701,6 +32883,9 @@ mod tests {
     /// `self.documents` is empty. It must take the same "new buffer" branch as a fresh run.
     #[test]
     fn zero_input_apply_after_matching_preview_with_no_document_open_creates_a_new_buffer() {
+        // A successful Apply writes `cdp_recent.toml`/`cdp_last_process.toml` into whatever
+        // `XDG_CONFIG_HOME` currently points at, so this needs its own — see `TestConfigHome`.
+        let _config_home = crate::config::TestConfigHome::new("zero_input_apply_after_matching_preview_");
         let mut app = new_app(None, None);
         assert_eq!(app.documents.len(), 0, "starts with nothing open");
         let catalog_index = app
@@ -32751,6 +32936,9 @@ mod tests {
     /// `glob_output_apply_opens_one_new_buffer_per_result` above.
     #[test]
     fn apply_with_a_sidecar_output_opens_save_matrix_as_after_splicing() {
+        // A successful Apply writes `cdp_recent.toml`/`cdp_last_process.toml` into whatever
+        // `XDG_CONFIG_HOME` currently points at, so this needs its own — see `TestConfigHome`.
+        let _config_home = crate::config::TestConfigHome::new("apply_with_a_sidecar_output_opens_save_m");
         let mut app = new_app(Some(doc(0.1, 4)), None);
         app.cdp_pending = Some(CdpPending {
             doc_index: 0,
@@ -40603,6 +40791,31 @@ mod tests {
         assert!(app.audition_pending.is_none());
     }
 
+    /// Focus leaving the Files panel stops the audition, which is the third way (beside moving
+    /// the highlight and opening the file) for the entry it belongs to to stop being the one the
+    /// user is pointing at. An audition is a property of *that highlight*, so it must not outlive
+    /// it and go on playing under whichever panel took over.
+    #[test]
+    fn audition_stops_when_the_files_panel_loses_focus() {
+        let mut app = app_with_fixture_selected();
+        app.audition = true;
+        app.tick_audition();
+        std::thread::sleep(Duration::from_millis(250));
+        app.tick_audition();
+        assert!(app.audition_playing_path.is_some());
+
+        app.file_panel.focused = false;
+        app.tick_audition();
+        assert!(app.audition_playing_path.is_none(), "the audition must not outlive the highlight it belongs to");
+        assert!(app.audition_pending.is_none(), "and nothing may still be queued to start");
+
+        // Nor may it re-arm while the panel is unfocused, however long the tick runs for.
+        std::thread::sleep(Duration::from_millis(250));
+        app.tick_audition();
+        assert!(app.audition_playing_path.is_none());
+        assert!(app.audition_pending.is_none());
+    }
+
     /// Actually opening a file (the real "load it") must stop any audition in progress —
     /// auditioning and the loaded document's own playback must never overlap.
     #[test]
@@ -40905,6 +41118,9 @@ mod tests {
     /// holds whether or not Praat is installed on the machine running the suite.
     #[test]
     fn an_image_process_runs_with_no_buffer_open() {
+        // A successful Apply writes `cdp_recent.toml`/`cdp_last_process.toml` into whatever
+        // `XDG_CONFIG_HOME` currently points at, so this needs its own — see `TestConfigHome`.
+        let _config_home = crate::config::TestConfigHome::new("an_image_process_runs_with_no_buffer_ope");
         let mut app = new_app(None, None);
         assert!(app.documents.is_empty(), "this test is only meaningful with no document");
         let index = app
@@ -40976,6 +41192,9 @@ mod tests {
     /// was filed from.
     #[test]
     fn a_generative_praat_process_runs_with_no_buffer_open() {
+        // A successful Apply writes `cdp_recent.toml`/`cdp_last_process.toml` into whatever
+        // `XDG_CONFIG_HOME` currently points at, so this needs its own — see `TestConfigHome`.
+        let _config_home = crate::config::TestConfigHome::new("a_generative_praat_process_runs_with_no_");
         let mut app = new_app(None, None);
         assert!(app.documents.is_empty(), "this test is only meaningful with no document");
         let index = app
@@ -43109,13 +43328,111 @@ mod tests {
         assert!(app.praat_picture.is_none());
     }
 
+    /// A preview loops, so nothing about the audio ever ends it — the dialog it was started from
+    /// is what bounds its life, and `sweep_cdp_preview_audio` is what enforces that without
+    /// needing every path out of a dialog to remember. Checked here as the pure decision, so
+    /// every case is covered without an audio device.
+    #[test]
+    fn a_preview_survives_only_its_own_dialog() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_params(0);
+        let params = app.dialog.take().expect("a params dialog for catalog entry 0");
+
+        // On screen and owned by this dialog: keeps playing.
+        assert!(preview_owner_on_screen(Some(&params), Some(PreviewOwner::Params)));
+        assert!(preview_owner_on_screen(
+            Some(&Dialog::CdpChainEditor),
+            Some(PreviewOwner::ChainEditor)
+        ));
+        // The one dialog allowed to cover either owner.
+        assert!(preview_owner_on_screen(
+            Some(&Dialog::PraatPicture { restore: None }),
+            Some(PreviewOwner::Params)
+        ));
+
+        // Gone, for any reason at all — Esc back to the waveform, Apply's own running modal, an
+        // error popup, a sub-editor opened over the params, or simply a path that reassigned
+        // `self.dialog` and forgot.
+        assert!(!preview_owner_on_screen(None, Some(PreviewOwner::Params)));
+        assert!(!preview_owner_on_screen(
+            Some(&Dialog::Info { message: String::new() }),
+            Some(PreviewOwner::Params)
+        ));
+        // A dialog that *may* own a preview, but does not own this one: stepping a params
+        // session back to the chain editor abandons what it was previewing.
+        assert!(!preview_owner_on_screen(
+            Some(&Dialog::CdpChainEditor),
+            Some(PreviewOwner::Params)
+        ));
+        assert!(!preview_owner_on_screen(Some(&params), Some(PreviewOwner::ChainEditor)));
+        assert!(!preview_owner_on_screen(Some(&Dialog::CdpChainEditor), None));
+    }
+
+    /// Editing a parameter ends the preview: what is looping is the result of the values the job
+    /// ran with, and the first keystroke makes it a recording of something the dialog no longer
+    /// describes. Read off the values rather than the keystrokes, so every editing route is
+    /// covered by the one check.
+    #[test]
+    fn editing_a_parameter_ends_the_preview_it_no_longer_describes() {
+        let mut app = new_app(Some(doc(0.1, 4)), None);
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "blur_avrg")
+            .expect("blur_avrg");
+        app.open_cdp_params(catalog_index);
+
+        let Some(Dialog::CdpParams { fields, preview, focus, .. }) = app.dialog.as_mut() else {
+            panic!("expected the params dialog");
+        };
+        *focus = 1; // the first parameter row (0 is the preset row)
+        *preview = Some(CdpPreview {
+            values: fields.iter().map(CdpField::to_value).collect(),
+            range: (0, 4),
+            channels: vec![vec![0.0; 4]],
+            sample_rate: 44100,
+            second_input_doc: None,
+            variadic_docs: Vec::new(),
+            formant_selections: formant_field_selections(fields),
+        });
+
+        assert!(
+            preview_still_current(app.dialog.as_ref(), Some(PreviewOwner::Params)),
+            "untouched, the preview still describes what the dialog says"
+        );
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE));
+
+        assert!(
+            !preview_still_current(app.dialog.as_ref(), Some(PreviewOwner::Params)),
+            "one keystroke into a parameter and the looping preview is stale — it must stop"
+        );
+    }
+
+    /// The sweep actually drops the engine and its owner together, so a stopped preview leaves
+    /// nothing behind for the next one to be judged against. Skipped where there is no audio
+    /// device to build an engine on — the decision itself is covered above.
+    #[test]
+    fn the_sweep_drops_a_preview_whose_dialog_has_gone() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.start_cdp_preview_audio(vec![vec![0.25f32; 4410]], 44100, PreviewOwner::Params);
+        if app.cdp_preview_audio.is_none() {
+            return;
+        }
+        app.dialog = None;
+        app.sweep_cdp_preview_audio();
+        assert!(app.cdp_preview_audio.is_none(), "the audition must stop with its dialog");
+        assert!(app.cdp_preview_owner.is_none(), "and leave no owner behind");
+    }
+
     /// The picture popup gets its own Esc arm ahead of the generic one specifically because the
     /// generic arm calls `stop_cdp_preview_audio`. A picture from a Preview is shown *while* its
     /// audition plays, and closing the picture must not silence the sound being judged.
     #[test]
     fn dismissing_a_picture_does_not_stop_the_preview_audition() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
-        app.cdp_preview_audio = preview_engine(vec![vec![0.25f32; 44100]], 44100);
+        app.start_cdp_preview_audio(vec![vec![0.25f32; 44100]], 44100, PreviewOwner::Params);
         let had_audio = app.cdp_preview_audio.is_some();
         app.open_praat_picture(Some(test_picture()), "Hard Clip".into(), None);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));

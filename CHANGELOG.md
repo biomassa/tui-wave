@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+- **Process previews now loop, and end with the dialog that started them.** A preview played its
+  result once, which made a short selection almost unjudgeable; it now repeats until you are done
+  with it. What made that safe to do is the other half of the change: previews used to be stopped
+  by an explicit call on each individual path out of a dialog, and the paths that had been missed
+  left an audition playing over the editor with nothing left on screen to stop it. A preview is
+  now tagged with the dialog it belongs to and ended the moment that dialog is no longer the one
+  showing — Esc, Apply (by key, by button, by mouse), a sub-editor opening over the params, the
+  next job's own modal, an error popup, or any path that simply changed the dialog. This works the
+  same way in the chain editor as in a params dialog, since both go through the one check. The one
+  deliberate exception is unchanged: a picture produced by a Preview is shown *while* its audition
+  plays, because the two are meant to be judged together.
+
+- **A preview also ends the moment you edit a parameter.** What loops is the result of the values
+  the job ran with, so the first keystroke into a field makes it a recording of something the
+  dialog no longer describes — and unlike a single pass, a loop would go on asserting that stale
+  answer for as long as the dialog stayed open. The check reads the resulting values rather than
+  the keystrokes, so it covers typing, a slider step, a cycled choice, a sub-editor committing and
+  a preset loaded alike, and it compares against the same cache Apply consults to decide whether
+  it may splice without re-running — so "the sound stopped" and "Apply will re-run" cannot
+  disagree.
+
+- **The Files-panel audition no longer plays on after you leave the panel.** Tabbing away from the
+  Files panel while a file was auditioning left it playing under whichever panel took over. The
+  audition already stopped when the highlight moved to another file and when the file was actually
+  opened, but the check that did both compared the new target against the old one, and with
+  nothing queued those were *both* "no target" — which read as "already on it" and left the sound
+  running. Focus loss (and a highlight sitting on a directory) is now its own case. Auditions
+  still play one pass rather than looping: they follow the highlight as you skim a directory, so
+  they end on their own.
+
 ## 2026-08-13 (2.9.0)
 
 - **The ExtProcess browser no longer requires a CDP installation.** An unset or invalid CDP
