@@ -2528,6 +2528,44 @@ fn formant_field_selections(fields: &[CdpField]) -> Vec<Option<usize>> {
 fn cdp_params_extra_input_focus(field_count: usize) -> usize {
     field_count
 }
+/// Whether a `Dialog::CdpParams` form would take `c` as a literal character rather than leaving
+/// it free to mean a command.
+///
+/// Extracted from `App::dialog_accepts` because the *renderer* has to answer the same question:
+/// the `p:preview` hint is greyed exactly where `p` would be typed instead, and a hint that
+/// disagreed with the key would be worse than no hint. One function, so they cannot.
+fn cdp_params_accepts_char(fields: &[CdpField], focus: usize, naming_a_preset: bool, c: char) -> bool {
+    if naming_a_preset {
+        return true; // preset name: free text
+    }
+    // The preset row has no free-text field of its own ('s'/'d'/'p' are dedicated key arms in
+    // `handle_dialog_key`, checked before the generic accepts-a-char path this gates).
+    if focus == CDP_PRESET_FOCUS {
+        return false;
+    }
+    match fields.get(focus - 1) {
+        // A whole-number field refuses the decimal point outright, rather than taking `3.5` and
+        // then quietly disabling Apply — which is what used to happen, and which reported it as
+        // "value out of range" when the value was in range and merely not whole. `-` stays:
+        // plenty of these are signed (a twelve-tone row's `-8`, a `real` with no floor).
+        Some(CdpField::Number { integer, .. }) => {
+            c.is_ascii_digit() || c == '-' || (c == '.' && !*integer)
+        }
+        // Free text: an L-system rule, a note name, a Praat formula. No filter can help here,
+        // and one would only get in the way.
+        Some(CdpField::Text { .. }) => true,
+        // Toggle/Choice fields aren't typed into, and the trailing second-input/Preview/Apply
+        // pseudo-fields accept nothing either.
+        _ => false,
+    }
+}
+
+/// The narrowest a params dialog may render: enough for its own hints bar, whose longest form
+/// (`Enter:pick`, on a variadic process's extra-input row) is 55 columns plus two of border.
+/// A terminal narrower than this still clips — `width.min(area.width)` has the last word — but
+/// the dialog no longer chooses to.
+const CDP_PARAMS_MIN_WIDTH: u16 = 57;
+
 fn cdp_params_preview_focus(field_count: usize, has_extra_input: bool) -> usize {
     field_count + has_extra_input as usize
 }
@@ -5727,29 +5765,9 @@ impl App {
                     _ => true, // folder / base name: free text
                 }
             }
-            Some(Dialog::CdpParams { save_prompt: Some(_), .. }) => true, // preset name: free text
-            Some(Dialog::CdpParams { fields, focus, .. }) if *focus != CDP_PRESET_FOCUS => {
-                match fields.get(*focus - 1) {
-                    // A whole-number field refuses the decimal point outright, rather than
-                    // taking `3.5` and then quietly disabling Apply — which is what used to
-                    // happen, and which reported it as "value out of range" when the value
-                    // was in range and merely not whole. `-` stays: plenty of these are
-                    // signed (a twelve-tone row's `-8`, a `real` with no floor).
-                    Some(CdpField::Number { integer, .. }) => {
-                        c.is_ascii_digit() || c == '-' || (c == '.' && !*integer)
-                    }
-                    // Free text: an L-system rule, a note name, a Praat formula. No filter can
-                    // help here, and one would only get in the way.
-                    Some(CdpField::Text { .. }) => true,
-                    // Toggle/Choice fields aren't typed into, and the trailing
-                    // second-input/Preview/Apply pseudo-fields accept nothing either.
-                    _ => false,
-                }
+            Some(Dialog::CdpParams { fields, focus, save_prompt, .. }) => {
+                cdp_params_accepts_char(fields, *focus, save_prompt.is_some(), c)
             }
-            // CdpParams with focus == CDP_PRESET_FOCUS: the preset row has no free-text
-            // field of its own ('s'/'d' are dedicated key arms in handle_dialog_key,
-            // checked before the generic accepts-a-char path this function gates).
-            Some(Dialog::CdpParams { .. }) => false,
             // CdpBrowser is always search-typable regardless of focus: falls through to the
             // catch-all below.
             Some(Dialog::CdpRunning { .. }) | Some(Dialog::CdpOutput { .. }) => false,
@@ -6650,6 +6668,20 @@ impl App {
                     && matches!(self.dialog, Some(Dialog::CdpBrowser { .. })) =>
             {
                 self.recall_last_process();
+            }
+            // 'p' previews the open params form from anywhere in it, without first tabbing down
+            // to the [Preview] button — the same "reject and fall through to typing" shape as
+            // 's'/'d'/'x', which here means a focused free-text field (an L-system rule, a note
+            // name, a Praat formula) and the preset-name prompt still take a literal 'p'.
+            KeyCode::Char('p')
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if !self.preview_open_cdp_params() && self.dialog_accepts('p') {
+                    if let Some(input) = self.dialog_input() {
+                        input.insert('p');
+                    }
+                    self.refresh_cdp_browser_filter();
+                }
             }
             // 'x' on the second-input row, while chain-editing a dual-input step: suspends
             // this `CdpParams` session and opens the browser to append a step to this step's
@@ -7987,7 +8019,12 @@ impl App {
             KeyCode::Char('d') => self.delete_chain_editor_row(),
             KeyCode::Char('s') => self.open_chain_save_prompt(),
             KeyCode::Char('l') => self.recall_last_chain(),
-            KeyCode::Char('p') => self.preview_chain_here(),
+            // 'p' means the same thing here as in a params form — preview what this dialog
+            // describes — which for the chain editor is the *whole* chain, from any row.
+            // Previewing only as far as the selected step is the narrower ask and moved to 'h'
+            // when 'p' took over; both remain plain keys, as every chain-editor command is.
+            KeyCode::Char('p') => self.run_cdp_chain(ChainRunFinish::PreviewWholeChain),
+            KeyCode::Char('h') => self.preview_chain_here(),
             _ => {}
         }
     }
@@ -13970,6 +14007,35 @@ impl App {
             Some(d) if d > 0.0 => time.min((d - 0.001).max(0.0)),
             _ => time,
         }
+    }
+
+    /// 'p' in an open params form: run a Preview, exactly as Enter on the `[Preview]` button
+    /// does, from whatever row the focus happens to be on.
+    ///
+    /// Returns `false` — leaving the caller to type the character — when there is no params form
+    /// open, or when the focused field would take `p` as text. That is the same rule 's', 'd',
+    /// 'x' and 'b' already follow in this dialog, and it is why a Praat formula containing a `p`
+    /// is still typeable.
+    ///
+    /// Not gated on `cdp_params_blocker`: the greying says "this will not work", pressing it says
+    /// why. A dead key would be less use than the reason, which is the same reasoning the dimmed
+    /// `[Preview]`/`[Apply]` buttons already follow.
+    fn preview_open_cdp_params(&mut self) -> bool {
+        let Some(Dialog::CdpParams { fields, focus, save_prompt, .. }) = &self.dialog else {
+            return false;
+        };
+        if cdp_params_accepts_char(fields, *focus, save_prompt.is_some(), 'p') {
+            return false;
+        }
+        // The same fork Enter takes: mid-chain-edit, a Preview runs the already-committed
+        // upstream steps plus this step's in-progress values and restores this session
+        // afterwards; standalone, it is an ordinary Preview run.
+        if self.cdp_chain_edit_target.is_some() {
+            self.preview_chain_step();
+        } else {
+            self.cdp_run(crate::cdp::JobPurpose::Preview);
+        }
+        true
     }
 
     /// Starts the looping preview audition for a result, tagged with the dialog it belongs to.
@@ -24337,7 +24403,12 @@ fn render_cdp_params_dialog(
     // would fall off the right edge.
     let (slider_width, _) = cdp_params_slider_column(def, area.width);
     let number_width = cdp_params_number_width(def);
-    let width = (14 + label_width + range_width + slider_width + value_width).max(50) as u16;
+    // The floor is the hints bar, not a round number: " \u{2190}\u{2192}:adjust  \u{2191}\u{2193}:field  p:preview  Enter:pick
+    // Esc:cancel" is 55 columns of text plus two of border, and a dialog narrower than that
+    // clips its own trailing hint (which is how `p:preview` was first noticed missing — the
+    // wrapped-error test lost `Esc:cancel` off the right edge the moment the bar grew).
+    let width = (14 + label_width + range_width + slider_width + value_width)
+        .max(CDP_PARAMS_MIN_WIDTH as usize) as u16;
     let width = width.min(area.width);
     let has_extra_input = cdp_has_extra_input(second_input, variadic_input, photo_input) as usize;
     // The inline error is the one piece of content that can be far wider than the form —
@@ -24835,11 +24906,23 @@ fn render_cdp_params_dialog(
     let variadic_row_focused =
         variadic_input.is_some() && focus == cdp_params_focus_extra_input(fields.len());
     let enter_hint = if variadic_row_focused { ":pick  " } else { ":run  " };
+    // 'p' previews from any row — except one that would take it as a character, where it is
+    // greyed rather than dropped so the key doesn't appear to come and go as focus moves. Asked
+    // of the same function the key itself consults, so the hint cannot promise what the
+    // keystroke won't do.
+    let preview_key_available = !cdp_params_accepts_char(fields, focus, save_prompt.is_some(), 'p');
+    // `theme::ANNOTATION`, the same muted colour the chain editor's own conditional hint and the
+    // blocked `[Preview]`/`[Apply]` buttons use for "present, but not right now".
+    let unavailable_style = Style::default().fg(theme::ANNOTATION).bg(theme::SURFACE0);
+    let preview_key_style = if preview_key_available { hint_style } else { unavailable_style };
+    let preview_key_label_style = if preview_key_available { label_style } else { unavailable_style };
     lines.push(Line::from(vec![
         Span::styled(" \u{2190}\u{2192}", hint_style),
         Span::styled(":adjust  ", label_style),
         Span::styled("\u{2191}\u{2193}", hint_style),
         Span::styled(":field  ", label_style),
+        Span::styled("p", preview_key_style),
+        Span::styled(":preview  ", preview_key_label_style),
         Span::styled("Enter", hint_style),
         Span::styled(enter_hint, label_style),
         Span::styled("Esc", hint_style),
@@ -25166,7 +25249,13 @@ fn render_cdp_chain_editor_dialog(
         lines.push(Line::from(spans));
     }
 
-    let footer_height = 3u16; // error line + blank gap + hints line
+    // error line + blank gap + two hints lines. Two because one no longer fits: the bar names
+    // nine keys, and at the popup's 100 columns of inner width the single line ran seven
+    // columns past the right border, clipping `Esc:close` down to `Es` (user report, with a
+    // screenshot). Splitting it by *kind* — motion above, actions below — rather than merely
+    // wrapping at the width, so the break lands somewhere meaningful and stays put as keys are
+    // added or renamed.
+    let footer_height = 4u16;
     let list_height = inner.height.saturating_sub(header_height + footer_height) as usize;
     let header_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: header_height };
     let list_area = Rect {
@@ -25177,7 +25266,13 @@ fn render_cdp_chain_editor_dialog(
     };
     let error_area = Rect { x: inner.x, y: inner.y + header_height + list_area.height, width: inner.width, height: 1 };
     let hints_area =
-        Rect { x: inner.x, y: inner.y + header_height + list_area.height + 2, width: inner.width, height: 1 };
+        Rect { x: inner.x, y: inner.y + header_height + list_area.height + 2, width: inner.width, height: 2 };
+    // Only the *actions* row is reported as the dialog's hints rect, and that is why `Enter`
+    // and `Esc` both live on it: `capture_dialog_hints` scrapes a single row (`rect.y`) and
+    // `hint_segment_at` indexes it by column alone, so a click on a two-row bar would read the
+    // wrong line's text. Keeping the clickable keys together on the reported row is what lets
+    // the bar grow without teaching either of those about a second dimension.
+    let hints_click_area = Rect { height: 1, y: hints_area.y + 1, ..hints_area };
 
     frame.render_widget(Paragraph::new(header_lines), header_area);
 
@@ -25192,32 +25287,41 @@ fn render_cdp_chain_editor_dialog(
     if let Some(error) = &state.error {
         frame.render_widget(Paragraph::new(Line::from(Span::styled(format!(" {error}"), error_style))), error_area);
     }
-    // "p:preview here" only makes sense on a Step row (something to preview "up to and
+    // "h:preview here" only makes sense on a Step row (something to preview "up to and
     // including") — greyed out (same muted `theme::ANNOTATION` color used for other
     // de-emphasized hints/annotations) rather than hidden, so the key doesn't appear to
-    // vanish depending on selection.
+    // vanish depending on selection. "p:preview" (the whole chain) is always available and
+    // sits directly before it, so the pair reads as one idea with a narrower second half.
     let preview_here_enabled = matches!(state.selected, ChainEditorRow::Step(_));
     let preview_here_key_style = if preview_here_enabled { hint_style } else { disabled_style };
     let preview_here_label_style = if preview_here_enabled { label_style } else { disabled_style };
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" \u{2191}\u{2193}", hint_style),
-            Span::styled(":move  ", label_style),
-            Span::styled("\u{2190}\u{2192}", hint_style),
-            Span::styled(":pick  ", label_style),
-            Span::styled("Shift+\u{2191}\u{2193}", hint_style),
-            Span::styled(":reorder  ", label_style),
-            Span::styled("Enter", hint_style),
-            Span::styled(":open/run  ", label_style),
-            Span::styled("p", preview_here_key_style),
-            Span::styled(":preview here  ", preview_here_label_style),
-            Span::styled("d", hint_style),
-            Span::styled(":delete  ", label_style),
-            Span::styled("s", hint_style),
-            Span::styled(":save  ", label_style),
-            Span::styled("Esc", hint_style),
-            Span::styled(":close", label_style),
-        ])),
+        Paragraph::new(vec![
+            // Motion.
+            Line::from(vec![
+                Span::styled(" \u{2191}\u{2193}", hint_style),
+                Span::styled(":move  ", label_style),
+                Span::styled("\u{2190}\u{2192}", hint_style),
+                Span::styled(":pick  ", label_style),
+                Span::styled("Shift+\u{2191}\u{2193}", hint_style),
+                Span::styled(":reorder", label_style),
+            ]),
+            // Actions — the reported, clickable row (see `hints_click_area`).
+            Line::from(vec![
+                Span::styled(" Enter", hint_style),
+                Span::styled(":open/run  ", label_style),
+                Span::styled("p", hint_style),
+                Span::styled(":preview  ", label_style),
+                Span::styled("h", preview_here_key_style),
+                Span::styled(":preview here  ", preview_here_label_style),
+                Span::styled("d", hint_style),
+                Span::styled(":delete  ", label_style),
+                Span::styled("s", hint_style),
+                Span::styled(":save  ", label_style),
+                Span::styled("Esc", hint_style),
+                Span::styled(":close", label_style),
+            ]),
+        ]),
         hints_area,
     );
 
@@ -25249,7 +25353,7 @@ fn render_cdp_chain_editor_dialog(
     }
     // The hints bar is the generic trailing "submit" slot; Enter in this dialog opens/runs
     // whatever is selected, which is the right thing for a click there.
-    rects.push(hints_area);
+    rects.push(hints_click_area);
     rects
 }
 
@@ -33871,7 +33975,7 @@ mod tests {
         );
     }
 
-    /// End-to-end against the real CDP binaries: `p` ("preview here") on the *first* step of
+    /// End-to-end against the real CDP binaries: `h` ("preview here") on the *first* step of
     /// a real 2-step committed chain must run only that one step (not the second), play real
     /// audio, and leave everything else untouched -- no splice, no undo entry, the draft
     /// still has both its committed steps, and the recalled-last-chain slot is still whatever
@@ -33899,8 +34003,8 @@ mod tests {
         app.cdp_chain_editor = Some(state);
         app.dialog = Some(Dialog::CdpChainEditor);
 
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-        assert!(matches!(app.dialog, Some(Dialog::CdpRunning { .. })), "'p' should start a real async run");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::CdpRunning { .. })), "'h' should start a real async run");
 
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         while matches!(app.dialog, Some(Dialog::CdpRunning { .. })) && std::time::Instant::now() < deadline {
@@ -33925,7 +34029,56 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
-    /// The `p:preview here` hint only makes sense with a `Step` row selected (something to
+    /// The chain editor's hints bar names nine keys and no longer fits on one line at the
+    /// popup's own width — it clipped `Esc:close` to `Es` (user report, with a screenshot). Both
+    /// lines must render whole, *and* the clickable keys must stay on the row reported as the
+    /// hints rect: `capture_dialog_hints` scrapes one row and `hint_segment_at` indexes it by
+    /// column alone, so `Enter`/`Esc` landing on the other line would make clicking them read
+    /// the wrong text.
+    #[test]
+    fn the_chain_editor_hints_wrap_to_two_lines_with_the_clickable_keys_on_the_reported_row() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+            name: "t".into(),
+            steps: vec![chain_step("blur_avrg")],
+        });
+        state.selected = ChainEditorRow::Step(vec![0]);
+        app.cdp_chain_editor = Some(state);
+        app.dialog = Some(Dialog::CdpChainEditor);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+
+        for hint in [
+            "\u{2191}\u{2193}:move",
+            "\u{2190}\u{2192}:pick",
+            "Shift+\u{2191}\u{2193}:reorder",
+            "Enter:open/run",
+            "p:preview",
+            "h:preview here",
+            "d:delete",
+            "s:save",
+            "Esc:close",
+        ] {
+            assert!(screen.contains(hint), "{hint:?} was clipped off the bar: {screen}");
+        }
+
+        // Both clickable keys sit on one line, and it is the line reported as the hints rect —
+        // the last entry in `dialog_row_rects`.
+        let hints_rect = *app.dialog_row_rects.last().expect("a hints rect is reported");
+        assert_eq!(hints_rect.height, 1, "the reported hints rect stays one row");
+        assert!(
+            app.dialog_hints_text.contains("Enter:open/run") && app.dialog_hints_text.contains("Esc:close"),
+            "the scraped row must hold both clickable keys, got {:?}",
+            app.dialog_hints_text
+        );
+    }
+
+    /// The `h:preview here` hint only makes sense with a `Step` row selected (something to
     /// preview "up to and including"); on any other row (Preset/AddStep/Preview/Run) it must
     /// render in the muted `theme::ANNOTATION` color instead of the normal shortcut accent,
     /// so the key doesn't look pressable when it'd be a no-op.
@@ -33941,34 +34094,34 @@ mod tests {
         app.cdp_chain_editor = Some(state);
         app.dialog = Some(Dialog::CdpChainEditor);
 
-        let find_p_cell = |app: &mut App| {
+        let find_preview_here_cell = |app: &mut App| {
             let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
             terminal.draw(|frame| app.render(frame)).unwrap();
             let buffer = terminal.backend().buffer().clone();
             let area = *buffer.area();
             for y in area.y..area.y + area.height {
                 let row_text: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
-                if let Some(byte_col) = row_text.find("p:preview here") {
+                if let Some(byte_col) = row_text.find("h:preview here") {
                     // `find` returns a byte offset, not a column -- the row contains
                     // multi-byte glyphs (the arrow hints) before this point, so convert.
                     let col = row_text[..byte_col].chars().count();
                     return buffer[(area.x + col as u16, y)].fg;
                 }
             }
-            panic!("hints bar with 'p:preview here' should be visible: no row matched");
+            panic!("hints bar with 'h:preview here' should be visible: no row matched");
         };
 
         assert_eq!(
-            find_p_cell(&mut app),
+            find_preview_here_cell(&mut app),
             theme::ANNOTATION,
-            "with Run selected, the 'p' hint should render in the muted/disabled color"
+            "with Run selected, the 'h' hint should render in the muted/disabled color"
         );
 
         app.cdp_chain_editor.as_mut().unwrap().selected = ChainEditorRow::Step(vec![0]);
         assert_eq!(
-            find_p_cell(&mut app),
+            find_preview_here_cell(&mut app),
             theme::SHORTCUT,
-            "with a Step selected, the 'p' hint should render in the normal shortcut color"
+            "with a Step selected, the 'h' hint should render in the normal shortcut color"
         );
     }
 
@@ -43366,6 +43519,179 @@ mod tests {
         ));
         assert!(!preview_owner_on_screen(Some(&params), Some(PreviewOwner::ChainEditor)));
         assert!(!preview_owner_on_screen(Some(&Dialog::CdpChainEditor), None));
+    }
+
+    /// `p` previews the open params form from wherever the focus happens to be, rather than
+    /// only from the `[Preview]` button — the point being that Preview is a thing you do
+    /// repeatedly while turning a knob, so it should not cost a trip down the form and back.
+    #[test]
+    fn p_previews_the_open_params_form_from_any_row() {
+        let mut app = new_app(Some(doc(0.5, 200)), None);
+        app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("cdp")
+            .to_string_lossy()
+            .to_string();
+        let catalog_index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "blur_avrg")
+            .expect("blur_avrg");
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = 1; // a parameter row, not the [Preview] button
+        }
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+
+        match &app.dialog {
+            Some(Dialog::CdpRunning { purpose, .. }) => assert_eq!(
+                *purpose,
+                crate::cdp::JobPurpose::Preview,
+                "'p' must preview, never apply — an Apply from a stray keystroke would edit the document"
+            ),
+            _ => panic!("'p' should have started a preview run"),
+        }
+        app.cdp_runner.cancel();
+    }
+
+    /// The hints bar says so, and greys the key exactly where it would be typed instead — asked
+    /// of the same function the keystroke consults, so the two cannot promise different things.
+    #[test]
+    fn the_params_hints_bar_advertises_p_and_greys_it_where_p_is_a_letter() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let (catalog_index, text_field) = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .enumerate()
+            .find_map(|(i, def)| {
+                let f = def
+                    .params
+                    .iter()
+                    .position(|p| matches!(p.kind, crate::model::cdp::ParamKind::Text { .. }))?;
+                Some((i, f))
+            })
+            .expect("some process in the catalog takes free text");
+        app.open_cdp_params(catalog_index);
+
+        let hint_color = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let area = *buffer.area();
+            for y in area.y..area.y + area.height {
+                let row: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
+                if let Some(byte_col) = row.find("p:preview") {
+                    let col = row[..byte_col].chars().count();
+                    return buffer[(area.x + col as u16, y)].fg;
+                }
+            }
+            panic!("the params hints bar should advertise 'p:preview'");
+        };
+
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = CDP_PRESET_FOCUS;
+        }
+        assert_eq!(
+            hint_color(&mut app),
+            theme::SHORTCUT,
+            "on a row that doesn't take text, 'p' is live and reads as a shortcut"
+        );
+
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = text_field + 1;
+        }
+        assert_eq!(
+            hint_color(&mut app),
+            theme::ANNOTATION,
+            "on a free-text field it is greyed — the key still exists, it just means a letter here"
+        );
+    }
+
+    /// …but not at the cost of typing. A free-text parameter (an L-system rule, a note name, a
+    /// Praat formula) still takes a literal `p`, exactly as `s`/`d`/`x`/`b` already yield to one.
+    #[test]
+    fn p_on_a_free_text_parameter_is_still_just_a_letter() {
+        let mut app = new_app(Some(doc(0.5, 200)), None);
+        let (catalog_index, field_index) = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .enumerate()
+            .find_map(|(i, def)| {
+                let f = def
+                    .params
+                    .iter()
+                    .position(|p| matches!(p.kind, crate::model::cdp::ParamKind::Text { .. }))?;
+                Some((i, f))
+            })
+            .expect("some process in the catalog takes free text");
+        app.open_cdp_params(catalog_index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = field_index + 1;
+        }
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else {
+            panic!("the form must still be open — 'p' here is a character, not a command");
+        };
+        match &fields[field_index] {
+            CdpField::Text { input } => assert!(
+                input.value().contains('p'),
+                "the 'p' should have been typed into the field, not swallowed as Preview"
+            ),
+            _ => panic!("expected a text field"),
+        }
+    }
+
+    /// In the chain editor `p` means the whole chain — from any row, including ones `h`
+    /// (preview up to the selected step) has nothing to say about.
+    #[test]
+    fn p_in_the_chain_editor_previews_the_whole_chain_from_any_row() {
+        let _config_home = crate::config::TestConfigHome::new("chain_p_previews_whole");
+        let mut app = new_app(Some(doc(0.5, 200)), None);
+        app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("cdp")
+            .to_string_lossy()
+            .to_string();
+        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+            name: "Double Invert".into(),
+            steps: vec![
+                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), side_chain: Vec::new() },
+            ],
+        });
+        // The Run row: `h` does nothing here (no step to preview "up to"), which is exactly
+        // where the whole-chain preview has to work.
+        state.selected = ChainEditorRow::Run;
+        app.cdp_chain_editor = Some(state);
+        app.dialog = Some(Dialog::CdpChainEditor);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert!(
+            matches!(app.dialog, Some(Dialog::CdpRunning { .. })),
+            "'p' on the Run row should preview the whole chain"
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while matches!(app.dialog, Some(Dialog::CdpRunning { .. })) && std::time::Instant::now() < deadline {
+            app.tick_cdp();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            matches!(app.dialog, Some(Dialog::CdpChainEditor)),
+            "a whole-chain preview returns to the editor it was started from"
+        );
+        assert!(!app.histories[0].can_undo(), "a Preview must never splice");
+        assert!(
+            crate::model::cdp::chain_last::load_last_chain().is_none(),
+            "nor auto-save the recalled-last-chain slot, which only a real Run does"
+        );
     }
 
     /// Editing a parameter ends the preview: what is looping is the result of the values the job
