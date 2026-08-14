@@ -14,6 +14,16 @@
   deliberate exception is unchanged: a picture produced by a Preview is shown *while* its audition
   plays, because the two are meant to be judged together.
 
+- **`p` previews, from anywhere in a process dialog.** Preview is what you press repeatedly while
+  turning a knob, so it no longer costs a trip down to the `[Preview]` button and back: `p` runs
+  it from whatever row has focus. In the chain editor `p` previews the **whole chain** from any
+  row, and previewing only as far as the selected step moved to `h`. A focused free-text parameter
+  (an L-system rule, a note name, a Praat formula) and the preset-name prompt still take a literal
+  `p` — the same way `s`, `d`, `x` and `b` already yield to one — and the hints bar greys `p` there
+  so the key never promises something the keystroke won't do. The chain editor's hints now wrap to
+  two lines, motion above and actions below: nine keys no longer fit on one, and `Esc:close` was
+  being clipped to `Es`.
+
 - **A preview also ends the moment you edit a parameter.** What loops is the result of the values
   the job ran with, so the first keystroke into a field makes it a recording of something the
   dialog no longer describes — and unlike a single pass, a loop would go on asserting that stale
