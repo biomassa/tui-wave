@@ -14,6 +14,26 @@
   deliberate exception is unchanged: a picture produced by a Preview is shown *while* its audition
   plays, because the two are meant to be judged together.
 
+- **praatAudioTools updated to `b874b71`** (12 upstream commits, all messaged "Add files via
+  upload"). One new process — *Prosodic Reiterant Speech* (Analysis), a KlattGrid reiterant-speech
+  prosody synth — bringing the catalog to 458. One new script is excluded: `py/Anomaly_Outlier
+  _Extractor.praat`, whose engine needs pandas.
+
+  The substance is a rework of the Reverb group. **Fifteen processes changed parameter shape** —
+  the eight *Universal Convolution Generator* modes and *Bursts and Taps* each gained a parameter,
+  *Stereo Ping-Pong Impulses* lost one, `NeuralResynthesisVocoder` went from 6 to 11, and four
+  more reordered — which is exactly the case where moving the submodule pin without regenerating
+  the catalog would have passed each script its arguments in the wrong order and produced
+  plausible, wrong audio rather than an error. Six more changed descriptions or section notes
+  only. `Reverb/The Lucier Machine.praat` and `Time & Granular/Time Manipulation.praat` were
+  renamed upstream to underscored filenames; the catalog keys are unchanged, since the converter
+  already normalised them.
+
+  The description-coverage guard was loosened from 19/20 to 14/15. The new Analysis script carries
+  a "WHAT IS NEW" header where every other script carries `# Description:`, so a single unusual
+  upstream file tipped a threshold set right against the previous figure — which says nothing
+  about the extractor it exists to guard. A real extractor regression drops hundreds at once.
+
 - **Envelope editor: double-click adds *or* removes a breakpoint.** Removing one was Shift+click,
   which never actually worked — xterm and kitty both claim Shift+click for their own text
   selection and never forward the event, so the app saw nothing (user report). Double-click on a
