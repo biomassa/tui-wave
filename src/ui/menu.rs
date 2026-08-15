@@ -282,14 +282,7 @@ impl MenuBar {
             .items
             .iter()
             .enumerate()
-            .map(|(i, item)| {
-                let style = if self.open == Some(i) {
-                    Style::default().fg(theme::HIGHLIGHT_FG).bg(theme::HIGHLIGHT_BG)
-                } else {
-                    Style::default().fg(theme::CHROME_FG).bg(theme::CHROME_BG)
-                };
-                Span::styled(format!(" {} ", item.label), style)
-            })
+            .flat_map(|(i, item)| title_spans(item, self.open == Some(i)))
             .collect();
         let bar_style = Style::default().fg(theme::CHROME_FG).bg(theme::CHROME_BG);
         frame.render_widget(Paragraph::new(Line::from(spans)).style(bar_style), area);
@@ -387,6 +380,40 @@ impl MenuBar {
     }
 }
 
+/// One bar title, split so its `Alt+` mnemonic letter renders in `theme::SHORTCUT` — the same
+/// peach every other advertised keystroke uses, so "the key that opens this" reads the same way
+/// on the bar as it does on a menu row's shortcut column and a toolbar button.
+///
+/// The mnemonic is matched case-insensitively against the label and only the *first* occurrence
+/// is accented: `ExtProcess`'s mnemonic is `X`, which appears in the label lowercase (`Alt+x`
+/// and `Alt+X` both open it — see `open_by_mnemonic`). A mnemonic that appears nowhere in its
+/// own label would leave the user nothing to guess from, so the title simply renders plain
+/// rather than accenting an arbitrary letter.
+///
+/// An **open** menu keeps its title one uniform highlight, exactly as a selected menu entry
+/// does: peach on `HIGHLIGHT_BG` (mauve) is two light pastel accents against each other, which
+/// is the low-contrast clash the entry renderer already avoids. The bar's accent says "press
+/// this letter to get here", and once you are there it has nothing left to say.
+fn title_spans(item: &MenuItem, open: bool) -> Vec<Span<'static>> {
+    if open {
+        let style = Style::default().fg(theme::HIGHLIGHT_FG).bg(theme::HIGHLIGHT_BG);
+        return vec![Span::styled(format!(" {} ", item.label), style)];
+    }
+    let base = Style::default().fg(theme::CHROME_FG).bg(theme::CHROME_BG);
+    let accent = Style::default().fg(theme::SHORTCUT).bg(theme::CHROME_BG);
+    // Split by *chars*, not bytes: every label here is ASCII, but slicing a label by a byte
+    // index is the kind of thing that only breaks once someone adds a non-ASCII one.
+    let chars: Vec<char> = item.label.chars().collect();
+    let Some(at) = chars.iter().position(|c| c.eq_ignore_ascii_case(&item.mnemonic)) else {
+        return vec![Span::styled(format!(" {} ", item.label), base)];
+    };
+    vec![
+        Span::styled(format!(" {}", chars[..at].iter().collect::<String>()), base),
+        Span::styled(chars[at].to_string(), accent),
+        Span::styled(format!("{} ", chars[at + 1..].iter().collect::<String>()), base),
+    ]
+}
+
 fn layout_bar_items(items: &[MenuItem], area: Rect) -> Vec<Rect> {
     let mut rects = Vec::with_capacity(items.len());
     let mut x = area.x;
@@ -423,6 +450,52 @@ mod tests {
         }
         // Wrapped all the way around back to the first menu, first entry.
         assert_eq!(menu.activate(), Some(Action::Save));
+    }
+
+    #[test]
+    fn a_bar_title_accents_its_alt_mnemonic() {
+        let menu = MenuBar::new(&HashMap::new());
+        let file = &menu.items[0];
+        let spans = title_spans(file, false);
+        assert_eq!(
+            spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>(),
+            vec![" ", "F", "ile "],
+        );
+        assert_eq!(spans[1].style.fg, Some(theme::SHORTCUT));
+        assert_eq!(spans[0].style.fg, Some(theme::CHROME_FG));
+    }
+
+    #[test]
+    fn a_lowercase_mnemonic_letter_is_still_the_one_accented() {
+        // ExtProcess's mnemonic is 'X', which appears in its own label in lowercase.
+        let menu = MenuBar::new(&HashMap::new());
+        let ext = menu.items.iter().find(|i| i.label == "ExtProcess").expect("ExtProcess menu");
+        let spans = title_spans(ext, false);
+        assert_eq!(spans[1].content.as_ref(), "x");
+        assert_eq!(spans[1].style.fg, Some(theme::SHORTCUT));
+    }
+
+    #[test]
+    fn accenting_the_mnemonic_does_not_move_a_title() {
+        // `hit_test_bar` indexes `layout_bar_items`, which sizes each title as label + 2 —
+        // splitting the rendered title into three spans must not change what it occupies.
+        let menu = MenuBar::new(&HashMap::new());
+        for item in &menu.items {
+            for open in [false, true] {
+                let width: usize =
+                    title_spans(item, open).iter().map(|s| s.content.chars().count()).sum();
+                assert_eq!(width, item.label.chars().count() + 2, "{} (open={open})", item.label);
+            }
+        }
+    }
+
+    #[test]
+    fn an_open_menu_title_stays_one_uniform_highlight() {
+        let menu = MenuBar::new(&HashMap::new());
+        let spans = title_spans(&menu.items[0], true);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].style.bg, Some(theme::HIGHLIGHT_BG));
+        assert_eq!(spans[0].style.fg, Some(theme::HIGHLIGHT_FG));
     }
 
     #[test]
