@@ -5,7 +5,7 @@
 Releases carry a macOS build for Intel and Apple Silicon and a `.deb`/`.rpm` for Linux. They
 contain the tui-wave binary and nothing else.
 
-**Run `setup-environment.sh` after installing.** 458 of tui-wave's processes are scripts
+**Run `setup-environment.sh` after installing.** 457 of tui-wave's processes are scripts
 from the praatAudioTools project, which no package bundles — without them tui-wave lists every
 Praat process and can run none of them. The script fetches the scripts, writes their location
 into your config, and (after asking) sets up the Python environment the 46 processes in the `py`
@@ -761,7 +761,7 @@ tui-wave drives three process backends through one browser:
 
 - **CDP**, the Composer's Desktop Project — a large set of command-line transformation
   programs you install yourself. More than 400 processes.
-- **Praat** with the praatAudioTools scripts, again installed separately. 458 processes.
+- **Praat** with the praatAudioTools scripts, again installed separately. 457 processes.
   Section 15 covers what is particular to them.
 - **Airwindows**, 500 effects compiled into tui-wave. Nothing to install. Section 16.
 
@@ -1001,7 +1001,7 @@ does not need CDP installed at all.
 
 ### The groups
 
-458 scripts are listed, in fourteen groups. The Groups column follows the plugin's own folders,
+457 scripts are listed, in fourteen groups. The Groups column follows the plugin's own folders,
 so anything written about praatAudioTools names the same groups you see here. Four are shortened
 to fit the column: Generative is Generative & Synthesis, Dynamics is Dynamics & Envelope,
 Spatial is Spatial & Surround, and Time/Granular is Time & Granular. The **py** group is the one
@@ -1070,7 +1070,7 @@ long as the audio does, and a few can hang outright. A script that draws gets fo
 because rendering a figure is slow. The four interactive `py` editors of section 1 get no limit
 at all, because you decide when they are done. Press `Esc` to stop any run early.
 
-**Not every script is listed.** 458 of the 499 are. The other 41 cannot be driven without a
+**Not every script is listed.** 457 of the 499 are. The other 42 cannot be driven without a
 window, need a corpus of other files, or work on things that are not sounds.
 `docs/praat-excluded-scripts.md` names every one and why.
 
