@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **Every dialog answers the mouse, and a test now says so.** A row that *is* a command performs
+  it on a click, which is what the params form's Preview and Apply already did and what the chain
+  editor's `+ Add step`, `Preview the whole chain` and `Run` did not — a click there only moved a
+  highlight, so on a chain whose Add step was already selected the mouse appeared to do nothing at
+  all (user report, with a screenshot of exactly that). A chain *step* selects on the first click
+  and opens on the second, the Files panel's rule, because a step's editor is a whole params
+  session and a stray click should not open one. The choice dialogs — Fade In, Fade Out, Remove DC
+  Offset — draw `◄ value ►` and now cycle when those arrows are clicked, where before the arrows
+  were a picture of a control rather than one. The scrollable and informational popups — the CDP
+  output viewer, the run-in-progress modal, the key reference — report their hints bar, so `close`
+  and `cancel` are reachable with the mouse like every other dialog's.
+
+  The guard against this recurring is `dialog_mouse_contract`: an **exhaustive** match in which
+  every `Dialog` variant declares how the mouse reaches it, so a dialog added later does not
+  compile until someone has said. `every_dialog_reports_the_click_targets_it_declares` then
+  renders one of each and checks the declaration is true. Wiring the mouse had been happening one
+  dialog at a time, on report, after the fact; a comment asking the next author to remember was
+  tried and did not hold.
+
 - **`?` opens a read-only key reference**, named **Keys** on the toolbar. Every binding in one
   scrollable window, two columns, grouped the way the documentation groups them — the keys, then
   the panels, then the mouse. The key column is *derived* from the live bindings rather than
