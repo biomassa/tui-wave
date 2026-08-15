@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **praatAudioTools updated to `a769160`** (5 upstream commits). The whole *Generative &
+  Synthesis* folder was rewritten — 28 scripts, roughly doubled in size — and **every one of the
+  25 with a form changed that form**, in both directions (`Analogique_B_Stochastic_Mass` 11 → 28
+  fields, `Formant_Synthesis` 42 → 27). This is the exact case where moving the submodule pin
+  without regenerating the catalog hands each script its arguments in the wrong order and
+  produces plausible, wrong audio rather than an error.
+
+  **Twelve generators would have vanished from the catalog.** The rewrite gave them a
+  multi-page settings wizard: the `form` became page one and the rest moved into `beginPause`
+  pages, which segfault praat under `--run` — so each fell through to the `gui_blocking`
+  exclusion. They are hoisted instead, the way three other scripts already were, and come back
+  with their extra pages as ordinary parameters (FM Texture Generator now exposes 35).
+  `FM_Texture_Generator`'s existing hoist also needed correcting: it locked on a
+  `Show_Advanced_Settings` toggle the rewrite deleted.
+
+  **65 of those hoisted controls would have been inert.** Upstream writes them as
+  `positive: "Min grain duration (ms)", min_grain_duration_ms` — Praat writes the answer to
+  `min_grain_duration`, derived from the label, while the script reads the variable named as the
+  *default*. The control does nothing, in stock Praat as much as here. `corrected_variable` now
+  infers the intended variable from that default under the guard it already applied by hand for
+  three earlier cases, rather than growing a 65-entry table that the next release would double.
+
+  `NMF Spectral Resynthesizer` was renamed upstream (spaces to underscores) and rewritten to
+  v0.6; it keeps its catalog key, since the converter slugifies both spellings the same way. The
+  duplicate `… (2)` entry it used to have is gone, upstream having deleted the twin file — which
+  is why the script count reads 457 rather than 458 while nothing was lost.
+
 - **Every dialog answers the mouse, and a test now says so.** A row that *is* a command performs
   it on a click, which is what the params form's Preview and Apply already did and what the chain
   editor's `+ Add step`, `Preview the whole chain` and `Run` did not — a click there only moved a

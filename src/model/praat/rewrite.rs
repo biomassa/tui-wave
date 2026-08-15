@@ -175,17 +175,68 @@ const PAUSE_VARIABLE_FIXES: &[(&str, &str)] = &[
 
 /// The variable an assignment for `label` must write, given the script it is being spliced into.
 ///
-/// [`variable_name`]'s answer — what Praat itself would do — unless a [`PAUSE_VARIABLE_FIXES`]
-/// entry applies *and* `source` still shows the defect it describes.
+/// [`variable_name`]'s answer — what Praat itself would do — unless the script shows the
+/// label/variable defect described above, in which case the variable it actually reads wins.
+///
+/// Two ways to find that variable, both gated by the *same* guard: the label-derived name must
+/// be read nowhere and the candidate must be read. A [`PAUSE_VARIABLE_FIXES`] entry names it by
+/// hand, and [`default_expression_variable`] infers it from the field's own default.
 fn corrected_variable(label: &str, source: &str) -> String {
     let derived = variable_name(label);
+    let usable = |candidate: &str| {
+        candidate != derived
+            && !mentions_variable(source, &derived)
+            && mentions_variable(source, candidate)
+    };
     for (broken, reads) in PAUSE_VARIABLE_FIXES {
-        if *broken == label && !mentions_variable(source, &derived) && mentions_variable(source, reads)
-        {
+        if *broken == label && usable(reads) {
             return (*reads).to_string();
         }
     }
+    if let Some(candidate) = default_expression_variable(label, source) {
+        if usable(&candidate) {
+            return candidate;
+        }
+    }
     derived
+}
+
+/// The bare variable a pause field passes as its **default**, if it passes one.
+///
+/// `positive: "Min grain duration (ms)", min_grain_duration_ms` reads the current value out of
+/// `min_grain_duration_ms` to pre-fill the field — and then Praat writes the user's answer to
+/// `min_grain_duration`, the name derived from the label, which nothing reads. The control is
+/// inert, in stock Praat as much as here.
+///
+/// Upstream shipped 65 fields of that shape in the 2026-08 Generative rewrite alone, across
+/// twelve scripts, which is why this is inferred rather than tabulated: a hand-maintained entry
+/// per label would have to grow by that much again on the next release, and every entry would
+/// be restating what the line already says. [`PAUSE_VARIABLE_FIXES`] stays for the cases this
+/// cannot see — a field whose default is a literal, where the name it should write appears
+/// nowhere on the line.
+///
+/// Deliberately narrow: only a bare identifier counts. A default that is an expression
+/// (`min_ms * 2`, `if x then a else b fi`) names no single variable to write back to.
+fn default_expression_variable(label: &str, source: &str) -> Option<String> {
+    let quoted = format!("\"{label}\"");
+    for line in source.lines() {
+        let Some(at) = line.find(&quoted) else { continue };
+        let rest = line[at + quoted.len()..].trim_start();
+        let Some(rest) = rest.strip_prefix(',') else { continue };
+        let candidate = rest.trim();
+        // A bare identifier and nothing else. Praat's own variable spelling allows a trailing
+        // `$` for a string, which `mentions_variable` and the emitted assignment both expect.
+        if candidate.is_empty() {
+            continue;
+        }
+        let body = candidate.strip_suffix('$').unwrap_or(candidate);
+        let first_is_alpha =
+            body.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        if first_is_alpha && body.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Some(candidate.to_string());
+        }
+    }
+    None
 }
 
 /// One assignment line to stand in for a field the pause dialog would have set.

@@ -264,14 +264,26 @@ mod tests {
             praat.len()
         );
 
-        // A chain is a pipeline of other processes, and naming them is the whole point.
+        // A chain is a pipeline of other processes, and naming them is the whole point. The
+        // step names are upstream's own and do change — the 2026-08 rework retitled step 2 from
+        // "Kotoński FSM Event Generator" to "Kotoński-Inspired State-Event Generator v1.5" —
+        // so this failing on a bump is the test working. Re-read the chain and update the
+        // names; do not loosen it to a substring that any prose would satisfy, since then it
+        // would stop noticing a description that had lost its step list altogether.
         let chain = catalog
             .processes
             .iter()
             .find(|p| p.bin == "Vector Chain/chain_7.praat")
             .expect("chain 7 in catalog");
-        assert!(chain.description.contains("Kotoński FSM Event Generator"), "{}", chain.description);
-        assert!(chain.description.contains("Golden Ratio Processor"), "{}", chain.description);
+        for step in [
+            "HMM Timbre Sequencing",
+            "Kotoński-Inspired State-Event Generator",
+            "Risset's Mutations",
+            "Stockhausen Studie II Generator",
+            "Golden Ratio Processor",
+        ] {
+            assert!(chain.description.contains(step), "{step:?} missing from: {}", chain.description);
+        }
     }
 
     /// No catalog file may repeat a key **within itself**.

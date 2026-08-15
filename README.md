@@ -16,7 +16,7 @@ install them yourself:
 - **Composer's Desktop Project (CDP)**, a set of command-line utilities that have a history of
   decades. They do time-domain and frequency-domain work you find nowhere else. Andrew Bentley,
   Archer Endrich, Richard Orton and Trevor Wishart founded the project in 1986.
-- **praatAudioTools**, 458 sound-transformation scripts for Praat by Shai Cohen.
+- **praatAudioTools**, 457 sound-transformation scripts for Praat by Shai Cohen.
 - **Airwindows**, 500 effects by Chris Johnson. This one needs no install, because tui-wave
   compiles it in.
 
@@ -41,13 +41,13 @@ Read [DOCUMENTATION.md](DOCUMENTATION.md) to learn how to use it.
 - **Configurable.** Every key assignment lives in a TOML config file.
 - **CDP.** An optional front end to the Composer's Desktop Project, with more than 400
 processes implemented.
-- **Praat.** An optional front end to praatAudioTools, 458 sound-transformation scripts for
+- **Praat.** An optional front end to praatAudioTools, 457 sound-transformation scripts for
 Praat, in the same browser and chainable with CDP.
 - **Airwindows.** 500 of Chris Johnson's effects, built in. Nothing to install and nothing to
 configure — unlike CDP and Praat, the processing is compiled into tui-wave itself, so it works
 on a fresh install and previews return instantly.
 
-The three backends put **1363 processes** in one browser: 405 from CDP, 458 from Praat and 500
+The three backends put **1362 processes** in one browser: 405 from CDP, 457 from Praat and 500
 from Airwindows. CDP adds 17 more that only a pitch-curve field can reach.
 
 The CDP process browser, the parameter form with automatable green fields and presets, and the
@@ -104,7 +104,7 @@ Each release carries a macOS build for Intel and Apple Silicon, plus a `.deb` an
 Linux — [github.com/biomassa/tui-wave/releases](https://github.com/biomassa/tui-wave/releases).
 
 **Run `setup-environment.sh` afterwards.** The packages contain the tui-wave binary and nothing
-else, and 458 of its processes are *scripts* from the praatAudioTools project, which they
+else, and 457 of its processes are *scripts* from the praatAudioTools project, which they
 do not bundle. Without them tui-wave lists every Praat process and can run none. The script
 fetches them, points tui-wave at them, and optionally sets up the Python environment the `py`
 group needs.
@@ -274,7 +274,7 @@ just as well. The tui-wave catalog does not depend on one CDP release.
 ## Optional: Praat support
 
 praatAudioTools is a collection of sound-transformation scripts for Praat, by Shai Cohen of
-Bar-Ilan University. tui-wave runs 458 of them: granular, spectral, reverb, distortion, spatial,
+Bar-Ilan University. tui-wave runs 457 of them: granular, spectral, reverb, distortion, spatial,
 generative and more. They share the `Ctrl+p` browser with CDP, under a **Praat** domain, and a
 chain (`Ctrl+h`) can mix the two freely.
 

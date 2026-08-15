@@ -303,9 +303,54 @@ PAUSE_HOISTS: dict[str, dict] = {
     # advanced values apply -- and the dialog is now where they are set, so they always should.
     # The script assigns every one of them as a plain variable just above the `if`, and those
     # assignments remain as the defaults the catalog reports.
+    # Was one of that trio until the 2026-08 Generative rewrite, which replaced its
+    # `Show_Advanced_Settings` toggle with a three-page wizard. The stale `lock_on` then named a
+    # parameter that no longer existed, the hoist failed, and the script fell through to
+    # `gui_blocking` — excluded outright. No toggle to lock any more: the pages are simply the
+    # rest of the settings.
     "Generative & Synthesis/FM_Texture_Generator.praat": {
-        "lock_on": ["Show_Advanced_Settings"],
-        "why": "exposes the 22 Advanced DX7 Parameters",
+        "why": "three-page wizard (Routing/Ops 1-2, Ops 3-4, Ops 5-6 and Timing)",
+    },
+    # The rest of the 2026-08 Generative rewrite, which gave twelve scripts the same shape:
+    # the `form` became page one and every remaining setting moved into `beginPause` pages
+    # ending in `endPause: "Run", 1` (or `"Next"` where there are several). Under `--run` that
+    # segfaults praat, so without a hoist each of these is excluded — which is what took twelve
+    # working generators out of the catalog on the first regeneration after the bump.
+    #
+    # None is gated by a toggle, unlike the trio above, so none needs `lock_on`: the pages are
+    # unconditional and every variable they set is one the script goes on to use.
+    "Generative & Synthesis/Coupled_Mesh_String.praat": {
+        "why": "two-page wizard (Physics, then Geometry & Pickup)",
+    },
+    "Generative & Synthesis/Dynamic_Stochastic_Synthesis.praat": {
+        "why": "second settings page (Grain Details)",
+    },
+    "Generative & Synthesis/Dynamic_Vowel_Transitions.praat": {
+        "why": "second settings page (Vowel & Source Details)",
+    },
+    "Generative & Synthesis/Evolving_Grain_Mass.praat": {
+        "why": "second settings page (Grain Statistics)",
+    },
+    "Generative & Synthesis/Flute_KlattGrid.praat": {
+        "why": "second settings page (Voice & Chiff)",
+    },
+    "Generative & Synthesis/Formant_Grain_Texture.praat": {
+        "why": "second settings page (Source / Filter Details)",
+    },
+    "Generative & Synthesis/Formant_Synthesis.praat": {
+        "why": "two settings pages (Resonance Details, then Source Details)",
+    },
+    "Generative & Synthesis/Formula_Markov_Synthesis.praat": {
+        "why": "second settings page (State / Synthesis Details)",
+    },
+    "Generative & Synthesis/GENDYN_Synthesis.praat": {
+        "why": "second settings page (Stochastic / Boundary Details)",
+    },
+    "Generative & Synthesis/Karplus-Strong_Texture_Generator.praat": {
+        "why": "second settings page (Scheduler / Spatial Details)",
+    },
+    "Generative & Synthesis/Koto\u0144ski_FSM_Event_Generator.praat": {
+        "why": "second settings page (State / Sound Details)",
     },
     "Time & Granular/HFD-Driven_Time_Warping.praat": {
         "lock_on": ["Show_advanced_settings"],
