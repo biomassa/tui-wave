@@ -3059,6 +3059,10 @@ pub struct App {
     /// the key handler has no frame area, and a second copy of the layout arithmetic would be
     /// a second thing to keep in step.
     pub help_rows_visible: usize,
+    /// Time and index of the last click on a `dialog_row_rects` row, for double-click
+    /// detection. A dialog row that opens something (a chain step's editor) wants the second
+    /// click, so a stray one cannot open a whole params session by accident.
+    last_dialog_row_click: Option<(Instant, usize)>,
     pub waveform_area: Rect,
     /// Absolute channel indices whose panes were drawn in the last frame — the range
     /// `channel_pane_rects` returned. Cached for the same reason `waveform_area` is: mouse
@@ -3827,10 +3831,6 @@ impl App {
     /// whatever happens to be in the user's real `~/.config/tui-wave/config.toml` (or race
     /// against other tests that temporarily redirect `XDG_CONFIG_HOME`).
     fn new_with_config(document: Option<Document>, directory: Option<PathBuf>, mut config: Config) -> Self {
-        // Before the fill, not after: a moved default must vacate its old key *first*, or the
-        // action that now owns that key is inserted alongside a stale claim on it and one of
-        // the two silently loses.
-        migrate_moved_keybindings(&mut config.keybindings);
         fill_missing_keybindings(&mut config.keybindings);
         let key_map = build_key_map(&config.keybindings);
 
@@ -3865,6 +3865,7 @@ impl App {
             key_map,
             picker: None,
             help_rows_visible: 0,
+            last_dialog_row_click: None,
             graphics_mode: config.graphics_mode,
             dot_matrix_gradient: config.dot_matrix_gradient,
             time_ruler: config.time_ruler,
@@ -7202,13 +7203,13 @@ impl App {
         Self::clamp_cdp_list_entry(edit, min, max, slider_max);
     }
 
-    fn handle_dialog_row_click(&mut self, row: usize, x_in_row: u16) {
+    fn handle_dialog_row_click(&mut self, row: usize, x_in_row: u16, double_click: bool) {
         let before = self.cdp_params_value_snapshot();
-        self.handle_dialog_row_click_inner(row, x_in_row);
+        self.handle_dialog_row_click_inner(row, x_in_row, double_click);
         self.flip_preset_to_custom_if_a_value_changed(before);
     }
 
-    fn handle_dialog_row_click_inner(&mut self, row: usize, x_in_row: u16) {
+    fn handle_dialog_row_click_inner(&mut self, row: usize, x_in_row: u16, double_click: bool) {
         // The hints bar is the last element of `dialog_row_rects`. A click on it does what the
         // hint under the pointer says — and *only* that.
         //
@@ -7288,6 +7289,10 @@ impl App {
         let mut cdp_open_focused_editor = false;
         let mut cdp_open_variadic_picker = false;
         let mut cdp_run_from_click = false;
+        // A chain-editor row that is a command, clicked. Deferred like `cdp_run_from_click`
+        // beside it: activation runs through `handle_dialog_key`, which needs `&mut self`
+        // after the `self.dialog` borrow below has ended.
+        let mut chain_row_activated = false;
         match self.dialog.as_mut() {
             Some(Dialog::Gain { input, right_input, focused, tanh_clip, per_channel, is_stereo }) => {
                 let rows = GainRows::new(*is_stereo, *per_channel);
@@ -7484,17 +7489,39 @@ impl App {
                 }
             }
             // The chain editor. Its rects are one per *display* row (`chain_display_rows`),
-            // so `row` indexes that list directly. A click selects; committing stays with
-            // Enter/the hints bar, matching how a click behaves on every other row-selection
-            // dialog here. Non-selectable synthetic rows already have unhittable rects, so
-            // there's nothing to filter out again at this end.
+            // so `row` indexes that list directly. Non-selectable synthetic rows already have
+            // unhittable rects, so there's nothing to filter out again at this end.
+            //
+            // A click on a row that *is a command* performs it, exactly as a click on the
+            // params form's Preview/Apply runs them: `+ Add step`, `Preview the whole chain`
+            // and `Run` are buttons wearing a list row's clothes, and a click that only moved
+            // a highlight onto one read as the mouse doing nothing at all (user report, with a
+            // screenshot of `+ Add step` already selected and clicking it changing nothing).
+            //
+            // A click on a *step* row selects it, and a second click opens it — the Files
+            // panel's convention, and the safe way round: a step's editor is a whole params
+            // session, and a stray click landing on one should not open it.
             Some(Dialog::CdpChainEditor) => {
                 let Some(state) = self.cdp_chain_editor.as_ref() else { return };
                 let rows = chain_display_rows(state, &self.cdp_catalog);
                 if let Some(DisplayRow::Row(clicked)) = rows.get(row) {
                     let clicked = clicked.clone();
+                    let was_selected = state.selected == clicked;
                     if let Some(state) = self.cdp_chain_editor.as_mut() {
-                        state.selected = clicked;
+                        state.selected = clicked.clone();
+                    }
+                    // Activation goes through the dialog's own Enter handling rather than
+                    // calling `activate_chain_editor_row` here, so a click and the key it
+                    // stands in for can never mean two different things.
+                    let activates = match clicked {
+                        ChainEditorRow::AddStep(_)
+                        | ChainEditorRow::Preview
+                        | ChainEditorRow::Run => true,
+                        ChainEditorRow::Step(_) => was_selected && double_click,
+                        ChainEditorRow::Preset => false,
+                    };
+                    if activates {
+                        chain_row_activated = true;
                     }
                 }
             }
@@ -7752,6 +7779,25 @@ impl App {
                     cdp_run_from_click = true;
                 }
             }
+            // The choice dialogs — Fade In, Fade Out, Remove DC Offset. Their one row is a
+            // `\u{25c4} value \u{25ba}` cycle, and the arrows are drawn because they are the
+            // affordance: clicking one steps that way, and a click anywhere else on the row
+            // steps forward, which is what a click on a cycle control conventionally does.
+            // Leaving the row inert made the two arrows a picture of a control rather than one.
+            Some(Dialog::FadeIn { curve }) | Some(Dialog::FadeOut { curve }) => {
+                *curve = if choice_click_steps_back(CHOICE_LABEL_CURVE, x_in_row) {
+                    curve.prev()
+                } else {
+                    curve.next()
+                };
+            }
+            Some(Dialog::RemoveDc { estimator }) => {
+                *estimator = if choice_click_steps_back(CHOICE_LABEL_MEASURE, x_in_row) {
+                    estimator.prev()
+                } else {
+                    estimator.next()
+                };
+            }
             // Every single-field text dialog (`render_dialog`'s shared tail) records exactly
             // one interactive rect, spanning just its text, so `x_in_row` *is* the character
             // offset — clicking lands the caret on the clicked character instead of only
@@ -7808,7 +7854,7 @@ impl App {
         if cdp_open_variadic_picker {
             self.open_cdp_variadic_picker();
         }
-        if cdp_run_from_click {
+        if cdp_run_from_click || chain_row_activated {
             self.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         }
         // Deferred curve-params actions (see the locals' declaration above): now that the
@@ -16544,7 +16590,14 @@ impl App {
                     .find(|(_, r)| r.contains(pos))
                     .map(|(row, r)| (row, pos.x.saturating_sub(r.x)));
                 if let Some((row, x_in_row)) = hit {
-                    self.handle_dialog_row_click(row, x_in_row);
+                    // Same 400ms window the Files panel and the marker labels use, so a
+                    // double-click means one thing across the whole app.
+                    let now = Instant::now();
+                    let double_click = self
+                        .last_dialog_row_click
+                        .is_some_and(|(t, r)| r == row && now.duration_since(t) < DOUBLE_CLICK);
+                    self.last_dialog_row_click = Some((now, row));
+                    self.handle_dialog_row_click(row, x_in_row, double_click);
                 }
             }
             return;
@@ -16601,7 +16654,7 @@ impl App {
                 self.file_panel.focused = true;
                 let now = Instant::now();
                 let is_double_click = self.last_file_click.is_some_and(|(t, x, y)| {
-                    now.duration_since(t) < Duration::from_millis(400)
+                    now.duration_since(t) < DOUBLE_CLICK
                         && x.abs_diff(mouse.column) <= 1
                         && y == mouse.row
                 });
@@ -16697,7 +16750,7 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 let now = Instant::now();
                 let is_double_click = self.last_waveform_click.is_some_and(|(t, x, y)| {
-                    now.duration_since(t) < Duration::from_millis(400)
+                    now.duration_since(t) < DOUBLE_CLICK
                         && x.abs_diff(mouse.column) <= 1
                         && y == mouse.row
                 });
@@ -16850,7 +16903,7 @@ impl App {
         // exclusive, so one timestamp covers all four.
         let now = Instant::now();
         let is_double_click = self.last_load_curve_click.is_some_and(|(t, x, y)| {
-            now.duration_since(t) < Duration::from_millis(400)
+            now.duration_since(t) < DOUBLE_CLICK
                 && x.abs_diff(mouse.column) <= 1
                 && y == mouse.row
         });
@@ -16953,7 +17006,7 @@ impl App {
 
                 let now = Instant::now();
                 let is_double = self.last_cdp_envelope_click.is_some_and(|(t0, x0, y0)| {
-                    now.duration_since(t0) < Duration::from_millis(400)
+                    now.duration_since(t0) < DOUBLE_CLICK
                         && x0.abs_diff(mouse.column) <= 1
                         && y0.abs_diff(mouse.row) <= 1
                 });
@@ -17166,7 +17219,7 @@ impl App {
                     .map(|(_, mi)| *mi);
                 let now = Instant::now();
                 let is_double = self.last_click.is_some_and(|(t, x, y)| {
-                    now.duration_since(t) < Duration::from_millis(400)
+                    now.duration_since(t) < DOUBLE_CLICK
                         && x.abs_diff(mouse.column) <= 1
                         && y == mouse.row
                 });
@@ -19331,7 +19384,12 @@ impl App {
         if let Some(Dialog::Help { scroll }) = &self.dialog {
             let scroll = *scroll;
             let lines = self.help_lines();
-            self.help_rows_visible = render_help_dialog(frame, area, &lines, scroll);
+            let (rows, hints) = render_help_dialog(frame, area, &lines, scroll);
+            self.help_rows_visible = rows;
+            // Set here rather than from `render_dialog`'s return, which ran before this and
+            // reported none: this window renders separately, so it records its own targets.
+            self.dialog_row_rects = vec![hints];
+            self.dialog_n_interactive = 0;
         }
         // `Dialog::CdpParams.file_picker` reuses the exact same widget/render function as
         // `Dialog::LoadCurve` above, for the exact same `&mut FilePanel` reason.
@@ -20087,6 +20145,134 @@ fn render_save_as_dialog(
 /// for a clamped layout with no room for its hints bar, so a dialog that is too small to
 /// show the row simply has no mouse target for it. Enter still submits either way; this
 /// only ever drops the click target, never the action.
+/// Where a choice dialog's `\u{25c4}` sits in its row, given the field label the dialog draws.
+///
+/// One function, called by [`render_choice_dialog`] to *place* the arrow and by the click
+/// handler to *read* it, so a click can never resolve against a column the renderer did not
+/// use — the discipline the params sliders follow for the same reason.
+///
+/// The row is built as `" {label}  \u{25c4} {value} \u{25ba}  "`, so the arrow lands one
+/// space past the label, which itself starts one column in.
+/// The field labels the choice dialogs draw. Constants because the click handler has to name
+/// the same string the renderer passed in, and a literal repeated in two places is a literal
+/// that eventually differs.
+const CHOICE_LABEL_CURVE: &str = "Curve:";
+const CHOICE_LABEL_MEASURE: &str = "Measure:";
+
+fn choice_left_arrow_column(field_label: &str) -> u16 {
+    1 + field_label.chars().count() as u16 + 2
+}
+
+/// Whether a click at `x_in_row` on a choice row means "step back": it landed on the left
+/// arrow or on the label to its left. Anything further right — the value, the right arrow, the
+/// space after it — steps forward, which is what a click on a cycle control conventionally
+/// does and what makes the common case one click rather than a hunt for a two-column glyph.
+fn choice_click_steps_back(field_label: &str, x_in_row: u16) -> bool {
+    x_in_row <= choice_left_arrow_column(field_label)
+}
+
+/// How the mouse reaches a given dialog. Declared per variant in an **exhaustive** match, so a
+/// dialog added later does not compile until someone has said how a user clicks it.
+///
+/// This exists because "wire up the mouse" kept being done one dialog at a time, on report,
+/// after the fact — the chain editor's `+ Add step` was the third such report. A comment asking
+/// the next author to remember was tried and did not hold. A match arm they cannot skip does.
+///
+/// `#[cfg(test)]` because it is a *statement of intent checked by a test*, not something the
+/// running program consults — the app's real mouse routing is `handle_dialog_row_click`. The
+/// value is that the match is exhaustive at compile time, which is as true in a test build.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MouseContract {
+    /// Reports one rect per interactive row, plus a trailing hints bar. `handle_dialog_row_click`
+    /// routes a click to the row under it.
+    Rows,
+    /// Nothing to focus, so the hints bar alone is clickable — which is how "close" and "cancel"
+    /// stay reachable with the mouse.
+    HintsOnly,
+    /// Hit-tests its own widget geometry instead of `dialog_row_rects`: a `FilePanel`, an
+    /// envelope grid, an image. Named here so it is a decision on record rather than an omission.
+    OwnGeometry,
+}
+
+/// A dialog's variant name, for test failure messages. `Dialog` holds `TextInput`s and job
+/// handles and is not `Debug`, so this is the readable identity a failure can quote.
+#[cfg(test)]
+fn dialog_kind_name(dialog: &Dialog) -> &'static str {
+    match dialog {
+        Dialog::Normalize { .. } => "Normalize",
+        Dialog::Gain { .. } => "Gain",
+        Dialog::FadeIn { .. } => "FadeIn",
+        Dialog::FadeOut { .. } => "FadeOut",
+        Dialog::RemoveDc { .. } => "RemoveDc",
+        Dialog::Resample { .. } => "Resample",
+        Dialog::RenameMarker { .. } => "RenameMarker",
+        Dialog::OpenDirectory { .. } => "OpenDirectory",
+        Dialog::RenameBuffer { .. } => "RenameBuffer",
+        Dialog::RenameFile { .. } => "RenameFile",
+        Dialog::SaveCurveAs { .. } => "SaveCurveAs",
+        Dialog::SaveMatrixAs { .. } => "SaveMatrixAs",
+        Dialog::LoadCurve { .. } => "LoadCurve",
+        Dialog::MixToMono { .. } => "MixToMono",
+        Dialog::MixToStereo { .. } => "MixToStereo",
+        Dialog::Export { .. } => "Export",
+        Dialog::ExportChannels { .. } => "ExportChannels",
+        Dialog::RemoveEmptyChannels { .. } => "RemoveEmptyChannels",
+        Dialog::HighPass { .. } => "HighPass",
+        Dialog::ExportRegions { .. } => "ExportRegions",
+        Dialog::CdpSetup { .. } => "CdpSetup",
+        Dialog::CdpBrowser { .. } => "CdpBrowser",
+        Dialog::CdpParams { .. } => "CdpParams",
+        Dialog::CdpRunning { .. } => "CdpRunning",
+        Dialog::CdpOutput { .. } => "CdpOutput",
+        Dialog::Help { .. } => "Help",
+        Dialog::Info { .. } => "Info",
+        Dialog::CurveEditor(_) => "CurveEditor",
+        Dialog::CdpChainEditor => "CdpChainEditor",
+        Dialog::FormantInfo { .. } => "FormantInfo",
+        Dialog::PraatPicture { .. } => "PraatPicture",
+    }
+}
+
+#[cfg(test)]
+fn dialog_mouse_contract(dialog: &Dialog) -> MouseContract {
+    match dialog {
+        // Row dialogs: fields, lists, buttons.
+        Dialog::Normalize { .. }
+        | Dialog::Gain { .. }
+        | Dialog::FadeIn { .. }
+        | Dialog::FadeOut { .. }
+        | Dialog::RemoveDc { .. }
+        | Dialog::Resample { .. }
+        | Dialog::RenameMarker { .. }
+        | Dialog::OpenDirectory { .. }
+        | Dialog::RenameBuffer { .. }
+        | Dialog::RenameFile { .. }
+        | Dialog::SaveCurveAs { .. }
+        | Dialog::SaveMatrixAs { .. }
+        | Dialog::MixToMono { .. }
+        | Dialog::MixToStereo { .. }
+        | Dialog::Export { .. }
+        | Dialog::ExportChannels { .. }
+        | Dialog::RemoveEmptyChannels { .. }
+        | Dialog::HighPass { .. }
+        | Dialog::ExportRegions { .. }
+        | Dialog::CdpSetup { .. }
+        | Dialog::CdpBrowser { .. }
+        | Dialog::CdpParams { .. }
+        | Dialog::CdpChainEditor => MouseContract::Rows,
+        // Nothing to focus — the hints bar carries the only action.
+        Dialog::CdpRunning { .. }
+        | Dialog::CdpOutput { .. }
+        | Dialog::Help { .. }
+        | Dialog::Info { .. }
+        | Dialog::FormantInfo { .. }
+        | Dialog::PraatPicture { .. } => MouseContract::HintsOnly,
+        // A `FilePanel` and an envelope grid own their own rects.
+        Dialog::LoadCurve { .. } | Dialog::CurveEditor(_) => MouseContract::OwnGeometry,
+    }
+}
+
 fn hints_bar_rect(popup: Rect, width: u16) -> Rect {
     if popup.height < 2 {
         return Rect::default();
@@ -20439,15 +20625,15 @@ fn render_dialog(
                 frame,
                 area,
                 "Remove DC Offset",
-                "Measure:",
+                CHOICE_LABEL_MEASURE,
                 estimator.label(),
             );
         }
         Dialog::FadeIn { curve } => {
-            return render_choice_dialog(frame, area, "Fade In", "Curve:", curve.label());
+            return render_choice_dialog(frame, area, "Fade In", CHOICE_LABEL_CURVE, curve.label());
         }
         Dialog::FadeOut { curve } => {
-            return render_choice_dialog(frame, area, "Fade Out", "Curve:", curve.label());
+            return render_choice_dialog(frame, area, "Fade Out", CHOICE_LABEL_CURVE, curve.label());
         }
         Dialog::ExportRegions {
             folder_input, base_name_input, depth, dither,
@@ -25272,7 +25458,10 @@ fn render_cdp_running_dialog(
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
-    Vec::new()
+    // Its `Esc:cancel` line is the last one in the popup, and cancelling a running job must be
+    // reachable with the mouse — this modal is the one place a user cannot reach any other
+    // control while it is up.
+    vec![hints_bar_rect(popup, popup.width.saturating_sub(2))]
 }
 
 /// Scrollable viewer for a failed CDP run's captured stdout+stderr.
@@ -25555,6 +25744,10 @@ fn render_cdp_chain_editor_dialog(
 /// The *width* is not a fraction of anything — see `help_popup_rect`.
 const HELP_HEIGHT_PERCENT: u16 = 85;
 
+/// How close together two clicks must be to count as a double-click. One constant, because a
+/// double-click has to mean the same gesture on a marker label, a file row and a dialog row.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
 /// Rows one wheel notch moves the help window. Three rather than one, because a notch is a
 /// coarse gesture and this list is a hundred rows long; the arrow keys are what move it by one.
 const HELP_WHEEL_ROWS: usize = 3;
@@ -25597,7 +25790,7 @@ fn render_help_dialog(
     area: Rect,
     lines_text: &[crate::ui::help::HelpLine],
     scroll: usize,
-) -> usize {
+) -> (usize, Rect) {
     use crate::ui::help::HelpLine;
 
     let popup = help_popup_rect(area, lines_text);
@@ -25659,7 +25852,9 @@ fn render_help_dialog(
         ])),
         hints_area,
     );
-    rows
+    // The hints bar is this window's one click target: `?/Esc:close` has to be clickable, like
+    // every other dialog's close is.
+    (rows, hints_area)
 }
 
 fn render_cdp_output_dialog(frame: &mut Frame, area: Rect, title: &str, lines_text: &[String], scroll: usize) -> Vec<Rect> {
@@ -25706,7 +25901,9 @@ fn render_cdp_output_dialog(frame: &mut Frame, area: Rect, title: &str, lines_te
         ])),
         hints_area,
     );
-    Vec::new()
+    // The hints bar is this dialog's one click target — it has no rows to focus, but "close"
+    // must be reachable with the mouse like every other dialog's is.
+    vec![hints_area]
 }
 
 /// `Dialog::LoadCurve`'s picker — `picker.render` draws its own bordered box/title/entry
@@ -27017,6 +27214,172 @@ mod tests {
             .take(popup.width as usize - 2)
             .collect();
         assert!(inside.trim().is_empty(), "expected a blank row above the hints, got {inside:?}");
+    }
+
+    /// **The guard against mouse-dead dialogs.**
+    ///
+    /// Every dialog declares in `dialog_mouse_contract` how the mouse reaches it, and that match
+    /// is exhaustive, so a new variant does not compile until it is classified. This test then
+    /// renders one of each and checks the declaration is true: a `Rows` or `HintsOnly` dialog
+    /// that reports no click targets is a window a user can look at and not touch.
+    ///
+    /// It exists because wiring the mouse kept happening one dialog at a time, after a report.
+    #[test]
+    fn every_dialog_reports_the_click_targets_it_declares() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(
+            Some(Document { channels: vec![vec![0.2; 4000], vec![0.2; 4000]], ..Document::default() }),
+            None,
+        );
+        let dialogs: Vec<Dialog> = vec![
+            Dialog::Normalize { input: TextInput::new("-1.0") },
+            Dialog::FadeIn { curve: crate::commands::fade::FadeCurve::Linear },
+            Dialog::FadeOut { curve: crate::commands::fade::FadeCurve::Linear },
+            Dialog::RemoveDc { estimator: crate::model::dsp::DcEstimator::Median },
+            Dialog::HighPass { input: TextInput::new("20") },
+            Dialog::RemoveEmptyChannels { input: TextInput::new("-48") },
+            Dialog::Resample { input: TextInput::new("48000"), current_rate: 44100 },
+            Dialog::OpenDirectory { input: TextInput::new("/tmp") },
+            Dialog::RenameMarker { position: 0, input: TextInput::new("m") },
+            Dialog::CdpSetup { input: TextInput::new("/tmp"), error: None },
+            Dialog::Info { message: "hello".into() },
+            Dialog::CdpOutput { title: "t".into(), lines: vec!["a".into()], scroll: 0 },
+            Dialog::Help { scroll: 0 },
+        ];
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        for dialog in dialogs {
+            let contract = dialog_mouse_contract(&dialog);
+            let label = dialog_kind_name(&dialog);
+            app.dialog = Some(dialog);
+            app.dialog_row_rects.clear();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            match contract {
+                MouseContract::Rows | MouseContract::HintsOnly => assert!(
+                    !app.dialog_row_rects.is_empty(),
+                    "{label} declares {contract:?} but reported no click targets"
+                ),
+                MouseContract::OwnGeometry => {}
+            }
+        }
+        app.dialog = None;
+    }
+
+    /// The reported bug: `+ Add step` was highlighted and clicking it did nothing, because a
+    /// click in the chain editor only ever moved the highlight. A row that *is* a command must
+    /// perform it, the way the params form's Preview and Apply already did.
+    #[test]
+    fn clicking_a_chain_editor_command_row_runs_it() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 1000)), None);
+        app.handle_action(Action::CdpChain);
+        assert!(matches!(app.dialog, Some(Dialog::CdpChainEditor)), "chain editor did not open");
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        // `+ Add step` is the row after the preset row on an empty chain.
+        let rows = chain_editor_rows(app.cdp_chain_editor.as_ref().unwrap(), &app.cdp_catalog);
+        let display = chain_display_rows(app.cdp_chain_editor.as_ref().unwrap(), &app.cdp_catalog);
+        assert!(rows.contains(&ChainEditorRow::AddStep(Vec::new())));
+        let index = display
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Row(ChainEditorRow::AddStep(p)) if p.is_empty()))
+            .expect("+ Add step row");
+        let rect = app.dialog_row_rects[index];
+        assert!(rect.width > 0, "+ Add step must have a hittable rect");
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x + 3,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(
+            matches!(app.dialog, Some(Dialog::CdpBrowser { .. })),
+            "clicking + Add step must open the process browser, as Enter on it does"
+        );
+    }
+
+    /// A step's editor is a whole params session, so a stray click must not open one: the first
+    /// click selects, the second opens — the Files panel's rule.
+    #[test]
+    fn a_chain_step_opens_on_the_second_click_not_the_first() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 1000)), None);
+        app.handle_action(Action::CdpChain);
+        if let Some(state) = app.cdp_chain_editor.as_mut() {
+            state.chain.steps.push(chain_step("blur_avrg"));
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let display = chain_display_rows(app.cdp_chain_editor.as_ref().unwrap(), &app.cdp_catalog);
+        let index = display
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Row(ChainEditorRow::Step(_))))
+            .expect("a step row");
+        let rect = app.dialog_row_rects[index];
+        let click = |app: &mut App| {
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + 3,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+
+        click(&mut app);
+        assert!(
+            matches!(app.dialog, Some(Dialog::CdpChainEditor)),
+            "one click must only select the step"
+        );
+        click(&mut app);
+        assert!(
+            !matches!(app.dialog, Some(Dialog::CdpChainEditor)),
+            "a second click on the selected step must open it"
+        );
+    }
+
+    /// The two arrows on a choice dialog are the affordance, so clicking one must step that way.
+    #[test]
+    fn clicking_a_choice_dialogs_arrows_cycles_it() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 1000)), None);
+        app.dialog = Some(Dialog::FadeIn { curve: crate::commands::fade::FadeCurve::Linear });
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let rect = app.dialog_row_rects[0];
+        let click_at = |app: &mut App, dx: u16| {
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + dx,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let curve = |app: &App| match app.dialog {
+            Some(Dialog::FadeIn { curve }) => curve,
+            _ => panic!("dialog closed"),
+        };
+
+        let start = curve(&app);
+        // Right of the value: forward.
+        click_at(&mut app, rect.width - 2);
+        let forward = curve(&app);
+        assert_ne!(forward, start, "clicking right of the value must cycle it");
+        // On the left arrow: back to where we started.
+        click_at(&mut app, choice_left_arrow_column(CHOICE_LABEL_CURVE));
+        assert_eq!(curve(&app), start, "clicking the left arrow must step back");
     }
 
     /// A streamed buffer refuses nearly everything, and the key reference must not be among
@@ -28773,7 +29136,7 @@ mod tests {
         // x_in_row must land past both the Domain and Groups columns, or the click is read as
         // a domain/group pick instead (see `App::handle_dialog_row_click`'s
         // `Dialog::CdpBrowser` arm).
-        app.handle_dialog_row_click(1, CDP_DOMAIN_COL_WIDTH + CDP_GROUP_COL_WIDTH);
+        app.handle_dialog_row_click(1, CDP_DOMAIN_COL_WIDTH + CDP_GROUP_COL_WIDTH, false);
 
         match &app.dialog {
             Some(Dialog::CdpParams { catalog_index: ci, .. }) => assert_eq!(*ci, catalog_index),
@@ -30970,7 +31333,7 @@ mod tests {
         // trailing hints row is the submit rect.
         app.dialog_n_interactive = field_count + 1;
 
-        app.handle_dialog_row_click(list_index, 0);
+        app.handle_dialog_row_click(list_index, 0, false);
 
         let params = curve_transform_params(&app);
         assert_eq!(params.focus, list_index, "the clicked field should get focus");
@@ -30993,7 +31356,7 @@ mod tests {
         app.dialog_n_interactive = field_count + 1;
         let before = matches!(curve_transform_params(&app).fields[toggle_index], CdpField::Toggle { on: true });
 
-        app.handle_dialog_row_click(toggle_index, 0);
+        app.handle_dialog_row_click(toggle_index, 0, false);
 
         let after = matches!(curve_transform_params(&app).fields[toggle_index], CdpField::Toggle { on: true });
         assert_ne!(before, after, "clicking a Toggle field should flip it");
@@ -31012,7 +31375,7 @@ mod tests {
         let field_count = curve_transform_params(&app).fields.len();
         app.dialog_n_interactive = field_count + 1;
 
-        app.handle_dialog_row_click(field_count, 0); // the Apply row
+        app.handle_dialog_row_click(field_count, 0, false); // the Apply row
 
         assert!(
             curve_transform_params(&app).error.is_some(),
@@ -32446,11 +32809,20 @@ mod tests {
             state.selected = ChainEditorRow::Preset;
         }
 
-        render_and_click(&mut app, "\u{25b6} Run", 0);
-        assert_eq!(
-            app.cdp_chain_editor.as_ref().map(|s| s.selected.clone()),
-            Some(ChainEditorRow::Run),
-            "clicking the Run row selects it"
+        // A *step* row selects on the first click — it opens on the second, so a stray click
+        // cannot launch a params session. (The command rows are the ones that act at once; see
+        // `clicking_a_chain_editor_command_row_runs_it`.)
+        render_and_click(&mut app, "Speed", 0);
+        assert!(
+            matches!(
+                app.cdp_chain_editor.as_ref().map(|s| s.selected.clone()),
+                Some(ChainEditorRow::Step(_))
+            ),
+            "clicking a step row selects it"
+        );
+        assert!(
+            matches!(app.dialog, Some(Dialog::CdpChainEditor)),
+            "and one click alone must not open it"
         );
 
         // The blur step is bracketed by a "PVOC Analyze" row; clicking that row must leave the
@@ -38062,7 +38434,7 @@ mod tests {
         app.dialog_n_interactive = 8;
 
         // Row 4 is the limit-length row; a click at the value column focuses the ms field.
-        app.handle_dialog_row_click(4, er_focus::VALUE_COL);
+        app.handle_dialog_row_click(4, er_focus::VALUE_COL, false);
         match &app.dialog {
             Some(Dialog::ExportRegions { focused, limit_length, .. }) => {
                 assert_eq!(*focused, er_focus::LIMIT_MS, "the value field must receive focus");
@@ -38072,7 +38444,7 @@ mod tests {
         }
 
         // A click left of the value column still toggles (and focuses) the checkbox.
-        app.handle_dialog_row_click(4, er_focus::VALUE_COL - 1);
+        app.handle_dialog_row_click(4, er_focus::VALUE_COL - 1, false);
         match &app.dialog {
             Some(Dialog::ExportRegions { focused, limit_length, .. }) => {
                 assert_eq!(*focused, er_focus::LIMIT_CB);
@@ -38082,7 +38454,7 @@ mod tests {
         }
 
         // Same split on the fade-out row (row 7 → focus indices 10/11).
-        app.handle_dialog_row_click(7, er_focus::VALUE_COL + 3);
+        app.handle_dialog_row_click(7, er_focus::VALUE_COL + 3, false);
         match &app.dialog {
             Some(Dialog::ExportRegions { focused, fade_out, .. }) => {
                 assert_eq!(*focused, er_focus::FADE_OUT_MS);
@@ -42462,7 +42834,7 @@ mod tests {
         terminal.draw(|frame| app.render(frame)).unwrap();
 
         for row in [1usize, 0, 2, SAVE_AS_DEST_FOCUS] {
-            app.handle_dialog_row_click(row, 0);
+            app.handle_dialog_row_click(row, 0, false);
             assert_eq!(app.save_as_focused, row, "clicking row {row} should focus it");
         }
     }
@@ -42487,16 +42859,20 @@ mod tests {
         terminal.draw(|frame| app.render(frame)).unwrap();
         assert!(!app.dialog_row_rects.is_empty(), "Normalize should publish click targets");
 
-        // ...replaced by one that publishes none.
+        // ...replaced by one whose only target is its own hints bar. It must report *that*,
+        // not carry Normalize's field rect forward — a stale rect is a click that lands on a
+        // dialog no longer on screen.
+        let normalize_rects = app.dialog_row_rects.clone();
         app.dialog = Some(Dialog::CdpOutput {
             title: "x".into(),
             lines: vec!["y".into()],
             scroll: 0,
         });
         terminal.draw(|frame| app.render(frame)).unwrap();
-        assert!(
-            app.dialog_row_rects.is_empty(),
-            "a target-less dialog must not inherit the previous dialog's rects"
+        assert_eq!(app.dialog_row_rects.len(), 1, "a hints-only dialog reports exactly its bar");
+        assert_ne!(
+            app.dialog_row_rects, normalize_rects,
+            "a dialog must not inherit the previous dialog's rects"
         );
 
         // ...and closing every dialog clears them too.
@@ -42896,7 +43272,7 @@ mod tests {
 
         // --- clicking Esc cancels: the dialog closes and the document is untouched.
         let before = app.documents[0].channels[0][0];
-        app.handle_dialog_row_click(app.dialog_n_interactive, col("Esc"));
+        app.handle_dialog_row_click(app.dialog_n_interactive, col("Esc"), false);
         assert!(app.dialog.is_none(), "clicking Esc should close the dialog");
         assert_eq!(
             app.documents[0].channels[0][0], before,
@@ -42906,14 +43282,14 @@ mod tests {
         // ...and the label beside it, not just the key itself.
         open(&mut app);
         render(&mut app);
-        app.handle_dialog_row_click(app.dialog_n_interactive, col("cancel"));
+        app.handle_dialog_row_click(app.dialog_n_interactive, col("cancel"), false);
         assert!(app.dialog.is_none());
         assert_eq!(app.documents[0].channels[0][0], before, "\"cancel\" must cancel");
 
         // --- clicking Enter still applies.
         open(&mut app);
         render(&mut app);
-        app.handle_dialog_row_click(app.dialog_n_interactive, col("Enter"));
+        app.handle_dialog_row_click(app.dialog_n_interactive, col("Enter"), false);
         assert!(app.dialog.is_none(), "clicking Enter should close the dialog");
         assert_ne!(
             app.documents[0].channels[0][0], before,
@@ -42925,7 +43301,7 @@ mod tests {
         open(&mut app);
         render(&mut app);
         let gap = col("Esc") - 1; // the separator before "Esc"
-        app.handle_dialog_row_click(app.dialog_n_interactive, gap);
+        app.handle_dialog_row_click(app.dialog_n_interactive, gap, false);
         assert!(app.dialog.is_some(), "a click on empty bar space must do nothing");
         assert_eq!(app.documents[0].channels[0][0], after_apply);
     }
@@ -42950,7 +43326,7 @@ mod tests {
         let hints = app.dialog_hints_text.clone();
         let tab = hints.find("Tab").map(|b| hints[..b].chars().count() as u16)
             .unwrap_or_else(|| panic!("no Tab in {hints:?}"));
-        app.handle_dialog_row_click(app.dialog_n_interactive, tab);
+        app.handle_dialog_row_click(app.dialog_n_interactive, tab, false);
         assert!(
             matches!(app.dialog, Some(Dialog::ExportRegions { .. })),
             "clicking a motion hint must not submit or cancel"
@@ -43031,7 +43407,7 @@ mod tests {
             for motion in ["Tab", "Space"] {
                 if let Some(b) = hints.find(motion) {
                     let col = hints[..b].chars().count() as u16;
-                    app.handle_dialog_row_click(app.dialog_n_interactive, col);
+                    app.handle_dialog_row_click(app.dialog_n_interactive, col, false);
                     assert_eq!(
                         app.dialog.as_ref().map(std::mem::discriminant),
                         Some(kind),
@@ -43042,7 +43418,7 @@ mod tests {
 
             // Esc closes it. That it *cancels* rather than applies is what the Normalize test
             // pins precisely; here the point is that every dialog agrees Esc means Esc.
-            app.handle_dialog_row_click(app.dialog_n_interactive, esc);
+            app.handle_dialog_row_click(app.dialog_n_interactive, esc, false);
             assert_ne!(
                 app.dialog.as_ref().map(std::mem::discriminant),
                 Some(kind),
