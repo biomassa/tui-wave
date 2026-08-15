@@ -6,12 +6,21 @@ A keyboard-driven audio editor that runs in a terminal (mouse works too!).
 ![tui-wave screenshot](screenshot2.png)
 
 tui-wave draws waveforms, plays and edits audio. It handles mono, stereo and multichannel
-files. Multichannel files that exceed the configurable threshold in size (default: 4GB) open in 
-streaming mode without loading into memory. This is needed for processing / auditioning / breaking 
-large session captures made with software like Cycling74's Max, etc.
-tui-wave is also, optionally, a front end for Composer's Desktop Project, a set of command-line
-utilities that exist for decades and provide a lot of unique time and frequency domain 
-processing capabilities.
+files. A file larger than the size threshold (4GB by default, and configurable) opens in
+streaming mode and never loads into memory. That mode is what lets you audition, cut and
+process the large session captures that software such as Cycling74's Max writes.
+
+tui-wave is also a front end for three process backends. Two of them are optional and you
+install them yourself:
+
+- **Composer's Desktop Project (CDP)**, a set of command-line utilities that have a history of
+  decades. They do time-domain and frequency-domain work you find nowhere else. Andrew Bentley,
+  Archer Endrich, Richard Orton and Trevor Wishart founded the project in 1986.
+- **praatAudioTools**, 458 sound-transformation scripts for Praat by Shai Cohen.
+- **Airwindows**, 500 effects by Chris Johnson. This one needs no install, because tui-wave
+  compiles it in.
+
+One browser lists all three, and one chain can mix them.
 
 Read [DOCUMENTATION.md](DOCUMENTATION.md) to learn how to use it.
 
@@ -30,13 +39,16 @@ Read [DOCUMENTATION.md](DOCUMENTATION.md) to learn how to use it.
   reads and writes RF64 and BW64.
 - **Formats.** It reads WAV, FLAC, and AIFF. It writes WAV, FLAC, and MP3.
 - **Configurable.** Every key assignment lives in a TOML config file.
-- **CDP.** An optional front end to the Composer's Desktop Project, with a growing list 
-(hundreds) of processes implemented.
-- **Praat.** An optional front end to praatAudioTools, 352 sound-transformation scripts for
+- **CDP.** An optional front end to the Composer's Desktop Project, with more than 400
+processes implemented.
+- **Praat.** An optional front end to praatAudioTools, 458 sound-transformation scripts for
 Praat, in the same browser and chainable with CDP.
 - **Airwindows.** 500 of Chris Johnson's effects, built in. Nothing to install and nothing to
 configure — unlike CDP and Praat, the processing is compiled into tui-wave itself, so it works
 on a fresh install and previews return instantly.
+
+The three backends put **1363 processes** in one browser: 405 from CDP, 458 from Praat and 500
+from Airwindows. CDP adds 17 more that only a pitch-curve field can reach.
 
 The CDP process browser, the parameter form with automatable green fields and presets, and the
 breakpoint envelope editor:
@@ -92,7 +104,7 @@ Each release carries a macOS build for Intel and Apple Silicon, plus a `.deb` an
 Linux — [github.com/biomassa/tui-wave/releases](https://github.com/biomassa/tui-wave/releases).
 
 **Run `setup-environment.sh` afterwards.** The packages contain the tui-wave binary and nothing
-else, and about 439 of its processes are *scripts* from the praatAudioTools project, which they
+else, and 458 of its processes are *scripts* from the praatAudioTools project, which they
 do not bundle. Without them tui-wave lists every Praat process and can run none. The script
 fetches them, points tui-wave at them, and optionally sets up the Python environment the `py`
 group needs.
@@ -262,7 +274,7 @@ just as well. The tui-wave catalog does not depend on one CDP release.
 ## Optional: Praat support
 
 praatAudioTools is a collection of sound-transformation scripts for Praat, by Shai Cohen of
-Bar-Ilan University. tui-wave runs 434 of them: granular, spectral, reverb, distortion, spatial,
+Bar-Ilan University. tui-wave runs 458 of them: granular, spectral, reverb, distortion, spatial,
 generative and more. They share the `Ctrl+p` browser with CDP, under a **Praat** domain, and a
 chain (`Ctrl+h`) can mix the two freely.
 
@@ -311,7 +323,7 @@ to.
 **`./install.sh` offers to set this up for you**, into a virtual environment it owns — the rest of
 this section is the manual route.
 
-34 of those scripts do their work in Python rather than in Praat: they hand the audio to a
+46 of those scripts do their work in Python rather than in Praat: they hand the audio to a
 helper script and read the result back. They appear under their own **py** group in the browser,
 so the extra requirement is visible before you pick one rather than a surprise when you run it.
 Everything in the other thirteen groups works without any of this.
@@ -320,7 +332,7 @@ They need three Python packages, and two more for the interactive ones:
 
 | Package | Needed for |
 |---|---|
-| `numpy`, `scipy`, `soundfile` | all 34 — the array maths and WAV I/O every helper uses |
+| `numpy`, `scipy`, `soundfile` | all 46 — the array maths and WAV I/O every helper uses |
 | `sounddevice` | Arranger and Performance Launcher, which audition while you work |
 | `pillow` | Spectral Eraser, which paints on a spectrogram image |
 
@@ -347,9 +359,9 @@ scripts find it without any of them being edited. If the environment does not ex
 left alone and the scripts use whatever `python3` you already have — so if those packages are
 already installed system-wide, nothing more is needed.
 
-Four of these open a window of their own — a spatial trajectory painter, a step arranger, a
-performance launcher, a spectrogram eraser. They run with no time limit, since you are the one
-deciding when they are finished; `Esc` cancels.
+Four of these open a window of their own — Arranger, Performance Launcher, Spatial Panner and
+Spectral Eraser. They run with no time limit, because you decide when they are finished. `Esc`
+cancels.
 
 ## Known issues
 
