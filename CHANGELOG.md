@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **`?` opens a read-only key reference.** Every binding in one scrollable window, two columns,
+  grouped the way the documentation groups them — the keys, then the panels, then the mouse. The
+  key column is *derived* from the live bindings rather than written out beside each description,
+  so a key rebound in `config.toml` shows as the user bound it, and a test walks the whole keymap
+  and fails if any bound action has no row. Commands with no key are listed too, reading `menu`
+  in the key column: a reference that named only the bound half could never tell a user that
+  Remove DC Offset exists. Up/Down, PgUp/PgDn and Home/End scroll it, and `?`, Esc, Enter or `q`
+  close it — `q` included, because the key that quits the program must not quit it from inside a
+  window that was opened to read. It works on a streamed read-only buffer, where nearly nothing
+  else does, that being the mode whose refusals most need explaining.
+
+  The hint sits in the toolbar's prefix column on the row below Play, which the layout had been
+  leaving blank: rows after the first are indented to FILE's column, so a whole button's width
+  under Play went unused on every wrapped row. On a terminal too wide to wrap, the hint takes a
+  row of its own rather than disappearing at exactly the widths with the most room for it.
+
+  **`?` was Previous Rising Edge, which moved to `\`** — one keytop from `/`, its forward
+  counterpart, so the pair still reads as a pair. `?` only ever held it because Shift+/ sends
+  that character and nothing else wanted it.
+
 - **The menu bar accents the letter that opens each menu.** `Alt+f`, `Alt+x` and the rest were
   documented but invisible: every bar title rendered in one flat colour, so the mnemonic was
   something to look up rather than something to read off the screen. The letter now draws in

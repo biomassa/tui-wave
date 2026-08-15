@@ -160,7 +160,7 @@ impl MenuBar {
                     entry("Extend Selection to Previous Marker",  Action::ExtendSelectionToPrevMarker,"{"),
                     entry("Extend Selection to Next Marker",      Action::ExtendSelectionToNextMarker,"}"),
                     entry("Next Rising Edge",                     Action::NextRisingEdge,             "/"),
-                    entry("Previous Rising Edge",                 Action::PrevRisingEdge,             "?"),
+                    entry("Previous Rising Edge",                 Action::PrevRisingEdge,             "\\"),
                     entry("Auto-Insert Markers at Transients",    Action::AutoInsertMarkers,          "t"),
                     entry("Increase Transient Threshold",         Action::IncreaseTransientThreshold, "+"),
                     entry("Decrease Transient Threshold",         Action::DecreaseTransientThreshold, "-"),

@@ -117,6 +117,10 @@ pub enum Action {
     ExtractFormants,
     ExtractFormantsFreqwise,
     FreezeSnapshotAtCursor,
+    /// The read-only key reference (`?`, `ui::help`). A dialog rather than a menu entry with a
+    /// paragraph in it: what a user wants when reaching for help is every binding at once, and
+    /// a list that long has to scroll.
+    ShowHelp,
     // Panel/modal commands (mostly dispatched contextually, not via the global keymap).
     Noop,
     OpenSelected,
@@ -212,11 +216,15 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::IncreaseTransientThreshold),
         KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::DecreaseTransientThreshold),
         KeyCode::Char('/') => Some(Action::NextRisingEdge),
-        // Shift+/ on most layouts sends '?' as the character itself, modifiers aside — bind
-        // the literal resulting key rather than relying on a Shift flag alongside '/' (the
-        // same reasoning that keeps every other shifted-symbol key in this app keyed off
-        // its own character, not a modifier combo a terminal might not report consistently).
-        KeyCode::Char('?') => Some(Action::PrevRisingEdge),
+        // '\' rather than '?', which is the near-universal "show me the keys" key and is bound
+        // to `ShowHelp` below. The two rising-edge directions stay one keytop apart on the same
+        // hand, which is what the pairing was for — '?' only ever held it because Shift+/ sends
+        // that character and nothing else was competing for it.
+        KeyCode::Char('\\') => Some(Action::PrevRisingEdge),
+        // The key reference. Bound as the literal '?' the terminal sends, for the same reason
+        // every other shifted-symbol key here is: a Shift flag alongside '/' is not reported
+        // consistently across terminals, but the resulting character always is.
+        KeyCode::Char('?') => Some(Action::ShowHelp),
         // Channel-window scrolling. Like '?' above, the shifted forms are bound as the literal
         // characters the terminal actually sends rather than ','/'.' plus a Shift flag.
         KeyCode::Char(',') => Some(Action::ScrollChannelsUp),
@@ -399,7 +407,8 @@ pub fn default_keybindings() -> HashMap<String, Vec<String>> {
     bind!("JumpPrevMarker", "[");
     bind!("JumpNextMarker", "]");
     bind!("NextRisingEdge", "/");
-    bind!("PrevRisingEdge", "?");
+    bind!("PrevRisingEdge", "\\");
+    bind!("ShowHelp", "?");
     bind!("AutoInsertMarkers", "t");
     bind!("ScrollChannelsUp", ",");
     bind!("ScrollChannelsDown", ".");
@@ -489,6 +498,7 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "JumpNextMarker" => Some(Action::JumpNextMarker),
         "NextRisingEdge" => Some(Action::NextRisingEdge),
         "PrevRisingEdge" => Some(Action::PrevRisingEdge),
+        "ShowHelp" => Some(Action::ShowHelp),
         "AutoInsertMarkers" => Some(Action::AutoInsertMarkers),
         "IncreaseTransientThreshold" => Some(Action::IncreaseTransientThreshold),
         "DecreaseTransientThreshold" => Some(Action::DecreaseTransientThreshold),
@@ -801,9 +811,27 @@ mod tests {
         assert_eq!(map_key(key(KeyCode::Char('/'), KeyModifiers::NONE)), Some(Action::NextRisingEdge));
     }
 
+    /// `?` is the near-universal "show me the keys" key, so it holds the help window and the
+    /// previous rising edge moved one keytop over to `\\`, next to `/`.
     #[test]
-    fn question_mark_is_prev_rising_edge() {
-        assert_eq!(map_key(key(KeyCode::Char('?'), KeyModifiers::NONE)), Some(Action::PrevRisingEdge));
+    fn question_mark_opens_the_help_window_and_backslash_is_prev_rising_edge() {
+        assert_eq!(map_key(key(KeyCode::Char('?'), KeyModifiers::NONE)), Some(Action::ShowHelp));
+        assert_eq!(
+            map_key(key(KeyCode::Char('\\'), KeyModifiers::NONE)),
+            Some(Action::PrevRisingEdge)
+        );
+    }
+
+    /// The default bindings back the menu and toolbar shortcut text, so a key that moved in
+    /// `map_key` and not here would leave both advertising the old one.
+    #[test]
+    fn the_default_bindings_agree_with_the_keymap_about_both_keys() {
+        let defaults = default_keybindings();
+        assert_eq!(defaults.get("ShowHelp").map(Vec::as_slice), Some(["?".to_string()].as_slice()));
+        assert_eq!(
+            defaults.get("PrevRisingEdge").map(Vec::as_slice),
+            Some(["\\".to_string()].as_slice())
+        );
     }
 
     #[test]

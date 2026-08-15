@@ -37,6 +37,11 @@ pub struct Toolbar {
     /// everything else refused, clicking these *is* the discoverable route, and two of them have
     /// no key to show because they never needed one.
     streamed: Vec<ToolGroup>,
+    /// The one-button group drawn in the prefix column of row 1, directly under Play — the
+    /// help hint. Not part of any set, because it belongs to a *position* rather than to a
+    /// command list: `build` places it in the space the wrapped rows' indent would otherwise
+    /// waste, and it is the same button whichever waveform set is showing.
+    help: ToolGroup,
     /// Per-button clickable rects with the action each triggers, recomputed every render.
     rects: Vec<(Rect, Action)>,
     pub active_actions: HashSet<Action>,
@@ -126,7 +131,7 @@ impl Toolbar {
                     ("ExtPrev",  sc(Action::ExtendSelectionToPrevMarker,"{"), Action::ExtendSelectionToPrevMarker),
                     ("ExtNext",  sc(Action::ExtendSelectionToNextMarker,"}"), Action::ExtendSelectionToNextMarker),
                     ("NextEdge", sc(Action::NextRisingEdge,             "/"), Action::NextRisingEdge),
-                    ("PrevEdge", sc(Action::PrevRisingEdge,             "?"), Action::PrevRisingEdge),
+                    ("PrevEdge", sc(Action::PrevRisingEdge,             "\\"), Action::PrevRisingEdge),
                     ("AutoMark", sc(Action::AutoInsertMarkers,          "t"), Action::AutoInsertMarkers),
                     // Labels are overridden dynamically in `button_label` (the live dB
                     // value, then the bare +/- shortcuts) — these are just placeholders.
@@ -203,17 +208,33 @@ impl Toolbar {
             },
         ];
 
+        // Row 1's prefix column, under Play. See `build` for why it lives there: rows after the
+        // first are indented to FILE's column, so the width Play occupies is blank on every one
+        // of them — a whole button's worth of space that nothing else can use, because the grid
+        // restarts to the right of it.
+        let help = ToolGroup {
+            label: "",
+            buttons: vec![("Help", sc(Action::ShowHelp, "?"), Action::ShowHelp)],
+        };
         Self {
             waveform,
             files,
             buffers,
             streamed,
+            help,
             rects: Vec::new(),
             active_actions: HashSet::new(),
             is_playing: false,
             transient_threshold_db: 13.0,
             streamed_buffer: false,
         }
+    }
+
+    /// Whether this focus shows the help hint under Play. Both waveform sets do — they are the
+    /// two that open with the Play prefix, so they are the two with a second row to put it on —
+    /// and the panel sets do not: their commands are a flat list with no prefix column at all.
+    fn shows_help_hint(focus: Focus) -> bool {
+        matches!(focus, Focus::Waveform)
     }
 
     fn groups_for(&self, focus: Focus) -> &[ToolGroup] {
@@ -303,17 +324,22 @@ impl Toolbar {
     /// effect (user report). The ordinary waveform set is the tallest of them all, so reserving it
     /// unconditionally is both the fix and the simplest statement of the rule.
     pub fn reserved_rows(&self, width: u16) -> u16 {
-        [&self.waveform, &self.files, &self.buffers, &self.streamed]
-            .into_iter()
-            .map(|groups| self.rows_for(width, groups))
-            .max()
-            .unwrap_or(1)
+        [
+            (&self.waveform, true),
+            (&self.files, false),
+            (&self.buffers, false),
+            (&self.streamed, true),
+        ]
+        .into_iter()
+        .map(|(groups, with_help)| self.rows_for(width, groups, with_help))
+        .max()
+        .unwrap_or(1)
     }
 
     /// Rows `groups` needs at `width`.
-    fn rows_for(&self, width: u16, groups: &[ToolGroup]) -> u16 {
+    fn rows_for(&self, width: u16, groups: &[ToolGroup], with_help: bool) -> u16 {
         let (_, _, rows) =
-            self.build(groups, Rect { x: 0, y: 0, width, height: u16::MAX });
+            self.build(groups, Rect { x: 0, y: 0, width, height: u16::MAX }, with_help);
         rows.max(1)
     }
 
@@ -321,7 +347,12 @@ impl Toolbar {
     /// pack tightly left-to-right, and every wrapped row restarts at the same column as the
     /// first section (FILE) — so each row's leading section lines up under FILE, while the
     /// inter-section spacing stays tight. Returns lines, per-button rects, and rows used.
-    fn build(&self, groups: &[ToolGroup], area: Rect) -> (Vec<Line<'static>>, Vec<(Rect, Action)>, u16) {
+    fn build(
+        &self,
+        groups: &[ToolGroup],
+        area: Rect,
+        with_help: bool,
+    ) -> (Vec<Line<'static>>, Vec<(Rect, Action)>, u16) {
         let chrome = Style::default().fg(theme::CHROME_FG);
         let prefix = &groups[0];
         let grid_groups = &groups[1..];
@@ -329,11 +360,19 @@ impl Toolbar {
         let prefix_w = self.section_width(prefix);
         let origin = area.x + prefix_w; // FILE's column; wrapped rows restart here
         let right = area.x + area.width;
+        // The help hint goes in the prefix column of the first wrapped row, under Play — but
+        // only while it fits inside that column. Both widths follow their button's shortcut,
+        // which a config can rebind, and a help hint wider than Play's column would push that
+        // row's whole grid right of the rows above it. Falling back to the plain indent keeps
+        // the columns square at the cost of the hint, which is the right way round.
+        let help_w = self.section_width(&self.help);
+        let with_help = with_help && help_w <= prefix_w;
 
         let mut rects: Vec<(Rect, Action)> = Vec::new();
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut spans: Vec<Span<'static>> = Vec::new();
         let mut row = 0u16;
+        let mut help_emitted = false;
 
         // Row 0: Play at the far left; FILE then begins exactly at `origin`.
         let mut x = self.emit_section(prefix, area.x, area.y, &mut spans, &mut rects);
@@ -344,8 +383,15 @@ impl Toolbar {
             if !first_in_row && x + SECTION_GAP + sw > right {
                 lines.push(Line::from(std::mem::take(&mut spans)));
                 row += 1;
-                // Indent the new row to FILE's column.
-                spans.push(Span::styled(" ".repeat(prefix_w as usize), chrome));
+                // Indent the new row to FILE's column — with the help hint occupying that
+                // indent on the first wrapped row, since nothing else ever can.
+                let mut used = 0;
+                if with_help && !help_emitted {
+                    help_emitted = true;
+                    used = self.emit_section(&self.help, area.x, area.y + row, &mut spans, &mut rects)
+                        - area.x;
+                }
+                spans.push(Span::styled(" ".repeat(prefix_w.saturating_sub(used) as usize), chrome));
                 x = origin;
                 first_in_row = true;
             }
@@ -356,7 +402,15 @@ impl Toolbar {
             x = self.emit_section(group, x, area.y + row, &mut spans, &mut rects);
             first_in_row = false;
         }
-        lines.push(Line::from(spans));
+        lines.push(Line::from(std::mem::take(&mut spans)));
+        // A terminal wide enough to fit every section on one row leaves the hint nowhere to go,
+        // so it takes a row of its own. One row of chrome is a cheap price for the key never
+        // disappearing at exactly the widths where there is the most room for it.
+        if with_help && !help_emitted {
+            row += 1;
+            self.emit_section(&self.help, area.x, area.y + row, &mut spans, &mut rects);
+            lines.push(Line::from(spans));
+        }
         (lines, rects, row + 1)
     }
 
@@ -365,7 +419,7 @@ impl Toolbar {
         if area.width == 0 || area.height == 0 {
             return;
         }
-        let (lines, rects, _) = self.build(self.groups_for(focus), area);
+        let (lines, rects, _) = self.build(self.groups_for(focus), area, Self::shows_help_hint(focus));
         self.rects = rects;
         // Toolbar sits on the main app background (theme::BASE), not the menu's chrome color,
         // so it blends with the spacer row and the editor area below it.
@@ -398,6 +452,70 @@ mod tests {
     /// streamed buffer, so these three are the only ones that do anything, and two of them have no
     /// key because they never needed one. There, clicking is the discoverable route rather than a
     /// redundant second one — which is the opposite of the situation the rule exists for.
+    /// The hint sits in the prefix column of the first wrapped row — the blank space under
+    /// Play that the grid's indent would otherwise waste. A rect there is the proof: it means
+    /// the button is both drawn and clickable at that position, not merely present in a list.
+    #[test]
+    fn the_help_hint_sits_directly_under_play() {
+        let bar = Toolbar::new(&HashMap::new());
+        let area = Rect { x: 0, y: 0, width: 100, height: 10 };
+        let (_, rects, rows) = bar.build(&bar.waveform, area, true);
+        assert!(rows >= 2, "a 100-column toolbar is expected to wrap");
+        let play = rects.iter().find(|(_, a)| *a == Action::TogglePlayback).expect("Play");
+        let help = rects.iter().find(|(_, a)| *a == Action::ShowHelp).expect("Help");
+        assert_eq!(help.0.x, play.0.x, "the help hint must start in Play's column");
+        assert_eq!(help.0.y, play.0.y + 1, "the help hint must sit on the row below Play");
+    }
+
+    /// Wide enough for one row means the wrapped row the hint normally rides on never happens,
+    /// so it takes a row of its own rather than vanishing at exactly the widths with most room.
+    #[test]
+    fn the_help_hint_survives_a_terminal_too_wide_to_wrap() {
+        let bar = Toolbar::new(&HashMap::new());
+        let area = Rect { x: 0, y: 0, width: 4000, height: 10 };
+        let (lines, rects, rows) = bar.build(&bar.waveform, area, true);
+        assert_eq!(rows, 2, "one grid row plus the hint's own");
+        assert_eq!(lines.len(), 2);
+        let help = rects.iter().find(|(_, a)| *a == Action::ShowHelp).expect("Help");
+        assert_eq!((help.0.x, help.0.y), (area.x, area.y + 1));
+    }
+
+    /// Both waveform sets open with the Play prefix and so have the column to hold it. The
+    /// panel sets are a flat list with no prefix column, and must not grow one.
+    #[test]
+    fn only_the_waveform_sets_show_the_help_hint() {
+        assert!(Toolbar::shows_help_hint(Focus::Waveform));
+        assert!(!Toolbar::shows_help_hint(Focus::Files));
+        assert!(!Toolbar::shows_help_hint(Focus::Buffers));
+
+        let bar = Toolbar::new(&HashMap::new());
+        let area = Rect { x: 0, y: 0, width: 100, height: 10 };
+        let (_, rects, _) = bar.build(&bar.files, area, false);
+        assert!(!rects.iter().any(|(_, a)| *a == Action::ShowHelp));
+    }
+
+    /// Play's shortcut and the hint's are both rebindable, and a hint wider than Play's column
+    /// would shove that row's grid right of every row above it. It yields instead.
+    #[test]
+    fn a_help_hint_too_wide_for_plays_column_is_dropped_rather_than_shifting_the_grid() {
+        let mut bar = Toolbar::new(&HashMap::new());
+        bar.help = ToolGroup {
+            label: "",
+            buttons: vec![("Help", "Ctrl+Shift+Alt+F1".to_string(), Action::ShowHelp)],
+        };
+        let area = Rect { x: 0, y: 0, width: 100, height: 10 };
+        let (_, rects, _) = bar.build(&bar.waveform, area, true);
+        assert!(!rects.iter().any(|(_, a)| *a == Action::ShowHelp));
+
+        // Every button still lands exactly where the ordinary hint would have left it.
+        let plain = Toolbar::new(&HashMap::new());
+        let (_, want, _) = plain.build(&plain.waveform, area, true);
+        let strip = |rs: &[(Rect, Action)]| -> Vec<(Rect, Action)> {
+            rs.iter().filter(|(_, a)| *a != Action::ShowHelp).copied().collect()
+        };
+        assert_eq!(strip(&rects), strip(&want));
+    }
+
     #[test]
     fn every_toolbar_button_shows_a_shortcut() {
         let bar = Toolbar::new(&HashMap::new());
@@ -481,15 +599,20 @@ mod tests {
                 "width {width}: a streamed buffer changed the reserved height"
             );
             // And it is the tallest set's height, so nothing is ever clipped.
-            let tallest = [&bar.waveform, &bar.files, &bar.buffers, &bar.streamed]
-                .into_iter()
-                .map(|g| bar.rows_for(width, g))
-                .max()
-                .unwrap();
+            let tallest = [
+                (&bar.waveform, true),
+                (&bar.files, false),
+                (&bar.buffers, false),
+                (&bar.streamed, true),
+            ]
+            .into_iter()
+            .map(|(g, help)| bar.rows_for(width, g, help))
+            .max()
+            .unwrap();
             assert_eq!(ordinary, tallest, "width {width}: must reserve the tallest set");
             assert_eq!(
                 ordinary,
-                bar.rows_for(width, &bar.waveform),
+                bar.rows_for(width, &bar.waveform, true),
                 "width {width}: the ordinary waveform set is expected to be the tallest"
             );
         }
