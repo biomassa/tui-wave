@@ -209,6 +209,35 @@ run() {
   fi
 }
 
+# Move the checkout to `PINNED_COMMIT`, forcing past the phantom local edits a
+# case-insensitive filesystem produces.
+#
+# praatAudioTools ships four pairs of scripts whose names differ only in case, in the same
+# folder — `Reverb/Stereo_Shimmer.praat` and `Reverb/stereo_shimmer.praat` among them. On APFS
+# (the macOS default) and on any case-insensitive volume, both tracked paths resolve to one
+# file, so git reports whichever it did not write as **locally modified** and refuses to check
+# anything out: "Your local changes to the following files would be overwritten by checkout".
+# That is not a user edit and there is nothing to preserve — it is the same filesystem limit
+# the README's *Known issues* describes, biting the update path rather than a run.
+#
+# So: try the ordinary checkout, and fall back to `--force`, which is safe here because this
+# checkout belongs to tui-wave. It is fetched at a pinned commit, the app runs each script from
+# a temporary copy and never writes to it, and anyone who wants a checkout of their own to edit
+# points `praat_audiotools_dir` at it instead.
+checkout_pinned_commit() {
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '    %s$ git -C %s checkout --detach %s%s\n' "$DIM" "$SCRIPTS" "$PINNED_COMMIT" "$RESET"
+    return 0
+  fi
+  if git -C "$SCRIPTS" checkout --quiet --detach "$PINNED_COMMIT" 2>/dev/null; then
+    return 0
+  fi
+  warn "the checkout refused to move — forcing past local changes"
+  warn "(expected on macOS: four scripts differ only in case and cannot coexist here)"
+  git -C "$SCRIPTS" checkout --quiet --detach --force "$PINNED_COMMIT" \
+    || die "could not move $SCRIPTS to $PINNED_COMMIT — delete it and re-run to re-clone"
+}
+
 confirm() {
   [ "$ASSUME_YES" = 1 ] && return 0
   [ "$DRY_RUN" = 1 ] && return 0
@@ -238,7 +267,7 @@ fi
 # --- 2. The praatAudioTools scripts ----------------------------------------------------------
 step "praatAudioTools scripts"
 have git || die "git is required to fetch the scripts — install it and re-run"
-info "about 456 of tui-wave's processes are scripts from this project"
+info "about 457 of tui-wave's processes are scripts from this project"
 # Whose work this is, at the moment it is being downloaded. The scripts are run as-is by
 # absolute path and never modified, so the credit belongs where the fetch happens rather than
 # buried in a notices file nobody opens.
@@ -257,16 +286,26 @@ if [ -d "$SCRIPTS/.git" ]; then
     # commits behind. A detached HEAD is correct here — this is a pinned dependency, not a
     # branch anybody works on.
     run git -C "$SCRIPTS" fetch --quiet origin || die "could not fetch from $UPSTREAM"
-    run git -C "$SCRIPTS" checkout --quiet --detach "$PINNED_COMMIT" \
-      || die "commit $PINNED_COMMIT not found — is this tui-wave newer than the script?"
+    # Ask whether the commit actually arrived *before* trying to check it out, so the two real
+    # failures stop sharing one message. A missing commit means this tui-wave is newer than the
+    # upstream the checkout points at; a refused checkout means something in the working tree
+    # is in the way, which is a different problem with a different fix.
+    #
+    # Skipped under --dry-run, where the fetch above was printed rather than run: the commit
+    # would be missing precisely because nothing was fetched, and a dry run must not fail on
+    # the consequences of its own inaction.
+    if [ "$DRY_RUN" != 1 ] \
+      && ! git -C "$SCRIPTS" cat-file -e "${PINNED_COMMIT}^{commit}" 2>/dev/null; then
+      die "commit $PINNED_COMMIT not found upstream — is this tui-wave newer than the script?"
+    fi
+    checkout_pinned_commit
     ok "moved to ${PINNED_COMMIT:0:7}"
   fi
 else
   [ -e "$SCRIPTS" ] && die "$SCRIPTS exists but is not a git checkout — move it aside and re-run"
   run mkdir -p "$(dirname "$SCRIPTS")"
   run git clone --quiet "$UPSTREAM" "$SCRIPTS" || die "could not clone $UPSTREAM"
-  run git -C "$SCRIPTS" checkout --quiet --detach "$PINNED_COMMIT" \
-    || die "commit $PINNED_COMMIT not found — is this tui-wave newer than the script?"
+  checkout_pinned_commit
   ok "cloned at ${PINNED_COMMIT:0:7}"
 fi
 
