@@ -214,7 +214,7 @@ impl Toolbar {
         // restarts to the right of it.
         let help = ToolGroup {
             label: "",
-            buttons: vec![("Help", sc(Action::ShowHelp, "?"), Action::ShowHelp)],
+            buttons: vec![("Keys", sc(Action::ShowHelp, "?"), Action::ShowHelp)],
         };
         Self {
             waveform,
@@ -501,7 +501,7 @@ mod tests {
         let mut bar = Toolbar::new(&HashMap::new());
         bar.help = ToolGroup {
             label: "",
-            buttons: vec![("Help", "Ctrl+Shift+Alt+F1".to_string(), Action::ShowHelp)],
+            buttons: vec![("Keys", "Ctrl+Shift+Alt+F1".to_string(), Action::ShowHelp)],
         };
         let area = Rect { x: 0, y: 0, width: 100, height: 10 };
         let (_, rects, _) = bar.build(&bar.waveform, area, true);

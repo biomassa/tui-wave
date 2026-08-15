@@ -130,10 +130,6 @@ pub const SECTIONS: &[HelpSection] = &[
             a(Action::Resample, "Ctrl+e", "Change the sample rate"),
             a(Action::TechnicalFades, "Ctrl+b", "Add very short fades at both ends"),
             a(Action::MixToMono, "Ctrl+m", "Sum the channels into one"),
-            a(Action::MixToStereo, "menu", "Route many channels to a new stereo buffer"),
-            a(Action::RemoveEmptyChannels, "menu", "Drop the channels that hold nothing"),
-            a(Action::RemoveDcOffset, "menu", "Recentre each channel on zero"),
-            a(Action::HighPass, "menu", "Remove a drifting baseline below a cutoff"),
         ],
     },
     HelpSection {
@@ -141,12 +137,6 @@ pub const SECTIONS: &[HelpSection] = &[
         rows: &[
             a(Action::CdpProcess, "Ctrl+p", "Browse CDP, Praat and Airwindows processes"),
             a(Action::CdpChain, "Ctrl+h", "Build a chain of processes"),
-            a(Action::ExtractPitchCurve, "menu", "CDP: extract a pitch curve from the selection"),
-            a(Action::LoadPitchCurve, "menu", "CDP: read a saved pitch curve from disk"),
-            a(Action::ExtractFormants, "menu", "CDP: extract formants, pitch-wise bands"),
-            a(Action::ExtractFormantsFreqwise, "menu", "CDP: extract formants, equal-Hz bands"),
-            a(Action::FreezeSnapshotAtCursor, "menu", "CDP: freeze the timbre at the cursor"),
-            a(Action::ConfigureCdpDirectory, "menu", "Set where the CDP binaries live"),
         ],
     },
     HelpSection {
@@ -172,11 +162,8 @@ pub const SECTIONS: &[HelpSection] = &[
             a(Action::SaveAs, "Shift+S", "Save to a new path, with a choice of depth"),
             a(Action::SaveAll, "Ctrl+l", "Save every buffer that has changes"),
             a(Action::ExportRegions, "Shift+E", "Write the audio between markers to a subfolder"),
-            a(Action::ExportChannels, "menu", "Split the channels into separate WAVs"),
-            a(Action::Export, "menu", "Write the buffer as FLAC or MP3"),
             a(Action::NewFromLeft, "Shift+L", "New buffer from the left channel"),
             a(Action::NewFromRight, "Shift+R", "New buffer from the right channel"),
-            a(Action::ResetConfig, "menu", "Throw away your settings"),
             a(Action::Quit, "q", "Quit"),
         ],
     },
@@ -229,10 +216,11 @@ pub enum HelpLine {
 /// Flattens [`SECTIONS`] into rendered lines, taking each row's key column from `bindings`
 /// where the row names an action — so a rebound key shows as the user bound it.
 ///
-/// A row whose action carries no binding (the menu-only commands) keeps its literal text,
-/// which is the word `menu`. Those are in the list on purpose: a user looking for Remove DC
-/// Offset needs to learn that it exists and that the menu is where it lives, and a reference
-/// that listed only the bound commands could never tell them.
+/// **Only keys are listed.** A menu-only command has nothing to print in the key column, and a
+/// row reading `menu` beside a description is a row the reader has to skip past on every pass
+/// through a list they opened to find a key in. The menus themselves are the reference for
+/// what has no key; this window answers "what does this key do", and the two menus that hold
+/// those commands are one `Alt+p` and `Alt+x` away.
 pub fn lines(bindings: &HashMap<Action, String>) -> Vec<HelpLine> {
     let mut out = Vec::new();
     for (i, section) in SECTIONS.iter().enumerate() {
@@ -267,6 +255,29 @@ pub fn key_column_width(lines: &[HelpLine]) -> usize {
         .max()
         .unwrap_or(0)
 }
+
+/// Columns of content the window needs: the key column, the gap, and the widest thing that
+/// follows it — a description, or a section heading, which starts at column zero and can be
+/// longer than the key column alone.
+///
+/// The window is sized from this rather than from a fraction of the terminal. A reference is
+/// read by running your eye down the key column, and a window stretched to 80% of a wide
+/// terminal puts a hand's width of blank between each key and the words that explain it.
+pub fn content_width(lines: &[HelpLine]) -> usize {
+    let keys = key_column_width(lines);
+    lines
+        .iter()
+        .map(|l| match l {
+            HelpLine::Entry { description, .. } => keys + KEY_GAP + description.chars().count(),
+            HelpLine::Heading(title) => title.chars().count(),
+            HelpLine::Blank => 0,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// Columns between the key column and the description.
+pub const KEY_GAP: usize = 3;
 
 #[cfg(test)]
 mod tests {
@@ -362,20 +373,19 @@ mod tests {
         }));
     }
 
+    /// Every row must name a key. An action with no binding would fall back to its literal
+    /// text, which is how the menu-only commands used to appear here — a row that answers
+    /// "which key" with "none" in a window whose whole subject is keys.
     #[test]
-    fn menu_only_commands_keep_their_literal_key_column() {
+    fn no_row_describes_a_command_that_has_no_key() {
         let bindings = crate::ui::keymap::build_action_display_map(&default_keybindings(), false);
-        let rendered = lines(&bindings);
-        let dc = rendered
+        let unbound: Vec<String> = SECTIONS
             .iter()
-            .find_map(|l| match l {
-                HelpLine::Entry { keys, description } if description.starts_with("Recentre") => {
-                    Some(keys.clone())
-                }
-                _ => None,
-            })
-            .expect("Remove DC Offset row");
-        assert_eq!(dc, "menu");
+            .flat_map(|s| s.rows.iter())
+            .filter_map(|row| row.action.filter(|a| !bindings.contains_key(a)))
+            .map(|a| format!("{a:?}"))
+            .collect();
+        assert!(unbound.is_empty(), "help rows for unbound commands:\n  {}", unbound.join("\n  "));
     }
 
     #[test]

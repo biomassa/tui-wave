@@ -5844,6 +5844,22 @@ impl App {
         self.help_lines().len().saturating_sub(self.help_rows_visible.max(1))
     }
 
+    /// Wheel scrolling for `Dialog::Help`, by `HELP_WHEEL_ROWS` a notch.
+    ///
+    /// Scrolls wherever the pointer is, rather than only over the window. The dialog is modal —
+    /// every other mouse event is being swallowed by the block that calls this — so a notch
+    /// outside it would otherwise do nothing at all, and "nothing happens" is a worse answer to
+    /// a wheel than the only scrollable thing on screen moving.
+    fn handle_help_scroll(&mut self, mouse: MouseEvent) {
+        let max = self.help_max_scroll();
+        let Some(Dialog::Help { scroll }) = self.dialog.as_mut() else { return };
+        match mouse.kind {
+            MouseEventKind::ScrollUp => *scroll = scroll.saturating_sub(HELP_WHEEL_ROWS),
+            MouseEventKind::ScrollDown => *scroll = (*scroll + HELP_WHEEL_ROWS).min(max),
+            _ => {}
+        }
+    }
+
     /// The whole keymap of `Dialog::Help`. Arrows and the paging keys scroll, everything that
     /// means "I am done" closes. `?` closes it too, so the key that opened the window also
     /// dismisses it rather than being inert on the one screen it just produced.
@@ -16487,6 +16503,7 @@ impl App {
         if self.dialog.is_some() || self.save_as_active {
             if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
                 self.handle_cdp_browser_scroll(mouse);
+                self.handle_help_scroll(mouse);
             }
             // A slider grabbed by a press keeps following the pointer until it is released,
             // which is what makes it a slider rather than a row of click targets. Handled here
@@ -25523,12 +25540,42 @@ fn render_cdp_chain_editor_dialog(
     rects
 }
 
-/// Fraction of the terminal the help window takes, and the floor it will not shrink below.
-/// Large on purpose: this is a reference you read, not a message you dismiss, and a two-column
-/// list of a hundred-odd bindings in a small box is mostly scrolling.
-const HELP_WIDTH_PERCENT: u16 = 80;
+/// Height the help window takes, as a fraction of the terminal. Tall on purpose: this is a
+/// reference you read, not a message you dismiss, and a list of a hundred-odd bindings in a
+/// short box is mostly scrolling.
+///
+/// The *width* is not a fraction of anything — see `help_popup_rect`.
 const HELP_HEIGHT_PERCENT: u16 = 85;
-const HELP_MIN_WIDTH: u16 = 46;
+
+/// Rows one wheel notch moves the help window. Three rather than one, because a notch is a
+/// coarse gesture and this list is a hundred rows long; the arrow keys are what move it by one.
+const HELP_WHEEL_ROWS: usize = 3;
+
+/// The hints bar's own width, which is the one thing in the window that does not follow the
+/// content. Counted rather than measured from the rendered spans, which do not exist yet when
+/// the rect is chosen: " \u{2191}\u{2193}/PgUp/PgDn/Home/End:scroll  ?/Esc:close" plus the
+/// position counter and its lead-in.
+const HELP_HINTS_WIDTH: u16 = 54;
+
+/// Where the help window sits: **sized to its own content**, centered in `area`.
+///
+/// The width is the widest row plus one space either side of the text, not a fraction of the
+/// terminal. A reference is read by running your eye down the key column and across, and a
+/// window stretched to a wide terminal leaves a hand's width of blank between a key and the
+/// words explaining it. It still yields to the terminal: a screen narrower than the content
+/// clips rather than overflowing, exactly as every other popup here does.
+fn help_popup_rect(area: Rect, lines_text: &[crate::ui::help::HelpLine]) -> Rect {
+    // content + a space each side of it + two borders, floored at what the hints bar needs.
+    let content = crate::ui::help::content_width(lines_text) as u16;
+    let width = (content + 4).max(HELP_HINTS_WIDTH + 2).min(area.width);
+    let height = (area.height * HELP_HEIGHT_PERCENT / 100).max(4).min(area.height);
+    Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
+}
 
 /// Draws the read-only key reference and returns how many content rows fitted, which
 /// `App::render` stores in `help_rows_visible` for the key handler to page by.
@@ -25545,14 +25592,7 @@ fn render_help_dialog(
 ) -> usize {
     use crate::ui::help::HelpLine;
 
-    let width = (area.width * HELP_WIDTH_PERCENT / 100).max(HELP_MIN_WIDTH).min(area.width);
-    let height = (area.height * HELP_HEIGHT_PERCENT / 100).max(3).min(area.height);
-    let popup = Rect {
-        x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    };
+    let popup = help_popup_rect(area, lines_text);
     frame.render_widget(ratatui::widgets::Clear, popup);
 
     let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
@@ -25569,13 +25609,16 @@ fn render_help_dialog(
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    // The last row is the hints bar, which never scrolls with the content.
-    let rows = inner.height.saturating_sub(1) as usize;
+    // The last row is the hints bar, and the one above it is blank — without the gap the final
+    // entry sits directly on the bar and reads as another row of the list.
+    let rows = inner.height.saturating_sub(2) as usize;
     let text_area =
         Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(2), height: rows as u16 };
-    let hints_area = Rect { x: inner.x, y: inner.y + rows as u16, width: inner.width, height: 1 };
+    let hints_area =
+        Rect { x: inner.x, y: inner.y + inner.height.saturating_sub(1), width: inner.width, height: 1 };
 
     let key_width = crate::ui::help::key_column_width(lines_text);
+    let gap = " ".repeat(crate::ui::help::KEY_GAP);
     let content: Vec<Line> = lines_text
         .iter()
         .skip(scroll)
@@ -25585,7 +25628,7 @@ fn render_help_dialog(
             HelpLine::Heading(title) => Line::from(Span::styled(title.clone(), heading_style)),
             HelpLine::Entry { keys, description } => Line::from(vec![
                 Span::styled(format!("{keys:<key_width$}"), key_style),
-                Span::styled("   ", base),
+                Span::styled(gap.clone(), base),
                 Span::styled(description.clone(), base),
             ]),
         })
@@ -26886,6 +26929,86 @@ mod tests {
                 .unwrap_or_else(|| panic!("{needle} not drawn"))
         };
         assert_eq!(col("Move the cursor one column"), col("Select the whole file"));
+    }
+
+    /// The window is sized to its content, not to the terminal, so a wider screen must not make
+    /// it wider — only more centered. The gap either side of the text is what it is allowed.
+    #[test]
+    fn the_help_window_is_sized_to_its_content_and_centered() {
+        let bindings =
+            crate::ui::keymap::build_action_display_map(&crate::ui::keymap::default_keybindings(), false);
+        let lines = crate::ui::help::lines(&bindings);
+        let content = crate::ui::help::content_width(&lines) as u16;
+
+        let narrow = help_popup_rect(Rect { x: 0, y: 0, width: 100, height: 40 }, &lines);
+        let wide = help_popup_rect(Rect { x: 0, y: 0, width: 400, height: 40 }, &lines);
+        assert_eq!(narrow.width, wide.width, "the width must not follow the terminal");
+        assert_eq!(narrow.width, content + 4, "content plus one space and one border each side");
+
+        // Centered in both.
+        assert_eq!(narrow.x, (100 - narrow.width) / 2);
+        assert_eq!(wide.x, (400 - wide.width) / 2);
+
+        // And it yields rather than overflowing a terminal narrower than its content.
+        let tiny = help_popup_rect(Rect { x: 0, y: 0, width: 30, height: 40 }, &lines);
+        assert_eq!(tiny.width, 30);
+    }
+
+    /// The wheel scrolls it, and stops at both ends exactly as the keys do.
+    #[test]
+    fn the_wheel_scrolls_the_help_window() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(Document::default()), None);
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let max = app.help_max_scroll();
+
+        let wheel = |kind| MouseEvent { kind, column: 60, row: 20, modifiers: KeyModifiers::NONE };
+        app.handle_mouse(wheel(MouseEventKind::ScrollDown));
+        assert!(matches!(app.dialog, Some(Dialog::Help { scroll }) if scroll == HELP_WHEEL_ROWS));
+
+        app.handle_mouse(wheel(MouseEventKind::ScrollUp));
+        app.handle_mouse(wheel(MouseEventKind::ScrollUp));
+        assert!(matches!(app.dialog, Some(Dialog::Help { scroll: 0 })), "must stop at the top");
+
+        for _ in 0..500 {
+            app.handle_mouse(wheel(MouseEventKind::ScrollDown));
+        }
+        assert!(matches!(app.dialog, Some(Dialog::Help { scroll }) if scroll == max));
+    }
+
+    /// The row above the hints bar is blank, so the last entry does not read as part of the bar.
+    #[test]
+    fn the_help_window_keeps_a_blank_row_above_its_hints() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(Document::default()), None);
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row_text = |y: u16| -> String {
+            (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect()
+        };
+        let bindings =
+            crate::ui::keymap::build_action_display_map(&crate::ui::keymap::default_keybindings(), false);
+        let popup = help_popup_rect(
+            Rect { x: 0, y: 0, width: 120, height: 40 },
+            &crate::ui::help::lines(&bindings),
+        );
+        let hints_y = popup.y + popup.height - 2;
+        assert!(row_text(hints_y).contains(":close"), "the hints bar is not where expected");
+        let gap = row_text(hints_y - 1);
+        let inside: String = gap
+            .chars()
+            .skip(popup.x as usize + 1)
+            .take(popup.width as usize - 2)
+            .collect();
+        assert!(inside.trim().is_empty(), "expected a blank row above the hints, got {inside:?}");
     }
 
     /// A streamed buffer refuses nearly everything, and the key reference must not be among
