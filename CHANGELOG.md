@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **The menu bar accents the letter that opens each menu.** `Alt+f`, `Alt+x` and the rest were
+  documented but invisible: every bar title rendered in one flat colour, so the mnemonic was
+  something to look up rather than something to read off the screen. The letter now draws in
+  `theme::SHORTCUT`, the same peach every menu row's shortcut column and every toolbar button
+  already uses, so "the key that gets you here" reads the same way in all three places. Matched
+  case-insensitively against the label, which is what accents the `x` in `ExtProcess` — its
+  mnemonic is `X` and `Alt+x` and `Alt+X` both work. An open menu keeps its title one uniform
+  highlight, exactly as a selected menu entry does: peach on mauve is the low-contrast pastel
+  clash the entry renderer already avoids, and the accent has nothing left to say once you are
+  there. A test pins each title's rendered width at `label + 2` in both states, since
+  `hit_test_bar` indexes the same layout and a title that changed width would misroute clicks.
+
 - **DOCUMENTATION.md brought back in line with the program.** The menu it described was still
   called CDP+Praat, its parameter-form keymap predated the sliders (it had Up/Down changing a
   number and Left/Right cycling a choice, which is now field movement and slider movement), and
