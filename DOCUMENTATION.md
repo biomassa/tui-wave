@@ -307,19 +307,23 @@ command does not apply to the current file.
 
 ### The key reference
 
-Press `?` for a window listing every key and what it does, in two columns. It is read-only:
-nothing you press inside it reaches your audio.
+Press `?` for a window listing every key and what it does, in two columns. The toolbar names it
+`Keys`. It is read-only: nothing you press inside it reaches your audio.
 
 | Key | Action |
 | --- | --- |
 | `Up` / `Down` | Scroll one row |
 | `PgUp` / `PgDn` | Scroll one screen |
 | `Home` / `End` | Jump to the top or the bottom |
+| Wheel | Scroll three rows |
 | `?`, `Esc`, `Enter` or `q` | Close the window |
 
 The count at the bottom right says how far down the list you are. The key column shows *your*
-bindings, so a key you rebound in `config.toml` appears as you bound it. A command with no key
-reads `menu` instead, which is where you will find it.
+bindings, so a key you rebound in `config.toml` appears as you bound it.
+
+The window lists keys only. A command reached from a menu and nothing else is not in it — the
+menu is its own reference, and a row that answered "which key" with "none" would be a row to
+skip past on every pass down the list. Section 22 names those commands.
 
 The window works on a streamed read-only buffer, where almost nothing else does.
 

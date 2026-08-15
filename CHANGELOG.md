@@ -2,16 +2,21 @@
 
 ## Unreleased
 
-- **`?` opens a read-only key reference.** Every binding in one scrollable window, two columns,
-  grouped the way the documentation groups them — the keys, then the panels, then the mouse. The
-  key column is *derived* from the live bindings rather than written out beside each description,
-  so a key rebound in `config.toml` shows as the user bound it, and a test walks the whole keymap
-  and fails if any bound action has no row. Commands with no key are listed too, reading `menu`
-  in the key column: a reference that named only the bound half could never tell a user that
-  Remove DC Offset exists. Up/Down, PgUp/PgDn and Home/End scroll it, and `?`, Esc, Enter or `q`
-  close it — `q` included, because the key that quits the program must not quit it from inside a
-  window that was opened to read. It works on a streamed read-only buffer, where nearly nothing
-  else does, that being the mode whose refusals most need explaining.
+- **`?` opens a read-only key reference**, named **Keys** on the toolbar. Every binding in one
+  scrollable window, two columns, grouped the way the documentation groups them — the keys, then
+  the panels, then the mouse. The key column is *derived* from the live bindings rather than
+  written out beside each description, so a key rebound in `config.toml` shows as the user bound
+  it, and a test walks the whole keymap and fails if any bound action has no row. It lists keys
+  and nothing else: a command reachable only from a menu has nothing to print in a key column,
+  and a row reading `menu` is a row to skip past on every pass down a list opened to find a key
+  in. Up/Down, PgUp/PgDn, Home/End and the wheel scroll it, and `?`, Esc, Enter or `q` close it
+  — `q` included, because the key that quits the program must not quit it from inside a window
+  that was opened to read. It works on a streamed read-only buffer, where nearly nothing else
+  does, that being the mode whose refusals most need explaining.
+
+  **Sized to its own content**, centered, rather than to a fraction of the terminal: a reference
+  is read by running your eye down the key column and across, and a window stretched to a wide
+  screen leaves a hand's width of blank between each key and the words explaining it.
 
   The hint sits in the toolbar's prefix column on the row below Play, which the layout had been
   leaving blank: rows after the first are indented to FILE's column, so a whole button's width
