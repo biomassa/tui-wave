@@ -47,7 +47,10 @@ use crate::model::selection::Selection;
 
 use super::buffer_panel::BufferPanel;
 use super::file_panel::{EntryKind as FileEntryKind, FilePanel};
-use super::keymap::{build_action_display_map, build_key_map, fill_missing_keybindings, map_key, Action};
+use super::keymap::{
+    build_action_display_map, build_key_map, fill_missing_keybindings, map_key,
+    migrate_moved_keybindings, Action,
+};
 use super::layout::split_chrome;
 use super::menu::MenuBar;
 use super::terminal::Tui;
@@ -3824,6 +3827,10 @@ impl App {
     /// whatever happens to be in the user's real `~/.config/tui-wave/config.toml` (or race
     /// against other tests that temporarily redirect `XDG_CONFIG_HOME`).
     fn new_with_config(document: Option<Document>, directory: Option<PathBuf>, mut config: Config) -> Self {
+        // Before the fill, not after: a moved default must vacate its old key *first*, or the
+        // action that now owns that key is inserted alongside a stale claim on it and one of
+        // the two silently loses.
+        migrate_moved_keybindings(&mut config.keybindings);
         fill_missing_keybindings(&mut config.keybindings);
         let key_map = build_key_map(&config.keybindings);
 
@@ -14697,6 +14704,7 @@ impl App {
         // recoverable.
         Config::backup_existing();
         let mut keybindings = std::collections::HashMap::new();
+        migrate_moved_keybindings(&mut keybindings);
         fill_missing_keybindings(&mut keybindings);
         self.config.keybindings = keybindings.clone();
         self.save_config(); // persists; also snapshots current toggle state
