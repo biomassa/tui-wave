@@ -3,6 +3,7 @@ pub mod buffer_panel;
 pub mod dest_picker;
 pub mod dialog_rows;
 pub mod file_panel;
+pub mod help;
 pub mod keymap;
 pub mod layout;
 pub mod menu;

@@ -1549,6 +1549,13 @@ enum Dialog {
     },
     /// Scrollable viewer for a CDP process's captured stdout+stderr after a failed run.
     CdpOutput { title: String, lines: Vec<String>, scroll: usize },
+    /// The `?` key reference (`ui::help`) — read-only and scrollable, with no field, no button
+    /// and nothing to submit. `scroll` is a rendered-row offset, exactly as `CdpOutput`'s is.
+    ///
+    /// Held as its own variant rather than as an `Info` with a long message, because it needs
+    /// the two-column layout and a scrollbar, and because `Info`'s Enter means "dismiss the
+    /// thing I just told you about" — here there is nothing to acknowledge.
+    Help { scroll: usize },
     /// Generic single-message info/error popup with an Enter/Esc-to-dismiss button.
     Info { message: String },
     /// The standalone pitch-curve editor (CDP-Ext-Plan.md Phase 4 "hard tier"), opened via
@@ -3043,6 +3050,12 @@ pub struct App {
     /// actions need this and re-reading it from the terminal on every input would require
     /// a redraw, so it's cached here instead.
     pub content_width: u16,
+    /// Content rows the help window (`Dialog::Help`) drew last frame — recorded by
+    /// `render_help_dialog`, read by `handle_help_key` for its page step and scroll ceiling.
+    /// Recorded rather than recomputed, like `waveform_area` below and the slider geometry:
+    /// the key handler has no frame area, and a second copy of the layout arithmetic would be
+    /// a second thing to keep in step.
+    pub help_rows_visible: usize,
     pub waveform_area: Rect,
     /// Absolute channel indices whose panes were drawn in the last frame — the range
     /// `channel_pane_rects` returned. Cached for the same reason `waveform_area` is: mouse
@@ -3844,6 +3857,7 @@ impl App {
             should_quit: false,
             key_map,
             picker: None,
+            help_rows_visible: 0,
             graphics_mode: config.graphics_mode,
             dot_matrix_gradient: config.dot_matrix_gradient,
             time_ruler: config.time_ruler,
@@ -5741,6 +5755,8 @@ impl App {
                 }
             }
             Dialog::CdpRunning { .. } | Dialog::CdpOutput { .. } => None,
+            // Read-only: no field to route a keystroke into. Handled whole by `handle_help_key`.
+            Dialog::Help { .. } => None,
             Dialog::Info { .. } => None,
             // Has its own early-intercepted key handling (`handle_curve_editor_key`) with
             // no plain `TextInput` field of its own — the in-progress typed cell lives in
@@ -5790,6 +5806,7 @@ impl App {
             // CdpBrowser is always search-typable regardless of focus: falls through to the
             // catch-all below.
             Some(Dialog::CdpRunning { .. }) | Some(Dialog::CdpOutput { .. }) => false,
+            Some(Dialog::Help { .. }) => false,
             Some(Dialog::Info { .. }) => false,
             // Named rather than left to the catch-all below, which would make a picture popup
             // swallow printable keys as though it were a text field.
@@ -5809,6 +5826,45 @@ impl App {
         let before = self.cdp_params_value_snapshot();
         self.handle_dialog_key_inner(key);
         self.flip_preset_to_custom_if_a_value_changed(before);
+    }
+
+    /// Rendered rows of the help window, for the current bindings. Rebuilt per keypress and per
+    /// frame rather than cached on `App`: it is a few hundred short strings, and a cache would
+    /// be one more thing that can disagree with `Config.keybindings` after a reload.
+    fn help_lines(&self) -> Vec<crate::ui::help::HelpLine> {
+        crate::ui::help::lines(&build_action_display_map(&self.config.keybindings, false))
+    }
+
+    /// Scroll rows available: the content that does not fit is what the last row can reach.
+    ///
+    /// The visible height comes from `help_rows_visible`, which the renderer records — the same
+    /// discipline the slider geometry follows. Recomputing the popup's size here would be a
+    /// second statement of the layout, and the two would drift.
+    fn help_max_scroll(&self) -> usize {
+        self.help_lines().len().saturating_sub(self.help_rows_visible.max(1))
+    }
+
+    /// The whole keymap of `Dialog::Help`. Arrows and the paging keys scroll, everything that
+    /// means "I am done" closes. `?` closes it too, so the key that opened the window also
+    /// dismisses it rather than being inert on the one screen it just produced.
+    fn handle_help_key(&mut self, key: KeyEvent) {
+        let max = self.help_max_scroll();
+        let page = self.help_rows_visible.saturating_sub(1).max(1);
+        let Some(Dialog::Help { scroll }) = self.dialog.as_mut() else { return };
+        match key.code {
+            KeyCode::Up => *scroll = scroll.saturating_sub(1),
+            KeyCode::Down => *scroll = (*scroll + 1).min(max),
+            KeyCode::PageUp => *scroll = scroll.saturating_sub(page),
+            KeyCode::PageDown => *scroll = (*scroll + page).min(max),
+            KeyCode::Home => *scroll = 0,
+            KeyCode::End => *scroll = max,
+            KeyCode::Esc
+            | KeyCode::Enter
+            | KeyCode::Char('?')
+            | KeyCode::Char('q')
+            | KeyCode::Char('Q') => self.dialog = None,
+            _ => {}
+        }
     }
 
     /// The params form's values, with the process they belong to. `catalog_index` is carried so
@@ -5898,6 +5954,13 @@ impl App {
         }
         if let Some(Dialog::CdpChainEditor) = &self.dialog {
             self.handle_cdp_chain_editor_key(key);
+            return;
+        }
+        // Intercepted whole rather than woven into the generic arms below: this dialog has no
+        // field, no button and nothing to submit, so every one of those paths would be asking
+        // a question it has no answer to. Scrolling and closing is the entire keymap.
+        if let Some(Dialog::Help { .. }) = &self.dialog {
+            self.handle_help_key(key);
             return;
         }
         if let Some(Dialog::LoadCurve { .. }) = &self.dialog {
@@ -6242,6 +6305,9 @@ impl App {
                     self.dialog = Some(d);
                 }
                 Some(Dialog::CdpOutput { .. }) => {} // just dismiss
+                // Unreachable: `handle_dialog_key_inner` intercepts this dialog whole, above.
+                // Present for exhaustiveness only.
+                Some(Dialog::Help { .. }) => {}
                 Some(Dialog::Info { .. }) => {} // just dismiss
                 Some(Dialog::FormantInfo { .. }) => {} // just dismiss
                 Some(Dialog::PraatPicture { restore }) => self.close_praat_picture(restore),
@@ -17218,6 +17284,9 @@ impl App {
                 | Action::DecreaseTransientThreshold
                 | Action::ResetConfig
                 | Action::ConfigureCdpDirectory
+                // The key reference reads nothing and writes nothing. Refusing it would be the
+                // one refusal a user cannot look up the reason for.
+                | Action::ShowHelp
                 // The operations this mode exists to support. Save As is here so a buffer
                 // trimmed by Remove Empty Channels can be written out — the whole point of
                 // dropping empty channels on a 30GB capture is to keep a smaller one.
@@ -17392,6 +17461,13 @@ impl App {
 
         if action == Action::ResetConfig {
             self.confirm = Some(Confirm::ResetConfig);
+            return;
+        }
+
+        // Opened from the top: a reference you come back to is one you expect to start at the
+        // beginning, not wherever you left the scroll last time.
+        if action == Action::ShowHelp {
+            self.dialog = Some(Dialog::Help { scroll: 0 });
             return;
         }
 
@@ -18077,6 +18153,7 @@ impl App {
             | Action::JumpNextMarker
             | Action::NextRisingEdge
             | Action::PrevRisingEdge
+            | Action::ShowHelp
             | Action::AutoInsertMarkers
             | Action::IncreaseTransientThreshold
             | Action::DecreaseTransientThreshold
@@ -19222,6 +19299,14 @@ impl App {
         // reads `picker`'s rects directly instead of going through `dialog_row_rects`.
         if let Some(Dialog::LoadCurve { picker }) = self.dialog.as_mut() {
             render_load_curve_dialog(frame, area, picker);
+        }
+        // The help window renders here rather than in `render_dialog` for two reasons it cannot
+        // satisfy: the rows come from the live keybindings, and the count that fits has to be
+        // written back to `self` for the key handler to page by.
+        if let Some(Dialog::Help { scroll }) = &self.dialog {
+            let scroll = *scroll;
+            let lines = self.help_lines();
+            self.help_rows_visible = render_help_dialog(frame, area, &lines, scroll);
         }
         // `Dialog::CdpParams.file_picker` reuses the exact same widget/render function as
         // `Dialog::LoadCurve` above, for the exact same `&mut FilePanel` reason.
@@ -20419,6 +20504,12 @@ fn render_dialog(
         Dialog::CdpOutput { title, lines, scroll } => {
             return render_cdp_output_dialog(frame, area, title, lines, *scroll);
         }
+        // Rendered separately by `App::render`, which alone can both derive the rows from the
+        // live keybindings and record how many of them fit (`help_rows_visible`). This function
+        // gets `&Dialog` and neither.
+        Dialog::Help { .. } => {
+            return Vec::new();
+        }
         Dialog::CdpSetup { input, error } => {
             return render_cdp_setup_dialog(frame, area, input, error.as_deref());
         }
@@ -20475,6 +20566,7 @@ fn render_dialog(
         | Dialog::CdpParams { .. }
         | Dialog::CdpRunning { .. }
         | Dialog::CdpOutput { .. }
+        | Dialog::Help { .. }
         | Dialog::CurveEditor(_)
         | Dialog::FormantInfo { .. }
         | Dialog::PraatPicture { .. }
@@ -25431,6 +25523,94 @@ fn render_cdp_chain_editor_dialog(
     rects
 }
 
+/// Fraction of the terminal the help window takes, and the floor it will not shrink below.
+/// Large on purpose: this is a reference you read, not a message you dismiss, and a two-column
+/// list of a hundred-odd bindings in a small box is mostly scrolling.
+const HELP_WIDTH_PERCENT: u16 = 80;
+const HELP_HEIGHT_PERCENT: u16 = 85;
+const HELP_MIN_WIDTH: u16 = 46;
+
+/// Draws the read-only key reference and returns how many content rows fitted, which
+/// `App::render` stores in `help_rows_visible` for the key handler to page by.
+///
+/// The key column is padded to one width across every section, so the descriptions form a
+/// single column down the whole window rather than stepping in and out per section. Rows are
+/// sliced by `scroll` here rather than handed to `Paragraph::scroll`, because each row is a
+/// two-span line and word wrapping would break the column the padding just established.
+fn render_help_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    lines_text: &[crate::ui::help::HelpLine],
+    scroll: usize,
+) -> usize {
+    use crate::ui::help::HelpLine;
+
+    let width = (area.width * HELP_WIDTH_PERCENT / 100).max(HELP_MIN_WIDTH).min(area.width);
+    let height = (area.height * HELP_HEIGHT_PERCENT / 100).max(3).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let key_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let heading_style = Style::default().fg(theme::ACTIVE).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+
+    let block = Block::default()
+        .title(" Keys ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(base);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    // The last row is the hints bar, which never scrolls with the content.
+    let rows = inner.height.saturating_sub(1) as usize;
+    let text_area =
+        Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(2), height: rows as u16 };
+    let hints_area = Rect { x: inner.x, y: inner.y + rows as u16, width: inner.width, height: 1 };
+
+    let key_width = crate::ui::help::key_column_width(lines_text);
+    let content: Vec<Line> = lines_text
+        .iter()
+        .skip(scroll)
+        .take(rows)
+        .map(|line| match line {
+            HelpLine::Blank => Line::from(Span::styled("", base)),
+            HelpLine::Heading(title) => Line::from(Span::styled(title.clone(), heading_style)),
+            HelpLine::Entry { keys, description } => Line::from(vec![
+                Span::styled(format!("{keys:<key_width$}"), key_style),
+                Span::styled("   ", base),
+                Span::styled(description.clone(), base),
+            ]),
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(content), text_area);
+
+    // Position, not a scrollbar: the row count is the one number that says how much is left,
+    // and it costs no column of the list to show.
+    let total = lines_text.len();
+    let shown = (scroll + rows).min(total);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" \u{2191}\u{2193}/PgUp/PgDn/Home/End", hint_style),
+            Span::styled(":scroll  ", label_style),
+            Span::styled("?/Esc", hint_style),
+            Span::styled(
+                format!(":close     {shown}/{total}"),
+                label_style,
+            ),
+        ])),
+        hints_area,
+    );
+    rows
+}
+
 fn render_cdp_output_dialog(frame: &mut Frame, area: Rect, title: &str, lines_text: &[String], scroll: usize) -> Vec<Rect> {
     let width = 70u16.min(area.width);
     let height = 20u16.min(area.height);
@@ -26584,6 +26764,139 @@ mod tests {
     /// capability query `from_query_stdio` performs, so the graphics path runs under
     /// `TestBackend`. The protocol is forced to Kitty to match the report, though the bug was in
     /// this app's own image-state keying and so is protocol-independent.
+    /// `?` opens the reference, and the keys that mean "I am done" close it. `?` closes it too:
+    /// the key that produced the window is the first thing a user presses again.
+    #[test]
+    fn the_help_window_opens_on_question_mark_and_closes_again() {
+        for closing in [KeyCode::Esc, KeyCode::Enter, KeyCode::Char('?'), KeyCode::Char('q')] {
+            let mut app = new_app(Some(Document::default()), None);
+            app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+            assert!(
+                matches!(app.dialog, Some(Dialog::Help { .. })),
+                "? did not open the help window"
+            );
+            app.handle_key(KeyEvent::new(closing, KeyModifiers::NONE));
+            assert!(app.dialog.is_none(), "{closing:?} did not close the help window");
+        }
+    }
+
+    /// `q` quits from the waveform, so the help window must swallow it rather than let it
+    /// through — closing a window and quitting the program are not the same keypress.
+    #[test]
+    fn q_closes_the_help_window_without_quitting() {
+        let mut app = new_app(Some(Document::default()), None);
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(app.dialog.is_none());
+        assert!(!app.should_quit, "q inside the help window must not quit the program");
+    }
+
+    /// Scrolling stops at the last row rather than running past the content, and Home/End reach
+    /// both ends in one press. The ceiling comes from the rendered row count, so this draws
+    /// first — before any render the window does not yet know its own height.
+    #[test]
+    fn the_help_window_scrolls_within_its_content() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(Document::default()), None);
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(app.help_rows_visible > 0, "the renderer must record the rows it drew");
+
+        let max = app.help_max_scroll();
+        assert!(max > 0, "the reference is expected to outrun a 40-row terminal");
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::Help { scroll: 0 })), "cannot scroll above the top");
+
+        for _ in 0..1000 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert!(matches!(app.dialog, Some(Dialog::Help { scroll }) if scroll == max));
+
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::Help { scroll: 0 })));
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::Help { scroll }) if scroll == max));
+    }
+
+    /// Read-only in the literal sense: no key inside it may reach the document. Typing the keys
+    /// that edit, cut and place markers must leave the buffer exactly as it was.
+    #[test]
+    fn the_help_window_cannot_edit_the_document() {
+        let mut app = new_app(
+            Some(Document { channels: vec![vec![0.5; 1000]], ..Document::default() }),
+            None,
+        );
+        app.handle_action(Action::SelectAll);
+        let channels_before = app.documents[0].channels.clone();
+        let markers_before = app.documents[0].markers.len();
+        let marks_before = app.documents[0].head_tail_marks.clone();
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        for (code, mods) in [
+            (KeyCode::Char('x'), KeyModifiers::CONTROL),
+            (KeyCode::Delete, KeyModifiers::NONE),
+            (KeyCode::Char('m'), KeyModifiers::NONE),
+            (KeyCode::Char('h'), KeyModifiers::NONE),
+            (KeyCode::Char('t'), KeyModifiers::NONE),
+        ] {
+            app.handle_key(KeyEvent::new(code, mods));
+        }
+        assert!(matches!(app.dialog, Some(Dialog::Help { .. })), "the window must stay up");
+        assert_eq!(app.documents[0].channels, channels_before);
+        assert_eq!(app.documents[0].markers.len(), markers_before);
+        assert_eq!(app.documents[0].head_tail_marks, marks_before);
+        assert!(!app.documents[0].dirty);
+    }
+
+    /// The window renders its two columns, and the descriptions line up in one column across
+    /// every section rather than stepping in and out per heading.
+    #[test]
+    fn the_help_window_renders_two_aligned_columns() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(Document::default()), None);
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        // Tall enough that a second section is on screen: the alignment claim is about rows
+        // from *different* sections sharing one description column.
+        let mut terminal = Terminal::new(TestBackend::new(120, 60)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>()
+            })
+            .collect();
+        let joined = text.join("\n");
+        assert!(joined.contains("Move the cursor one column"), "a description is missing");
+        assert!(joined.contains("Move and view"), "a section heading is missing");
+        assert!(joined.contains(":close"), "the hints bar is missing");
+
+        // Two rows from different sections must start their description at the same column.
+        //
+        // Counted in *characters*, not bytes: a row that crosses the waveform's `\u{2502}`
+        // borders carries three bytes per border, so `str::find`'s byte offset is not the
+        // screen column and two aligned rows compare as two apart.
+        let col = |needle: &str| -> usize {
+            text.iter()
+                .find_map(|row| row.find(needle).map(|byte| row[..byte].chars().count()))
+                .unwrap_or_else(|| panic!("{needle} not drawn"))
+        };
+        assert_eq!(col("Move the cursor one column"), col("Select the whole file"));
+    }
+
+    /// A streamed buffer refuses nearly everything, and the key reference must not be among
+    /// them — it is the one screen that explains what a refusal even means.
+    #[test]
+    fn the_help_window_opens_on_a_streamed_buffer() {
+        assert!(Action::ShowHelp.is_checkable() == false);
+        let app = new_app(Some(Document::default()), None);
+        assert!(app.action_allowed_on_streamed_buffer(Action::ShowHelp));
+    }
+
     #[test]
     fn scrolling_the_channel_window_in_graphics_mode_does_not_panic() {
         use ratatui::backend::TestBackend;

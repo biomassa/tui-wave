@@ -305,6 +305,24 @@ between entries. Press `Enter` to run the entry and `Esc` to close the menu.
 Three dots after an entry mean that the entry opens a dialog. An entry in grey means that the
 command does not apply to the current file.
 
+### The key reference
+
+Press `?` for a window listing every key and what it does, in two columns. It is read-only:
+nothing you press inside it reaches your audio.
+
+| Key | Action |
+| --- | --- |
+| `Up` / `Down` | Scroll one row |
+| `PgUp` / `PgDn` | Scroll one screen |
+| `Home` / `End` | Jump to the top or the bottom |
+| `?`, `Esc`, `Enter` or `q` | Close the window |
+
+The count at the bottom right says how far down the list you are. The key column shows *your*
+bindings, so a key you rebound in `config.toml` appears as you bound it. A command with no key
+reads `menu` instead, which is where you will find it.
+
+The window works on a streamed read-only buffer, where almost nothing else does.
+
 ### Dialogs
 
 Every dialog works the same way. `Tab` moves between fields. `Enter` accepts the dialog, and
@@ -527,7 +545,7 @@ Press `t` to place a marker at every transient in the selection. A transient her
 rise in level.
 
 The `+` and `-` keys raise and lower the threshold that decides what counts as a transient.
-Press `/` to jump to the next rising edge and `?` to jump to the previous one. Use those two
+Press `/` to jump to the next rising edge and `\` to jump to the previous one. Use those two
 keys to check the threshold before you place markers with `t`.
 
 ---
@@ -1284,6 +1302,7 @@ The Waveform panel must have focus for these keys, unless the table says otherwi
 | `<` / `>` | Channel window one page |
 | `Tab` / `Shift+Tab` | Move focus |
 | `F10` / `Alt`+letter | Open the menu bar |
+| `?` | Open the key reference |
 
 ### Selection
 
@@ -1331,7 +1350,7 @@ The Waveform panel must have focus for these keys, unless the table says otherwi
 | `[` / `]` | Jump to the previous or next marker |
 | `t` | Markers at transients |
 | `+` / `-` | Raise or lower the transient threshold |
-| `/` / `?` | Next or previous rising edge |
+| `/` / `\` | Next or previous rising edge |
 
 ### Files and transport
 
