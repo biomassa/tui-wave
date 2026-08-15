@@ -18,6 +18,17 @@
   is read by running your eye down the key column and across, and a window stretched to a wide
   screen leaves a hand's width of blank between each key and the words explaining it.
 
+  **A moved default key is now migrated in an existing `config.toml`.**
+  `fill_missing_keybindings` only ever inserts, which is what protects a user's own choices
+  across an upgrade — but a default that *moves* leaves the old key behind in every existing
+  config, and here the key it vacated was immediately claimed by a new action. Both entries then
+  named `?`, and which one won came down to `HashMap` iteration order, so the key opened nothing
+  on an upgraded install while every test passed against the defaults (user report). A saved
+  binding equal to the *old* default is not a choice — it is the value this program wrote into
+  that file itself — so it is rewritten to the new one, while a binding the user has since
+  changed is left alone. `build_key_map` also iterates in sorted order now: a genuine
+  user-authored collision still resolves one way, but always the same way rather than per run.
+
   The hint sits in the toolbar's prefix column on the row below Play, which the layout had been
   leaving blank: rows after the first are indented to FILE's column, so a whole button's width
   under Play went unused on every wrapped row. On a terminal too wide to wrap, the hint takes a

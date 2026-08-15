@@ -656,16 +656,53 @@ pub fn build_action_display_map(
 /// the primary dispatch source, supplemented by `map_key` for any key not found in it.
 pub fn build_key_map(bindings: &HashMap<String, Vec<String>>) -> HashMap<KeyEvent, Action> {
     let mut map = HashMap::new();
-    for (name, keys) in bindings {
-        if let Some(action) = parse_action_name(name) {
-            for key_str in keys {
-                if let Some(key) = parse_key_binding(key_str) {
-                    map.insert(key, action);
-                }
+    // Sorted by action name, not `HashMap` order. Two actions can claim one key — a user can
+    // write that, and until `migrate_moved_keybindings` existed an upgrade could too — and the
+    // last writer wins. Iterating a `HashMap` made *which* one wins vary between runs of the
+    // same binary on the same file, so the key worked or did not according to nothing the user
+    // could see. Sorted, a conflict still resolves one way, but always the same way.
+    let mut names: Vec<&String> = bindings.keys().collect();
+    names.sort();
+    for name in names {
+        let Some(action) = parse_action_name(name) else { continue };
+        for key_str in &bindings[name] {
+            if let Some(key) = parse_key_binding(key_str) {
+                map.insert(key, action);
             }
         }
     }
     map
+}
+
+/// Bindings whose default key moved between releases, as `(action, old default, new default)`.
+///
+/// `fill_missing_keybindings` only ever *inserts*, which is what keeps a user's own choices safe
+/// across an upgrade — but it also means a default that *moves* leaves the old key behind in
+/// every existing `config.toml`. When the key it vacated is then claimed by a new action, both
+/// entries name it and one of them silently loses (user report: `?` opened nothing, because a
+/// saved `PrevRisingEdge = ["?"]` from before the move still sat beside the new
+/// `ShowHelp = ["?"]`).
+///
+/// A saved binding equal to the old default is not evidence of a choice — it is the value this
+/// program wrote into that file itself — so rewriting it to the new default is a correction, not
+/// an override. A binding the user has since changed to anything else is left exactly as it is.
+const MOVED_BINDINGS: &[(&str, &str, &str)] = &[
+    // 2.9.x: `?` became the key reference, so Previous Rising Edge moved next to `/`.
+    ("PrevRisingEdge", "?", "\\"),
+];
+
+/// Applies [`MOVED_BINDINGS`] to a loaded config. Runs *before* `fill_missing_keybindings`, so a
+/// vacated key is free by the time the new action's default is inserted.
+pub fn migrate_moved_keybindings(bindings: &mut HashMap<String, Vec<String>>) {
+    for (action, old, new) in MOVED_BINDINGS {
+        if let Some(keys) = bindings.get_mut(*action) {
+            for key in keys.iter_mut() {
+                if key == old {
+                    *key = (*new).to_string();
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -820,6 +857,82 @@ mod tests {
             map_key(key(KeyCode::Char('\\'), KeyModifiers::NONE)),
             Some(Action::PrevRisingEdge)
         );
+    }
+
+    /// The bug this whole migration exists for, reproduced from the shape of a real config.
+    ///
+    /// `fill_missing_keybindings` only inserts, so an upgrade left `PrevRisingEdge = ["?"]`
+    /// sitting beside the freshly-added `ShowHelp = ["?"]`. Both claimed `?`, one of them lost,
+    /// and which one lost came down to `HashMap` iteration order — so the key opened nothing on
+    /// the user's machine while every test here passed against the defaults.
+    #[test]
+    fn an_upgraded_config_still_holding_the_old_key_resolves_to_the_new_action() {
+        let mut saved: HashMap<String, Vec<String>> = HashMap::new();
+        saved.insert("PrevRisingEdge".to_string(), vec!["?".to_string()]);
+        saved.insert("NextRisingEdge".to_string(), vec!["/".to_string()]);
+
+        migrate_moved_keybindings(&mut saved);
+        fill_missing_keybindings(&mut saved);
+        let map = build_key_map(&saved);
+
+        assert_eq!(
+            map.get(&key(KeyCode::Char('?'), KeyModifiers::NONE)),
+            Some(&Action::ShowHelp),
+            "? must open the key reference after the upgrade"
+        );
+        assert_eq!(
+            map.get(&key(KeyCode::Char('\\'), KeyModifiers::NONE)),
+            Some(&Action::PrevRisingEdge),
+            "the old command must move to its new key, not vanish"
+        );
+    }
+
+    /// A binding the user has since chosen for themselves is not a stale default and is left
+    /// alone — the migration only rewrites the exact value this program wrote there itself.
+    #[test]
+    fn the_migration_leaves_a_users_own_choice_alone() {
+        let mut saved: HashMap<String, Vec<String>> = HashMap::new();
+        saved.insert("PrevRisingEdge".to_string(), vec!["ctrl+j".to_string()]);
+        migrate_moved_keybindings(&mut saved);
+        assert_eq!(saved["PrevRisingEdge"], vec!["ctrl+j".to_string()]);
+    }
+
+    /// Two defaults sharing one key is the collision that started this. It cannot be caught by
+    /// a test of `map_key` — that one is a `match`, where the first arm simply wins — so it has
+    /// to be checked here, over the table that a user's config is merged against.
+    #[test]
+    fn no_two_default_bindings_claim_the_same_key() {
+        let defaults = default_keybindings();
+        let mut claimed: HashMap<String, Vec<String>> = HashMap::new();
+        for (name, keys) in &defaults {
+            for k in keys {
+                claimed.entry(k.clone()).or_default().push(name.clone());
+            }
+        }
+        let mut clashes: Vec<String> = claimed
+            .iter()
+            .filter(|(_, actions)| actions.len() > 1)
+            .map(|(k, actions)| {
+                let mut actions = actions.clone();
+                actions.sort();
+                format!("{k:?}: {}", actions.join(", "))
+            })
+            .collect();
+        clashes.sort();
+        assert!(clashes.is_empty(), "keys claimed by two default bindings:\n  {}", clashes.join("\n  "));
+    }
+
+    /// Which action wins a genuine user-made collision must not depend on hash order — the same
+    /// binary on the same file has to behave the same way every run.
+    #[test]
+    fn a_duplicate_key_resolves_the_same_way_every_time() {
+        let mut saved: HashMap<String, Vec<String>> = HashMap::new();
+        saved.insert("Reverse".to_string(), vec!["ctrl+j".to_string()]);
+        saved.insert("Normalize".to_string(), vec!["ctrl+j".to_string()]);
+        let first = build_key_map(&saved);
+        for _ in 0..25 {
+            assert_eq!(build_key_map(&saved), first);
+        }
     }
 
     /// The default bindings back the menu and toolbar shortcut text, so a key that moved in
