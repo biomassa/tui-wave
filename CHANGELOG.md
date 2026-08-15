@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **DOCUMENTATION.md brought back in line with the program.** The menu it described was still
+  called CDP+Praat, its parameter-form keymap predated the sliders (it had Up/Down changing a
+  number and Left/Right cycling a choice, which is now field movement and slider movement), and
+  its envelope-editor section still advertised `Shift+click` to delete a point — a gesture no
+  terminal ever delivers, which is why double-click took that meaning. Counts were stale in both
+  directions: 439 praatAudioTools scripts and 34 `py` processes against the real 458 and 46, and
+  "around a quarter" of the collection excluded against the real 41 of 499.
+
+  Newly documented rather than merely corrected: Remove DC Offset and High-Pass Filter, Mix
+  Multichannel to Stereo, Gain's per-channel and soft-clip options, Export Regions' four optional
+  steps, the parameter sliders, `Esc` stepping back one level, looping previews and how they end,
+  the chain editor's keymap, Praat's picture input and its no-input generators, staged atomic
+  writes, and a menu-only command table. README's opening section gained the two backends it
+  never mentioned — praatAudioTools and Airwindows — and the process total across the three.
+
 ## 2026-08-15 (2.9.1)
 
 - **Process previews now loop, and end with the dialog that started them.** A preview played its

@@ -5,11 +5,14 @@
 Releases carry a macOS build for Intel and Apple Silicon and a `.deb`/`.rpm` for Linux. They
 contain the tui-wave binary and nothing else.
 
-**Run `setup-environment.sh` after installing.** About 439 of tui-wave's processes are scripts
+**Run `setup-environment.sh` after installing.** 458 of tui-wave's processes are scripts
 from the praatAudioTools project, which no package bundles — without them tui-wave lists every
 Praat process and can run none of them. The script fetches the scripts, writes their location
-into your config, and (after asking) sets up the Python environment the 34 processes in the `py`
+into your config, and (after asking) sets up the Python environment the 46 processes in the `py`
 group need. It also checks whether Praat itself is installed and says where to get it.
+
+The 500 Airwindows effects need none of this. They are compiled into the binary, so section 16
+works on a fresh install with nothing fetched and nothing configured.
 
 | how you installed | where the script is |
 | --- | --- |
@@ -116,7 +119,7 @@ the same way and works just as well; the tui-wave catalog does not depend on one
 
 tui-wave looks in `~/cdp` by default, so unpacking or building there needs no further setup.
 Anywhere else, answer the first-use prompt with the real path, or set it later through the
-CDP+Praat menu with Configure CDP Directory. tui-wave saves it as `cdp_dir` in your config file.
+ExtProcess menu with Configure CDP Directory. tui-wave saves it as `cdp_dir` in your config file.
 
 ### Praat and praatAudioTools (optional)
 
@@ -190,14 +193,14 @@ You do **not** need to install the scripts into Praat itself. tui-wave runs them
 never writes to your Praat preferences folder, so an existing Praat setup is left alone.
 
 **Python, for the `py` group only** — and again, `./install.sh` offers to do all of this for you,
-into a virtual environment it owns. 34 of the scripts do their work in Python instead of in
+into a virtual environment it owns. 46 of the scripts do their work in Python instead of in
 Praat: they hand the audio to a helper and read back the result. They sit in their own **py**
 group in the browser so you can see the extra requirement before choosing one. The other
 thirteen groups need nothing beyond Praat.
 
 | Package | What needs it |
 |---|---|
-| `numpy`, `scipy`, `soundfile` | all 34 — array maths and WAV reading/writing |
+| `numpy`, `scipy`, `soundfile` | all 46 — array maths and WAV reading/writing |
 | `sounddevice` | Arranger, Performance Launcher — they audition as you work |
 | `pillow` | Spectral Eraser — it paints on a spectrogram image |
 
@@ -225,9 +228,9 @@ own copy of the plugin is never modified. With no such environment neither happe
 resolve their interpreter exactly as they always would, so a system-wide install of those
 packages works too.
 
-Four of the `py` processes open a window of their own — a spatial trajectory painter, a step
-arranger, a performance launcher and a spectrogram eraser. Those run with no time limit, because
-you decide when they are done. `Esc` cancels.
+Four of the `py` processes open a window of their own — Arranger, Performance Launcher,
+Spatial Panner and Spectral Eraser. Those run with no time limit, because you decide when they
+are done. `Esc` cancels.
 
 ---
 
@@ -271,7 +274,8 @@ To leave the program, press `q`. If a file has unsaved changes, tui-wave asks yo
 
 The screen has five parts, from top to bottom:
 
-1. The **menu bar**, with the titles File, Edit, View, Process, CDP+Praat, Markers, and Transport.
+1. The **menu bar**, with the titles File, Edit, View, Process, ExtProcess, Markers, and
+   Transport. ExtProcess holds the three external backends — CDP, Praat and Airwindows.
 2. The **toolbar**, a row of clickable commands.
 3. The **Files** panel on the left, which lists the current directory.
 4. The **Buffers** panel in the middle, which lists the open files.
@@ -291,8 +295,9 @@ Directory in the Files panel.
 
 ### The menu bar
 
-Press `F10` to open the first menu. Press `Alt` and the highlighted letter to open one menu
-directly. `Alt+f` opens File, and `Alt+p` opens Process.
+Press `F10` to open the first menu. Press `Alt` and a letter from the title to open one menu
+directly: `Alt+f` File, `Alt+e` Edit, `Alt+v` View, `Alt+p` Process, `Alt+x` ExtProcess,
+`Alt+m` Markers, `Alt+t` Transport.
 
 Inside a menu, the Left and Right arrows move between menus. The Up and Down arrows move
 between entries. Press `Enter` to run the entry and `Esc` to close the menu.
@@ -456,13 +461,48 @@ whole file when you select nothing.
 | `Ctrl+b` | Technical Fades | Adds very short fades at both ends |
 | `Ctrl+m` | Mix to Mono | Sums the channels into one |
 
+Four more Process commands have no key. Open the Process menu for them.
+
+| Command | What it does |
+| --- | --- |
+| Mix Multichannel to Stereo | Routes every channel to Left, Right, Both or Skip, into a new buffer. Section 11 |
+| Remove Empty Channels | Drops the channels that hold nothing. Section 11 |
+| Remove DC Offset | Recentres each channel on zero |
+| High-Pass Filter | Removes a drifting baseline below a cutoff you give |
+
 Technical Fades removes the click at a hard edit point. The fades last a few milliseconds, so
 you do not hear them as a fade.
 
 Resample rewrites the whole file with a windowed-sinc conversion. It also rebuilds the audio
 engine, because the engine reads the sample rate once at startup.
 
-Every command in this table supports undo.
+Gain opens with one field. On a stereo file it also offers a per-channel mode, which splits that
+field into a Left gain and a Right gain, and a soft-clip option that runs the result through a
+tanh limiter instead of letting it clip.
+
+### Remove DC Offset and High-Pass Filter
+
+These two answer different questions, which is why they are two commands.
+
+**Remove DC Offset** subtracts one constant per channel. That is the right correction for the
+fixed bias a capture chain adds, and no correction at all for a baseline that wanders. The
+dialog offers two ways to measure that constant. `Tab` cycles them.
+
+- **Median**, the default: the level the signal sits on. Use this.
+- **Mean**: the DC component in the strict sense. It drives the file's average to exactly zero,
+  which some measurements want. On real material the mean mostly reports the waveform's own
+  asymmetry, so it can lift a file that had no offset at all off the zero line.
+
+It measures each channel on its own, and always over the whole file. Two channels biased in
+opposite directions would cancel in one shared figure and neither would be fixed. A constant
+subtracted across part of a file is a step at each edge, which you hear as a click.
+
+**High-Pass Filter** is for the drifting baseline, and it does honour the selection. Give it a
+cutoff in Hz. The filter is a 2nd-order Butterworth run forward and then backward, so the two
+passes cancel each other's phase shift exactly and the slope works out at 24 dB per octave. A
+cutoff at or above half the sample rate is refused, because such a filter has no passband left.
+
+Every command in this section supports undo.
 
 ---
 
@@ -540,6 +580,33 @@ Remove Empty Channels to drop them.
 The command drops every channel whose peak sits below a threshold. The default threshold is -48
 dBFS. The command measures the whole file, never the selection. It also supports undo.
 
+### Mix Multichannel to Stereo
+
+Open Process and choose Mix Multichannel to Stereo to fold a wide file down to two channels
+deliberately, rather than leaving it to the monitoring fold of section 6.
+
+The dialog lists every channel with a destination — Left, Right, Both or Skip — and a dB
+attenuation. The list scrolls, so thirty channels are as workable as three. `←` and `→` cycle
+the destination of the selected row, and typing edits its gain, so the arrows do not move a
+text caret here as they do in other dialogs.
+
+The defaults are channel 1 left, channel 2 right, and so on alternating, at -6 dB a channel.
+That is the same interleave the monitoring fold uses, so the dialog opens on the routing you
+were already hearing. -6 dB rather than unity because unity on every channel of a mixdown is
+the one setting guaranteed to clip. A channel set to Both loses a further 3 dB in each leg, so
+centred material does not sit louder than panned material.
+
+The limiter is on by default and works on the summed legs. Its ceiling is the field beside the
+checkbox, at -1 dBFS to match the fold. A ceiling above 0 dBFS is allowed: this is a saturator,
+not a cap. A gain field you cannot parse reads as silence for that channel.
+
+The result is a new buffer. Your source file is untouched. The command is refused below three
+channels, where Gain and Mix to Mono say the same things more directly.
+
+The summary line counts every channel exactly once, in four buckets that add up to the channel
+count: left, right, both, and dropped. A channel counts as dropped when it is silent in the
+output, whatever its destination says.
+
 ### Export Channels
 
 Open File and choose Export Channels to split a multichannel file into separate WAV files.
@@ -567,7 +634,7 @@ size in memory. The working format is 32-bit float whatever the source depth, so
 grows by one third and a 32-bit float file stays the same size.
 
 If that decoded size exceeds `max_resident_mb`, the file opens streamed. The default is 4096, or
-4GB. Section 20 shows how to change it.
+4GB. Section 21 shows how to change it.
 
 Below the threshold nothing changes. The file opens the way it always did.
 
@@ -627,8 +694,15 @@ a clean stop.
 | Key | Command | What it writes |
 | --- | --- | --- |
 | `Ctrl+s` | Save | The same path, as 32-bit float WAV |
-| `Ctrl+Shift+S` | Save As | A new path, with a choice of depth |
+| `Shift+S` or `Ctrl+Shift+S` | Save As | A new path, with a choice of depth |
 | `Ctrl+l` | Save All | Every buffer with changes |
+
+Save As answers to two keys. Both stay bound, because a terminal does not always deliver a
+two-modifier combination — `Shift+S` is the one that always arrives.
+
+Every write is staged. tui-wave writes a temporary file beside the target and renames it over
+the target only once the write is complete, so a full disk or a crash leaves your original file
+where it was.
 
 Save As lets you pick the bit depth. Press `Tab` to move between 16-bit, 24-bit, and 32-bit
 float. Press `Ctrl+d` to turn dither on or off. Dither helps at 16-bit and 24-bit, and does
@@ -651,64 +725,135 @@ illegal for MP3.
 Press `Shift+E` to write the audio between markers into separate files in a subfolder. Use this
 to split one long take at the marks you placed.
 
+The dialog takes a subfolder name, a base name for the files, a bit depth and the dither
+toggle. Four optional steps sit below that, each a checkbox with its own value field: limit the
+length of a region, normalize it, fade it in, fade it out. tui-wave applies them in that order.
+It limits the length first, so normalize measures the peak of the audio you actually keep, and
+it fades last, so the taper never affects that measurement.
+
 ---
 
-## 14. CDP processes
+## 14. External processes: the browser and the parameter form
 
-CDP is the Composer's Desktop Project, a large set of command-line sound transformation
-programs. tui-wave runs them on your selection and splices the result back in.
+tui-wave drives three process backends through one browser:
+
+- **CDP**, the Composer's Desktop Project — a large set of command-line transformation
+  programs you install yourself. More than 400 processes.
+- **Praat** with the praatAudioTools scripts, again installed separately. 458 processes.
+  Section 15 covers what is particular to them.
+- **Airwindows**, 500 effects compiled into tui-wave. Nothing to install. Section 16.
+
+This section describes what all three share: the browser, the parameter form, previews,
+presets, envelopes and chains. tui-wave runs a process on your selection and splices the result
+back in, and that edit supports undo.
 
 | Key | Command |
 | --- | --- |
-| `Ctrl+p` | CDP+Praat Process |
-| `Ctrl+h` | CDP+Praat Chain |
+| `Ctrl+p` | ExtProcess |
+| `Ctrl+h` | ExtProcess Chain |
 
-Install CDP first — section 1 covers it. You can change the path later from the CDP+Praat menu
-with Configure CDP Directory.
+Install CDP first if you want that domain — section 1 covers it. You can change the path later
+from the ExtProcess menu with Configure CDP Directory. The Airwindows domain never needs any of
+this and is always available.
 
 ### The browser
 
-The CDP+Praat Process dialog opens a browser with three columns:
+The ExtProcess dialog opens a browser with three columns:
 
-1. **Domain**: All, Recent, Time-domain, Spectral, Praat.
-2. **Groups**: the CDP groups inside that domain, such as DISTORT, BLUR, and FOCUS.
+1. **Domain**: All, Recent, Time-domain, Spectral, Praat, Airwindows. The first two are the
+   whole catalog and your recent picks; the middle two are CDP's two domains.
+2. **Groups**: the groups inside that domain — CDP's own `DISTORT`, `BLUR`, `FOCUS` and so on,
+   praatAudioTools' folders, Chris Johnson's Airwindows categories.
 3. **Description**: the processes themselves.
 
-The group names match CDP's own documentation exactly. Anything written about CDP therefore
-names the same groups you see here.
+Every group name comes from the backend's own documentation. Anything written about CDP,
+praatAudioTools or Airwindows therefore names the same group you see here.
 
 `Tab` and `Shift+Tab` move between columns and wrap around. Left and Right also move between
 columns and stop at the ends. Focus skips the Groups column when it holds nothing, because All
 and Recent have no groups.
 
 Type to filter the process list. The Up and Down arrows move the selection, and `Enter` opens
-the parameter form. Small badges mark what a process needs, such as `>1 inputs`, `pitch curve`,
-`formants`, and `snapshot`.
+the parameter form. Press `Ctrl+l` to reopen the last process you ran, with its values.
+
+Every row carries one pale backend badge — `[cdp]`, `[pr]` or `[air]` — so you always know what
+a process will need. Further badges mark what it wants from you: `>1 inputs`, `pitch curve`,
+`formants`, `snapshot`, and `[pvoc]` for CDP's spectral domain.
 
 ### The parameter form
 
-Each process opens a form of fields. Move between them like this:
+Each process opens a form of fields.
 
 | Key | Action |
 | --- | --- |
+| Up / Down | Move between fields |
+| Left / Right | Move the slider of the focused field |
 | `Tab` / `Shift+Tab` | Move between fields, presets, Preview, and Apply |
-| Up / Down | Change a number field |
 | `Space` | Change a toggle field |
-| Left / Right | Change a choice field |
+| type a digit | Replace the value of a number field |
+| `e` | Open the envelope, list, table or curve editor of that field |
+| `b` | Pick a buffer for a field that wants one |
+| `p` | Preview, from any row |
 | `Enter` | Run the process |
+| `Esc` | Go back one level |
 
-Apply runs the process on your selection, or on the whole file, and splices the result back in.
-The edit supports undo.
+**Every parameter with two finite bounds carries a slider**, a dotted track with a round knob,
+to the left of its number. Left and Right step it through 15 stops, or through one stop per
+value when a whole-number range holds fewer than 15. The stops follow the parameter's own
+scale, so a 20 Hz to 20 kHz range steps logarithmically rather than putting thirteen stops
+below 2 kHz.
 
-Move to Preview to hear the result through your speakers first. Preview does not change the
-file. If you then press Apply without changing a field, tui-wave reuses that render instead of
-running CDP again.
+The slider is a way to reach a value, not a limit on it. A number you type is submitted exactly
+as typed and merely drawn at the nearest stop. A parameter bounded on one side only — most of
+the Praat catalog — gets no slider at all, because there is no honest place to draw the knob
+when one end runs to infinity. On a narrow terminal the slider column is dropped and the rows
+render as plain fields.
 
-Spectral processes need a phase-vocoder analysis pass first. tui-wave does that for you, so you
-never touch an analysis file. A process that takes two inputs grows a second input row. Left and
-Right pick another open buffer, which tui-wave uses whole. The sample rates must match.
+`Esc` walks back one level per press: parameter form, then browser, then the chain editor if
+you came from one, then the waveform. Picking the wrong process out of the catalog costs one
+key, not a reopen and a re-search.
 
-If CDP rejects the run, tui-wave shows CDP's own error text in a scrollable viewer.
+Apply runs the process on your selection, or on the whole file when nothing is selected, and
+splices the result back in.
+
+**Preview** hears the result first and changes nothing on disk. It loops, because one pass over
+a short selection decides nothing. `p` starts one from any row of the form. It stops on its own
+when you leave the dialog, and when you change any value, because what loops is the result of
+the values it ran with. A `[Preview ✓]` label means Apply will splice exactly what you last
+heard, with no second run.
+
+A blocked run is stated inline the moment the dialog opens, with Preview and Apply dimmed —
+too many channels, no buffer open, no image picked, not enough head and tail marks. The reason
+is in the dialog rather than in a failure after Apply, because nothing in the fields looks
+wrong in those cases.
+
+Spectral CDP processes need a phase-vocoder analysis pass first. tui-wave does that for you, so
+you never touch an analysis file. A process that takes two inputs grows a second input row.
+Left and Right pick another open buffer, which tui-wave uses whole. The sample rates must
+match.
+
+If a backend rejects the run, tui-wave shows its own error text in a scrollable viewer.
+
+### Chains
+
+`Ctrl+h` opens the chain editor, which runs several processes in order, each on the output of
+the one before. A chain may mix all three backends freely. A chain of Praat steps alone needs
+no CDP installed.
+
+| Key | Action |
+| --- | --- |
+| Up / Down | Move between steps |
+| Left / Right | Cycle the value on the selected row |
+| `Shift`+Up / Down | Reorder a step |
+| `Enter` | Open a step, or run the chain |
+| `p` | Preview the whole chain |
+| `h` | Preview as far as the selected step |
+| `d` | Delete the step |
+| `s` | Save the chain under a name |
+| `l` | Load the chain you last ran |
+| `Esc` | Close |
+
+The top row cycles your saved chains, exactly as the preset row of a parameter form does.
 
 ### Automating a parameter
 
@@ -726,11 +871,26 @@ The editor graphs value against time over a dimmed copy of your waveform.
 | `n` | Insert a point |
 | `Del` | Remove a point |
 | `c` | Throw away the envelope and go back to one value |
-| `Enter` | Save and close |
-| `Esc` | Close without saving |
+| `Enter` | Commit the shape and close |
+| `Esc` | Close without keeping it |
 
-The mouse works too. A click selects the nearest point. A double-click inserts one. A drag moves
-one, and a drag with `Shift` moves it finely. A click with `Shift` deletes one.
+The editor has a preset row of its own at the top, with the same `Tab`, `s` and `d` keys the
+parameter form's preset row uses.
+
+The mouse works too. A click selects the nearest point. A drag moves one, and a drag with
+`Shift` moves it finely. **A double-click adds a point, or removes the one you double-clicked**
+— removal is the second meaning of the double-click because a terminal never delivers
+`Shift`+click to a program at all. Both xterm and kitty keep that gesture for their own text
+selection. A `Shift`+drag does arrive, because the terminal forwards the drag once the button
+is already down.
+
+`c` asks before it acts. It discards the drawn shape and writes one constant back into the
+field, and nothing can undo that: the editor keeps no history, and a plain number field cannot
+remember a curve. On a field that requires a datafile there is no constant to go back to, so
+`c` means "use an open curve" instead and opens a picker.
+
+`Enter` means done, not save: it commits the drawn shape into the field and closes. `s` on the
+same bar is what writes a named preset to disk.
 
 ### Presets
 
@@ -738,11 +898,17 @@ A preset row sits above the fields. Left and Right load a saved preset for this 
 `s` to save the current values under a name, and `d` to delete one. tui-wave stores presets in
 `~/.config/tui-wave/cdp_presets/`.
 
+`s`, `d`, `p`, `b`, `e` and `x` mean these commands everywhere in the form except in a field
+that takes free text, and in the preset-name prompt. There they are typed as characters. The
+hint bar greys a key exactly where it would be typed instead, so a hint never promises
+something the key will not do.
+
 ### Adding your own processes
 
 Drop a TOML file into `~/.config/tui-wave/cdp/`. The file uses the same schema as the built-in
 catalog. A new `key` adds a process. A `key` that matches a built-in one replaces it, which lets
-you correct a range or a default.
+you correct a range or a default. Files there load after every built-in catalog, so this works
+for the Praat and Airwindows entries too, not only the CDP ones.
 
 The repository holds a worked example at `docs/cdp-custom-process-example.toml`. Copy it, edit
 it, and restart tui-wave.
@@ -752,8 +918,8 @@ it, and restart tui-wave.
 Some CDP processes take a pitch curve, which is a contour of time against frequency, instead of
 one number.
 
-1. Choose CDP then Extract Pitch Curve. This works best on a clear single-note melody. A `[p]`
-   row appears in the Buffers panel.
+1. Choose ExtProcess then CDP Extract Pitch Curve. This works best on a clear single-note
+   melody. A `[p]` row appears in the Buffers panel.
 2. Press `Enter` on that row to open a table of times and frequencies. The arrows select a row,
    and typing overwrites a value. Press `n` to insert a row and `Del` to remove one. Press `t`
    to apply a CDP curve transform, such as quantise, smooth, vibrato, or pitch shift. Press
@@ -761,7 +927,8 @@ one number.
 3. Open any process with the `pitch curve` badge, such as Psow Stretch. Move to its pitch field,
    press `e`, then press `c` to load an open curve into the envelope. tui-wave rescales the
    curve to your selection.
-4. Press `Ctrl+s` on a curve row to save it to disk. CDP then Load Pitch Curve reads one back.
+4. Press `Ctrl+s` on a curve row to save it to disk. ExtProcess then CDP Load Pitch Curve reads
+   one back.
 
 `Ctrl+z` and `Ctrl+y` inside the curve editor undo and redo the curve, not the audio. A curve
 that you typed or loaded by hand cannot run a transform, because it has no CDP source.
@@ -770,10 +937,12 @@ that you typed or loaded by hand cannot run a transform, because it has no CDP s
 
 Formants describe the timbre of a sound, apart from its pitch.
 
-1. Choose CDP then Extract Formants to capture the spectral envelope of your selection into an
-   `[f]` buffer. This works best on a voice or an instrument with real timbre.
-2. Choose CDP then Freeze Formant Snapshot at Cursor to freeze the timbre at one moment into an
-   `[s]` buffer. If the file has no formants yet, tui-wave extracts them first.
+1. Choose ExtProcess then CDP Extract Formants to capture the spectral envelope of your
+   selection into an `[f]` buffer. This works best on a voice or an instrument with real
+   timbre. The menu offers two of them, which differ in how they size the analysis bands:
+   pitch-wise uses musically log-spaced bands, frequency-wise uses bands of equal width in Hz.
+2. Choose ExtProcess then CDP Freeze Formant Snapshot at Cursor to freeze the timbre at one
+   moment into an `[s]` buffer. If the file has no formants yet, tui-wave extracts them first.
 3. To put either onto other audio, open Formants Put for an `[f]` buffer or Oneform Put for an
    `[s]` buffer. Press `b` to pick the buffer, then Apply.
 
@@ -800,20 +969,21 @@ collection of sound-transformation scripts written for it by Shai Cohen. tui-wav
 scripts on your selection and splices the result back in, exactly as it does with CDP.
 
 They share one browser. Open it with `Ctrl+p` and pick **Praat** in the Domain column. The menu
-they live under is named CDP+Praat.
+they live under is named ExtProcess.
 
 Install Praat and the scripts first — section 1 covers both.
 
-Chains mix freely. A CDP+Praat Chain (`Ctrl+h`) can put a Praat step after a CDP one and back
+Chains mix freely. An ExtProcess Chain (`Ctrl+h`) can put a Praat step after a CDP one and back
 again; the audio simply passes from each step to the next. A chain made only of Praat processes
 does not need CDP installed at all.
 
 ### The groups
 
-The Groups column follows the plugin's own folders, so anything written about praatAudioTools
-names the same groups you see here. Four are shortened to fit the column: Generative is
-Generative & Synthesis, Dynamics is Dynamics & Envelope, Spatial is Spatial & Surround, and
-Time/Granular is Time & Granular.
+458 scripts are listed, in fourteen groups. The Groups column follows the plugin's own folders,
+so anything written about praatAudioTools names the same groups you see here. Four are shortened
+to fit the column: Generative is Generative & Synthesis, Dynamics is Dynamics & Envelope,
+Spatial is Spatial & Surround, and Time/Granular is Time & Granular. The **py** group is the one
+that needs the Python environment of section 1.
 
 Everything else works as it does for CDP: the parameter form, presets, Preview, Apply and undo.
 
@@ -824,11 +994,29 @@ but no minimum or maximum, so tui-wave invents a generous range around the start
 a parameter past anything sensible and Praat simply refuses with a clear message. Nothing is
 harmed by trying.
 
-**Generative processes open a new buffer.** Everything in the Generative group synthesises from
-scratch: its length comes from its own Duration setting and its rate from its own Sample Rate
-setting, neither of which has anything to do with the selection you launched it from. The result
-therefore arrives as a new buffer and your original is left untouched. Set Sample Rate to 96000
-and you get a 96kHz buffer.
+**Generative processes open a new buffer, and most need no file open at all.** Everything in
+the Generative group synthesises from scratch: its length comes from its own Duration setting
+and its rate from its own Sample Rate setting, neither of which has anything to do with the
+selection you launched it from. The result therefore arrives as a new buffer and your original
+is left untouched. Set Sample Rate to 96000 and you get a 96kHz buffer.
+
+47 of the 53 read no audio whatever, so you can run them on an empty screen, the way Record
+works. Four more read a picture instead, which is the next item. The remaining two do read a
+sound, and say so in the dialog when none is open, with Preview and Apply dimmed.
+
+**Four processes read a picture, not a sound.** Percussive, Spectral and Brightness-Controlled
+Photo Sonification, and plain Photo Sonification, turn an image into audio. They take an extra
+row in the parameter form: press `Enter` on it to open a file picker with a preview pane beside
+it, and pick your image there.
+
+**PNG only.** That is Praat's own limit — it links libpng and nothing else — so the picker lists
+nothing else. A JPEG or a TIFF fails inside Praat with a read error, which is why tui-wave does
+not offer to convert one for you. Until you pick an image the dialog says so and Apply stays
+dimmed.
+
+**Some processes draw.** A script that produces a Praat figure shows it in a popup over the
+editor when the run finishes. `Esc` closes it. A picture that arrives from a Preview stays up
+while the audition loops, so you can judge the two together.
 
 Undo closes that buffer again. There is nothing else for it to undo — nothing was spliced — so
 `Ctrl+z` removes what the process made. If you have edited the new buffer, undo reverses those
@@ -856,10 +1044,12 @@ is applied inside the script — but the fields go on showing the manual values.
 process returns audio only.
 
 **A run is stopped after two minutes.** Some scripts play their result aloud, which takes as
-long as the audio does, and a few can hang outright. Press `Esc` to stop one early.
+long as the audio does, and a few can hang outright. A script that draws gets four minutes,
+because rendering a figure is slow. The four interactive `py` editors of section 1 get no limit
+at all, because you decide when they are done. Press `Esc` to stop any run early.
 
-**Not every script is listed.** Around a quarter of the collection cannot be driven without a
-window, needs a corpus of other files, or works on things that are not sounds.
+**Not every script is listed.** 458 of the 499 are. The other 41 cannot be driven without a
+window, need a corpus of other files, or work on things that are not sounds.
 `docs/praat-excluded-scripts.md` names every one and why.
 
 ---
@@ -883,7 +1073,8 @@ plugin — the Airwindopedia, the videos, the forum posts — points at the same
 ### Parameters read 0 to 1
 
 Every Airwindows control is a number from 0.0 to 1.0. That is genuinely how the effects work,
-not a simplification made here.
+not a simplification made here. Both bounds are finite, so every one of them carries a slider:
+Left and Right walk the range, and you never have to guess what a sensible number would be.
 
 Beside each field, dimmed, is the effect's own reading of that value in its own units:
 
@@ -962,14 +1153,21 @@ The Buffers panel lists every open file. Give it focus with `Tab` twice.
 
 | Key | Action |
 | --- | --- |
-| `Up` / `Down` | Move the selection |
-| `Enter` | Switch to that buffer |
+| `Up` / `Down` | Switch to that buffer |
+| `Enter` | Switch to it and move focus to the waveform |
 | `/` | Search the list |
 | `Ctrl+s` | Save that buffer |
 | `Ctrl+w` | Close that buffer |
 | `Ctrl+r` | Rename that buffer |
 | `Ctrl+a` | Save every buffer |
 | `Ctrl+l` | Reload that buffer from disk |
+
+Moving the selection loads the buffer at once, so there is nothing left for `Enter` to commit.
+It hands focus to the waveform instead, because picking a buffer is almost always followed by
+editing it.
+
+The panel also lists the pitch curves and formant buffers of section 14, tagged `[p]`, `[f]`
+and `[s]`.
 
 These `Ctrl` keys mean something else in the Waveform panel. `Ctrl+r` is Reverse there, and
 `Ctrl+a` is Select All. The panel with focus decides.
@@ -990,12 +1188,22 @@ The mouse works alongside the keyboard.
 | --- | --- |
 | Click the waveform | Move the play position |
 | Drag across the waveform | Make a selection |
+| Double-click the waveform | Select the region between the markers either side of the click |
 | Wheel over the waveform | Move the channel window |
 | Wheel over a panel | Scroll the list |
 | Click a menu title | Open that menu |
 | Click a toolbar button | Run that command |
 | Drag a marker line | Move the marker |
+| Drag a head or tail mark | Move that mark |
 | Double-click a marker label | Rename the marker |
+| Double-click a file in the Files panel | Open it |
+
+With no marker on one side of a double-click, that edge of the region is the start or the end
+of the file. With zero-crossing snap on, both edges snap.
+
+`Shift`+click never reaches tui-wave. Terminals keep that gesture for their own text selection.
+Nothing in the editor is bound to it — see the envelope editor in section 14, where a
+double-click removes a point for exactly this reason.
 
 ---
 
@@ -1028,9 +1236,20 @@ Useful settings:
 | `praat_bin` | Path to the Praat program. Empty means find it on your `PATH` |
 | `praat_audiotools_dir` | Path to the praatAudioTools scripts. Defaults to the bundled copy |
 | `graphics_mode` | Draw with terminal graphics |
+| `dot_matrix_gradient` | Shade the waveform by amplitude |
 | `time_ruler` | Show the time ruler row |
+| `snap_to_zero` | Zero-crossing snap |
+| `fine_mode` | Fine step mode |
+| `auto_vertical_zoom` | Fit the amplitude zoom to the peak |
+| `loop_playback` | Loop playback |
+| `cursor_follows_playback` | The cursor follows playback |
+| `viewport_follows_playback` | The view follows playback |
+| `audition` | Play the file under the Files panel highlight |
 | `transient_threshold_db` | Threshold for transient markers |
 | `keybindings` | Your own key assignments |
+
+Every toggle in that list is one you set from the View menu or a key. The file records where
+you left it, so it comes back on the next start.
 
 Raise `max_resident_mb` to edit larger files in memory. Remember that a file open for playback
 costs about twice its decoded size. A 4GB buffer with playback running therefore needs about 8GB.
@@ -1087,7 +1306,7 @@ The Waveform panel must have focus for these keys, unless the table says otherwi
 | `Del` | Delete |
 | `C` | Copy to new buffer |
 | `Ctrl+z` | Undo |
-| `Ctrl+y` | Redo |
+| `Ctrl+y` or `Ctrl+Shift+z` | Redo |
 
 ### Process
 
@@ -1119,7 +1338,7 @@ The Waveform panel must have focus for these keys, unless the table says otherwi
 | Key | Action |
 | --- | --- |
 | `Ctrl+s` | Save |
-| `Ctrl+Shift+S` | Save As |
+| `Shift+S` or `Ctrl+Shift+S` | Save As |
 | `Ctrl+l` | Save All |
 | `Shift+E` | Export Regions |
 | `L` / `R` | New buffer from the left or right channel |
@@ -1127,9 +1346,20 @@ The Waveform panel must have focus for these keys, unless the table says otherwi
 | `l` | Loop playback |
 | `i` | Cursor follows playback |
 | `f` | View follows playback |
-| `Ctrl+p` | CDP+Praat Process |
-| `Ctrl+h` | CDP+Praat Chain |
+| `Ctrl+p` | ExtProcess |
+| `Ctrl+h` | ExtProcess Chain |
 | `q` | Quit |
+
+### Menu-only commands
+
+These have no key. Open the menu named beside each.
+
+| Menu | Command |
+| --- | --- |
+| File | Export Channels, Export to FLAC or MP3, Reset Config to Defaults |
+| View | Gradient, Time Ruler |
+| Process | Mix Multichannel to Stereo, Remove Empty Channels, Remove DC Offset, High-Pass Filter |
+| ExtProcess | CDP Extract Pitch Curve, CDP Load Pitch Curve, CDP Extract Formants (both), CDP Freeze Formant Snapshot at Cursor, Configure CDP Directory |
 
 ---
 
