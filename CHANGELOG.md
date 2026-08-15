@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+- **praatAudioTools updated to `e2cbd5f`** (3 further commits). Upstream is working through
+  *Generative & Synthesis* alphabetically, converting each script to "the `form` is page one and
+  the rest is a `beginPause` page" — `a769160` took A–K, this batch takes G–W. **23 more forms
+  changed**, mostly shrinking as fields moved onto those pages (`Wave_Terrain_Synthesis` 51 → 36,
+  `Waveguide_Klangmaschine` 34 → 18).
+
+  22 more scripts are hoisted, so none of them leaves the catalog. The count holds at 457 and the
+  parameter total *rises* from 5746 to 5889: 25 processes gained fields, none lost any, and the
+  hoisted pages are ordinary editable parameters rather than settings frozen at their defaults
+  (`Grisey_Spectral_Becoming_Engine` 15 → 29, `Lorenz_Deep_Analog` 10 → 23).
+
+  `Photo__sonification.praat` was renamed to `Photo_sonification.praat` — one underscore. That
+  path is a key in the converter's hand-maintained `PHOTO_INPUTS` table, and a stale key there
+  does not merely lose a note: the script falls through to the generic path and is **excluded**,
+  which would have quietly cost one of the four image sonifiers.
+
+- **Script descriptions read the new header shape.** The rewrite dropped the `# Description:`
+  block for an ALL-CAPS title followed by prose, so ten processes fell back to showing their own
+  title as their description — the exact hole the extractor was written to close. It now reads
+  both shapes, and the catalog is better off than before the bump: 14 entries without a real
+  description, where there were 29. The fallback is confined to the file's leading comment block,
+  because every script is full of section banners (`# INPUT CHECK`) that read like a title —
+  `Vector Chain/chain_7` has no header title at all and had its step list displaced by the path
+  comments under one of them.
+
 ## 2026-08-15 (2.9.2)
 
 - **praatAudioTools updated to `a769160`** (5 upstream commits). The whole *Generative &

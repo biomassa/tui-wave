@@ -352,6 +352,76 @@ PAUSE_HOISTS: dict[str, dict] = {
     "Generative & Synthesis/Koto\u0144ski_FSM_Event_Generator.praat": {
         "why": "second settings page (State / Sound Details)",
     },
+    # The second wave of the same Generative sweep, `e2cbd5f`. Upstream is working through the
+    # folder alphabetically, converting each script to "form is page one, the rest is a
+    # `beginPause` page" — the first wave (`a769160`) took A-K, this one G-W. Same reasoning as
+    # above: without a hoist each of these is `gui_blocking` and leaves the catalog.
+    "Generative & Synthesis/Generative_Sound_System.praat": {
+        "why": "second settings page (Generative Details)",
+    },
+    "Generative & Synthesis/Grisey_Spectral_Becoming_Engine.praat": {
+        "why": "two settings pages (Spectrum / Threshold, then Process / Output)",
+    },
+    "Generative & Synthesis/Layered_Markov_Texture.praat": {
+        "why": "second settings page (Markov / Texture Details)",
+    },
+    "Generative & Synthesis/Logistic_Map_Synthesis.praat": {
+        "why": "second settings page (Mapping Details)",
+    },
+    "Generative & Synthesis/Lorenz_Deep_Analog.praat": {
+        "why": "second settings page (Integration / Mapping Details)",
+    },
+    "Generative & Synthesis/Markov_Rhythm_Generator.praat": {
+        "why": "second settings page (Markov / Timing Details)",
+    },
+    "Generative & Synthesis/Poisson_Point_Process_Synthesis.praat": {
+        "why": "second settings page (Grain / Reproducibility Details)",
+    },
+    "Generative & Synthesis/Poisson_Rhythm_Synthesis.praat": {
+        "why": "second settings page (Technical / Reproducibility Details)",
+    },
+    "Generative & Synthesis/PolyrhythmsFromDots.praat": {
+        "why": "second settings page (Dot / Audio Details)",
+    },
+    "Generative & Synthesis/Pulsar_Synthesis_Engine.praat": {
+        "why": "second settings page (Details)",
+    },
+    "Generative & Synthesis/Random_Walk_Melody.praat": {
+        "why": "second settings page (Details)",
+    },
+    "Generative & Synthesis/Random_Walk_Rhythm.praat": {
+        "why": "second settings page (Details)",
+    },
+    "Generative & Synthesis/Rich_Formant_Grains.praat": {
+        "why": "second settings page (Details)",
+    },
+    "Generative & Synthesis/Risset's_Mutations.praat": {
+        "why": "second settings page (Details)",
+    },
+    "Generative & Synthesis/Spectral_Image_Sonification.praat": {
+        "why": "second settings page (Details)",
+    },
+    "Generative & Synthesis/Stockhausen_Studie_II_Generator.praat": {
+        "why": "second settings page (Model / Audio Details)",
+    },
+    "Generative & Synthesis/Subtractive_Synthesis_Generator.praat": {
+        "why": "second settings page (Details)",
+    },
+    "Generative & Synthesis/Vector_Synthesis.praat": {
+        "why": "second settings page (details)",
+    },
+    "Generative & Synthesis/Visual_Game_of_Life_Synthesis.praat": {
+        "why": "second settings page (Details)",
+    },
+    "Generative & Synthesis/Wave_Terrain_Synthesis.praat": {
+        "why": "second settings page (details)",
+    },
+    "Generative & Synthesis/Waveguide_Klangmaschine.praat": {
+        "why": "second settings page (Reverb / Render Details)",
+    },
+    "Generative & Synthesis/Waveguide_Modal_Synthesis.praat": {
+        "why": "second settings page (details)",
+    },
     "Time & Granular/HFD-Driven_Time_Warping.praat": {
         "lock_on": ["Show_advanced_settings"],
         "why": "exposes the 17 Advanced HFD Parameters",
@@ -1090,7 +1160,7 @@ def extract_description(source: str) -> str:
             start, first = i, match.group(1).strip()
             break
     if start is None:
-        return ""
+        return extract_titled_description(lines)
 
     paragraphs: list[list[str]] = [[first]] if first else [[]]
     for line in lines[start + 1:]:
@@ -1111,6 +1181,65 @@ def extract_description(source: str) -> str:
     # description panel does its own wrapping at whatever width it has.
     joined = [" ".join(p) for p in paragraphs if p]
     return "\n\n".join(joined).strip()
+
+
+# The header shape the 2026-08 Generative rewrite introduced, which carries no
+# `# Description:` line at all:
+#
+#     # Repository: https://github.com/...
+#     #
+#     # PHOTO SONIFICATION: RGB SPECTRAL COLUMN SCAN
+#     #
+#     # CONCEPTUAL SCOPE
+#     # ----------------
+#     # This engine is intentionally a 1-D COLUMN-PROJECTION sonification of a 2-D
+#     # Photo. Horizontal image position is preserved as musical time...
+#
+# An ALL-CAPS restatement of the title, then either prose or a section heading and its rule
+# before the prose. Ten scripts had already moved to it when this was written, and every one of
+# them fell back to showing its own title as its description — which is the exact hole
+# `extract_description` was written to close in the first place.
+TITLE_LINE_RE = re.compile(r"^#\s*([A-Z][A-Z0-9 &/,'\u2013\u2014:.()-]{6,})\s*$")
+RULE_LINE_RE = re.compile(r"^#\s*[-=]{3,}\s*$")
+
+
+def extract_titled_description(lines: list[str]) -> str:
+    """The first prose paragraph under an ALL-CAPS header line. Empty if there is none.
+
+    Confined to the file's **leading comment block**. Every script is full of section banners
+    (`# INPUT CHECK`, `# SYNTHESIS`) that read exactly like a title, and `Vector Chain/chain_7`
+    proved the point: it has no header title at all, so the scan ran on into the body, took
+    `# INPUT CHECK` for a title and returned the path comments beneath it — displacing the step
+    list `describe_chain` produces for a chain, which is the one thing a chain's description is
+    for.
+    """
+    seen_title = False
+    paragraph: list[str] = []
+    for line in lines:
+        stripped = line.rstrip()
+        if not stripped.startswith("#"):
+            if stripped.strip():
+                break               # first line of code: the header is over
+            if seen_title and paragraph:
+                break
+            continue
+        body = stripped[1:].strip()
+        if not seen_title:
+            # The banner rules and the Author/Version/Repository block come first; the title is
+            # the first all-caps line after them.
+            if TITLE_LINE_RE.match(stripped) and ":" not in body.split(" ")[0]:
+                seen_title = True
+            continue
+        if not body or RULE_LINE_RE.match(stripped):
+            if paragraph:
+                break                   # the paragraph ended
+            continue                    # still in the gap before it
+        if TITLE_LINE_RE.match(stripped):
+            if paragraph:
+                break                   # a further section heading closes it
+            continue                    # a section heading before the prose
+        paragraph.append(body)
+    return " ".join(paragraph).strip()
 
 
 # A chain script's own step list. The `Vector Chain` scripts are fixed pipelines of other
@@ -1525,7 +1654,7 @@ ZERO_INPUT_EXCEPTIONS: dict[str, str] = {
 PHOTO_INPUTS: dict[str, str] = {
     "Generative & Synthesis/Percussive_Image_Sonification.praat":
         "scans image columns left-to-right into clicks; brightness drives rate, pitch and volume",
-    "Generative & Synthesis/Photo__sonification.praat":
+    "Generative & Synthesis/Photo_sonification.praat":
         "maps R/G/B to low/mid/high frequency bands, brightness to amplitude",
     "Generative & Synthesis/Photo_Brightness-Controlled_Pitch_Sonification.praat":
         "maps brightness to a phase-continuous pitch contour",
