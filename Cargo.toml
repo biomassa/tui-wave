@@ -9,7 +9,7 @@ default-members = [".", "crates/airwindows-sys"]
 
 [package]
 name = "tui-wave"
-version = "2.9.1"
+version = "2.9.2"
 edition = "2024"
 license = "MIT"
 # Below this line: metadata the packagers read. `cargo-deb` and `cargo-generate-rpm` both

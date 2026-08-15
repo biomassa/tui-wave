@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-15 (2.9.2)
 
 - **praatAudioTools updated to `a769160`** (5 upstream commits). The whole *Generative &
   Synthesis* folder was rewritten — 28 scripts, roughly doubled in size — and **every one of the
