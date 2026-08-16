@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-16 (2.9.4)
 
 - **A failed process returns you to its parameter form.** A run rejected for an out-of-range
   value — the limits many Praat scripts enforce but never declare — showed its error and then
