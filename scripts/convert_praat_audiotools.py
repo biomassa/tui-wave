@@ -309,6 +309,7 @@ PAUSE_HOISTS: dict[str, dict] = {
     # `gui_blocking` — excluded outright. No toggle to lock any more: the pages are simply the
     # rest of the settings.
     "Generative & Synthesis/FM_Texture_Generator.praat": {
+        "lock_on": ["Edit_operator_details"],
         "why": "three-page wizard (Routing/Ops 1-2, Ops 3-4, Ops 5-6 and Timing)",
     },
     # The rest of the 2026-08 Generative rewrite, which gave twelve scripts the same shape:
@@ -320,36 +321,47 @@ PAUSE_HOISTS: dict[str, dict] = {
     # None is gated by a toggle, unlike the trio above, so none needs `lock_on`: the pages are
     # unconditional and every variable they set is one the script goes on to use.
     "Generative & Synthesis/Coupled_Mesh_String.praat": {
+        "lock_on": ["Edit_all_model_parameters"],
         "why": "two-page wizard (Physics, then Geometry & Pickup)",
     },
     "Generative & Synthesis/Dynamic_Stochastic_Synthesis.praat": {
+        "lock_on": ["Edit_grain_details"],
         "why": "second settings page (Grain Details)",
     },
     "Generative & Synthesis/Dynamic_Vowel_Transitions.praat": {
+        "lock_on": ["Edit_vowel_source_details"],
         "why": "second settings page (Vowel & Source Details)",
     },
     "Generative & Synthesis/Evolving_Grain_Mass.praat": {
+        "lock_on": ["Edit_grain_statistics"],
         "why": "second settings page (Grain Statistics)",
     },
     "Generative & Synthesis/Flute_KlattGrid.praat": {
+        "lock_on": ["Edit_voice_and_chiff"],
         "why": "second settings page (Voice & Chiff)",
     },
     "Generative & Synthesis/Formant_Grain_Texture.praat": {
+        "lock_on": ["Edit_source_filter_details"],
         "why": "second settings page (Source / Filter Details)",
     },
     "Generative & Synthesis/Formant_Synthesis.praat": {
+        "lock_on": ["Edit_formant_details", "Edit_source_details"],
         "why": "two settings pages (Resonance Details, then Source Details)",
     },
     "Generative & Synthesis/Formula_Markov_Synthesis.praat": {
+        "lock_on": ["Edit_state_synthesis_details"],
         "why": "second settings page (State / Synthesis Details)",
     },
     "Generative & Synthesis/GENDYN_Synthesis.praat": {
+        "lock_on": ["Edit_stochastic_boundaries"],
         "why": "second settings page (Stochastic / Boundary Details)",
     },
     "Generative & Synthesis/Karplus-Strong_Texture_Generator.praat": {
+        "lock_on": ["Edit_texture_details"],
         "why": "second settings page (Scheduler / Spatial Details)",
     },
     "Generative & Synthesis/Koto\u0144ski_FSM_Event_Generator.praat": {
+        "lock_on": ["Edit_state_sound_details"],
         "why": "second settings page (State / Sound Details)",
     },
     # The second wave of the same Generative sweep, `e2cbd5f`. Upstream is working through the
@@ -357,69 +369,91 @@ PAUSE_HOISTS: dict[str, dict] = {
     # `beginPause` page" — the first wave (`a769160`) took A-K, this one G-W. Same reasoning as
     # above: without a hoist each of these is `gui_blocking` and leaves the catalog.
     "Generative & Synthesis/Generative_Sound_System.praat": {
+        "lock_on": ["Edit_generative_details"],
         "why": "second settings page (Generative Details)",
     },
     "Generative & Synthesis/Grisey_Spectral_Becoming_Engine.praat": {
+        "lock_on": ["Edit_spectral_details", "Edit_process_details"],
         "why": "two settings pages (Spectrum / Threshold, then Process / Output)",
     },
     "Generative & Synthesis/Layered_Markov_Texture.praat": {
+        "lock_on": ["Edit_markov_texture_details"],
         "why": "second settings page (Markov / Texture Details)",
     },
     "Generative & Synthesis/Logistic_Map_Synthesis.praat": {
+        "lock_on": ["Edit_mapping_details"],
         "why": "second settings page (Mapping Details)",
     },
     "Generative & Synthesis/Lorenz_Deep_Analog.praat": {
+        "lock_on": ["Edit_integration_mapping_details"],
         "why": "second settings page (Integration / Mapping Details)",
     },
     "Generative & Synthesis/Markov_Rhythm_Generator.praat": {
+        "lock_on": ["Edit_markov_rhythm_details"],
         "why": "second settings page (Markov / Timing Details)",
     },
     "Generative & Synthesis/Poisson_Point_Process_Synthesis.praat": {
+        "lock_on": ["Edit_details"],
         "why": "second settings page (Grain / Reproducibility Details)",
     },
     "Generative & Synthesis/Poisson_Rhythm_Synthesis.praat": {
+        "lock_on": ["Edit_details"],
         "why": "second settings page (Technical / Reproducibility Details)",
     },
     "Generative & Synthesis/PolyrhythmsFromDots.praat": {
+        "lock_on": ["Edit_details"],
         "why": "second settings page (Dot / Audio Details)",
     },
     "Generative & Synthesis/Pulsar_Synthesis_Engine.praat": {
+        "lock_on": ["Edit_details"],
         "why": "second settings page (Details)",
     },
     "Generative & Synthesis/Random_Walk_Melody.praat": {
+        "lock_on": ["Edit_details"],
         "why": "second settings page (Details)",
     },
     "Generative & Synthesis/Random_Walk_Rhythm.praat": {
+        "lock_on": ["Edit_details"],
         "why": "second settings page (Details)",
     },
     "Generative & Synthesis/Rich_Formant_Grains.praat": {
+        "lock_on": ["edit_details"],
         "why": "second settings page (Details)",
     },
     "Generative & Synthesis/Risset's_Mutations.praat": {
+        "lock_on": ["Edit_details"],
         "why": "second settings page (Details)",
     },
     "Generative & Synthesis/Spectral_Image_Sonification.praat": {
+        "lock_on": ["edit_details"],
         "why": "second settings page (Details)",
     },
     "Generative & Synthesis/Stockhausen_Studie_II_Generator.praat": {
+        "lock_on": ["Edit_details"],
         "why": "second settings page (Model / Audio Details)",
     },
     "Generative & Synthesis/Subtractive_Synthesis_Generator.praat": {
+        "lock_on": ["Edit_details"],
         "why": "second settings page (Details)",
     },
     "Generative & Synthesis/Vector_Synthesis.praat": {
+        "lock_on": ["Edit_details"],
         "why": "second settings page (details)",
     },
     "Generative & Synthesis/Visual_Game_of_Life_Synthesis.praat": {
+        "lock_on": ["Edit_details"],
         "why": "second settings page (Details)",
     },
     "Generative & Synthesis/Wave_Terrain_Synthesis.praat": {
+        "lock_on": ["Edit_details"],
         "why": "second settings page (details)",
     },
     "Generative & Synthesis/Waveguide_Klangmaschine.praat": {
+        "lock_on": ["Edit_reverb_render_details"],
         "why": "second settings page (Reverb / Render Details)",
     },
     "Generative & Synthesis/Waveguide_Modal_Synthesis.praat": {
+        "lock_on": ["Edit_details"],
         "why": "second settings page (details)",
     },
     "Time & Granular/HFD-Driven_Time_Warping.praat": {
