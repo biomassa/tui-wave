@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-16 (2.9.3)
 
 - **praatAudioTools updated to `e2cbd5f`** (3 further commits). Upstream is working through
   *Generative & Synthesis* alphabetically, converting each script to "the `form` is page one and
@@ -17,6 +17,19 @@
   path is a key in the converter's hand-maintained `PHOTO_INPUTS` table, and a stale key there
   does not merely lose a note: the script falls through to the generic path and is **excluded**,
   which would have quietly cost one of the four image sonifiers.
+
+- **`setup-environment.sh` can update a checkout on a case-insensitive filesystem.** Reported
+  from macOS: the script could not move the scripts to the pinned commit, and blamed a missing
+  commit while git had actually refused with "Your local changes to the following files would be
+  overwritten by checkout: `Reverb/Stereo_Shimmer.praat`". praatAudioTools ships four pairs of
+  scripts whose names differ only in case, and on APFS both tracked paths resolve to one file —
+  so git reports the one it did not write as locally modified and refuses to check anything out.
+  That is the filesystem limit README's *Known issues* already describes, biting the update path
+  rather than a run. The checkout now falls back to `--force`, which is safe because this
+  checkout belongs to tui-wave: it is fetched at a pinned commit, every script runs from a
+  temporary copy, and anyone wanting one to edit points `praat_audiotools_dir` at their own. The
+  two failures also stop sharing one message, so a missing commit and a refused checkout each
+  say what happened.
 
 - **Script descriptions read the new header shape.** The rewrite dropped the `# Description:`
   block for an ALL-CAPS title followed by prose, so ten processes fell back to showing their own
