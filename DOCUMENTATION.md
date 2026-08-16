@@ -855,6 +855,13 @@ Left and Right pick another open buffer, which tui-wave uses whole. The sample r
 match.
 
 If a backend rejects the run, tui-wave shows its own error text in a scrollable viewer.
+Dismissing that viewer — `Enter` or `Esc` — returns you to the parameter form you ran from,
+with every value still in it and the reason repeated above the buttons. Fix the value the
+process objected to and run again; you never have to reopen the browser and find the process
+a second time. This is how every backend behaves, not a property of any one process.
+
+Many scripts carry limits they do not declare — a duration that must be under two minutes, a
+frequency that must stay below Nyquist. Those are the errors this exists for.
 
 ### Chains
 

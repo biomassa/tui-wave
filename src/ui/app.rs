@@ -3330,6 +3330,20 @@ pub struct App {
     /// different behavior than the normal top-level flow (process-list filtering, what Enter
     /// on the Apply row actually does).
     cdp_chain_edit_target: Option<ChainEditTarget>,
+    /// The dialog to reopen when the process-error viewer (`Dialog::CdpOutput`) is dismissed —
+    /// the params form the failed run came from, with every value still in it, or the chain
+    /// editor for a failed chain.
+    ///
+    /// Universal by construction: it hangs off the *error viewer*, which every failed run of
+    /// every backend already funnels through, rather than off any one process or backend. A
+    /// rejected value used to cost the whole session — the form and the browser both closed and
+    /// the waveform came back, so fixing one number meant reopening the browser, finding the
+    /// process again and retyping every other field (user report).
+    ///
+    /// A side-channel field rather than a `restore` on `Dialog::CdpOutput`, for the reason
+    /// `cdp_chain_edit_target` above gives: that variant is destructured by full field list at
+    /// 40 sites, and a new mandatory field there would mean touching all of them for no gain.
+    cdp_error_restore: Option<Box<Dialog>>,
     /// Paused parent chain-step-editing sessions, innermost last — pushed by "Configure
     /// Side-Chain..." (opened from within a dual-input step's own `CdpParams` session) and
     /// popped once that nested edit commits or is cancelled, restoring the parent session
@@ -3865,6 +3879,7 @@ impl App {
             key_map,
             picker: None,
             help_rows_visible: 0,
+            cdp_error_restore: None,
             last_dialog_row_click: None,
             graphics_mode: config.graphics_mode,
             dot_matrix_gradient: config.dot_matrix_gradient,
@@ -6328,7 +6343,10 @@ impl App {
                     // has any effect while this dialog is showing).
                     self.dialog = Some(d);
                 }
-                Some(Dialog::CdpOutput { .. }) => {} // just dismiss
+                // Back to the form the run came from, if there is one — see `cdp_error_restore`.
+                Some(Dialog::CdpOutput { .. }) => {
+                    self.dialog = self.cdp_error_restore.take().map(|d| *d);
+                }
                 // Unreachable: `handle_dialog_key_inner` intercepts this dialog whole, above.
                 // Present for exhaustiveness only.
                 Some(Dialog::Help { .. }) => {}
@@ -6372,6 +6390,12 @@ impl App {
                         unreachable!("just matched")
                     };
                     self.close_praat_picture(restore);
+                } else if matches!(self.dialog, Some(Dialog::CdpOutput { .. })) {
+                    // Esc on the error viewer means the same as Enter on it: back to the form
+                    // the failed run came from. Its own arm, ahead of the generic dismissal,
+                    // for the reason the picture popup has one — the branch below would drop
+                    // the restore on the floor and land on the waveform.
+                    self.dialog = self.cdp_error_restore.take().map(|d| *d);
                 } else if let Some(back) = self.cdp_dialog_return() {
                     // One level per Esc: params -> browser -> chain editor -> waveform. The
                     // audition is stopped either way, since stepping back still abandons
@@ -8875,6 +8899,63 @@ impl App {
             selected,
             desc_scroll: 0,
             restore: saved.restore.map(|r| *r),
+        });
+    }
+
+    /// The params form a failed run came from, rebuilt from its `CdpPending` with every value
+    /// the user had typed, and `message` shown inline above the buttons.
+    ///
+    /// One function for every backend, because the pending is what each of them already carries
+    /// a run on: CDP, Praat and Airwindows all reach their failure branch holding one of these,
+    /// so none of them needs its own idea of what to go back to. Stored in `cdp_error_restore`
+    /// and reopened when the error viewer closes.
+    ///
+    /// The inline message is a *summary* — the first non-empty line. The viewer above it holds
+    /// the whole output, which for CDP can run to dozens of lines; the form needs the sentence
+    /// that says which value to change.
+    fn params_dialog_after_failure(pending: CdpPending, message: Option<String>) -> Dialog {
+        Dialog::CdpParams {
+            catalog_index: pending.catalog_index,
+            restore: pending.restore,
+            fields: pending.fields,
+            second_input: pending.second_input,
+            variadic_input: pending.variadic_input,
+            photo_input: pending.photo_input,
+            focus: pending.focus,
+            error: message,
+            // Deliberately dropped: a failed run rendered nothing, so there is no audition to
+            // keep and nothing for Apply to splice without running again.
+            preview: None,
+            envelope: None,
+            list_edit: None,
+            table_edit: None,
+            marker_time_list_edit: None,
+            hilite_band_edit: None,
+            formant_picker: None, file_picker: None, variadic_picker: None, photo_picker: None,
+            presets: pending.presets,
+            preset_selected: pending.preset_selected,
+            custom_values: pending.custom_values,
+            save_prompt: None,
+            scroll: 0,
+        }
+    }
+
+    /// The one-line summary of a failure, for the params form's inline error.
+    fn failure_summary(lines: &[String]) -> Option<String> {
+        lines.iter().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_string())
+    }
+
+    /// Show the process-error viewer, and remember what to reopen when it is dismissed.
+    ///
+    /// Every failed run goes through here, which is what makes the behaviour universal rather
+    /// than per-process: a backend that fails does not decide where the user lands, it just
+    /// reports what happened and hands over the session it was holding.
+    fn show_process_error(&mut self, title: &str, lines: Vec<String>, restore: Option<Dialog>) {
+        self.cdp_error_restore = restore.map(Box::new);
+        self.dialog = Some(Dialog::CdpOutput {
+            title: title.to_string(),
+            lines,
+            scroll: 0,
         });
     }
 
@@ -12615,11 +12696,9 @@ impl App {
                         let output = match result {
                             Ok(output) => output,
                             Err(err) => {
-                                self.dialog = Some(Dialog::CdpOutput {
-                                    title: "ExtProcess Chain Error".into(),
-                                    lines: praat_error_lines(&err),
-                                    scroll: 0,
-                                });
+                                let lines = praat_error_lines(&err);
+                                    let back = self.cdp_chain_editor.is_some().then_some(Dialog::CdpChainEditor);
+                                    self.show_process_error("ExtProcess Chain Error", lines, back);
                                 continue;
                             }
                         };
@@ -12659,11 +12738,10 @@ impl App {
                     let output = match result {
                         Ok(output) => output,
                         Err(err) => {
-                            self.dialog = Some(Dialog::CdpOutput {
-                                title: "Praat Error".into(),
-                                lines: praat_error_lines(&err),
-                                scroll: 0,
-                            });
+                            let lines = praat_error_lines(&err);
+                            let summary = Self::failure_summary(&lines);
+                            let back = Self::params_dialog_after_failure(pending, summary);
+                            self.show_process_error("Praat Error", lines, Some(back));
                             continue;
                         }
                     };
@@ -12866,11 +12944,9 @@ impl App {
                         let output = match result {
                             Ok(output) => output,
                             Err(err) => {
-                                self.dialog = Some(Dialog::CdpOutput {
-                                    title: "ExtProcess Chain Error".into(),
-                                    lines: vec![err.to_string()],
-                                    scroll: 0,
-                                });
+                                let lines = vec![err.to_string()];
+                                    let back = self.cdp_chain_editor.is_some().then_some(Dialog::CdpChainEditor);
+                                    self.show_process_error("ExtProcess Chain Error", lines, back);
                                 continue;
                             }
                         };
@@ -12904,11 +12980,10 @@ impl App {
                     let output = match result {
                         Ok(output) => output,
                         Err(err) => {
-                            self.dialog = Some(Dialog::CdpOutput {
-                                title: "Airwindows Error".into(),
-                                lines: vec![err.to_string()],
-                                scroll: 0,
-                            });
+                            let lines = vec![err.to_string()];
+                            let summary = Self::failure_summary(&lines);
+                            let back = Self::params_dialog_after_failure(pending, summary);
+                            self.show_process_error("Airwindows Error", lines, Some(back));
                             continue;
                         }
                     };
@@ -13356,11 +13431,9 @@ impl App {
         };
         let Some(def) = self.cdp_catalog.processes.iter().find(|p| p.key == step.process_key).cloned() else {
             self.cdp_pending_chain_run = None;
-            self.dialog = Some(Dialog::CdpOutput {
-                title: "ExtProcess Chain Error".into(),
-                lines: vec![format!("Process \"{}\" no longer exists in the catalog", step.process_key)],
-                scroll: 0,
-            });
+            let lines = vec![format!("Process \"{}\" no longer exists in the catalog", step.process_key)];
+                let back = self.cdp_chain_editor.is_some().then_some(Dialog::CdpChainEditor);
+                self.show_process_error("ExtProcess Chain Error", lines, back);
             return;
         };
         let is_dual = matches!(def.input, crate::model::cdp::IoKind::DualWav | crate::model::cdp::IoKind::DualAna);
@@ -13388,11 +13461,9 @@ impl App {
         if is_dual && !step.side_chain.is_empty() && run.pending_secondary.is_none() {
             let Some((buf, rate)) = self.chain_picked_buffer(&this_path) else {
                 self.cdp_pending_chain_run = None;
-                self.dialog = Some(Dialog::CdpOutput {
-                    title: "ExtProcess Chain Error".into(),
-                    lines: vec!["A side-chain's source buffer is no longer available".into()],
-                    scroll: 0,
-                });
+                let lines = vec!["A side-chain's source buffer is no longer available".into()];
+                    let back = self.cdp_chain_editor.is_some().then_some(Dialog::CdpChainEditor);
+                    self.show_process_error("ExtProcess Chain Error", lines, back);
                 return;
             };
             if let Some(run) = self.cdp_pending_chain_run.as_mut() {
@@ -13461,11 +13532,9 @@ impl App {
             Ok(p) => p,
             Err(err) => {
                 self.cdp_pending_chain_run = None;
-                self.dialog = Some(Dialog::CdpOutput {
-                    title: "ExtProcess Chain Error".into(),
-                    lines: vec![cdp_plan_error_message(&err)],
-                    scroll: 0,
-                });
+                let lines = vec![cdp_plan_error_message(&err)];
+                    let back = self.cdp_chain_editor.is_some().then_some(Dialog::CdpChainEditor);
+                    self.show_process_error("ExtProcess Chain Error", lines, back);
                 return;
             }
         };
@@ -13764,11 +13833,9 @@ impl App {
             .collect()
         else {
             self.cdp_pending_chain_run = None;
-            self.dialog = Some(Dialog::CdpOutput {
-                title: "ExtProcess Chain Error".into(),
-                lines: vec!["A process in this chain no longer exists in the catalog".into()],
-                scroll: 0,
-            });
+            let lines = vec!["A process in this chain no longer exists in the catalog".into()];
+                let back = self.cdp_chain_editor.is_some().then_some(Dialog::CdpChainEditor);
+                self.show_process_error("ExtProcess Chain Error", lines, back);
             return;
         };
         let pairs: Vec<(&crate::model::cdp::ProcessDef, &[crate::model::cdp::ParamValue])> =
@@ -13785,11 +13852,9 @@ impl App {
             Ok(p) => p,
             Err(err) => {
                 self.cdp_pending_chain_run = None;
-                self.dialog = Some(Dialog::CdpOutput {
-                    title: "ExtProcess Chain Error".into(),
-                    lines: vec![cdp_plan_error_message(&err)],
-                    scroll: 0,
-                });
+                let lines = vec![cdp_plan_error_message(&err)];
+                    let back = self.cdp_chain_editor.is_some().then_some(Dialog::CdpChainEditor);
+                    self.show_process_error("ExtProcess Chain Error", lines, back);
                 return;
             }
         };
@@ -14450,11 +14515,9 @@ impl App {
                     if let Some(mut run) = self.cdp_pending_chain_run.take() {
                         let Ok(output) = result else {
                             let Err(err) = result else { unreachable!() };
-                            self.dialog = Some(Dialog::CdpOutput {
-                                title: "ExtProcess Chain Error".into(),
-                                lines: cdp_error_lines(&err),
-                                scroll: 0,
-                            });
+                            let lines = cdp_error_lines(&err);
+                                let back = self.cdp_chain_editor.is_some().then_some(Dialog::CdpChainEditor);
+                                self.show_process_error("ExtProcess Chain Error", lines, back);
                             continue;
                         };
                         let result_channels = output.results.into_iter().next().unwrap_or_default();
@@ -14729,11 +14792,10 @@ impl App {
                             }
                         },
                         Err(err) => {
-                            self.dialog = Some(Dialog::CdpOutput {
-                                title: "CDP Error".into(),
-                                lines: cdp_error_lines(&err),
-                                scroll: 0,
-                            });
+                            let lines = cdp_error_lines(&err);
+                            let summary = Self::failure_summary(&lines);
+                            let back = Self::params_dialog_after_failure(pending, summary);
+                            self.show_process_error("CDP Error", lines, Some(back));
                         }
                     }
                 }
@@ -27380,6 +27442,105 @@ mod tests {
         // On the left arrow: back to where we started.
         click_at(&mut app, choice_left_arrow_column(CHOICE_LABEL_CURVE));
         assert_eq!(curve(&app), start, "clicking the left arrow must step back");
+    }
+
+    /// A rejected value must not cost the session. The error viewer names what to fix, and
+    /// dismissing it returns to the very form the run came from — every value still in it —
+    /// rather than dropping the user back at the waveform to reopen the browser, find the
+    /// process again and retype the rest.
+    ///
+    /// Driven through `show_process_error`, the one point every backend's failure reaches, so
+    /// this is a property of the error path rather than of any one process.
+    #[test]
+    fn dismissing_a_process_error_returns_to_the_form_it_came_from() {
+        for dismiss in [KeyCode::Enter, KeyCode::Esc] {
+            let mut app = new_app(Some(doc(0.1, 1000)), None);
+            let index = app
+                .cdp_catalog
+                .processes
+                .iter()
+                .position(|p| p.key == "blur_avrg")
+                .expect("blur_avrg");
+            app.open_cdp_params(index);
+
+            // A value the user typed, which must survive the round trip.
+            if let Some(Dialog::CdpParams { fields, .. }) = app.dialog.as_mut() {
+                if let Some(CdpField::Number { input, .. }) = fields.first_mut() {
+                    *input = TextInput::new("42");
+                }
+            }
+            let Some(Dialog::CdpParams { fields, .. }) = app.dialog.as_ref() else { panic!() };
+            let typed: Vec<crate::model::cdp::ParamValue> =
+                fields.iter().map(CdpField::to_value).collect();
+
+            // The failure, as any backend reports one.
+            let Some(Dialog::CdpParams {
+                catalog_index, fields, second_input, variadic_input, photo_input, focus,
+                presets, preset_selected, custom_values, restore, ..
+            }) = app.dialog.take() else { panic!() };
+            let pending = CdpPending {
+                doc_index: 0,
+                range: (0, 1000),
+                label: "blur".into(),
+                catalog_index,
+                fields,
+                second_input,
+                variadic_input,
+                photo_input,
+                focus,
+                presets,
+                preset_selected,
+                custom_values,
+                restore,
+            };
+            let lines = vec!["Duration must be > 0 and <= 120 seconds.".to_string()];
+            let summary = App::failure_summary(&lines);
+            let back = App::params_dialog_after_failure(pending, summary);
+            app.show_process_error("Praat Error", lines, Some(back));
+
+            assert!(matches!(app.dialog, Some(Dialog::CdpOutput { .. })), "the error must show");
+
+            app.handle_key(KeyEvent::new(dismiss, KeyModifiers::NONE));
+
+            match &app.dialog {
+                Some(Dialog::CdpParams { fields, error, .. }) => {
+                    let now: Vec<crate::model::cdp::ParamValue> =
+                        fields.iter().map(CdpField::to_value).collect();
+                    assert_eq!(now, typed, "{dismiss:?}: the typed values must come back");
+                    assert_eq!(
+                        error.as_deref(),
+                        Some("Duration must be > 0 and <= 120 seconds."),
+                        "{dismiss:?}: the reason must stay visible while fixing it"
+                    );
+                }
+                other => panic!(
+                    "{dismiss:?}: expected the params form back, got {}",
+                    other.as_ref().map(dialog_kind_name).unwrap_or("nothing")
+                ),
+            }
+        }
+    }
+
+    /// A failure with nothing behind it — a curve extraction, a chain whose editor is gone —
+    /// still closes to the waveform. The restore is an option, not an assumption.
+    #[test]
+    fn a_process_error_with_no_form_behind_it_still_closes() {
+        let mut app = new_app(Some(doc(0.1, 1000)), None);
+        app.show_process_error("CDP Error", vec!["something broke".into()], None);
+        assert!(matches!(app.dialog, Some(Dialog::CdpOutput { .. })));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "with no restore it must close as before");
+    }
+
+    /// The summary is the first line with anything in it — `praat_error_lines` leads with the
+    /// headline and pads with blanks, and an empty inline error would say nothing.
+    #[test]
+    fn the_inline_summary_is_the_first_meaningful_line() {
+        assert_eq!(
+            App::failure_summary(&["".into(), "  ".into(), " the real reason ".into(), "more".into()]),
+            Some("the real reason".to_string())
+        );
+        assert_eq!(App::failure_summary(&[]), None);
     }
 
     /// A streamed buffer refuses nearly everything, and the key reference must not be among

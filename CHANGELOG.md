@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **A failed process returns you to its parameter form.** A run rejected for an out-of-range
+  value — the limits many Praat scripts enforce but never declare — showed its error and then
+  closed the whole flow: the form and the browser both went, the waveform came back, and fixing
+  one number meant reopening the browser, finding the process again and retyping every other
+  value (user report). Dismissing the error viewer now reopens the form the run came from, every
+  value still in it, with the reason repeated inline above Preview and Apply.
+
+  Universal by construction rather than per process: the return hangs off the error viewer, which
+  every failed run of every backend already funnels through, so CDP, Praat and Airwindows all
+  behave the same way and a fourth backend would inherit it. A failed *chain* step lands back in
+  the chain editor for the same reason. A failure with nothing behind it — a curve extraction —
+  still closes to the waveform, since the restore is an option rather than an assumption.
+
 - **The hoisted settings pages now actually apply.** Every one of the 34 scripts whose second
   page was hoisted declares a `boolean Edit_…_details 0` on page one and wraps the page in
   `if edit_…_details`. The hoist replaced the block in place — *inside* that branch — so with
