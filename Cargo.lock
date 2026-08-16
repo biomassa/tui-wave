@@ -2843,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "tui-wave"
-version = "2.9.2"
+version = "2.9.3"
 dependencies = [
  "airwindows-sys",
  "color-eyre",
