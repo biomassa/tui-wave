@@ -26017,6 +26017,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Stiffness and damping values in the form are REFERENCE coefficients at 2205 physics steps/s"
 description = "Stiffness and damping values in the form are REFERENCE coefficients at 2205 physics steps/s.  When Model_rate_Hz changes:"
+praat_form_locks = [["Edit_all_model_parameters", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -26025,8 +26026,8 @@ preset_param = 0
 preset_custom_option = 0
 param_notes = [
   { before = 4, text = "Enable the next option only when you want to edit all model parameters." },
-  { before = 9, text = "Reference coefficients at 2205 model steps/s" },
-  { before = 18, text = "All positions and mixes are normalized; valid range is 0..1" },
+  { before = 8, text = "Reference coefficients at 2205 model steps/s" },
+  { before = 17, text = "All positions and mixes are normalized; valid range is 0..1" },
 ]
 
 [[process.script_presets]]
@@ -26099,13 +26100,6 @@ default = 2205.0
 exponential = false
 scale = "plain"
 integer = true
-
-[[process.params]]
-name = "Edit_all_model_parameters"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Edge_fade_s"
@@ -26369,6 +26363,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Dynamic Stochastic Grain Field: an inhomogeneous-Poisson granular synthesizer with linearly evolving event density and an octave-domain frequency trajectory"
 description = "Dynamic Stochastic Grain Field: an inhomogeneous-Poisson granular synthesizer with linearly evolving event density and an octave-domain frequency trajectory."
+praat_form_locks = [["Edit_grain_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -26506,13 +26501,6 @@ options = ["Mono", "Stereo Evolution", "Rotating Cloud", "Wide Field"]
 default = 0
 
 [[process.params]]
-name = "Edit_grain_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
 name = "Normalize_output"
 description = ""
 automatable = false
@@ -26607,6 +26595,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Dynamic Vowel Transitions"
 description = "Dynamic Vowel Transitions"
+praat_form_locks = [["Edit_vowel_source_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -26614,7 +26603,7 @@ output_is_stereo = false
 preset_param = 0
 preset_custom_option = 0
 param_notes = [
-  { before = 9, text = "For A-E-I and Vowel Cycle presets, start/end fields are not used; source settings still apply." },
+  { before = 8, text = "For A-E-I and Vowel Cycle presets, start/end fields are not used; source settings still apply." },
 ]
 
 [[process.script_presets]]
@@ -26727,13 +26716,6 @@ automatable = false
 kind = "choice"
 options = ["Reference RMS", "Safety ceiling", "Peak normalize"]
 default = 0
-
-[[process.params]]
-name = "Edit_vowel_source_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Draw_visualization"
@@ -26915,6 +26897,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "An evolving granular mass driven by a time-varying Poisson event field"
 description = "An evolving granular mass driven by a time-varying Poisson event field.\n\nIn ALL evolution modes, Initial_density and Final_density control the actual event intensity:\n\nlambda(t) = d0 + (d1-d0) * t/T\n\nEvent times are generated as an inhomogeneous Poisson process by exponential increments in cumulative-intensity space:\n\nLambda(t) = d0*t + (d1-d0)*t^2/(2T)\n\nThe selected evolution mode then controls the spectral/statistical layer:\n\n1. Density Only - density evolves - pitch center and pitch spread remain stationary\n\n2. Density + Pitch Sweep - density evolves - pitch center follows: fc(t) = f0 * 2^(Pitch_evolution_octaves*t/T) - pitch spread remains stationary\n\n3. Density + Distribution Morph - density evolves - pitch center evolves as above - pitch spread interpolates continuously from Initial_pitch_spread to Final_pitch_spread - expected grain duration moves continuously from long toward short\n\nGrain frequency is drawn in LOG-frequency space with a clipped Gaussian:\n\nf = fc * 2^(spread_octaves * z),  z in [-2.5, +2.5]\n\nGrain amplitude is compensated by expected local overlap, so increasing density changes mass/occupancy rather than acting as an unintended loudness envelope."
+praat_form_locks = [["Edit_grain_statistics", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -27065,13 +27048,6 @@ options = ["Mono", "Stereo Evolution", "Rotating Cloud", "Wide Field"]
 default = 0
 
 [[process.params]]
-name = "Edit_grain_statistics"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
 name = "Normalize_output"
 description = ""
 automatable = false
@@ -27179,6 +27155,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Six-operator FM/PM-style texture generator"
 description = "Six-operator FM/PM-style texture generator."
+praat_form_locks = [["Edit_operator_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -27266,13 +27243,6 @@ step = 0.01
 default = 0.8
 exponential = false
 scale = "plain"
-
-[[process.params]]
-name = "Edit_operator_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Peak_protection"
@@ -27575,6 +27545,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Flute-LIKE KlattGrid synthesis with a twelve-tone pitch row and interval-derived rhythmic palette"
 description = "Flute-LIKE KlattGrid synthesis with a twelve-tone pitch row and interval-derived rhythmic palette.\n\nThis is not a physical waveguide model of a flute. KlattGrid is a source/filter synthesizer; here its phonation/noise controls and a pitch-tracking five-resonance cascade are deliberately repurposed to create a flute-like family of timbres."
+praat_form_locks = [["Edit_voice_and_chiff", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -27700,13 +27671,6 @@ step = 0.01
 default = 1.0
 exponential = false
 scale = "plain"
-
-[[process.params]]
-name = "Edit_voice_and_chiff"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Normalize_output"
@@ -27894,6 +27858,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Each stochastic event creates a Hann-windowed excitation grain"
 description = "Each stochastic event creates a Hann-windowed excitation grain. The grain is assigned to one of five SYNTHESIS vowel banks:"
+praat_form_locks = [["Edit_source_filter_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -28005,13 +27970,6 @@ automatable = false
 kind = "choice"
 options = ["Mono", "Stereo Vowel Spread", "Rotating Vowel Buses", "Wide Vowel Field"]
 default = 0
-
-[[process.params]]
-name = "Edit_source_filter_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Normalize_output"
@@ -28148,6 +28106,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Praat KlattGrid is used as an explicit source-filter synthesizer: phonation / aspiration / breathiness source -> four oral resonances F1..F4 -> output Sound"
 description = "Praat KlattGrid is used as an explicit source-filter synthesizer: phonation / aspiration / breathiness source -> four oral resonances F1..F4 -> output Sound"
+praat_form_locks = [["Edit_formant_details", true], ["Edit_source_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -28232,20 +28191,6 @@ automatable = false
 kind = "choice"
 options = ["Mono", "Stereo Micro-Delay", "Detuned Stereo Chorus"]
 default = 0
-
-[[process.params]]
-name = "Edit_formant_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
-name = "Edit_source_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Normalize_output"
@@ -28480,6 +28425,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "A finite-state, first-order Markov chain selects a state for every stochastic sound event"
 description = "A finite-state, first-order Markov chain selects a state for every stochastic sound event. Each state maps to frequency, duration and a mild amplitude tilt."
+praat_form_locks = [["Edit_state_synthesis_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -28626,13 +28572,6 @@ options = ["Mono", "State-Based Pan", "Rotating Events"]
 default = 0
 
 [[process.params]]
-name = "Edit_state_synthesis_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
 name = "Normalize_output"
 description = ""
 automatable = false
@@ -28756,6 +28695,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "A waveform cycle is a polygon defined by N breakpoints"
 description = "A waveform cycle is a polygon defined by N breakpoints. Every breakpoint has an amplitude and a relative time spacing. The polygon is sampled by linear interpolation at the target audio sample rate."
+praat_form_locks = [["Edit_stochastic_boundaries", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -28906,13 +28846,6 @@ options = ["Mono", "Stereo Dual", "Equal-Power Cross-Rotation"]
 default = 0
 
 [[process.params]]
-name = "Edit_stochastic_boundaries"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
 name = "Normalize_output"
 description = ""
 automatable = false
@@ -29016,6 +28949,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Six distinct generative synthesis processes sharing one compact interface"
 description = "Six distinct generative synthesis processes sharing one compact interface.\n\n1. Harmonic Drift Harmonic layers whose instantaneous frequencies are driven by independent bounded stochastic drift controls. Phase is integrated at audio sample rate.\n\n2. Granular Cloud Genuine Poisson-distributed Hann grains. Each layer has an independent stochastic event rate, grain frequency jitter, duration and phase.\n\n3. Chaotic FM Logistic-map control signals are resampled to audio rate and mapped to bounded instantaneous carrier frequency. Audio phase is then integrated sample by sample. This is true frequency modulation by a chaotic control, not a sinusoidal phase formula merely labelled \"chaos\".\n\n4. Spectral Morph A shared noise source is split into fixed spectral bands. A coherent moving focus crossfades among the bands, producing an actual time-varying spectral weighting rather than amplitude-modulating a fixed filter.\n\n5. Rhythmic Pulse Each layer generates a jittered, probabilistically thinned pulse train. Every event has its own onset, duration and phase.\n\n6. Subtractive Noise Independent noise bands are shaped by independent bounded stochastic amplitude controls. Evolution_rate controls the control-process speed."
+praat_form_locks = [["Edit_generative_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -29110,13 +29044,6 @@ step = 0.01
 default = 1.0
 exponential = false
 scale = "plain"
-
-[[process.params]]
-name = "Edit_generative_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Normalize_output"
@@ -29265,6 +29192,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "This instrument is INSPIRED by Gérard Grisey's compositional attitude: sound as process, harmonicity <-> inharmonicity, micro/macro temporal continuity, percept"
 description = "This instrument is INSPIRED by Gérard Grisey's compositional attitude: sound as process, harmonicity <-> inharmonicity, micro/macro temporal continuity, perceptual thresholds, instrumental/additive synthesis and continuous mutation."
+praat_form_locks = [["Edit_spectral_details", true], ["Edit_process_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -29397,20 +29325,6 @@ automatable = false
 kind = "choice"
 options = ["Simple process", "Five-stage becoming (inspired)"]
 default = 1
-
-[[process.params]]
-name = "Edit_spectral_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
-name = "Edit_process_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Peak_protection"
@@ -29620,6 +29534,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "A two-level design:"
 description = "A two-level design:"
+praat_form_locks = [["Edit_texture_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -29770,13 +29685,6 @@ options = ["Mono", "Stereo Event Spread", "Stereo Detuned Pair", "Stereo Micro-D
 default = 0
 
 [[process.params]]
-name = "Edit_texture_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
 name = "Peak_protection"
 description = ""
 automatable = false
@@ -29924,6 +29832,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "This is NOT a reconstruction of Wlodzimierz Kotonski's compositional method"
 description = "This is NOT a reconstruction of Wlodzimierz Kotonski's compositional method. It is an engine-specific finite-state event controller informed by three historically documented strategies in his electroacoustic work:"
+praat_form_locks = [["Edit_state_sound_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -30042,13 +29951,6 @@ automatable = false
 kind = "choice"
 options = ["Mono", "Event Spread", "State Positions"]
 default = 0
-
-[[process.params]]
-name = "Edit_state_sound_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Peak_protection"
@@ -30227,6 +30129,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "This engine is a coupled collection of finite-state stochastic processes"
 description = "This engine is a coupled collection of finite-state stochastic processes. Each layer has:"
+praat_form_locks = [["Edit_markov_texture_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -30390,13 +30293,6 @@ options = ["Mono", "Layer Spread", "Rotating Layers"]
 default = 0
 
 [[process.params]]
-name = "Edit_markov_texture_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
 name = "Peak_protection"
 description = ""
 automatable = false
@@ -30543,6 +30439,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Autonomous fixed-r mode:"
 description = "Autonomous fixed-r mode:"
+praat_form_locks = [["Edit_mapping_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -30697,13 +30594,6 @@ exponential = false
 scale = "plain"
 
 [[process.params]]
-name = "Edit_mapping_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
 name = "Spatial_mode"
 description = ""
 automatable = false
@@ -30833,6 +30723,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "dx/dt = sigma*(y-x) dy/dt = x*(rho-z)-y dz/dt = x*y-beta*z"
 description = "dx/dt = sigma*(y-x) dy/dt = x*(rho-z)-y dz/dt = x*y-beta*z"
+praat_form_locks = [["Edit_integration_mapping_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -30965,13 +30856,6 @@ automatable = false
 kind = "choice"
 options = ["Mono", "Stereo Z-axis pan", "Stereo X-Y oscillator split"]
 default = 0
-
-[[process.params]]
-name = "Edit_integration_mapping_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Peak_protection"
@@ -31133,6 +31017,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "A Markov state is a CYCLIC BINARY RHYTHM TEMPLATE (a rhythm necklace)"
 description = "A Markov state is a CYCLIC BINARY RHYTHM TEMPLATE (a rhythm necklace). The chain changes state once per completed template cycle, not once per beat. Tempo therefore has a musically explicit meaning:"
+praat_form_locks = [["Edit_markov_rhythm_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -31280,13 +31165,6 @@ step = 0.01
 default = 1.0
 exponential = false
 scale = "plain"
-
-[[process.params]]
-name = "Edit_markov_rhythm_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Peak_protection"
@@ -32115,6 +31993,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Stochastic grain synthesis using Poisson point processes"
 description = "Stochastic grain synthesis using Poisson point processes. Events occur at random times with exponentially distributed inter-arrival intervals - a mathematically rigorous approach to statistical texture synthesis (cf. Xenakis).\n\nEach event triggers a short windowed grain with randomized frequency and duration. Independent L/R processes create spatial depth."
+praat_form_locks = [["Edit_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -32236,13 +32115,6 @@ step = 0.01
 default = 1.0
 exponential = false
 scale = "plain"
-
-[[process.params]]
-name = "Edit_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Draw_visualization"
@@ -32398,6 +32270,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Rhythmic synthesis using two independent homogeneous Poisson layers"
 description = "Rhythmic synthesis using two independent homogeneous Poisson layers. One process generates accented main beats and a denser independent secondary layer. Canon mode repeats the same stochastic realization at delayed entries, with alternating pitch and stereo placement."
+praat_form_locks = [["Edit_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -32522,13 +32395,6 @@ options = ["No Canon", "Canon 2 voices", "Canon 3 voices", "Canon 4 voices"]
 default = 0
 
 [[process.params]]
-name = "Edit_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
 name = "Draw_visualization"
 description = ""
 automatable = false
@@ -32643,6 +32509,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Polyrhythm generator and visualizer"
 description = "Polyrhythm generator and visualizer. Creates two rhythmic lines with different numbers of evenly-spaced beats over a common duration, demonstrating metric relationships like 3:4, 5:7, etc.\n\nVisual representation shows dots on two lines; audio uses different pitches for each line with stereo separation.\n\nv0.4 adds a Repeat_count form field that concatenates the single-bar pattern N times for an N-bar output."
+praat_form_locks = [["Edit_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -32762,13 +32629,6 @@ exponential = false
 scale = "plain"
 
 [[process.params]]
-name = "Edit_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
 name = "Draw_visualization"
 description = ""
 automatable = false
@@ -32830,6 +32690,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Pulsar synthesis using a selected Sound as the pulsaret/timbre kernel"
 description = "Pulsar synthesis using a selected Sound as the pulsaret/timbre kernel. The engine separates four stages explicitly: 1. onset process (periodic/chirped/jittered or Poisson), 2. band-limited impulse train, 3. convolution with the selected Sound, 4. per-IOI Hann duty gate + global envelope / AM.\n\nThe duty cycle is the fraction of each realized inter-onset interval during which the convolved pulsaret remains active. The Hann gate is applied AFTER convolution, so changing duty cycle changes the sound.\n\nVisualization is mechanism-first rather than result-first: A. realized onset intervals versus the generating rule, B. actual duty-cycle gate inside a representative IOI, C. selected kernel plus global envelope / AM controls, D. measured output waveform, followed by process/QC summary."
+praat_form_locks = [["Edit_details", true]]
 input = "wav"
 output = "wav"
 stereo_native = true
@@ -32898,13 +32759,6 @@ step = 0.01
 default = 0.5
 exponential = false
 scale = "plain"
-
-[[process.params]]
-name = "Edit_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Normalize_output"
@@ -33070,6 +32924,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Generates a melody from a bounded discrete random walk on scale degrees"
 description = "Generates a melody from a bounded discrete random walk on scale degrees. At each note transition, a Bernoulli decision with probability p either holds the current degree or chooses uniformly among all legal, non-zero steps up to Max_step_size.  This makes Step_probability the actual probability of changing pitch, without extra zero-steps or sticky clamps.\n\nThe selected scale maps degree -> frequency.  Each note is synthesized as a phase-reset sine inside a Hann window, and the final sound is normalized once at the end."
+praat_form_locks = [["Edit_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -33185,13 +33040,6 @@ scale = "plain"
 integer = true
 
 [[process.params]]
-name = "Edit_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
 name = "Draw_visualization"
 description = ""
 automatable = false
@@ -33268,6 +33116,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Generates a quantized percussive pulse stream whose FREQUENCY follows a bounded random walk on a linear-Hz lattice"
 description = "Generates a quantized percussive pulse stream whose FREQUENCY follows a bounded random walk on a linear-Hz lattice. Timing is deterministic: Tempo x Steps_per_beat defines the rhythmic grid. At each transition a categorical draw requests up, down, or hold; requests that point outside the frequency lattice are reflected inward instead of being clamped.\n\nEach event uses a local-phase sine, exponential decay, and cosine closure. Spatial modes are mono, true event-alternating stereo ping-pong, constant-power rotating panorama, and dual-band AM."
+praat_form_locks = [["Edit_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -33417,13 +33266,6 @@ options = ["Mono", "Stereo Ping-Pong", "Rotating Panorama", "Dual-Band AM"]
 default = 0
 
 [[process.params]]
-name = "Edit_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
 name = "Draw_visualization"
 description = ""
 automatable = false
@@ -33551,6 +33393,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Rich Formant Grains"
 description = "Rich Formant Grains"
+praat_form_locks = [["edit_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -33664,13 +33507,6 @@ automatable = false
 kind = "choice"
 options = ["Mono", "Stereo Spectral Split", "Rotating Field", "Dual-Band Whisper"]
 default = 0
-
-[[process.params]]
-name = "edit_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "draw_visualization"
@@ -33802,6 +33638,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Risset-inspired timbre-mutation generator"
 description = "Risset-inspired timbre-mutation generator. Randomly scheduled sine events pass through time-varying polynomial waveshapers. A separate amplitude envelope closes every event smoothly; a mutation envelope swells the waveshaping depth toward the event midpoint and returns to the sine source.\n\nMode 1 uses an odd polynomial (fundamental + 3rd + 5th components), Mode 2 crossfades toward a fundamental + 2nd-harmonic Chebyshev shape, and Mode 3 crossfades toward the 7th-order Chebyshev polynomial T7."
+praat_form_locks = [["Edit_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -33826,13 +33663,6 @@ step = 0.01
 default = 30.0
 exponential = false
 scale = "plain"
-
-[[process.params]]
-name = "Edit_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Draw_visualization"
@@ -33897,6 +33727,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "RGB-column sonification by additive synthesis"
 description = "RGB-column sonification by additive synthesis. Horizontal image position maps to time. Sparse rows are sampled and averaged within each analysis column. RGB controls three interleaved harmonic families: Red   -> harmonics 1, 4, 7, 10, ... Green -> harmonics 2, 5, 8, 11, ... Blue  -> harmonics 3, 6, 9, 12, ... Harmonic amplitude is C(t)/h and the control values are linearly interpolated between analysis columns. Red-blue balance controls constant-power stereo position; green remains centred."
+praat_form_locks = [["edit_details", true]]
 input = "photo"
 output = "wav"
 stereo_native = true
@@ -33941,13 +33772,6 @@ default = 12.0
 exponential = false
 scale = "plain"
 integer = true
-
-[[process.params]]
-name = "edit_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "draw_visualization"
@@ -34039,6 +33863,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Generator inspired by Karlheinz Stockhausen's Studie II (1954)"
 description = "Generator inspired by Karlheinz Stockhausen's Studie II (1954). Serial mode is a historically informed MODEL, not a transcription. Core materials: - idealized 81-tone scale based on 5^(1/25) - five-component Tongemische selected by 1..5 SCALE STEPS - section/group organization inspired by the documented five-part form - monochrome, two-system score visualization informed by the published score: upper system = 81-line tone-mixture field centre strip = tape-time / duration information lower system = articulation and amplitude envelopes"
+praat_form_locks = [["Edit_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -34063,13 +33888,6 @@ step = 0.01
 default = 10.0
 exponential = false
 scale = "plain"
-
-[[process.params]]
-name = "Edit_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Draw_score"
@@ -34217,6 +34035,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Subtractive Synthesis Generator"
 description = "Subtractive Synthesis Generator"
+praat_form_locks = [["Edit_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -34362,13 +34181,6 @@ exponential = false
 scale = "plain"
 
 [[process.params]]
-name = "Edit_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
 name = "Draw_visualization"
 description = ""
 automatable = false
@@ -34430,6 +34242,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Four-source vector synthesis using bilinear interpolation"
 description = "Four-source vector synthesis using bilinear interpolation. A 2-D path controls the amplitudes of SAW / SQR / TRI / SIN sources."
+praat_form_locks = [["Edit_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -34493,13 +34306,6 @@ exponential = false
 scale = "plain"
 
 [[process.params]]
-name = "Edit_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
-
-[[process.params]]
 name = "Draw_visualization"
 description = ""
 automatable = false
@@ -34555,6 +34361,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Conway Game of Life sonification"
 description = "Conway Game of Life sonification.  The cellular state is evolved first, then each live cell is mapped to a sinusoid for one generation."
+praat_form_locks = [["Edit_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -34637,13 +34444,6 @@ automatable = false
 kind = "choice"
 options = ["Mono", "Stereo constant-power X pan"]
 default = 0
-
-[[process.params]]
-name = "Edit_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Draw_visualization"
@@ -34758,6 +34558,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Wave-terrain synthesis: a bounded 2-D trajectory scans a terrain z(x,y), and the interpolated terrain height becomes the audio sample value"
 description = "Wave-terrain synthesis: a bounded 2-D trajectory scans a terrain z(x,y), and the interpolated terrain height becomes the audio sample value."
+praat_form_locks = [["Edit_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -34835,13 +34636,6 @@ step = 0.01
 default = 330.0
 exponential = false
 scale = "plain"
-
-[[process.params]]
-name = "Edit_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Draw_visualization"
@@ -35049,6 +34843,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Waveguide Klangmaschine: generates a randomized SATB chord using digital waveguide synthesis with per-string allpass fractional delay, stiffness dispersion, LP "
 description = "Waveguide Klangmaschine: generates a randomized SATB chord using digital waveguide synthesis with per-string allpass fractional delay, stiffness dispersion, LP damping, and bridge coupling — processed through an 8-mode soundboard resonator bank, spectral-split stereo imaging, and an independent-L/R Poisson-process spectral decay reverb."
+praat_form_locks = [["Edit_reverb_render_details", true]]
 input = "wav"
 output = "wav"
 stereo_native = true
@@ -35104,13 +34899,6 @@ automatable = false
 kind = "choice"
 options = ["None", "Subtle", "Wild"]
 default = 1
-
-[[process.params]]
-name = "Edit_reverb_render_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Draw_visualization"
@@ -35304,6 +35092,7 @@ category = "praat"
 subcategory = "Generative"
 short_description = "Waveguide Modal Synthesis"
 description = "Waveguide Modal Synthesis"
+praat_form_locks = [["Edit_details", true]]
 input = "none"
 output = "wav"
 stereo_native = true
@@ -35372,13 +35161,6 @@ automatable = false
 kind = "choice"
 options = ["No Envelope", "Percussive", "Slow Decay", "Smooth Gate", "Reverse Ramp", "Tremolo", "Swell", "ADSR", "Smooth Stutter", "Random Bursts"]
 default = 0
-
-[[process.params]]
-name = "Edit_details"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Draw_visualization"

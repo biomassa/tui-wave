@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- **The hoisted settings pages now actually apply.** Every one of the 34 scripts whose second
+  page was hoisted declares a `boolean Edit_…_details 0` on page one and wraps the page in
+  `if edit_…_details`. The hoist replaced the block in place — *inside* that branch — so with
+  the box at its default the assignments never ran and the detail parameters were ignored, while
+  sitting in the dialog looking editable (user report, against Markov Rhythm Generator: ticking
+  the box seemed to change nothing, and leaving it unticked silently discarded eight fields).
+
+  Each entry now carries `lock_on`, the mechanism three older scripts already used: the boolean
+  is deleted from the form and the variable forced true, so the detail parameters apply
+  unconditionally. The checkbox disappears with it, which is right — it was never a parameter of
+  the sound, only an answer to "show me page two?", and the dialog answers that by showing page
+  two. 36 gate toggles gone across 34 processes (two have two), 457 processes unchanged, and no
+  process lost anything else.
+
 ## 2026-08-16 (2.9.3)
 
 - **praatAudioTools updated to `e2cbd5f`** (3 further commits). Upstream is working through
