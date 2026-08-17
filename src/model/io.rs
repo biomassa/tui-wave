@@ -415,6 +415,20 @@ pub fn save_wav_with(
     dither: bool,
 ) -> color_eyre::Result<()> {
     let path = path.as_ref();
+    // A streamed document keeps its samples on disk and its `channels` deliberately empty, so
+    // the write loops below would emit a header claiming the stream's channel count and then
+    // no audio at all — a valid, empty WAV, staged and renamed over a take that may be 30GB.
+    // The read-only allowlist in `App::handle_action` is meant to keep such a document away
+    // from here, but it guards one entry point and this function has several (quick Save, Save
+    // All, the Buffers panel, a dirty-close confirm). Refusing at the funnel is what makes the
+    // guarantee independent of every caller remembering. Streamed Save As is not affected: it
+    // goes through `save_streamed_wav`, which reads the audio back off disk as it writes.
+    if doc.is_streaming() {
+        color_eyre::eyre::bail!(
+            "refusing to save a streamed buffer in place: its audio lives on disk, not in memory. \
+             Use Save As, which streams the file to a new path."
+        );
+    }
     let spec = WavSpec {
         channels: doc.channel_count().max(1) as u16,
         sample_rate: doc.sample_rate,
