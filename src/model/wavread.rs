@@ -98,6 +98,22 @@ pub struct WavInfo {
 }
 
 impl WavInfo {
+    /// Bytes one channel occupies inside a frame — the stride between channel *n* and *n+1*.
+    ///
+    /// Not the same as `format.bytes_per_sample()` whenever `probe` accepted a `blockAlign`
+    /// wider than the depth implies, which it deliberately does ("a writer may pad samples to a
+    /// wider container"). Honouring the padded stride for the frame and the unpadded one for the
+    /// channel offset — as the decoders used to — makes the two disagree, so every channel above
+    /// 0 decodes from the wrong bytes: audible garbage that still looks like a plausible
+    /// waveform. Derived rather than stored, so it cannot drift from `bytes_per_frame`.
+    ///
+    /// Assumes the sample sits at the *start* of its slot, with the padding trailing, which is
+    /// the ordinary convention for padded PCM. Standard files are unaffected either way: with no
+    /// padding this equals `bytes_per_sample()` exactly.
+    pub fn bytes_per_channel(&self) -> usize {
+        self.bytes_per_frame / self.channels.max(1)
+    }
+
     /// Bytes a fully-resident `Vec<Vec<f32>>` of this file would occupy.
     ///
     /// The working format is f32 regardless of source depth, so this is *not* the file size:
@@ -278,9 +294,13 @@ impl WavFrames {
         // for a 30GB file ran at ~320 MB/s on a disk that does 2.5 GB/s — CPU-bound at an
         // eighth of the hardware. `chunks_exact` also gives the compiler a fixed-size window to
         // elide bounds checks against, which per-sample `scratch[at..at + n]` indexing does not.
+        // Stride between channels is the frame's own per-channel slot, which is wider than the
+        // sample whenever `probe` accepted a padded `blockAlign`. `sample_bytes` stays the
+        // *width* decoded out of that slot — the two are different quantities.
+        let stride = self.info.bytes_per_channel();
         for (ch, out_ch) in out.iter_mut().enumerate().take(self.info.channels) {
             out_ch.reserve(frames);
-            let base = ch * sample_bytes;
+            let base = ch * stride;
             let bytes = &self.scratch[..frames * bpf];
             match format {
                 SourceFormat::Float32 => {
@@ -351,7 +371,8 @@ impl WavFrames {
         let bpf = self.info.bytes_per_frame;
         let format = self.info.format;
         let sample_bytes = format.bytes_per_sample();
-        let base = channel * sample_bytes;
+        // See `read_into`: the stride is the padded slot, the width is the sample.
+        let base = channel * self.info.bytes_per_channel();
         let frames = raw.len() / bpf;
         out.reserve(frames);
         // Same specialization as `read_into`, and for the same reason: with the match inside the
@@ -414,7 +435,8 @@ impl WavFrames {
 
         let format = self.info.format;
         let sample_bytes = format.bytes_per_sample();
-        let base = channel * sample_bytes;
+        // See `read_into`: the stride is the padded slot, the width is the sample.
+        let base = channel * self.info.bytes_per_channel();
         out.reserve(frames);
         for f in 0..frames {
             let at = f * bpf + base;
@@ -713,6 +735,72 @@ mod tests {
         assert_eq!(info.channels, 58);
         assert_eq!(info.format, SourceFormat::Float32, "the GUID says IEEE float");
         assert_eq!(info.frame_count, frames as u64);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `probe` deliberately accepts a `blockAlign` wider than the depth implies ("a writer may
+    /// pad samples to a wider container") and uses it as the frame stride — but the decoders
+    /// computed each channel's offset from the *unpadded* `bytes_per_sample()`, so the two
+    /// disagreed and every channel above 0 read from the wrong bytes: audible garbage that still
+    /// looks like a plausible waveform.
+    ///
+    /// 24-bit stereo in 4-byte containers: `blockAlign` 8 against an implied 6.
+    #[test]
+    fn a_padded_block_align_strides_channels_by_the_padded_slot() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_pad_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let frames = 32usize;
+
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(b"WAVE");
+        body.extend_from_slice(b"fmt ");
+        body.extend_from_slice(&16u32.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes()); // WAVE_FORMAT_PCM
+        body.extend_from_slice(&2u16.to_le_bytes()); // stereo
+        body.extend_from_slice(&48000u32.to_le_bytes());
+        body.extend_from_slice(&(48000u32 * 8).to_le_bytes()); // byteRate
+        body.extend_from_slice(&8u16.to_le_bytes()); // blockAlign: 4-byte slots, implied is 6
+        body.extend_from_slice(&24u16.to_le_bytes()); // 24-bit samples
+
+        // Distinct, easily-told-apart ramps so a wrong stride cannot coincidentally match.
+        let l: Vec<i32> = (0..frames).map(|i| (i as i32 + 1) * 0x0100).collect();
+        let r: Vec<i32> = (0..frames).map(|i| -((i as i32 + 1) * 0x0100)).collect();
+        body.extend_from_slice(b"data");
+        body.extend_from_slice(&((frames * 8) as u32).to_le_bytes());
+        for f in 0..frames {
+            for v in [l[f], r[f]] {
+                let b = v.to_le_bytes();
+                body.extend_from_slice(&b[0..3]); // the 24-bit sample
+                body.push(0); // trailing pad, filling the 4-byte slot
+            }
+        }
+
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        let path = dir.join("padded.wav");
+        std::fs::write(&path, &out).unwrap();
+
+        let info = probe(&path).unwrap();
+        assert_eq!(info.bytes_per_frame, 8, "the padded blockAlign is the frame stride");
+        assert_eq!(info.bytes_per_channel(), 4, "and each channel gets half of it, not 3");
+        assert_eq!(info.frame_count, frames as u64);
+
+        let doc = crate::model::io::load_wav(&path).unwrap();
+        assert_eq!(doc.channel_count(), 2);
+        let scale = 1.0 / 8_388_608.0;
+        for f in 0..frames {
+            let want_l = l[f] as f32 * scale;
+            let want_r = r[f] as f32 * scale;
+            assert!((doc.channels[0][f] - want_l).abs() < 1e-6, "left frame {f}");
+            assert!(
+                (doc.channels[1][f] - want_r).abs() < 1e-6,
+                "right frame {f}: got {} want {want_r} — the right channel is the one a wrong stride corrupts",
+                doc.channels[1][f]
+            );
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -295,13 +295,19 @@ fn find_note_key_u32(bytes: &[u8], key_name: &str) -> Option<u32> {
     while let Some(key) = lines.next() {
         let Some(value_hex) = lines.next() else { break };
         if key.trim() == key_name {
-            let hex = value_hex.trim();
+            // Sliced as bytes, not as `&str`: the length check below is a *byte* length, but
+            // `body` is only guaranteed valid UTF-8, not ASCII — so an 8-byte value line
+            // carrying a multi-byte character at an odd offset (a corrupt or truncated CDP
+            // formant file) would slice mid-codepoint and panic. Byte slicing cannot, and
+            // `from_utf8` on a split pair fails into the same `None` a bad hex digit does.
+            let hex = value_hex.trim().as_bytes();
             if hex.len() != 8 {
                 return None;
             }
             let mut arr = [0u8; 4];
             for i in 0..4 {
-                arr[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+                let pair = std::str::from_utf8(&hex[i * 2..i * 2 + 2]).ok()?;
+                arr[i] = u8::from_str_radix(pair, 16).ok()?;
             }
             return Some(u32::from_le_bytes(arr));
         }
@@ -483,6 +489,31 @@ mod tests {
         assert_eq!(cleaned.get(2, 0), 0.5, "the dropout frame's bin 0 should be replaced by its neighbors' value");
         assert_eq!(cleaned.get(2, 1), 0.6, "the dropout frame's bin 1 should be replaced by its neighbors' value");
         assert_eq!(cleaned.get(0, 0), 0.5, "an untouched frame should stay the same");
+    }
+
+    /// `find_note_key_u32` guards on `hex.len() != 8`, which is a *byte* length, and then sliced
+    /// `&hex[i*2..i*2+2]` as a `&str`. `body` is only guaranteed valid UTF-8, not ASCII, so an
+    /// 8-byte value line carrying a multi-byte character at an odd offset sliced mid-codepoint
+    /// and panicked — process abort on a corrupt or truncated CDP formant file. It must decline
+    /// the value instead.
+    #[test]
+    fn a_note_chunk_with_non_ascii_hex_is_declined_rather_than_panicking() {
+        fn note_chunk(value_line: &str) -> Vec<u8> {
+            let body = format!("specenvcnt\n{value_line}\n");
+            let mut out = Vec::new();
+            out.extend_from_slice(b"note");
+            out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            out.extend_from_slice(body.as_bytes());
+            out
+        }
+
+        // 8 bytes, but `é` is two of them starting at byte 1 — every pair boundary after it
+        // lands mid-codepoint.
+        assert_eq!(find_note_key_u32(&note_chunk("aé23456"), "specenvcnt"), None);
+        // A 2-byte character sitting exactly on a pair boundary is still not hex.
+        assert_eq!(find_note_key_u32(&note_chunk("00é23456"[..8].into()), "specenvcnt"), None);
+        // And the ordinary case still reads: 0x00000003 little-endian.
+        assert_eq!(find_note_key_u32(&note_chunk("03000000"), "specenvcnt"), Some(3));
     }
 
     #[test]

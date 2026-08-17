@@ -34,6 +34,62 @@
   curve editor's `n` has always had for exactly this case, and both editors decline an empty list
   rather than indexing it — Esc still closes.
 
+- **A chain no longer splices a result that changes the channel count.** Twelve processes declare
+  `output_new_buffer` because splicing them would rewrite the source document's own width, and
+  `CdpProcessCommand` widens a document to fit a wider result but has no guard for a *narrower*
+  one — `insert_range` fills every channel the data doesn't cover from channel 0. `pairex` (8 in,
+  2 out) run as a chain step on an 8-channel take therefore overwrote channels 2-7 with a copy of
+  the result's channel 0, silently. `process_is_chainable` filters on `IoKind` alone, so all twelve
+  reach the chain, and until now the flag's only readers were in the *standalone* Apply path: the
+  two disagreed about the one thing it decides. A chain whose steps include one now opens its
+  result as a new buffer, exactly as the standalone run does.
+
+- **Abandoning a side-chain pick no longer hijacks the next process run.** "Configure Side-Chain…"
+  suspends the parent step's parameter session and opens the browser, but opened it with no return
+  — so Esc there matched no arm and fell through to closing everything, leaving the chain-edit
+  target and the suspend stack set with no dialog left to clear them. The next ordinary `Ctrl+P`
+  was then silently filtered to chainable processes only, and its Apply committed the process into
+  the abandoned chain draft instead of processing the audio. Nothing said so, and only a restart
+  cleared it. Esc now resumes the parent step's session, which is what "back to the chain being
+  built" means once a session was suspended to get there. `preview_chain_step`'s five other early
+  returns took the dialog before failing and stranded the same state; each now restores the form
+  with a reason.
+
+- **Undoing a Trim that did nothing no longer panics.** `execute` declines a span running past the
+  end of the document, but `History::apply` has already pushed the command — so the undo stack held
+  a Trim with no saved state, and `undo` unwrapped it. Reachable because nothing clamps a selection
+  when a command shrinks the document. It now no-ops, the shape its four sibling commands already
+  used.
+
+- **Marks no longer destroy each other on a drag.** Both mark systems key their undo commands on a
+  position, so two marks on one sample is not representable — the drag handler reconciled that by
+  sorting and de-duplicating, which silently deleted one of a hand-placed pair and left the undo
+  command pointing at a position that no longer existed, so it moved the survivor instead of
+  restoring the lost one. Ordinary markers had the milder form of it: two on one sample made undo's
+  position lookup ambiguous, swapping two labels and then saving cue points under the wrong names.
+  A mark now does not move onto an occupied sample; it sticks until the pointer clears it.
+
+- **An over-4GB write no longer leaves malformed padding.** The RF64 upgrade reserves 60 bytes and
+  `ds64` needs 36, and the remaining 24 were zero-filled — which a chunk walker reads as three
+  chunks with a NUL id, between `ds64` and `fmt `. This app's own reader survives it; a stricter
+  one may refuse a file that cost 30GB of I/O to produce. The remainder is now a real `JUNK` chunk.
+
+- **A padded `blockAlign` decodes correctly.** The reader deliberately accepts a `blockAlign` wider
+  than the depth implies and used it as the frame stride, but the decoders computed each channel's
+  offset from the *unpadded* sample size — so on such a file every channel above 0 read from the
+  wrong bytes: audible garbage that still looks like a plausible waveform. Standard files were
+  never affected, and are byte-identical now.
+
+- **Resample is ~4.3x faster and a corrupt formant file no longer aborts.** The resampler's tap loop
+  evaluated a `sin` and a `cos` per tap; both angles advance by a fixed step, so they are now
+  rotated through the loop instead (measured 101ms against 434ms for ten seconds of one channel).
+  This shortens the freeze rather than removing it — a large conversion still blocks the UI thread
+  with no progress and no cancel, unlike every other long operation here. Separately,
+  `find_note_key_u32` length-checked *bytes* and then sliced a `&str`, so an 8-byte value line
+  holding a multi-byte character panicked; it slices bytes now. And the pitch-curve resample was
+  quadratic in the analysis-window count — a 5-minute selection was ~5e9 inner iterations — and now
+  binary-searches.
+
 ## 2026-08-16 (2.9.4)
 
 - **A failed process returns you to its parameter form.** A run rejected for an out-of-range
