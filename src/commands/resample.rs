@@ -6,15 +6,6 @@ use crate::model::document::Document;
 /// crossings regardless of conversion ratio.
 const HALF_TAPS: usize = 32;
 
-fn sinc(x: f64) -> f64 {
-    if x.abs() < 1e-9 {
-        1.0
-    } else {
-        let p = std::f64::consts::PI * x;
-        p.sin() / p
-    }
-}
-
 /// Arbitrary-ratio resample of one channel via a normalized windowed-sinc (Hann) kernel.
 /// `ratio` is `out_rate / in_rate`. Normalizing by the summed weights gives unity DC gain
 /// and graceful edge handling without an explicit zero-padding pass. Pure function — no
@@ -29,25 +20,58 @@ pub fn resample_channel(input: &[f32], ratio: f64) -> Vec<f32> {
     let half = (HALF_TAPS as f64 / cutoff).ceil() as isize;
     let len = input.len() as isize;
 
+    // `tau` falls by exactly 1.0 per tap, so both angles the kernel needs advance by a *fixed*
+    // step: the sinc's by `-PI * cutoff` and the Hann window's by `-PI / half`. Rotating them
+    // through the tap loop with the angle-addition identities costs two multiply-adds each,
+    // where evaluating them directly costs a `sin` and a `cos` per tap — and the tap count is
+    // `2 * ceil(32 / cutoff)`, so a 96k→48k pass spent 128 transcendentals per output sample
+    // per channel. On a 30-channel 5-minute take that is ~5e10 of them, on the UI thread, with
+    // nothing on screen saying the app is working rather than hung.
+    //
+    // Measured at **4.3x** on that ratio in a release build (101ms against 434ms for 10s of
+    // one channel) — well short of the ~64x the transcendental count alone implies, because
+    // the compiler vectorizes the direct form and memory traffic takes over. Worth having, but
+    // this shortens the freeze rather than removing it: a genuinely large conversion still
+    // blocks the UI thread with no progress and no way to cancel, unlike every other long
+    // operation here (streamed load, streamed Save As, Export Channels).
+    //
+    // The rotation restarts from a fresh `sin_cos` on every output sample, so error is bounded
+    // by one sample's tap count instead of accumulating across the file — at ~1e-16 per step
+    // over at most a few thousand steps, far below the f32 the result is stored as.
+    let (sin_step, cos_step) = (-std::f64::consts::PI * cutoff).sin_cos();
+    let half_f = half as f64;
+    let (sin_wstep, cos_wstep) = (-std::f64::consts::PI / half_f).sin_cos();
+
     let mut out = Vec::with_capacity(out_len);
     for i in 0..out_len {
         let center = i as f64 / ratio; // position in input-sample units
         let n0 = center.floor() as isize;
+        let n_start = n0 - half + 1;
+        let tau_start = center - n_start as f64;
+        // Angles at the first tap; each iteration rotates them to the next.
+        let (mut sin_a, mut cos_a) = (std::f64::consts::PI * cutoff * tau_start).sin_cos();
+        let (mut sin_w, mut cos_w) = (std::f64::consts::PI * tau_start / half_f).sin_cos();
         let mut acc = 0.0f64;
         let mut norm = 0.0f64;
-        for n in (n0 - half + 1)..=(n0 + half) {
-            if n < 0 || n >= len {
-                continue;
-            }
+        for n in n_start..=(n0 + half) {
             let tau = center - n as f64;
-            if tau.abs() > half as f64 {
-                continue;
+            if n >= 0 && n < len && tau.abs() <= half_f {
+                // `sin_a` is `sin(PI * cutoff * tau)` — the sinc's numerator, with the same
+                // small-argument guard the standalone `sinc` uses.
+                let x = cutoff * tau;
+                let s = if x.abs() < 1e-9 { 1.0 } else { sin_a / (std::f64::consts::PI * x) };
+                // Hann window over the [-half, half] support; `cos_w` is its cosine term.
+                let w = 0.5 * (1.0 + cos_w);
+                let h = s * cutoff * w;
+                acc += input[n as usize] as f64 * h;
+                norm += h;
             }
-            // Hann window over the [-half, half] support.
-            let w = 0.5 * (1.0 + (std::f64::consts::PI * tau / half as f64).cos());
-            let h = sinc(cutoff * tau) * cutoff * w;
-            acc += input[n as usize] as f64 * h;
-            norm += h;
+            let next_sin_a = sin_a * cos_step + cos_a * sin_step;
+            cos_a = cos_a * cos_step - sin_a * sin_step;
+            sin_a = next_sin_a;
+            let next_sin_w = sin_w * cos_wstep + cos_w * sin_wstep;
+            cos_w = cos_w * cos_wstep - sin_w * sin_wstep;
+            sin_w = next_sin_w;
         }
         out.push(if norm.abs() > 1e-12 {
             (acc / norm) as f32
@@ -170,6 +194,72 @@ mod tests {
             bits_per_sample: 32,
             bext: None,
             stream: None,
+        }
+    }
+
+    /// The tap loop rotates its two angles instead of evaluating `sin`/`cos` per tap, which is
+    /// mathematically the same kernel and ~64x less arithmetic. This pins that equivalence
+    /// against a direct evaluation of the same formula, so a future edit to the recurrence
+    /// cannot quietly change what the filter does — the failure mode being subtly wrong audio
+    /// rather than an error.
+    #[test]
+    fn the_rotated_kernel_matches_direct_evaluation() {
+        /// The normalized sinc, evaluated directly. Lives here rather than beside
+        /// `resample_channel` because the rotation recurrence is the only kernel production
+        /// uses now — this is the independent statement of the same maths to check it against.
+        fn sinc(x: f64) -> f64 {
+            if x.abs() < 1e-9 {
+                1.0
+            } else {
+                let p = std::f64::consts::PI * x;
+                p.sin() / p
+            }
+        }
+
+        /// The kernel written the obvious way, as the reference.
+        fn reference(input: &[f32], ratio: f64) -> Vec<f32> {
+            let out_len = ((input.len() as f64) * ratio).round().max(1.0) as usize;
+            let cutoff = ratio.min(1.0);
+            let half = (HALF_TAPS as f64 / cutoff).ceil() as isize;
+            let len = input.len() as isize;
+            let mut out = Vec::with_capacity(out_len);
+            for i in 0..out_len {
+                let center = i as f64 / ratio;
+                let n0 = center.floor() as isize;
+                let (mut acc, mut norm) = (0.0f64, 0.0f64);
+                for n in (n0 - half + 1)..=(n0 + half) {
+                    if n < 0 || n >= len {
+                        continue;
+                    }
+                    let tau = center - n as f64;
+                    if tau.abs() > half as f64 {
+                        continue;
+                    }
+                    let w = 0.5 * (1.0 + (std::f64::consts::PI * tau / half as f64).cos());
+                    let h = sinc(cutoff * tau) * cutoff * w;
+                    acc += input[n as usize] as f64 * h;
+                    norm += h;
+                }
+                out.push(if norm.abs() > 1e-12 { (acc / norm) as f32 } else { 0.0 });
+            }
+            out
+        }
+
+        let input: Vec<f32> = (0..500)
+            .map(|i| (i as f32 * 0.07).sin() * 0.6 + (i as f32 * 0.31).sin() * 0.3)
+            .collect();
+        // Upsampling, downsampling, and a ratio that is neither a multiple nor a divisor —
+        // the last widens the kernel to a non-integer half-width.
+        for &ratio in &[2.0, 0.5, 44100.0 / 48000.0, 3.0 / 7.0] {
+            let fast = resample_channel(&input, ratio);
+            let slow = reference(&input, ratio);
+            assert_eq!(fast.len(), slow.len(), "length must match at ratio {ratio}");
+            let max_err = fast
+                .iter()
+                .zip(&slow)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(max_err < 1e-5, "ratio {ratio}: max error {max_err} is too large");
         }
     }
 

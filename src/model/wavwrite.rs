@@ -161,10 +161,21 @@ impl WavWriter {
         file.write_all(&self.data_bytes.to_le_bytes())?;
         file.write_all(&self.frames.to_le_bytes())?;
         file.write_all(&0u32.to_le_bytes())?; // tableLength
-        // The reservation is 8 more bytes than `ds64` needs; zero the remainder so nothing
-        // downstream reads stale placeholder bytes as table entries.
-        let written = 8 + DS64_BODY;
-        file.write_all(&vec![0u8; 8 + PLACEHOLDER_BODY - written])?;
+        // The reservation is 24 bytes larger than `ds64` needs (52 reserved, 28 used). Zeroing
+        // that remainder — as this did — is not neutral: a chunk walker reads it as three
+        // chunks whose id is `\0\0\0\0` and whose size is 0, sitting between `ds64` and `fmt `.
+        // This app's own reader survives it (zero-size chunks advance 8 bytes and 24 is a
+        // multiple of 8, so it lands exactly on `fmt `), but the chunk list is malformed and a
+        // stricter third-party reader may refuse a file the user just spent 30GB of I/O
+        // producing. So the remainder becomes a real `JUNK` chunk — 8 bytes of header plus a
+        // 16-byte body — which is what the placeholder already was before this conversion, and
+        // what JUNK exists for. The constants guarantee the remainder is 24, comfortably above
+        // the 8 a chunk header needs.
+        let remainder = 8 + PLACEHOLDER_BODY - (8 + DS64_BODY);
+        debug_assert!(remainder >= 8, "the ds64 remainder must be able to hold a chunk header");
+        file.write_all(b"JUNK")?;
+        file.write_all(&((remainder - 8) as u32).to_le_bytes())?;
+        file.write_all(&vec![0u8; remainder - 8])?;
 
         file.seek(SeekFrom::Start(self.data_size_at))?;
         file.write_all(&super::riff::SIZE_IN_DS64.to_le_bytes())?;
@@ -296,6 +307,39 @@ mod tests {
             crate::model::riff::SIZE_IN_DS64,
             "the 32-bit RIFF size must hold the sentinel"
         );
+
+        // The reservation is 24 bytes larger than `ds64` needs, and those bytes must be a real
+        // chunk. Zeroed (as they were), a walker reads them as three chunks with a NUL id and
+        // size 0 — this app's reader survives that, but the chunk list is malformed and a
+        // stricter reader may refuse a file that cost 30GB of I/O to produce.
+        assert_eq!(
+            u32::from_le_bytes(bytes[16..20].try_into().unwrap()),
+            DS64_BODY as u32,
+            "ds64 declares its own body length"
+        );
+        let remainder_at = PLACEHOLDER_AT as usize + 8 + DS64_BODY;
+        assert_eq!(&bytes[remainder_at..remainder_at + 4], b"JUNK", "the remainder is real padding, not NUL chunks");
+        assert_eq!(
+            u32::from_le_bytes(bytes[remainder_at + 4..remainder_at + 8].try_into().unwrap()) as usize,
+            PLACEHOLDER_BODY - DS64_BODY - 8,
+            "and its body fills the reservation exactly"
+        );
+
+        // Walked end to end, every chunk id must be printable ASCII — the property the zeroed
+        // remainder broke, and the one a third-party reader actually depends on.
+        let mut at = 12usize;
+        while at + 8 <= bytes.len() {
+            let id = &bytes[at..at + 4];
+            assert!(
+                id.iter().all(|b| b.is_ascii_graphic() || *b == b' '),
+                "chunk id at offset {at} is not printable ASCII: {id:?}"
+            );
+            let size = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+            if id == b"data" {
+                break; // its declared size carries the sentinel, not the real length
+            }
+            at += 8 + size + (size & 1);
+        }
 
         // And our own reader gets the same audio back out of it.
         let info = wavread::probe(&path).unwrap();

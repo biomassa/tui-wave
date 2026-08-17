@@ -178,28 +178,36 @@ pub fn splice_pitch_wav_data(template: &[u8], new_values: &[f64]) -> Option<Vec<
 /// value outside `points`' own time range, same convention as every envelope-shaped
 /// parameter elsewhere in this app.
 pub fn resample_to_grid(points: &[(f64, f64)], grid_times: &[f64]) -> Vec<f64> {
+    let (Some(&(first_t, first_v)), Some(&(last_t, last_v))) = (points.first(), points.last())
+    else {
+        return vec![0.0; grid_times.len()];
+    };
     grid_times
         .iter()
         .map(|&t| {
-            let Some(&(first_t, first_v)) = points.first() else { return 0.0 };
             if t <= first_t {
                 return first_v;
             }
-            let Some(&(last_t, last_v)) = points.last() else { return first_v };
             if t >= last_t {
                 return last_v;
             }
-            for pair in points.windows(2) {
-                let (t0, v0) = pair[0];
-                let (t1, v1) = pair[1];
-                if t >= t0 && t <= t1 {
-                    if (t1 - t0).abs() < 1e-12 {
-                        return v0;
-                    }
-                    return v0 + (v1 - v0) * (t - t0) / (t1 - t0);
-                }
+            // Binary search rather than the linear `windows(2)` scan this used. Both lists come
+            // from the same pitch analysis and are therefore the same order of magnitude, so
+            // scanning made this quadratic in the analysis-window count: at CDP's ~344 windows
+            // per second, a 5-minute selection is ~103k grid points against ~103k breakpoints,
+            // roughly 5e9 inner iterations with the UI thread blocked and nothing on screen
+            // saying so. Binary search rather than a monotonic cursor so the result cannot
+            // depend on `grid_times` happening to be sorted.
+            //
+            // `first_t < t < last_t` here, so at least one point is `<= t` and at least one is
+            // `> t` — the index is in `1..points.len()` and both lookups are in bounds.
+            let i = points.partition_point(|&(pt, _)| pt <= t);
+            let (t0, v0) = points[i - 1];
+            let (t1, v1) = points[i];
+            if (t1 - t0).abs() < 1e-12 {
+                return v0;
             }
-            last_v
+            v0 + (v1 - v0) * (t - t0) / (t1 - t0)
         })
         .collect()
 }

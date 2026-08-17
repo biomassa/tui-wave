@@ -8603,7 +8603,14 @@ impl App {
             presets: presets.clone(),
         });
         self.cdp_chain_edit_target = Some(ChainEditTarget::Append(path));
-        self.open_cdp_browser();
+        // Esc in this browser goes back to the parent step's suspended session, not to the
+        // waveform — the same reason the sibling call site in `open_cdp_chain_step_target`
+        // passes a return. Opening it bare left Esc matching no arm at all, so it fell through
+        // to `self.dialog = None` with `cdp_chain_edit_target` and the suspend stack still set
+        // and no dialog left on screen to clear them: the next ordinary `Ctrl+P` browser was
+        // then silently filtered to chainable processes, and its Apply committed into the
+        // abandoned chain draft instead of processing the audio.
+        self.open_cdp_browser_returning_to(Some(CdpReturn::ChainEditor));
         true
     }
 
@@ -8864,6 +8871,16 @@ impl App {
                 // actually being chosen, and a stale one puts the *next* browser session into
                 // chain mode (`cdp_chain_edit_target.is_some()` filters the process list).
                 self.cdp_chain_edit_target = None;
+                // A side-chain pick is reached by *suspending* the parent step's own params
+                // session (`configure_chain_side_chain`), so "back to the chain being built"
+                // means that session rather than the editor behind it. Popping it here is what
+                // keeps the stack from outliving the dialog that owns it: an entry left behind
+                // is only ever popped by `resume_after_chain_step_edit`, which nothing reaches
+                // once the flow has closed to the waveform.
+                if !self.cdp_chain_edit_suspended.is_empty() {
+                    self.resume_after_chain_step_edit();
+                    return;
+                }
                 self.dialog = Some(Dialog::CdpChainEditor);
             }
         }
@@ -13265,9 +13282,18 @@ impl App {
             return;
         }
 
-        let (parent_path, upstream_count) = {
-            let Some(state) = self.cdp_chain_editor.as_ref() else { return };
-            match &target {
+        // `resume` is built *before* the first thing that can fail, and every failure below goes
+        // through `resume_step_edit_with_error`. The dialog has already been taken by this
+        // point, so a bare `return` would leave nothing on screen while `cdp_chain_edit_target`
+        // and the suspend stack stayed set — state only `resume_after_chain_step_edit` clears,
+        // which nothing reaches once the flow has closed. The next ordinary browser would then
+        // be silently chain-filtered and its Apply would commit into the abandoned draft.
+        // (`run_cdp_chain` has the same preconditions but does not take the dialog first, which
+        // is why Run merely appears to do nothing where Preview stranded the session.)
+        let resume = SuspendedStepEdit { target, catalog_index, fields, second_input, variadic_input, photo_input, presets };
+
+        let Some((parent_path, upstream_count)) = self.cdp_chain_editor.as_ref().map(|state| {
+            match &resume.target {
                 ChainEditTarget::Replace(path) => {
                     let (&last, parent) = path.split_last().expect("Replace target path is never empty");
                     (parent.to_vec(), last)
@@ -13277,35 +13303,59 @@ impl App {
                     (parent.clone(), count)
                 }
             }
-        };
-
-        let resume = SuspendedStepEdit { target, catalog_index, fields, second_input, variadic_input, photo_input, presets };
-
-        let Some(state) = self.cdp_chain_editor.as_ref() else { return };
-        let Some(upstream) = crate::model::cdp::steps_at(&state.chain, &parent_path) else { return };
-        let Some(process_key) = self.cdp_catalog.processes.get(resume.catalog_index).map(|d| d.key.clone()) else {
+        }) else {
+            self.resume_step_edit_with_error(resume, "The chain editor is no longer open".into());
             return;
         };
-        let mut temp_steps: Vec<_> = upstream.iter().take(upstream_count).cloned().collect();
+
+        // Everything needed from the editor, taken as owned values in one borrow so the failure
+        // paths below are free to touch `self`.
+        let from_editor = self.cdp_chain_editor.as_ref().and_then(|state| {
+            crate::model::cdp::steps_at(&state.chain, &parent_path).map(|upstream| {
+                (
+                    state.chain.name.clone(),
+                    upstream.iter().take(upstream_count).cloned().collect::<Vec<_>>(),
+                    state.buffer_picks.clone(),
+                )
+            })
+        });
+        let Some((chain_name, upstream_steps, buffer_picks)) = from_editor else {
+            self.resume_step_edit_with_error(resume, "That step is no longer in the chain".into());
+            return;
+        };
+        let Some(process_key) = self.cdp_catalog.processes.get(resume.catalog_index).map(|d| d.key.clone()) else {
+            self.resume_step_edit_with_error(resume, "That process is no longer in the catalog".into());
+            return;
+        };
+        let mut temp_steps = upstream_steps;
         let values: Vec<_> = resume.fields.iter().map(CdpField::to_value).collect();
         temp_steps.push(crate::model::cdp::ChainStep { process_key, values, side_chain: Vec::new() });
-        let temp_chain = crate::model::cdp::CdpChain { name: state.chain.name.clone(), steps: temp_steps };
+        let temp_chain = crate::model::cdp::CdpChain { name: chain_name, steps: temp_steps };
 
         let (initial_buffer, initial_rate, doc_index, splice_range) = if parent_path.is_empty() {
             let idx = self.active_document;
-            let Some(doc) = self.documents.get(idx) else { return };
+            let doc_slice = self.documents.get(idx).map(|d| (d.sample_rate, d.len_samples()));
+            let Some((sample_rate, _)) = doc_slice else {
+                self.resume_step_edit_with_error(resume, "No buffer open to preview against".into());
+                return;
+            };
             let Some(range) = self.operation_range(idx, self.snap_to_zero) else {
                 self.resume_step_edit_with_error(resume, "No audio selected to preview against".into());
                 return;
             };
-            (doc.slice(range.0..range.1), doc.sample_rate, idx, range)
+            let channels = self.documents[idx].slice(range.0..range.1);
+            (channels, sample_rate, idx, range)
         } else {
-            let Some(doc_i) = state.buffer_picks.get(&parent_path).copied() else {
+            let Some(doc_i) = buffer_picks.get(&parent_path).copied() else {
                 self.resume_step_edit_with_error(resume, "Pick a second-input buffer first (Left/Right)".into());
                 return;
             };
-            let Some(doc) = self.documents.get(doc_i) else { return };
-            (doc.channels.clone(), doc.sample_rate, doc_i, (0, doc.len_samples()))
+            let picked = self.documents.get(doc_i).map(|d| (d.channels.clone(), d.sample_rate, d.len_samples()));
+            let Some((channels, sample_rate, len)) = picked else {
+                self.resume_step_edit_with_error(resume, "The picked second-input buffer is gone".into());
+                return;
+            };
+            (channels, sample_rate, doc_i, (0, len))
         };
 
         let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
@@ -13314,7 +13364,6 @@ impl App {
             return;
         }
 
-        let buffer_picks = state.buffer_picks.clone();
         self.start_chain_run(
             temp_chain,
             buffer_picks,
@@ -14001,6 +14050,53 @@ impl App {
                         crate::commands::cdp::timing_tolerance(category, crate::model::cdp::PvocSettings::default().points)
                     })
                     .sum();
+                // A step declaring `output_new_buffer` changes the channel count, and splicing a
+                // *narrower* result is the exact hazard that flag exists to prevent:
+                // `CdpProcessCommand::execute` widens a document to fit a wider result but has
+                // no guard for a narrower one, and `insert_range` fills every channel the data
+                // doesn't cover from channel 0 — so `pairex` (8 in, 2 out) run in a chain
+                // overwrote channels 2..7 of an 8-channel take with a copy of the result's
+                // channel 0, silently.
+                //
+                // `process_is_chainable` filters on `IoKind` alone, so all twelve of these reach
+                // here, and until now the flag's only readers were in `tick_cdp`'s *standalone*
+                // Apply arm — the two paths disagreed about the one thing it decides. Same
+                // destination as standalone, so a process behaves the same way whether it is run
+                // on its own or as a chain step. Top-level steps only, matching the tolerance
+                // sum above: a side-chain finishes before its owning step and feeds it as an
+                // input rather than contributing to the spine's final width.
+                let opens_new_buffer = chain.steps.iter().any(|s| {
+                    self.cdp_catalog
+                        .processes
+                        .iter()
+                        .find(|p| p.key == s.process_key)
+                        .is_some_and(|d| d.output_new_buffer)
+                });
+                if opens_new_buffer {
+                    let bits_per_sample =
+                        self.documents.get(doc_index).map(|d| d.bits_per_sample).unwrap_or(32);
+                    self.push_document(Document {
+                        head_tail_marks: Vec::new(),
+                        channels: final_frame.running_buffer,
+                        sample_rate: final_frame.running_rate,
+                        bits_per_sample,
+                        selection: None,
+                        cursor: 0,
+                        dirty: true,
+                        path: None,
+                        markers: Vec::new(),
+                        bext: None,
+                        stream: None,
+                    });
+                    self.viewport = None;
+                    self.rebuild_audio();
+                    self.rebuild_waveform_caches();
+                    crate::model::cdp::chain_recent::record_used(&chain.name);
+                    crate::model::cdp::chain_last::save_last_chain(&chain);
+                    self.cdp_chain_editor = None;
+                    self.dialog = None;
+                    return;
+                }
                 let label = format!("CDP Chain: {}", chain.name);
                 self.histories[doc_index].apply(
                     crate::commands::cdp::cdp_process_command(label, splice_range, final_frame.running_buffer, tolerance),
@@ -17269,6 +17365,20 @@ impl App {
                 let colx = mouse.column.clamp(area.x, area.x + area.width - 1);
                 let col = (colx - area.x) as f64;
                 let pos = ((scroll as f64 + col * spc) as usize).min(total - 1);
+                // Two marks on one sample cannot both survive: the Up arm sorts and dedups
+                // (role is derived from index, and CDP's marklist must be strictly ascending),
+                // which silently destroyed one of a hand-placed pair — and the undo command,
+                // keyed on the position the mark was dragged *from*, could then only move the
+                // survivor rather than put the lost one back. Easy to hit, because the drag
+                // quantizes to whole columns and clamps to `total - 1`, so any two marks
+                // dragged to the same column at the same zoom land on the identical sample.
+                //
+                // So a mark does not move onto a sample another one already holds: it sticks
+                // until the pointer clears it. The lists are hand-placed and short, so the scan
+                // costs nothing.
+                if doc.head_tail_marks.iter().enumerate().any(|(i, &m)| i != hi && m == pos) {
+                    return true;
+                }
                 let mut path = None;
                 if let Some(m) = doc.head_tail_marks.get_mut(hi) {
                     *m = pos;
@@ -17374,6 +17484,16 @@ impl App {
                 let colx = mouse.column.clamp(area.x, area.x + area.width - 1);
                 let col = (colx - area.x) as f64;
                 let pos = ((scroll as f64 + col * spc) as usize).min(total - 1);
+                // `commands::marker` keys every command on a marker's *position*, and its module
+                // header states markers are never allowed to share one — but that guard lives in
+                // `handle_marker_action`, which the drag path does not go through. Two markers on
+                // one sample made `MoveMarkerCommand::undo`'s `find(|m| m.position == self.to)`
+                // ambiguous: it could restore the position onto the *other* marker, swapping the
+                // two labels and then saving cue points under the wrong names. Same rule as the
+                // head/tail lane above — a marker does not move onto an occupied sample.
+                if doc.markers.iter().enumerate().any(|(i, m)| i != mi && m.position == pos) {
+                    return true;
+                }
                 let mut path = None;
                 if let Some(m) = doc.markers.get_mut(mi) {
                     m.position = pos;
@@ -37650,6 +37770,45 @@ mod tests {
         assert_eq!(state.chain.steps[0].side_chain[0].process_key, "blur_avrg");
     }
 
+    /// The other half of the side-chain flow: *abandoning* the pick. `configure_chain_side_chain`
+    /// opened the browser with no `restore`, so Esc there matched no arm and fell through to
+    /// `self.dialog = None` — leaving `cdp_chain_edit_target` and the suspend stack set with no
+    /// dialog on screen to clear them. The next ordinary `Ctrl+P` browser was then silently
+    /// filtered to chainable processes (roughly a third of the catalog gone, unexplained) and its
+    /// Apply dispatched into `cdp_chain_commit_step`, writing the process into the abandoned
+    /// chain draft instead of processing the audio. Only a restart cleared it.
+    ///
+    /// Esc must instead resume the parent step's suspended session, which is what "back to the
+    /// chain being built" means once a session was suspended to get here.
+    #[test]
+    fn abandoning_a_side_chain_pick_does_not_strand_the_chain_edit_state() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
+        let combine_index =
+            app.cdp_catalog.processes.iter().position(|p| p.key == "combine_mean_1").expect("combine_mean_1 in catalog");
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(crate::model::cdp::CdpChain {
+            name: "t".into(),
+            steps: vec![crate::model::cdp::ChainStep { process_key: "combine_mean_1".into(), values: Vec::new(), side_chain: Vec::new() }],
+        }));
+
+        app.open_cdp_chain_step_target(ChainEditTarget::Replace(vec![0]));
+        if let Some(Dialog::CdpParams { focus, fields, .. }) = app.dialog.as_mut() {
+            *focus = cdp_params_focus_extra_input(fields.len());
+        }
+        assert!(app.configure_chain_side_chain(), "should suspend and open the browser");
+        assert_eq!(app.cdp_chain_edit_suspended.len(), 1);
+        assert!(matches!(app.dialog, Some(Dialog::CdpBrowser { .. })));
+
+        // Change of mind: Esc out of the browser instead of picking anything.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(app.cdp_chain_edit_suspended.is_empty(), "the suspend stack must not outlive the dialog");
+        let Some(Dialog::CdpParams { catalog_index, .. }) = &app.dialog else {
+            panic!("Esc must resume the parent step's session, not close to the waveform");
+        };
+        assert_eq!(*catalog_index, combine_index, "and it must be the parent (combine) step");
+    }
+
     /// Regression (user report, 2026-07-21), rewritten for CDP grouping: `psow`'s processes
     /// (e.g. "Psow Reinforce Harmonics") are ordinary wav-in/wav-out and must be reachable
     /// from the groups column. Under the old semantic taxonomy they lived in "pitch" and the
@@ -38969,6 +39128,59 @@ mod tests {
         assert!(app.documents[0].dirty);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Both mark systems key their undo commands on a *position*, so two marks on one sample is
+    /// not a representable state. The Up arm used to reconcile that with `sort_unstable(); dedup()`,
+    /// which silently destroyed one of a hand-placed pair — and the command, keyed on the position
+    /// the mark was dragged *from*, could then only move the survivor rather than put the lost one
+    /// back. Easy to hit: the drag quantizes to whole columns and clamps to `total - 1`, so any two
+    /// marks dragged to the same column at one zoom land on the identical sample.
+    ///
+    /// A mark now simply does not move onto an occupied sample; it sticks until the pointer clears.
+    #[test]
+    fn a_mark_never_drags_onto_a_sample_another_one_holds() {
+        let mut app = new_app(Some(doc(0.5, 1000)), None);
+        app.waveform_area = Rect::new(0, 0, 80, 20);
+        app.viewport = Some(crate::ui::viewport::Viewport::fit_to_width(1000, 80));
+
+        app.documents[0].head_tail_marks = vec![100, 200];
+        app.documents[0].markers = vec![
+            Marker { position: 100, label: "Intro".into() },
+            Marker { position: 900, label: "Chorus".into() },
+        ];
+
+        // Drag the *first* head/tail mark to the far right, where the second already sits after
+        // its own clamp. Both would resolve to the same sample.
+        let far_right = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 79,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.dragging_head_tail_mark = Some(1);
+        app.try_handle_head_tail_mark_mouse(far_right);
+        app.dragging_head_tail_mark = Some(0);
+        app.try_handle_head_tail_mark_mouse(far_right);
+
+        let marks = &app.documents[0].head_tail_marks;
+        assert_eq!(marks.len(), 2, "neither mark may be destroyed by a collision");
+        assert_ne!(marks[0], marks[1], "and they must not share a sample");
+
+        // Same rule for ordinary markers, whose labels would otherwise swap on undo.
+        app.dragging_marker = Some(1);
+        let onto_intro = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 0,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.try_handle_marker_mouse(onto_intro);
+        let markers = &app.documents[0].markers;
+        assert_eq!(markers.len(), 2);
+        assert_ne!(markers[0].position, markers[1].position, "two markers may not share a sample");
+        assert_eq!(markers[0].label, "Intro", "and the labels must stay with their own marker");
+        assert_eq!(markers[1].label, "Chorus");
     }
 
     /// The other half of the same defect: the two marker mouse lanes mutate a document and set

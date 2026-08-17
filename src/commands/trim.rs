@@ -58,8 +58,17 @@ impl Command for TrimCommand {
 
     fn undo(&mut self, doc: &mut Document) {
         let (start, _end) = self.range;
-        let before = self.before.take().expect("undo called before execute");
-        let after = self.after.take().expect("undo called before execute");
+        // `execute` returns early on a degenerate or out-of-range span, leaving these unset —
+        // and `History::apply` pushes the command regardless, so that no-op sits on the undo
+        // stack like any other edit. Undoing it must be a no-op too rather than a panic out of
+        // raw mode. The same shape `FadeCommand`/`NormalizeCommand`/`GainCommand`/
+        // `HighPassCommand` already use; `RemoveRangeCommand` may keep its `expect` because its
+        // `execute` has no early return to leave it in this state.
+        //
+        // Reachable because nothing clamps `Document.selection` when a command shrinks the
+        // document: undoing a paste leaves a selection whose `end` is past the new length, and
+        // Trim only checks `start < end` before applying.
+        let (Some(before), Some(after)) = (self.before.take(), self.after.take()) else { return };
         for (i, channel) in doc.channels.iter_mut().enumerate() {
             let mut restored = before[i].clone();
             restored.extend_from_slice(channel);
@@ -104,6 +113,29 @@ mod tests {
 
         cmd.undo(&mut doc);
         assert_eq!(doc.head_tail_marks, vec![5, 25, 40, 90]);
+    }
+
+    /// `execute` refuses a span running past the end of the document, but `History::apply` has
+    /// already pushed the command by then — so the undo stack holds a Trim that did nothing, and
+    /// undoing it must be a no-op rather than a panic. Reachable in practice because nothing
+    /// clamps `Document.selection` when a command shrinks the document.
+    #[test]
+    fn undoing_a_trim_that_did_nothing_is_a_no_op() {
+        let mut doc = Document {
+            head_tail_marks: Vec::new(),
+            channels: vec![vec![1.0, 2.0, 3.0, 4.0, 5.0]],
+            markers: vec![Marker { position: 2, label: "M".into() }],
+            ..Default::default()
+        };
+
+        // A range past the end: `execute` declines, leaving `before`/`after` unset.
+        let mut cmd = TrimCommand::new(1, 99);
+        cmd.execute(&mut doc);
+        assert_eq!(doc.channels[0], vec![1.0, 2.0, 3.0, 4.0, 5.0], "nothing was trimmed");
+
+        cmd.undo(&mut doc);
+        assert_eq!(doc.channels[0], vec![1.0, 2.0, 3.0, 4.0, 5.0], "and undo leaves it alone");
+        assert_eq!(doc.markers.len(), 1, "without disturbing the markers either");
     }
 
     #[test]
