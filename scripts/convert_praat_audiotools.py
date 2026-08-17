@@ -464,6 +464,34 @@ PAUSE_HOISTS: dict[str, dict] = {
         "lock_on": ["Show_advanced_settings"],
         "why": "exposes the 15 Advanced Tape Physics parameters",
     },
+    # Four that the a7f9583 bump reshaped into the same `boolean Edit_… 0` + `beginPause` shape
+    # the Generative rewrite gave twelve scripts above. All four were working catalog entries
+    # before that commit and were excluded as `gui_blocking` the moment it landed, so these
+    # entries are what keep the bump from being a net capability loss rather than new reach.
+    # Each is `lock_on`ed for the reason recorded at the top of this table: with the dialog
+    # replaced by assignments the toggle no longer shows anything, it only decides whether the
+    # values apply — and the dialog is now where they are set.
+    "Spectral/Basic_Mirror.praat": {
+        "lock_on": ["Edit_details"],
+        "why": "second settings page (Spectral Mirror - Details)",
+    },
+    # Eight of its fourteen pause fields carry a label whose Praat-derived variable the script
+    # reads nowhere — "Max frequency (Hz)" binds `max_frequency` where the script uses
+    # `max_frequency_Hz` — so the page is inert in stock Praat as much as here. No table entry
+    # is needed for that: every one passes its own variable as the field's default, which is
+    # exactly the shape `rewrite::default_expression_variable` infers from.
+    "Spectral/Beltrami_Inspired_Spectral_Melter.praat": {
+        "lock_on": ["Edit_details"],
+        "why": "second settings page (14 diffusion/ridge details, shown after preset loading)",
+    },
+    "Spectral/Self-Similarity_Spectral_Resynthesis.praat": {
+        "lock_on": ["Edit_details"],
+        "why": "second settings page (Self-Similarity Resynthesis - Details)",
+    },
+    "Analysis/Speech_to_MusicXML_Rhythm_Converter.praat": {
+        "lock_on": ["Edit_advanced_settings"],
+        "why": "second settings page (Speech Rhythm - Advanced settings)",
+    },
     # No `form` at all -- the whole UI is a two-stage wizard. Step 1 picks an algorithm, then
     # exactly one of nine settings blocks runs, each behind `if algorithm$ = "..."`.
     "Reverb/Universal Convolution Generator.praat": {
@@ -1749,6 +1777,50 @@ NEVER_PLANNED: dict[str, str] = {
         "launches a detached Qt window and returns no Sound; nothing comes back to the editor",
 }
 
+# Scripts that are *defective upstream* — not blocked by their own nature (`NEVER_PLANNED`)
+# nor by the app's current shape (`OUT_OF_SCOPE`), but simply broken in the checkout in front
+# of us. The distinction earns its own table because the expected lifetime is different: these
+# are meant to come back, so each entry carries a `guard` that re-derives the defect from the
+# script and `broken_upstream_reason` drops the entry the moment the guard stops finding it. A
+# fix upstream therefore restores the process with no edit here, and `stale_tables` still
+# catches a rename.
+#
+# `guard` takes the script source and returns True while the defect is present.
+def _brightness_classifier_is_broken(source: str) -> bool:
+    """`HF_split_Hz`'s derived variable is read nowhere, and no branch assigns it for Custom.
+
+    Praat lowercases only the *first* letter of a form label, so `positive HF_split_Hz` binds
+    `hF_split_Hz` — while the script reads `hf_split_Hz` throughout. The five non-Custom preset
+    branches assign `hf_split_Hz` themselves, which makes the form field inert there; the
+    `else` (Custom, and anything past the listed presets) does not, so the first read of it
+    hits an undefined variable and Praat aborts. Verified against the 7.0 binary via plain
+    `runScript`, so this is upstream's bug rather than anything this app does.
+    """
+    if "positive HF_split_Hz" not in source:
+        return False  # upstream renamed the label — re-test it
+    if re.search(r"\bhF_split_Hz\b", source):
+        return False  # upstream now reads the variable the label really binds
+    return bool(re.search(r"\bhf_split_Hz\b", source))
+
+
+BROKEN_UPSTREAM: dict[str, dict] = {
+    "Analysis/BrightnessClassifier.praat": {
+        "guard": _brightness_classifier_is_broken,
+        "reason": "form field HF_split_Hz binds hF_split_Hz but the script reads hf_split_Hz, "
+                  "so the control is inert on five presets and Custom aborts on an undefined "
+                  "variable",
+    },
+}
+
+
+def broken_upstream_reason(rel_key: str, source: str) -> str | None:
+    """The exclusion reason while the defect is still present, else None."""
+    entry = BROKEN_UPSTREAM.get(rel_key)
+    if entry is None:
+        return None
+    return entry["reason"] if entry["guard"](source) else None
+
+
 OUT_OF_SCOPE: dict[str, str] = {
     # Deliberately near-empty now: everything it used to hold moved to `NEVER_PLANNED`, this
     # table being for scripts blocked by *the app's current shape* rather than by their own.
@@ -2075,6 +2147,10 @@ def check_stale_keys() -> list[str]:
         ("ZERO_INPUT_EXCEPTIONS", ZERO_INPUT_EXCEPTIONS),
         ("OUT_OF_SCOPE", OUT_OF_SCOPE),
         ("NEVER_PLANNED", NEVER_PLANNED),
+        # A stale entry here is the benign direction — the guard would stop matching anyway and
+        # the process would simply return — but a renamed script should still be reported rather
+        # than sitting in the table forever pointing at nothing.
+        ("BROKEN_UPSTREAM", BROKEN_UPSTREAM),
     ):
         for key in table:
             if key not in present:
@@ -2105,6 +2181,14 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
         never_planned = NEVER_PLANNED.get(str(rel).replace("\\", "/"))
         if never_planned:
             excluded.append((str(rel), "never_planned", never_planned))
+            continue
+
+        # Before the parse: a script broken upstream would otherwise produce a plausible entry
+        # with a dead control, which is worse than an honest absence. The guard re-reads the
+        # defect from `source`, so an upstream fix brings the process back on the next run.
+        broken = broken_upstream_reason(str(rel).replace("\\", "/"), source)
+        if broken:
+            excluded.append((str(rel), "broken_upstream", broken))
             continue
 
         out_of_scope = OUT_OF_SCOPE.get(str(rel).replace("\\", "/"))

@@ -28650,8 +28650,12 @@ mod tests {
         }
 
         // Anything you drive in its own window: the result is what you built there.
+        // A canary on the set's size, like the py-group count in `praat::python`: 4 -> 5 on
+        // 2026-08-17, when the a7f9583 submodule bump brought `SPEAR_Fast_Resynthesis`, whose
+        // `spear_fast_gui.py` is a Tk editor of its own. The point is that a new one is noticed
+        // rather than absorbed.
         let interactive: Vec<_> = catalog.processes.iter().filter(|p| p.interactive).collect();
-        assert_eq!(interactive.len(), 4, "the four Tk editors");
+        assert_eq!(interactive.len(), 5, "the five Tk editors");
         for def in interactive {
             assert!(
                 App::praat_opens_new_buffer(def),
