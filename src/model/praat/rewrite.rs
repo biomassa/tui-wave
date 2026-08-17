@@ -67,6 +67,10 @@ pub enum RewriteError {
     /// with no assignments — which is deleted, and rightly so — a hoisted folder param exists
     /// *because* of that call, so its absence means the entry no longer describes the script.
     MissingDirectoryChooser { variable: String },
+    /// The script's `form` no longer declares the `boolean` a `lock_on` entry names. The lock
+    /// drops that field from the catalog, so the form must lose it too — Praat fills a form
+    /// positionally, and a field the catalog no longer declares would still demand an argument.
+    MissingFormLock { label: String },
 }
 
 impl std::fmt::Display for RewriteError {
@@ -84,6 +88,11 @@ impl std::fmt::Display for RewriteError {
             RewriteError::MissingDirectoryChooser { variable } => write!(
                 f,
                 "script no longer assigns {variable} from chooseDirectory$; \
+                 the plugin may have been updated — regenerate the catalog"
+            ),
+            RewriteError::MissingFormLock { label } => write!(
+                f,
+                "script's form no longer declares the boolean {label}; \
                  the plugin may have been updated — regenerate the catalog"
             ),
         }
@@ -309,20 +318,37 @@ fn render_number(value: f64) -> String {
 /// everything consistent: Praat fills a form positionally, so a field the catalog no longer
 /// declares must not be there to receive an argument either. The variable is then assigned
 /// immediately after `endform`, before any code that reads it.
-fn apply_form_locks(lines: &mut Vec<String>, locks: &[(String, f64)]) {
+fn apply_form_locks(
+    lines: &mut Vec<String>,
+    locks: &[(String, f64)],
+) -> Result<(), RewriteError> {
     if locks.is_empty() {
-        return;
+        return Ok(());
     }
     let mut assignments: Vec<String> = Vec::new();
     for (label, value) in locks {
-        let declaration = format!("boolean {label}");
-        if let Some(at) = lines.iter().position(|l| {
-            let t = l.trim();
-            t.starts_with(&declaration)
-                && t[declaration.len()..].chars().next().is_none_or(char::is_whitespace)
-        }) {
-            lines.remove(at);
-        }
+        // Whitespace between `boolean` and the label is arbitrary: upstream column-aligns some
+        // forms (`boolean   Edit_details           0`) and single-spaces others. Matching on a
+        // literal `"boolean {label}"` missed every aligned one, and the miss was silent —
+        // the field stayed in the form while the assignment was emitted anyway, so Praat was
+        // handed one argument fewer than its form declares and answered "Found N arguments but
+        // expected more". `Beltrami_Inspired_Spectral_Melter` is where that surfaced.
+        let position = lines.iter().position(|l| {
+            let rest = l.trim().strip_prefix("boolean").unwrap_or("");
+            let Some(rest) = rest.strip_prefix(char::is_whitespace) else { return false };
+            rest.trim_start()
+                .strip_prefix(label.as_str())
+                .is_some_and(|after| after.chars().next().is_none_or(char::is_whitespace))
+        });
+        // Not finding it is an error rather than a no-op, for the reason a missing directory
+        // chooser is: the assignment below has already committed to the field being gone, so
+        // carrying on guarantees an arity mismatch at run time. The converter validates every
+        // `lock_on` name against its own parse of the form, so a miss here means this matcher
+        // and that parser disagree — exactly the drift worth failing loudly on.
+        let Some(at) = position else {
+            return Err(RewriteError::MissingFormLock { label: label.clone() });
+        };
+        lines.remove(at);
         assignments.push(format!("{} = {}", variable_name(label), render_number(*value)));
     }
     if let Some(at) = lines.iter().position(|l| l.trim() == "endform") {
@@ -330,6 +356,7 @@ fn apply_form_locks(lines: &mut Vec<String>, locks: &[(String, f64)]) {
             lines.insert(at + 1 + offset, line);
         }
     }
+    Ok(())
 }
 
 pub fn rewrite_pause_blocks(
@@ -384,7 +411,7 @@ pub fn rewrite_pause_blocks(
         }
     }
 
-    apply_form_locks(&mut out, form_locks);
+    apply_form_locks(&mut out, form_locks)?;
 
     let mut text = out.join("\n");
     if source.ends_with('\n') {
@@ -957,6 +984,50 @@ mod form_lock_tests {
             after_endform.starts_with("show_advanced_settings = 1"),
             "must be assigned immediately after the form:\n{out}"
         );
+    }
+
+    /// Upstream column-aligns some forms and single-spaces others. Matching on a literal
+    /// `"boolean {label}"` missed every aligned one — and missed it *silently*: the field stayed
+    /// in the form while the assignment was emitted anyway, so Praat got one argument fewer than
+    /// its form declares and answered "Found 6 arguments but expected more". That is how
+    /// `Beltrami_Inspired_Spectral_Melter` failed the smoke sweep on the a7f9583 bump, while its
+    /// three single-spaced siblings passed.
+    #[test]
+    fn a_column_aligned_form_field_is_still_found() {
+        let source = "form Test\n    boolean   Edit_details           0\n    \
+                      boolean   Draw_visualization     1\nendform\nif edit_details\n    x = 1\nendif\n";
+        let out = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Edit_details".into(), 1.0)])
+            .expect("rewrites");
+
+        assert!(!out.contains("boolean   Edit_details"), "the aligned field must be gone:\n{out}");
+        assert!(out.contains("boolean   Draw_visualization"), "its neighbour must survive:\n{out}");
+        let after_endform = out.split("endform\n").nth(1).expect("an endform");
+        assert!(after_endform.starts_with("edit_details = 1"), "assigned after the form:\n{out}");
+    }
+
+    /// A label that shares a prefix with the locked one must not be mistaken for it — the match
+    /// has to end on a whitespace boundary, not merely start with the name.
+    #[test]
+    fn a_longer_label_sharing_the_prefix_is_not_matched() {
+        let source = "form Test\n    boolean Edit_details_extra 0\nendform\n";
+        let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Edit_details".into(), 1.0)])
+            .expect_err("must not match the longer label");
+        assert!(matches!(err, RewriteError::MissingFormLock { .. }));
+    }
+
+    /// A lock naming a field the form no longer declares is an error, not a no-op. The
+    /// assignment has already committed to the field being gone, so carrying on guarantees the
+    /// arity mismatch above — and the converter validates every `lock_on` against its own parse,
+    /// so a miss here means this matcher and that parser disagree.
+    #[test]
+    fn a_lock_with_no_matching_field_is_an_error() {
+        let source = "form Test\n    real Amount 1.0\nendform\n";
+        let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Gone_toggle".into(), 1.0)])
+            .expect_err("a missing lock target must fail loudly");
+        match err {
+            RewriteError::MissingFormLock { label } => assert_eq!(label, "Gone_toggle"),
+            other => panic!("expected MissingFormLock, got {other:?}"),
+        }
     }
 
     /// No locks means the form is untouched — every other process must be unaffected.

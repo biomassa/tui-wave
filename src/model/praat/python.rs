@@ -515,8 +515,11 @@ python_command$ = \"py\"
         // nara_wpe/mido and the torch stack were admitted in two optional tiers. 45 -> 46 the
         // same day, when `Semantic_timbre_retrieval`'s corpus folder was hoisted out of its
         // `chooseDirectory$` call — see `DIRECTORY_HOISTS` — and back to 45 when `MotionControl`
-        // was moved to `NEVER_PLANNED`, taking OpenCV out of the light tier with it.
-        assert_eq!(flagged, 46, "the py group is 46 processes");
+        // was moved to `NEVER_PLANNED`, taking OpenCV out of the light tier with it. 46 -> 47 on
+        // 2026-08-17, when the a7f9583 submodule bump brought `SPEAR_Fast_Resynthesis` — a new
+        // py-group script with its own Tk editor, which is also the fifth entry in
+        // `only_generative_praat_processes_open_a_new_buffer`'s interactive canary.
+        assert_eq!(flagged, 47, "the py group is 47 processes");
     }
 
     /// End to end through the planner: a py-group process must come out asking for a rewritten
