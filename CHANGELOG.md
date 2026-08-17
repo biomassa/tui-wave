@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+- **A streamed buffer can no longer be saved over its own source.** The read-only allowlist that
+  keeps a 20-30GB take safe lives in `handle_action`, but the two marker mouse lanes reach the
+  document without passing through it: dragging a marker or a head/tail mark set `dirty` on a
+  streamed buffer. Once dirty, two *allowlisted* actions — Close Buffer and Quit — raise a confirm
+  modal whose `(s)ave` arm calls the ordinary in-place save. That save writes a header claiming the
+  stream's channel count and then loops over `channels`, which a streamed document deliberately
+  leaves **empty**, so it emitted a valid 68-byte WAV with zero samples, staged it, and renamed it
+  over the recording. The take was gone in under a second, silently.
+
+  Fixed with two independent guards, so neither half alone can reopen it: `save_wav_with` refuses a
+  streamed document outright (streamed Save As is unaffected — it goes through `save_streamed_wav`,
+  which reads the audio back off disk as it writes), and the marker lanes decline the event rather
+  than mutating one. Declining rather than consuming is deliberate: the click falls through to
+  seek/select, which a streamed buffer is allowed to do.
+
+  The irony worth recording: the empty `channels` is documented as "defence in depth — a code path
+  never taught about streaming operates on nothing rather than on wrong data". Against a *reader*
+  that holds. Against a writer, operating on nothing is exactly what made the loss silent instead
+  of an error.
+
+- **Two editors no longer panic on a degenerate curve.** `curve::parse_breakpoints` accepts a `.pc`
+  file with one breakpoint line, and an empty or whitespace-only one, returning a one-element and
+  an empty list — neither is rejected on the way in. The envelope editor's `n` then computed
+  `(i - 1, i)` when there was no interval to bisect, underflowing `usize` on a one-point list; the
+  curve editor indexed `points[selected_row]` on an empty one the moment a digit was typed. Either
+  aborted the process out of raw mode, taking every open buffer's unsaved edits and undo history
+  with it.
+
+  The envelope editor's `n` now extends a lone point into a real interval, mirroring the branch the
+  curve editor's `n` has always had for exactly this case, and both editors decline an empty list
+  rather than indexing it — Esc still closes.
+
 ## 2026-08-16 (2.9.4)
 
 - **A failed process returns you to its parameter form.** A run rejected for an out-of-range

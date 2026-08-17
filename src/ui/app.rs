@@ -10155,6 +10155,18 @@ impl App {
             Self::commit_curve_editor_cell(edit);
         }
 
+        // `open_curve_editor` copies `curve.points` verbatim, and `curve::parse_breakpoints`
+        // returns an empty vec for an empty or whitespace-only `.pc` file rather than rejecting
+        // it — so a curve with no points at all can reach this editor and every arm that reads
+        // `edit.points[edit.selected_row]` would be indexing nothing. Esc still closes.
+        if edit.points.is_empty() {
+            if matches!(key.code, KeyCode::Esc) {
+                self.dialog = None;
+            }
+            return;
+        }
+        edit.selected_row = edit.selected_row.min(edit.points.len() - 1);
+
         match key.code {
             KeyCode::Char(c) if is_cdp_table_edit_char(c) => {
                 let current = if edit.selected_col == 0 {
@@ -11305,6 +11317,18 @@ impl App {
         let constant_key = edit.target.constant_key(required_envelope);
         let is_crystal = edit.target == CdpEnvelopeTarget::CrystalEnvelope;
 
+        // Almost every arm below indexes `edit.points[edit.selected]` directly. The editor seeds
+        // three points, but the list can be replaced wholesale by `rescale_points_to_envelope`
+        // when a curve is loaded over it, and `curve::parse_breakpoints` accepts a file with one
+        // line (one point) or none at all (no points) — neither is rejected on the way in. Rather
+        // than teach each arm its own degenerate case, refuse to edit a list with nothing in it
+        // and keep `selected` addressable for the rest. `n` still handles length 1 on its own,
+        // since bisecting an interval needs two points to bisect between.
+        if edit.points.is_empty() {
+            return;
+        }
+        edit.selected = edit.selected.min(edit.points.len() - 1);
+
         match key.code {
             KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 let i = edit.selected;
@@ -11356,6 +11380,27 @@ impl App {
             }
             KeyCode::Char('n') => {
                 let i = edit.selected;
+                // One point has no interval to bisect, and `(i - 1, i)` below would underflow on
+                // it. Mirrors the curve editor's `n`, which already branches on exactly this:
+                // step one interval along the time axis, placing the new point before the
+                // existing one when there is no room after it, so the list stays ascending.
+                if edit.points.len() == 1 {
+                    let (cur_t, v) = edit.points[0];
+                    let time_step = (edit.time_max / 40.0).max(0.001);
+                    let new_t = if cur_t + time_step <= edit.time_max {
+                        cur_t + time_step
+                    } else {
+                        (cur_t - time_step).max(0.0)
+                    };
+                    if new_t >= cur_t {
+                        edit.points.push((round6(new_t), v));
+                        edit.selected = 1;
+                    } else {
+                        edit.points.insert(0, (round6(new_t), v));
+                        edit.selected = 0;
+                    }
+                    return;
+                }
                 let (lo_i, hi_i) = if i + 1 < edit.points.len() { (i, i + 1) } else { (i - 1, i) };
                 let (t0, v0) = edit.points[lo_i];
                 let (t1, v1) = edit.points[hi_i];
@@ -17175,6 +17220,13 @@ impl App {
     /// head/tail row (which is the lower, more specific one) wins its own clicks rather than
     /// being shadowed.
     fn try_handle_head_tail_mark_mouse(&mut self, mouse: MouseEvent) -> bool {
+        // A streamed buffer is read-only, and this is one of the two paths that reaches a
+        // document without passing through `handle_action`'s allowlist — so the refusal has to
+        // be stated here too. Declining the event (rather than consuming it) lets the click
+        // fall through to seek/select, which a streamed buffer is allowed to do.
+        if self.active_doc().is_some_and(|d| d.is_streaming()) {
+            return false;
+        }
         let area = self.waveform_area;
         let in_area = mouse.column >= area.x
             && mouse.column < area.x + area.width
@@ -17256,6 +17308,12 @@ impl App {
     /// press-and-drag a marker to move it. Returns `true` if the event was consumed (so the
     /// caller skips the normal seek/select handling).
     fn try_handle_marker_mouse(&mut self, mouse: MouseEvent) -> bool {
+        // See `try_handle_head_tail_mark_mouse`: a streamed buffer is read-only, and the two
+        // marker mouse lanes are the paths that reach a document without going through
+        // `handle_action`'s allowlist.
+        if self.active_doc().is_some_and(|d| d.is_streaming()) {
+            return false;
+        }
         let area = self.waveform_area;
         let in_area = mouse.column >= area.x
             && mouse.column < area.x + area.width
@@ -29617,6 +29675,53 @@ mod tests {
         assert_eq!(edit.points[0].0, 0.0);
     }
 
+    /// The envelope editor seeds two or three points, but a curve loaded over it replaces the
+    /// list wholesale, and `curve::parse_breakpoints` accepts a one-line `.pc` file. With one
+    /// point, `n`'s `(i - 1, i)` fallback underflows `usize` — there is no interval to bisect.
+    /// The curve editor's own `n` has always branched on exactly this case; this one had not.
+    ///
+    /// An empty list is the same defect one step further along, reaching the arms that index
+    /// `edit.points[edit.selected]` directly.
+    #[test]
+    fn the_envelope_editor_survives_a_degenerate_point_list() {
+        // One point: `n` must extend it into a real interval rather than underflowing.
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_blur_avrg_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &mut app.dialog else {
+            panic!("expected the envelope editor to be open");
+        };
+        edit.points.truncate(1);
+        edit.selected = 0;
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &app.dialog else {
+            panic!("the editor must still be open");
+        };
+        assert_eq!(edit.points.len(), 2, "n must add a point, not panic");
+        assert!(edit.points[0].0 <= edit.points[1].0, "and keep the list ascending");
+        assert!(edit.selected < edit.points.len(), "with the selection addressable");
+
+        // No points at all: every arm must decline rather than index an empty list.
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        open_blur_avrg_with_field_focused(&mut app);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &mut app.dialog else {
+            panic!("expected the envelope editor to be open");
+        };
+        edit.points.clear();
+
+        for code in [KeyCode::Char('n'), KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right, KeyCode::Delete] {
+            app.handle_dialog_key(KeyEvent::new(code, KeyModifiers::NONE));
+            app.handle_dialog_key(KeyEvent::new(code, KeyModifiers::SHIFT));
+        }
+        assert!(
+            matches!(app.dialog, Some(Dialog::CdpParams { envelope: Some(_), .. })),
+            "the editor must survive every key on an empty list"
+        );
+    }
+
     /// Esc discards every edit made in the session and leaves the field a plain constant —
     /// opening the editor and immediately backing out must be a true no-op, not a silent
     /// "envelope with 2 identical points" left behind.
@@ -38795,6 +38900,114 @@ mod tests {
         assert_eq!(doc.channels.len(), 4);
         assert_eq!(doc.channels[0].len(), 5_000);
         assert!(!app.pending_cache_build, "no streaming build for a resident buffer");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `curve::parse_breakpoints` accepts a `.pc` file with one breakpoint line, and an empty or
+    /// whitespace-only one, returning a one-element and an empty list respectively — neither is
+    /// rejected on the way in. Both editors that receive such a list index it directly.
+    ///
+    /// The curve editor's own `n` already branched on length 1; nothing covered length 0, where
+    /// typing a digit indexes an empty vec. A panic here aborts the process out of raw mode and
+    /// takes every open buffer's unsaved edits and undo history with it.
+    #[test]
+    fn the_curve_editor_survives_a_curve_with_no_points() {
+        let mut app = new_app(Some(doc(0.5, 1000)), None);
+        app.curves.push(crate::model::curve::PitchCurve {
+            name: "empty".into(),
+            points: Vec::new(),
+            path: None,
+            dirty: false,
+            binary_template: None,
+        });
+        app.open_curve_editor(0);
+        assert!(matches!(app.dialog, Some(Dialog::CurveEditor(_))), "the editor must open");
+
+        // Each of these indexed `edit.points[edit.selected_row]` unconditionally.
+        for code in [KeyCode::Char('5'), KeyCode::Char('n'), KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right] {
+            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+        }
+        assert!(matches!(app.dialog, Some(Dialog::CurveEditor(_))), "still open, still empty");
+
+        // Esc must remain the way out rather than being swallowed with everything else.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "Esc must still close it");
+    }
+
+    /// A streamed buffer keeps its audio on disk and its `channels` deliberately *empty*, so an
+    /// in-place save would write a header claiming the stream's channel count followed by no
+    /// audio at all — then stage and rename that over the take. On the 20-30GB captures this
+    /// mode exists for, that is the recording gone.
+    ///
+    /// The read-only allowlist lives in `handle_action`, which is one entry point among
+    /// several: a dirty buffer reaches `save_buffer` through the Buffers panel and through the
+    /// close/quit confirm modals, none of which consult it. So the guard is at the save funnel,
+    /// and this pins it against the file's own bytes rather than against a flag.
+    #[test]
+    fn a_streamed_buffer_is_never_written_in_place() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_stream_nosave_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.wav");
+        multichannel_float_wav(&path, 4, 5_000);
+        let before = std::fs::read(&path).unwrap();
+
+        let mut app = streaming_app();
+        app.load_file(path.clone());
+        assert!(app.documents[0].is_streaming(), "the fixture must actually open streamed");
+
+        // Force the precondition the guard exists for, rather than relying on any one route to
+        // produce it: whatever marked it dirty, the save must still refuse.
+        app.documents[0].dirty = true;
+
+        app.save_buffer(0);
+        assert_eq!(std::fs::read(&path).unwrap(), before, "quick Save must not touch the source");
+        assert!(app.documents[0].dirty, "and must not claim it saved");
+
+        app.save_all();
+        assert_eq!(std::fs::read(&path).unwrap(), before, "Save All reaches the same funnel");
+        assert!(app.documents[0].dirty);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The other half of the same defect: the two marker mouse lanes mutate a document and set
+    /// `dirty` directly, without passing through `handle_action`'s allowlist. A streamed buffer
+    /// does carry markers — `load_file_streaming` reads the cue chunks and the head/tail
+    /// sidecar, since neither needs the audio — so the drag really is reachable on one.
+    ///
+    /// Declining the event (rather than consuming it) is deliberate: the click falls through to
+    /// seek/select, which a streamed buffer is allowed to do.
+    #[test]
+    fn a_marker_drag_cannot_dirty_a_streamed_buffer() {
+        let dir = std::env::temp_dir().join(format!("tuiwave_stream_nodrag_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.wav");
+        multichannel_float_wav(&path, 4, 5_000);
+
+        let mut app = streaming_app();
+        app.load_file(path);
+        assert!(app.documents[0].is_streaming(), "the fixture must actually open streamed");
+
+        app.documents[0].markers.push(Marker { position: 100, label: "M1".into() });
+        app.documents[0].head_tail_marks.push(200);
+        app.waveform_area = Rect::new(0, 0, 80, 20);
+
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 40,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        app.dragging_marker = Some(0);
+        assert!(!app.try_handle_marker_mouse(drag), "it must decline, not consume");
+        app.dragging_head_tail_mark = Some(0);
+        assert!(!app.try_handle_head_tail_mark_mouse(drag), "and so must the head/tail lane");
+
+        assert!(!app.documents[0].dirty, "a streamed buffer must never become dirty");
+        assert_eq!(app.documents[0].markers[0].position, 100, "the marker must not move");
+        assert_eq!(app.documents[0].head_tail_marks[0], 200);
 
         std::fs::remove_dir_all(&dir).ok();
     }
