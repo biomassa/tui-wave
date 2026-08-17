@@ -1,6 +1,42 @@
 # Changelog
 
-## Unreleased
+## 2026-08-17 (2.10.0)
+
+- **praatAudioTools updated to `a7f9583`, and the catalog regenerated with it.** Upstream moved six
+  commits — all titled "Add files via upload", as ever — rewriting 55 scripts and adding 7. Fifty of
+  those rewrites changed their form's field count or type sequence, which is why the pin and the
+  catalog have to move together: Praat fills a form positionally and does not reject a mismatch, it
+  produces plausible wrong audio. 457 → 463 processes.
+
+  Six are genuinely new — Causal Recomposer, Audio File Properties, Zero Crossing Rate, Zero DC
+  Offset, ASA Demos, SPEAR Fast Resynthesis (a fifth Tk editor).
+
+  **If you have saved presets, re-check them for these 27 processes**, whose parameter lists
+  changed: Acoustic Features Batch Extraction, Audio Descriptions and Global Statistics, Climax
+  Profile Matcher, Continuous Pitch over MIDI Grid Visualizer, Correlation-Based Pitch Class
+  Extraction, DTW-Aligned Multi-Feature Audio Analysis, Extract Segment, Kick detector and bass
+  adder, Krumhansl-Schmuckler Key Profiler, MFCC, Melodic Contour Parsons Code, Multi-Layer Audio
+  Visualizer, Musikalisches Würfelspiel Audio Game, Pitch and Loudness Comparison Two Sounds,
+  SpectraScore Orchestration Matcher, Doppler shift, Fractal Spectral Hologram, Hilbert Transform,
+  LPC Voice Morphing, Partial Editing Resynthesis, Self Adaptive Sieve Convolution, Spectral Blur,
+  Spectral Effects Suite, Spectral Freeze Synthesis, Spectral swirl effect, Vocoding, Wave
+  Interference Pattern. A preset stores values by position, so one saved against the old shape now
+  binds them to different controls. Nothing warns about this yet.
+
+  Four working entries were reshaped upstream into the `boolean Edit_… 0` + `beginPause` shape that
+  excludes a script on sight; they take hoist entries, so none is lost. **BrightnessClassifier**
+  arrives new and broken upstream — its `HF_split_Hz` field binds a variable the script never reads,
+  leaving the control inert on five presets while the sixth aborts outright — and is excluded under
+  a new `broken_upstream` category, which unlike the existing exclusions carries a guard that
+  re-derives the defect, so an upstream fix restores the process with no edit here.
+
+- **A column-aligned gating toggle is now found.** `apply_form_locks` matched the `boolean` it
+  removes from a script's form with a hard-coded single space, so a declaration written
+  `boolean   Edit_details           0` was never found — and the miss was silent: it deleted
+  nothing but emitted the assignment anyway, leaving the form one field wider than the catalog
+  declares, and Praat answered "Found 6 arguments but expected more". The matcher now takes
+  arbitrary whitespace (still requiring a trailing word boundary, so `Edit_details` cannot match
+  `Edit_details_extra`), and a lock that finds no field is a hard error rather than a no-op.
 
 - **A streamed buffer can no longer be saved over its own source.** The read-only allowlist that
   keeps a 20-30GB take safe lives in `handle_action`, but the two marker mouse lanes reach the
