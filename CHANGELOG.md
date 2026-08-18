@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+- **praatAudioTools updated to `7a42591`, and the catalog regenerated with it.** Three commits,
+  all titled "Add files via upload" as ever, adding one script and rewriting twelve in `py/`.
+  463 → 464 processes.
+
+  One is genuinely new: **Symmetric Group Permuter** (Time/Granular) — cuts the selection into n
+  segments by one of five segmentation modes, reorders them by a permutation σ of Sₙ typed in
+  cycle notation or taken from a named preset, raises σ to the k-th power, and reassembles with
+  `Concatenate with overlap` so no boundary clicks.
+
+  **If you have saved presets, re-check them for Hierarchical Neural Recomposition and Internal
+  Polyphony**, the two whose parameter lists changed. The first lost `Density`,
+  `Section_contrast` and `Source_trace`; the second lost `Max_overlap`, which also re-indexed all
+  five of its script presets. This is the reason the pin and the catalog can only move together:
+  Praat fills a form positionally and does not reject a mismatch, it produces plausible wrong
+  audio. Latent Barycentric Mutation relabels one `Normalize_mode` option (`loudness` →
+  `loudness (RMS proxy)`); the remaining six rewrites — HPSS Phase Vocoder, Acoustic Identity
+  Separation, Latent Diffusion Resynthesis, Latent Spat, The Latent Counterpoint, Latent Folding —
+  changed bodies and version strings only, leaving their forms alone.
+
+  `LatentSTFTDecoder` and `MotionControl` were reshaped substantially upstream but stay excluded
+  (a Tk editor and a webcam capture respectively), so neither costs anything here. Exclusions
+  hold at 42.
+
 ## 2026-08-17 (2.10.0)
 
 - **praatAudioTools updated to `a7f9583`, and the catalog regenerated with it.** Upstream moved six
