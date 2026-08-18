@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-18 (2.10.1)
 
 - **praatAudioTools updated to `7a42591`, and the catalog regenerated with it.** Three commits,
   all titled "Add files via upload" as ever, adding one script and rewriting twelve in `py/`.
