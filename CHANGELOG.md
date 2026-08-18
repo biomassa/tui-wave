@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Closing a buffer no longer leaves its star behind in the Files panel.** The panel keeps its
+  own dirty state — `FilePanel.dirty_paths`, keyed by path rather than by buffer, mirrored by
+  hand from sixteen call sites — and `close_buffer` dropped the document, its history and its
+  waveform cache while never retracting the mark. Nothing else ever would: `dirty_paths` is only
+  written through `mark_dirty`, so a re-scan, a directory change and reopening the panel all left
+  the stale entry in place, and the star survived for the rest of the session. It claimed a file
+  on disk had unsaved changes with nothing open on it at all. Reachable by closing a dirty buffer
+  without saving, which is exactly the case where the changes are being discarded and the mark is
+  least true. Retracted only once no remaining buffer on that path is dirty, since the same file
+  can be open twice.
+
 ## 2026-08-18 (2.10.1)
 
 - **praatAudioTools updated to `7a42591`, and the catalog regenerated with it.** Three commits,

@@ -15221,12 +15221,35 @@ impl App {
 
     /// Removes buffer `idx` (and its parallel history), fixes the active index, and rebuilds
     /// derived state. Closing the last buffer leaves the empty state.
+    ///
+    /// The file panel keeps its **own** dirty state (`FilePanel.dirty_paths`, keyed by path
+    /// rather than by buffer), so closing has to retract the mark as well as drop the document
+    /// — nothing else ever will. `dirty_paths` is only written through `mark_dirty`, so a
+    /// re-`scan()`, a directory change and reopening the panel all leave a stale entry in
+    /// place: the star outlived the buffer for the rest of the session, claiming a file on
+    /// disk had unsaved changes when nothing was open on it at all. Reachable by closing a
+    /// dirty buffer without saving (answering `n` to the confirm), which is precisely the case
+    /// where the changes are being *discarded* and the mark is least true.
+    ///
+    /// Retracted only once **no remaining buffer** on that path is dirty. The same file can be
+    /// open twice, and closing one of two dirty views of it must not clear a mark the other one
+    /// is still earning.
     fn close_buffer(&mut self, idx: usize) {
         if idx >= self.documents.len() {
             return;
         }
+        let closed_path = self.documents[idx].path.clone();
         self.documents.remove(idx);
         self.histories.remove(idx);
+        if let Some(path) = closed_path {
+            let still_dirty = self
+                .documents
+                .iter()
+                .any(|d| d.dirty && d.path.as_deref() == Some(path.as_path()));
+            if !still_dirty {
+                self.file_panel.mark_dirty(&path, false);
+            }
+        }
         if idx < self.waveform_caches.len() {
             self.waveform_caches.remove(idx);
         }
@@ -39977,6 +40000,51 @@ mod tests {
         let saved = std::fs::read_to_string(&curve_path).unwrap();
         assert!(saved.contains("220"), "the curve's points should be on disk");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Closing a dirty buffer without saving retracts the file panel's star as well as
+    /// dropping the document. The panel keeps its own path-keyed dirty set, and nothing else
+    /// ever clears it — a re-scan doesn't, and neither does changing directory — so the mark
+    /// used to outlive the buffer for the rest of the session, claiming a file on disk had
+    /// unsaved changes with nothing open on it.
+    #[test]
+    fn closing_a_dirty_buffer_clears_the_file_panels_star() {
+        let path = PathBuf::from("/tmp/tui_wave_close_star.wav");
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.documents[0].path = Some(path.clone());
+        app.documents[0].dirty = true;
+        app.file_panel.mark_dirty(&path, true);
+
+        app.close_buffer(0);
+
+        assert!(app.documents.is_empty());
+        assert!(
+            !app.file_panel.dirty_paths.contains(&path),
+            "the star must not outlive the buffer that earned it"
+        );
+    }
+
+    /// ...but only once *no* remaining buffer on that path is still dirty. The same file can
+    /// be open twice, and closing one dirty view of it must not clear a mark the other is
+    /// still earning.
+    #[test]
+    fn closing_one_of_two_dirty_views_of_a_file_keeps_the_star() {
+        let path = PathBuf::from("/tmp/tui_wave_close_star_shared.wav");
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        app.documents[0].path = Some(path.clone());
+        app.documents[0].dirty = true;
+        app.push_document(doc(0.2, 10));
+        app.documents[1].path = Some(path.clone());
+        app.documents[1].dirty = true;
+        app.file_panel.mark_dirty(&path, true);
+
+        app.close_buffer(1);
+
+        assert_eq!(app.documents.len(), 1);
+        assert!(
+            app.file_panel.dirty_paths.contains(&path),
+            "the surviving dirty buffer still earns the star"
+        );
     }
 
     /// Backing out (Esc) of a queued Save-As prompt cancels the whole pending sequence —
