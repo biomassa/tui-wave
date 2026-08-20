@@ -1392,6 +1392,19 @@ def split_label_and_value(rest: str, colon_form: bool) -> tuple[str | None, str]
     unparseable, and with them 54 parameters locked at their script defaults.
     """
     rest = rest.strip()
+    # A **multi-line** text field puts its height first: `text: 6, "Pbind", "Pbind(...)"`
+    # declares a six-line editor named `Pbind`. The height is a property of the widget, not an
+    # operand, and Praat still passes exactly one argument for the field — so it has to come off
+    # before the label is read. Without this the label parses as `6` and the real label is
+    # swallowed into the default, which arrives as `Pbind", "Pbind(...)`: the field count stays
+    # right, so the script still *runs*, and the dialog simply offers a control called "6"
+    # holding a mangled string. (`py/PraatPbind.praat`, rewritten into the colon syntax
+    # upstream on 2026-08-19.) Recognised by shape rather than by keyword because a bare
+    # integer followed by a comma and a quoted label is unique to this declaration.
+    if colon_form:
+        lines = re.match(r'(\d+)\s*,\s*(?=")', rest)
+        if lines:
+            rest = rest[lines.end() :]
     if colon_form and rest.startswith('"'):
         end = rest.find('"', 1)
         if end == -1:

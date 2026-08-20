@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- **praatAudioTools updated to `a4f29c7`, and the catalog regenerated with it.** Eight upstream
+  commits, three of them README-only; the rest continue the alphabetical sweep through `py/` that
+  the last bump began, this time covering P through V. 464 processes, unchanged — nothing entered
+  or left the browser.
+
+  **If you have saved presets, re-check them for these eight processes**, whose parameter lists
+  changed: Sympathetic Resonance (`Decay_s` replaced by `Pitch_basis` and `Decay_ceiling_s`),
+  Recomposer (`+Min_silence_dur_s`, `+Min_sound_dur_s`), TinySOL Retrieval (`+Envelope_follow`),
+  Spectral Morph (`+Swap_A_and_B`), Rhythmic Voice Flattener (`+Seed`), Paulstretch
+  (`+Random_seed`), Semantic Timbre Retrieval (reordered), and PraatPbind (labels only).
+
+  Exclusions 42 → 43: `GranularFaceNavigator` arrives excluded, its helper needing cv2 and
+  mediapipe to track a face through a webcam — the same reason `MotionControl` is out. `SSMComposer`
+  stays excluded but for a new reason, having gained the helper it previously lacked: it now needs
+  matplotlib.
+
+- **A multi-line text field no longer takes its own line count as its name.** Praat's colon-style
+  form syntax puts the editor height first — `text: 6, "Pbind", "Pbind(...)"` declares a six-line
+  box named `Pbind` — and the converter read that `6` as the label, folding the real one into the
+  default, which arrived as the mangled `Pbind", "Pbind(...)`. The height is a property of the
+  widget rather than an operand, and Praat still passes exactly one argument for the field, so the
+  arity stayed correct and nothing would have errored: the dialog simply offered a control called
+  "6" holding a broken Pbind expression. Surfaced by `py/PraatPbind.praat`, rewritten into the
+  colon syntax upstream on 2026-08-19.
+
 - **Closing a buffer no longer leaves its star behind in the Files panel.** The panel keeps its
   own dirty state — `FilePanel.dirty_paths`, keyed by path rather than by buffer, mirrored by
   hand from sixteen call sites — and `close_buffer` dropped the document, its history and its
