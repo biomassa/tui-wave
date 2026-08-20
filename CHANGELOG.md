@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-20 (2.10.2)
 
 - **praatAudioTools updated to `a4f29c7`, and the catalog regenerated with it.** Eight upstream
   commits, three of them README-only; the rest continue the alphabetical sweep through `py/` that
