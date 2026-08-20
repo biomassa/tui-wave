@@ -27,6 +27,16 @@
   "6" holding a broken Pbind expression. Surfaced by `py/PraatPbind.praat`, rewritten into the
   colon syntax upstream on 2026-08-19.
 
+- **Airwindows updated to airwin2rack `35ad772`.** 500 → 501 effects: `RetroBass` (Filter) joins the
+  catalog. Four further plugins arrived upstream — `ConsoleX3`, `PurestWarm3`, `Spiral3` and `Weave`
+  — and are deliberately absent, though not by any choice made here: airwin2rack's
+  `registerAirwindow` drops an effect whose `whatText` is empty, and all four ship without
+  documentation text. RetroBass differs only in that its `res/awpdoc/RetroBass.txt` landed in the
+  same commit. They will appear on a later bump, once their docs do. `PunchyDeluxe` and
+  `PunchyGuitar` changed upstream but are undocumented in the same way and were already absent, so
+  neither affects this catalog. No new category, so the browser's Groups column still holds 23
+  against its 24-row limit.
+
 - **Closing a buffer no longer leaves its star behind in the Files panel.** The panel keeps its
   own dirty state — `FilePanel.dirty_paths`, keyed by path rather than by buffer, mirrored by
   hand from sixteen call sites — and `close_buffer` dropped the document, its history and its
