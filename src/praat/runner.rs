@@ -380,6 +380,10 @@ fn run_job_body(
                 &rewrite.directories,
             )
             .map_err(|e| fail(e.to_string()))?;
+            // Unconditional, and a no-op on every script that does not carry the defect: it is
+            // detected in the text rather than declared, so there is nothing to gate it on. See
+            // `rewrite::repair_branch_scoped_variables`.
+            source = crate::model::praat::rewrite::repair_branch_scoped_variables(&source);
         }
 
         let name = match (&job.planned.pause_rewrite, &job.planned.python_rewrite) {

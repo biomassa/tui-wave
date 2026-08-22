@@ -333,12 +333,21 @@ fn apply_form_locks(
         // the field stayed in the form while the assignment was emitted anyway, so Praat was
         // handed one argument fewer than its form declares and answered "Found N arguments but
         // expected more". `Beltrami_Inspired_Spectral_Melter` is where that surfaced.
+        //
+        // A **trailing colon on the label** is accepted for the same reason: upstream writes
+        // both `boolean Advanced_settings 0` and `boolean Advanced_settings: 0` inside otherwise
+        // classic forms, and Praat tolerates either. The converter's own parser already strips
+        // it (`split_label_and_value` rstrips `":"`), so a matcher that did not would disagree
+        // with the parse that produced the `lock_on` name -- and disagreement here is not a
+        // no-op, it is the hard `MissingFormLock` below. Two of the eleven scripts hoisted in
+        // the 2026-08-22 bump are written that way.
         let position = lines.iter().position(|l| {
             let rest = l.trim().strip_prefix("boolean").unwrap_or("");
             let Some(rest) = rest.strip_prefix(char::is_whitespace) else { return false };
-            rest.trim_start()
-                .strip_prefix(label.as_str())
-                .is_some_and(|after| after.chars().next().is_none_or(char::is_whitespace))
+            rest.trim_start().strip_prefix(label.as_str()).is_some_and(|after| {
+                let after = after.strip_prefix(':').unwrap_or(after);
+                after.chars().next().is_none_or(char::is_whitespace)
+            })
         });
         // Not finding it is an error rather than a no-op, for the reason a missing directory
         // chooser is: the assignment below has already committed to the field being gone, so
@@ -359,6 +368,154 @@ fn apply_form_locks(
     Ok(())
 }
 
+/// Give a variable assigned only inside an `if` arm a value on the arm that reads it without it.
+///
+/// The defect this repairs is upstream's, and it is specific: a `pageHeight = 8.00` sits inside
+/// `if draw_visualization`, and the 2026-08-22 "suite-standard visualization" rework then pasted
+/// a page-restore block into that same `if`'s **`else`** arm — which reads `pageHeight`. Praat
+/// answers `Unknown variable: pageHeight` and the script dies after its audio is already made.
+/// Stock Praat hits it too, but only for a user who unticks the drawing box; this app forces
+/// every `Draw`/`Play` toggle off, so the broken arm is the *only* arm it ever takes. Two scripts
+/// arrived that way (`Filter & Color/Harmonic_Remover.praat`,
+/// `Filter & Color/Intelligent_EQ_Adaptive_Bandpass.praat`), both of which ran clean the day
+/// before.
+///
+/// **Derived, not tabulated.** There is no list of afflicted scripts to keep in step with
+/// upstream: the defect is re-detected in the text in front of it every run, so a fixed script
+/// stops matching and is copied through untouched. That is the same "upstream always wins" rule
+/// [`PAUSE_VARIABLE_FIXES`] follows, without the staleness a table brings — and it is why the
+/// guard below is deliberately narrow rather than clever.
+///
+/// Repaired only when **all** of these hold, which is what separates the two broken scripts from
+/// the thirty-two others that assign `pageHeight` the same way and are perfectly fine (their
+/// page-restore block sits inside the `if` arm, merely un-indented):
+///
+/// * the variable is assigned exactly once, to a plain numeric literal, inside an `if` arm;
+/// * that same `if` has an `else` arm which *reads* the variable;
+/// * the variable is assigned nowhere at top level before that `if`.
+///
+/// The repair is the smallest one that works: the same literal, assigned immediately above the
+/// `if`, so both arms see it and the then-arm's own assignment still runs and still wins.
+pub fn repair_branch_scoped_variables(source: &str) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut inserts: Vec<(usize, String)> = Vec::new();
+
+    for (start, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if !(trimmed.starts_with("if ") || trimmed == "if") {
+            continue;
+        }
+        // Walk this `if` to its matching `else`/`endif`, tracking nesting so an inner block's
+        // `else` is never mistaken for this one's.
+        let mut depth = 0usize;
+        let (mut else_at, mut end_at) = (None, None);
+        for (i, l) in lines.iter().enumerate().skip(start) {
+            let s = l.trim();
+            if s == "if" || s.starts_with("if ") {
+                depth += 1;
+            } else if s == "endif" {
+                depth -= 1;
+                if depth == 0 {
+                    end_at = Some(i);
+                    break;
+                }
+            } else if s == "else" && depth == 1 {
+                else_at = Some(i);
+            }
+        }
+        let (Some(else_at), Some(end_at)) = (else_at, end_at) else { continue };
+
+        for (i, l) in lines.iter().enumerate().take(else_at).skip(start + 1) {
+            let Some((name, value)) = numeric_assignment(l) else { continue };
+            // Assigned anywhere else at all — and *any* assignment counts, not just another
+            // numeric one. Checking only numeric assignments was the bug that made this fire on
+            // 111 scripts instead of two: the overwhelmingly common shape is
+            //
+            //     if cond
+            //         x = 1
+            //     else
+            //         x = <something computed>
+            //         ... uses x
+            //     endif
+            //
+            // where the else arm assigns `x` itself before reading it and there is nothing wrong.
+            // A computed assignment is invisible to `numeric_assignment`, so that read looked
+            // like a read of an undefined variable and every one of those scripts was needlessly
+            // rewritten — which also pushed them onto the copy-in-a-temp-directory path and broke
+            // the ones that resolve anything relative to their own location.
+            let assigned_elsewhere = lines
+                .iter()
+                .enumerate()
+                .any(|(j, other)| j != i && assigns_variable(other, &name));
+            if assigned_elsewhere {
+                continue;
+            }
+            let read_on_else_arm = lines[else_at + 1..end_at]
+                .iter()
+                .any(|l| mentions_variable(l, &name));
+            if read_on_else_arm {
+                let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+                // The note goes on its own line: Praat treats `#` as a comment only at the
+                // start of a line, so a trailing one is parsed as part of the expression and
+                // answers `Unknown symbol: #`.
+                inserts.push((
+                    start,
+                    format!(
+                        "{indent}# tui-wave: defined here for the branch that reads it\n\
+                         {indent}{name} = {value}"
+                    ),
+                ));
+            }
+        }
+    }
+
+    if inserts.is_empty() {
+        return source.to_string();
+    }
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + inserts.len());
+    for (i, line) in lines.iter().enumerate() {
+        for (at, text) in &inserts {
+            if *at == i {
+                out.push(text.clone());
+            }
+        }
+        out.push((*line).to_string());
+    }
+    let mut text = out.join("\n");
+    if source.ends_with('\n') {
+        text.push('\n');
+    }
+    text
+}
+
+/// Whether `line` assigns `name`, by any expression at all.
+///
+/// Praat spells comparison `=` too (`if preset = 2`), so an assignment is recognised only when
+/// the whole left-hand side is the bare name — a comparison always carries a keyword before it.
+fn assigns_variable(line: &str, name: &str) -> bool {
+    line.split_once('=').is_some_and(|(lhs, rhs)| {
+        lhs.trim() == name && !rhs.starts_with('=')
+    })
+}
+
+/// `name = <numeric literal>` and nothing else — the only assignment shape safe to duplicate,
+/// since it cannot depend on anything computed inside the arm it is being lifted out of.
+fn numeric_assignment(line: &str) -> Option<(String, String)> {
+    let (lhs, rhs) = line.split_once('=')?;
+    let name = lhs.trim();
+    if name.is_empty()
+        || !name.chars().next()?.is_ascii_alphabetic()
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    let value = rhs.split('#').next()?.trim();
+    if value.is_empty() || !value.parse::<f64>().is_ok() {
+        return None;
+    }
+    Some((name.to_string(), value.to_string()))
+}
+
 pub fn rewrite_pause_blocks(
     source: &str,
     blocks: &BTreeMap<usize, Vec<Assignment>>,
@@ -368,10 +525,44 @@ pub fn rewrite_pause_blocks(
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut block_index = 0usize;
     let mut i = 0usize;
+    // The script's own `form` is the one Praat fills positionally and `apply_form_locks` edits;
+    // only a *second* one is a hoistable block. See the converter's `SECOND_FORM_RE` for why a
+    // second form exists at all — Praat allows one per run, so it is upstream's own bug, and it
+    // is hoisted through exactly the pause-block machinery because only the delimiters differ.
+    let mut seen_first_form = false;
 
     while i < lines.len() {
         let line = lines[i];
-        if line.trim_start().starts_with("beginPause:") || line.trim_start().starts_with("beginPause ") {
+        let trimmed = line.trim_start();
+        let is_form_head = trimmed == "form"
+            || trimmed.starts_with("form ")
+            || trimmed.starts_with("form:");
+        if is_form_head && !seen_first_form {
+            seen_first_form = true;
+            out.push(line.to_string());
+            i += 1;
+            continue;
+        }
+        let is_second_form = is_form_head && seen_first_form;
+        if is_second_form {
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            let Some(end) = (i + 1..lines.len()).find(|&j| lines[j].trim() == "endform") else {
+                return Err(RewriteError::UnterminatedBlock { line: i + 1 });
+            };
+            out.push(format!(
+                "{indent}# --- second form {block_index} replaced by tui-wave ---"
+            ));
+            for assignment in blocks.get(&block_index).map(Vec::as_slice).unwrap_or(&[]) {
+                for rendered in assignment.render_into(source) {
+                    out.push(format!("{indent}{rendered}"));
+                }
+            }
+            // No buttons on a form, so nothing to report as clicked.
+            block_index += 1;
+            i = end + 1;
+            continue;
+        }
+        if trimmed.starts_with("beginPause:") || trimmed.starts_with("beginPause ") {
             let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
             let Some(end) = (i + 1..lines.len()).find(|&j| is_end_pause(lines[j])) else {
                 return Err(RewriteError::UnterminatedBlock { line: i + 1 });
@@ -628,6 +819,87 @@ mod tests {
             unread.is_empty(),
             "labels whose derived variable no script reads:\n  {}",
             unread.join("\n  ")
+        );
+    }
+
+    /// The 2026-08-22 shape: `pageHeight` assigned in the `if` arm, read in the `else` arm that
+    /// this app is the only one to take. Repaired above the `if`, so both arms see it.
+    #[test]
+    fn a_variable_read_on_the_arm_that_never_assigns_it_is_defined_above_the_if() {
+        let broken = "if draw_visualization\n    pageHeight = 8.00\n    Select outer viewport: 0, 8, 0, pageHeight\nelse\n    appendInfoLine: \"skipped\"\nSelect outer viewport: 0, 8, 0, pageHeight\nendif\n";
+        let out = repair_branch_scoped_variables(broken);
+        let above = out.lines().position(|l| l.contains("pageHeight = 8.00")).expect("repair");
+        let the_if = out.lines().position(|l| l.starts_with("if draw_visualization")).expect("if");
+        assert!(above < the_if, "the definition must precede the branch:\n{out}");
+    }
+
+    /// The thirty-two scripts that are *not* broken: same assignment, but the page-restore block
+    /// sits inside the `if` arm — merely un-indented, which is what made the defect hard to see
+    /// by eye. Nothing may be inserted here, or a correct script gets edited for no reason.
+    #[test]
+    fn a_variable_read_only_on_the_arm_that_assigns_it_is_left_alone() {
+        let fine = "if draw_visualization\n    pageHeight = 8.00\n    Draw stuff\nSelect outer viewport: 0, 8, 0, pageHeight\nendif\n";
+        assert_eq!(repair_branch_scoped_variables(fine), fine);
+    }
+
+    /// Upstream always wins: once the assignment is lifted to top level, the guard stops matching
+    /// and the script is copied through byte-for-byte.
+    #[test]
+    fn an_upstream_fix_stops_the_repair_from_applying() {
+        let fixed = "pageHeight = 8.00\nif draw_visualization\n    Draw stuff\nelse\nSelect outer viewport: 0, 8, 0, pageHeight\nendif\n";
+        assert_eq!(repair_branch_scoped_variables(fixed), fixed);
+    }
+
+    /// Only a plain numeric literal is duplicated. Anything computed inside the arm could depend
+    /// on work done there, so lifting it would change what the script means.
+    #[test]
+    fn a_computed_assignment_is_never_lifted() {
+        let computed = "if draw_visualization\n    pageHeight = height * 2\nelse\nSelect outer viewport: 0, 8, 0, pageHeight\nendif\n";
+        assert_eq!(repair_branch_scoped_variables(computed), computed);
+    }
+
+    /// The shape that made an earlier version of this fire on 111 scripts instead of two: the
+    /// else arm assigns the variable itself, with a computed expression, before reading it.
+    /// Nothing is wrong there, and nothing may be inserted.
+    #[test]
+    fn an_else_arm_that_computes_the_variable_itself_is_left_alone() {
+        let fine = "if cond\n    pageHeight = 8.00\nelse\n    pageHeight = base * 2\n    Select outer viewport: 0, 8, 0, pageHeight\nendif\n";
+        assert_eq!(repair_branch_scoped_variables(fine), fine);
+    }
+
+    /// A canary over the real plugin: this repair edits someone else's script, so the set it
+    /// touches must stay tiny and known. It fired on 111 of them once, which pushed every one
+    /// onto the copy-in-a-temp-directory path and broke the scripts that resolve paths relative
+    /// to their own location — a failure the unit tests above could not show, because each is a
+    /// fragment rather than a real script. Skipped when the submodule is absent.
+    #[test]
+    fn the_repair_touches_only_the_handful_of_scripts_that_need_it() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("third_party/praat-audiotools");
+        let Ok(categories) = std::fs::read_dir(&dir) else { return };
+        let mut touched = Vec::new();
+        for category in categories.filter_map(|e| e.ok()) {
+            if !category.path().is_dir() || category.file_name() == "Max-MSP" {
+                continue;
+            }
+            let Ok(scripts) = std::fs::read_dir(category.path()) else { continue };
+            for script in scripts.filter_map(|e| e.ok()) {
+                let path = script.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("praat") {
+                    continue;
+                }
+                let Ok(source) = std::fs::read_to_string(&path) else { continue };
+                if repair_branch_scoped_variables(&source) != source {
+                    touched.push(script.file_name().to_string_lossy().into_owned());
+                }
+            }
+        }
+        touched.sort();
+        assert!(
+            touched.len() <= 5,
+            "the repair should touch only scripts carrying the defect, but it touches {}: {:?}",
+            touched.len(),
+            touched
         );
     }
 
@@ -1038,3 +1310,4 @@ mod form_lock_tests {
         assert_eq!(out, source);
     }
 }
+

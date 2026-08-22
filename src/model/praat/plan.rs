@@ -342,7 +342,21 @@ pub fn plan_praat_job_with(
         .iter()
         .map(|(label, on)| (label.clone(), if *on { 1.0 } else { 0.0 }))
         .collect();
-    let pause_rewrite = (!blocks.is_empty() || !form_locks.is_empty() || !directories.is_empty())
+    // A script with no dialog to rewrite still needs a copy when it carries the branch-scoped
+    // variable defect — see `rewrite::repair_branch_scoped_variables`. Detected by reading the
+    // script here rather than recorded in the catalog, so it is re-derived every run and an
+    // upstream fix takes effect immediately, with nothing here to go stale. Best-effort: an
+    // unreadable script is not this function's failure to report, and the runner reads it again
+    // and reports properly.
+    let needs_branch_repair = std::fs::read_to_string(&script_path)
+        .map(|source| {
+            crate::model::praat::rewrite::repair_branch_scoped_variables(&source) != source
+        })
+        .unwrap_or(false);
+    let pause_rewrite = (!blocks.is_empty()
+        || !form_locks.is_empty()
+        || !directories.is_empty()
+        || needs_branch_repair)
         .then(|| PauseRewrite {
             script_name: REWRITTEN_SCRIPT.to_string(),
             blocks,

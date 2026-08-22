@@ -28721,7 +28721,11 @@ mod tests {
                     && declares_a_channel_count(&p.title)
             })
             .collect();
-        assert_eq!(widening.len(), 12, "the N-channel family");
+        // 13 since the 2026-08-22 bump, which added a second `4-Channel_Canon.praat`
+        // upstream — a twin of the existing one, keyed `_2` like the eleven other same-name
+        // pairs. The count is asserted so a *silent* change in what the name rule matches
+        // shows up; a real catalog addition moving it is the expected kind of edit.
+        assert_eq!(widening.len(), 13, "the N-channel family");
         for def in widening {
             assert!(App::praat_opens_new_buffer(def), "{}", def.key);
         }
