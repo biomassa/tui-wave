@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased
+
+- **praatAudioTools updated to `27f439e`, and the catalog regenerated with it.** Forty-eight
+  upstream commits, about half of them a Max/MSP external subproject this app does not read. The
+  rest rework 221 scripts across every category and add seven. 464 → 471 processes, 43 → 41
+  excluded; nothing left the catalog.
+
+  Seven new: **NMF Spectral Resynthesizer** and **Tournament Grid Recomposer** (AI & Adaptive),
+  **OM Rhythm Tree Slicer** and a second **Symmetric Group Permuter** (Dynamics), **BFG Pitch
+  Time Modulation** (Pitch), a second **4-Channel Canon** and **Ambisonic Bed Mixer** (Spatial).
+
+- **Eleven processes kept their advanced settings instead of leaving the catalog.** Upstream gave
+  each a `boolean Advanced_settings 0` guarding a `beginPause` page holding the settings that
+  matter most — the compressor knee and lookahead, the reverb's early-reflection geometry, the
+  distortion band splits. Under `--run` that page segfaults Praat, so all eleven would have been
+  excluded outright on the first regeneration. They take `PAUSE_HOISTS` entries with the toggle
+  locked on, which is what puts those fields in the ordinary dialog: Multiband Distortion, Virtual
+  Subharmonic Generator, Compressor, Intensity Envelope Processor, Time-domain RMS Envelope
+  Follower, Vintage Glue Compressor, Hexaphonic Serial Audio Processor, Phonetic Tremolo/Glitch
+  Effect, Spectral-Driven Intensity Modulation, Fractal Pitch Terrain, Artificial Room.
+
+- **Three more got their advanced page back from an illegal second `form`.** Praat allows one
+  `form` per script run, so a second one inside `if advanced_settings` cannot work — and unlike a
+  `beginPause` it does not segfault, so the exclusion detector never saw it: Dynamic Formant
+  Sweeper, Adaptive Spectral Resonance Suppressor and Jitter-Shimmer Formant Mapping stayed in the
+  catalog quietly missing 27 parameters between them. A second form is now recognised as the
+  secondary settings block it is and hoisted through the identical machinery, only the delimiters
+  differing; the script's own first form is never a block. All three are back to exactly their
+  pre-bump parameter counts.
+
+- **Two processes no longer die after making their audio.** Upstream's "suite-standard
+  visualization" rework pasted a page-restore block into the **`else`** arm of
+  `if draw_visualization`, where it reads a `pageHeight` that only the `if` arm assigns — so Praat
+  answers `Unknown variable: pageHeight`. Stock Praat reaches it only for a user who unticks the
+  drawing box; this app forces every `Draw`/`Play` toggle off, so the broken arm is the only arm it
+  ever takes, and **Harmonic Remover** and **Intelligent EQ Adaptive Bandpass** failed on every
+  run despite having worked the day before. The repair is derived from the script rather than
+  tabulated — re-detected each run, so an upstream fix silently retires it — and is guarded to a
+  single numeric assignment read on the arm that does not make it, which is what leaves the
+  thirty-two scripts that assign `pageHeight` the same way and are perfectly fine untouched.
+
+- **A form lock now matches a label written with a trailing colon.** Upstream writes both
+  `boolean Advanced_settings 0` and `boolean Advanced_settings: 0` inside otherwise classic forms.
+  The converter's parser already stripped that colon, so the two disagreed — and a disagreement
+  here is not a no-op but a hard `MissingFormLock`, which would have taken out two of the eleven
+  hoists above.
+
 ## 2026-08-20 (2.10.2)
 
 - **praatAudioTools updated to `a4f29c7`, and the catalog regenerated with it.** Eight upstream

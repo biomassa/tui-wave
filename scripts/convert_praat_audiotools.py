@@ -232,7 +232,7 @@ GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
     # which blocks Apply until a folder is picked -- so blank is unreachable and so is the
     # dialog.
     "AI & Adaptive/OT_CORPUS_CONCATENATOR.praat": {
-        "why": "chooseFolder$ is a fallback for a blank Folder_path field, which cannot be blank",
+        "why": "chooseFolder$ is a fallback for a blank Folder field, which cannot be blank",
     },
     "AI & Adaptive/Timbral_Similarity_Browser.praat": {
         "why": "chooseFolder$ is a fallback for a blank Folder field, which cannot be blank",
@@ -508,6 +508,89 @@ PAUSE_HOISTS: dict[str, dict] = {
             "Stereo Fibonacci": "Settings: Stereo Fibonacci",
             "Swing": "Settings: Swing",
         },
+    },
+    # Eleven of a shape, arriving together in the 2026-08-22 bump, which reworked 221 scripts
+    # across every category. Each grew a `boolean Advanced_settings 0` in its form guarding a
+    # single `if advanced_settings` / `beginPause ... endPause` page of the settings that matter
+    # most -- the compressor knee and lookahead, the reverb's early-reflection geometry, the
+    # distortion band splits. Under `--run` that page segfaults praat, so all eleven fell out of
+    # the catalog on the first regeneration after the bump.
+    #
+    # Same treatment and same reasoning as the `Show_advanced_settings` trio above: the page is
+    # gated, so the toggle is locked **on** or the hoisted assignments sit inside an `if` that
+    # never runs. Nothing is smuggled in by that -- with the dialog replaced by assignments the
+    # toggle no longer shows anything, it only decides whether the advanced values apply, and
+    # the dialog is now where they are set.
+    #
+    # `Artificial_Room`'s guard is `if advanced_settings or room_preset = 5`, so locking the
+    # toggle makes it true whatever the preset -- which is what is wanted: the page is where its
+    # room geometry lives, and reaching it only on preset 5 would hide those fields on the other
+    # four. It is also the one whose block ends `endPause: "Run", 1` rather than "Continue".
+    "Distortion/Multiband_Distortion.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "Advanced settings page (band splits, per-band drive)",
+    },
+    "Distortion/Virtual_Subharmonic_Generator.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "Advanced settings page (tracking and division detail)",
+    },
+    "Dynamics & Envelope/Compressor.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "Advanced settings page (knee, lookahead, detector)",
+    },
+    "Dynamics & Envelope/Intensity_Envelope_Processor.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "Advanced settings page (envelope extraction detail)",
+    },
+    "Dynamics & Envelope/Time-domain_RMS_envelope_follower.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "Advanced settings page (window and smoothing detail)",
+    },
+    "Dynamics & Envelope/Vintage_Glue_Compressor.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "Advanced settings page (glue character, sidechain)",
+    },
+    "Modulation/Hexaphonic Serial Audio Processor.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "Advanced settings page (per-string processing detail)",
+    },
+    "Modulation/Phonetic_Tremolo_Glitch_Effect.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "Advanced settings page (glitch rate and gate detail)",
+    },
+    "Modulation/Spectral-Driven Intensity Modulation.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "Advanced settings page (spectral driver detail)",
+    },
+    "Pitch/Fractal_Pitch_Terrain.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "Advanced settings page (fractal depth and terrain shaping)",
+    },
+    "Reverb/Artificial_Room.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "Room details / Advanced page (early reflections, geometry)",
+    },
+    # The same bump's other shape: a second `form ... endform` rather than a `beginPause`, which
+    # Praat allows even less (one form per run) and which the `gui_blocking` detector does not
+    # see, so these three stayed in the catalog quietly missing their advanced fields instead of
+    # being excluded. Hoisted through the identical machinery -- see `SECOND_FORM_RE`.
+    #
+    # Each preserves its pre-bump behaviour by assigning every advanced default as a plain
+    # variable immediately above the guard ("Advanced defaults preserve the original v1.0
+    # behavior"), which is what makes the hoist verifiable by inspection: those assignments and
+    # the second form's own defaults agree, so a run with the dialog untouched is the run
+    # upstream intended.
+    "Filter & Color/Dynamic_Formant_Sweeper.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "second form (formant analysis detail, fades, output level)",
+    },
+    "Filter & Color/Adaptive_Spectral_Resonance_Suppressor.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "second form (analysis window, smoothing, band layout)",
+    },
+    "Filter & Color/Jitter-Shimmer_Formant_Mapping.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "second form (manual pitch range, formant ceiling, output level)",
     },
 }
 
@@ -1176,13 +1259,49 @@ PAUSE_RE = re.compile(
 )
 
 
+# A **second `form ... endform`**, which is the same idea spelled differently and just as fatal.
+# Praat allows one form per script run, so an author reaching for a second one has written
+# something that cannot work -- and unlike `beginPause` it does not segfault, it simply opens a
+# dialog and waits, or is skipped entirely when its `if` guard is false. Upstream shipped three
+# of these in the 2026-08-22 bump (`Dynamic_Formant_Sweeper`,
+# `Adaptive_Spectral_Resonance_Suppressor`, `Jitter-Shimmer_Formant_Mapping`), each guarded by
+# `if advanced_settings`, each hiding between 8 and 10 parameters that had been ordinary form
+# fields the day before.
+#
+# They are treated as pause blocks rather than as a category of their own because everything
+# downstream -- tagging fields with their block index, `lock_on` forcing the guard true, the
+# catalog's `praat_pause_block`, the runner's replace-with-assignments -- is identical. Only the
+# delimiters differ. The **first** form is the script's own and is never a block: it is the one
+# Praat fills positionally, and `apply_form_locks` edits it in place.
+SECOND_FORM_RE = re.compile(
+    r"^[ \t]*form[ \t:][^\n]*\n"
+    r"(?P<body>.*?)"
+    r"^[ \t]*endform[ \t]*$",
+    re.S | re.M,
+)
+
+
 def find_pause_blocks(source: str) -> list[dict]:
-    """Every `beginPause` ... `endPause` block, in source order.
+    """Every secondary settings block -- `beginPause`/`endPause` or a second `form`/`endform`
+    -- in source order.
 
     Each entry carries the span to replace, the dialog title (used to attach a block to a
     catalog entry -- see PAUSE_SPLITS), its parsed fields, and the default button number.
     """
     blocks = []
+    # Skip the first form: it is the script's own, not a hoistable block.
+    for n, m in enumerate(SECOND_FORM_RE.finditer(source)):
+        if n == 0:
+            continue
+        title = source[m.start():source.index("\n", m.start())].strip()
+        title = title.removeprefix("form").lstrip(": ").strip().strip('"')
+        blocks.append({
+            "title": title,
+            "fields": parse_fields(m.group("body"), script_variables(source, m.start())),
+            # A form has no buttons, so nothing branches on a click. 1 is inert here.
+            "default_button": 1,
+            "span": (m.start(), m.end()),
+        })
     for m in PAUSE_RE.finditer(source):
         tail = m.group("tail")
         numbers = re.findall(r"(?<![\w.])(\d+)(?![\w.])", tail)
@@ -1194,6 +1313,10 @@ def find_pause_blocks(source: str) -> list[dict]:
             "default_button": int(numbers[0]) if numbers else 1,
             "span": (m.start(), m.end()),
         })
+    # Both loops append independently, so order by position: the block index the catalog records
+    # must be the one the runner arrives at counting down the file, or a hoisted field would be
+    # written into the wrong block.
+    blocks.sort(key=lambda b: b["span"][0])
     return blocks
 
 
