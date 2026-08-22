@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-22 (2.11.0)
 
 - **praatAudioTools updated to `27f439e`, and the catalog regenerated with it.** Forty-eight
   upstream commits, about half of them a Max/MSP external subproject this app does not read. The
