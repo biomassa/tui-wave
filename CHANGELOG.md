@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **praatAudioTools updated to `d19c75c`.** Two upstream commits carrying the visualization
+  standardization into `Time & Granular`: 37 scripts touched, 22 of them editing a form title or
+  version string. **No entry gains or loses a parameter**, none gained a `beginPause` page, none
+  carries a second `form`, and none repeats the `pageHeight`-in-the-`else`-arm defect that broke
+  two Filter & Color processes in 2.11.0 — checked for specifically, since this is the same
+  campaign reaching the next directory. 471 processes, 41 excluded, both unchanged.
+
+  `In-Place_Paulstretch_Slicer__Multi-channel_.praat` lost its trailing underscore upstream, so
+  its `bin` moves. Its catalog **key does not** — the slug already collapsed that underscore — so
+  saved presets and chain steps naming it keep working.
+
+- **Airwindows updated to airwin2rack `3789392`.** 501 → 502 effects: **ChannelX** (Tone Color),
+  which "translates Channel9 into a profusion of wild experiments". `DeRez5` arrived in the same
+  upstream commit and is absent for the reason four of 2.10.2's five additions were: it ships with
+  no `res/awpdoc/` text, and airwin2rack's `registerAirwindow` drops an effect whose `whatText` is
+  empty. It will appear once its documentation does. No existing effect changed parameters, so
+  nothing re-points by index.
+
 ## 2026-08-22 (2.11.0)
 
 - **praatAudioTools updated to `27f439e`, and the catalog regenerated with it.** Forty-eight
