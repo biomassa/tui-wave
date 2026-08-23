@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **Every `◄ value ►` control is now mouse-driveable, and its arrows hold still.** Seven of
+  them had drifted into four behaviours: the process params table, Save As's format and Export
+  Regions' format ignored clicks entirely, so their triangles were a picture of a control rather
+  than one; Export, Export Channels and Mix to Stereo cycled *forward* wherever you clicked, so
+  the left triangle was decorative; only Fade In/Out and Remove DC Offset were right. All seven
+  now share one `choice_click_step` — the left triangle steps back, the value and everything
+  right of it steps forward, and a click on a parameter's *name* changes nothing.
+
+  The gap between the triangles is sized to the **widest** option the control can show, with
+  shorter values centred in it, so neither arrow moves as the value cycles. They used to be sized
+  to whatever was on screen, which walked the right arrow across the row on every step — clicking
+  through a list meant chasing it with the mouse rather than clicking one place repeatedly. The
+  widths are derived by walking each enum's own `next()` back round to its start, so a variant
+  added later is picked up with nothing to maintain. Export and Export Channels keep their
+  existing layout, both already holding their arrows still by other means.
+
+- **`cpal` dropped as a direct dependency.** Nothing referenced it — only two comments mentioned
+  it — while rodio, which does use it, requires an older version: the graph carried **two** copies
+  of a native audio crate, one of them for nothing. 371 → 365 crates. `libasound.so.2` is still
+  linked through rodio, and the `.deb`/`.rpm` `depends` lines are hardcoded rather than `$auto`,
+  so packaging is unchanged.
+
 - **praatAudioTools updated to `d19c75c`.** Two upstream commits carrying the visualization
   standardization into `Time & Granular`: 37 scripts touched, 22 of them editing a form title or
   version string. **No entry gains or loses a parameter**, none gained a `beginPause` page, none

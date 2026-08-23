@@ -24,7 +24,6 @@ keywords = ["audio", "waveform", "editor", "tui", "wav"]
 
 [dependencies]
 color-eyre = "0.6.5"
-cpal = "0.18.1"
 crossbeam-channel = "0.5.15"
 crossterm = "0.29.0"
 flacenc = { version = "0.5", default-features = false }
@@ -50,7 +49,7 @@ airwindows-sys = { path = "crates/airwindows-sys" }
 # would be lying. They ship the editor, and the app reports what is missing at run time.
 
 # cargo-deb. `depends` is resolved from the binary's own ELF needs by `$auto`, which picks up
-# libasound2 (via cpal) with the right versioned constraint for whatever runner built it —
+# libasound2 (via rodio's cpal) with the right versioned constraint for whatever runner built it —
 # hardcoding a version would either over-constrain older Debians or under-constrain newer ones.
 [package.metadata.deb]
 section = "sound"
