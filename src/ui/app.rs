@@ -3139,6 +3139,10 @@ pub struct App {
     /// Where the open params dialog drew its slider track this frame, or `None` when it drew
     /// none. Written by `App::render`, read by the click/drag handlers.
     cdp_slider_geometry: Option<CdpSliderGeometry>,
+    /// Column the params table draws a choice row's `\u{25c4}` in, as last drawn. Recorded from
+    /// the render for the reason `cdp_slider_geometry` is: the click handler has no frame area,
+    /// and the slider column's presence (which shifts this) depends on the terminal width.
+    cdp_choice_value_column: Option<usize>,
     /// The field index whose slider a press grabbed, held until the button is released. `None`
     /// when no drag is in progress.
     cdp_slider_drag: Option<usize>,
@@ -3937,6 +3941,7 @@ impl App {
             dest_picker: None,
             dialog_hints_text: String::new(),
             cdp_slider_geometry: None,
+            cdp_choice_value_column: None,
             cdp_slider_drag: None,
             cdp_sub_editor_slider_drag: false,
             cdp_table_drew_sliders: false,
@@ -7259,7 +7264,20 @@ impl App {
 
         if self.save_as_active {
             match row {
-                0 | 1 => self.save_as_focused = row,
+                // Row 1 is the depth cycle. Its triangles were the only ones in the app with no
+                // click handling of any kind — Save As is not a `Dialog` variant, so it never
+                // reached the arm that serves the rest.
+                1 => {
+                    self.save_as_focused = 1;
+                    if let Some(forward) = choice_click_step(SAVE_AS_ARROW_COLUMN, x_in_row) {
+                        self.save_as_depth = if forward {
+                            self.save_as_depth.next()
+                        } else {
+                            self.save_as_depth.prev()
+                        };
+                    }
+                }
+                0 => self.save_as_focused = row,
                 2 if self.save_as_depth.supports_dither() => {
                     self.save_as_focused = 2;
                     self.save_as_dither = !self.save_as_dither;
@@ -7295,6 +7313,8 @@ impl App {
         let mut cdp_sync_table_rows = false;
         // Read before `self.dialog` is borrowed below, since it lives on `self` too.
         let slider_geometry = self.cdp_slider_geometry;
+        // Read before the `self.dialog` borrow below, exactly like `slider_geometry`.
+        let choice_value_column = self.cdp_choice_value_column;
         // Set when a click landed on a slider track: the field it belongs to, which subsequent
         // drag events then keep writing to. Held on `self` so a drag that wanders off the track
         // (or off the row) keeps moving the slider it grabbed rather than silently stopping or,
@@ -7309,6 +7329,8 @@ impl App {
         // Read before the borrow below, like `slider_geometry`.
         let table_drew_sliders = self.cdp_table_drew_sliders;
         // Same deferral as the rest: the re-seed needs `&mut self` after the dialog borrow ends.
+        // Deferred like the rest: `cycle_export_setting` needs `&mut self`.
+        let mut export_cycle: Option<bool> = None;
         let mut cdp_flipped_toggle = false;
         let mut cdp_open_focused_editor = false;
         let mut cdp_open_variadic_picker = false;
@@ -7375,8 +7397,10 @@ impl App {
                                     x_in_row.saturating_sub(cols.gain) as usize
                                 );
                             }
-                        } else if x_in_row >= cols.dest {
-                            stereo_mix::cycle_dest(dests, clicked, true);
+                        } else if let Some(forward) =
+                            choice_click_step(cols.dest as usize, x_in_row)
+                        {
+                            stereo_mix::cycle_dest(dests, clicked, forward);
                         }
                     }
                 } else {
@@ -7402,8 +7426,9 @@ impl App {
             Some(Dialog::Export { focused, .. }) => {
                 if row < ex_focus::COUNT {
                     *focused = row;
+                    // Was unconditionally forward, which made the left triangle decorative.
                     if row != ex_focus::NAME {
-                        self.cycle_export_setting(true);
+                        export_cycle = choice_click_step(EXPORT_ARROW_COLUMN, x_in_row);
                     }
                 }
             }
@@ -7416,10 +7441,12 @@ impl App {
                     if clicked < modes.len() {
                         *focused = ec_focus::CHANNELS;
                         *selected = clicked;
-                        // Left of the mode column only moves the highlight; on or past it the
-                        // click also cycles, which is how a mouse user commits a choice.
-                        if (x_in_row as usize) >= ec_columns(modes.len()).mode {
-                            channel_export::cycle_mode(modes, clicked, true);
+                        // Left of the mode column only moves the highlight; on the arrow it
+                        // steps back, on the label or past it forward.
+                        if let Some(forward) =
+                            choice_click_step(ec_columns(modes.len()).mode, x_in_row)
+                        {
+                            channel_export::cycle_mode(modes, clicked, forward);
                         }
                     }
                 } else {
@@ -7433,6 +7460,15 @@ impl App {
                     0..=3 => {
                         *focused = row;
                         if row == er_focus::DITHER && depth.supports_dither() { *dither = !*dither; }
+                        // The Format row's triangles were inert: the row took focus and nothing
+                        // else happened.
+                        if row == er_focus::FORMAT {
+                            if let Some(forward) =
+                                choice_click_step(EXPORT_REGIONS_ARROW_COLUMN, x_in_row)
+                            {
+                                *depth = if forward { depth.next() } else { depth.prev() };
+                            }
+                        }
                     }
                     4..=7 => {
                         let (cb, val) = er_focus::checkbox_row_focus(row);
@@ -7777,11 +7813,22 @@ impl App {
                         cdp_slider_drag_field = Some(row - 1);
                     }
                     // A Toggle flips in place (it has no editor); everything else with a
-                    // dedicated overlay opens it. A plain Number/Choice just takes focus.
+                    // dedicated overlay opens it. A Number just takes focus.
                     match fields.get_mut(row - 1) {
                         Some(CdpField::Toggle { on }) => {
                             *on = !*on;
                             cdp_flipped_toggle = true;
+                        }
+                        // The triangles are the affordance and were inert: the row took focus
+                        // and nothing else happened, so they read as a picture of a control
+                        // rather than one (user report, with a screenshot of `Internal Preset`).
+                        Some(CdpField::Choice { options, selected }) if !options.is_empty() => {
+                            if let Some(forward) = choice_value_column
+                                .and_then(|arrow| choice_click_step(arrow, x_in_row))
+                            {
+                                *selected = choice_cycled(*selected, options.len(), forward);
+                                cdp_flipped_toggle = true;
+                            }
                         }
                         Some(
                             CdpField::List { .. }
@@ -7858,6 +7905,9 @@ impl App {
             || cdp_hilite_slider_drag
         {
             self.cdp_sub_editor_slider_drag = true;
+        }
+        if let Some(forward) = export_cycle {
+            self.cycle_export_setting(forward);
         }
         if cdp_flipped_toggle {
             self.reseed_channel_split_defaults();
@@ -19631,6 +19681,18 @@ impl App {
                 .map(|(width, track_start)| CdpSliderGeometry { track_start, width }),
             _ => None,
         };
+        self.cdp_choice_value_column = match self.dialog.as_ref() {
+            Some(Dialog::CdpParams { catalog_index, .. }) => self
+                .cdp_catalog
+                .processes
+                .get(*catalog_index)
+                .map(|def| {
+                    let (label_width, range_width, _) = cdp_params_column_widths(def);
+                    let (slider_width, _) = cdp_params_slider_column(def, area.width);
+                    cdp_choice_arrow_column(label_width, range_width, slider_width)
+                }),
+            _ => None,
+        };
         self.render_dest_picker_column(frame);
         self.capture_dialog_hints(frame);
 
@@ -20307,7 +20369,13 @@ fn render_save_as_dialog(
     let format_line = if focused == 1 {
         Line::from(vec![
             Span::styled(" Format:  ◄ ", label_style),
-            Span::styled(depth.label(), cursor_style),
+            Span::styled(
+                choice_centred(
+                    depth.label(),
+                    cycled_label_width(depth, |d| d.next(), |d| d.label().to_string()),
+                ),
+                cursor_style,
+            ),
             Span::styled(" ►  ", label_style),
         ])
     } else {
@@ -20426,12 +20494,11 @@ fn choice_left_arrow_column(field_label: &str) -> u16 {
     1 + field_label.chars().count() as u16 + 2
 }
 
-/// Whether a click at `x_in_row` on a choice row means "step back": it landed on the left
-/// arrow or on the label to its left. Anything further right — the value, the right arrow, the
-/// space after it — steps forward, which is what a click on a cycle control conventionally
-/// does and what makes the common case one click rather than a hunt for a two-column glyph.
+/// [`choice_click_step`] for the single-row choice dialogs (Fade In/Out, Remove DC Offset),
+/// where the row **is** the control — so a click left of the arrow still means "back" rather
+/// than nothing, there being no other column on the row it could belong to.
 fn choice_click_steps_back(field_label: &str, x_in_row: u16) -> bool {
-    x_in_row <= choice_left_arrow_column(field_label)
+    !choice_click_step(choice_left_arrow_column(field_label) as usize, x_in_row).unwrap_or(false)
 }
 
 /// How the mouse reaches a given dialog. Declared per variant in an **exhaustive** match, so a
@@ -20806,6 +20873,9 @@ fn render_choice_dialog(
     title: &str,
     field_label: &str,
     value: &str,
+    // Columns between the triangles: the widest label this control can show, so neither arrow
+    // moves as the value cycles. See `choice_centred`.
+    gap_width: usize,
 ) -> Vec<Rect> {
     // Sized to the hints bar (" ←→:change  Enter:apply  Esc:cancel", 35 columns) rather than
     // to the one field above it — see `render_mix_to_mono_dialog`.
@@ -20828,7 +20898,7 @@ fn render_choice_dialog(
     // Row 0: the selector
     let curve_line = Line::from(vec![
         Span::styled(format!(" {field_label}  ◄ "), label_style),
-        Span::styled(value, cursor_style),
+        Span::styled(choice_centred(value, gap_width), cursor_style),
         Span::styled(" ►  ", label_style),
     ]);
 
@@ -20890,13 +20960,20 @@ fn render_dialog(
                 "Remove DC Offset",
                 CHOICE_LABEL_MEASURE,
                 estimator.label(),
+                cycled_label_width(*estimator, |e| e.next(), |e| e.label().to_string()),
             );
         }
         Dialog::FadeIn { curve } => {
-            return render_choice_dialog(frame, area, "Fade In", CHOICE_LABEL_CURVE, curve.label());
+            return render_choice_dialog(
+                frame, area, "Fade In", CHOICE_LABEL_CURVE, curve.label(),
+                cycled_label_width(*curve, |c| c.next(), |c| c.label().to_string()),
+            );
         }
         Dialog::FadeOut { curve } => {
-            return render_choice_dialog(frame, area, "Fade Out", CHOICE_LABEL_CURVE, curve.label());
+            return render_choice_dialog(
+                frame, area, "Fade Out", CHOICE_LABEL_CURVE, curve.label(),
+                cycled_label_width(*curve, |c| c.next(), |c| c.label().to_string()),
+            );
         }
         Dialog::ExportRegions {
             folder_input, base_name_input, depth, dither,
@@ -21313,6 +21390,11 @@ fn render_export_dialog(
     const LABEL_WIDTH: usize = 10; // "File name:", the longest
     let label_cell = |text: &str| format!(" {text:<LABEL_WIDTH$} ");
 
+    // Deliberately **not** centred in a fixed gap, unlike the other choice controls: this
+    // dialog aligns all three values in one column (see the assertions in
+    // `the_export_dialog_keeps_one_size_and_one_label_column`), and a per-row centring pad
+    // offsets each value by a different amount, breaking that. Its values are short enough that
+    // the right arrow barely moves, which is why this one already read fine (user).
     let value_row = |label: &str, value: String, is_focused: bool| {
         if is_focused {
             Line::from(vec![
@@ -21499,7 +21581,10 @@ fn render_export_channels_dialog(
                 ChannelExportMode::PairWithNext => "Stereo pair",
             };
             let mode = if is_sel {
-                format!("◄ {label:<11} ►")
+                // Left-aligned in a fixed 11, not centred like the other choice controls: the
+                // width already holds both triangles still, and this column reads better with
+                // the modes starting flush under one another (user).
+                format!("\u{25c4} {label:<11} \u{25ba}")
             } else {
                 format!("  {label:<11}  ")
             };
@@ -21717,7 +21802,7 @@ fn render_mix_to_stereo_dialog(
         // The arrows appear only on the selected row, but the cell is padded to the same width
         // on every row so selecting one doesn't shift the attenuation column sideways.
         let dest_cell = if is_sel {
-            format!("◄ {label:<5} ►")
+            format!("\u{25c4} {} \u{25ba}", choice_centred(label, 5))
         } else {
             format!("  {label:<5}  ")
         };
@@ -21908,7 +21993,13 @@ fn render_export_regions_dialog(
     let format_line = if focused == er_focus::FORMAT {
         Line::from(vec![
             Span::styled("   Format: ◄ ", label_style),
-            Span::styled(depth.label(), cursor_style),
+            Span::styled(
+                choice_centred(
+                    depth.label(),
+                    cycled_label_width(depth, |d| d.next(), |d| d.label().to_string()),
+                ),
+                cursor_style,
+            ),
             Span::styled(" ►  ", label_style),
         ])
     } else {
@@ -24714,6 +24805,95 @@ fn cdp_params_slider_column(
     (slider_width, cdp_params_slider_start(label_width, range_width))
 }
 
+/// Column the params table draws a choice row's `\u{25c4}` in.
+///
+/// Mirrors `cdp_params_slider_start`'s arithmetic against the same three widths, because the row
+/// is built as `label` + `range_and_slider_pad` + `" \u{25c4} value \u{25ba}"` and those are the
+/// only things before it.
+fn cdp_choice_arrow_column(label_width: usize, range_width: usize, slider_width: usize) -> usize {
+    1 + label_width + 2 + range_width + slider_width + 1
+}
+
+/// **The** definition of what a click does to a `\u{25c4} value \u{25ba}` cycle control, given
+/// the column its left arrow is drawn in. `Some(true)` steps forward, `Some(false)` back, `None`
+/// means the click was left of the control entirely and must not change it.
+///
+/// One function for every such control in the app, because there are seven of them and they had
+/// drifted into four different behaviours: three ignored clicks outright, three cycled forward
+/// wherever you clicked (so the left triangle was decorative), and one was right. A user reported
+/// the params table's, which is the same bug the other five have.
+///
+/// Everything from the value text rightwards steps **forward** rather than only the right arrow:
+/// that is what a click on a cycle control conventionally does, and it makes the common case one
+/// click instead of a hunt for a two-column glyph.
+fn choice_click_step(left_arrow_column: usize, x_in_row: u16) -> Option<bool> {
+    let x = x_in_row as usize;
+    if x < left_arrow_column {
+        return None;
+    }
+    // The arrow itself and the space after it step back; the value and beyond step forward.
+    Some(x >= left_arrow_column + 2)
+}
+
+/// Columns the fixed-layout choice rows draw their `\u{25c4}` in, derived from the very label
+/// literal each renderer passes so the two cannot drift. Named rather than inlined because a
+/// magic number in a click handler is exactly the thing that stops matching the render.
+const EXPORT_ARROW_COLUMN: usize = 12; // `label_cell`: " " + 10 + " ", then the arrow
+const EXPORT_REGIONS_ARROW_COLUMN: usize = 11; // "   Format: " is 11 wide
+const SAVE_AS_ARROW_COLUMN: usize = 10; // " Format:  " is 10 wide
+
+/// The widest label a cycle control can show, found by walking `next` back round to `start`.
+///
+/// Derived rather than declared as a list per enum: a variant added later is picked up with
+/// nothing here to update, which is the failure mode a hand-maintained `ALL` would have.
+/// The step guard is a runaway backstop for a `next` that never returns to its start; every
+/// one of these enums has at most a handful of variants.
+fn cycled_label_width<T, F, L>(start: T, next: F, label: L) -> usize
+where
+    T: Copy + PartialEq,
+    F: Fn(T) -> T,
+    L: Fn(T) -> String,
+{
+    let mut width = label(start).chars().count();
+    let mut current = next(start);
+    for _ in 0..64 {
+        if current == start {
+            break;
+        }
+        width = width.max(label(current).chars().count());
+        current = next(current);
+    }
+    width
+}
+
+/// `text` centred in `width` columns, so a `\u{25c4} value \u{25ba}` control keeps **both**
+/// triangles still while the value cycles.
+///
+/// Sizing the gap to the value being shown, which is what every one of these controls used to
+/// do, made the right arrow move on every step — so clicking through a list meant chasing the
+/// arrow across the row with the mouse instead of clicking one place repeatedly (user report).
+/// The left arrow never moved, which is why only half the control was usable.
+///
+/// Odd remainders lean left: the extra column goes on the right, so a value that grows by one
+/// character does not shuffle every shorter one sideways.
+fn choice_centred(text: &str, width: usize) -> String {
+    let len = text.chars().count();
+    if len >= width {
+        return text.to_string();
+    }
+    let left = (width - len) / 2;
+    format!("{:left$}{text}{:right$}", "", "", left = left, right = width - len - left)
+}
+
+/// `selected` stepped one place, wrapping. Shared so seven call sites cannot disagree about
+/// which way the ends join up.
+fn choice_cycled(selected: usize, len: usize, forward: bool) -> usize {
+    if len == 0 {
+        return selected;
+    }
+    if forward { (selected + 1) % len } else { (selected + len - 1) % len }
+}
+
 /// The params dialog's slider geometry as last drawn — `(track_start, slider_width)` measured
 /// from the inside of the dialog's border.
 ///
@@ -25327,7 +25507,17 @@ fn render_cdp_params_dialog(
             }
             CdpField::Choice { options, selected } => {
                 let text = options.get(*selected).map(String::as_str).unwrap_or("");
-                let value = if is_focused { format!(" \u{25c4} {text} \u{25ba}") } else { format!(" {text}") };
+                // Sized to the widest option this field has, so both triangles hold still while
+                // the value cycles — see `choice_centred`. The unfocused row is indented by the
+                // width of "\u{25c4} " for the same reason the Export dialog's is: the value must
+                // not jump sideways when the row merely gains or loses focus.
+                let width = options.iter().map(|o| o.chars().count()).max().unwrap_or(0);
+                let cell = choice_centred(text, width);
+                let value = if is_focused {
+                    format!(" \u{25c4} {cell} \u{25ba}")
+                } else {
+                    format!("   {cell}")
+                };
                 Line::from(vec![
                     Span::styled(label, label_style_here),
                     Span::styled(range_and_slider_pad.clone(), range_style),
@@ -43499,6 +43689,184 @@ mod tests {
             app.handle_dialog_row_click(row, 0, false);
             assert_eq!(app.save_as_focused, row, "clicking row {row} should focus it");
         }
+    }
+
+    /// Every fixed-column choice arrow constant must equal where its renderer actually draws
+    /// `\u{25c4}`, measured from the row's own click rect.
+    ///
+    /// The constants exist because the click handler has no frame to consult, which is exactly
+    /// the arrangement that rots: `save_as_click_rects_land_on_the_rows_they_name` records how a
+    /// hand-numbered offset once drifted silently while a full suite stayed green. Asserting
+    /// against the rendered buffer is what stops a relabelled row (" Format:" gaining a word)
+    /// from quietly pointing the arrow test at the wrong column.
+    #[test]
+    fn every_fixed_choice_arrow_column_matches_its_render() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        // (label, the action that opens it, focus setup, the row holding the arrow, constant)
+        let cases: Vec<(&str, Action, usize, usize)> = vec![
+            ("Save As", Action::SaveAs, 1, SAVE_AS_ARROW_COLUMN),
+            ("Export", Action::Export, ex_focus::FORMAT, EXPORT_ARROW_COLUMN),
+            ("Export Regions", Action::ExportRegions, er_focus::FORMAT, EXPORT_REGIONS_ARROW_COLUMN),
+        ];
+        for (name, action, row, expected) in cases {
+            let mut app = new_app(Some(doc(0.1, 100)), None);
+            // Export Regions needs regions to export; the other two ignore these.
+            app.documents[0].markers = vec![
+                crate::model::document::Marker { position: 10, label: "a".into() },
+                crate::model::document::Marker { position: 50, label: "b".into() },
+            ];
+            app.handle_action(action);
+            let mut terminal = Terminal::new(TestBackend::new(110, 34)).unwrap();
+            // Render before clicking: the rect list a click resolves against comes from the
+            // render, which is why `clicking_a_save_as_row_focuses_it` does the same. Then
+            // render again, because the arrows are only drawn on the *focused* row.
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            app.handle_dialog_row_click(row, 0, false);
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let rect = app.dialog_row_rects.get(row).copied().unwrap_or_default();
+            assert!(rect.width > 0, "{name}: row {row} has no click rect");
+            let arrow = (rect.x..rect.x + rect.width)
+                .find(|&x| buffer[(x, rect.y)].symbol() == "\u{25c4}")
+                .unwrap_or_else(|| {
+                    let line: String = (rect.x..rect.x + rect.width)
+                        .map(|x| buffer[(x, rect.y)].symbol())
+                        .collect();
+                    panic!("{name}: no left arrow on row {row}: {line:?}")
+                });
+            assert_eq!(
+                (arrow - rect.x) as usize,
+                expected,
+                "{name}: the constant and the render disagree about the arrow column"
+            );
+        }
+    }
+
+    /// Neither triangle may move as a choice cycles.
+    ///
+    /// The gap used to be sized to the value on screen, so the right arrow tracked the text and
+    /// clicking through a list meant chasing it across the row with the mouse — the left arrow
+    /// stayed put, so only half the control was usable (user report). Sizing the gap to the
+    /// widest option and centring the rest is what pins both.
+    ///
+    /// Asserted by rendering every step of a real cycle and comparing arrow columns, rather than
+    /// by checking the padding arithmetic: the arithmetic being right is not the claim, the
+    /// arrows holding still is.
+    #[test]
+    fn cycling_a_choice_never_moves_its_triangles() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        let Some(index) = app.cdp_catalog.processes.iter().position(|p| {
+            p.params.iter().any(|q| matches!(q.kind, crate::model::cdp::ParamKind::Choice { ref options, .. }
+                if options.len() >= 3 && options.iter().map(|o| o.chars().count()).min() != options.iter().map(|o| o.chars().count()).max()))
+        }) else {
+            return; // no catalog, or no choice with options of differing length
+        };
+        app.open_cdp_params(index);
+        let Some(Dialog::CdpParams { fields, .. }) = app.dialog.as_ref() else { panic!("params") };
+        let Some(field_index) = fields.iter().position(|f| matches!(f, CdpField::Choice { options, .. }
+            if options.len() >= 3 && options.iter().map(|o| o.chars().count()).min() != options.iter().map(|o| o.chars().count()).max()))
+        else {
+            return;
+        };
+        let steps = match &fields[field_index] {
+            CdpField::Choice { options, .. } => options.len(),
+            _ => unreachable!(),
+        };
+        let row = field_index + 1;
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 44)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        app.handle_dialog_row_click(row, 0, false); // focus, so the triangles are drawn
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let arrows_now = |app: &mut App, terminal: &mut Terminal<TestBackend>| {
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let rect = app.dialog_row_rects.get(row).copied().unwrap_or_default();
+            let cols: Vec<u16> = (rect.x..rect.x + rect.width)
+                .filter(|&x| {
+                    let s = buffer[(x, rect.y)].symbol();
+                    s == "\u{25c4}" || s == "\u{25ba}"
+                })
+                .collect();
+            let line: String =
+                (rect.x..rect.x + rect.width).map(|x| buffer[(x, rect.y)].symbol()).collect();
+            (cols, line)
+        };
+
+        let (first, first_line) = arrows_now(&mut app, &mut terminal);
+        assert_eq!(first.len(), 2, "a focused choice row draws both triangles: {first_line:?}");
+        for step in 1..steps {
+            // Click the value, which steps forward — the gesture the report is about.
+            let arrow = app.cdp_choice_value_column.expect("recorded") as u16;
+            app.handle_dialog_row_click(row, arrow + 3, false);
+            let (cols, line) = arrows_now(&mut app, &mut terminal);
+            assert_eq!(
+                cols, first,
+                "step {step}: the triangles moved\n  from {first_line:?}\n  to   {line:?}"
+            );
+        }
+    }
+
+    /// A click on a params-table choice must cycle it, and a click on the parameter's *name*
+    /// must not.
+    ///
+    /// The triangles are drawn as the affordance and were inert — the row took focus and
+    /// nothing happened, so they read as a picture of a control rather than one (user report,
+    /// against `Internal Preset`). The label half matters just as much: the columns left of the
+    /// value hold the name and range, and a click there that silently changed the value would
+    /// be the trap `cdp_slider_stop_at` already refuses for the same reason.
+    #[test]
+    fn a_params_choice_cycles_from_its_triangles_but_not_from_its_label() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 10)), None);
+        let Some(index) = app.cdp_catalog.processes.iter().position(|p| {
+            p.params.iter().any(|q| matches!(q.kind, crate::model::cdp::ParamKind::Choice { ref options, .. } if options.len() >= 3))
+        }) else {
+            return; // no catalog available in this build
+        };
+        app.open_cdp_params(index);
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let Some(Dialog::CdpParams { fields, .. }) = app.dialog.as_ref() else { panic!("params") };
+        let Some(field_index) = fields
+            .iter()
+            .position(|f| matches!(f, CdpField::Choice { options, .. } if options.len() >= 3))
+        else {
+            return;
+        };
+        let row = field_index + 1;
+        let arrow = app.cdp_choice_value_column.expect("a choice row records its arrow column");
+        let read = |app: &App| match &app.dialog {
+            Some(Dialog::CdpParams { fields, .. }) => match &fields[field_index] {
+                CdpField::Choice { selected, .. } => *selected,
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+
+        // Focus it first, so the triangles are on screen where the click will land.
+        app.handle_dialog_row_click(row, 0, false);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let start = read(&app);
+
+        app.handle_dialog_row_click(row, arrow as u16 + 3, false); // on the value: forward
+        let forward = read(&app);
+        assert_ne!(forward, start, "clicking the value should step the choice forward");
+
+        app.handle_dialog_row_click(row, arrow as u16, false); // on the left triangle: back
+        assert_eq!(read(&app), start, "clicking the left triangle should step back");
+
+        app.handle_dialog_row_click(row, 1, false); // on the label: no change
+        assert_eq!(read(&app), start, "clicking the parameter name must not change its value");
     }
 
     /// A dialog with no click targets must not inherit the previous dialog's.
