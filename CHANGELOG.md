@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-23 (2.11.1)
 
 - **Every `◄ value ►` control is now mouse-driveable, and its arrows hold still.** Seven of
   them had drifted into four behaviours: the process params table, Save As's format and Export
