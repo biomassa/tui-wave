@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-24 (2.11.2)
 
 - **praatAudioTools updated to `65fa69e`.** Fifteen commits carrying the visualization
   standardization into `AI & Adaptive` and `Analysis`: 15 scripts touched, two new. 471 → 473
