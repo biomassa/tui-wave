@@ -2793,6 +2793,15 @@ def render_report(processes: list[Process], excluded: list[tuple[str, str, str]]
 
 
 def main() -> int:
+    # The parser self-test runs on every conversion, not just when asked for. It costs
+    # milliseconds, and the failure it guards against is silent: a parser that stops
+    # understanding an idiom does not crash, it drops the affected scripts and writes a catalog
+    # that looks fine. Both cases it covers reached the catalog as "excluded, reason misleading"
+    # rather than as an error.
+    if selftest() != 0:
+        print("error: parser self-test failed -- refusing to write a catalog", file=sys.stderr)
+        return 1
+
     if not PLUGIN.is_dir() or not any(PLUGIN.iterdir()):
         print(f"error: {PLUGIN} is missing or empty -- run: git submodule update --init",
               file=sys.stderr)
@@ -2843,5 +2852,87 @@ def main() -> int:
     return 0
 
 
+def selftest() -> int:
+    """Parser regression cases, run with `--selftest`.
+
+    These pin the *idioms* rather than any one script. Both were found the hard way: a script
+    arrived using them, the parser silently produced nothing usable, and the entry was excluded
+    with a message that pointed at the symptom rather than the cause. Nothing else in this repo
+    exercises the parser directly -- the catalog it writes is checked downstream by `cargo test`
+    and the praat smoke sweep, which would catch a regression only as entries quietly vanishing
+    from a catalog diff at the next bump.
+    """
+    failures: list[str] = []
+
+    def check(label: str, got, want) -> None:
+        if got != want:
+            failures.append(f"{label}\n     got:  {got!r}\n     want: {want!r}")
+
+    # --- endPause assignment targets -------------------------------------------------
+    # Praat procedure-local variables carry a leading dot. Allowing only `\w+` matched no block
+    # at all, so a script with two pause pages reported "no beginPause block found".
+    for target, label in [
+        (".clicked = ", "procedure-local (.clicked)"),
+        ("clicked = ", "plain (clicked)"),
+        ("", "bare endPause, no assignment"),
+    ]:
+        source = (
+            'beginPause: "Page"\n'
+            '    positive: "Grain_ms", 60\n'
+            f'{target}endPause: "Cancel", "Continue", 2, 1\n'
+        )
+        blocks = find_pause_blocks(source)
+        check(f"endPause target -- {label}: one block found", len(blocks), 1)
+        if blocks:
+            check(f"endPause target -- {label}: default button", blocks[0]["default_button"], 2)
+
+    # --- string$() defaults ----------------------------------------------------------
+    # A numeric pause field wants its default as text, so the idiom is
+    # `positive: "X", string$(x)`. Resolving only a bare name rejected every such field as a
+    # non-numeric default and took the whole script with it.
+    check(
+        "string$ unwrap -- bare identifier",
+        unwrap_string_cast("string$(minimum_frequency_Hz)"),
+        "minimum_frequency_Hz",
+    )
+    check("string$ unwrap -- whitespace tolerated", unwrap_string_cast("string$( x )"), "x")
+    check("string$ unwrap -- plain name untouched", unwrap_string_cast("voices"), "voices")
+    check("string$ unwrap -- literal untouched", unwrap_string_cast("60"), "60")
+    # Deliberately NOT unwrapped: this parser cannot evaluate these, and guessing is worse than
+    # the loud "non-numeric default" the caller reports.
+    for expr in ("string$(a + b)", "fixed$(x, 2)", "string$(f(x))", "string$(x) + y"):
+        check(f"string$ unwrap -- {expr} left alone", unwrap_string_cast(expr), expr)
+
+    # --- the two together, which is the shape that actually arrived ------------------
+    # The variable is assigned above the block, exactly as the real scripts do -- that is what
+    # `script_variables` reads to resolve the seeded default.
+    source = (
+        "minimum_frequency_Hz = 80\n"
+        "if edit_analysis_settings\n"
+        '    beginPause: "Analysis"\n'
+        '        positive: "Minimum_frequency_Hz", string$(minimum_frequency_Hz)\n'
+        '    .clicked = endPause: "Cancel", "Continue", 2, 1\n'
+        "endif\n"
+    )
+    blocks = find_pause_blocks(source)
+    if len(blocks) != 1:
+        failures.append(f"combined case: expected one block, got {len(blocks)}")
+    else:
+        fields = blocks[0]["fields"]
+        if isinstance(fields, str):
+            failures.append(f"combined case: the block refused to parse -- {fields}")
+        else:
+            check("combined case: one field", len(fields), 1)
+            check("combined case: default resolved", fields[0].default if fields else None, 80.0)
+            check("combined case: default button", blocks[0]["default_button"], 2)
+
+    for failure in failures:
+        print(f"  FAIL  {failure}")
+    print(f"selftest: {'FAILED' if failures else 'ok'} ({len(failures)} failure(s))")
+    return 1 if failures else 0
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        raise SystemExit(selftest())
     raise SystemExit(main())
