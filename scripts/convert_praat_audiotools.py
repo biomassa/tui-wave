@@ -592,6 +592,20 @@ PAUSE_HOISTS: dict[str, dict] = {
         "lock_on": ["Advanced_settings"],
         "why": "second form (manual pitch range, formant ceiling, output level)",
     },
+    # Arrived 2026-08-24 with *two* pause pages, one per toggle, holding everything the five
+    # texture presets otherwise choose for you -- the wavelet analysis grid on one, the grain
+    # engine and output on the other. Its own `Custom` preset (option 5) already sets both
+    # toggles to 1, so locking them on is what that preset does by hand; the other four presets
+    # assign every hoisted variable themselves just above the guards, which is what makes the
+    # rewrite verifiable by inspection.
+    #
+    # Both blocks end `endPause: "Cancel", "Continue", 2, 1` and `exitScript` on button 1, so the
+    # captured default button (2) is load-bearing rather than cosmetic: assuming button 1 would
+    # turn every run into a silent no-op. Same trap as `Polyphonic_Improviser`.
+    "AI & Adaptive/CWT_Granular_Resampler.praat": {
+        "lock_on": ["Edit_analysis_settings", "Edit_engine_settings"],
+        "why": "two settings pages (wavelet analysis/triggers, then grain engine/output)",
+    },
 }
 
 # Scripts that ask for a folder with `chooseDirectory$`, hoisted into a `ParamKind::FolderPath`
@@ -1254,7 +1268,14 @@ FORM_RE = re.compile(r"^[ \t]*form\b[^\n]*\n(.*?)^[ \t]*endform", re.S | re.M)
 PAUSE_RE = re.compile(
     r"^[ \t]*beginPause:[ \t]*(?P<title>\"[^\"]*\"|[^\n]*)\n"
     r"(?P<body>.*?)"
-    r"^[ \t]*(?:\w+[ \t]*=[ \t]*)?endPause:(?P<tail>[^\n]*)$",
+    # The assignment target allows a leading `.`: Praat's procedure-local variables are spelled
+    # `.clicked`, and `\w+` alone silently failed to match `.clicked = endPause: …` — the block
+    # was then not found at all, so the script fell through to `gui_blocking` and was excluded
+    # with "no beginPause block found" even though it plainly has one
+    # (`AI & Adaptive/CWT_Granular_Resampler.praat`, 2026-08-24). The Rust matcher splits on `=`
+    # and takes the left side verbatim, so it never had this gap; this is the two sides agreeing
+    # again.
+    r"^[ \t]*(?:[.\w]+[ \t]*=[ \t]*)?endPause:(?P<tail>[^\n]*)$",
     re.S | re.M,
 )
 
@@ -1545,6 +1566,27 @@ def split_label_and_value(rest: str, colon_form: bool) -> tuple[str | None, str]
     return name, value
 
 
+STRING_CAST_RE = re.compile(r"^string\$\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)$")
+
+
+def unwrap_string_cast(value: str) -> str:
+    """`string$(minimum_frequency_Hz)` -> `minimum_frequency_Hz`, else the value unchanged.
+
+    A pause field seeds its default with the variable the script assigned just above it, and for
+    a *numeric* field Praat wants that as text -- so the idiomatic spelling is
+    `positive: "Minimum_frequency_Hz", string$(minimum_frequency_Hz)`. Resolving only the bare
+    name missed every one of those, and a whole script fell out of the catalog because one field
+    reported a "non-numeric default" (`AI & Adaptive/CWT_Granular_Resampler.praat`, whose two
+    pages spell all seventeen numeric defaults this way).
+
+    Deliberately narrow: only a cast wrapping a single bare identifier. Anything else -- an
+    arithmetic expression, a nested call, `fixed$(x, 2)` -- is left alone to fail loudly as a
+    non-numeric default, which is the honest outcome for a value this cannot know.
+    """
+    match = STRING_CAST_RE.match(value.strip())
+    return match.group(1) if match else value.strip()
+
+
 def parse_fields(body: str, variables: dict[str, str] | None = None) -> list[Param] | str:
     """Parse a run of Praat field declarations -- a `form` body or a `beginPause` body.
 
@@ -1606,7 +1648,7 @@ def parse_fields(body: str, variables: dict[str, str] | None = None) -> list[Par
         # Resolve it from those assignments; an unresolvable one falls through and is reported
         # by the caller as a non-numeric default, which is the honest outcome.
         if value_text and not NUMBER_RE.match(value_text.strip()):
-            resolved = variables.get(value_text.strip()) if variables else None
+            resolved = variables.get(unwrap_string_cast(value_text), None) if variables else None
             if resolved is not None:
                 value_text = resolved
 
