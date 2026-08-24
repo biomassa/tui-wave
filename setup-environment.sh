@@ -42,7 +42,7 @@ set -euo pipefail
 
 # The praatAudioTools commit this build's catalog was generated from. Kept in step with
 # src/model/cdp/praat_catalog.toml's header by a test — see the note above.
-PINNED_COMMIT="d19c75c85133a6ad32dc373668b0b2dc3f4046c2"
+PINNED_COMMIT="65fa69eb71ec9abe2932d2f7705efbd09b6df673"
 UPSTREAM="https://github.com/ShaiCohen-ops/Praat-plugin_AudioTools"
 
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"

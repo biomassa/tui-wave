@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+- **praatAudioTools updated to `65fa69e`.** Fifteen commits carrying the visualization
+  standardization into `AI & Adaptive` and `Analysis`: 15 scripts touched, two new. 471 → 473
+  processes, 41 excluded (unchanged). No second `form` blocks and no repeat of the
+  `pageHeight`-in-the-`else`-arm defect — both checked for specifically, this being the same
+  campaign moving through directories.
+
+  **CWT Granular Resampler** (AI & Adaptive) and **CWT Scalogram** (Analysis) are the new
+  entries. Three catalog entries changed parameters: LZ-Inspired Audio Variations swapped four
+  fields while keeping its count (`Similarity_threshold`, `Distance_metric`, `Min_separation_s`,
+  `Output_mode` → `Alphabet_size`, `Generation_mode`, `Novelty`, `Max_copy_windows`), PCA Tone
+  Shaper renamed `Chunk_ms` to `Control_smoothing_ms`, and Self Attention Recomposer gained
+  `Play_result`. **Re-check saved presets for those three** — the first especially, since a
+  same-count field swap is the drift a pin-only bump would silently mis-bind.
+
+- **Two converter fixes, both surfaced by the new CWT Granular Resampler.** Its two settings
+  pages hold nineteen parameters between them — the wavelet analysis grid and the grain engine —
+  and without either fix the whole script fell out of the catalog.
+
+  A pause block's `endPause` may assign to a **procedure-local variable**, spelled with a leading
+  dot (`.clicked = endPause: …`). The block regex allowed only `\w+` as the assignment target, so
+  it matched nothing and the script was excluded as `gui_blocking` with "no beginPause block
+  found" — while plainly having two. The Rust matcher splits on `=` and takes the left side
+  verbatim, so it never had this gap; the two sides now agree again.
+
+  A pause field seeds its default with the variable assigned just above it, and for a *numeric*
+  field Praat wants that as text — so the idiomatic spelling is `positive: "Minimum_frequency_Hz",
+  string$(minimum_frequency_Hz)`. Only the bare name was resolved, so all seventeen numeric
+  defaults on those pages read as non-numeric and the entry was rejected. The unwrap is
+  deliberately narrow: a cast around a single bare identifier and nothing else, so an arithmetic
+  expression or a nested call still fails loudly rather than being guessed at.
+
+- **Airwindows updated to airwin2rack `0767d15`.** Upstream revised `ChannelX`, which arrived
+  only in 2.11.1. Its parameters are unchanged, so nothing re-points by index and the catalog
+  moves only its recorded source commit; 502 effects either way.
+
 ## 2026-08-23 (2.11.1)
 
 - **Every `◄ value ►` control is now mouse-driveable, and its arrows hold still.** Seven of
