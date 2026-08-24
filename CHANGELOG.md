@@ -33,6 +33,17 @@
   deliberately narrow: a cast around a single bare identifier and nothing else, so an arithmetic
   expression or a nested call still fails loudly rather than being guessed at.
 
+- **The converter now self-tests its parser before it writes anything.** It had no tests of any
+  kind: the catalog it generates is checked downstream by `cargo test` and the Praat smoke sweep,
+  but nothing exercised the parser itself, so a regression would surface only as entries quietly
+  vanishing from a catalog diff at some future bump — which is exactly how both bugs above
+  reached the exclusion list with messages pointing at the symptom rather than the cause.
+  `--selftest` pins the idioms rather than any one script (`.clicked = endPause` and a plain
+  `clicked =` and a bare `endPause` all parse; `string$(var)` resolves; an arithmetic default
+  still fails loudly), and `main()` runs it on every conversion and refuses to write a catalog if
+  it fails. Each case was checked against the unfixed parser to confirm it actually catches the
+  regression.
+
 - **Airwindows updated to airwin2rack `0767d15`.** Upstream revised `ChannelX`, which arrived
   only in 2.11.1. Its parameters are unchanged, so nothing re-points by index and the catalog
   moves only its recorded source commit; 502 effects either way.
