@@ -153,6 +153,52 @@ pub(crate) fn mentions_variable(source: &str, variable: &str) -> bool {
     })
 }
 
+/// `source` with comment bodies and string contents blanked out, every other byte in place.
+///
+/// [`corrected_variable`]'s guard asks whether a variable is *read* anywhere, and prose is not a
+/// read. Without this the question is asked of the raw text, so a changelog line is enough to
+/// answer it wrongly — which is exactly what happened. `Karplus-Strong_Texture_Generator` carries
+///
+///     #   - micro-delay stereo reads from the original mono voice, not in-place self
+///
+/// and its pause field is labelled `"Micro-delay (ms)"`, deriving `micro-delay`. The comment made
+/// the guard believe that name was read, so the inferred correction (`micro_delay_ms`, which the
+/// script really does read) was discarded and the assignment went out as `micro-delay = 11` —
+/// which Praat parses as `micro - delay` and rejects with `Unknown variable: micro`, taking the
+/// whole process down. `Lorenz_Deep_Analog` had the identical shape via `burn-in`.
+///
+/// Blanking rather than deleting keeps every byte at its own offset, so a match position still
+/// refers to the same place in the original. The converter's own `code_only` does this for the
+/// same reason and against the same hazard; this is that rule on the Rust side of the boundary.
+///
+/// Praat has no backslash escapes in strings — an embedded quote is doubled — so a naive toggle
+/// on `"` is exact: the second quote of a doubled pair opens a string that the next character
+/// closes, and every byte between them is blanked either way.
+fn code_only(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    for line in source.lines() {
+        let mut in_string = false;
+        let mut commented = false;
+        for c in line.chars() {
+            match c {
+                _ if commented => out.push(' '),
+                '"' => {
+                    in_string = !in_string;
+                    out.push('"');
+                }
+                '#' if !in_string => {
+                    commented = true;
+                    out.push(' ');
+                }
+                _ if in_string => out.push(' '),
+                _ => out.push(c),
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// Pause-dialog fields whose label does **not** derive the variable the script goes on to read,
 /// with the variable it actually reads.
 ///
@@ -192,10 +238,13 @@ const PAUSE_VARIABLE_FIXES: &[(&str, &str)] = &[
 /// hand, and [`default_expression_variable`] infers it from the field's own default.
 fn corrected_variable(label: &str, source: &str) -> String {
     let derived = variable_name(label);
+    // Asked of the code alone: a variable named in a comment or a log message is not read. See
+    // [`code_only`] for the failure that made this necessary.
+    let code = code_only(source);
     let usable = |candidate: &str| {
         candidate != derived
-            && !mentions_variable(source, &derived)
-            && mentions_variable(source, candidate)
+            && !mentions_variable(&code, &derived)
+            && mentions_variable(&code, candidate)
     };
     for (broken, reads) in PAUSE_VARIABLE_FIXES {
         if *broken == label && usable(reads) {
@@ -941,6 +990,64 @@ mod tests {
                  — upstream fixed it, so delete the entry"
             );
         }
+    }
+
+    /// A comment must not answer the "is this variable read?" question.
+    ///
+    /// `corrected_variable` only repairs a field when the label-derived name is read *nowhere*.
+    /// Asked of the raw text, a changelog line naming the same phrase satisfies "read" and the
+    /// repair is silently dropped. That is not hypothetical: `Karplus-Strong_Texture_Generator`
+    /// documents its own `micro-delay` behaviour in a comment, and the label `"Micro-delay (ms)"`
+    /// derives exactly that — so the field went out as `micro-delay = 11`, which Praat parses as
+    /// `micro - delay` and rejects with `Unknown variable: micro`. The process failed outright,
+    /// as did `Lorenz_Deep_Analog` via `burn-in`.
+    #[test]
+    fn a_comment_naming_the_derived_variable_does_not_block_the_repair() {
+        let source = "\
+#   - micro-delay stereo reads from the original mono voice, not in-place self
+micro_delay_ms = 8.0
+beginPause: \"Details\"
+    real: \"Micro-delay (ms)\", micro_delay_ms
+endPause: \"Run\", 1
+if micro_delay_ms < 0
+    exitScript: \"nope\"
+endif
+";
+        assert_eq!(corrected_variable("Micro-delay (ms)", source), "micro_delay_ms");
+
+        let rendered =
+            Assignment::Number { label: "Micro-delay (ms)".into(), value: 11.0 }.render_into(source);
+        assert_eq!(rendered, vec!["micro_delay_ms = 11".to_string()]);
+    }
+
+    /// The same blanking must apply to string contents, not only to comments — a log line that
+    /// prints the phrase is no more a read than a comment is.
+    #[test]
+    fn a_string_literal_naming_the_derived_variable_does_not_block_the_repair() {
+        let source = "\
+burn_in_Lorenz_time = 5.0
+appendInfoLine: \"burn-in is measured in Lorenz time units\"
+beginPause: \"Details\"
+    real: \"Burn-in (Lorenz time units)\", burn_in_Lorenz_time
+endPause: \"Run\", 1
+if burn_in_Lorenz_time < 0
+    exitScript: \"nope\"
+endif
+";
+        assert_eq!(
+            corrected_variable("Burn-in (Lorenz time units)", source),
+            "burn_in_Lorenz_time"
+        );
+    }
+
+    /// `code_only` keeps code bytes and blanks only prose, so a real read still counts.
+    #[test]
+    fn code_only_blanks_comments_and_strings_but_keeps_code() {
+        let out = code_only("a = 1 # b = 2\nprint: \"c = 3\"\nd = 4\n");
+        assert!(mentions_variable(&out, "a"), "code survives");
+        assert!(mentions_variable(&out, "d"), "code after a comment line survives");
+        assert!(!mentions_variable(&out, "b"), "comment body is blanked");
+        assert!(!mentions_variable(&out, "c"), "string contents are blanked");
     }
 
     /// An optionmenu sets both variables, because scripts read both.
