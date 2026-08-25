@@ -1,5 +1,109 @@
 # Changelog
 
+## Unreleased
+
+- **The Vector Chain scripts are explicated, and twelve of them are now Process Chain presets.**
+  A Vector Chain script is a fixed pipeline: it runs three or four other AudioTools scripts via
+  `runScript:`, each with a hardcoded argument list. Praat fills a `form` **positionally**, so
+  those lists are both the substance of a chain and its main hazard — a list that does not match
+  its target's form does not fail, it binds values to the wrong fields.
+
+  `scripts/explicate_vector_chains.py` writes `docs/vector-chain-stages.txt`, pairing every
+  argument with the field it lands in across all 19 chains, and flagging the mismatches. There
+  are five, and two of them are the standing `chain_5` / `Live_5` failure the smoke sweep reports
+  as "Found 17 arguments but expected more" — 17 arguments against an 18-field form, now visible
+  as a line in a table rather than as an error string from a run.
+
+  `--chains` writes the same pipelines as `chain_preset` TOML. Twelve of the nineteen convert;
+  each refusal is a property of the chain, not a gap in the generator. The three `*_Random`
+  variants compute their arguments at run time, so there is nothing fixed to save — a preset
+  would freeze the one thing about them meant to vary. `chain_7` has three `input = "none"`
+  generator stages, which cannot be chain steps because a step consumes the previous step's
+  audio. `chain_5` and `Live_5` carry the arity defect above, and a preset built from one would
+  bake the misalignment in rather than report it. `cleanup.praat` has no stages.
+
+  All twelve were checked by loading them through `chain_preset::list_chains_in` and running
+  `CdpChain::validate` against the real catalog, so "it parses" and "every step resolves to a
+  chainable process with the right number of values" are both established rather than assumed.
+
+  One parsing note worth keeping: Praat continues a statement on a line beginning with `...`, and
+  an argument list is routinely split across three lines. Reading only the first gives a short
+  count that is **indistinguishable from a real arity bug** — six chains looked broken until
+  `logical_lines` existed, which is why that helper is load-bearing rather than cosmetic.
+
+- **Five Praat processes that could never run now do:** Karplus-Strong Texture Generator, Lorenz
+  Deep Analog, Chirikov Standard Map, Multi-Layer Audio Visualizer and Perceptual Synchrony. Every
+  one failed with `Unknown variable:`, and they looked like one bug because the smoke sweep
+  reported only the first line of Praat's error — Praat puts the offending name on the *second*.
+  Widening that capture showed two distinct causes.
+
+  **Two were ours.** `corrected_variable` repairs a pause field whose label does not derive the
+  variable its script reads, and it applies the repair only while the label-derived name is read
+  *nowhere*. It asked that question of the raw script, so a comment was enough to answer it:
+  Karplus-Strong documents its own `micro-delay` behaviour in a changelog line, and its field is
+  labelled `"Micro-delay (ms)"`. The guard concluded `micro-delay` was read, discarded the
+  inferred `micro_delay_ms`, and emitted `micro-delay = 11` — which Praat parses as
+  `micro - delay` and rejects, taking the whole process down. Lorenz Deep Analog had the identical
+  shape via `burn-in`. The guard now reads a `code_only` view with comment bodies and string
+  contents blanked, mirroring what the converter already does on the Python side and for the same
+  reason: prose is not a read.
+
+  **The other three are upstream's, exposed by a default of ours.** Each assigns a variable only
+  inside its drawing branch and then reads it outside: Chirikov's `drawStride` (assigned line 322,
+  read line 353 from `if draw_visualization and (cp mod drawStride = 0)` — Praat's `and` evaluates
+  both operands, so a false left arm does not spare the right); Perceptual Synchrony's `modeText$`
+  (assigned line 1236, read line 1520 by its closing summary); and the Visualizer's
+  `spectrogramID` (created line 132, read line 148 by the `else` arm `spectrogramDrawID =
+  spectrogramID`). All three are equally broken in stock Praat with the box unticked — we just
+  reach it every time, because `SILENCE_RE` forces every `play`/`draw`/`show` toggle off so a
+  process cannot spend a run drawing or playing something nobody asked for.
+
+  `SILENCE_EXEMPTIONS` lets a named entry opt specific toggles back out of that rule. Chirikov and
+  Perceptual Synchrony take one each. The Visualizer takes all eleven of its layer toggles, and
+  for a second reason that would justify the entry on its own: the layers *are* its output, so
+  with them off it drew nothing even once it stopped failing. Restored to the script's own form
+  defaults. The table is registered with `check_stale_keys`, and applying it hard-errors on a
+  parameter the process does not declare, so a renamed script or field fails loudly instead of
+  quietly reverting to a default that crashes.
+
+- **The Praat smoke sweep now drives every entry at two channel widths, not one.** Its fixture
+  was mono, and most of these scripts fold their input to mono before analysing it — against a
+  mono fixture that fold is a no-op, so the sweep never exercised any script's stereo handling.
+  That was not a theoretical gap: this release's Reich Generator change adds a cancellation-safe
+  mono analysis gated on `channels > 1`, and the sweep went green on it without reaching a line
+  of the new code.
+
+  `smoke_fixture_stereo` is the mono fixture's decorrelated companion — right leg detuned 3 Hz,
+  tremolo in quadrature, its own noise seed. Deliberately *not* phase-opposed: inverting one leg
+  would exercise the cancellation path head-on but folds to digital silence, so every script that
+  analyses the fold would be reading a dead signal and failing for the fixture's sake rather than
+  its own. Both widths run because neither subsumes the other, and each result line names its
+  width so a one-sided failure is legible.
+
+  A full sweep is now 936 runs. Four entries that had been failing purely for want of a stereo
+  input now pass at that width — Spatial Trajectory Tracker, Stereo Channel Similarity Meter,
+  Mid/Side Matrix and Mix Multi-Channel to Stereo — and **no entry failed at stereo that passed
+  at mono**, apart from one already-known nondeterministic vector-chain pair.
+
+
+- **praatAudioTools updated to `91a8b36`.** Two commits, both edits to scripts already in the
+  tree — nothing added, nothing removed. 473 processes, 41 excluded, both unchanged, and the
+  regenerated catalog differs from the last one by its pin comment alone.
+
+  **Reich Generator** is the one live entry touched, and its `form` is untouched — so no
+  parameter rebinds and saved presets carry over. The changes are internal: its mono analysis is
+  now cancellation-safe (a stereo source whose channels nearly cancel in the fold-down is
+  analysed on its strongest-RMS channel instead of on a near-silent average, which is what a
+  phase-opposed pair used to give it), and the Source panel of the visualization draws the
+  zero-crossing-snapped loop bounds rather than the pre-snap random candidate, so the highlighted
+  region is the audio the loop actually uses.
+
+  **CHORD DETECTION** renamed a `form` field (`Harmonic_downweight_percent` →
+  `Harmonic_residual_weight_percent`) and reworked its fallback segment bookkeeping, but it is
+  excluded as `gui_blocking` and has no catalog entry, so none of that reaches here. Worth
+  naming only because a same-position field rename is exactly the drift a pin-only bump
+  mis-binds silently — this one happens to land on a script we do not drive.
+
 ## 2026-08-24 (2.11.2)
 
 - **praatAudioTools updated to `65fa69e`.** Fifteen commits carrying the visualization
