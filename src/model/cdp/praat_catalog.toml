@@ -5581,7 +5581,7 @@ name = "Draw_visualization"
 description = ""
 automatable = false
 kind = "toggle"
-default = false
+default = true
 
 [[process.params]]
 name = "Play_result"
@@ -8843,77 +8843,77 @@ name = "Draw_events_strip"
 description = ""
 automatable = false
 kind = "toggle"
-default = false
+default = true
 
 [[process.params]]
 name = "Draw_spectrogram"
 description = ""
 automatable = false
 kind = "toggle"
-default = false
+default = true
 
 [[process.params]]
 name = "Draw_waveform"
 description = ""
 automatable = false
 kind = "toggle"
-default = false
+default = true
 
 [[process.params]]
 name = "Draw_intensity"
 description = ""
 automatable = false
 kind = "toggle"
-default = false
+default = true
 
 [[process.params]]
 name = "Draw_pitch"
 description = ""
 automatable = false
 kind = "toggle"
-default = false
+default = true
 
 [[process.params]]
 name = "Draw_spectral_centroid"
 description = ""
 automatable = false
 kind = "toggle"
-default = false
+default = true
 
 [[process.params]]
 name = "Draw_formants"
 description = ""
 automatable = false
 kind = "toggle"
-default = false
+default = true
 
 [[process.params]]
 name = "Draw_pulses"
 description = ""
 automatable = false
 kind = "toggle"
-default = false
+default = true
 
 [[process.params]]
 name = "Draw_F1"
 description = ""
 automatable = false
 kind = "toggle"
-default = false
+default = true
 
 [[process.params]]
 name = "Draw_F2"
 description = ""
 automatable = false
 kind = "toggle"
-default = false
+default = true
 
 [[process.params]]
 name = "Draw_F3"
 description = ""
 automatable = false
 kind = "toggle"
-default = false
+default = true
 
 [[process.params]]
 name = "Time_step"
@@ -27869,7 +27869,7 @@ name = "Draw_visualization"
 description = ""
 automatable = false
 kind = "toggle"
-default = false
+default = true
 
 [[process.params]]
 name = "Play_result"

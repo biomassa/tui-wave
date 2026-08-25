@@ -661,6 +661,50 @@ DIRECTORY_HOISTS: dict[str, dict] = {
 # show it". A prefix added here needs a decision there about whether it draws.
 SILENCE_RE = re.compile(r"^(play|draw|show|visuali|demo|open_|export)", re.I)
 
+# Toggles `SILENCE_RE` must NOT force off, because the script does not survive with them off.
+#
+# Keyed by script path and parameter name, and each entry is a claim about a *defect*: the
+# script reads a variable that only its own drawing branch assigns, so turning drawing off
+# reaches an unassigned read. Praat's `and` does not short-circuit, so a guard of the form
+# `if draw_visualization and (... drawStride ...)` evaluates the right operand even when the
+# left is false -- the script is equally broken in stock Praat with the box unticked.
+#
+# Enforced two ways, both fatal rather than silent: `check_stale_keys` reports a path that no
+# longer names a script, and applying the table hard-errors on a parameter the process does not
+# declare. Neither can prove the *defect* is still there — only running the script with the
+# toggle off can, which is what the smoke sweep does — so an entry outliving its bug costs a
+# forced-on toggle, not a broken process.
+SILENCE_EXEMPTIONS: dict[str, dict[str, str]] = {
+    "Analysis/Multi-Layer Audio Visualizer (EAnalysis Style).praat": {
+        # Two reasons at once, and either alone would justify the entry. The crash:
+        # `spectrogramID` is created only inside `if draw_spectrogram or draw_spectral_centroid`
+        # (line 132) and then read unconditionally at line 148 by the `else` arm
+        # `spectrogramDrawID = spectrogramID`, so every layer off is an unassigned read. And the
+        # point: this process *is* its drawing — the layers are the entire output, and a run with
+        # all eleven forced off draws nothing even once it stops failing. Restored to the
+        # script's own form defaults, which are 1 for all eleven.
+        name: "the layers are this process's whole output, and all-off is also an unassigned "
+              "read of spectrogramID at line 148"
+        for name in (
+            "Draw_events_strip", "Draw_spectrogram", "Draw_waveform", "Draw_intensity",
+            "Draw_pitch", "Draw_spectral_centroid", "Draw_formants", "Draw_pulses",
+            "Draw_F1", "Draw_F2", "Draw_F3",
+        )
+    },
+    "AI & Adaptive/Perceptual_Synchrony.praat": {
+        "Draw_visualization":
+            "modeText$ is assigned only inside `if draw_visualization` (line 1236) and read at "
+            "line 1520 by the closing `appendInfoLine: \"  Mode: \", modeText$`, which sits "
+            "outside that block",
+    },
+    "Generative & Synthesis/ChirikovStandardMap.praat": {
+        "Draw_visualization":
+            "drawStride is assigned only inside `if draw_visualization` (line 322) and read "
+            "at line 353 by `if draw_visualization and (cp mod drawStride = 0)`; Praat's `and` "
+            "evaluates both operands, so drawing off is `Unknown variable: drawStride`",
+    },
+}
+
 # --- static exclusion detectors -------------------------------------------------------
 # Each maps a reason slug to a pattern that, if found anywhere in a script, disqualifies it.
 #
@@ -2329,6 +2373,9 @@ def check_stale_keys() -> list[str]:
         # the process would simply return — but a renamed script should still be reported rather
         # than sitting in the table forever pointing at nothing.
         ("BROKEN_UPSTREAM", BROKEN_UPSTREAM),
+        # Stale here means a toggle silently goes back to forced-off and the script starts
+        # failing again on an unassigned read — the exact regression the entry prevents.
+        ("SILENCE_EXEMPTIONS", SILENCE_EXEMPTIONS),
     ):
         for key in table:
             if key not in present:
@@ -2819,6 +2866,26 @@ def main() -> int:
             print(f"  {line}", file=sys.stderr)
 
     processes, excluded = collect()
+
+    # Re-enable the toggles `SILENCE_RE` forced off but the script cannot run without. Applied
+    # here rather than in `parse_fields`, which sees a field's label and never the script it
+    # came from. Unknown keys are a hard error: an entry that no longer matches is the shape
+    # that silently stops applying, which is the whole failure this table exists to prevent.
+    for rel, wanted in SILENCE_EXEMPTIONS.items():
+        matches = [proc for proc in processes if proc.bin == rel]
+        if not matches:
+            print(f"error: SILENCE_EXEMPTIONS names {rel!r}, which is not a shipped process",
+                  file=sys.stderr)
+            return 1
+        for proc in matches:
+            for name in wanted:
+                hits = [param for param in proc.params if param.name == name]
+                if not hits:
+                    print(f"error: SILENCE_EXEMPTIONS[{rel!r}] names parameter {name!r}, "
+                          f"which {proc.key} does not declare", file=sys.stderr)
+                    return 1
+                for param in hits:
+                    param.default = True
 
     # Must happen before anything is written: a repeated key is an *override* to
     # `CdpCatalog::load`, not an error, so a collision silently deletes a process from the
