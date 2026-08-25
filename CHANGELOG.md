@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-25 (2.11.3)
 
 - **The Vector Chain scripts are explicated, and twelve of them are now Process Chain presets.**
   A Vector Chain script is a fixed pipeline: it runs three or four other AudioTools scripts via
