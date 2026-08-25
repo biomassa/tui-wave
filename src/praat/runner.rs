@@ -1154,13 +1154,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&state);
     }
 
-    /// Two seconds of material with real structure — a 220 Hz tone under a slow tremolo, plus a
-    /// deterministic pseudo-noise layer.
-    ///
-    /// A constant full-level sine is the wrong fixture for this collection: many of these
-    /// scripts analyse pitch, envelope or dynamics, and Praat rejects a signal whose loudest
-    /// and softest parts differ by 0.0002 dB outright. The variation here is what makes a
-    /// failure mean "the catalog entry is wrong" rather than "the fixture was degenerate".
     /// `setup-environment.sh` pins the praatAudioTools commit it checks out, and that pin must
     /// equal the one this build's catalog was generated from.
     ///
@@ -1217,22 +1210,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Two seconds of mono material with real structure — a 220 Hz tone under a slow tremolo,
+    /// plus a deterministic pseudo-noise layer.
+    ///
+    /// A constant full-level sine is the wrong fixture for this collection: many of these
+    /// scripts analyse pitch, envelope or dynamics, and Praat rejects a signal whose loudest
+    /// and softest parts differ by 0.0002 dB outright. The variation here is what makes a
+    /// failure mean "the catalog entry is wrong" rather than "the fixture was degenerate".
+    ///
+    /// Paired with [`smoke_fixture_stereo`]; the sweep drives every entry at both widths.
     fn smoke_fixture() -> (Vec<Vec<f32>>, u32) {
         const RATE: u32 = 44_100;
-        let samples = (0..RATE * 2)
+        (vec![smoke_leg(220.0, 0.0, 0)], RATE)
+    }
+
+    /// The stereo companion to [`smoke_fixture`], with the two channels genuinely decorrelated.
+    ///
+    /// **Why a second width at all.** Most of these scripts fold their input to mono before
+    /// analysing it, and against a mono fixture that fold is a no-op — so a sweep of mono alone
+    /// never exercises any script's stereo handling, and a defect there passes unseen. That is
+    /// not hypothetical: an upstream Reich Generator fix (2026-08-25) added a cancellation-safe
+    /// mono analysis gated on `channels > 1`, and the sweep went green on it without reaching a
+    /// line of the new code. Both widths run because neither subsumes the other — a script can
+    /// just as easily break on a mono input it assumed was stereo.
+    ///
+    /// **Decorrelated, not phase-opposed.** Inverting one channel would exercise the
+    /// cancellation path head-on, but it folds to digital silence, so every script analysing the
+    /// fold would be reading a dead signal and its failure would be the fixture's fault rather
+    /// than the catalog's — the same degeneracy the tremolo in [`smoke_fixture`] exists to
+    /// avoid. The right leg is detuned 3 Hz with its tremolo in quadrature and its own noise
+    /// seed instead: the fold stays healthy while the two channels are never interchangeable.
+    fn smoke_fixture_stereo() -> (Vec<Vec<f32>>, u32) {
+        const RATE: u32 = 44_100;
+        let left = smoke_leg(220.0, 0.0, 0);
+        let right = smoke_leg(223.0, std::f32::consts::FRAC_PI_2, 0x9E37_79B9);
+        (vec![left, right], RATE)
+    }
+
+    /// One channel of smoke-fixture material. `seed` decorrelates the noise layer between legs;
+    /// the jitter is a deterministic hash rather than an RNG so a failure is reproducible.
+    fn smoke_leg(hz: f32, tremolo_phase: f32, seed: u32) -> Vec<f32> {
+        const RATE: u32 = 44_100;
+        (0..RATE * 2)
             .map(|i| {
                 let t = i as f32 / RATE as f32;
-                let tremolo = 0.55 + 0.45 * (t * std::f32::consts::TAU * 1.7).sin();
-                let tone = (t * 220.0 * std::f32::consts::TAU).sin();
-                // Deterministic hash-like jitter: varied enough to look like signal, identical
-                // on every run so a failure is reproducible.
-                let grit = (((i as u32).wrapping_mul(2_654_435_761) >> 9) as f32 / 4_194_304.0
+                let tremolo = 0.55 + 0.45 * (t * std::f32::consts::TAU * 1.7 + tremolo_phase).sin();
+                let tone = (t * hz * std::f32::consts::TAU).sin();
+                let grit = ((i.wrapping_add(seed).wrapping_mul(2_654_435_761) >> 9) as f32
+                    / 4_194_304.0
                     - 1.0)
                     * 0.05;
                 (tone * tremolo + grit) * 0.7
             })
-            .collect();
-        (vec![samples], RATE)
+            .collect()
     }
 
     /// A PNG for the `IoKind::Photo` processes to sonify, written under `state` and returned by
@@ -1291,6 +1321,18 @@ mod tests {
 
         let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
         let (channels, sample_rate) = smoke_fixture();
+        let (stereo_channels, _) = smoke_fixture_stereo();
+        // Every entry is driven at both widths — see `smoke_fixture_stereo` for why neither
+        // subsumes the other. Mono first, so a script that breaks at both reports the simpler
+        // case first.
+        let widths: [(&str, &Vec<Vec<f32>>); 2] =
+            [("mono", &channels), ("stereo", &stereo_channels)];
+        // Built once even if nothing asks for them: a minute of audio is cheap to synthesise and
+        // the alternative is building it inside the entry loop, once per width per entry.
+        let (long_channels, _) = long_fixture();
+        let (long_stereo, _) = long_fixture_stereo();
+        let long_widths: [(&str, &Vec<Vec<f32>>); 2] =
+            [("mono", &long_channels), ("stereo", &long_stereo)];
 
         // A folder of real sounds for `ParamKind::FolderPath` params, which have no catalog
         // default because there is no sensible directory to invent. Leaving one empty is not a
@@ -1411,7 +1453,7 @@ mod tests {
         eprintln!("{banner}");
         use std::io::Write as _;
         let _ = std::io::stdout().flush();
-        sweep_log!("praat smoke sweep: {total} entries\n");
+        sweep_log!("praat smoke sweep: {total} entries x {} widths\n", widths.len());
         if !filter.is_empty() {
             sweep_log!("filter {filter:?}: {total} of {} Praat entries\n", catalog.processes.iter().filter(|d| d.backend() == crate::model::cdp::def::Backend::Praat).count());
         }
@@ -1443,52 +1485,72 @@ mod tests {
             // tell which one was making noise. The timing has to come after, and without it a
             // slow process and a wedged one look identical for however long the timeout is —
             // which is exactly how a sweep reads as a hang.
-            sweep_log!("[{:>3}/{total}] {:<58}", index + 1, def.key);
-            let started = std::time::Instant::now();
-            let planned = match crate::model::praat::plan_praat_job_with(def, &values, &checkout, python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref()) {
-                Ok(planned) => planned,
-                Err(err) => {
-                    failures.push(format!("{}: plan failed: {err}", def.key));
-                    continue;
-                }
-            };
-            // A two-Sound process gets the same fixture on both sides; self-processing is a
-            // valid shape for everything being checked here.
-            let input_count = planned.input_names.len();
-            let job = PraatJob {
-                id: ran as u64,
-                praat_bin: praat_bin_for(""),
-                inputs: vec![channels.clone(); input_count],
-                // An `IoKind::Photo` process `exitScript`s without one, so the sweep would
-                // report four confusing "produced no Sound object" failures rather than
-                // covering them at all — the same reasoning as the corpus folder above.
-                photo_path: planned.photo_input.then(|| photo.clone()),
-                planned,
-                input_sample_rate: sample_rate,
-                purpose: JobPurpose::Apply,
-                timeout: Duration::from_secs(60),
-                prefs_dir: prefs.clone(),
-                // The sweep exercises the `py` group too, so it needs the same venv the app
-                // uses — otherwise every Python-backed process fails on missing imports here
-                // while working perfectly in the app.
-                python_venv_bin: python_venv_bin(&state_dir()),
-            };
-            ran += 1;
-            let outcome = run(&job);
-            let elapsed = started.elapsed();
-            if let Err(err) = outcome {
-                let detail = match &err {
-                    PraatError::NonZeroExit { output, .. } => output
-                        .lines()
-                        .find(|l| l.starts_with("Error:"))
-                        .unwrap_or("(no Error: line)")
-                        .to_string(),
-                    other => other.to_string(),
+            // The width is part of the printed line because a failure that reproduces at one
+            // width and not the other is the whole reason both run — a bare key would leave the
+            // reader unable to tell which input produced it.
+            // A handful of entries correctly refuse two seconds of continuous tone; they get a
+            // minute of segmented material instead. See `LONG_FIXTURE_ENTRIES`.
+            let long_material = LONG_FIXTURE_ENTRIES.contains(&def.key.as_str());
+            let entry_widths = if long_material { long_widths } else { widths };
+            // Thirty times the audio is thirty times the analysis, and `vector_chain_chain_1`
+            // spends 46s on the mono leg alone — under the ordinary budget it would fail as a
+            // timeout, which reads as a wedged script rather than as a slow one. Raised only for
+            // the entries actually handed the long fixture, so a genuine hang anywhere else is
+            // still caught in a minute.
+            let budget =
+                if long_material { LONG_FIXTURE_TIMEOUT } else { Duration::from_secs(60) };
+            for (width, width_channels) in entry_widths {
+                sweep_log!("[{:>3}/{total}] {:<52} {:<7}", index + 1, def.key, width);
+                let started = std::time::Instant::now();
+                // Re-planned per width rather than planned once and reused: a plan is derived
+                // from the def and its values and not from the audio, but re-deriving keeps the
+                // two runs independent, so neither can inherit anything the other left behind.
+                let planned = match crate::model::praat::plan_praat_job_with(def, &values, &checkout, python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref()) {
+                    Ok(planned) => planned,
+                    Err(err) => {
+                        failures.push(format!("{} [{width}]: plan failed: {err}", def.key));
+                        sweep_log!("   plan failed\n");
+                        continue;
+                    }
                 };
-                failures.push(format!("{}: {detail}", def.key));
-                sweep_log!(" {:>6.1}s  FAIL ({} so far)\n", elapsed.as_secs_f32(), failures.len());
-            } else {
-                sweep_log!(" {:>6.1}s  ok\n", elapsed.as_secs_f32());
+                // A two-Sound process gets the same fixture on both sides; self-processing is a
+                // valid shape for everything being checked here.
+                let input_count = planned.input_names.len();
+                let job = PraatJob {
+                    id: ran as u64,
+                    praat_bin: praat_bin_for(""),
+                    inputs: vec![width_channels.clone(); input_count],
+                    // An `IoKind::Photo` process `exitScript`s without one, so the sweep would
+                    // report four confusing "produced no Sound object" failures rather than
+                    // covering them at all — the same reasoning as the corpus folder above.
+                    photo_path: planned.photo_input.then(|| photo.clone()),
+                    planned,
+                    input_sample_rate: sample_rate,
+                    purpose: JobPurpose::Apply,
+                    timeout: budget,
+                    prefs_dir: prefs.clone(),
+                    // The sweep exercises the `py` group too, so it needs the same venv the app
+                    // uses — otherwise every Python-backed process fails on missing imports here
+                    // while working perfectly in the app.
+                    python_venv_bin: python_venv_bin(&state_dir()),
+                };
+                ran += 1;
+                let outcome = run(&job);
+                let elapsed = started.elapsed();
+                if let Err(err) = outcome {
+                    let detail = match &err {
+                        PraatError::NonZeroExit { output, .. } => output
+                            .lines()
+                            .find(|l| l.starts_with("Error:"))
+                            .unwrap_or("(no Error: line)")
+                            .to_string(),
+                        other => other.to_string(),
+                    };
+                    failures.push(format!("{} [{width}]: {detail}", def.key));
+                    sweep_log!(" {:>6.1}s  FAIL ({} so far)\n", elapsed.as_secs_f32(), failures.len());
+                } else {
+                    sweep_log!(" {:>6.1}s  ok\n", elapsed.as_secs_f32());
+                }
             }
         }
         let _ = std::fs::remove_dir_all(&state);
@@ -1498,6 +1560,118 @@ mod tests {
             sweep_log!("  {failure}\n");
         }
         assert!(ran > 0, "no Praat entries found in the catalog");
+    }
+
+    /// Entries whose script refuses [`smoke_fixture`] on its merits, needing a **long, segmented**
+    /// recording instead of two seconds of continuous tone.
+    ///
+    /// Not a workaround and not a baseline: each of these states its requirement plainly and
+    /// correctly — "Sound too short (< 20 s). Need longer material for structural analysis",
+    /// "Need at least 2 word segments! Found: 1", "Too few events detected (1)". A two-second
+    /// unbroken tone is one event and one segment however long you stare at it, so the sweep was
+    /// asserting nothing about these four beyond the fact that they can read a header.
+    ///
+    /// Kept as a named list rather than given to everything, because the ordinary fixture is what
+    /// makes a 936-run sweep cheap: a minute of audio costs thirty times the analysis on every
+    /// entry that never needed it. Same reasoning as `melody_fixture`, which exists for the one
+    /// script that wants discrete pitched notes.
+    const LONG_FIXTURE_ENTRIES: &[&str] = &[
+        "praat_time_granular_dramaturgical_structure_composer",
+        "praat_time_granular_mds_space_navigator",
+        "praat_vector_chain_chain_1",
+        "praat_py_phasespacecomposer",
+    ];
+
+    /// What [`LONG_FIXTURE_ENTRIES`] get instead of the sweep's ordinary 60s budget.
+    ///
+    /// A timeout and a failure are not the same report — one says the script is wrong, the other
+    /// says it did not finish — and handing an entry thirty times the audio without adjusting the
+    /// clock turns the second into the first. `vector_chain_chain_1` takes 46s on the mono leg
+    /// and more on stereo, having taken 0.1s to *reject* the short fixture outright.
+    const LONG_FIXTURE_TIMEOUT: Duration = Duration::from_secs(240);
+
+    /// Sixty seconds of discrete, silence-separated events in three sections — what
+    /// [`LONG_FIXTURE_ENTRIES`] need and what [`smoke_fixture`] deliberately is not.
+    ///
+    /// Three properties, one per failure it answers. It is **a minute long**, clearing the 20 s
+    /// floor structural analysis asks for. Its events are **separated by real gaps** — a noise
+    /// floor near -72 dBFS rather than digital silence, so a silence-based segmenter finds
+    /// boundaries where a continuous tone offers none, and an onset detector finds forty-odd
+    /// events rather than one. And it is **sectioned**: register, density and brightness all step
+    /// twice across the minute, so a script looking for *structure* has some to find rather than
+    /// one texture repeated for sixty seconds, which would satisfy the duration check and then
+    /// fail the analysis it exists for.
+    ///
+    /// Deterministic like every other fixture here — the jitter is a hash of the event index, so
+    /// a failure reproduces exactly. `seed` decorrelates the stereo legs, as in
+    /// [`smoke_fixture_stereo`].
+    fn long_fixture_leg(seed: u32) -> Vec<f32> {
+        const RATE: u32 = 44_100;
+        const SECONDS: usize = 60;
+        let total = RATE as usize * SECONDS;
+        let mut out = vec![0.0f32; total];
+
+        // A hash-like unit value for event `k`, stable across runs.
+        let jitter = |k: u32, salt: u32| {
+            ((k.wrapping_add(seed).wrapping_add(salt).wrapping_mul(2_246_822_519) >> 8) % 1_000)
+                as f32
+                / 1_000.0
+        };
+
+        // Low noise floor everywhere: real recordings are never digitally silent, and a segmenter
+        // tuned for speech behaves differently against true zeros.
+        for (i, sample) in out.iter_mut().enumerate() {
+            *sample = (jitter(i as u32, 0x5F35) - 0.5) * 0.0005;
+        }
+
+        let mut at = RATE as usize / 4;
+        let mut event = 0u32;
+        while at < total {
+            // Three sections across the minute, stepping register, brightness and density.
+            let section = (at * 3 / total).min(2);
+            let (root, brightness, gap_scale) =
+                [(150.0f32, 0.25f32, 1.0f32), (260.0, 0.55, 0.7), (420.0, 0.85, 1.4)][section];
+
+            let steps = [0i32, 3, 5, 7, 10, 12];
+            let semitone = steps[(event as usize + section) % steps.len()] as f32;
+            let freq = root * 2f32.powf(semitone / 12.0);
+
+            let dur = ((0.45 + jitter(event, 1) * 0.40) * RATE as f32) as usize;
+            let len = dur.min(total - at);
+            let fade = (RATE as usize / 40).min(len / 2).max(1);
+            for i in 0..len {
+                let t = i as f32 / RATE as f32;
+                let envelope = if i < fade {
+                    // Raised cosine, so an onset detector sees an edge without a click.
+                    0.5 - 0.5 * (std::f32::consts::PI * i as f32 / fade as f32).cos()
+                } else if i + fade > len {
+                    0.5 - 0.5 * (std::f32::consts::PI * (len - i) as f32 / fade as f32).cos()
+                } else {
+                    1.0
+                };
+                let phase = t * freq * std::f32::consts::TAU;
+                let tone = phase.sin()
+                    + brightness * 0.5 * (phase * 2.0).sin()
+                    + brightness * 0.25 * (phase * 3.0).sin();
+                let breath = (jitter(event * 977 + i as u32, 0x9E37) - 0.5) * 0.06;
+                out[at + i] += (tone / 1.75 + breath) * envelope * 0.6;
+            }
+
+            let gap = (((0.28 + jitter(event, 2) * 0.45) * gap_scale) * RATE as f32) as usize;
+            at += len + gap.max(RATE as usize / 8);
+            event += 1;
+        }
+        out
+    }
+
+    /// Mono [`long_fixture_leg`]; see it for what this is for.
+    fn long_fixture() -> (Vec<Vec<f32>>, u32) {
+        (vec![long_fixture_leg(0)], 44_100)
+    }
+
+    /// Stereo [`long_fixture_leg`], decorrelated the way [`smoke_fixture_stereo`] is.
+    fn long_fixture_stereo() -> (Vec<Vec<f32>>, u32) {
+        (vec![long_fixture_leg(0), long_fixture_leg(0x9E37_79B9)], 44_100)
     }
 
     /// A melody of discrete pitched notes — what the note-extracting scripts actually need, and
