@@ -1,5 +1,58 @@
 # Changelog
 
+## Unreleased
+
+- **praatAudioTools bumped to `dee6eec` (2026-08-26), 42 commits on.** Upstream reworked two whole
+  folders — all 16 `Distortion/` scripts and 14 of `Spatial & Surround/` — and the bulk of it is a
+  truth-in-labelling pass on the form fields: "Conditional limiter to 0.95" became "Attenuate to
+  0.95 only if peak > 0.95", "Brickwall Limiter" became "Near-Hard Clip", "Circular Rotation"
+  became "Sine Auto-Pan". Twenty-one catalog entries changed as a result.
+
+  Five of those scripts changed their **field count**, which is the hazard a bump exists to catch:
+  Praat fills a form positionally, so a stale entry binds values to the wrong fields and produces
+  plausible wrong audio rather than an error. `Sidechain_Feedback_VCA` is the largest — 13 fields
+  to 16, gaining `Excitation_Source` and `Resonance_Tracking`, losing `Allow_negative_VCA`, and
+  adding `Drive`, `Sidechain_depth_dB`, `Stereo_spread_percent`, `Target_RMS_dBFS` and `Fade_ms`
+  to its hoisted page. `Wave_Shaper_Distortion` gained `Oversample`, `Knight's Tour Sonification`
+  gained `Declick_ramp_(ms)`, and `Distortion_Bit-Crusher` and `Full-Wave_Rectifier_Abs` renamed
+  `Scale_peak` to `Target_peak`. All of it is picked up by re-running the converter, which is why
+  the converter exists; the point of recording it here is that a bump without one would not have
+  failed.
+
+  Every changed process was swept against the real Praat binary at both channel widths — 16
+  Distortion, 40 Spatial, plus Messagesquisse Opening and PhaseSpaceComposer. `cargo test` does
+  not shell out to Praat, so nothing else establishes this.
+
+- **Stereo Mixer keeps its Custom gains for Sounds 5-8**, which the bump would otherwise have cost
+  it. Upstream moved those eight fields off the form into a `beginPause` page behind a new
+  `Edit_custom_gains_5_to_8` toggle. A pause block segfaults praat under `--run` however it is
+  guarded, so the static detector reported `gui_blocking` and the process left the catalog
+  outright — the one entry the bump would have dropped.
+
+  It comes back as a `PAUSE_HOISTS` entry with `lock_on`, so all eight gains are ordinary dialog
+  parameters and the toggle disappears rather than showing as a control that gates fields sitting
+  beside it. Only that toggle is locked: the block's other two guards, `preset = 1` and
+  `numSounds > 4`, are facts about the run rather than settings, and gains 5-8 mean nothing
+  outside Custom and nothing at all when there is no Sound 5. The script assigns all eight to 1.0
+  above the guard, so a run that skips the block gets the numbers it always did.
+
+  This needed one narrow widening of the converter. A pause block whose fields are a *bank* seeds
+  them from a **vector** rather than from N scalars — `real: "Gain_5_L", gainL#[5]` against
+  `gainL#[5] = 1.0` above the guard — and `ASSIGNMENT_RE` matched only bare names, so every one of
+  the eight read as a non-numeric default and took the whole script with it. Subscripts are now
+  resolved, but only **literal** ones: `gainL#[i]` inside a loop stays unresolvable and is still
+  reported as the non-numeric default it is, rather than guessed at. No other catalog entry
+  changed as a result, which the old-versus-new catalog diff confirms.
+
+- **Two new upstream scripts are excluded, both deliberately.** `Analysis/OM_Score_Transformer`
+  (`gui_blocking`: a conditional pause plus a `chooseReadFile$` fallback, and it wants a MusicXML
+  path) and `py/BasicPitchTranscriber` (`out_of_scope`: its helper needs `basic_pitch`, which
+  pulls in TensorFlow, and `music21` — neither is in the app's venv). Recorded in
+  `docs/praat-excluded-scripts.md` with the rest.
+
+- **airwin2rack is already at upstream tip** (`0767d15`), so the Airwindows catalog is unchanged.
+
+
 ## 2026-08-25 (2.11.3)
 
 - **The Vector Chain scripts are explicated, and twelve of them are now Process Chain presets.**

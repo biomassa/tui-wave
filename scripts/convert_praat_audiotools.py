@@ -289,6 +289,21 @@ PAUSE_HOISTS: dict[str, dict] = {
     # Guarded by `if preset = 1` (Custom). Its `else` branch already assigns the same variables
     # to the same defaults, which is what makes the rewrite verifiable by inspection: the
     # hoisted assignments and the script's own placeholder block must agree.
+    # Arrived in the 2026-08-26 bump, which split the eight Custom gains in two: Sounds 1-4
+    # stayed on the form and Sounds 5-8 moved into a `beginPause` page behind a new
+    # `Edit_custom_gains_5_to_8` toggle. That took a shipping process out of the catalog, since
+    # a pause block is `gui_blocking` however it is guarded.
+    #
+    # Its guard is `if preset = 1 and numSounds > 4 and edit_custom_gains_5_to_8`, and only the
+    # third conjunct is ours to lock. The other two are the run's own facts -- which preset was
+    # chosen, and how many Sounds were handed over -- and they must stay conditions: gains 5-8
+    # mean nothing outside Custom, and nothing at all when there is no Sound 5 to gain. The
+    # script assigns all eight to 1.0 above the `if`, so a run that skips the block gets the
+    # same numbers it always did.
+    "Spatial & Surround/Stereo_Mixer.praat": {
+        "lock_on": ["Edit_custom_gains_5_to_8"],
+        "why": "Custom gains for Sounds 5-8, moved off the form to keep it compact",
+    },
     "Time & Granular/Polyphonic_Improviser.praat": {
         "why": "Voice Details page, reached on the Custom preset (option 1, the default)",
     },
@@ -1549,7 +1564,16 @@ NUMBER_RE = re.compile(r"^[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?$")
 # `name = <literal>` at the top level of a script. Pause blocks in the "advanced settings" shape
 # declare their defaults as these variables, assigned immediately above the `if` that guards the
 # block, so this is where the real values live.
-ASSIGNMENT_RE = re.compile(r"^\s*(\w+\$?)\s*=\s*(\"[^\"]*\"|[-+]?[\d.]+(?:[eE][-+]?\d+)?)\s*$", re.M)
+#
+# The name may carry a `#[n]` subscript, because a block whose fields are a *bank* seeds them
+# from a vector rather than from N separate scalars: `Stereo_Mixer` assigns `gainL#[5] = 1.0`
+# through `gainR#[8] = 1.0` above its guard and then writes `real: "Gain_5_L", gainL#[5]`.
+# Keyed by the subscript's literal text, which is exactly how the field spells it — deliberately
+# only a literal index, so `gainL#[i]` inside a loop stays unresolvable and is reported as the
+# non-numeric default it is rather than being guessed at.
+ASSIGNMENT_RE = re.compile(
+    r"^\s*(\w+\$?(?:#\[\d+\])?)\s*=\s*(\"[^\"]*\"|[-+]?[\d.]+(?:[eE][-+]?\d+)?)\s*$", re.M
+)
 
 
 def script_variables(source: str, before: int | None = None) -> dict[str, str]:
