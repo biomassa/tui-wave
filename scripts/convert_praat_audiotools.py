@@ -1925,10 +1925,44 @@ def zero_or_photo_input_kind(rel_key: str) -> str:
     """
     if rel_key in PHOTO_INPUTS:
         return "photo"
+    if rel_key in VARIADIC_INPUTS:
+        return "variadic_wav"
     in_zero_input_dir = rel_key.split("/")[0] == ZERO_INPUT_DIR
     if in_zero_input_dir and rel_key not in ZERO_INPUT_EXCEPTIONS:
         return "none"
     return ""
+
+
+# Scripts that mix or arrange **several** Sound objects, not one. Emitted as
+# `input = "variadic_wav"`, which is what makes the app offer a picker and hand Praat every
+# buffer chosen -- `praat_input_count` then reports the run's real count and the driver emits
+# one `infile` per Sound.
+#
+# The default is one Sound, and for 471 of 473 entries that is right. For these two it was
+# silently wrong in a way nothing reported: the script ran, produced audio, and simply did its
+# work over a selection of one. `Stereo_Mixer` mixed a single Sound (leaving *seven* of its eight
+# gain pairs unable to affect anything), and `Distribute_sounds_in_stereo_field` distributed one
+# sound across the stereo field. Neither errored, which is why this needs a table rather than a
+# runtime check.
+#
+# An allowlist rather than a rule inferred from the source, deliberately. The shape that finds
+# them -- assigning `numberOfSelected("Sound")` to a variable and looping to it -- is also what a
+# script writes to *validate* a single selection, so inferring would sweep in scripts that mean
+# one Sound. Each entry here was read. `min` is the script's own floor.
+VARIADIC_INPUTS: dict[str, dict] = {
+    # `numSounds > 8` is its own cap; `for i from 1 to numSounds` reads each in Objects-list
+    # order. Its eight Custom gain pairs are one per Sound, so the count is the whole point.
+    "Spatial & Surround/Stereo_Mixer.praat": {
+        "min": 1,
+        "why": "mixes up to 8 Sounds, one Custom gain pair each",
+    },
+    # `numberOfSounds < 1` is the only guard -- no upper bound. Pans each selected Sound to its
+    # own position across the field, so with one Sound there is nothing to distribute.
+    "Spatial & Surround/Distribute_sounds_in_stereo_field.praat": {
+        "min": 1,
+        "why": "pans each selected Sound to its own place in the field; uncapped",
+    },
+}
 
 
 ZERO_INPUT_EXCEPTIONS: dict[str, str] = {
@@ -2387,6 +2421,7 @@ def check_stale_keys() -> list[str]:
         ("DIRECTORY_HOISTS", DIRECTORY_HOISTS),
         ("GENERATORS", GENERATORS),
         ("PHOTO_INPUTS", PHOTO_INPUTS),
+        ("VARIADIC_INPUTS", VARIADIC_INPUTS),
         # Stale here is the dangerous direction: a renamed exception stops matching, the
         # directory rule then claims the script reads nothing, and a process that needs a
         # Sound would run without one instead of failing.
@@ -2740,6 +2775,12 @@ def render_catalog(processes: list[Process], sha: str) -> str:
             out.append(f"praat_form_locks = [{pairs}]")
         input_kind = proc.input_kind or ("dual_wav" if proc.inputs == 2 else "wav")
         out.append(f'input = "{input_kind}"')
+        # `input_arity` defaults a variadic floor to 1, so this is emitted only where the script
+        # demands more -- the value is the script's own guard, not a house style.
+        if input_kind == "variadic_wav":
+            floor = VARIADIC_INPUTS.get(proc.bin, {}).get("min", 1)
+            if floor > 1:
+                out.append(f"min_inputs = {floor}")
         out.append('output = "wav"')
         # Praat reads a multi-channel Sound natively, so there is never a reason to split a
         # stereo input into per-channel lanes the way a mono-only CDP binary needs.

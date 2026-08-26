@@ -1505,7 +1505,7 @@ mod tests {
                 // Re-planned per width rather than planned once and reused: a plan is derived
                 // from the def and its values and not from the audio, but re-deriving keeps the
                 // two runs independent, so neither can inherit anything the other left behind.
-                let planned = match crate::model::praat::plan_praat_job_with(def, &values, &checkout, python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref()) {
+                let planned = match crate::model::praat::plan_praat_job_with(def, &values, &checkout, python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref(), 1) {
                     Ok(planned) => planned,
                     Err(err) => {
                         failures.push(format!("{} [{width}]: plan failed: {err}", def.key));
@@ -1860,7 +1860,7 @@ mod tests {
                     }
                 })
                 .collect();
-            let planned = match crate::model::praat::plan_praat_job_with(def, &values, &checkout, python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref()) {
+            let planned = match crate::model::praat::plan_praat_job_with(def, &values, &checkout, python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref(), 1) {
                 Ok(planned) => planned,
                 Err(err) => {
                     failures.push(format!("{}: plan failed: {err}", def.key));

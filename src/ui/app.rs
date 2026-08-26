@@ -12569,6 +12569,17 @@ impl App {
                 };
                 praat_inputs.push(doc_b.channels.clone());
             }
+            // The variadic picks, after the selection's own — the same order, and for the same
+            // reason, as the CDP branch below: `input_names` is positional, so this *is* the
+            // order the script sees its Sounds selected in. Missed when variadic input landed,
+            // because only the CDP branch was taught about it; the Praat branch went on planning
+            // one input however many buffers the picker had collected, which the driver then
+            // faithfully turned into a one-`infile` form. Same shape as the Airwindows chain
+            // bug: a per-backend branch updated on one side only.
+            for doc_index in &variadic_docs {
+                let Some(extra) = self.documents.get(*doc_index) else { continue };
+                praat_inputs.push(extra.channels.clone());
+            }
             let sample_rate = doc.sample_rate;
             if let Some(error) = self.praat_submit(
                 &def, catalog_index, &values, praat_inputs, sample_rate, range, idx, purpose,
@@ -12696,7 +12707,7 @@ impl App {
             return Some(message);
         }
 
-        let planned = match crate::model::praat::plan_praat_job_with(def, values, &audiotools_dir, crate::praat::runner::python_venv_interpreter(&praat_state_dir()).as_deref()) {
+        let planned = match crate::model::praat::plan_praat_job_with(def, values, &audiotools_dir, crate::praat::runner::python_venv_interpreter(&praat_state_dir()).as_deref(), inputs.len()) {
             Ok(planned) => planned,
             Err(err) => return Some(err.to_string()),
         };
@@ -13767,6 +13778,13 @@ impl App {
                 .iter()
                 .any(|p| matches!(p.kind, crate::model::cdp::ParamKind::FolderPath))
             || declares_a_channel_count(&def.title)
+            // A process fed N buffers has no one buffer to be an edit *of*. Its result is a
+            // function of every input, and the selection it would splice into is merely the
+            // first of them — so splicing would overwrite one input with the mix of all of
+            // them, and do it at whatever length the mix came out. The same reasoning
+            // `stereo_mix` uses natively for Mix Multichannel to Stereo, and the same
+            // destination the glob-output processes already take.
+            || matches!(def.input, crate::model::cdp::IoKind::VariadicWav | crate::model::cdp::IoKind::GroupedWav)
             // And any process you drive **interactively**. What comes back is the arrangement
             // you built in its own window — a painted trajectory, a step sequence, an erased
             // spectrogram — whose length and shape you chose there and which bears no fixed
@@ -13828,7 +13846,7 @@ impl App {
         if let Err(message) = crate::praat::probe_praat(&self.config.praat_bin) {
             return fail(self, message);
         }
-        let planned = match crate::model::praat::plan_praat_job_with(def, values, &audiotools_dir, crate::praat::runner::python_venv_interpreter(&praat_state_dir()).as_deref()) {
+        let planned = match crate::model::praat::plan_praat_job_with(def, values, &audiotools_dir, crate::praat::runner::python_venv_interpreter(&praat_state_dir()).as_deref(), inputs.len()) {
             Ok(planned) => planned,
             Err(err) => return fail(self, err.to_string()),
         };

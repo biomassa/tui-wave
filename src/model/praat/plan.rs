@@ -261,7 +261,9 @@ pub fn plan_praat_job(
     values: &[ParamValue],
     audiotools_dir: &Path,
 ) -> Result<PraatPlannedJob, PraatPlanError> {
-    plan_praat_job_with(def, values, audiotools_dir, None)
+    // One Sound: the selection. A variadic process planned through this entry point has not
+    // been through a picker, which is right for every caller that has no UI behind it.
+    plan_praat_job_with(def, values, audiotools_dir, None, 1)
 }
 
 /// [`plan_praat_job`] with an explicit Python interpreter for the `py` group.
@@ -276,6 +278,7 @@ pub fn plan_praat_job_with(
     values: &[ParamValue],
     audiotools_dir: &Path,
     python_interpreter: Option<&Path>,
+    picked_inputs: usize,
 ) -> Result<PraatPlannedJob, PraatPlanError> {
     if def.backend() != Backend::Praat {
         return Err(PraatPlanError::NotAPraatProcess);
@@ -363,7 +366,7 @@ pub fn plan_praat_job_with(
             form_locks,
             directories,
         });
-    let input_count = praat_input_count(def);
+    let input_count = praat_input_count(def, picked_inputs);
     let save_picture = draws_picture(def, values);
     // A built-in ships with the app rather than living in the submodule, so there is nothing at
     // `script_path` to run — the runner writes the embedded text beside the driver instead. Same
@@ -462,14 +465,26 @@ pub fn is_picture_toggle_name(name: &str) -> bool {
     ["draw", "show", "visuali"].iter().any(|prefix| name.starts_with(prefix))
 }
 
-/// How many Sound objects this process expects selected, read off its declared `input`.
+/// How many Sound objects this process expects selected.
+///
+/// `picked` is how many buffers the run actually supplies — the selection plus whatever the
+/// variadic picker collected. It is ignored by every fixed-arity kind, which read their count
+/// off `input` alone, and is the answer for `VariadicWav`/`GroupedWav`, whose count is a
+/// property of the **run** rather than of the definition. That is the whole reason this takes an
+/// argument at all: a variadic process has no count until someone has picked, so a function of
+/// `def` alone could only ever have guessed, and guessed 1 — which is what silently handed
+/// `Stereo_Mixer` a single Sound and left seven of its eight gain pairs unable to do anything.
+///
+/// Clamped to at least 1 for a variadic kind: `selectObject:` with no arguments is a syntax
+/// error, and the driver omits the line entirely only for the genuinely zero-input kinds below.
 ///
 /// `IoKind::DualWav` is CDP's existing "two input files" kind and carries over unchanged: the
 /// meaning ("this process needs a second buffer, and the UI must offer a picker for it") is the
 /// same on both backends even though the mechanism differs entirely.
-pub fn praat_input_count(def: &ProcessDef) -> usize {
+pub fn praat_input_count(def: &ProcessDef, picked: usize) -> usize {
     match def.input {
         IoKind::DualWav => 2,
+        IoKind::VariadicWav | IoKind::GroupedWav => picked.max(1),
         // A process that creates its Sound rather than transforming one — Record, today. The
         // driver emits no `infile` field and no `selectObject:` for this, and the runner writes
         // no temp WAV, so such a process runs with no document open at all. That is the point of
@@ -686,6 +701,43 @@ mod tests {
             plan_praat_job(&def, &[ParamValue::Table(vec![])], Path::new("/p")),
             Err(PraatPlanError::UnsupportedParamKind { param: "Taps".into() })
         );
+    }
+
+    /// A variadic process's input count is a property of the **run**, not of the definition, so
+    /// the planner has to be told. This is the assertion that would have failed before the
+    /// count was plumbed through: `praat_input_count` answered 1 for `VariadicWav` however many
+    /// buffers the picker had collected, so the driver emitted a one-`infile` form and Praat
+    /// saw a single Sound selected — `Stereo_Mixer` then mixed one Sound and reported success.
+    #[test]
+    fn a_variadic_process_plans_one_input_file_per_picked_buffer() {
+        let mut def = praat_def(vec![]);
+        def.input = IoKind::VariadicWav;
+        for picked in [1usize, 2, 5, 8] {
+            let job = plan_praat_job_with(&def, &[], Path::new("/p"), None, picked).unwrap();
+            assert_eq!(job.input_names.len(), picked, "{picked} buffers -> {picked} temp WAVs");
+            let expected: Vec<String> =
+                (1..=picked).map(|i| format!("snd{i}")).collect();
+            assert!(
+                job.driver_source.contains(&format!("selectObject: {}\n", expected.join(", "))),
+                "all {picked} Sounds must be selected together:\n{}",
+                job.driver_source
+            );
+            for i in 1..=picked {
+                assert!(job.driver_source.contains(&format!("    infile Input_file_{i}\n")));
+            }
+        }
+    }
+
+    /// Zero would emit `selectObject:` with no arguments, which is a syntax error rather than a
+    /// no-op — the driver omits that line only for the genuinely zero-input kinds, and a
+    /// variadic process is not one of them.
+    #[test]
+    fn a_variadic_process_never_plans_zero_inputs() {
+        let mut def = praat_def(vec![]);
+        def.input = IoKind::VariadicWav;
+        let job = plan_praat_job_with(&def, &[], Path::new("/p"), None, 0).unwrap();
+        assert_eq!(job.input_names.len(), 1);
+        assert!(!job.driver_source.contains("selectObject: \n"));
     }
 
     /// `IoKind::DualWav` carries over from CDP unchanged: it means "needs a second buffer" on
@@ -1048,7 +1100,7 @@ mod interactive_tests {
             catalog.processes.iter().filter(|p| p.input == IoKind::Photo).collect();
         assert_eq!(photo.len(), 4, "the four image sonifiers, no more and no fewer");
         for def in &photo {
-            assert_eq!(praat_input_count(def), 0, "{}: reads a picture, not a buffer", def.key);
+            assert_eq!(praat_input_count(def, 1), 0, "{}: reads a picture, not a buffer", def.key);
             assert!(praat_needs_photo(def), "{}", def.key);
             let values: Vec<ParamValue> =
                 def.params.iter().map(|p| p.kind.default_value()).collect();
