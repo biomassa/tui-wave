@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-26 (2.11.4)
 
 - **Praat processes can take more than one buffer.** `IoKind::VariadicWav` existed and CDP used
   it; the Praat side declared no entry with it, and two things stopped one from working. The
