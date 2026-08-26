@@ -3017,6 +3017,40 @@ def selftest() -> int:
             check("combined case: default resolved", fields[0].default if fields else None, 80.0)
             check("combined case: default button", blocks[0]["default_button"], 2)
 
+    # --- vector-seeded defaults ------------------------------------------------------
+    # A pause block whose fields are a *bank* seeds them from a vector element rather than from
+    # N scalars (`Stereo_Mixer`'s eight Custom gains). `ASSIGNMENT_RE` matching only bare names
+    # reported every one as a non-numeric default and dropped the script.
+    source = (
+        "gainL#[5] = 1.0\n"
+        "gainR#[5] = 0.25\n"
+        "preset = 1\n"
+        "if preset = 1 and edit_custom_gains\n"
+        '    beginPause: "Custom gains"\n'
+        '        real: "Gain_5_L", gainL#[5]\n'
+        '        real: "Gain_5_R", gainR#[5]\n'
+        '    endPause: "Apply", 1\n'
+        "endif\n"
+    )
+    blocks = find_pause_blocks(source)
+    if len(blocks) != 1:
+        failures.append(f"vector-seeded case: expected one block, got {len(blocks)}")
+    else:
+        fields = blocks[0]["fields"]
+        if isinstance(fields, str):
+            failures.append(f"vector-seeded case: the block refused to parse -- {fields}")
+        else:
+            check("vector-seeded case: two fields", len(fields), 2)
+            check("vector-seeded: L resolved", fields[0].default if fields else None, 1.0)
+            check("vector-seeded: R resolved", fields[1].default if len(fields) > 1 else None, 0.25)
+
+    # Only a *literal* subscript resolves. A loop variable cannot be evaluated here, and the
+    # loud "non-numeric default" is the honest outcome -- the same bar `unwrap_string_cast` sets.
+    vars_seen = script_variables("gainL#[5] = 1.0\ngainL#[i] = 2.0\nplain = 3.0\n")
+    check("vector-seeded: literal subscript recorded", vars_seen.get("gainL#[5]"), "1.0")
+    check("vector-seeded: loop subscript ignored", vars_seen.get("gainL#[i]"), None)
+    check("vector-seeded: plain name still recorded", vars_seen.get("plain"), "3.0")
+
     for failure in failures:
         print(f"  FAIL  {failure}")
     print(f"selftest: {'FAILED' if failures else 'ok'} ({len(failures)} failure(s))")
