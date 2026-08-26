@@ -824,7 +824,7 @@ mod pause_hoist_tests {
         let gain = def.params.iter().position(|p| p.name == "Output_Gain").expect("Output_Gain");
         let mode = def.params.iter().position(|p| p.name == "Spatial_Mode").expect("Spatial_Mode");
         values[gain] = ParamValue::Number(0.375);
-        values[mode] = ParamValue::Choice(3); // "Binaural", the 4th option
+        values[mode] = ParamValue::Choice(3); // "Pseudo-Binaural (Delay/Filter)", the 4th option
 
         assert!(
             def.params[gain].praat_pause_block.is_some(),
@@ -840,7 +840,7 @@ mod pause_hoist_tests {
         // capital G, and the optionmenu sets both forms.
         assert!(script.contains("output_Gain = 0.375"), "the typed gain must reach the script");
         assert!(script.contains("spatial_Mode = 4"));
-        assert!(script.contains("spatial_Mode$ = \"Binaural\""));
+        assert!(script.contains("spatial_Mode$ = \"Pseudo-Binaural (Delay/Filter)\""));
 
         // A hoisted param must NOT also be passed as a runScript: argument — the script's form
         // has no slot for it, and Praat matches arguments by position and count.
