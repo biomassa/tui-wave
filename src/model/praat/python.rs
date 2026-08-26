@@ -537,7 +537,7 @@ python_command$ = \"py\"
             .find(|d| d.bin.starts_with("py/") && d.params.iter().all(|p| !matches!(p.kind, crate::model::cdp::ParamKind::CrystalVdat)))
             .expect("a py-group process");
         let values: Vec<ParamValue> = py.params.iter().map(|p| p.kind.default_value()).collect();
-        let job = crate::model::praat::plan_praat_job_with(py, &values, plugin, Some(venv))
+        let job = crate::model::praat::plan_praat_job_with(py, &values, plugin, Some(venv), 1)
             .expect("py-group process plans");
         let rewrite = job.python_rewrite.expect("py-group process needs the rewrite");
         assert_eq!(rewrite.interpreter, venv.to_string_lossy());
@@ -549,7 +549,7 @@ python_command$ = \"py\"
 
         // With no venv the script keeps its own discovery — someone with the packages on their
         // system interpreter should not be forced into a venv to keep working.
-        let none = crate::model::praat::plan_praat_job_with(py, &values, plugin, None).unwrap();
+        let none = crate::model::praat::plan_praat_job_with(py, &values, plugin, None, 1).unwrap();
         assert!(none.python_rewrite.is_none());
 
         let other = catalog
@@ -558,7 +558,7 @@ python_command$ = \"py\"
             .find(|d| d.bin.starts_with("Reverb/"))
             .expect("a non-py process");
         let values: Vec<ParamValue> = other.params.iter().map(|p| p.kind.default_value()).collect();
-        let job = crate::model::praat::plan_praat_job_with(other, &values, plugin, Some(venv))
+        let job = crate::model::praat::plan_praat_job_with(other, &values, plugin, Some(venv), 1)
             .expect("plans");
         assert!(job.python_rewrite.is_none(), "{} must not be rewritten", other.key);
     }

@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+- **Praat processes can take more than one buffer.** `IoKind::VariadicWav` existed and CDP used
+  it; the Praat side declared no entry with it, and two things stopped one from working. The
+  planner's `praat_input_count` read the count off the `ProcessDef`, but a variadic count is a
+  property of the **run** — there is no count until someone has picked — so it could only answer
+  1. And `App`'s Praat submit branch built its input list from the selection plus a `DualWav`
+  second buffer and never appended the variadic picks, though the CDP branch forty lines below it
+  did. That is the same shape as the Airwindows chain bug in 2.8.0: a per-backend branch updated
+  on one side only.
+
+  Everything downstream was already generic and needed no change — the driver emits one `infile`
+  per input, one `Read from file:` per input, and an N-way `selectObject:`, and the runner stages
+  one temp WAV per `input_names` entry.
+
+  **Two processes were quietly getting one Sound where their script loops over many.** Neither
+  errored, which is why this needed finding rather than reporting: `Stereo_Mixer` mixed a single
+  Sound (with *seven* of its eight gain pairs unable to affect anything) and
+  `Distribute_sounds_in_stereo_field` distributed one sound across the stereo field. They are
+  now `input = "variadic_wav"` via a `VARIADIC_INPUTS` table in the converter — an allowlist,
+  because the source shape that finds them is also what a script writes to *validate* a single
+  selection, so inferring it would sweep in scripts that mean one Sound. A sweep of all 473
+  entries against their own `numberOfSelected("Sound")` guards found these two and no others.
+
+  A variadic result opens a **new buffer**. A process fed N buffers has no one buffer to be an
+  edit of: its output is a function of every input, and the selection it would splice into is
+  merely the first of them — so splicing would overwrite one input with the mix of all of them,
+  at whatever length the mix came out.
+
+  Verified end to end against the real Praat binary, three Sounds through `Stereo_Mixer` with
+  per-Sound gain pairs: `Mixing 3 sounds`, each routed to its own position, and the two output
+  legs measuring differently (RMS L 0.589 / R 0.468) — which is what distinguishes three Sounds
+  routed from one Sound duplicated. The smoke sweep cannot establish this; it supplies one input.
+
+
 - **praatAudioTools bumped to `dee6eec` (2026-08-26), 42 commits on.** Upstream reworked two whole
   folders — all 16 `Distortion/` scripts and 14 of `Spatial & Surround/` — and the bulk of it is a
   truth-in-labelling pass on the form fields: "Conditional limiter to 0.95" became "Attenuate to
