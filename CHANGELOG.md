@@ -44,6 +44,11 @@
   reported as the non-numeric default it is, rather than guessed at. No other catalog entry
   changed as a result, which the old-versus-new catalog diff confirms.
 
+  The idiom is pinned by `--selftest`, alongside the two that broke the converter before it. All
+  three fail the same way — "non-numeric default for ..." on a field that plainly has one — and
+  that shared symptom is the reason the selftest is where a new idiom gets recorded rather than
+  the parser alone.
+
 - **Two new upstream scripts are excluded, both deliberately.** `Analysis/OM_Score_Transformer`
   (`gui_blocking`: a conditional pause plus a `chooseReadFile$` fallback, and it wants a MusicXML
   path) and `py/BasicPitchTranscriber` (`out_of_scope`: its helper needs `basic_pitch`, which
