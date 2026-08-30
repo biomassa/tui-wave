@@ -1124,6 +1124,11 @@ pub struct ProcessDef {
     /// fails. The app runs a copy with those assignments repointed; see `model::praat::python`.
     #[serde(default)]
     pub praat_python_rewrite: bool,
+    /// The `endPause` button this script's pause blocks should report as pressed, overriding each
+    /// block's own declared default. See [`crate::model::praat::plan::PauseRewrite::button_override`]
+    /// for why a declared default is normally right and what makes a wizard the exception.
+    #[serde(default)]
+    pub praat_pause_button: Option<u32>,
     /// True for a process whose binary can't correctly read the `WAVE_FORMAT_EXTENSIBLE`
     /// WAV header `hound` (this project's WAV library) writes for any file with
     /// `bits_per_sample > 16` — which is every input file this app ever sends CDP, since
@@ -1500,7 +1505,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false,
+            praat_python_rewrite: false, praat_pause_button: None,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1580,7 +1585,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false,
+            praat_python_rewrite: false, praat_pause_button: None,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1679,7 +1684,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false,
+            praat_python_rewrite: false, praat_pause_button: None,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1749,7 +1754,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false,
+            praat_python_rewrite: false, praat_pause_button: None,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1827,7 +1832,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false,
+            praat_python_rewrite: false, praat_pause_button: None,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1890,7 +1895,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false,
+            praat_python_rewrite: false, praat_pause_button: None,
             requires_simple_wav_input: false,
             sidecar_extension: None,
             needs_head_tail_marks: false,

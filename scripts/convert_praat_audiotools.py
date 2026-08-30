@@ -255,6 +255,17 @@ GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
     # two-pass "draw the pan curve by hand" workflow that opens a RealTier editor and asks the
     # user to come back. The other seven modes never touch it. Dropping that option leaves a
     # 1248-line script with seven working modes rather than nothing.
+    # The pause is reached only under `mod_source = 5`, "Second Sound (select 2 sounds)", where
+    # the script asks which of the two selected Sounds is the carrier. The app hands Praat one
+    # Sound (`input = "wav"`), so that mode could not work here even without the dialog -- and
+    # the option's own label says so. Dropping it leaves the four oscillator modes, which are
+    # what the process is for.
+    "Filter & Color/XMod.praat": {
+        "drop_options": {
+            "Mod_source": ["Second Sound (select 2 sounds)"],
+        },
+        "why": "the carrier-choice pause is reached only under the Second Sound mod source",
+    },
     "Spatial & Surround/Advanced_Stereo_Panner.praat": {
         "drop_options": {
             "Pan_mode": ["Trajectory: DRAW YOUR OWN (two passes - see Info)"],
@@ -279,6 +290,26 @@ GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
 #   variants  -- option label -> the `beginPause` title of the block belonging to it. An
 #                explicit map because the two do NOT match: the option reads "Bursts and Taps"
 #                and its block is titled "Settings: Bursts & Taps".
+# Scripts whose `endPause` blocks must report a button *other* than the one they declare as
+# default. Emitted as `praat_pause_button = N`.
+#
+# The rewrite honours a declared default, and that is right nearly everywhere: it is the author's
+# statement of the ordinary path, and `Polyphonic_Improviser` declares button 1 and `exitScript`s
+# on anything else. A **wizard** inverts it. `Universal Convolution Generator` (reworked upstream
+# 2026-08-30) has no `form` at all: an outer `while sessionActive = 1`, an inner
+# `while wizardDone = 0`, and nine settings pages each ending
+# `endPause: "< Back", "Apply", "OK", 2`. Its own comment states the semantics -- "Apply keeps the
+# session alive and returns directly to the same algorithm-specific page. OK applies once and
+# closes the session" -- so honouring the declared 2 sets `uiAction = 2` and the session loop never
+# ends. Every one of its nine catalog variants ran to the runner's timeout instead of failing,
+# which is the worst shape of all: no error, just a job that never returns.
+#
+# Per script and opt-in, so the general rule is untouched. A value here must be a button that
+# *finishes*; `the_pause_button_override_still_terminates` is the guard that it still does.
+PAUSE_BUTTON_OVERRIDES: dict[str, int] = {
+    "Reverb/Universal Convolution Generator.praat": 3,  # "OK" -- apply once, close the session
+}
+
 PAUSE_HOISTS: dict[str, dict] = {
     # One unconditional block, and the author's own changelog explains exactly why it exists:
     # "an attempt to split the long form into two `form...endform` blocks failed ('Unknown
@@ -303,6 +334,39 @@ PAUSE_HOISTS: dict[str, dict] = {
     "Spatial & Surround/Stereo_Mixer.praat": {
         "lock_on": ["Edit_custom_gains_5_to_8"],
         "why": "Custom gains for Sounds 5-8, moved off the form to keep it compact",
+    },
+    # Arrived in the 2026-08-30 bump, which moved most of each script's form onto a `beginPause`
+    # page behind a new toggle -- the same rework shape as the 2026-08 Generative batch below.
+    # `Undertone_Field` kept 10 of its 14 fields; `Stereo_Micro_Macro_Time_Collapser` kept 6 of
+    # 22, its other 16 spread across three pages, which is why it needs no `split_on`: the pages
+    # are sequential rather than alternative.
+    # Renamed from `Pitch Processor.praat` and restructured in the same bump: 13 form fields
+    # became 6, the rest moving onto three `beginPause` pages.
+    #
+    # Deliberately **no** `lock_on`, unlike its neighbours here. The guard is not a toggle that
+    # exists only to reveal a dialog -- it is `optionmenu Settings`, whose three options are "Run
+    # the preset as it is" / "Edit main settings" / "Edit main and advanced settings", and the
+    # blocks sit behind `settings >= 2` and `settings >= 3`. Hoisting without locking keeps that
+    # control meaning exactly what it says: leave it on option 1 and the chosen preset governs,
+    # move it up and the hoisted fields take effect, which is the script's own semantics rather
+    # than an approximation of them. Locking it would assert "always edit everything" and quietly
+    # retire a choice the author put on the form.
+    #
+    # The first two blocks are alternatives on `mode` (Detune / Canon) rather than a sequence, and
+    # need no `split_on`: the rewrite replaces each block where it stands, so block 0's
+    # assignments stay inside `if mode = 1` and block 1's inside its `else`. Each set therefore
+    # applies only in the mode it belongs to, and the dialog offering both is the same thing the
+    # two Praat pages would have done.
+    "Pitch/Pitch_Processor.praat": {
+        "why": "Detune / Canon settings pages plus an advanced page, behind the Settings optionmenu",
+    },
+    "Pitch/Undertone_Field.praat": {
+        "lock_on": ["Show_advanced_settings"],
+        "why": "advanced settings page (denominator list and its controls)",
+    },
+    "Time & Granular/Stereo_Micro_Macro_Time_Collapser.praat": {
+        "lock_on": ["Edit_advanced_settings"],
+        "why": "three-page wizard (Analysis, Transformation and assembly, Normalization)",
     },
     "Time & Granular/Polyphonic_Improviser.praat": {
         "why": "Voice Details page, reached on the Custom preset (option 1, the default)",
@@ -1170,6 +1234,19 @@ CHOICE_KEYWORDS = {"optionmenu", "choice"}
 # note rather than dropping it.
 IGNORED_KEYWORDS = {"comment"}
 
+# Control flow *inside* a `beginPause` body. Praat lets a pause page declare a field
+# conditionally -- `Pitch_Processor`'s advanced page shows three humanize controls only under
+# `if mode = 2` -- and hitting the `if` was an "unsupported form field 'if'" that dropped the
+# whole script.
+#
+# The branch is dropped and every field it guards is hoisted unconditionally, which is safe for
+# the reason the hoist itself is: a pause field's default is the variable the script assigned
+# *above* the block, so the variable exists either way and the branch only decided whether the
+# dialog offered to change it. A hoisted field the run does not read is simply unused -- and one
+# whose default is not so seeded still fails loudly as a non-numeric default rather than being
+# guessed at. A real `form` cannot contain these at all, so this only ever applies to a pause.
+PAUSE_CONTROL_KEYWORDS = {"if", "elsif", "else", "endif"}
+
 # Characters a script uses purely to decorate a section heading (`=== Preset ===`,
 # `--- Output ---`, `── Mode ──────`). Stripping them from both ends is also how a heading is
 # *recognised*: text that loses characters to this strip was decorated, and therefore a heading.
@@ -1634,7 +1711,11 @@ def split_label_and_value(rest: str, colon_form: bool) -> tuple[str | None, str]
     return name, value
 
 
-STRING_CAST_RE = re.compile(r"^string\$\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)$")
+# The space before `(` is Praat-legal and upstream writes both spellings -- `Pitch_Processor`
+# uses `string$ (stereo_detune_semitones)` throughout while most scripts write
+# `string$(x)`. Without it the spaced form reads as a non-numeric default and drops the
+# whole script, which is how it was found.
+STRING_CAST_RE = re.compile(r"^string\$\s*\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)$")
 
 
 def unwrap_string_cast(value: str) -> str:
@@ -1676,6 +1757,9 @@ def parse_fields(body: str, variables: dict[str, str] | None = None) -> list[Par
         # A trailing colon on the *keyword* marks the modern syntax, which quotes its operands.
         colon_form = head.endswith(":")
         keyword = head.rstrip(":").lower()
+
+        if keyword in PAUSE_CONTROL_KEYWORDS:
+            continue
 
         if keyword in IGNORED_KEYWORDS:
             note = classify_comment(rest, colon_form)
@@ -2422,6 +2506,7 @@ def check_stale_keys() -> list[str]:
         ("GENERATORS", GENERATORS),
         ("PHOTO_INPUTS", PHOTO_INPUTS),
         ("VARIADIC_INPUTS", VARIADIC_INPUTS),
+        ("PAUSE_BUTTON_OVERRIDES", PAUSE_BUTTON_OVERRIDES),
         # Stale here is the dangerous direction: a renamed exception stops matching, the
         # directory rule then claims the script reads nothing, and a process that needs a
         # Sound would run without one instead of failing.
@@ -2777,6 +2862,9 @@ def render_catalog(processes: list[Process], sha: str) -> str:
         out.append(f'input = "{input_kind}"')
         # `input_arity` defaults a variadic floor to 1, so this is emitted only where the script
         # demands more -- the value is the script's own guard, not a house style.
+        button = PAUSE_BUTTON_OVERRIDES.get(proc.bin)
+        if button is not None:
+            out.append(f"praat_pause_button = {button}")
         if input_kind == "variadic_wav":
             floor = VARIADIC_INPUTS.get(proc.bin, {}).get("min", 1)
             if floor > 1:
@@ -3028,6 +3116,9 @@ def selftest() -> int:
         "minimum_frequency_Hz",
     )
     check("string$ unwrap -- whitespace tolerated", unwrap_string_cast("string$( x )"), "x")
+    # A space before the paren: Praat-legal, and the spelling `Pitch_Processor` uses.
+    check("string$ unwrap -- space before paren", unwrap_string_cast("string$ (x)"), "x")
+    check("string$ unwrap -- space both sides", unwrap_string_cast("string$ ( x )"), "x")
     check("string$ unwrap -- plain name untouched", unwrap_string_cast("voices"), "voices")
     check("string$ unwrap -- literal untouched", unwrap_string_cast("60"), "60")
     # Deliberately NOT unwrapped: this parser cannot evaluate these, and guessing is worse than
@@ -3091,6 +3182,36 @@ def selftest() -> int:
     check("vector-seeded: literal subscript recorded", vars_seen.get("gainL#[5]"), "1.0")
     check("vector-seeded: loop subscript ignored", vars_seen.get("gainL#[i]"), None)
     check("vector-seeded: plain name still recorded", vars_seen.get("plain"), "3.0")
+
+    # --- conditionally-declared pause fields ------------------------------------------
+    # Praat lets a pause page declare a field inside an `if`. Reaching one was "unsupported form
+    # field 'if'", which dropped the whole script (`Pitch_Processor`'s advanced page).
+    source = (
+        "harmonics = 6\n"
+        "humanize_cents = 3.5\n"
+        "mode = 2\n"
+        'beginPause: "Advanced"\n'
+        '    natural: "Harmonics", string$ (harmonics)\n'
+        "    if mode = 2\n"
+        '        real: "Humanize_cents", string$ (humanize_cents)\n'
+        "    endif\n"
+        'endPause: "Continue", 1\n'
+    )
+    blocks = find_pause_blocks(source)
+    if len(blocks) != 1:
+        failures.append(f"conditional-field case: expected one block, got {len(blocks)}")
+    else:
+        fields = blocks[0]["fields"]
+        if isinstance(fields, str):
+            failures.append(f"conditional-field case: refused to parse -- {fields}")
+        else:
+            check("conditional-field: both fields hoisted", len(fields), 2)
+            check("conditional-field: plain one", fields[0].default if fields else None, 6.0)
+            check(
+                "conditional-field: guarded one",
+                fields[1].default if len(fields) > 1 else None,
+                3.5,
+            )
 
     for failure in failures:
         print(f"  FAIL  {failure}")

@@ -32429,7 +32429,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false,
+            praat_python_rewrite: false, praat_pause_button: None,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             param_notes: Vec::new(),
             params: vec![ParamDef {
@@ -36028,7 +36028,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false,
+            praat_python_rewrite: false, praat_pause_button: None,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             param_notes: Vec::new(),
             params: vec![ParamDef {
@@ -36120,7 +36120,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false,
+            praat_python_rewrite: false, praat_pause_button: None,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             param_notes: Vec::new(),
             params: vec![ParamDef {
@@ -44846,7 +44846,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false,
+            praat_python_rewrite: false, praat_pause_button: None,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             param_notes: Vec::new(),
             params: vec![ParamDef {

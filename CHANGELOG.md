@@ -1,5 +1,100 @@
 # Changelog
 
+## Unreleased
+
+- **praatAudioTools bumped to `2c9c52f` (2026-08-30), 36 commits on**, and **airwin2rack to
+  `a0e2c2b`**. 59 Praat scripts changed, concentrated in `Filter & Color` (16),
+  `Generative & Synthesis` (15) and `Dynamics & Envelope` (11), plus one rename
+  (`Pitch Processor.praat` → `Pitch_Processor.praat`) and one new script.
+
+  Eleven scripts changed their **field count**, several of them by large margins because the
+  rework moved most of a form onto `beginPause` pages — `Stereo_Micro_Macro_Time_Collapser` went
+  from 22 fields to 6, `Undertone_Field` from 14 to 10, `Pitch_Processor` from 13 to 6. Ten
+  entries changed parameter *names*; `Poisson_Rhythm_Synthesis` was rewritten wholesale, losing
+  10 parameters and gaining 14, so any saved preset for it is dead rather than stale.
+
+- **Four processes the bump would have dropped are kept**, each for a different reason, which is
+  the point worth recording: "gained a pause block" is one symptom with several causes.
+
+  `Undertone_Field` and `Stereo_Micro_Macro_Time_Collapser` are the ordinary case — a `boolean`
+  guarding a settings page — and take `PAUSE_HOISTS` entries with `lock_on`, recovering 8 and 16
+  parameters respectively.
+
+  `XMod`'s pause is reached only under `mod_source = 5`, "Second Sound (select 2 sounds)", where
+  the script asks which of two Sounds is the carrier. The app hands Praat one Sound, so that mode
+  could not work here even without the dialog — the option's own label says so. It takes a
+  `drop_options` override, leaving the four oscillator modes the process is actually for.
+
+  `Pitch_Processor` deliberately gets **no** `lock_on`. Its guard is not a toggle that exists to
+  reveal a dialog; it is `optionmenu Settings`, reading "Run the preset as it is" / "Edit main
+  settings" / "Edit main and advanced settings". Hoisting without locking keeps that control
+  meaning what it says — leave it on option 1 and the preset governs, move it up and the hoisted
+  fields take effect. Locking it would have asserted "always edit everything" and quietly retired
+  a choice the author put on the form. Its first two pages are alternatives on `mode` rather than
+  a sequence and need no `split_on`: the rewrite replaces each block where it stands, so each
+  set of assignments stays inside the branch it belongs to.
+
+- **Two more parser idioms**, both found the way the previous three were — as a "non-numeric
+  default" or an "unsupported form field" that dropped an entire script.
+
+  `string$ (x)` with a **space before the paren** is Praat-legal and `Pitch_Processor` uses it
+  throughout, where most scripts write `string$(x)`. And a pause page may declare a field
+  **conditionally** — that script's advanced page shows three humanize controls only under
+  `if mode = 2` — which reached the parser as `unsupported form field 'if'`. The branch is now
+  dropped and every field it guards is hoisted unconditionally, which is safe for the reason the
+  hoist itself is: a pause field's default is the variable the script assigned above the block,
+  so the variable exists either way and the branch only decided whether the dialog offered to
+  change it. One whose default is *not* so seeded still fails loudly rather than being guessed at.
+  Both are pinned by `--selftest`.
+
+- **`Universal Convolution Generator` survives being turned into a wizard.** Upstream rewrote it
+  with **no `form` at all**: an outer `while sessionActive = 1`, an inner `while wizardDone = 0`,
+  and nine settings pages each ending `endPause: "< Back", "Apply", "OK", 2`. The rewrite honours
+  a block's declared default button — rightly, since that is the author's statement of the
+  ordinary path, and `Polyphonic_Improviser` declares button 1 and `exitScript`s on anything else
+  — but here the script's own comment defines 2 as *"Apply keeps the session alive and returns
+  directly to the same algorithm-specific page"*. So all nine catalog variants ran to the runner's
+  60-second timeout: no error, no output, just a job that never returned, which is the worst
+  failure shape available.
+
+  `praat_pause_button` is the fix — a per-script override naming the `endPause` button to report,
+  here 3 ("OK applies once and closes the session"). Opt-in and per script, so the general rule is
+  untouched: a declared default stays right until a specific script is shown to loop on it.
+
+  The guard is `the_nine_convolution_generators_render_nine_different_impulse_responses`, and it
+  deliberately does not test what the smoke sweep tests. The sweep can only say each variant
+  *finishes*; a wizard reached through hoisted pause blocks could just as easily finish while every
+  page selected the same algorithm, and the sweep would report nine passes for nine identical
+  renders. So the test renders all nine and asserts they are pairwise **distinct** and non-silent —
+  currently 132300 samples each with peaks from 0.218 to 0.480.
+
+- **Upstream broke three Vector Chains, and the report we already had is what caught it.**
+  `chain_2`, `Composition_2` and `Live_2` had their third stage rewritten to a "compact form" of
+  `8-channel_speed_deviations` — eight channel-speed reals collapsed into one space-separated
+  sentence, the two pitch bounds into another — while that script ships **unchanged**, still
+  declaring its original 22 fields. Each chain now passes 14 arguments to a 22-field form and
+  dies with "Found 14 arguments but expected more". `docs/vector-chain-stages.txt` flags all
+  three, which is exactly the defect class it was built for; the two standing `chain_5`/`Live_5`
+  mismatches remain, and the two others in the previous report are fixed.
+
+  Nothing in this app changed to accommodate it — the chains are upstream's files and the report
+  states the problem. The one consequence here is that
+  `a_chained_script_finds_its_siblings_through_the_redirected_prefs_dir` ran `chain_2`, so it now
+  runs `chain_3`: three stages, all sibling `../` paths, clean arity. Not `chain_1`, whose first
+  stage segments its input into words and refuses fewer than two — a property of the test's tone
+  fixture rather than of that chain. Anyone holding a saved chain preset for the three broken
+  chains should expect it to fail until upstream reconciles them.
+
+- **Airwindows gains one effect, `PurestWarm3`** (Subtlety) — 502 entries to 503. Worth recording
+  why a bump that adds no plugin adds an entry: `airwin2rack`'s own
+  `AirwinRegistry::registerAirwindow` **silently drops any plugin whose description is empty**,
+  which is why 19 of its 521 registrations have never reached this catalog (the `ConsoleX` and
+  `ConsoleH` families, `BezEQ4`, `DeRez5`, `Weave`, `Spiral3` and others). `PurestWarm3` was
+  documented upstream in this commit and moved from `Unclassified` to `Subtlety`, so it now
+  registers. Nothing else changed: no plugin was added or removed, and no catalogued plugin
+  changed category.
+
+
 ## 2026-08-26 (2.11.4)
 
 - **Praat processes can take more than one buffer.** `IoKind::VariadicWav` existed and CDP used

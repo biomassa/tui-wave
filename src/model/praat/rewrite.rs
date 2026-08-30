@@ -565,12 +565,17 @@ fn numeric_assignment(line: &str) -> Option<(String, String)> {
     Some((name.to_string(), value.to_string()))
 }
 
+/// `button_override` reports that `endPause` button as pressed in place of every block's own
+/// declared default; `None` honours each declaration. See `PauseRewrite::button_override` for when
+/// overriding is the right thing and why it is per script rather than a rule.
 pub fn rewrite_pause_blocks(
     source: &str,
     blocks: &BTreeMap<usize, Vec<Assignment>>,
     form_locks: &[(String, f64)],
+    button_override: Option<u32>,
 ) -> Result<String, RewriteError> {
-    let lines: Vec<&str> = source.lines().collect();
+    let lines: Vec<&str> = source.lines()
+            .collect();
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut block_index = 0usize;
     let mut i = 0usize;
@@ -632,7 +637,8 @@ pub fn rewrite_pause_blocks(
             // assign when the script actually captured it, so a bare `endPause:` introduces no
             // stray variable.
             if let Some(variable) = end_pause_target(lines[end]) {
-                out.push(format!("{indent}{variable} = {}", default_button(lines[end])));
+                let button = button_override.unwrap_or_else(|| default_button(lines[end]));
+                out.push(format!("{indent}{variable} = {button}"));
             }
 
             block_index += 1;
@@ -1075,7 +1081,8 @@ endif
             0,
             vec![Assignment::Number { label: "HF loss per generation".into(), value: 0.42 }],
         );
-        let out = rewrite_pause_blocks(broken, &blocks, &[]).expect("rewrites");
+        let out = rewrite_pause_blocks(broken, &blocks, &[], None)
+            .expect("rewrites");
         assert!(
             out.contains("hf_loss_per_generation = 0.42"),
             "the value must reach the variable the script actually reads:\n{out}"
@@ -1088,14 +1095,16 @@ endif
         // Upstream fixes the reads to match the label: the guard sees the derived variable is
         // read after all and stands aside, so the script runs exactly as written.
         let fixed = broken.replace("if hf_loss_per_generation > 0", "if hF_loss_per_generation > 0");
-        let out = rewrite_pause_blocks(&fixed, &blocks, &[]).expect("rewrites");
+        let out = rewrite_pause_blocks(&fixed, &blocks, &[], None)
+            .expect("rewrites");
         assert!(out.contains("hF_loss_per_generation = 0.42"), "{out}");
 
         // And a script that never mentions the corrected variable is never guessed at.
         let unrelated = "beginPause: \"Advanced\"\n\
                          real: \"HF loss per generation\", 0.1\n\
                          clicked = endPause: \"OK\", 1\n";
-        let out = rewrite_pause_blocks(unrelated, &blocks, &[]).expect("rewrites");
+        let out = rewrite_pause_blocks(unrelated, &blocks, &[], None)
+            .expect("rewrites");
         assert!(out.contains("hF_loss_per_generation = 0.42"), "{out}");
     }
 
@@ -1120,7 +1129,8 @@ endif
                 Assignment::Number { label: "Debug".into(), value: 0.0 },
             ],
         );
-        let out = rewrite_pause_blocks(&source, &blocks, &[]).expect("rewrites");
+        let out = rewrite_pause_blocks(&source, &blocks, &[], None)
+            .expect("rewrites");
 
         assert!(!has_live_pause(&out), "a surviving beginPause would segfault Praat");
         // Every variable the script goes on to read must now be set.
@@ -1158,7 +1168,8 @@ endif
                 .map(|(l, v)| Assignment::Number { label: (*l).into(), value: *v })
                 .collect(),
         );
-        let out = rewrite_pause_blocks(&source, &blocks, &[]).expect("rewrites");
+        let out = rewrite_pause_blocks(&source, &blocks, &[], None)
+            .expect("rewrites");
         assert!(!has_live_pause(&out));
         for (label, value) in defaults {
             let line = format!("{} = {}", variable_name(label), value);
@@ -1178,7 +1189,8 @@ endif
         let mut blocks = BTreeMap::new();
         blocks.insert(0, vec![Assignment::Choice { label: "Algorithm".into(), index: 1, text: "Accelerando".into() }]);
         blocks.insert(1, vec![Assignment::Number { label: "First_hit_time".into(), value: 0.1 }]);
-        let out = rewrite_pause_blocks(&source, &blocks, &[]).expect("rewrites");
+        let out = rewrite_pause_blocks(&source, &blocks, &[], None)
+            .expect("rewrites");
         assert!(!has_live_pause(&out), "all ten dialogs must go, not just the two used");
         assert!(out.contains("algorithm$ = \"Accelerando\""));
         assert!(out.contains("first_hit_time = 0.1"));
@@ -1192,7 +1204,7 @@ endif
     fn referring_to_a_block_that_does_not_exist_is_an_error() {
         let mut blocks = BTreeMap::new();
         blocks.insert(3, vec![Assignment::Number { label: "X".into(), value: 1.0 }]);
-        let err = rewrite_pause_blocks("beginPause: \"a\"\nendPause: \"ok\", 1\n", &blocks, &[])
+        let err = rewrite_pause_blocks("beginPause: \"a\"\nendPause: \"ok\", 1\n", &blocks, &[], None)
             .expect_err("must refuse");
         assert_eq!(err, RewriteError::MissingBlock { index: 3, found: 1 });
     }
@@ -1352,7 +1364,7 @@ mod form_lock_tests {
         let source = "form Test\n    real Amount 1.0\n    boolean Show_advanced_settings 0\nendform\n\
                       if show_advanced_settings\n    x = 1\nendif\n";
         let out = rewrite_pause_blocks(&source.replace('\\', ""), &BTreeMap::new(),
-                                       &[("Show_advanced_settings".into(), 1.0)])
+                                       &[("Show_advanced_settings".into(), 1.0)], None)
             .expect("rewrites");
 
         assert!(!out.contains("boolean Show_advanced_settings"), "the form field must be gone:\n{out}");
@@ -1375,7 +1387,7 @@ mod form_lock_tests {
     fn a_column_aligned_form_field_is_still_found() {
         let source = "form Test\n    boolean   Edit_details           0\n    \
                       boolean   Draw_visualization     1\nendform\nif edit_details\n    x = 1\nendif\n";
-        let out = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Edit_details".into(), 1.0)])
+        let out = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Edit_details".into(), 1.0)], None)
             .expect("rewrites");
 
         assert!(!out.contains("boolean   Edit_details"), "the aligned field must be gone:\n{out}");
@@ -1389,7 +1401,7 @@ mod form_lock_tests {
     #[test]
     fn a_longer_label_sharing_the_prefix_is_not_matched() {
         let source = "form Test\n    boolean Edit_details_extra 0\nendform\n";
-        let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Edit_details".into(), 1.0)])
+        let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Edit_details".into(), 1.0)], None)
             .expect_err("must not match the longer label");
         assert!(matches!(err, RewriteError::MissingFormLock { .. }));
     }
@@ -1401,7 +1413,7 @@ mod form_lock_tests {
     #[test]
     fn a_lock_with_no_matching_field_is_an_error() {
         let source = "form Test\n    real Amount 1.0\nendform\n";
-        let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Gone_toggle".into(), 1.0)])
+        let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Gone_toggle".into(), 1.0)], None)
             .expect_err("a missing lock target must fail loudly");
         match err {
             RewriteError::MissingFormLock { label } => assert_eq!(label, "Gone_toggle"),
@@ -1413,7 +1425,8 @@ mod form_lock_tests {
     #[test]
     fn without_locks_the_form_is_left_alone() {
         let source = "form Test\n    boolean Show_advanced_settings 0\nendform\n";
-        let out = rewrite_pause_blocks(source, &BTreeMap::new(), &[]).expect("rewrites");
+        let out = rewrite_pause_blocks(source, &BTreeMap::new(), &[], None)
+            .expect("rewrites");
         assert_eq!(out, source);
     }
 }
