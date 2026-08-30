@@ -1,3 +1,4 @@
+pub mod auto_trim;
 pub mod cdp;
 pub mod cut;
 pub mod delete;

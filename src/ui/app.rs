@@ -14,6 +14,7 @@ use ratatui::Frame;
 
 use crate::audio::engine::AudioEngine;
 use crate::config::Config;
+use crate::commands::auto_trim::auto_trim_command;
 use crate::commands::cut::cut_command;
 use crate::commands::delete::delete_command;
 use crate::commands::fade::{fade_command, technical_fades_command, FadeCurve};
@@ -112,6 +113,92 @@ mod er_focus {
     /// `"   [X] "` (7 chars) + the padded label + one space. Clicks left of this toggle
     /// the checkbox; clicks on/after it focus the value field for editing.
     pub const VALUE_COL: u16 = (3 + 3 + 1 + ROW_LABEL_WIDTH + 1) as u16;
+}
+
+/// Resolved Auto-Trim settings — see `App::apply_auto_trim`.
+struct AutoTrimSettings {
+    method: crate::model::silence::ThresholdMethod,
+    threshold_db: f32,
+    min_silence_secs: f64,
+    pad_lead_ms: f64,
+    pad_trail_ms: f64,
+    fade_ms: f64,
+    snap: bool,
+    remove_gaps: bool,
+    levels: Vec<f32>,
+    range: (usize, usize),
+}
+
+/// What Auto-Trim would do — see `App::auto_trim_outcome`.
+struct AutoTrimOutcome {
+    keep: (usize, usize),
+    /// Absolute ranges to excise from inside `keep` — the internal gaps, already inset by the
+    /// padding so each surviving phrase keeps its own breath. Empty when gap removal is off.
+    removed: Vec<(usize, usize)>,
+    trimmed_lead: usize,
+    trimmed_trail: usize,
+    /// Total samples the internal gaps take out, for the summary.
+    removed_samples: usize,
+}
+
+/// The threshold field's value, falling back to the measured one when it does not parse.
+///
+/// Falling back to the *measurement* rather than to a constant, and deliberately not to
+/// silence: an unparseable threshold should behave as though the user had not typed over the
+/// pre-filled number, which is the only reading that cannot surprise. `parse_gain_db`'s
+/// opposite choice is right for a gain, where the safe default is quiet; here the safe default
+/// is the one the analysis already proposed.
+fn parse_threshold_db(
+    text: &str,
+    levels: &[f32],
+    method: crate::model::silence::ThresholdMethod,
+) -> f32 {
+    text.trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|v| v.is_finite())
+        .or_else(|| crate::model::silence::auto_threshold_db(levels, method))
+        .unwrap_or(-60.0)
+}
+
+/// A duration field, falling back to its own default. Negative is not a shorter fade, it is a
+/// nonsense one, so it reads as the default rather than as zero.
+fn parse_non_negative(text: &str, fallback: f64) -> f64 {
+    text.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(fallback)
+}
+
+/// Auto-Trim Silence's focus stops. Laid out the way the decision is made: how the threshold
+/// was derived, then the number it produced, then what counts as silence, then what to keep
+/// around it, then the two switches.
+///
+/// Structured like [`er_focus`] rather than as a flat list of text fields because this dialog
+/// has the same three control kinds — a cycler, plain numbers, and checkboxes — and a user who
+/// has driven Export Regions already knows how to drive this.
+mod at_focus {
+    pub const METHOD: usize = 0;
+    pub const THRESHOLD: usize = 1;
+    pub const MIN_SILENCE: usize = 2;
+    pub const PAD_LEAD: usize = 3;
+    pub const PAD_TRAIL: usize = 4;
+    pub const FADE_MS: usize = 5;
+    pub const SNAP_CB: usize = 6;
+    pub const REMOVE_GAPS_CB: usize = 7;
+    pub const COUNT: usize = 8;
+
+    /// Rows before this one hold a single control, so focus index == row index. From here on a
+    /// row is a checkbox, and still one control — the two switches take no value field, unlike
+    /// Export Regions' checkbox+value pairs.
+    pub const FIRST_CHECKBOX_ROW: usize = SNAP_CB;
+
+    /// Width every label is padded to, so all six values start in the same column.
+    pub const LABEL_WIDTH: usize = 20;
+
+    /// Column where a row's value starts: one leading space, the padded label, one space.
+    pub const VALUE_COL: u16 = (1 + LABEL_WIDTH + 1) as u16;
 }
 
 /// Save As's focus stops: filename, format, dither, then the destination list
@@ -1331,6 +1418,37 @@ enum Dialog {
     /// the text-field dialogs — there is one decision and it is a pick from two, not something
     /// typed. Tab cycles the estimator, Enter applies.
     RemoveDc { estimator: DcEstimator },
+    /// Auto-Trim Silence: trims the leading and trailing silence off the operation range and
+    /// marks the quiet stretches inside it. Analysis in `model::silence`, edit in
+    /// `commands::auto_trim`.
+    ///
+    /// `threshold` is **pre-filled from the material** rather than defaulted to a constant, and
+    /// re-derived whenever `method` changes — the same "show the measurement, let it be typed
+    /// over" shape `App::dc_offset_estimate` uses to pre-fill the CDP Remove DC Offset process.
+    /// A constant default would be the one number guaranteed to be wrong for the take in front
+    /// of you, and there is no honest constant to pick: -35 dBFS is right for a hot mix and
+    /// silly for a quiet field recording.
+    ///
+    /// `levels` is the frame analysis, cached at open. It costs one pass over the range and the
+    /// dialog re-derives the threshold on every method change, which must not re-scan the audio
+    /// — a 30-minute take would stall on each ←/→. `range` is what was analysed, so what applies
+    /// is what was measured even if the selection somehow moved underneath.
+    AutoTrim {
+        method: crate::model::silence::ThresholdMethod,
+        threshold: TextInput,
+        min_silence: TextInput,
+        pad_lead: TextInput,
+        pad_trail: TextInput,
+        fade_ms: TextInput,
+        snap: bool,
+        remove_gaps: bool,
+        focused: usize,
+        levels: Vec<f32>,
+        range: (usize, usize),
+        /// `"2.4s of 61.0s is silence · 3 gaps"`, recomputed as the fields change so the dialog
+        /// says what it is about to do before it does it. Empty when there is nothing to trim.
+        summary: String,
+    },
     /// High-Pass Filter: one numeric field, the cutoff in Hz. Shaped like
     /// `RemoveEmptyChannels` rather than like `Gain` because there is exactly one decision to
     /// make — the filter order is fixed (see `dsp::high_pass_zero_phase`), so an order field
@@ -5716,6 +5834,18 @@ impl App {
             Dialog::Export { name_input, focused, .. } => {
                 (*focused == ex_focus::NAME).then_some(name_input)
             }
+            // Five numeric fields and two checkboxes: typing reaches whichever number has
+            // focus, and reaches nothing at all while the method cycler or a checkbox does.
+            Dialog::AutoTrim {
+                threshold, min_silence, pad_lead, pad_trail, fade_ms, focused, ..
+            } => match *focused {
+                at_focus::THRESHOLD => Some(threshold),
+                at_focus::MIN_SILENCE => Some(min_silence),
+                at_focus::PAD_LEAD => Some(pad_lead),
+                at_focus::PAD_TRAIL => Some(pad_trail),
+                at_focus::FADE_MS => Some(fade_ms),
+                _ => None,
+            },
             Dialog::RemoveEmptyChannels { input }
             | Dialog::HighPass { input }
             | Dialog::Normalize { input }
@@ -6076,8 +6206,35 @@ impl App {
             }
         }
 
+        // Auto-Trim owns Up/Down and Space, and ←/→ **only on its cycler row** — on a number
+        // field they stay caret movement, which is the convention every native dialog here
+        // follows (the CDP params form is the one that repurposes them, for sliders). Enter,
+        // Esc, Tab and typing fall through to the generic arms unchanged.
+        if let Some(Dialog::AutoTrim { .. }) = &self.dialog {
+            if self.handle_auto_trim_key(key) {
+                return;
+            }
+        }
+
         match key.code {
             KeyCode::Enter => match self.dialog.take() {
+                Some(Dialog::AutoTrim {
+                    method, threshold, min_silence, pad_lead, pad_trail, fade_ms, snap,
+                    remove_gaps, levels, range, ..
+                }) => {
+                    self.apply_auto_trim(AutoTrimSettings {
+                        method,
+                        threshold_db: parse_threshold_db(threshold.value(), &levels, method),
+                        min_silence_secs: parse_non_negative(min_silence.value(), 0.1),
+                        pad_lead_ms: parse_non_negative(pad_lead.value(), 30.0),
+                        pad_trail_ms: parse_non_negative(pad_trail.value(), 100.0),
+                        fade_ms: parse_non_negative(fade_ms.value(), 5.0),
+                        snap,
+                        remove_gaps,
+                        levels,
+                        range,
+                    });
+                }
                 Some(Dialog::Normalize { input }) => {
                     let db = input.value().parse::<f32>().unwrap_or(-1.0).min(0.0);
                     self.apply_normalize(db);
@@ -6981,6 +7138,7 @@ impl App {
                 *estimator = if forward { estimator.next() } else { estimator.prev() };
             }
             Some(Dialog::ExportRegions { focused, .. }) => *focused = step(*focused, er_focus::COUNT),
+            Some(Dialog::AutoTrim { focused, .. }) => *focused = step(*focused, at_focus::COUNT),
             Some(Dialog::ExportChannels { focused, .. }) => *focused = step(*focused, ec_focus::COUNT),
             Some(Dialog::MixToStereo { focused, .. }) => *focused = step(*focused, ms_focus::COUNT),
             Some(Dialog::Export { focused, .. }) => *focused = step(*focused, ex_focus::COUNT),
@@ -7451,6 +7609,31 @@ impl App {
                     }
                 } else {
                     *focused = ec_focus::SUBFOLDER;
+                }
+            }
+            // Every row is one control, so a click focuses it — and on the two switches that
+            // click also toggles, because a checkbox a mouse user has to click and then press
+            // Space on is a checkbox that does not work. The cycler's triangles step it, the
+            // same hit-test `EXPORT_REGIONS_ARROW_COLUMN` performs on the Format row; a click
+            // elsewhere on that row only takes focus, so landing on the label cannot silently
+            // change the derivation.
+            Some(Dialog::AutoTrim { method, snap, remove_gaps, focused, .. }) => {
+                if row >= at_focus::COUNT {
+                    return;
+                }
+                *focused = row;
+                match row {
+                    at_focus::METHOD => {
+                        if let Some(forward) =
+                            choice_click_step(AUTO_TRIM_ARROW_COLUMN, x_in_row)
+                        {
+                            *method = if forward { method.next() } else { method.prev() };
+                            self.reprefill_auto_trim_threshold();
+                        }
+                    }
+                    at_focus::SNAP_CB => *snap = !*snap,
+                    at_focus::REMOVE_GAPS_CB => *remove_gaps = !*remove_gaps,
+                    _ => {}
                 }
             }
             Some(Dialog::ExportRegions {
@@ -15478,6 +15661,251 @@ impl App {
         self.after_sample_mutation(idx);
     }
 
+    /// Open Auto-Trim Silence, measuring the material first so the threshold field opens on a
+    /// number that means something for *this* take.
+    ///
+    /// The frame analysis is done once here and carried in the dialog. Re-deriving the
+    /// threshold on every ←/→ of the method cycler must not re-scan the audio — on a
+    /// half-hour take that would stall the keypress — and the dialog only ever needs the
+    /// per-frame levels, which are ~1/900th of the samples at a 20ms frame.
+    fn open_auto_trim_dialog(&mut self) {
+        let idx = self.active_document;
+        let Some((start, end)) = self.operation_range(idx, false) else { return };
+        let Some(doc) = self.documents.get(idx) else { return };
+        if doc.channels.is_empty() {
+            return;
+        }
+        let rate = doc.sample_rate;
+        let levels = crate::model::silence::frame_levels(&doc.channels, (start, end), rate);
+        let method = crate::model::silence::ThresholdMethod::default();
+        let Some(threshold_db) = crate::model::silence::auto_threshold_db(&levels, method) else {
+            // No threshold exists for digital silence throughout — there is no "sounding" to
+            // separate from "silent". Said plainly rather than opening a dialog whose every
+            // field would be meaningless.
+            self.dialog = Some(Dialog::Info {
+                message: "This range is entirely silent — there is nothing to trim to."
+                    .to_string(),
+            });
+            return;
+        };
+        let mut dialog = Dialog::AutoTrim {
+            method,
+            threshold: TextInput::fresh(&format!("{threshold_db:.1}")),
+            min_silence: TextInput::fresh("0.10"),
+            pad_lead: TextInput::fresh("30"),
+            pad_trail: TextInput::fresh("100"),
+            fade_ms: TextInput::fresh("5"),
+            snap: true,
+            remove_gaps: true,
+            focused: at_focus::THRESHOLD,
+            levels,
+            range: (start, end),
+            summary: String::new(),
+        };
+        self.refresh_auto_trim_summary(&mut dialog);
+        self.dialog = Some(dialog);
+    }
+
+    /// Auto-Trim's own keys. Returns whether the key was consumed.
+    ///
+    /// Up/Down and Tab/Shift+Tab both move between fields, wrapping — Tab because every other
+    /// dialog here accepts it, Up/Down because with eight stacked rows that is what a reader
+    /// reaches for. ←/→ cycle only on the method row; everywhere else they are the caret, so a
+    /// number field behaves exactly like the ones in Gain and Export Regions.
+    fn handle_auto_trim_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let Some(Dialog::AutoTrim { method, snap, remove_gaps, focused, .. }) = self.dialog.as_mut()
+        else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Up => {
+                *focused = (*focused + at_focus::COUNT - 1) % at_focus::COUNT;
+                true
+            }
+            KeyCode::Down => {
+                *focused = (*focused + 1) % at_focus::COUNT;
+                true
+            }
+            KeyCode::Left | KeyCode::Right if *focused == at_focus::METHOD => {
+                *method = if key.code == KeyCode::Right { method.next() } else { method.prev() };
+                // The threshold field is re-derived from the *same* levels, so switching method
+                // shows what that method would have proposed — the field is a pre-fill, not a
+                // value the user has to keep. A number they typed themselves is overwritten,
+                // which is the point of asking for a different derivation.
+                self.reprefill_auto_trim_threshold();
+                true
+            }
+            KeyCode::Char(' ') => match *focused {
+                at_focus::SNAP_CB => {
+                    *snap = !*snap;
+                    true
+                }
+                at_focus::REMOVE_GAPS_CB => {
+                    *remove_gaps = !*remove_gaps;
+                    true
+                }
+                // A space in a number field is not a character it accepts, and must not fall
+                // through to the browser-search arms below either.
+                _ => true,
+            },
+            _ => false,
+        }
+    }
+
+    /// Put the method's own proposal back in the threshold field. See `Dialog::AutoTrim`.
+    fn reprefill_auto_trim_threshold(&mut self) {
+        let Some(Dialog::AutoTrim { method, threshold, levels, .. }) = self.dialog.as_mut() else {
+            return;
+        };
+        if let Some(db) = crate::model::silence::auto_threshold_db(levels, *method) {
+            *threshold = TextInput::fresh(&format!("{db:.1}"));
+        }
+    }
+
+    /// Recompute the line that says what Auto-Trim is about to do.
+    ///
+    /// Called after every edit to any field, so the dialog can never describe a different edit
+    /// than the one Enter performs — both go through `auto_trim_outcome`.
+    fn refresh_auto_trim_summary(&self, dialog: &mut Dialog) {
+        let Dialog::AutoTrim {
+            method, threshold, min_silence, pad_lead, pad_trail, fade_ms, snap, remove_gaps,
+            levels, range, summary, ..
+        } = dialog
+        else {
+            return;
+        };
+        let settings = AutoTrimSettings {
+            method: *method,
+            threshold_db: parse_threshold_db(threshold.value(), levels, *method),
+            min_silence_secs: parse_non_negative(min_silence.value(), 0.1),
+            pad_lead_ms: parse_non_negative(pad_lead.value(), 30.0),
+            pad_trail_ms: parse_non_negative(pad_trail.value(), 100.0),
+            fade_ms: parse_non_negative(fade_ms.value(), 5.0),
+            snap: *snap,
+            remove_gaps: *remove_gaps,
+            levels: levels.clone(),
+            range: *range,
+        };
+        let rate = self
+            .documents
+            .get(self.active_document)
+            .map(|d| d.sample_rate)
+            .unwrap_or(44_100)
+            .max(1) as f64;
+        *summary = match self.auto_trim_outcome(self.active_document, &settings) {
+            None => "nothing to trim at this threshold".to_string(),
+            Some(o) => {
+                let secs = |n: usize| n as f64 / rate;
+                let mut parts = Vec::new();
+                if o.trimmed_lead > 0 {
+                    parts.push(format!("{:.2}s off the head", secs(o.trimmed_lead)));
+                }
+                if o.trimmed_trail > 0 {
+                    parts.push(format!("{:.2}s off the tail", secs(o.trimmed_trail)));
+                }
+                if parts.is_empty() {
+                    parts.push("nothing off the ends".to_string());
+                }
+                if o.removed_samples > 0 {
+                    parts.push(format!(
+                        "{:.2}s from {} internal {}",
+                        secs(o.removed_samples),
+                        o.removed.len(),
+                        if o.removed.len() == 1 { "gap" } else { "gaps" }
+                    ));
+                }
+                parts.join(" · ")
+            }
+        };
+    }
+
+    /// Everything Auto-Trim needs to act, resolved from the dialog's fields. A struct rather
+    /// than nine arguments because the same set is needed twice — once to apply, and once to
+    /// build the summary the dialog shows before applying — and the two must not drift.
+    fn apply_auto_trim(&mut self, settings: AutoTrimSettings) {
+        let idx = self.active_document;
+        let Some(outcome) = self.auto_trim_outcome(idx, &settings) else {
+            // Nothing to trim is a real answer, not a failure: the take is already tight. Said
+            // out loud rather than silently doing nothing, because a dialog that closes with no
+            // visible effect reads as a bug.
+            self.dialog = Some(Dialog::Info {
+                message: "No silence to trim at this threshold — the range is already tight."
+                    .to_string(),
+            });
+            return;
+        };
+        let fade = (settings.fade_ms / 1000.0 * self.documents[idx].sample_rate as f64) as usize;
+        self.histories[idx].apply(
+            auto_trim_command(outcome.keep, outcome.removed, fade),
+            &mut self.documents[idx],
+        );
+        self.viewport = None;
+        self.after_sample_mutation(idx);
+    }
+
+    /// What Auto-Trim would do with these settings, or `None` if it would do nothing.
+    ///
+    /// The single place padding, clamping and snapping are applied, so the summary the dialog
+    /// shows and the edit Enter performs are computed by the same code — the discipline
+    /// `App::dc_offset_estimate` follows for the same reason.
+    fn auto_trim_outcome(&self, idx: usize, settings: &AutoTrimSettings) -> Option<AutoTrimOutcome> {
+        let doc = self.documents.get(idx)?;
+        let rate = doc.sample_rate;
+        let (range_start, range_end) = settings.range;
+        let plan = crate::model::silence::plan(
+            &settings.levels,
+            settings.range,
+            rate,
+            settings.threshold_db,
+            settings.min_silence_secs,
+        )?;
+        let ms = |v: f64| (v / 1000.0 * rate as f64) as usize;
+        // Padding widens the kept region but can never reach outside the range that was
+        // analysed: a selection's Auto-Trim must stay inside the selection.
+        let mut start = plan.start.saturating_sub(ms(settings.pad_lead_ms)).max(range_start);
+        let mut end = (plan.end + ms(settings.pad_trail_ms)).min(range_end);
+        if settings.snap {
+            // Snapped after padding, so the snap acts on the boundary that will actually be
+            // cut. `snap_to_zero_crossing` looks both ways, which is right here: the padding
+            // has already put the edge in silence, so either direction is quiet.
+            let (a, b) = doc.snap_range_to_zero_crossing(start, end);
+            start = a.max(range_start);
+            end = b.min(range_end);
+        }
+        // Each internal gap is inset by the *same* two padding controls the ends use: the
+        // trailing pad stays after the phrase that just ended, the leading pad before the one
+        // about to start. Without that, closing a gap would butt the two phrases together with
+        // no breath at all, which is audibly wrong in a way the ends are protected from — and
+        // it reuses controls already on screen rather than adding two more that mean the same.
+        let pad_after = ms(settings.pad_trail_ms);
+        let pad_before = ms(settings.pad_lead_ms);
+        let removed: Vec<(usize, usize)> = if settings.remove_gaps {
+            plan.gaps
+                .iter()
+                .filter_map(|&(gs, ge)| {
+                    let from = gs.saturating_add(pad_after).max(start);
+                    let to = ge.saturating_sub(pad_before).min(end);
+                    // A gap shorter than its own padding has nothing left to remove; dropping
+                    // it beats splicing a zero- or negative-length range.
+                    (from < to).then_some((from, to))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let removed_samples: usize = removed.iter().map(|(s, e)| e - s).sum();
+        if start >= end || (start == range_start && end == range_end && removed.is_empty()) {
+            return None;
+        }
+        Some(AutoTrimOutcome {
+            keep: (start, end),
+            removed,
+            trimmed_lead: start.saturating_sub(range_start),
+            trimmed_trail: range_end.saturating_sub(end),
+            removed_samples,
+        })
+    }
+
     fn apply_high_pass(&mut self, cutoff_hz: f32) {
         let idx = self.active_document;
         let Some((start, end)) = self.operation_range(idx, self.snap_to_zero) else { return };
@@ -18075,6 +18503,11 @@ impl App {
             return;
         }
 
+        if action == Action::AutoTrimSilence {
+            self.open_auto_trim_dialog();
+            return;
+        }
+
         if action == Action::RemoveDcOffset {
             if self.active_doc().is_some() {
                 self.dialog = Some(Dialog::RemoveDc { estimator: DcEstimator::default() });
@@ -18537,6 +18970,7 @@ impl App {
             | Action::RemoveEmptyChannels
             | Action::RemoveDcOffset
             | Action::HighPass
+            | Action::AutoTrimSilence
             | Action::ScrollChannelsUp
             | Action::ScrollChannelsDown
             | Action::ScrollChannelsPageUp
@@ -19042,6 +19476,19 @@ impl App {
     fn render(&mut self, frame: &mut Frame) {
         let area: Rect = frame.area();
         self.last_frame_area = area;
+        // Auto-Trim's summary is *derived* here rather than refreshed at each of the dozen
+        // places a dialog field can change — the discipline `ec_scroll_top` and `ms_scroll_top`
+        // follow, and for the same reason: a value recomputed in one place from the current
+        // fields cannot disagree with them, where a value updated by hooks disagrees the first
+        // time someone adds a thirteenth way to edit a field. It costs one pass over the cached
+        // frame levels, not over the audio.
+        if matches!(self.dialog, Some(Dialog::AutoTrim { .. })) {
+            let mut dialog = self.dialog.take();
+            if let Some(d) = dialog.as_mut() {
+                self.refresh_auto_trim_summary(d);
+            }
+            self.dialog = dialog;
+        }
         let focus = self.focus();
         // Reserve the tallest set's height for every mode so the layout doesn't jump on Tab.
         let toolbar_height = self.toolbar.reserved_rows(area.width);
@@ -20548,6 +20995,7 @@ enum MouseContract {
 #[cfg(test)]
 fn dialog_kind_name(dialog: &Dialog) -> &'static str {
     match dialog {
+        Dialog::AutoTrim { .. } => "AutoTrim",
         Dialog::Normalize { .. } => "Normalize",
         Dialog::Gain { .. } => "Gain",
         Dialog::FadeIn { .. } => "FadeIn",
@@ -20586,7 +21034,11 @@ fn dialog_kind_name(dialog: &Dialog) -> &'static str {
 fn dialog_mouse_contract(dialog: &Dialog) -> MouseContract {
     match dialog {
         // Row dialogs: fields, lists, buttons.
-        Dialog::Normalize { .. }
+        // Auto-Trim: one rect per control row, so a click focuses that row — and toggles it
+        // where the row is a checkbox, or steps it where the click lands on the cycler's
+        // triangles. See its arm in `handle_dialog_row_click_inner`.
+        Dialog::AutoTrim { .. }
+        | Dialog::Normalize { .. }
         | Dialog::Gain { .. }
         | Dialog::FadeIn { .. }
         | Dialog::FadeOut { .. }
@@ -21094,6 +21546,15 @@ fn render_dialog(
         Dialog::CdpChainEditor => {
             return render_cdp_chain_editor_dialog(frame, area, chain_editor, catalog, documents);
         }
+        Dialog::AutoTrim {
+            method, threshold, min_silence, pad_lead, pad_trail, fade_ms, snap, remove_gaps,
+            focused, summary, ..
+        } => {
+            return render_auto_trim_dialog(
+                frame, area, *method, threshold, min_silence, pad_lead, pad_trail, fade_ms,
+                *snap, *remove_gaps, *focused, summary,
+            );
+        }
         Dialog::LoadCurve { .. } => {
             // Rendered separately by `App::render` (needs `&mut FilePanel` for the picker's
             // own row-rect/visible-rows bookkeeping) — `render_dialog` only ever gets
@@ -21105,6 +21566,10 @@ fn render_dialog(
 
     // Simple single-row text dialogs (Normalize, Resample, RenameMarker, OpenDirectory, RenameBuffer).
     let (title, prefix, input, suffix): (&str, String, Option<&TextInput>, String) = match dialog {
+        // Rendered above by `render_auto_trim_dialog`; unreachable here, and listed rather than
+        // swept into the catch-all so the exhaustiveness check keeps working for the next
+        // dialog someone adds.
+        Dialog::AutoTrim { .. } => return Vec::new(),
         Dialog::Normalize { input } => {
             ("Normalize", " Target peak (dBFS): ".into(), Some(input), " ".into())
         }
@@ -24853,12 +25318,162 @@ fn choice_click_step(left_arrow_column: usize, x_in_row: u16) -> Option<bool> {
     Some(x >= left_arrow_column + 2)
 }
 
+/// Auto-Trim Silence. Six value rows, two checkbox rows, a summary line, and the hints bar.
+///
+/// Laid out like `render_export_regions_dialog`: labels left-aligned and padded to one width so
+/// every value starts in the same column, and one `Rect` per interactive row appended in focus
+/// order, which is what lets `handle_dialog_row_click` route a click by row index alone.
+///
+/// Fixed height, for the reason the Export dialog is: the summary line changes as fields are
+/// edited, and a popup that grew and shrank under the pointer while typing would be its own
+/// bug. The summary is one line and is truncated rather than wrapped.
+#[allow(clippy::too_many_arguments)]
+fn render_auto_trim_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    method: crate::model::silence::ThresholdMethod,
+    threshold: &TextInput,
+    min_silence: &TextInput,
+    pad_lead: &TextInput,
+    pad_trail: &TextInput,
+    fade_ms: &TextInput,
+    snap: bool,
+    remove_gaps: bool,
+    focused: usize,
+    summary: &str,
+) -> Vec<Rect> {
+    // Sized to the **summary**, not to the fields: at 62 the worst case
+    // ("12.34s off the head · 12.34s off the tail · 12 internal gaps marked") clipped mid-word,
+    // and that line's whole job is to be read before Enter is pressed. The hints bar is 59
+    // columns and the widest field row far less, so the summary is what sets this.
+    let width = 72u16.min(area.width);
+    // 8 control rows + blank + summary + blank + hints, inside a border.
+    let height = (8 + 3 + 1 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
+
+    let label_cell = |text: &str| format!(" {text:<width$} ", width = at_focus::LABEL_WIDTH);
+
+    // A number field. The block cursor marks "this field is edited as text" — the same meaning
+    // it carries in the CDP params dialog, where a row with a slider drops it precisely because
+    // its caret cannot move.
+    let value_row = |label: &str, input: &TextInput, unit: &str, is_focused: bool| {
+        let mut spans = vec![Span::styled(label_cell(label), label_style)];
+        if is_focused {
+            spans.push(Span::styled(input.value().to_string(), cursor_style));
+        } else {
+            spans.push(Span::styled(input.value().to_string(), base));
+        }
+        spans.push(Span::styled(format!(" {unit}"), dim_style));
+        Line::from(spans)
+    };
+
+    let check_row = |label: &str, on: bool, is_focused: bool| {
+        let mark = if on { "[X]" } else { "[ ]" };
+        let style = if is_focused { cursor_style } else { base };
+        Line::from(vec![
+            Span::styled(label_cell(label), label_style),
+            Span::styled(mark.to_string(), style),
+        ])
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    // The cycler, drawn with the same triangles every other choice control in the app uses, and
+    // padded to the widest label so neither arrow moves as the value changes.
+    let method_gap = cycled_label_width(
+        crate::model::silence::ThresholdMethod::NoiseFloor,
+        |m: crate::model::silence::ThresholdMethod| m.next(),
+        |m: crate::model::silence::ThresholdMethod| m.label().to_string(),
+    );
+    lines.push(if focused == at_focus::METHOD {
+        Line::from(vec![
+            Span::styled(label_cell("Threshold from"), label_style),
+            Span::styled("◄ ", label_style),
+            Span::styled(choice_centred(method.label(), method_gap), cursor_style),
+            Span::styled(" ►", label_style),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(label_cell("Threshold from"), label_style),
+            Span::styled("  ", label_style),
+            Span::styled(choice_centred(method.label(), method_gap), base),
+        ])
+    });
+    lines.push(value_row("Threshold", threshold, "dBFS", focused == at_focus::THRESHOLD));
+    lines.push(value_row(
+        "Min silence",
+        min_silence,
+        "s",
+        focused == at_focus::MIN_SILENCE,
+    ));
+    lines.push(value_row("Keep before", pad_lead, "ms", focused == at_focus::PAD_LEAD));
+    lines.push(value_row("Keep after", pad_trail, "ms", focused == at_focus::PAD_TRAIL));
+    lines.push(value_row("Edge fade", fade_ms, "ms", focused == at_focus::FADE_MS));
+    lines.push(check_row("Snap to quiet point", snap, focused == at_focus::SNAP_CB));
+    lines.push(check_row("Remove internal gaps", remove_gaps, focused == at_focus::REMOVE_GAPS_CB));
+    lines.push(Line::from(Span::styled(" ", base)));
+    lines.push(Line::from(Span::styled(
+        format!(" {summary}"),
+        Style::default().fg(theme::FOCUS).bg(theme::SURFACE0),
+    )));
+    lines.push(Line::from(Span::styled(" ", base)));
+    lines.push(Line::from(vec![
+        Span::styled(" ↑↓", hint_style),
+        Span::styled(":field  ", label_style),
+        Span::styled("←→", hint_style),
+        Span::styled(":change  ", label_style),
+        Span::styled("Space", hint_style),
+        Span::styled(":toggle  ", label_style),
+        Span::styled("Enter", hint_style),
+        Span::styled(":apply  ", label_style),
+        Span::styled("Esc", hint_style),
+        Span::styled(":cancel", label_style),
+    ]));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER).bg(theme::SURFACE0))
+        .style(Style::default().bg(theme::SURFACE0))
+        .title(" Auto-Trim Silence ");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(Paragraph::new(lines).style(base), inner);
+
+    // One rect per interactive row in focus order, then the hints bar — the contract
+    // `handle_dialog_row_click` routes against. See `MouseContract::Rows`.
+    let mut rects: Vec<Rect> = (0..at_focus::COUNT)
+        .map(|i| Rect {
+            x: inner.x,
+            y: inner.y + i as u16,
+            width: inner.width,
+            height: 1,
+        })
+        .collect();
+    rects.push(hints_bar_rect(popup, inner.width));
+    rects
+}
+
 /// Columns the fixed-layout choice rows draw their `\u{25c4}` in, derived from the very label
 /// literal each renderer passes so the two cannot drift. Named rather than inlined because a
 /// magic number in a click handler is exactly the thing that stops matching the render.
 const EXPORT_ARROW_COLUMN: usize = 12; // `label_cell`: " " + 10 + " ", then the arrow
 const EXPORT_REGIONS_ARROW_COLUMN: usize = 11; // "   Format: " is 11 wide
 const SAVE_AS_ARROW_COLUMN: usize = 10; // " Format:  " is 10 wide
+/// Auto-Trim's cycler sits after `at_focus::VALUE_COL`, which is where every value in that
+/// dialog starts — derived from the same constant the renderer pads with, so a label change
+/// moves the render and the click hit-test together.
+const AUTO_TRIM_ARROW_COLUMN: usize = at_focus::VALUE_COL as usize;
 
 /// The widest label a cycle control can show, found by walking `next` back round to `start`.
 ///
@@ -27267,6 +27882,260 @@ mod tests {
         assert_eq!(app.audio_channels, Some(1), "undo must rebuild too");
     }
 
+    // ---- Auto-Trim Silence ----------------------------------------------------------
+
+    /// Silence, a tone, silence — at 44.1kHz to match `doc`'s rate.
+    fn auto_trim_doc(lead: usize, tone: usize, tail: usize) -> Document {
+        let mut ch = vec![0.0f32; lead];
+        for i in 0..tone {
+            ch.push((i as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.5);
+        }
+        ch.extend(std::iter::repeat_n(0.0, tail));
+        Document { channels: vec![ch], sample_rate: 44_100, ..Default::default() }
+    }
+
+    fn open_auto_trim(app: &mut App) {
+        app.handle_action(Action::AutoTrimSilence);
+    }
+
+    /// The threshold field opens on a number measured from *this* take, not on a constant.
+    /// A constant would be the one value guaranteed to be wrong for the material in front of
+    /// you — see `Dialog::AutoTrim`.
+    #[test]
+    fn the_threshold_opens_pre_filled_from_the_material() {
+        let mut app = new_app(Some(auto_trim_doc(22_050, 44_100, 22_050)), None);
+        open_auto_trim(&mut app);
+        let Some(Dialog::AutoTrim { threshold, levels, .. }) = &app.dialog else {
+            panic!("dialog did not open");
+        };
+        let typed: f32 = threshold.value().parse().expect("a parseable dB value");
+        assert!(typed < 0.0 && typed > -120.0, "pre-filled threshold {typed} is not plausible");
+        assert!(!levels.is_empty(), "the frame analysis is cached in the dialog");
+    }
+
+    /// With nothing selected the whole file is the range — the same contract every other range
+    /// operation follows through `operation_range`.
+    #[test]
+    fn with_no_selection_auto_trim_covers_the_whole_file() {
+        let mut app = new_app(Some(auto_trim_doc(22_050, 44_100, 22_050)), None);
+        open_auto_trim(&mut app);
+        let Some(Dialog::AutoTrim { range, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*range, (0, 88_200), "the whole file");
+    }
+
+    /// A selection narrows it, and the threshold is measured on the selection alone.
+    #[test]
+    fn a_selection_narrows_the_range_auto_trim_analyses() {
+        let mut app = new_app(Some(auto_trim_doc(22_050, 44_100, 22_050)), None);
+        app.documents[0].selection = Some(Selection { start: 10_000, end: 70_000 });
+        open_auto_trim(&mut app);
+        let Some(Dialog::AutoTrim { range, .. }) = &app.dialog else { panic!("no dialog") };
+        assert_eq!(*range, (10_000, 70_000));
+    }
+
+    /// ←/→ on the method row cycles it *and* re-derives the threshold, which is the whole point
+    /// of offering two derivations.
+    #[test]
+    fn cycling_the_method_re_derives_the_threshold() {
+        let mut app = new_app(Some(auto_trim_doc(22_050, 44_100, 22_050)), None);
+        open_auto_trim(&mut app);
+        if let Some(Dialog::AutoTrim { focused, .. }) = app.dialog.as_mut() {
+            *focused = at_focus::METHOD;
+        }
+        let before = match &app.dialog {
+            Some(Dialog::AutoTrim { threshold, .. }) => threshold.value().to_string(),
+            _ => unreachable!(),
+        };
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let Some(Dialog::AutoTrim { method, threshold, .. }) = &app.dialog else {
+            panic!("dialog closed")
+        };
+        assert_eq!(*method, crate::model::silence::ThresholdMethod::PeakRelative);
+        assert_ne!(threshold.value(), before, "the threshold must follow the method");
+    }
+
+    /// ←/→ on a *number* row stay caret movement, which is the convention every native dialog
+    /// here follows — only the CDP params form repurposes them, for its sliders.
+    #[test]
+    fn arrows_on_a_number_row_do_not_cycle_the_method() {
+        let mut app = new_app(Some(auto_trim_doc(22_050, 44_100, 22_050)), None);
+        open_auto_trim(&mut app);
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let Some(Dialog::AutoTrim { method, focused, .. }) = &app.dialog else { panic!() };
+        assert_eq!(*focused, at_focus::THRESHOLD, "opens on the threshold, not the cycler");
+        assert_eq!(
+            *method,
+            crate::model::silence::ThresholdMethod::NoiseFloor,
+            "Right on a number field must not change the derivation"
+        );
+    }
+
+    /// Space toggles a checkbox, and only on a checkbox row.
+    #[test]
+    fn space_toggles_the_switches() {
+        let mut app = new_app(Some(auto_trim_doc(22_050, 44_100, 22_050)), None);
+        open_auto_trim(&mut app);
+        if let Some(Dialog::AutoTrim { focused, .. }) = app.dialog.as_mut() {
+            *focused = at_focus::SNAP_CB;
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let Some(Dialog::AutoTrim { snap, remove_gaps, .. }) = &app.dialog else { panic!() };
+        assert!(!*snap, "snap starts on and Space turns it off");
+        assert!(*remove_gaps, "the other switch is untouched");
+    }
+
+    /// Up/Down wrap, so a user who holds one cannot fall off either end into a dialog that
+    /// looks frozen.
+    #[test]
+    fn field_focus_wraps_in_both_directions() {
+        let mut app = new_app(Some(auto_trim_doc(22_050, 44_100, 22_050)), None);
+        open_auto_trim(&mut app);
+        if let Some(Dialog::AutoTrim { focused, .. }) = app.dialog.as_mut() {
+            *focused = 0;
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        let up = match &app.dialog {
+            Some(Dialog::AutoTrim { focused, .. }) => *focused,
+            _ => unreachable!(),
+        };
+        assert_eq!(up, at_focus::COUNT - 1, "Up from the first row wraps to the last");
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let down = match &app.dialog {
+            Some(Dialog::AutoTrim { focused, .. }) => *focused,
+            _ => unreachable!(),
+        };
+        assert_eq!(down, 0, "and back again");
+    }
+
+    /// The mouse must drive this dialog as fully as the keyboard: a click focuses a row, and on
+    /// a checkbox row it toggles too — a checkbox you have to click *and then* press Space on
+    /// is a checkbox that does not work.
+    #[test]
+    fn clicking_a_row_focuses_it_and_toggles_a_checkbox() {
+        let mut app = new_app(Some(auto_trim_doc(22_050, 44_100, 22_050)), None);
+        open_auto_trim(&mut app);
+        // What a render would set: one rect per control row, plus the hints bar. Every dialog
+        // mouse test does this — `handle_dialog_row_click` treats anything at or past it as the
+        // hints bar, so without it a real row reads as a hint.
+        app.dialog_n_interactive = at_focus::COUNT;
+        app.handle_dialog_row_click(at_focus::REMOVE_GAPS_CB, 2, false);
+        let Some(Dialog::AutoTrim { focused, remove_gaps, snap, .. }) = &app.dialog else {
+            panic!("dialog closed")
+        };
+        assert_eq!(*focused, at_focus::REMOVE_GAPS_CB);
+        assert!(!*remove_gaps, "the click toggled it");
+        assert!(*snap, "and left the other switch alone");
+
+        app.handle_dialog_row_click(at_focus::PAD_LEAD, 30, false);
+        let Some(Dialog::AutoTrim { focused, .. }) = &app.dialog else { panic!() };
+        assert_eq!(*focused, at_focus::PAD_LEAD, "a value row takes focus without toggling");
+    }
+
+    /// Clicking the cycler's triangles steps it; clicking the label does not. Landing on a
+    /// label must never silently change the derivation.
+    #[test]
+    fn clicking_the_method_triangles_steps_it_but_the_label_does_not() {
+        let mut app = new_app(Some(auto_trim_doc(22_050, 44_100, 22_050)), None);
+        open_auto_trim(&mut app);
+        app.dialog_n_interactive = at_focus::COUNT;
+        app.handle_dialog_row_click(at_focus::METHOD, 2, false);
+        let Some(Dialog::AutoTrim { method, .. }) = &app.dialog else { panic!() };
+        assert_eq!(
+            *method,
+            crate::model::silence::ThresholdMethod::NoiseFloor,
+            "a click on the label only focuses"
+        );
+        app.handle_dialog_row_click(at_focus::METHOD, AUTO_TRIM_ARROW_COLUMN as u16, false);
+        let Some(Dialog::AutoTrim { method, .. }) = &app.dialog else { panic!() };
+        assert_eq!(*method, crate::model::silence::ThresholdMethod::PeakRelative);
+    }
+
+    /// The gap between two phrases is closed up, not marked — and one Ctrl+Z restores the whole
+    /// take, ends and gap together.
+    #[test]
+    fn enter_removes_an_internal_gap_and_undo_restores_the_whole_take() {
+        // 0.5s silence · 0.5s tone · 0.5s silence · 0.5s tone · 0.5s silence
+        let mut ch = vec![0.0f32; 22_050];
+        let tone: Vec<f32> = (0..22_050)
+            .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.5)
+            .collect();
+        ch.extend_from_slice(&tone);
+        ch.extend(std::iter::repeat_n(0.0, 22_050));
+        ch.extend_from_slice(&tone);
+        ch.extend(std::iter::repeat_n(0.0, 22_050));
+        let doc = Document { channels: vec![ch], sample_rate: 44_100, ..Default::default() };
+        let mut app = new_app(Some(doc), None);
+        let before = app.documents[0].len_samples();
+
+        open_auto_trim(&mut app);
+        let Some(Dialog::AutoTrim { remove_gaps, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(*remove_gaps, "gap removal is on by default");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let after = app.documents[0].len_samples();
+        // Both outer silences and most of the middle one are gone; the two tones remain.
+        assert!(after < before - 22_050, "the middle gap came out too: {before} -> {after}");
+        assert!(after >= 44_100, "both tones survived: {after}");
+        assert!(app.documents[0].markers.is_empty(), "no markers are left behind");
+
+        app.handle_action(Action::Undo);
+        assert_eq!(app.documents[0].len_samples(), before, "one undo restores everything");
+    }
+
+    /// Turning the switch off leaves the middle alone — only the ends come off.
+    #[test]
+    fn with_gap_removal_off_only_the_ends_are_trimmed() {
+        let mut ch = vec![0.0f32; 22_050];
+        let tone: Vec<f32> = (0..22_050)
+            .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.5)
+            .collect();
+        ch.extend_from_slice(&tone);
+        ch.extend(std::iter::repeat_n(0.0, 22_050));
+        ch.extend_from_slice(&tone);
+        ch.extend(std::iter::repeat_n(0.0, 22_050));
+        let doc = Document { channels: vec![ch], sample_rate: 44_100, ..Default::default() };
+        let mut app = new_app(Some(doc), None);
+
+        open_auto_trim(&mut app);
+        if let Some(Dialog::AutoTrim { focused, .. }) = app.dialog.as_mut() {
+            *focused = at_focus::REMOVE_GAPS_CB;
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let after = app.documents[0].len_samples();
+        // The two tones plus the whole middle silence, plus padding — comfortably over 66150.
+        assert!(after > 22_050 * 2, "the middle silence is still there: {after}");
+    }
+
+    /// End to end: Enter trims the ends, keeps the tone, and Ctrl+Z puts the file back.
+    #[test]
+    fn enter_trims_the_silence_and_undo_restores_it() {
+        let mut app = new_app(Some(auto_trim_doc(22_050, 44_100, 22_050)), None);
+        let before = app.documents[0].len_samples();
+        open_auto_trim(&mut app);
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let after = app.documents[0].len_samples();
+        assert!(after < before, "the ends came off: {before} -> {after}");
+        assert!(after > 44_100 / 2, "the tone survived: {after}");
+        app.handle_action(Action::Undo);
+        assert_eq!(app.documents[0].len_samples(), before, "undo restores the whole file");
+    }
+
+    /// An entirely silent range has no threshold to separate anything from anything, so the
+    /// dialog is refused with a reason rather than opened with meaningless fields.
+    #[test]
+    fn an_entirely_silent_range_is_refused_with_a_reason() {
+        let mut app = new_app(Some(doc(0.0, 44_100)), None);
+        open_auto_trim(&mut app);
+        match &app.dialog {
+            Some(Dialog::Info { message }) => {
+                assert!(message.contains("entirely silent"), "{message}");
+            }
+            _ => panic!("expected an explanation, not a dialog"),
+        }
+    }
+
     /// Remove DC Offset is the second command in the app to deliberately ignore
     /// `operation_range`, after Remove Empty Channels. A selection must not narrow it: a
     /// capture-chain bias is a property of the file, and correcting only part of it would
@@ -27411,6 +28280,9 @@ mod tests {
 
         assert!(!app.action_allowed_on_streamed_buffer(Action::RemoveDcOffset));
         assert!(!app.action_allowed_on_streamed_buffer(Action::HighPass));
+        // Auto-Trim joins them: it is an edit, and `AutoTrimCommand` stores the samples it
+        // removed and the edges its fade overwrote.
+        assert!(!app.action_allowed_on_streamed_buffer(Action::AutoTrimSilence));
 
         // And the refusal is real, not only advisory: dispatching must leave the buffer's
         // history untouched.

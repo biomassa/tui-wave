@@ -16,6 +16,7 @@ pub mod io;
 pub mod praat;
 pub mod riff;
 pub mod selection;
+pub mod silence;
 pub mod stereo_mix;
 pub mod stream;
 pub mod wavread;

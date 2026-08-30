@@ -120,6 +120,7 @@ impl MenuBar {
                     entry("Fade In...",         Action::FadeIn,        "Ctrl+f"),
                     entry("Fade Out...",        Action::FadeOut,       "Ctrl+o"),
                     entry("Trim",            Action::Trim,          "Ctrl+t"),
+                    entry("Auto-Trim Silence...", Action::AutoTrimSilence, ""),
                     entry("Resample...",        Action::Resample,      "Ctrl+e"),
                     entry("Technical Fades", Action::TechnicalFades,"Ctrl+b"),
                     entry("Mix to Mono...",     Action::MixToMono,     "Ctrl+m"),

@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+- **Auto-Trim Silence** (Process ▸ Auto-Trim Silence…) removes the silence from a take: always
+  the leading and trailing, and by default the gaps between phrases too. With nothing selected
+  it covers the whole file, like every other range operation; a selection narrows it, and the
+  threshold is then measured on the selection alone rather than inherited from audio outside it.
+
+  **The threshold is measured, not defaulted.** The field opens on a number derived from the
+  material in front of you — the same "show the measurement, let it be typed over" shape
+  `App::dc_offset_estimate` uses to pre-fill the CDP process of the same name. There is no honest
+  constant to pick: -35 dBFS is right for a hot mix and silly for a quiet field recording. Two
+  derivations are offered because they disagree exactly where it matters. **Noise floor** (the
+  default) takes a low percentile of frame level and adds a margin, so it tracks what the
+  recording is actually quiet at. **Peak-relative** sits a fixed distance below the loudest
+  moment, which is predictable and ignores the floor — on a hissy take with a loud peak it puts
+  the threshold above the hiss. Cycling the method re-derives the number, so the field always
+  shows what that method proposes.
+
+  **Detection is framed, never per-sample.** A loud waveform crosses zero thousands of times a
+  second, so a per-sample threshold reports silence in the middle of every note. Levels are
+  reduced to one RMS figure per 20ms frame first, and the **loudest channel decides** — averaging
+  across 56 channels lets 48 dead inputs bury a live one and would trim a take into its own first
+  note. `min_silence` is what stops a breath between words being read as the end of the take.
+
+  **Every join is faded, not just the two ends.** Closing an internal gap creates a splice
+  mid-take, which is exactly where a click comes from, so the `Edge fade` applies at each
+  boundary. Gaps are inset by the same two padding controls the ends use — the trailing pad stays
+  after the phrase that just ended, the leading pad before the next — so closing a gap leaves each
+  phrase its breath instead of butting them together.
+
+  It is one `Command`: trim, excise, fade and marker remap are a single Ctrl+Z. Markers and
+  head/tail marks follow their audio across the splice, and one whose audio was removed goes with
+  it — the contract Trim already set, extended to the interior. Undo is sample-exact, including
+  the samples the fade overwrote, which reassembly alone cannot recover.
+
+  Absent from the streamed read-only allowlist: it is an edit, and the command stores the audio it
+  removed.
+
+  Verified against the real binary on a 5.00s fixture (1s hiss / 1s tone / 0.5s hiss / 1s tone /
+  1.5s hiss): threshold auto-derived to -47.1 dBFS against a -48 dBFS floor, the summary read
+  "0.97s off the head - 1.40s off the tail - 0.37s from 1 internal gap", and the saved result
+  measured **2.260s** — the predicted 5.00 - 0.97 - 1.40 - 0.37 exactly, with both outer edges
+  faded and the peak intact.
+
+
 - **praatAudioTools bumped to `2c9c52f` (2026-08-30), 36 commits on**, and **airwin2rack to
   `a0e2c2b`**. 59 Praat scripts changed, concentrated in `Filter & Color` (16),
   `Generative & Synthesis` (15) and `Dynamics & Envelope` (11), plus one rename

@@ -44,6 +44,14 @@ pub enum Action {
     /// baseline counterpart to [`Action::RemoveDcOffset`]; menu-only, since it opens a dialog
     /// for the cutoff anyway and free Ctrl letters are nearly gone.
     HighPass,
+    /// Trim the leading and trailing silence off the operation range, and drop a marker at each
+    /// quiet stretch inside it. Menu-only, for the reason [`Action::RemoveDcOffset`] is: a
+    /// once-per-take cleanup step whose dialog holds real decisions (which threshold, and how
+    /// it was derived), not something reached for mid-edit.
+    ///
+    /// With no selection this covers the whole file, like every other range operation — see
+    /// `App::operation_range`.
+    AutoTrimSilence,
     Resample,
     Delete,
     ClearSelection,
@@ -471,6 +479,7 @@ fn parse_action_name(name: &str) -> Option<Action> {
         "Normalize" => Some(Action::Normalize),
         "RemoveEmptyChannels" => Some(Action::RemoveEmptyChannels),
         "RemoveDcOffset" => Some(Action::RemoveDcOffset),
+        "AutoTrimSilence" => Some(Action::AutoTrimSilence),
         "HighPass" => Some(Action::HighPass),
         "Resample" => Some(Action::Resample),
         "Gain" => Some(Action::Gain),
