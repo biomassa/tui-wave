@@ -107,6 +107,20 @@ pub struct PauseRewrite {
     /// script would otherwise open, as (variable including its `$`, absolute path). See
     /// `rewrite::rewrite_directory_choosers`.
     pub directories: Vec<(String, String)>,
+    /// The button number to report as pressed, overriding each `endPause`'s own declared default.
+    ///
+    /// An `endPause` declares which button is default and the rewrite honours it, because that is
+    /// the author's statement of the ordinary path — `Polyphonic_Improviser` declares button 1
+    /// and would `exitScript` on any other. But a **wizard** inverts that: `Universal Convolution
+    /// Generator` (upstream, 2026-08-30) has no `form` at all, nine settings pages each ending
+    /// `endPause: "< Back", "Apply", "OK", 2`, and an outer `while sessionActive = 1`. Its own
+    /// comment says "Apply keeps the session alive and returns to the same page. OK applies once
+    /// and closes the session" — so honouring the declared 2 is an infinite loop, and the run
+    /// hangs until the runner's timeout rather than failing.
+    ///
+    /// Per script and opt-in, so the general rule above is untouched: a default is right until a
+    /// specific script is shown to loop on it. `None` means "use each block's declared default".
+    pub button_override: Option<u32>,
 }
 
 /// The assignment standing in for one hoisted param, or `None` for a param that travels as an
@@ -365,6 +379,7 @@ pub fn plan_praat_job_with(
             blocks,
             form_locks,
             directories,
+            button_override: def.praat_pause_button,
         });
     let input_count = praat_input_count(def, picked_inputs);
     let save_picture = draws_picture(def, values);
@@ -572,7 +587,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false,
+            praat_python_rewrite: false, praat_pause_button: None,
             requires_simple_wav_input: false,
             sidecar_extension: None,
             min_inputs: None,
@@ -885,7 +900,7 @@ mod pause_hoist_tests {
 
         let job = plan_praat_job(def, &values, &checkout()).expect("plans");
         let rewrite = job.pause_rewrite.as_ref().expect("this entry rewrites");
-        let script = crate::model::praat::rewrite::rewrite_pause_blocks(&source, &rewrite.blocks, &[])
+        let script = crate::model::praat::rewrite::rewrite_pause_blocks(&source, &rewrite.blocks, &[], None)
             .expect("rewrites");
 
         // The exact variable names the script reads further down — note `output_Gain` keeps its
@@ -1028,7 +1043,7 @@ mod pause_hoist_tests {
             let job = plan_praat_job(def, &values, &checkout()).expect("plans");
             let rewrite = job.pause_rewrite.as_ref().expect("rewrites");
             let script =
-                crate::model::praat::rewrite::rewrite_pause_blocks(&source, &rewrite.blocks, &[])
+                crate::model::praat::rewrite::rewrite_pause_blocks(&source, &rewrite.blocks, &[], None)
                     .expect("rewrites");
             // Read from the entry's own locked Algorithm choice, not parsed out of the title:
             // one of the algorithms is literally "Fibonacci (Mono)", so splitting the title on

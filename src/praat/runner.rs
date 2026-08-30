@@ -373,6 +373,7 @@ fn run_job_body(
                 &source,
                 &rewrite.blocks,
                 &rewrite.form_locks,
+                rewrite.button_override,
             )
             .map_err(|e| fail(e.to_string()))?;
             source = crate::model::praat::rewrite::rewrite_directory_choosers(
@@ -1117,13 +1118,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&state);
     }
 
-    /// End-to-end proof that the redirect actually unlocks the chained scripts: `chain_2` locates
+    /// End-to-end proof that the redirect actually unlocks the chained scripts: `chain_3` locates
     /// its siblings through `preferencesDirectory$` and fails outright without this.
+    ///
+    /// Was `chain_2` until the 2026-08-30 bump, where upstream rewrote its third stage's call to
+    /// a "compact form" of `8-channel_speed_deviations` -- collapsing eight channel-speed reals
+    /// into one space-separated sentence and the two pitch bounds into another -- while shipping
+    /// that script **unchanged**, with its original 22-field form. The chain now passes 14
+    /// arguments to a 22-field form and dies with "Found 14 arguments but expected more". Three
+    /// chains carry the same edit (`chain_2`, `Composition_2`, `Live_2`);
+    /// `docs/vector-chain-stages.txt` flags all three, which is what that report is for.
+    ///
+    /// `chain_3` is the replacement rather than `chain_1` because this test's fixture is a plain
+    /// tone: `chain_1` opens on `MDS_Space_Navigator`, which segments its input into words and
+    /// refuses one with fewer than two. That is a property of the fixture, not of the chain.
     #[test]
     fn a_chained_script_finds_its_siblings_through_the_redirected_prefs_dir() {
         require_praat!();
         let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/praat-audiotools");
-        let script = checkout.join("Vector Chain/chain_2.praat");
+        let script = checkout.join("Vector Chain/chain_3.praat");
         if !script.is_file() {
             eprintln!("skipping: submodule not initialised");
             return;
@@ -1799,6 +1812,112 @@ mod tests {
     /// proportion rather than a threshold — and because a script refusing the fixture on its
     /// merits ("No loops found. Try adjusting parameters." on two seconds of tone) is not a
     /// defect in this feature. Separately gated from `TUI_WAVE_PRAAT_SMOKE` so the ordinary
+    /// The nine `Universal Convolution Generator` variants must render **nine different**
+    /// impulse responses, not nine copies of one.
+    ///
+    /// Upstream reworked that script into a wizard with no `form` at all: an outer
+    /// `while sessionActive = 1`, an inner `while wizardDone = 0`, and nine settings pages each
+    /// ending `endPause: "< Back", "Apply", "OK", 2`. Honouring that declared default sets
+    /// `uiAction = 2`, which the script documents as "keeps the session alive" — so every variant
+    /// ran to the runner's timeout, the worst failure shape there is: no error, just a job that
+    /// never returns. `praat_pause_button = 3` ("OK — applies once and closes the session") is the
+    /// fix, and the smoke sweep can only say each variant now *finishes*.
+    ///
+    /// Finishing is not the property worth pinning. A wizard reached through hoisted pause blocks
+    /// could just as easily complete while every page selected the same algorithm, and the sweep
+    /// would report nine passes for nine identical renders. So this compares the actual audio:
+    /// pairwise-distinct outputs are what proves the algorithm choice reaches the script.
+    #[test]
+    fn the_nine_convolution_generators_render_nine_different_impulse_responses() {
+        require_praat!();
+        let checkout =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/praat-audiotools");
+        if crate::praat::validate_audiotools_dir(&checkout).is_err() {
+            return; // submodule not initialised
+        }
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let defs: Vec<_> = catalog
+            .processes
+            .iter()
+            .filter(|d| d.key.starts_with("praat_reverb_universal_convolution_generator_"))
+            .collect();
+        assert_eq!(defs.len(), 9, "nine algorithm variants");
+
+        let state = std::env::temp_dir().join(format!("praat-ucg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        let prefs = prepare_prefs_dir(&state, &checkout);
+        let sample_rate = 44_100u32;
+        let tone: Vec<f32> = (0..sample_rate as usize)
+            .map(|i| (i as f32 * 220.0 * std::f32::consts::TAU / sample_rate as f32).sin() * 0.5)
+            .collect();
+
+        let mut rendered: Vec<(String, Vec<f32>)> = Vec::new();
+        for def in &defs {
+            let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+            let planned = crate::model::praat::plan_praat_job_with(
+                def,
+                &values,
+                &checkout,
+                python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref(),
+                1,
+            )
+            .unwrap_or_else(|e| panic!("{}: plan failed: {e}", def.key));
+            assert_eq!(
+                planned.pause_rewrite.as_ref().and_then(|r| r.button_override),
+                Some(3),
+                "{}: the override must reach the plan, or this test proves nothing",
+                def.key
+            );
+            let input_count = planned.input_names.len();
+            let job = PraatJob {
+                id: 0,
+                praat_bin: praat_bin_for(""),
+                inputs: vec![vec![tone.clone()]; input_count],
+                photo_path: None,
+                planned,
+                input_sample_rate: sample_rate,
+                purpose: JobPurpose::Apply,
+                // Well under the 60s the hang used to consume, so a regression to the session
+                // loop fails here quickly rather than stalling the suite.
+                timeout: Duration::from_secs(30),
+                prefs_dir: prefs.clone(),
+                python_venv_bin: python_venv_bin(&state_dir()),
+            };
+            match run(&job) {
+                Ok(out) => {
+                    let first = out.result.first().cloned().unwrap_or_default();
+                    assert!(!first.is_empty(), "{}: produced no audio", def.key);
+                    // Non-empty is not enough: nine distinct near-silences would satisfy the
+                    // pairwise check below while meaning the generator produced nothing usable.
+                    let peak = first.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+                    assert!(
+                        peak > 0.01,
+                        "{}: peak {peak} — rendered essentially silence",
+                        def.key
+                    );
+                    eprintln!(
+                        "  {:52} {:>7} samples  peak {peak:.3}",
+                        def.key.trim_start_matches("praat_reverb_universal_convolution_generator_"),
+                        first.len()
+                    );
+                    rendered.push((def.key.clone(), first));
+                }
+                Err(err) => panic!("{}: {err}", def.key),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&state);
+
+        for (i, (key_a, a)) in rendered.iter().enumerate() {
+            for (key_b, b) in rendered.iter().skip(i + 1) {
+                assert!(
+                    a != b,
+                    "{key_a} and {key_b} rendered identical audio — the algorithm choice is not \
+                     reaching the script"
+                );
+            }
+        }
+    }
+
     /// sweep does not double in cost.
     #[test]
     fn praat_draw_smoke_test() {
