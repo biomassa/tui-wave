@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-08-30 (2.11.5)
 
 - **Auto-Trim Silence** (Process ▸ Auto-Trim Silence…) removes the silence from a take: always
   the leading and trailing, and by default the gaps between phrases too. With nothing selected
