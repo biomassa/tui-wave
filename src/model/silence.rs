@@ -164,14 +164,6 @@ pub struct SilencePlan {
     pub gaps: Vec<(usize, usize)>,
 }
 
-impl SilencePlan {
-    /// Whether this plan would change anything at all — a take with no leading or trailing
-    /// silence and no internal gaps is already trimmed.
-    pub fn is_noop(&self, range: (usize, usize)) -> bool {
-        self.start == range.0 && self.end == range.1 && self.gaps.is_empty()
-    }
-}
-
 /// Locate the sounding region and the internal gaps.
 ///
 /// `min_silence_secs` is how long a quiet stretch must last to count. Without it every pause

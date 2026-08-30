@@ -117,7 +117,8 @@ mod er_focus {
 
 /// Resolved Auto-Trim settings — see `App::apply_auto_trim`.
 struct AutoTrimSettings {
-    method: crate::model::silence::ThresholdMethod,
+    /// Already resolved to a number by `parse_threshold_db` — the *method* that produced it is
+    /// the dialog's business, and nothing downstream of here needs to know which one it was.
     threshold_db: f32,
     min_silence_secs: f64,
     pad_lead_ms: f64,
@@ -188,11 +189,6 @@ mod at_focus {
     pub const SNAP_CB: usize = 6;
     pub const REMOVE_GAPS_CB: usize = 7;
     pub const COUNT: usize = 8;
-
-    /// Rows before this one hold a single control, so focus index == row index. From here on a
-    /// row is a checkbox, and still one control — the two switches take no value field, unlike
-    /// Export Regions' checkbox+value pairs.
-    pub const FIRST_CHECKBOX_ROW: usize = SNAP_CB;
 
     /// Width every label is padded to, so all six values start in the same column.
     pub const LABEL_WIDTH: usize = 20;
@@ -6223,7 +6219,6 @@ impl App {
                     remove_gaps, levels, range, ..
                 }) => {
                     self.apply_auto_trim(AutoTrimSettings {
-                        method,
                         threshold_db: parse_threshold_db(threshold.value(), &levels, method),
                         min_silence_secs: parse_non_negative(min_silence.value(), 0.1),
                         pad_lead_ms: parse_non_negative(pad_lead.value(), 30.0),
@@ -15775,7 +15770,6 @@ impl App {
             return;
         };
         let settings = AutoTrimSettings {
-            method: *method,
             threshold_db: parse_threshold_db(threshold.value(), levels, *method),
             min_silence_secs: parse_non_negative(min_silence.value(), 0.1),
             pad_lead_ms: parse_non_negative(pad_lead.value(), 30.0),
