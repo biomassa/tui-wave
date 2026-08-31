@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+- **praatAudioTools bumped to `4ad5d6e`**, for one process: `Neural_Ambient_Drone_Designer`, from
+  1356 lines to 2099 (v0.8 → v1.2). No catalog entry changes — its form still declares the same
+  13 fields with the same names — which is exactly why this bump is worth recording. The catalog
+  is the *interface*; the script is the *implementation*, and the app runs the script from the
+  pinned checkout. An unchanged entry means the dialog looks the same, not that the audio does.
+
+  Upstream's own changelog heads its v1.2 section "CRITICAL BUG FIX (changes audio output)", and
+  the defect is pointed straight at the material this app is for. Spectral centroid and bandwidth
+  were read out of the Spectrum slice unchecked; a grain landing in a digitally silent region
+  gives 0/0 for both moments and Praat returns undefined. One undefined value propagates through
+  `mean_cent`, `std_cent`, every `norm_cent#` and then every k-means distance. The old guard
+  tested only the peak of the **whole file**, so leading or trailing silence — or a gap between
+  phrases — passed it.
+
+  Reproduced here before taking the bump, on a fixture of tone / digital silence / tone / digital
+  silence. Old script: `Active clusters: 1 of 3 requested`, all 69 grains collapsed into one
+  cluster. New script: `Active clusters: 3 of 3 requested`. The renders differ in 529063 of
+  529200 samples, RMS 0.370 → 0.515 — so this was silently producing degraded output, not merely
+  a different one.
+
+  Three further fixes ride along: k-means empty-cluster reseeding no longer steals a grain
+  without decrementing the donor (k clusters could report active while one held everything),
+  shimmer tile seams get a 2ms internal crossfade instead of a waveform step repeating at the
+  grain rate, and centroid seeding draws from a shuffled index list rather than a rejection
+  sampler whose escape clause was always true when `nGrains = k`.
+
+  Also in the range: `Vector Chain/cleanup.praat` deleted (already excluded), and two new Ableton
+  bridge scripts that exclude themselves — `Send_to_Ableton` as `hardcoded_path` (Windows-only,
+  UDP to a Max for Live device via PowerShell) and `Clean_Ableton_Bridge` as
+  `not_a_sound_process`, it being a utility that deletes WAVs and `.asd` sidecars from a folder.
+  Excluded count 44 → 45; process count unchanged at 473.
+
+
 ## 2026-08-30 (2.11.5)
 
 - **Auto-Trim Silence** (Process ▸ Auto-Trim Silence…) removes the silence from a take: always
