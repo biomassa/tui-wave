@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-09-01 (2.11.6)
 
 - **praatAudioTools bumped to `4ad5d6e`**, for one process: `Neural_Ambient_Drone_Designer`, from
   1356 lines to 2099 (v0.8 → v1.2). No catalog entry changes — its form still declares the same
