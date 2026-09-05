@@ -99,6 +99,11 @@ impl BankEnvelope {
     /// failed to record and whose absence is why a saved chain's automation drifted. `min`/`max`
     /// are the parameter's declared range, which is what the Y values are in.
     ///
+    /// `invert` must be the flag of the reference the points were read through, so that this
+    /// undoes what [`BankEnvelope::project`] applied. Normalizing an inverted reading without it
+    /// stores the *flipped* shape, which then flips again on the next read and flips for every
+    /// other parameter sharing the curve.
+    ///
     /// Degenerate axes collapse rather than divide by zero: a zero-length span puts everything
     /// at time 0, a zero-width range puts everything at value 0.
     pub fn normalized(
@@ -107,6 +112,7 @@ impl BankEnvelope {
         authored_time_max: f64,
         min: f64,
         max: f64,
+        invert: bool,
     ) -> Self {
         let span = if authored_time_max > 0.0 { authored_time_max } else { 0.0 };
         let width = max - min;
@@ -115,7 +121,7 @@ impl BankEnvelope {
             .map(|&(t, v)| {
                 let nt = if span > 0.0 { (t / span).clamp(BANK_MIN, BANK_MAX) } else { BANK_MIN };
                 let nv = if width != 0.0 { ((v - min) / width).clamp(BANK_MIN, BANK_MAX) } else { BANK_MIN };
-                (nt, nv)
+                (nt, if invert { BANK_MAX - nv } else { nv })
             })
             .collect();
         Self { name: name.into(), points }
@@ -247,7 +253,7 @@ mod tests {
     #[test]
     fn normalizing_then_projecting_the_same_range_round_trips() {
         let authored = [(0.0, 1.0), (5.0, 100.0), (10.0, 40.0)];
-        let bank_env = BankEnvelope::normalized("swell", &authored, 10.0, 1.0, 100.0);
+        let bank_env = BankEnvelope::normalized("swell", &authored, 10.0, 1.0, 100.0, false);
         let back = bank_env.project(10.0, 1.0, 100.0, false);
         for (a, b) in authored.iter().zip(&back) {
             assert!((a.0 - b.0).abs() < 1e-9, "time {a:?} vs {b:?}");
@@ -259,7 +265,7 @@ mod tests {
     /// spans that duration, instead of running off the end or finishing early.
     #[test]
     fn one_shape_spans_whatever_duration_it_is_projected_onto() {
-        let bank_env = BankEnvelope::normalized("swell", &[(0.0, 0.0), (10.0, 1.0)], 10.0, 0.0, 1.0);
+        let bank_env = BankEnvelope::normalized("swell", &[(0.0, 0.0), (10.0, 1.0)], 10.0, 0.0, 1.0, false);
         assert_eq!(bank_env.project(3.0, 0.0, 1.0, false).last().unwrap().0, 3.0);
         assert_eq!(bank_env.project(30.0, 0.0, 1.0, false).last().unwrap().0, 30.0);
     }
@@ -287,16 +293,16 @@ mod tests {
     #[test]
     fn normalizing_clamps_rather_than_escaping_the_bank_range() {
         // A point past the authored duration, and a value outside the declared range.
-        let bank_env = BankEnvelope::normalized("odd", &[(0.0, -5.0), (99.0, 500.0)], 10.0, 0.0, 100.0);
+        let bank_env = BankEnvelope::normalized("odd", &[(0.0, -5.0), (99.0, 500.0)], 10.0, 0.0, 100.0, false);
         assert_eq!(bank_env.points, vec![(0.0, 0.0), (1.0, 1.0)]);
         assert_eq!(bank_env.validate(), Ok(()));
     }
 
     #[test]
     fn degenerate_axes_collapse_instead_of_dividing_by_zero() {
-        let zero_span = BankEnvelope::normalized("z", &[(0.0, 5.0), (1.0, 7.0)], 0.0, 0.0, 10.0);
+        let zero_span = BankEnvelope::normalized("z", &[(0.0, 5.0), (1.0, 7.0)], 0.0, 0.0, 10.0, false);
         assert!(zero_span.points.iter().all(|p| p.0 == 0.0));
-        let zero_width = BankEnvelope::normalized("w", &[(0.0, 5.0), (1.0, 7.0)], 1.0, 3.0, 3.0);
+        let zero_width = BankEnvelope::normalized("w", &[(0.0, 5.0), (1.0, 7.0)], 1.0, 3.0, 3.0, false);
         assert!(zero_width.points.iter().all(|p| p.1 == 0.0));
     }
 

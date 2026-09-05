@@ -25,7 +25,8 @@
 //! Deliberately **not** persisted: *which buffer* feeds a `Buffer` branch. That's chosen live
 //! from whatever documents happen to be open when the chain runs, the same way a single
 //! dual-input process's `CdpSecondInput.selected` is chosen fresh every time its dialog opens
-//! rather than saved in `CdpPreset` — see `CDP-CHAIN-PLAN.md`'s design decision 4.
+//! rather than saved in `CdpPreset`. A buffer index means a different document in the next
+//! session, so saving one would point a branch at the wrong audio.
 //!
 //! # Envelopes
 //!
@@ -200,7 +201,7 @@ pub enum ChainError {
     /// (`IoKind::None`), pitch-curve transforms (`IoKind::Curve`), and glob-output processes
     /// (`IoKind::WavGlob`) each produce a result shape ("no real input," "a curve, not
     /// audio," "N new buffers") that doesn't compose into "feeds the next step's audio
-    /// input" — see `CDP-CHAIN-PLAN.md`'s design decision 3.
+    /// input".
     ProcessNotChainable { key: String },
     /// More branches than this step's process has inputs to feed. Replaced the old
     /// `SideChainOnSingleInputStep`, which could only say "one is too many for a step that
@@ -298,7 +299,7 @@ impl CdpChain {
             let hi = points.iter().map(|&(_, v)| v).fold(f64::NEG_INFINITY, f64::max);
             let (lo, hi) = if lo.is_finite() && hi.is_finite() && hi > lo { (lo, hi) } else { (0.0, 1.0) };
             let name = self.bank.next_name();
-            let envelope = BankEnvelope::normalized(name.clone(), &points, span, lo, hi);
+            let envelope = BankEnvelope::normalized(name.clone(), &points, span, lo, hi, false);
             let name = self.bank.insert_unique(envelope);
             set_envelope_ref(
                 &mut self.steps,
@@ -446,7 +447,7 @@ fn collect_finished_outputs(
 /// upstream to consume), pitch-curve transforms (`IoKind::Curve` — carries no audio on either
 /// side), glob output (`IoKind::WavGlob` — many results, not one to feed onward), and the
 /// variadic input kinds (`VariadicWav`/`GroupedWav` — their extra files come from a per-run
-/// picker a saved chain has no way to carry). See `CDP-CHAIN-PLAN.md` design decision 3.
+/// picker a saved chain has no way to carry).
 ///
 /// Public and shared with `ui::app`'s browser filter (`cdp_filter_entries`) rather than
 /// duplicated there. It *was* duplicated, as `matches!(output, Wav | Ana) && input != None` —

@@ -1,5 +1,53 @@
 # Changelog
 
+## Unreleased
+
+### Envelopes in a chain kept their own mapping
+
+An envelope in a chain is a shape in the chain's bank, normalized on both axes. Each parameter
+adds its own mapping: the window `min`/`max` it reads the shape through, and `invert`. The editor computes that mapping when the curve connects to a parameter. It belongs to that
+parameter alone.
+
+Opening a step's dialog and pressing Enter threw that mapping away. The commit path normalized
+the edited points against the parameter's **declared** range instead of the window they were read
+through, and rewrote the reference with `invert: false`. Three things followed:
+
+- **The commit rescaled the stored shape.** Spectral Blur declares 0.1..100. A curve read through a
+  1..10 window projects to `[1, 10, 1]`, and normalizing that against 0.1..100 stored
+  `[0.009, 0.099, 0.009]` — a tenth of its height. No invert was needed to see this.
+- **`invert` survived as part of the shape, then the flag went to false.** Projection applies the
+  flip and nothing undid it, so a rising curve came back falling, permanently.
+- **Both faults spread to every parameter sharing the shape**, because the commit writes back into
+  the shared bank curve. Two parameters in one step sharing a curve was worse: each wrote the
+  shape in its own units and the last one won.
+
+`BankEnvelope::normalized` now takes `invert`, so it is now the exact inverse of `project`. The editor
+remembers the whole `EnvelopeRef` rather than its name alone, and the commit normalizes through
+the window the points were read through. Only a curve drawn fresh, with no reference before it, takes the
+declared range.
+
+### A step that produces no audio stops the chain
+
+A CDP binary can exit 0 and still write a header-only file. `distort delete` does this when its
+input has too few wavesets to search: it warns that it cannot truncate the output, returns 0, then
+leaves a 2128-byte result. That empty buffer became the running buffer and fed every later step
+nothing, so the chain appeared to hang and reported nothing. The chain now stops and
+says what happened.
+
+### The chain editor
+
+- **Remove branch.** The `SPLIT` line carries a button that removes the combiner, both branches
+  and every step inside them. It asks first only when steps would be lost, because the draft has
+  no undo. An empty split, just made by mistake, goes at once.
+- **Recall is `Ctrl+R` everywhere.** It was `Ctrl+L` in the process browser and a bare `r` in the
+  chain editor.
+- **A dual-input step inside a combiner's leg appeared twice.** `layout_chain_join` decided
+  between an ordinary step and a split by asking whether the step had branches, and a dual-input
+  process has one too. The step took a split frame and drew its own branch again, so one selection
+  lit two cursors and Up/Down could not move past it: `move_chain_selection` finds the cursor with
+  `position`, which returns the first match, so Down from the later copy jumped back. One function now answers whether a step is a
+  combiner. Two tests pin what that protects.
+
 ## 2026-09-05 (2.11.7)
 
 ### ExtProcess chains: parallel branches, native combiners, a per-chain envelope bank

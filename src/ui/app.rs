@@ -1708,8 +1708,8 @@ enum Dialog {
     /// sub-editors, this is a top-level dialog with no browser/params dialog underneath it
     /// — Esc/Enter both close it outright (see `CurveEditorState`'s doc comment).
     CurveEditor(CurveEditorState),
-    /// The "CDP Chain" editor — a linear list of steps, any of which may have a side-chain
-    /// (see `CDP-CHAIN-PLAN.md`). A thin marker: all the actual state lives in
+    /// The "CDP Chain" editor — a tree of steps, any of which may carry parallel inputs.
+    /// A thin marker: all the actual state lives in
     /// `App.cdp_chain_editor` (`ChainEditorState`) since adding/editing one step temporarily
     /// switches the visible dialog to `CdpBrowser`/`CdpParams` (reused verbatim) and back,
     /// and `Dialog` can only hold one variant at a time.
@@ -3764,8 +3764,8 @@ struct ChainEditorState {
     /// `CdpParams`'s own `CdpSecondInput` while editing that step
     /// (`open_cdp_chain_step_params`/`cdp_chain_commit_step`) — both mechanisms read and write
     /// this same map, so whichever was used most recently is exactly what the other one shows
-    /// next. Never persisted (`CDP-CHAIN-PLAN.md` design decision 4) — reset to empty whenever
-    /// a chain (including a freshly loaded preset) is loaded into the editor.
+    /// next. Never persisted — a buffer index means a different document in the next session —
+    /// and reset to empty whenever a chain (including a freshly loaded preset) is loaded.
     buffer_picks: std::collections::HashMap<ChainPath, usize>,
     selected: ChainEditorRow,
     error: Option<String>,
@@ -3789,7 +3789,7 @@ struct ChainEditorState {
     /// Per parameter of the step currently being edited, the bank envelope its value came from
     /// (index-parallel to that process's `params`). Lets a re-edit update the curve the step
     /// already owned rather than adding a near-duplicate to the bank on every visit.
-    step_edit_envelope_names: Vec<Option<String>>,
+    step_edit_envelope_refs: Vec<Option<crate::model::cdp::EnvelopeRef>>,
     /// Which column the keys act on. The envelope bank is a second list with its own commands
     /// (delete, duplicate), so it needs to be reachable, and `Focus` is how the rest of this app
     /// already expresses "which of two lists is the keyboard talking to".
@@ -3920,7 +3920,7 @@ impl ChainEditorState {
             custom_chain: None,
             save_prompt: None,
             step_edit_time_max: 1.0,
-            step_edit_envelope_names: Vec::new(),
+            step_edit_envelope_refs: Vec::new(),
             focus: ChainFocus::Steps,
             param_edit: None,
             envelope: None,
@@ -11041,7 +11041,7 @@ impl App {
         // chain's automation span whatever it is applied to instead of drifting.
         let time_max = self.cdp_editor_time_axis().1;
         let bank = self.cdp_chain_editor.as_ref().map(|s| s.chain.bank.clone()).unwrap_or_default();
-        let envelope_names = Self::step_envelope_names(step, &def);
+        let envelope_refs = Self::step_envelope_refs(step, &def);
         if step.values.len() == fields.len() {
             let projected = Self::project_step_values(step, &bank, time_max);
             fields = def.params.iter().zip(&projected).map(|(p, v)| CdpField::from_value(p, v)).collect();
@@ -11056,7 +11056,7 @@ impl App {
         }
         if let Some(state) = self.cdp_chain_editor.as_mut() {
             state.step_edit_time_max = time_max;
-            state.step_edit_envelope_names = envelope_names;
+            state.step_edit_envelope_refs = envelope_refs;
         }
         if let ChainEditTarget::Replace(path) = &target {
             let mut branch_path = path.clone();
@@ -11098,14 +11098,14 @@ impl App {
 
     /// The bank envelope each of `step`'s parameters currently reads, index-parallel to
     /// `def.params`. `None` for a parameter that is a plain constant.
-    fn step_envelope_names(
+    fn step_envelope_refs(
         step: &crate::model::cdp::ChainStep,
         def: &crate::model::cdp::ProcessDef,
-    ) -> Vec<Option<String>> {
+    ) -> Vec<Option<crate::model::cdp::EnvelopeRef>> {
         use crate::model::cdp::ParamValue;
         (0..def.params.len())
             .map(|i| match step.values.get(i) {
-                Some(ParamValue::EnvelopeRef(r)) => Some(r.name.clone()),
+                Some(ParamValue::EnvelopeRef(r)) => Some(r.clone()),
                 _ => None,
             })
             .collect()
@@ -11152,22 +11152,36 @@ impl App {
         def: &crate::model::cdp::ProcessDef,
         bank: &mut crate::model::cdp::EnvelopeBank,
         authored_time_max: f64,
-        prior_names: &[Option<String>],
+        prior_refs: &[Option<crate::model::cdp::EnvelopeRef>],
     ) {
         use crate::model::cdp::{BankEnvelope, EnvelopeRef, ParamKind, ParamValue};
         for (i, value) in step.values.iter_mut().enumerate() {
             let ParamValue::Breakpoints(points) = value else { continue };
             let Some(param) = def.params.get(i) else { continue };
-            let (min, max) = match &param.kind {
-                ParamKind::Number { min, max, .. } => (*min, *max),
+            // The window these points were *read* through, when they came from a reference.
+            // Normalizing against the parameter's declared range instead would rescale the
+            // stored shape by the ratio between the two: a curve read through a 1..10 window on
+            // a 0.1..100 parameter came back flattened to a tenth of its height, and every other
+            // parameter sharing that shape then read the flattened version (user report).
+            let prior = prior_refs.get(i).and_then(|r| r.clone());
+            let (min, max) = match (&prior, &param.kind) {
+                (Some(reference), _) => (reference.min, reference.max),
+                (None, ParamKind::Number { min, max, .. }) => (*min, *max),
                 // Only a Number field can carry an envelope (`ParamDef::automatable` implies
                 // it), so this is unreachable in practice; 0..1 keeps it lossless rather than
                 // collapsing the shape if it ever isn't.
                 _ => (0.0, 1.0),
             };
-            let normalized =
-                BankEnvelope::normalized(bank.next_name(), points, authored_time_max, min, max);
-            let name = match prior_names.get(i).and_then(|n| n.clone()) {
+            let invert = prior.as_ref().is_some_and(|r| r.invert);
+            let normalized = BankEnvelope::normalized(
+                bank.next_name(),
+                points,
+                authored_time_max,
+                min,
+                max,
+                invert,
+            );
+            let name = match prior.as_ref().map(|r| r.name.clone()) {
                 Some(existing) if bank.contains(&existing) => {
                     if let Some(slot) = bank.get_mut(&existing) {
                         slot.points = normalized.points;
@@ -11176,7 +11190,9 @@ impl App {
                 }
                 _ => bank.insert_unique(normalized),
             };
-            *value = ParamValue::EnvelopeRef(EnvelopeRef { name, min, max, invert: false });
+            // The reference keeps the window and the flip it already had. Only a curve drawn
+            // fresh in the params dialog, with no reference before it, takes the declared range.
+            *value = ParamValue::EnvelopeRef(EnvelopeRef { name, min, max, invert });
         }
     }
 
@@ -11253,7 +11269,7 @@ impl App {
         let prior_names = self
             .cdp_chain_editor
             .as_ref()
-            .map(|s| s.step_edit_envelope_names.clone())
+            .map(|s| s.step_edit_envelope_refs.clone())
             .unwrap_or_default();
 
         let Some(state) = self.cdp_chain_editor.as_mut() else {
@@ -15688,6 +15704,22 @@ impl App {
                                 continue;
                             }
                         };
+                        if !Self::chain_output_has_audio(&output.result) {
+                            self.cdp_pending_chain_run = None;
+                            let lines = vec![
+                                "A step in this chain produced no audio, so the chain stopped."
+                                    .to_string(),
+                                "The process exited without an error but wrote an empty result. \
+                                 A waveset or grain process does this when its input has too \
+                                 little to work with — try a longer selection, or a gentler \
+                                 setting on the step before it."
+                                    .to_string(),
+                            ];
+                            let back =
+                                self.cdp_chain_editor.is_some().then_some(Dialog::CdpChainEditor);
+                            self.show_process_error("ExtProcess Chain Error", lines, back);
+                            continue;
+                        }
                         let step_count = run.pending_step_count;
                         if let Some(frame) = run.frames.last_mut() {
                             frame.running_buffer = output.result;
@@ -16170,8 +16202,8 @@ impl App {
     /// steps *before* this one in its own list (main chain, or a side-chain at any depth),
     /// followed by this step's *in-progress* (not-yet-committed) values, then plays the
     /// result and restores this exact `CdpParams` session — see `ChainRunFinish::
-    /// PreviewStepInProgress`. No caching (`CDP-CHAIN-PLAN.md` design decision 5, confirmed
-    /// again when adding this): every Preview press reruns the upstream steps fresh.
+    /// PreviewStepInProgress`. Nothing is cached: every Preview press reruns the upstream steps
+    /// fresh, because a cached result cannot know which upstream value changed under it.
     fn preview_chain_step(&mut self) {
         let Some(target) = self.cdp_chain_edit_target.clone() else { return };
         let Some(Dialog::CdpParams { catalog_index, fields, second_input, variadic_input, photo_input, presets, .. }) = self.dialog.take() else {
@@ -16470,6 +16502,17 @@ impl App {
     /// a new frame for that side-chain instead (a post-order walk: a step's side-chain must
     /// fully finish before the step itself can run) and recurses. Once the top frame's list
     /// is exhausted, hands off to `finish_current_chain_frame`.
+    /// Whether a finished step actually produced audio.
+    ///
+    /// A CDP binary can exit 0 and still write a header-only file: `distort delete` on input
+    /// with too few wavesets to search reports "WARNING: can't truncate SFfile", returns 0, and
+    /// leaves a 2128-byte result. Carrying that on as the running buffer feeds every later step
+    /// an empty signal, and what the user sees is a chain that never finishes rather than one
+    /// that says what went wrong (user report).
+    fn chain_output_has_audio(result: &[Vec<f32>]) -> bool {
+        result.iter().any(|channel| !channel.is_empty())
+    }
+
     fn submit_current_chain_stage(&mut self) {
         let Some(run) = self.cdp_pending_chain_run.as_ref() else { return };
         let Some(frame) = run.frames.last() else { return };
@@ -40123,7 +40166,7 @@ mod tests {
                 crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), branches: Vec::new(), legacy_side_chain: Vec::new() },
             ],
         };
-        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_names: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
+        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_refs: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
             chain,
             buffer_picks: std::collections::HashMap::new(),
             selected: ChainEditorRow::Run,
@@ -40196,7 +40239,7 @@ mod tests {
                 crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), branches: Vec::new(), legacy_side_chain: Vec::new() },
             ],
         };
-        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_names: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
+        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_refs: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
             chain,
             buffer_picks: std::collections::HashMap::new(),
             selected: ChainEditorRow::Run,
@@ -40268,7 +40311,7 @@ mod tests {
                 crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values, branches: Vec::new(), legacy_side_chain: Vec::new() },
             ],
         };
-        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_names: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
+        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_refs: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
             chain,
             buffer_picks: std::collections::HashMap::new(),
             selected: ChainEditorRow::Run,
@@ -40330,7 +40373,7 @@ mod tests {
                 crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values, branches: Vec::new(), legacy_side_chain: Vec::new() },
             ],
         };
-        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_names: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
+        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_refs: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
             chain,
             buffer_picks: std::collections::HashMap::new(),
             selected: ChainEditorRow::Run,
@@ -40375,7 +40418,7 @@ mod tests {
         let mut app = new_app(Some(doc(0.5, 200)), None);
         app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
 
-        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_names: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
+        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_refs: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
             chain: crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
                 name: "Preview Test".into(),
                 steps: vec![crate::model::cdp::ChainStep {
@@ -41942,7 +41985,7 @@ mod tests {
 
     /// Chain-mode filtering (`cdp_chain_edit_target.is_some()`): synthesis (`IoKind::None`)
     /// and glob-output processes must be excluded from the picker, since neither composes
-    /// into "feeds the next step's audio input" (`CDP-CHAIN-PLAN.md` design decision 3) —
+    /// into "feeds the next step's audio input" —
     /// but an ordinary Wav/Ana single-input process must still show up.
     #[test]
     fn chain_edit_mode_excludes_synthesis_and_glob_output_processes_from_the_browser() {
@@ -42577,7 +42620,7 @@ mod tests {
     fn fresh_chain_editor_state(chain: crate::model::cdp::CdpChain) -> ChainEditorState {
         ChainEditorState {
             step_edit_time_max: 1.0,
-            step_edit_envelope_names: Vec::new(),
+            step_edit_envelope_refs: Vec::new(),
             focus: Default::default(),
             param_edit: None,
             envelope: None,
@@ -42847,6 +42890,232 @@ mod tests {
                 "Up did not go back one row"
             );
         }
+    }
+
+    /// Opening a chain step and committing it **unchanged** must leave its envelope exactly as
+    /// it was: same stored shape, same window, same invert.
+    ///
+    /// Spectral Blur is the test process because it has exactly one envelope-capable parameter
+    /// (`Blurring`, declared 0.1..100), so nothing else can account for a change.
+    #[test]
+    fn round_tripping_a_step_preserves_a_narrowed_envelope_window() {
+        use crate::model::cdp::{BankEnvelope, EnvelopeBank, EnvelopeRef, ParamValue};
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let def = app.cdp_catalog.processes.iter().find(|p| p.key == "blur_blur").unwrap().clone();
+
+        let shape = BankEnvelope { name: "Env 1".into(), points: vec![(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)] };
+        let mut bank = EnvelopeBank::default();
+        bank.envelopes.push(shape.clone());
+        // Read through a *narrow* window, not the parameter's declared range.
+        let reference = EnvelopeRef { name: "Env 1".into(), min: 1.0, max: 10.0, invert: false };
+        let mut step = chain_step("blur_blur");
+        step.values = vec![ParamValue::EnvelopeRef(reference.clone())];
+        let time_max = 4.0;
+
+        // Open the step's dialog, then commit it without touching anything.
+        step.values = App::project_step_values(&step, &bank, time_max);
+        App::lift_envelopes_into_bank(&mut step, &def, &mut bank, time_max, &[Some(reference.clone())]);
+
+        assert_eq!(
+            bank.get("Env 1").unwrap().points,
+            shape.points,
+            "the stored shape must be unchanged by a round trip that changed nothing"
+        );
+        assert_eq!(
+            step.values[0],
+            ParamValue::EnvelopeRef(reference),
+            "and so must the window it is read through"
+        );
+    }
+
+    /// The same, for an inverted reference. Projection applies the flip, so normalizing without
+    /// undoing it stores the flipped shape and then clears the flag, which flips the curve for
+    /// every other parameter reading it.
+    #[test]
+    fn round_tripping_a_step_preserves_an_inverted_envelope() {
+        use crate::model::cdp::{BankEnvelope, EnvelopeBank, EnvelopeRef, ParamValue};
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let def = app.cdp_catalog.processes.iter().find(|p| p.key == "blur_blur").unwrap().clone();
+
+        let shape = BankEnvelope { name: "Env 1".into(), points: vec![(0.0, 0.0), (1.0, 1.0)] };
+        let mut bank = EnvelopeBank::default();
+        bank.envelopes.push(shape.clone());
+        let reference = EnvelopeRef { name: "Env 1".into(), min: 0.1, max: 100.0, invert: true };
+        let mut step = chain_step("blur_blur");
+        step.values = vec![ParamValue::EnvelopeRef(reference.clone())];
+
+        step.values = App::project_step_values(&step, &bank, 4.0);
+        App::lift_envelopes_into_bank(&mut step, &def, &mut bank, 4.0, &[Some(reference.clone())]);
+
+        assert_eq!(bank.get("Env 1").unwrap().points, shape.points, "a rising curve must stay rising");
+        assert_eq!(step.values[0], ParamValue::EnvelopeRef(reference), "invert must survive");
+    }
+
+    /// The one that matters most: one shape driving two parameters. Editing the step that holds
+    /// the first must not change what the second reads.
+    #[test]
+    fn editing_one_step_does_not_change_what_another_parameter_reads() {
+        use crate::model::cdp::{BankEnvelope, EnvelopeBank, EnvelopeRef, ParamValue};
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let def = app.cdp_catalog.processes.iter().find(|p| p.key == "blur_blur").unwrap().clone();
+
+        let mut bank = EnvelopeBank::default();
+        bank.envelopes
+            .push(BankEnvelope { name: "Env 1".into(), points: vec![(0.0, 0.0), (0.5, 1.0), (1.0, 0.25)] });
+
+        // Two parameters, same shape, different windows — which is the reason a bank exists.
+        let narrow = EnvelopeRef { name: "Env 1".into(), min: 1.0, max: 10.0, invert: false };
+        let wide = EnvelopeRef { name: "Env 1".into(), min: 0.1, max: 100.0, invert: false };
+        let before = bank.resolve(&wide, 4.0).unwrap();
+
+        let mut edited = chain_step("blur_blur");
+        edited.values = vec![ParamValue::EnvelopeRef(narrow.clone())];
+        edited.values = App::project_step_values(&edited, &bank, 4.0);
+        App::lift_envelopes_into_bank(&mut edited, &def, &mut bank, 4.0, &[Some(narrow.clone())]);
+
+        let after = bank.resolve(&wide, 4.0).unwrap();
+        assert_eq!(before, after, "the other parameter's automation changed under it");
+    }
+
+    /// Two parameters in the *same* step reading one shape through different windows. Each is
+    /// committed in turn against the same bank, so a normalization that used anything but each
+    /// parameter's own window would leave whichever wrote last in charge of the shape.
+    #[test]
+    fn two_parameters_in_one_step_sharing_a_shape_agree_on_what_it_is() {
+        use crate::model::cdp::{BankEnvelope, EnvelopeBank, EnvelopeRef, ParamKind, ParamValue};
+        let app = new_app(Some(doc(0.1, 100)), None);
+        // A process with two envelope-capable number parameters, whichever the catalog offers.
+        let def = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .find(|d| {
+                crate::model::cdp::chain::process_is_chainable(d)
+                    && d.params
+                        .iter()
+                        .filter(|p| p.automatable && matches!(p.kind, ParamKind::Number { .. }))
+                        .count()
+                        >= 2
+            })
+            .expect("a chainable process with two automatable numbers")
+            .clone();
+        let automatable: Vec<usize> = def
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.automatable && matches!(p.kind, ParamKind::Number { .. }))
+            .map(|(i, _)| i)
+            .take(2)
+            .collect();
+
+        let shape = BankEnvelope { name: "Env 1".into(), points: vec![(0.0, 0.1), (0.5, 0.9), (1.0, 0.4)] };
+        let mut bank = EnvelopeBank::default();
+        bank.envelopes.push(shape.clone());
+
+        let mut step = chain_step(&def.key);
+        step.values = def.params.iter().map(|p| p.default_value()).collect();
+        // Deliberately different windows on the two parameters.
+        let refs: Vec<EnvelopeRef> = vec![
+            EnvelopeRef { name: "Env 1".into(), min: 1.0, max: 10.0, invert: false },
+            EnvelopeRef { name: "Env 1".into(), min: 0.0, max: 1.0, invert: true },
+        ];
+        let mut prior: Vec<Option<EnvelopeRef>> = vec![None; def.params.len()];
+        for (slot, reference) in automatable.iter().zip(&refs) {
+            step.values[*slot] = ParamValue::EnvelopeRef(reference.clone());
+            prior[*slot] = Some(reference.clone());
+        }
+
+        step.values = App::project_step_values(&step, &bank, 3.0);
+        App::lift_envelopes_into_bank(&mut step, &def, &mut bank, 3.0, &prior);
+
+        // Compared with a tolerance: a value survives a divide and a multiply, not a bit pattern.
+        let back = &bank.get("Env 1").unwrap().points;
+        assert_eq!(back.len(), shape.points.len());
+        for (a, b) in shape.points.iter().zip(back) {
+            assert!(
+                (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9,
+                "neither parameter may rewrite the shared shape into its own units: {a:?} vs {b:?}"
+            );
+        }
+        for (slot, reference) in automatable.iter().zip(&refs) {
+            assert_eq!(&step.values[*slot], &ParamValue::EnvelopeRef(reference.clone()));
+        }
+    }
+
+    /// A step that exits cleanly but writes nothing must stop the chain.
+    ///
+    /// `distort delete` on input with too few wavesets to search returns 0, warns that it
+    /// cannot truncate the output file, and leaves a header-only result. Carried on as the
+    /// running buffer that feeds every later step an empty signal (user report: the chain either
+    /// never finished or reported a CDP error, depending on the cycle count).
+    #[test]
+    fn a_step_that_produced_no_audio_is_not_carried_on() {
+        assert!(!App::chain_output_has_audio(&[]), "no channels at all");
+        assert!(!App::chain_output_has_audio(&[Vec::new()]), "one empty channel");
+        assert!(!App::chain_output_has_audio(&[Vec::new(), Vec::new()]), "two empty channels");
+        assert!(App::chain_output_has_audio(&[vec![0.0]]), "digital silence is still audio");
+        assert!(App::chain_output_has_audio(&[Vec::new(), vec![0.5, -0.5]]), "one live channel is enough");
+    }
+
+    /// The reported chain shape — one step, then a split whose two legs both tap it, gathered by
+    /// a mixer — runs to completion, and each leg is fed the audio *arriving* at the split
+    /// rather than anything the mixer produced.
+    ///
+    /// A tap reads the running buffer, which upstream steps have already finished writing, so a
+    /// leg can never receive its own combiner's output. This pins that: the legs are given the
+    /// signal that entered the split, and the walk terminates in a bounded number of dispatches
+    /// rather than feeding itself.
+    #[test]
+    fn a_split_feeds_its_legs_the_upstream_signal_and_terminates() {
+        use crate::model::cdp::{chain::Branch, BranchSource};
+        let mut app = new_app(Some(doc(0.25, 4410)), None);
+        let mixer_def = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .find(|p| p.key == crate::model::cdp::native::MIXER_KEY)
+            .cloned()
+            .unwrap();
+        let mut mixer = chain_step(crate::model::cdp::native::MIXER_KEY);
+        mixer.values = mixer_def.params.iter().map(|p| p.default_value()).collect();
+        // Both legs tap the same point, exactly as the report's chain does.
+        mixer.branches = vec![
+            Branch { source: BranchSource::Tap, steps: vec![chain_step("airwindows_density")] },
+            Branch { source: BranchSource::Tap, steps: Vec::new() },
+        ];
+        let chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            // A step before the split, so "the signal arriving at the split" is distinguishable
+            // from the chain's own input.
+            steps: vec![chain_step("airwindows_density"), mixer],
+        };
+        assert_eq!(chain.validate(&app.cdp_catalog), Ok(()));
+
+        app.start_chain_run(
+            chain,
+            std::collections::HashMap::new(),
+            vec![vec![0.25; 4410], vec![0.25; 4410]],
+            44_100,
+            0,
+            (0, 4410),
+            ChainRunFinish::Splice,
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut dispatches = 0;
+        while app.cdp_pending_chain_run.is_some() && std::time::Instant::now() < deadline {
+            if app.tick_airwindows() {
+                dispatches += 1;
+                assert!(dispatches <= 100, "the split is feeding itself rather than progressing");
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            app.cdp_pending_chain_run.is_none(),
+            "the chain must finish; a leg that read the mixer's own output never would"
+        );
     }
 
     /// No row may appear twice in the layout, at any nesting.
