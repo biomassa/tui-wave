@@ -3064,6 +3064,9 @@ enum Confirm {
     /// and the loss is total — a hand-drawn shape of a dozen breakpoints is gone with no undo,
     /// the editor having no history of its own.
     RevertEnvelopeToConstant,
+    /// Removing a combiner and everything its branches hold. Carries the count so the question
+    /// can say what it costs.
+    RemoveChainSplit { path: ChainPath, steps: usize },
 }
 
 /// What to do once `App::save_as_queue` (buffers waiting for a filename before some other
@@ -3704,6 +3707,10 @@ enum ChainEditorRow {
     /// not be reached (user report); the same gap sat between any box and a following join.
     /// `index` is the position the new step takes, which for the last segment is the end.
     AddStep { path: ChainPath, index: usize },
+    /// The `SPLIT into N` marker above a combiner's columns, carrying the button that undoes
+    /// it. Selectable, unlike the marker used to be, because the button has to be reachable by
+    /// key as well as pointer. The path is the combiner's own.
+    RemoveSplit(ChainPath),
     /// Trailing "+ Branch out" affordance for the list at this *parent* path — beside the
     /// "+ Add step" row it sits under. Branching out was reachable only by key (`o`), which is
     /// no help to someone who has not read the hints bar: adding a step and splitting the
@@ -4075,14 +4082,6 @@ enum DisplayRow {
     /// not a setting. Present from the moment the dialog opens, so an empty chain still shows
     /// a signal path rather than a blank pane.
     In,
-    /// The fan-out above a combiner's branch columns. The combiner itself is drawn *below* them
-    /// as the join — an earlier version drew it above its own legs, which read as the mixer
-    /// dividing the signal rather than gathering it (user report, with a screenshot).
-    ///
-    /// Only a native combiner produces one. A dual-input CDP process reads input 0 from the
-    /// running buffer and nothing divides, so its branch is drawn as a row of the step itself
-    /// (`layout_chain_step_rows`) rather than as a column under a split.
-    Split { count: usize },
     /// `depth` is the bracketed step's nesting depth in *branches* (0 = top level), for
     /// indentation only — matching what `chain_path_depth` returns for that step's own path.
     /// It was `path.len()` before paths alternated Step/Branch segments, which no longer
@@ -4352,6 +4351,15 @@ fn layout_chain_segments(
     close(layout, &mut segment_top, y);
 }
 
+/// Every step in `steps`, counting those nested inside their branches — what "and everything
+/// inside it" comes to when a split is removed.
+fn chain_steps_deep(steps: &[crate::model::cdp::ChainStep]) -> usize {
+    steps
+        .iter()
+        .map(|step| 1 + step.branches.iter().map(|b| chain_steps_deep(&b.steps)).sum::<usize>())
+        .sum()
+}
+
 /// Whether this step gathers *every* input from a branch, and so is drawn as a split with
 /// columns. False for a dual-input CDP process, whose single branch is only its second infile.
 /// An unknown process is not a combiner: the layout it would get is the more elaborate one.
@@ -4485,7 +4493,7 @@ fn layout_chain_join(
     let base = span.saturating_sub(gap * (count - 1)) / count;
 
     layout.cells.push((
-        DisplayRow::Split { count: count as usize },
+        DisplayRow::Row(ChainEditorRow::RemoveSplit(path.to_vec())),
         ChainCell { x, y: *y, width: span, depth: 0 },
     ));
     *y += 1;
@@ -4509,7 +4517,11 @@ fn layout_chain_join(
         for (i, inner) in branch.steps.iter().enumerate() {
             let mut inner_path = branch_path.clone();
             inner_path.push(PathSeg::Step(i));
-            if inner.branches.is_empty() {
+            // Combiner-ness, not "has branches": a dual-input step also has one, and drawing it
+            // as a split here gave it a SPLIT/JOIN frame *and* let `layout_chain_step_rows`
+            // draw its branch inline as well — the same row twice, so one selection lit two
+            // cursors at once (user report).
+            if !chain_step_is_combiner(inner, catalog) {
                 layout_chain_step_rows(
                     layout, &branch.steps, i, &inner_path, catalog, bx + 1, &mut by,
                     column.saturating_sub(2).max(1), 0,
@@ -6570,6 +6582,9 @@ impl App {
             Confirm::RevertEnvelopeToConstant => {
                 self.revert_cdp_envelope_to_constant();
             }
+            Confirm::RemoveChainSplit { path, .. } => {
+                self.remove_chain_split_now(&path);
+            }
         }
     }
 
@@ -7914,10 +7929,11 @@ impl App {
                     self.refresh_cdp_browser_filter();
                 }
             }
-            // "Recall last process" — only in the CDP Process browser, and only Ctrl-modified
-            // since a bare 'l' there is a live search character (unlike the CDP Chain
-            // editor's own 'l', which has no search box to collide with).
-            KeyCode::Char('l') | KeyCode::Char('L')
+            // "Recall last process" — only in the CDP Process browser, and Ctrl-modified
+            // because a bare letter there is a live search character. The same key recalls the
+            // last *chain* in the chain editor: one gesture for "bring back what I ran last",
+            // wherever you are (it was Ctrl+L here and a bare `r` there).
+            KeyCode::Char('r') | KeyCode::Char('R')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && matches!(self.dialog, Some(Dialog::CdpBrowser { .. })) =>
             {
@@ -8750,7 +8766,8 @@ impl App {
                     // calling `activate_chain_editor_row` here, so a click and the key it
                     // stands in for can never mean two different things.
                     let activates = match clicked {
-                        ChainEditorRow::AddStep { .. }
+                        ChainEditorRow::RemoveSplit(_)
+                        | ChainEditorRow::AddStep { .. }
                         | ChainEditorRow::BranchOut(_)
                         | ChainEditorRow::Out
                         | ChainEditorRow::Preview
@@ -9535,7 +9552,7 @@ impl App {
             KeyCode::Char('s') => self.open_chain_save_prompt(),
             // `r` for recall. Moved off `l`, which vim navigation wanted, and onto a free key
             // with a better mnemonic than the one it left.
-            KeyCode::Char('r') => self.recall_last_chain(),
+            KeyCode::Char('r') | KeyCode::Char('R') if ctrl => self.recall_last_chain(),
             // 'b' for the branch source, reachable from either side (see
             // `toggle_chain_branch_source`). A plain key, like every other chain-editor command.
             KeyCode::Char('e') => self.cycle_chain_param_envelope(),
@@ -10459,6 +10476,50 @@ impl App {
         backgrounds
     }
 
+    /// **Remove branch**: the inverse of "Branch out" — takes out the combiner, both of its
+    /// branches, and every step inside them.
+    ///
+    /// It asks first, but only when there is something to lose. Undoing a Branch out you just
+    /// made is the common case and destroys nothing, so an empty split goes at once; a split
+    /// holding steps names how many before it takes them, because the chain draft has no undo
+    /// and a stray Enter on a six-step side-chain would be unrecoverable.
+    fn remove_chain_split(&mut self, path: &[crate::model::cdp::PathSeg]) {
+        let inside = self
+            .cdp_chain_editor
+            .as_ref()
+            .and_then(|s| crate::model::cdp::step_at(&s.chain, path))
+            .map(|step| step.branches.iter().map(|b| chain_steps_deep(&b.steps)).sum::<usize>())
+            .unwrap_or(0);
+        if inside == 0 {
+            self.remove_chain_split_now(path);
+            return;
+        }
+        self.confirm = Some(Confirm::RemoveChainSplit { path: path.to_vec(), steps: inside });
+    }
+
+    /// The removal itself, once nothing is in the way of it.
+    fn remove_chain_split_now(&mut self, path: &[crate::model::cdp::PathSeg]) {
+        use crate::model::cdp::PathSeg;
+        let Some((&last, parent)) = path.split_last() else { return };
+        let PathSeg::Step(i) = last else { return };
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let Some(siblings) = crate::model::cdp::steps_at_mut(&mut state.chain, parent) else { return };
+        if i >= siblings.len() {
+            return;
+        }
+        siblings.remove(i);
+        remove_buffer_picks_under(&mut state.buffer_picks, parent, i);
+        // The row that took its place, so the cursor stays where the work is.
+        state.selected = if i > 0 {
+            let mut prev = parent.to_vec();
+            prev.push(PathSeg::Step(i - 1));
+            ChainEditorRow::Step(prev)
+        } else {
+            ChainEditorRow::AddStep { path: parent.to_vec(), index: 0 }
+        };
+        state.error = None;
+    }
+
     /// **Branch out**: inserts a Mixer with two `Tap` branches, so the signal at that point
     /// splits and rejoins.
     ///
@@ -10873,6 +10934,7 @@ impl App {
                 self.open_cdp_chain_step_target(ChainEditTarget::Insert { parent: path, index })
             }
             ChainEditorRow::BranchOut(parent_path) => self.branch_out_at_end(&parent_path),
+            ChainEditorRow::RemoveSplit(path) => self.remove_chain_split(&path),
             // Enter on a parameter opens its step's own dialog. For a slider-driven value that
             // is redundant with Left/Right, and for everything else — an envelope, a table, a
             // marker-time list — it is the only way in, so one key covers both rather than
@@ -10924,6 +10986,8 @@ impl App {
                 }
             }
             ChainEditorRow::BranchHeader(path) => self.delete_chain_branch(&path),
+            // The marker row's own delete *is* its button: both remove the split.
+            ChainEditorRow::RemoveSplit(path) => self.remove_chain_split(&path),
             ChainEditorRow::Param { .. }
             | ChainEditorRow::AddStep { .. }
             | ChainEditorRow::BranchOut(_)
@@ -11744,7 +11808,7 @@ impl App {
     /// Like `open_cdp_params`, but overrides the freshly-built default `fields` with
     /// `values` when the count matches (silently keeps the defaults otherwise — e.g. the
     /// catalog's own param list for this process changed shape since `values` was saved).
-    /// Used by "Recall last process" (`Ctrl+L` in the browser, `App::recall_last_process`)
+    /// Used by "Recall last process" (`Ctrl+R` in the browser, `App::recall_last_process`)
     /// to reopen the params dialog exactly as it was last applied.
     fn open_cdp_params_with_values(
         &mut self,
@@ -11783,7 +11847,7 @@ impl App {
         }
     }
 
-    /// "Recall last process" (`Ctrl+L` in the CDP Process browser): reopens the params
+    /// "Recall last process" (`Ctrl+R` in the CDP Process browser): reopens the params
     /// dialog for the last successfully-*applied* process (not Preview), prefilled with its
     /// exact saved values — the single-process counterpart to the chain editor's own `l`
     /// ("Recall last chain"). Shows an inline info dialog instead of silently doing nothing
@@ -11806,7 +11870,7 @@ impl App {
     ///
     /// One function rather than two calls at each of four sites — the two CDP Apply branches and
     /// the two Praat ones — because that is exactly how they drifted: the Praat side recorded a
-    /// process as recent but never as last, so `Ctrl+L` skipped every Praat run and recalled
+    /// process as recent but never as last, so recall skipped every Praat run and recalled
     /// whatever CDP process preceded them, however long ago (user report, 2026-08-03). The two
     /// facts are recorded together or not at all.
     ///
@@ -15230,7 +15294,7 @@ impl App {
                     // Same pairing as the two Apply branches in each tick handler. This path —
                     // Apply straight after a Preview whose parameters still match, i.e. the
                     // ordinary way of working — had the same gap they did: recorded as recent,
-                    // never as last, so `Ctrl+L` skipped it.
+                    // never as last, so recall skipped it.
                     let buffers = variadic_input
                         .as_ref()
                         .map(|v| self.variadic_input_buffer_refs(v))
@@ -15644,7 +15708,7 @@ impl App {
                     // Captured up front, exactly as `tick_cdp` does, because both Apply branches
                     // below need them after `pending.fields` has been moved from. Without this
                     // the Praat side recorded a process as *recent* but never as the *last* one,
-                    // so `Ctrl+L` skipped past every Praat run and recalled the last CDP process
+                    // so recall skipped past every Praat run and recalled the last CDP process
                     // instead — however long ago that was (user report, 2026-08-03).
                     let last_process_values: Vec<crate::model::cdp::ParamValue> =
                         pending.fields.iter().map(CdpField::to_value).collect();
@@ -17922,7 +17986,7 @@ impl App {
                     );
                     // Same "auto-save on a real Apply, not Preview" treatment
                     // `chain_last::save_last_chain` gives a whole chain — recalled via
-                    // `Ctrl+L` in the browser (`App::recall_last_process`).
+                    // `Ctrl+R` in the browser (`App::recall_last_process`).
                     let last_process_values: Vec<crate::model::cdp::ParamValue> =
                         pending.fields.iter().map(CdpField::to_value).collect();
                     // Recall must restore the extra inputs too, or re-running the last
@@ -23166,6 +23230,10 @@ impl App {
                 Confirm::RevertEnvelopeToConstant => {
                     " Delete envelope and switch back to constant value? — (y) delete · (Esc) cancel ".to_string()
                 }
+                Confirm::RemoveChainSplit { steps, .. } => {
+                    let plural = if *steps == 1 { "step" } else { "steps" };
+                    format!(" Remove this split? {steps} {plural} in its branches go too — (y) remove · (Esc) cancel ")
+                }
             };
             render_confirm(frame, area, &text);
         }
@@ -28192,7 +28260,7 @@ fn render_cdp_browser_dialog(
             Span::styled(":page  ", label_style),
             Span::styled("Enter", hint_style),
             Span::styled(":open  ", label_style),
-            Span::styled("Ctrl+l", hint_style),
+            Span::styled("Ctrl+R", hint_style),
             Span::styled(":recall last  ", label_style),
             Span::styled("Esc", hint_style),
             Span::styled(":cancel", label_style),
@@ -30032,11 +30100,11 @@ fn render_cdp_chain_editor_dialog(
     // A selected row uses one uniform highlight for the whole line (see `theme.rs`'s own
     // convention) rather than layering the shortcut accent on top of it.
     let preset_line = if preset_selected {
-        Line::from(Span::styled(format!("{preset_lead}r: Recall last chain"), preset_style))
+        Line::from(Span::styled(format!("{preset_lead}Ctrl+R: Recall last chain"), preset_style))
     } else {
         Line::from(vec![
             Span::styled(preset_lead, preset_style),
-            Span::styled("r", hint_style),
+            Span::styled("Ctrl+R", hint_style),
             Span::styled(": Recall last chain", label_style),
         ])
     };
@@ -30081,14 +30149,6 @@ fn render_cdp_chain_editor_dialog(
                 rendered.push((*cell, Line::from(Span::styled(
                     format!(" \u{25b8} IN    {chain_input}"),
                     disabled_style,
-                ))));
-                continue;
-            }
-            // The fan-out. Drawn above the columns; the combiner that gathers them is below.
-            DisplayRow::Split { count } => {
-                rendered.push((*cell, Line::from(Span::styled(
-                    format!(" \u{2443} SPLIT into {count}"),
-                    Style::default().fg(theme::ACTIVE).bg(theme::SURFACE0),
                 ))));
                 continue;
             }
@@ -30345,6 +30405,23 @@ fn render_cdp_chain_editor_dialog(
                     }
                 }
                 spans
+            }
+            // The fan-out marker, and the button that undoes it. The combiner is drawn *below*
+            // the columns it gathers, so this line is the only place the split itself is named,
+            // which makes it where the thing that removes it belongs.
+            ChainEditorRow::RemoveSplit(path) => {
+                let count = crate::model::cdp::step_at(&state.chain, path)
+                    .map(|step| step.branches.len())
+                    .unwrap_or(0);
+                let marker = format!(" \u{2443} SPLIT into {count}");
+                // Only the button inverts. The rest of the line names the split rather than
+                // doing anything, so highlighting all of it would mark a whole structure as
+                // "selected" when what is selected is one thing you can press (user report).
+                vec![
+                    Span::styled(marker, Style::default().fg(theme::ACTIVE).bg(theme::SURFACE0)),
+                    Span::styled("        ", Style::default().bg(theme::SURFACE0)),
+                    Span::styled("\u{2a2f} Remove branch", button_style(selected)),
+                ]
             }
             ChainEditorRow::BranchOut(_) => {
                 let indent = chain_indent(depth, ChainIndent::Step);
@@ -30638,7 +30715,7 @@ fn render_cdp_chain_editor_dialog(
                 Span::styled(":preview here  ", preview_here_label_style),
                 Span::styled("a", hint_style),
                 Span::styled(":preview all  ", label_style),
-                Span::styled("r", hint_style),
+                Span::styled("Ctrl+R", hint_style),
                 Span::styled(":recall  ", label_style),
                 Span::styled("Del", hint_style),
                 Span::styled(":delete  ", label_style),
@@ -40434,7 +40511,7 @@ mod tests {
             "Enter:open/run",
             "p:preview here",
             "a:preview all",
-            "r:recall",
+            "Ctrl+R:recall",
             "Del:delete",
             "s:save",
             "Esc:close",
@@ -42719,6 +42796,110 @@ mod tests {
         );
     }
 
+    /// Down from the first row reaches the last in exactly one press per row, and Up walks back.
+    ///
+    /// `move_chain_selection` finds the cursor with `position`, which returns the *first* match,
+    /// so a duplicated row pulled Down back to `first_copy + 1` and the selection bounced between
+    /// two places forever — the cursor could not be moved past that part of the chain at all
+    /// (user report). The traversal is pinned here as well as the uniqueness that allows it,
+    /// since any future way of producing a repeated row would break navigation the same way.
+    #[test]
+    fn arrow_keys_walk_every_chain_row_without_getting_stuck() {
+        use crate::model::cdp::PathSeg::{Branch as B, Step as S};
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step(crate::model::cdp::native::MIXER_KEY)],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        crate::model::cdp::branch_at_mut(&mut chain, &[S(0), B(0)])
+            .unwrap()
+            .steps
+            .push(chain_step("combine_mean_1"));
+        chain.normalize_branches(&app.cdp_catalog);
+
+        let rows = {
+            let state = fresh_chain_editor_state(chain);
+            let rows = chain_editor_rows(&state, &app.cdp_catalog);
+            app.cdp_chain_editor = Some(state);
+            rows
+        };
+        app.dialog = Some(Dialog::CdpChainEditor);
+        app.cdp_chain_editor.as_mut().unwrap().selected = rows[0].clone();
+
+        // One press, one row, all the way down.
+        for expected in rows.iter().skip(1) {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            assert_eq!(
+                &app.cdp_chain_editor.as_ref().unwrap().selected,
+                expected,
+                "Down did not advance one row"
+            );
+        }
+        // And back up again.
+        for expected in rows.iter().rev().skip(1) {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+            assert_eq!(
+                &app.cdp_chain_editor.as_ref().unwrap().selected,
+                expected,
+                "Up did not go back one row"
+            );
+        }
+    }
+
+    /// No row may appear twice in the layout, at any nesting.
+    ///
+    /// `state.selected` is one row and the click handler indexes `dialog_row_rects` by position,
+    /// so a duplicated row lights two cursors that move together and routes a click to whichever
+    /// copy came first. That is exactly what a dual-input step inside a combiner's column did:
+    /// `layout_chain_join` dispatched on "has branches" rather than on being a combiner, so the
+    /// step got a split frame *and* drew its own branch inline (user report, with a screenshot
+    /// of two cursors).
+    #[test]
+    fn no_chain_editor_row_is_ever_laid_out_twice() {
+        use crate::model::cdp::PathSeg::{Branch as B, Step as S};
+        let app = new_app(Some(doc(0.1, 100)), None);
+
+        // A mixer whose first leg holds a dual-input step, which itself carries a branch: the
+        // shape from the report, and the deepest one `MAX_SPLIT_DEPTH` allows.
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step(crate::model::cdp::native::MIXER_KEY)],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        crate::model::cdp::branch_at_mut(&mut chain, &[S(0), B(0)])
+            .unwrap()
+            .steps
+            .push(chain_step("combine_mean_1"));
+        chain.normalize_branches(&app.cdp_catalog);
+
+        let state = fresh_chain_editor_state(chain);
+        let rows = chain_editor_rows(&state, &app.cdp_catalog);
+        let mut seen: Vec<&ChainEditorRow> = Vec::new();
+        for row in &rows {
+            assert!(
+                !seen.contains(&row),
+                "row laid out twice: {row:?}\nfull list: {rows:#?}"
+            );
+            seen.push(row);
+        }
+
+        // And the dual-input step inside the leg is drawn as an ordinary step: its branch is a
+        // row of its own, with no split marker or join frame around it.
+        assert!(
+            rows.contains(&ChainEditorRow::BranchHeader(vec![S(0), B(0), S(0), B(0)])),
+            "the dual-input step's second input is a row of that step"
+        );
+        assert!(
+            !rows.contains(&ChainEditorRow::RemoveSplit(vec![S(0), B(0), S(0)])),
+            "and it is not framed as a split, since nothing divides there"
+        );
+    }
+
     /// A dual-input CDP process reads input 0 from the running buffer, so its branch is drawn
     /// as a row of the step — "2nd input: ..." above its parameters — not as a column under a
     /// split with the step in a JOIN box below. It read "SPLIT into 1" once, describing an
@@ -42947,11 +43128,11 @@ mod tests {
         assert!(state.buffer_picks.is_empty());
     }
 
-    /// 'l' loads whatever chain `chain_last::save_last_chain` most recently persisted into the
+    /// Ctrl+R loads whatever chain `chain_last::save_last_chain` most recently persisted into the
     /// draft — end to end through the real key-handling path, not the lower-level helper
     /// directly — clearing any stale `buffer_picks`/`preset_selected` from before the load.
     #[test]
-    fn r_key_recalls_the_last_run_chain_via_real_key_handling() {
+    fn ctrl_r_recalls_the_last_run_chain_via_real_key_handling() {
         let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_chain_last_key_test_{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
@@ -42972,7 +43153,7 @@ mod tests {
         app.cdp_chain_editor = Some(state);
         app.dialog = Some(Dialog::CdpChainEditor);
 
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
 
         let state = app.cdp_chain_editor.as_ref().expect("chain editor still open");
         assert_eq!(state.chain, last_chain, "'r' should load the auto-saved chain into the draft");
@@ -42984,9 +43165,9 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
-    /// 'r' with no chain ever run shows an inline error instead of silently doing nothing.
+    /// Ctrl+R with no chain ever run shows an inline error instead of silently doing nothing.
     #[test]
-    fn r_key_with_no_last_chain_shows_an_inline_error() {
+    fn ctrl_r_with_no_last_chain_shows_an_inline_error() {
         let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_chain_last_key_empty_test_{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
@@ -42996,7 +43177,7 @@ mod tests {
         app.cdp_chain_editor = Some(fresh_chain_editor_state(crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(), name: "draft".into(), steps: Vec::new() }));
         app.dialog = Some(Dialog::CdpChainEditor);
 
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
 
         let state = app.cdp_chain_editor.as_ref().expect("chain editor still open");
         assert!(state.error.is_some(), "no chain has ever been run — 'r' should surface an error, not silently no-op");
@@ -44578,7 +44759,7 @@ mod tests {
 
     /// A successful single-process Apply auto-saves it (process key + exact field values)
     /// as the recallable "last process" -- the single-process counterpart to
-    /// `chain_last::save_last_chain`, recalled via `Ctrl+L` in the browser
+    /// `chain_last::save_last_chain`, recalled via `Ctrl+R` in the browser
     /// (`App::recall_last_process`). Reuses the same "fake copy job" trick
     /// `applying_a_process_records_it_as_recently_used` does, since this only needs a real
     /// `Apply` completion to fire, not a real CDP binary.
@@ -44667,10 +44848,10 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
-    /// `Ctrl+L` in the CDP Process browser reopens the params dialog for the saved "last
+    /// `Ctrl+R` in the CDP Process browser reopens the params dialog for the saved "last
     /// process," prefilled with its exact saved values — not just its defaults.
     #[test]
-    fn ctrl_l_in_browser_recalls_the_last_process_prefilled_with_its_values() {
+    fn ctrl_r_in_browser_recalls_the_last_process_prefilled_with_its_values() {
         let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_last_process_recall_test_{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
@@ -44685,10 +44866,10 @@ mod tests {
         });
 
         app.open_cdp_browser();
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
 
         let Some(Dialog::CdpParams { catalog_index: opened_index, fields, .. }) = &app.dialog else {
-            panic!("Ctrl+L should open the params dialog prefilled from the last process")
+            panic!("Ctrl+R should open the params dialog prefilled from the last process")
         };
         assert_eq!(*opened_index, catalog_index);
         assert_eq!(fields.len(), 1);
@@ -44702,7 +44883,7 @@ mod tests {
     /// `Ctrl+L` with no process ever applied shows an inline info message instead of
     /// silently doing nothing.
     #[test]
-    fn ctrl_l_in_browser_with_no_last_process_shows_an_info_message() {
+    fn ctrl_r_in_browser_with_no_last_process_shows_an_info_message() {
         let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_last_process_empty_test_{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
@@ -44711,7 +44892,7 @@ mod tests {
         let mut app = new_app(Some(doc(0.1, 44100)), None);
         app.open_cdp_browser();
 
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
 
         assert!(matches!(app.dialog, Some(Dialog::Info { .. })), "no process has ever run -- Ctrl+L should surface a message, not silently no-op");
 
@@ -44720,7 +44901,7 @@ mod tests {
     }
 
     /// A bare (non-Ctrl) 'l' in the browser must still type into the live search box, exactly
-    /// as before this feature existed — only `Ctrl+L` is the "recall last process" command,
+    /// as before this feature existed — only `Ctrl+R` is the "recall last process" command,
     /// since a bare letter here has no free key the way it does in the CDP Chain editor
     /// (which has no search box to collide with).
     #[test]
