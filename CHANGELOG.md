@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-09-05 (2.11.8)
 
 ### Envelopes in a chain kept their own mapping
 
