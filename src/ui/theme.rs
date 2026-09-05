@@ -91,6 +91,23 @@ pub const WARNING_BG: Color = SURFACE1;
 /// Inline heads-up annotations that should read as a step below regular muted text (e.g.
 /// the CDP browser's ">1 inputs" note) — deliberately dimmer than `SUBTEXT0`/`DB_SCALE`,
 /// which are for text that's still meant to be read at a glance.
+/// A row that *does* something when you press Enter on it — "+ Add step", "Branch out", "Run".
+///
+/// Peach, the same accent shortcuts wear, because these rows are the same kind of thing: the
+/// place an action is offered. It reads as distinct from the process names beside them (mauve)
+/// and from the parameters below them (plain text), so a glance down a chain separates what it
+/// *is* from what you can *do* to it.
+pub const BUTTON: Color = PEACH;
+
+/// A process's name in the ExtProcess chain editor.
+///
+/// A chain row carries four kinds of thing at once — a step number, the process's name, its
+/// backend badge and its parameters — and with all of them in `TEXT` the name was the hardest to
+/// pick out despite being what you scan for. Mauve because it is the one accent not already
+/// spoken for in a dialog: peach is "where you are", green is "this can take an envelope", and
+/// the badges are deliberately muted.
+pub const PROCESS_NAME: Color = MAUVE;
+
 pub const ANNOTATION: Color = OVERLAY0;
 
 /// A section heading inside a parameter dialog, and the rule drawn from it out to the dialog's

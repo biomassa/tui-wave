@@ -71,6 +71,14 @@ fn list_chains_in(dir: &Path) -> Vec<CdpChain> {
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"))
         .filter_map(|p| std::fs::read_to_string(&p).ok())
         .filter_map(|text| toml::from_str::<CdpChain>(&text).ok())
+        // Every reader of a saved chain comes through here, so this is where the pre-branches
+        // `side_chain` shape is folded into `branches` — one place, rather than each caller
+        // remembering to. Topping a step up to its process's required branch count needs the
+        // catalog and so happens in the editor's own load paths instead.
+        .map(|mut chain| {
+            chain.migrate_legacy();
+            chain
+        })
         .collect();
     chains.sort_by(|a, b| a.name.cmp(&b.name));
     chains
@@ -119,11 +127,9 @@ mod tests {
     fn sample_chain(name: &str) -> CdpChain {
         CdpChain {
             name: name.into(),
-            steps: vec![ChainStep {
-                process_key: "blur_avrg".into(),
-                values: vec![ParamValue::Number(4.0)],
-                side_chain: Vec::new(),
-            }],
+            steps: vec![ChainStep::new("blur_avrg", vec![ParamValue::Number(4.0)])],
+            bank: Default::default(),
+            output: Default::default(),
         }
     }
 
@@ -135,18 +141,184 @@ mod tests {
     }
 
     #[test]
-    fn save_then_list_round_trips_a_chain_with_a_side_chain() {
+    fn save_then_list_round_trips_a_chain_with_a_branch() {
         let dir = TempDir::new("roundtrip");
         let mut chain = sample_chain("My Vocoder Setup");
-        chain.steps[0].side_chain = vec![ChainStep {
-            process_key: "focus_freeze_1".into(),
-            values: vec![ParamValue::Number(1.0)],
-            side_chain: Vec::new(),
+        chain.steps[0].branches = vec![crate::model::cdp::chain::Branch {
+            source: crate::model::cdp::BranchSource::Buffer,
+            steps: vec![ChainStep::new("focus_freeze_1", vec![ParamValue::Number(1.0)])],
         }];
         save_chain_in(&dir.0, &chain);
 
         let loaded = list_chains_in(&dir.0);
         assert_eq!(loaded, vec![chain]);
+    }
+
+    /// Everything a chain can hold must survive a save/load, not just the shape the editor
+    /// happened to be tested with: the envelope bank and the references into it, every branch
+    /// source, nested branches, a native combiner, the output destination, and every
+    /// `ParamValue` variant.
+    ///
+    /// The whole-struct comparison at the end is the real assertion; the individual ones above
+    /// it are there so a failure names the part that broke instead of printing two chains. The
+    /// serialization check comes first because `save_chain_in` ignores a failed
+    /// `toml::to_string_pretty` — a chain TOML cannot represent would otherwise be silently not
+    /// saved, and the only symptom would be a preset missing from the list.
+    #[test]
+    fn a_chain_holding_everything_it_can_hold_round_trips() {
+        use crate::model::cdp::chain::{Branch, BranchSource, ChainOutput, PathSeg::Branch as B, PathSeg::Step as S};
+        use crate::model::cdp::envelope_bank::{BankEnvelope, EnvelopeBank, EnvelopeRef};
+        use crate::model::cdp::def::{CrystalVdat, HiliteBandRow};
+
+        let dir = TempDir::new("everything");
+
+        // Two curves, referenced from two different steps at different ranges and polarities.
+        let bank = EnvelopeBank {
+            envelopes: vec![
+                BankEnvelope { name: "swell".into(), points: vec![(0.0, 0.0), (0.5, 1.0), (1.0, 0.25)] },
+                BankEnvelope { name: "stutter".into(), points: vec![(0.0, 1.0), (1.0, 0.0)] },
+            ],
+        };
+
+        // A step carrying one of every `ParamValue` variant, so a variant that cannot be
+        // serialized is caught here rather than by a user losing a saved chain.
+        let every_value = ChainStep::new(
+            "blur_avrg",
+            vec![
+                ParamValue::Number(4.25),
+                ParamValue::Toggle(true),
+                ParamValue::Choice(2),
+                ParamValue::EnvelopeRef(EnvelopeRef {
+                    name: "swell".into(),
+                    min: 1.0,
+                    max: 100.0,
+                    invert: true,
+                }),
+                ParamValue::List(vec![0.5, 1.5, 2.5]),
+                ParamValue::Table(vec![vec![0.0, 1.0], vec![2.0, 3.0]]),
+                ParamValue::MarkerTimeList(vec![('a', 0.25), ('b', 1.75)]),
+                ParamValue::HiliteBand(vec![HiliteBandRow {
+                    lofrq: 100.0,
+                    hifrq: 2000.0,
+                    amp_bit: true,
+                    ramp_bit: false,
+                    transpose_bit: true,
+                    add_bit: false,
+                    amp1: 0.25,
+                    amp2: 0.75,
+                    transpose_value: 1.5,
+                    transpose_additive: true,
+                }]),
+                ParamValue::FormantBufferRef,
+                ParamValue::FilePath("/tmp/some/where.wav".into()),
+                ParamValue::Text("free text".into()),
+                ParamValue::CrystalVdat(CrystalVdat {
+                    vertices: vec![[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]],
+                    envelope: vec![(0.0, 0.0), (1.0, 1.0)],
+                }),
+            ],
+        );
+
+        // A native combiner with both leg shapes: a tap that nests a branch of its own, and a
+        // leg reading the finished output of the sibling beside it. Two legs, because
+        // `native::MAX_MIX_LEGS` is the ceiling and an over-wide fixture would not be a chain
+        // the editor could produce.
+        let mut inner_combine = ChainStep::new("combine_mean_1", vec![ParamValue::Number(0.5)]);
+        inner_combine.branches = vec![Branch {
+            // A step-naming `From`, as against the branch-naming one on the mixer below.
+            source: BranchSource::From(vec![S(0)]),
+            steps: vec![ChainStep::new("focus_freeze_1", vec![ParamValue::Number(1.0)])],
+        }];
+        let mut mixer = ChainStep::new(
+            crate::model::cdp::native::MIXER_KEY,
+            vec![
+                ParamValue::Toggle(true),
+                ParamValue::Number(-0.1),
+                ParamValue::EnvelopeRef(EnvelopeRef {
+                    name: "stutter".into(),
+                    min: -60.0,
+                    max: 12.0,
+                    invert: false,
+                }),
+                ParamValue::Toggle(false),
+                ParamValue::Number(-6.0),
+                ParamValue::Toggle(true),
+            ],
+        );
+        mixer.branches = vec![
+            Branch { source: BranchSource::Tap, steps: vec![inner_combine] },
+            // Leg B reads leg A: siblings finish left to right.
+            Branch { source: BranchSource::From(vec![S(1), B(0)]), steps: Vec::new() },
+        ];
+
+        let chain = CdpChain {
+            name: "Everything / at once?".into(),
+            steps: vec![every_value, mixer],
+            bank,
+            // Not the default, so a round-trip that dropped it would show.
+            output: ChainOutput::NewBuffer,
+        };
+
+        assert!(
+            toml::to_string_pretty(&chain).is_ok(),
+            "a chain TOML cannot represent is silently never saved"
+        );
+
+        save_chain_in(&dir.0, &chain);
+        let loaded = list_chains_in(&dir.0);
+        assert_eq!(loaded.len(), 1, "the chain saved and came back");
+        let back = &loaded[0];
+
+        assert_eq!(back.name, chain.name, "a name with unsafe characters survives inside the file");
+        assert_eq!(back.output, ChainOutput::NewBuffer, "the output destination is part of the chain");
+        assert_eq!(back.bank, chain.bank, "the envelope bank round-trips, curves and all");
+        assert_eq!(back.steps[0].values, chain.steps[0].values, "every ParamValue variant round-trips");
+        assert_eq!(
+            back.steps[1].branches.iter().map(|b| b.source.clone()).collect::<Vec<_>>(),
+            vec![BranchSource::Tap, BranchSource::From(vec![S(1), B(0)])],
+            "both leg sources, including the path a From names"
+        );
+        assert_eq!(
+            back.steps[1].branches[0].steps[0].branches[0].source,
+            BranchSource::From(vec![S(0)]),
+            "a branch nested inside a branch keeps its own source, path and all"
+        );
+
+        // The references still resolve against the bank that came back with them, which is what
+        // makes a recalled chain runnable rather than merely well-formed.
+        for step in [&back.steps[0], &back.steps[1]] {
+            for value in &step.values {
+                if let ParamValue::EnvelopeRef(reference) = value {
+                    assert!(
+                        back.bank.envelopes.iter().any(|e| e.name == reference.name),
+                        "recalled chain references \"{}\", which is not in its own bank",
+                        reference.name
+                    );
+                }
+            }
+        }
+
+        assert_eq!(*back, chain, "and nothing else changed on the way through");
+    }
+
+    /// Which document feeds a `Buffer` branch is deliberately *not* saved: it is a live pick in
+    /// the editor (`buffer_picks`), so a recalled chain asks for it again rather than naming a
+    /// buffer index that means something different in the next session.
+    #[test]
+    fn a_buffer_branch_saves_its_source_but_no_document() {
+        use crate::model::cdp::chain::{Branch, BranchSource};
+        let dir = TempDir::new("buffer_pick");
+        let mut chain = sample_chain("Side-chained");
+        chain.steps[0].branches =
+            vec![Branch { source: BranchSource::Buffer, steps: Vec::new() }];
+        save_chain_in(&dir.0, &chain);
+
+        let text = std::fs::read_to_string(chain_file_path(&dir.0, &chain.name)).unwrap();
+        assert!(text.contains("Buffer"), "the source itself is saved");
+        assert!(!text.contains("buffer_picks"), "the pick is not");
+
+        let loaded = list_chains_in(&dir.0);
+        assert_eq!(loaded[0].steps[0].branches[0].source, BranchSource::Buffer);
     }
 
     #[test]

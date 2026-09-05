@@ -415,6 +415,13 @@ pub enum PlanError {
     /// `MissingHeadTailMarks` this is not about a *parameter*: no field in the dialog can fix
     /// it, so `reason` is written as a whole user-facing sentence naming the shortfall.
     InputChannelCount { reason: String },
+    /// A `ParamValue::EnvelopeRef` reached the planner. It never should: a bank reference is
+    /// resolved to real `Breakpoints` by the chain runner *before* planning, against the audio
+    /// duration that step actually has, which is the whole point of the bank (see
+    /// `model::cdp::envelope_bank`). Reaching here means a chain path skipped that resolution,
+    /// so this is deliberately a hard error rather than a fallback to some default curve —
+    /// silently planning the wrong automation is exactly the failure the bank exists to end.
+    UnresolvedEnvelopeRef { param: String, name: String },
 }
 
 /// Complete Head/Tail pairs a DISTMORE process needs before it will run. CDP's own
@@ -603,6 +610,12 @@ fn plan_param(
                     ParamPlan { arg: format_arg(&param.flag, &format_number(value)), deferred: None }
                 }
             }
+        }
+        // Guarded by the `UnresolvedEnvelopeRef` check in `plan_args`, which every caller of
+        // this function passes through — see that check for why it is an error and not a
+        // fallback.
+        ParamValue::EnvelopeRef(reference) => {
+            unreachable!("unresolved envelope reference {:?} reached plan_param", reference.name)
         }
         ParamValue::Breakpoints(points) => {
             let super::def::ParamKind::Number { scale, .. } = &param.kind else {
@@ -852,6 +865,19 @@ fn build_process_args(
 ) -> Result<(Vec<String>, Vec<DeferredWindowTarget>), PlanError> {
     if values.len() != def.params.len() {
         return Err(PlanError::ParamCountMismatch { expected: def.params.len(), actual: values.len() });
+    }
+
+    // Every path into `plan_param` comes through here, so this one check is what lets that
+    // function treat an `EnvelopeRef` as unreachable. A bank reference must have been resolved
+    // to real `Breakpoints` by the chain runner before planning — against the duration the
+    // audio actually has at that step — so one arriving here means a chain path skipped that
+    // step. Erroring is deliberate: planning it as anything at all would write automation the
+    // user never asked for, which is the exact failure the bank exists to end.
+    if let Some((param, name)) = values.iter().zip(&def.params).find_map(|(v, p)| match v {
+        ParamValue::EnvelopeRef(r) => Some((p.name.clone(), r.name.clone())),
+        _ => None,
+    }) {
+        return Err(PlanError::UnresolvedEnvelopeRef { param, name });
     }
 
     let mut args = Vec::new();
@@ -1977,6 +2003,25 @@ fn plan_variadic_wav(
 /// on the two `.ana` files, `pvoc synth` the result back. Channel pairing follows
 /// `plan_dual_wav` (mono reused against stereo); the deferred ana-window-count param can't
 /// occur here (only `blur_blur` uses that scale and it's single-input).
+/// A dual-input spectral process: one analysis per input, the process, one resynthesis.
+///
+/// **The steps after it are deliberately not merged into this job**, unlike a run of
+/// single-input spectral steps (`plan_ana_chain`). It looks like an obvious optimisation — this
+/// process emits a `.ana`, so the next spectral step could read it directly instead of having it
+/// resynthesised and analysed again — and it was built, measured and reverted. The measurements,
+/// on `[combine mean, blur avrg 6]` against the real binaries:
+///
+/// - The round trip is **not** the lossy part. `synth(x.ana)` against
+///   `synth(anal(synth(x.ana)))` nulls at -95.8 dB. It costs time, not quality.
+/// - Merging changes the *result* substantially: correlation with the un-blurred combine falls
+///   from 0.94 to 0.52, and the output keeps a third of the pre-blur energy instead of half.
+///
+/// The reason is that a dual-input process's output is not an analysis of any real signal — it
+/// holds the averaged amplitudes and frequencies of *two* sounds. Resynthesising re-grounds that
+/// into something a following spectral process reads as it would any recording; handing it the
+/// construct directly makes the next process behave differently. Which is wanted is a musical
+/// question, so the existing behaviour stands rather than being silently changed under every
+/// saved chain.
 fn plan_dual_ana(
     def: &ProcessDef,
     values: &[ParamValue],

@@ -1,5 +1,120 @@
 # Changelog
 
+## Unreleased
+
+### ExtProcess chains: parallel branches, native combiners, a per-chain envelope bank
+
+The chain editor was a fixed 102x30 popup listing `N. Title` per step and nothing else. Two
+things it could not do: run signal paths in parallel and recombine them, and show what a chain's
+parameters are set to without opening each step in turn. Both are now there, and the editor is
+full-terminal.
+
+**Branches.** `ChainStep.side_chain` — a single sub-chain, usable only as input 2 of a CDP
+dual-input process, and always fed by a separately picked open file — becomes
+`branches: Vec<Branch>`, each with a `BranchSource`. `Buffer` is what a side-chain always was and
+what every saved chain migrates to. `Tap` is new: a copy of the signal *arriving at that step*,
+which is what makes "process this two ways and mix" expressible at all.
+
+There is deliberately no `Split` node. A combiner takes **every** leg from a branch, so an empty
+`Tap` leg is the dry signal and a leg with steps in it is a processed one, both tapping the same
+point. Splitting and joining are one node.
+
+Paths gained a segment type (`PathSeg::Step`/`Branch`) because "descend into the side-chain" is
+no longer the only move a path element can mean. Nesting stays unlimited.
+
+**Native combiners** (`model::cdp::native`), a fourth backend compiled into the binary like
+Airwindows and needing nothing installed:
+
+- **Mixer** — up to 8 legs, each with gain and phase invert, and a soft limiter on the *sum*.
+- **Crossfade** — two legs, equal-power (a linear blend dips ~3 dB in the middle), automatable.
+
+Unequal legs are reconciled once, in one place: pad to the longest, widen to the widest channel
+count *without* smearing a narrow leg across the extra channels, and resample to leg A's rate.
+Both are refused outside a chain, stated inline with Apply dimmed — they are still worth finding
+and reading about, and "add this inside a chain" is a better answer than the entry not existing.
+
+**A per-chain envelope bank**, which fixes a real bug rather than only adding a feature.
+
+A chain step's envelope was stored as breakpoints in *absolute seconds*, baked to whichever
+selection was live when it was drawn — and nothing recorded that duration. A chain saved against
+a 10-second selection and re-run against 3 wrote automation running off the end of the file;
+against 30 it finished in the first third; reopening its editor drew it against the wrong axis.
+
+Rather than patch the rescale, a raw `Breakpoints` is now **unrepresentable inside a chain**:
+`CdpChain::validate` rejects one. A step's automation is a reference into the chain's own bank,
+where curves are normalized 0-1 on both axes, and it is projected onto the real axis when the
+step runs — against the duration that step's audio *actually* has, so a chain stays correct
+across every selection length and at every point in the chain, including after a time-stretch.
+One shape can drive several parameters, each through its own range window and optionally
+inverted.
+
+**The editor.** Full terminal, and **legs are drawn as columns**: where a step branches, its
+legs sit side by side in boxes that start and finish level, so the fan-out and the join are
+shapes rather than something to infer from indentation. All columns share one vertical scroll,
+so the relationships hold as you move. Columns never narrow below a readable width — past that
+the view scrolls horizontally instead, because a column too thin for a label and a slider shows
+none of what the layout exists to show.
+
+Only a native combiner's columns are a split. A dual-input CDP process reads input 0 from the
+running buffer and takes its one branch as input 1, so its marker reads `SECOND INPUT` rather
+than the earlier `SPLIT into 1`.
+
+Every box carries its own `+ Add step`, inserting at that boundary. One trailing row per list
+left no way to add a step *before* a combiner, so a chain beginning with one could not be given
+anything to feed it. Inserting shifts the siblings after it, so `buffer_picks` and every
+`BranchSource::From` path move with them.
+
+A dual-input CDP process is no longer drawn as a split at all. It reads input 0 from the running
+buffer, so it is an ordinary step whose second infile is a row of its own — `← 2nd input: ...`,
+with any sub-chain on that input nested under it.
+
+**Delete moved to `Del`** for saved presets, chain steps and bank envelopes; `d` was one slip of
+the finger from the letters that type into the search box beside it. The envelope editor keeps
+`d` for deleting a saved envelope preset, because `Del` there already removes a breakpoint.
+
+**The envelope bank pane** draws each curve over two rows instead of one and names the parameters
+it drives, wrapped, instead of counting them. A curve opened from the panel now draws over real
+audio — the chain's input, or the file feeding a branch that holds one of its parameters, with
+`w` switching between them. And `e` gained a slot at the end of its walk that makes a *new*
+curve, so a parameter can get a shape of its own once the bank already holds shapes.
+
+Every parameter is a row with its own `param_slider`, driven by Left/Right, with toggles and
+choices cycling in place; anything whose editor is a sub-dialog shows a one-line summary and
+opens on Enter, so no editor is reimplemented. Every step shows all of its parameters; there is
+no fold.
+
+**Keys.** `↑↓` move by row and `PgUp`/`PgDn` by a screenful; `Tab` steps between processes and
+the places a step can be added, skipping the parameters in between. `←→` adjust the focused
+value, exactly as in a params dialog — and once a parameter carries a curve they walk the
+envelope bank and back to a constant instead, since there is no number left for a slider to
+move. `e` attaches an envelope, `E` draws it, `i` inverts it, `Ctrl+E` crosses to the envelope
+bank. `p` previews *what you are pointing at* — up to the selected step, or the whole chain
+elsewhere — and `a` previews all; `r` recalls the last chain. Typing a digit on a parameter row
+replaces its value, as a number field does everywhere else in this app.
+
+**The envelope bank** is a navigable column of its own: `d` deletes (refused while anything
+still reads the curve, with the count), `D` duplicates one so a shared shape can be diverged
+without redrawing it, and Enter draws the selected curve through the first parameter that reads
+it. Curves are named `Env 1`, `Env 2`… rather than after the parameter they were first drawn
+on, since the moment a second parameter references one, that name describes only where it
+started. An automated parameter's row states **what the curve actually produces** in that
+parameter's units, not the window it could reach.
+
+A combiner lists its legs *above* its parameters — "Leg A gain" over the leg it belongs to reads
+backwards — while every other step keeps its parameters next to it.
+
+### Fixed
+
+- **`remap_buffer_picks_after_swap`/`remove_buffer_picks_under` cross-contaminated branches.**
+  Both compared only the path element *at* a given depth without checking the prefix matched, so
+  reordering steps inside one branch silently repointed picks belonging to a *different* step's
+  branch — at another document.
+- **`configure_chain_side_chain` targeted a step rather than its branch**, which under the new
+  path type names no step list: the commit bailed and the suspend stack never popped.
+- **A merged spectral run bypassed envelope resolution**, so an automated parameter inside a run
+  of 2+ adjacent spectral steps would have been refused by the planner.
+
+
 ## 2026-09-01 (2.11.6)
 
 - **praatAudioTools bumped to `4ad5d6e`**, for one process: `Neural_Ambient_Drone_Designer`, from
