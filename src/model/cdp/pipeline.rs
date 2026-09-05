@@ -466,6 +466,19 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 
 /// Computes the real analysis window count from a `.ana` file's `decfactor` and the number
 /// of samples that went into the analysis.
+/// The analysis decimation factor `pvoc anal` will use for these settings, without running it.
+///
+/// Verified against the real binary across every combination tried: `decfactor` in the `.ana`
+/// header is exactly `points / 2^overlap` (1024/2^3 = 128, 1024/2^1 = 512, 512/2^3 = 64,
+/// 2048/2^3 = 256). That makes the window count predictable *before* the analysis exists, which
+/// is what lets the editor say what a `PercentOfAnaWindowCount` value comes to.
+///
+/// The runner still reads the real header rather than trusting this, because a plan that guessed
+/// wrong would hand CDP an out-of-range argument. This is for display only.
+pub fn predicted_decfactor(pvoc: &PvocSettings) -> u32 {
+    (pvoc.points >> pvoc.overlap.min(31)).max(1)
+}
+
 pub fn window_count_from_decfactor(len_samples: usize, decfactor: u32) -> u32 {
     ((len_samples as f64 / decfactor as f64).ceil() as u32).max(1)
 }

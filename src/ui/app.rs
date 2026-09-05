@@ -4360,6 +4360,48 @@ fn chain_steps_deep(steps: &[crate::model::cdp::ChainStep]) -> usize {
         .sum()
 }
 
+/// What a `PercentOfAnaWindowCount` percentage comes to in analysis windows, for the audio the
+/// chain reads.
+///
+/// Three CDP parameters are declared as a percentage of the analysis window count, and the number
+/// on the row is that percentage. It reads as a modest figure on a 0..100 scale and is not one: a
+/// Spectral Blur set to 80 asks the process to average each window over 80% of every window in
+/// the file, which no envelope timing can make local (user report — a blur drawn to fall away
+/// early stayed audible almost to the end, because at that width it cannot be anything else).
+///
+/// Approximate, and marked as such on the row. It is exact for a step reading the chain's own
+/// input, and an estimate for one further down a chain whose length has changed — the true count
+/// is only known once `pvoc anal` has run, which is why the runner resolves the real value from
+/// the `.ana` header rather than from this.
+fn ana_window_count_for(len_samples: usize) -> u32 {
+    let pvoc = crate::model::cdp::PvocSettings::default();
+    crate::model::cdp::pipeline::window_count_from_decfactor(
+        len_samples,
+        crate::model::cdp::pipeline::predicted_decfactor(&pvoc),
+    )
+}
+
+/// The " (n windows)" note appended to a percent-of-window-count value, or nothing at all for
+/// every other parameter.
+fn ana_window_note(param: &crate::model::cdp::ParamDef, values: &[f64], len_samples: usize) -> String {
+    use crate::model::cdp::def::NumberScale;
+    let crate::model::cdp::ParamKind::Number { scale: NumberScale::PercentOfAnaWindowCount, .. } =
+        &param.kind
+    else {
+        return String::new();
+    };
+    if len_samples == 0 {
+        return String::new();
+    }
+    let total = ana_window_count_for(len_samples);
+    let windows = |percent: f64| (f64::from(total) * percent / 100.0).max(1.0).round() as u32;
+    match values {
+        [one] => format!("  (\u{2248}{} of {total} windows)", windows(*one)),
+        [lo, hi] => format!("  (\u{2248}{} \u{2026} {} of {total} windows)", windows(*lo), windows(*hi)),
+        _ => String::new(),
+    }
+}
+
 /// Whether this step gathers *every* input from a branch, and so is drawn as a split with
 /// columns. False for a dual-input CDP process, whose single branch is only its second infile.
 /// An unknown process is not a combiner: the layout it would get is the more elaborate one.
@@ -23200,6 +23242,10 @@ impl App {
             && self.cdp_chain_edit_target.is_some()
             && !matches!(self.dialog, Some(Dialog::CdpChainEditor))
         {
+            let chain_input_len = self
+                .operation_range(self.active_document, self.snap_to_zero)
+                .map(|(a, b)| b.saturating_sub(a))
+                .unwrap_or(0);
             render_cdp_chain_editor_dialog(
                 frame,
                 area,
@@ -23207,6 +23253,7 @@ impl App {
                 &self.cdp_catalog,
                 &self.documents,
                 &self.chain_input_summary(),
+                chain_input_len,
             );
         }
         let dialog_rects = self
@@ -23216,7 +23263,11 @@ impl App {
                 render_dialog(
                     frame, area, d, &self.cdp_catalog, &self.curve_histories, &self.curves,
                     &self.formant_buffers, self.cdp_chain_editor.as_ref(), &self.documents,
-                    &self.chain_input_summary(), self.graphics_available(),
+                    &self.chain_input_summary(),
+                    self.operation_range(self.active_document, self.snap_to_zero)
+                        .map(|(a, b)| b.saturating_sub(a))
+                        .unwrap_or(0),
+                    self.graphics_available(),
                     self.praat_picture.as_ref(),
                     blocked.as_deref(),
                 )
@@ -24621,6 +24672,7 @@ fn render_dialog(
     chain_editor: Option<&ChainEditorState>,
     documents: &[Document],
     chain_input: &str,
+    chain_input_len: usize,
     graphics_mode: bool,
     // The figure `Dialog::PraatPicture` shows. Passed in rather than read off `App` for the
     // same reason `formant_buffers` is: this function only ever gets `&Dialog`.
@@ -24762,7 +24814,7 @@ fn render_dialog(
             if let Some(edit) = chain_editor.and_then(|s| s.envelope.as_ref()) {
                 return render_cdp_envelope_editor(frame, area, &[], edit, None, curves, graphics_mode);
             }
-            return render_cdp_chain_editor_dialog(frame, area, chain_editor, catalog, documents, chain_input);
+            return render_cdp_chain_editor_dialog(frame, area, chain_editor, catalog, documents, chain_input, chain_input_len);
         }
         Dialog::AutoTrim {
             method, threshold, min_silence, pad_lead, pad_trail, fade_ms, snap, remove_gaps,
@@ -30057,6 +30109,9 @@ fn render_cdp_chain_editor_dialog(
     catalog: &crate::model::cdp::CdpCatalog,
     documents: &[Document],
     chain_input: &str,
+    // Samples the chain will read, for turning a percent-of-window-count parameter into the
+    // window count it comes to. Zero when nothing is open, which suppresses the note.
+    chain_input_len: usize,
 ) -> Vec<Rect> {
     // Full terminal, less a one-cell margin so the border reads as a window rather than as the
     // screen edge. This was a fixed 102x30 popup, which was enough for one line per step and
@@ -30363,9 +30418,12 @@ fn render_cdp_chain_editor_dialog(
                             .produced_span(reference)
                             .unwrap_or((reference.min, reference.max));
                         let flip = if reference.invert { "  inv" } else { "" };
+                        // A percentage of the analysis window count is not a modest number on a
+                        // 0..100 scale: 80 means averaging over 80% of every window in the file.
+                        let note = ana_window_note(param, &[lo, hi], chain_input_len);
                         spans.push(Span::styled(
                             format!(
-                                "\u{2190} \u{2314} {}   {} \u{2026} {}{flip}",
+                                "\u{2190} \u{2314} {}   {} \u{2026} {}{flip}{note}",
                                 reference.name,
                                 format_cdp_number_for_display(round3(lo), false),
                                 format_cdp_number_for_display(round3(hi), false),
@@ -30415,7 +30473,11 @@ fn render_cdp_chain_editor_dialog(
                                 ));
                             }
                             None => spans.push(Span::styled(
-                                format_cdp_number_for_display(now, *integer),
+                                format!(
+                                    "{}{}",
+                                    format_cdp_number_for_display(now, *integer),
+                                    ana_window_note(param, &[now], chain_input_len)
+                                ),
                                 if selected { style } else { base },
                             )),
                         }
@@ -43116,6 +43178,50 @@ mod tests {
             app.cdp_pending_chain_run.is_none(),
             "the chain must finish; a leg that read the mixer's own output never would"
         );
+    }
+
+    /// A percent-of-window-count parameter says what its percentage comes to.
+    ///
+    /// Spectral Blur's "Blurring" is a percentage of the analysis window count. 80 reads as a
+    /// modest number on a 0..100 scale and asks the process to average each window over 80% of
+    /// every window in the file, which no envelope timing can make local (user report). The row
+    /// now states the count, and every other parameter is left alone.
+    #[test]
+    fn a_percent_of_window_count_parameter_says_what_it_comes_to() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let blur = app.cdp_catalog.processes.iter().find(|p| p.key == "blur_blur").unwrap();
+        let blurring = &blur.params[0];
+        // 3.74s at 44.1k, the reported case: 164934 samples over a decfactor of 128.
+        let len = 164_934;
+        assert_eq!(ana_window_count_for(len), 1289);
+
+        let note = ana_window_note(blurring, &[80.02], len);
+        assert!(note.contains("1031"), "80% of 1289 windows: {note}");
+        assert!(note.contains("1289"), "and says what the total is: {note}");
+
+        let span = ana_window_note(blurring, &[0.1, 80.02], len);
+        assert!(span.contains("1 \u{2026} 1031"), "a span reads as a span: {span}");
+
+        // A parameter on any other scale says nothing extra, and neither does an unknown length.
+        let plain = app.cdp_catalog.processes.iter().find(|p| p.key == "distort_delete_2").unwrap();
+        assert_eq!(ana_window_note(&plain.params[0], &[15.0], len), "");
+        assert_eq!(ana_window_note(blurring, &[80.02], 0), "");
+    }
+
+    /// `pvoc anal`'s decimation factor is `points / 2^overlap`, checked against the real binary
+    /// at 1024/o1, 1024/o2, 1024/o3, 1024/o4, 512/o3 and 2048/o3. Predicting it is what lets the
+    /// editor show a window count before any analysis exists.
+    #[test]
+    fn the_predicted_decfactor_matches_what_pvoc_writes() {
+        use crate::model::cdp::pipeline::predicted_decfactor;
+        use crate::model::cdp::PvocSettings;
+        assert_eq!(predicted_decfactor(&PvocSettings { points: 1024, overlap: 3 }), 128);
+        assert_eq!(predicted_decfactor(&PvocSettings { points: 1024, overlap: 1 }), 512);
+        assert_eq!(predicted_decfactor(&PvocSettings { points: 1024, overlap: 2 }), 256);
+        assert_eq!(predicted_decfactor(&PvocSettings { points: 1024, overlap: 4 }), 64);
+        assert_eq!(predicted_decfactor(&PvocSettings { points: 512, overlap: 3 }), 64);
+        assert_eq!(predicted_decfactor(&PvocSettings { points: 2048, overlap: 3 }), 256);
+        assert_eq!(predicted_decfactor(&PvocSettings::default()), 128, "the settings a chain runs with");
     }
 
     /// No row may appear twice in the layout, at any nesting.
