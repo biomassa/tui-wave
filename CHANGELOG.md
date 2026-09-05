@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-09-05 (2.11.9)
+
+### A percent-of-window-count parameter says what it comes to
+
+Three CDP parameters are declared as a percentage of the analysis window count, and the row
+showed the percentage alone. On a 0..100 scale 80 reads as a modest setting. It is not one. It
+asks the process to average each window over 80% of every window in the file. At that width no
+envelope timing can make the effect local.
+
+A Spectral Blur drawn to fall away early stayed audible almost to the end for that reason, and
+nothing on screen explained it.
+
+The row now states the count, for a constant and for an envelope's produced span:
+
+```
+Blurring   <- Env 2   0.1 ... 80.02  (~1 ... 1031 of 1289 windows)
+```
+
+`pvoc anal`'s decimation factor is predictable: `decfactor` is `points / 2^overlap`. A check
+against the real binary confirms it at 1024/o1, 1024/o2, 1024/o3, 1024/o4, 512/o3 and 2048/o3.
+That makes a count available before any analysis exists.
+
+The row marks the count approximate for two reasons. It is exact only for a step that reads the
+chain's own input, because a step further down a chain whose length changed reads a different one.
+The runner also still takes the real figure from the `.ana` header rather than trusting the
+prediction.
+
+Measured while confirming the report: CDP honours our breakpoint times normally. With the value at
+65 windows, moving the drop from 0.55s to 3.0s changes the output. With it at 1038 windows the two
+results are byte-identical, because the averaging span already covers most of the file.
+
 ## 2026-09-05 (2.11.8)
 
 ### Envelopes in a chain kept their own mapping
