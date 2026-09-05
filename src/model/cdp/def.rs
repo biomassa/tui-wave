@@ -26,6 +26,13 @@ pub enum Category {
     /// installed. Here for the same reason `Praat` is: the browser's Domain column is
     /// literally `CdpDomainRow::Domain(Category)`, so a new variant *is* the new domain row.
     Airwindows,
+    /// A combiner built into this app (`model::cdp::native`) — the only category whose
+    /// processes join a chain step's parallel branches rather than transforming one signal.
+    /// Its own domain rather than folded in with `Airwindows` (the other no-install backend)
+    /// for the same reason as above: the Domain column *is* this enum, and someone looking for
+    /// "how do I mix two branches" should find a domain that says so rather than go hunting
+    /// inside 500 effects.
+    Native,
 }
 
 /// Which external program actually runs a `ProcessDef` — derived from `Category`, never
@@ -44,6 +51,10 @@ pub enum Backend {
     /// with temp WAVs on either side. Nothing to install, nothing to configure, and a
     /// preview that returns in the time a spawn alone would have cost.
     Airwindows,
+    /// A few lines of arithmetic in this crate (`model::cdp::native`), not vendored DSP.
+    /// Distinct from `Airwindows` in two ways: its processes take every input from a branch
+    /// rather than transforming one signal, and it renders inline rather than on a worker.
+    Native,
 }
 
 /// What kind of file a process reads/writes on one side. `Dual*` processes take two input
@@ -266,6 +277,17 @@ pub enum ParamValue {
     Toggle(bool),
     Choice(usize),
     Breakpoints(Vec<(f64, f64)>),
+    /// A reference into the owning *chain's* envelope bank, rather than a curve of this
+    /// parameter's own. Only ever appears inside a `ChainStep` — a standalone process dialog has
+    /// no bank to point at and keeps using `Breakpoints`.
+    ///
+    /// This variant is what makes the stale-envelope bug unrepresentable in a chain. A
+    /// `Breakpoints` is in seconds baked to whichever selection was live when it was drawn, and
+    /// nothing recorded that duration, so replaying a saved chain against a different selection
+    /// silently mis-timed its automation. A bank curve is normalized on both axes and projected
+    /// onto the real axis at run time, against the duration the audio *actually* has at that
+    /// step — see `model::cdp::envelope_bank`.
+    EnvelopeRef(super::envelope_bank::EnvelopeRef),
     /// A plain ordered list of numbers, one per line in the datafile CDP reads — no time
     /// axis, unlike `Breakpoints` (see `ParamDef::required_list`'s doc comment for the
     /// real processes this covers: a list of grain-onset *times*, or a list of per-grain
@@ -1328,6 +1350,34 @@ pub struct ParamNote {
     pub section: bool,
 }
 
+impl ParamDef {
+    /// This parameter's declared default, as a `ParamValue`.
+    ///
+    /// Exists because a `ChainStep` can hold fewer values than its process has parameters — a
+    /// chain saved before the catalog grew one, or a hand-written preset — and the chain editor
+    /// renders those rows anyway. Falling back to the range's *minimum* (which is what reading
+    /// `min` directly amounts to) is not a neutral choice: on a mixer leg it reads -60 dB and
+    /// on a limiter toggle it reads off, so a chain would appear to be set to something it is
+    /// not, and adjusting one row would commit that misreading to the rest.
+    pub fn default_value(&self) -> ParamValue {
+        match &self.kind {
+            ParamKind::Number { default, integer, .. } => {
+                ParamValue::Number(if *integer { default.round() } else { *default })
+            }
+            ParamKind::Toggle { default } => ParamValue::Toggle(*default),
+            ParamKind::Choice { default, .. } => ParamValue::Choice(*default),
+            ParamKind::NumberList { default, .. } => ParamValue::List(default.clone()),
+            ParamKind::Text { default } => ParamValue::Text(default.clone()),
+            ParamKind::MarkerTimeList { .. } => ParamValue::MarkerTimeList(Vec::new()),
+            ParamKind::Table { .. } => ParamValue::Table(Vec::new()),
+            ParamKind::HiliteBand { .. } => ParamValue::HiliteBand(Vec::new()),
+            ParamKind::FormantBufferRef { .. } => ParamValue::FormantBufferRef,
+            ParamKind::FilePath { .. } | ParamKind::FolderPath => ParamValue::FilePath(String::new()),
+            ParamKind::CrystalVdat => ParamValue::CrystalVdat(CrystalVdat::default()),
+        }
+    }
+}
+
 impl ProcessDef {
     /// Which external program runs this process. Derived from `category` rather than stored
     /// alongside it, so the two can never drift apart — the same reasoning that keeps
@@ -1336,7 +1386,68 @@ impl ProcessDef {
         match self.category {
             Category::Praat => Backend::Praat,
             Category::Airwindows => Backend::Airwindows,
+            Category::Native => Backend::Native,
             Category::Time | Category::Pvoc => Backend::Cdp,
+        }
+    }
+
+    /// How many parallel [`super::chain::Branch`]es a chain step running this process may
+    /// carry — i.e. how many of its inputs come from somewhere other than the running buffer.
+    ///
+    /// Derived from `input`, never stored, for the same reason [`ProcessDef::backend`] is
+    /// derived from `category`: a declared arity that disagreed with the process's actual
+    /// input shape would plan a job with the wrong number of input files, and CDP's binaries
+    /// reject that outright.
+    ///
+    /// A dual-input process keeps input 0 = the running buffer and takes exactly one branch,
+    /// which is precisely what a "side-chain" meant before branches existed. Everything else
+    /// takes none today; the native combiners will take several, and this is the one place
+    /// that will need to say so.
+    pub fn branch_arity(&self) -> usize {
+        if self.category == Category::Native {
+            // Derived from the key rather than stored, the same discipline `backend()` follows:
+            // the native catalog is built in this crate, so a mismatch between a declared arity
+            // and the combiner's actual shape would be a bug with no way to notice it.
+            return match self.key.as_str() {
+                super::native::CROSSFADE_KEY => 2,
+                _ => super::native::MAX_MIX_LEGS,
+            };
+        }
+        match self.input {
+            IoKind::DualWav | IoKind::DualAna => 1,
+            _ => 0,
+        }
+    }
+
+    /// Whether input 0 comes from the chain's running buffer. True for every process except a
+    /// native combiner, which reads all of its inputs from branches.
+    ///
+    /// The chain editor labels a step's branch columns from this: a fan-out for a combiner, a
+    /// second input for a dual-input CDP process.
+    pub fn consumes_running_buffer(&self) -> bool {
+        self.category != Category::Native
+    }
+
+    /// How many branches a step running this process must carry for the step to be runnable at
+    /// all — as opposed to [`ProcessDef::branch_arity`], which is the ceiling.
+    ///
+    /// The two differ because a dual-input process's second input is *mandatory*: the binary
+    /// takes two infiles and fails without them. So its one branch always exists, even when it
+    /// holds no steps — an empty `Buffer` branch is "use the picked buffer as-is", which is
+    /// exactly what a dual-input step with no side-chain has always done, and having the branch
+    /// exist is what gives that pick somewhere to hang off (`buffer_picks` is keyed by branch
+    /// path, since the picked document is a property of the branch's *source*).
+    ///
+    /// A native combiner's legs are optional by contrast — its arity is a ceiling only.
+    pub fn branch_arity_min(&self) -> usize {
+        if self.category == Category::Native {
+            // A combiner with fewer than two legs is not combining anything; the crossfade in
+            // particular is defined as a blend of exactly two.
+            return 2;
+        }
+        match self.input {
+            IoKind::DualWav | IoKind::DualAna => 1,
+            _ => 0,
         }
     }
 

@@ -40,6 +40,11 @@ pub fn timing_tolerance(category: Category, pvoc_points: u32) -> usize {
         // than the wavecycle-alignment or analysis-window padding the allowances above exist
         // to forgive. Zero says so, and keeps every in-range marker on its exact sample.
         Category::Airwindows => 0,
+        // Exact for the same reason, and more strongly: a native combiner is arithmetic over
+        // buffers this app already holds, with no encoder, no analysis window and no
+        // subprocess between the input and the result. Its length is whatever pad-to-longest
+        // produced, which the caller passes as the run's own extension.
+        Category::Native => 0,
     }
 }
 

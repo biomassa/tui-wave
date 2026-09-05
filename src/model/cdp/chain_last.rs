@@ -43,7 +43,11 @@ pub fn save_last_chain(chain: &CdpChain) {
 
 fn load_last_chain_in(path: &Path) -> Option<CdpChain> {
     let text = std::fs::read_to_string(path).ok()?;
-    toml::from_str(&text).ok()
+    let mut chain: CdpChain = toml::from_str(&text).ok()?;
+    // Same reason as `chain_preset::list_chains_in`: migrate where the file is read, so no
+    // caller can forget to.
+    chain.migrate_legacy();
+    Some(chain)
 }
 
 fn save_last_chain_in(path: &Path, chain: &CdpChain) {
@@ -84,7 +88,9 @@ mod tests {
     fn sample_chain(name: &str) -> CdpChain {
         CdpChain {
             name: name.into(),
-            steps: vec![ChainStep { process_key: "blur_avrg".into(), values: vec![ParamValue::Number(4.0)], side_chain: Vec::new() }],
+            steps: vec![ChainStep::new("blur_avrg", vec![ParamValue::Number(4.0)])],
+            bank: Default::default(),
+            output: Default::default(),
         }
     }
 

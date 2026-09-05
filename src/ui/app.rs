@@ -461,9 +461,22 @@ fn preview_owner_on_screen(dialog: Option<&Dialog>, owner: Option<PreviewOwner>)
 /// sub-editor committing, a preset loaded. The cache it compares against is the same one Apply
 /// consults to decide whether it may splice without re-running, so "the sound stopped" and "Apply
 /// will re-run" cannot disagree.
-fn preview_still_current(dialog: Option<&Dialog>, owner: Option<PreviewOwner>) -> bool {
+fn preview_still_current(
+    dialog: Option<&Dialog>,
+    owner: Option<PreviewOwner>,
+    chain_editor: Option<&ChainEditorState>,
+) -> bool {
     if !preview_owner_on_screen(dialog, owner) {
         return false;
+    }
+    // The chain editor's own preview, ended by the chain moving on from it — the same rule the
+    // params form has always had, which the editor never did because until parameters became
+    // editable in place there was nothing there to change.
+    if owner == Some(PreviewOwner::ChainEditor) {
+        return match chain_editor {
+            Some(state) => state.previewed.as_ref().is_some_and(|c| *c == state.chain),
+            None => false,
+        };
     }
     if let (Some(Dialog::CdpParams { fields, preview: Some(cached), .. }), Some(PreviewOwner::Params)) =
         (dialog, owner)
@@ -570,6 +583,12 @@ fn cdp_plan_error_message(err: &crate::model::cdp::PlanError) -> String {
         }
         PlanError::InputCountMismatch { expected, actual } => {
             format!("internal error: expected {expected} inputs, got {actual}")
+        }
+        // Like the two above, an internal error rather than anything the user can fix: the
+        // chain runner resolves every bank reference before planning, so one surviving to the
+        // planner means a chain path missed that resolution.
+        PlanError::UnresolvedEnvelopeRef { param, name } => {
+            format!("internal error: envelope \"{name}\" for \"{param}\" was never resolved")
         }
         // Reachable for real: a variadic process's file count is picked by hand
         // (`CdpVariadicInput`), so an unusable count is a normal user state, not a bug.
@@ -1115,6 +1134,14 @@ fn format_cdp_number_for_display(v: f64, integer: bool) -> String {
 /// a slider step (CDP's own params are never meaningfully precise to more than a handful of
 /// decimals, so this is lossless in practice). Used at every point a breakpoint envelope's
 /// own `points` get nudged, not just the main params dialog's flat number fields.
+/// Rounds to `param_slider::DECIMALS` — the precision a slider stop is already quantized to,
+/// and so the most a derived read-out should claim. `round6` above is the finer version used
+/// where a *stored* value is being nudged rather than merely displayed.
+fn round3(v: f64) -> f64 {
+    let scale = 10f64.powi(crate::ui::widgets::param_slider::DECIMALS);
+    (v * scale).round() / scale
+}
+
 fn round6(v: f64) -> f64 {
     (v * 1e6).round() / 1e6
 }
@@ -1232,6 +1259,7 @@ fn cdp_backend_badge(p: &crate::model::cdp::ProcessDef) -> &'static str {
         crate::model::cdp::def::Backend::Cdp => "[cdp]",
         crate::model::cdp::def::Backend::Praat => "[pr]",
         crate::model::cdp::def::Backend::Airwindows => "[air]",
+        crate::model::cdp::def::Backend::Native => "[mix]",
     }
 }
 
@@ -1733,14 +1761,32 @@ struct CdpSecondInput {
     doc_indices: Vec<usize>,
     names: Vec<String>,
     selected: usize,
+    /// What each entry actually is, index-parallel to `names`.
+    ///
+    /// Outside a chain every entry is a document and this row is a buffer picker, as it always
+    /// was. *Inside* one it also offers what the chain has already made — an earlier step's or
+    /// branch's output — because that is the whole point of a two-input process in a chain and
+    /// the alternative was building the same material twice. `doc_indices` stays index-parallel
+    /// too, holding a placeholder for the non-document entries, so nothing that reads it by
+    /// position had to learn about this.
+    sources: Vec<ChainBranchInput>,
 }
 
 impl CdpSecondInput {
     fn selected_doc_index(&self) -> Option<usize> {
-        self.doc_indices.get(self.selected).copied()
+        match self.sources.get(self.selected) {
+            Some(ChainBranchInput::Buffer(i)) => Some(*i),
+            // A chain output, or the incoming signal: not a document at all.
+            Some(_) => None,
+            None => self.doc_indices.get(self.selected).copied(),
+        }
     }
     fn selected_name(&self) -> &str {
         self.names.get(self.selected).map(String::as_str).unwrap_or("")
+    }
+    /// What the row currently points at, for the commit path to write into the branch.
+    fn selected_source(&self) -> Option<ChainBranchInput> {
+        self.sources.get(self.selected).cloned()
     }
 }
 
@@ -1941,6 +1987,14 @@ enum CdpEnvelopeTarget {
     /// `envelope` half only; its vertex half is edited by a `CdpTableEdit` with the matching
     /// `CdpTableTarget::CrystalVertices`, and 'v' switches between the two.
     CrystalEnvelope,
+    /// A curve in the chain's own envelope bank, edited on its **own** axes.
+    ///
+    /// A bank curve is normalized 0-1 on both, so it needs no parameter to be drawn against —
+    /// which is the point: it exists before anything reads it, and a shape you cannot open until
+    /// you have found somewhere to put it is a shape you cannot design. The grid then reads 0-1
+    /// rather than Hz or dB, which is what the stored curve actually is. `field_index` names the
+    /// bank entry rather than a field, there being no `fields` behind this one.
+    BankEnvelope,
 }
 
 /// What the envelope editor's 'c' key does in a given session — three genuinely different
@@ -1971,12 +2025,22 @@ impl CdpEnvelopeTarget {
                 crate::model::cdp::CrystalVdat::ENVELOPE_MAX,
                 crate::model::cdp::CrystalVdat::ENVELOPE_STEP,
             )),
+            CdpEnvelopeTarget::BankEnvelope => Some((
+                crate::model::cdp::envelope_bank::BANK_MIN,
+                crate::model::cdp::envelope_bank::BANK_MAX,
+                0.01,
+            )),
         }
     }
 
     fn constant_key(self, required_envelope: bool) -> CdpEnvelopeConstantKey {
         match self {
-            CdpEnvelopeTarget::CrystalEnvelope => CdpEnvelopeConstantKey::Unavailable,
+            // Neither has a constant to fall back to: a crystal envelope is a required half of
+            // its datafile, and a bank curve *is* the thing being edited — "revert this to a
+            // number" would mean deleting it, which `Del` in the bank already does.
+            CdpEnvelopeTarget::CrystalEnvelope | CdpEnvelopeTarget::BankEnvelope => {
+                CdpEnvelopeConstantKey::Unavailable
+            }
             CdpEnvelopeTarget::NumberField if required_envelope => CdpEnvelopeConstantKey::UseCurve,
             CdpEnvelopeTarget::NumberField => CdpEnvelopeConstantKey::RevertToConstant,
         }
@@ -2014,6 +2078,23 @@ fn cdp_envelope_write_back(fields: &mut [CdpField], edit: &CdpEnvelopeEdit, poin
     }
 }
 
+/// One audio source the envelope grid can draw behind the curve.
+///
+/// A curve in the chain's bank may drive parameters at different points in the chain, and those
+/// points do not all read the same audio: a step inside a branch fed by a picked file operates
+/// on that file, not on the buffer the chain started from. So the background is a *list* with a
+/// key to switch it (`w`), rather than one waveform that would be wrong for half the references.
+///
+/// What it shows is the audio arriving at the *chain*, not at the step — the true input to a
+/// late step is only known once the steps before it have run. It is a reference for drawing
+/// against, and the label says which source it is.
+#[derive(Debug, Clone, PartialEq)]
+struct EnvelopeBackground {
+    label: String,
+    document: usize,
+    range: (usize, usize),
+}
+
 struct CdpEnvelopeEdit {
     field_index: usize,
     /// Which part of `fields[field_index]` this session edits — see `CdpEnvelopeTarget`.
@@ -2022,10 +2103,18 @@ struct CdpEnvelopeEdit {
     selected: usize,
     original: Option<Vec<(f64, f64)>>,
     time_max: f64,
+    /// What to call this session in its title. `None` for a field-backed one, whose name comes
+    /// from the parameter; `Some` for a bank curve, which has no field to take a name from.
+    label: Option<String>,
     /// The same sample range `time_max` was derived from — kept alongside it so the
     /// graphics-mode renderer can look up the actual audio for that span to draw as a pale
     /// reference waveform behind the curve, without recomputing the selection.
     range: (usize, usize),
+    /// The audio sources `w` cycles through, and which one is showing. Empty for a session
+    /// opened on a parameter, where the only audio in question is the selection `range` already
+    /// names — populated for a bank curve, which has no single parameter to inherit one from.
+    backgrounds: Vec<EnvelopeBackground>,
+    background: usize,
     /// `Some` while the 'c' ("use curve") picker overlay is open — only reachable on a
     /// `required_envelope` field (a plain automatable field's 'c' means "revert to a
     /// constant" instead, since it actually has one to revert to; a required_envelope field
@@ -2856,6 +2945,7 @@ impl CdpDomainRow {
             CdpDomainRow::Domain(Category::Pvoc) => "Spectral",
             CdpDomainRow::Domain(Category::Praat) => "Praat",
             CdpDomainRow::Domain(Category::Airwindows) => "Airwindows",
+            CdpDomainRow::Domain(Category::Native) => "Combiners",
         }
     }
 }
@@ -3260,6 +3350,13 @@ pub struct App {
     /// The field index whose slider a press grabbed, held until the button is released. `None`
     /// when no drag is in progress.
     cdp_slider_drag: Option<usize>,
+    /// Track geometry for the chain editor's inline parameter sliders, one entry per rendered
+    /// row (see `chain_slider_columns`), refreshed every frame from `render_overlays`.
+    chain_slider_columns: Vec<Option<(u16, u16)>>,
+    /// The chain-editor parameter a slider drag is following, if any — its step's path and its
+    /// index. Held rather than re-derived per motion event, so a drag that wanders off the row
+    /// keeps driving the parameter it started on.
+    chain_slider_drag: Option<(ChainPath, usize)>,
     /// Set while a press has grabbed a slider inside one of the grid sub-editors. Those have a
     /// single slider column and always drag the *selected* row, so unlike `cdp_slider_drag`
     /// there is no index to remember.
@@ -3518,9 +3615,62 @@ struct CdpPending {
 #[derive(Debug, Clone, PartialEq)]
 enum ChainEditTarget {
     /// Edit the step already at this exact path.
-    Replace(Vec<usize>),
-    /// Append a new step to the list at this *parent* path (`[]` = the main chain itself).
-    Append(Vec<usize>),
+    Replace(ChainPath),
+    /// Insert a new step into the list at `parent` (`[]` = the main chain itself, otherwise a
+    /// path ending at a `Branch`), at position `index`.
+    ///
+    /// `index` rather than always appending, because the editor offers an add row per framed
+    /// segment: a step can go before a combiner as well as after one. Inserting shifts every
+    /// later sibling, so the commit path also remaps `buffer_picks` and `BranchSource::From`.
+    Insert { parent: ChainPath, index: usize },
+}
+
+/// Local alias for a chain path, so the dozens of signatures below don't each spell out the
+/// module path. See `model::cdp::chain::PathSeg` for the Step/Branch alternation rule.
+type ChainPath = crate::model::cdp::Path;
+
+/// The indent for a row of `kind` at `depth` levels of nesting *within its own column*.
+///
+/// One level is four columns, and a parameter sits two in from the step it belongs to — enough
+/// to subordinate it without spending a whole level. Written as one function because every row
+/// kind has to agree; the depth itself comes from `ChainCell`, since a branch opens a new
+/// column and its contents restart at zero rather than marching further right.
+fn chain_indent(depth: usize, kind: ChainIndent) -> String {
+    let level = 2 + 4 * depth;
+    let columns = match kind {
+        ChainIndent::Step => level,
+        ChainIndent::Detail => level + 2,
+    };
+    " ".repeat(columns)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChainIndent {
+    /// A step, a PVOC bracket, a branch header, or a branch's "+ Add step" — everything that
+    /// sits at its column's own base indent.
+    Step,
+    /// A parameter row, or a step's "+ Add branch".
+    Detail,
+}
+
+/// How deeply nested a chain path is, in *branches* — the indentation level a row draws at.
+/// Not `path.len()`, which counts Step and Branch segments alike and so doubles with depth.
+fn chain_path_depth(path: &[crate::model::cdp::PathSeg]) -> usize {
+    path.iter().filter(|seg| matches!(seg, crate::model::cdp::PathSeg::Branch(_))).count()
+}
+
+/// `1.2` for a top-level step's second branch's… — a human-readable rendering of a chain path
+/// for error messages, 1-based the way the step rows themselves are numbered. Branch segments
+/// read as letters (`A`, `B`, …), matching how the editor labels them.
+fn chain_path_label(path: &[crate::model::cdp::PathSeg]) -> String {
+    use crate::model::cdp::PathSeg;
+    path.iter()
+        .map(|seg| match seg {
+            PathSeg::Step(i) => (i + 1).to_string(),
+            PathSeg::Branch(b) => char::from(b'A' + (*b).min(25) as u8).to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// One selectable row in the chain editor's flattened step list (`chain_editor_rows`) —
@@ -3532,10 +3682,37 @@ enum ChainEditorRow {
     /// chain's steps, mirroring `Dialog::CdpParams`'s own `CDP_PRESET_FOCUS` row exactly.
     Preset,
     /// The step at this exact path.
-    Step(Vec<usize>),
-    /// Trailing "+ Add step" affordance for the list at this *parent* path (`[]` = the main
-    /// chain's own trailing row; a dual-input step's own path = its side-chain's).
-    AddStep(Vec<usize>),
+    Step(ChainPath),
+    /// One parameter of the step at `path`, `index` into that process's `params`.
+    ///
+    /// The point of the whole editor rework: a chain's values are legible and adjustable
+    /// without opening each step in turn. Left/Right drives the same `param_slider` the params
+    /// dialog uses for a closed-range number, cycles a toggle or a choice in place, and does
+    /// nothing on a value whose editor is a whole sub-dialog — Enter opens `CdpParams` for
+    /// those, so no editor is reimplemented here.
+    Param { path: ChainPath, index: usize },
+    /// One of a step's parallel inputs, at this exact path (which ends at a `Branch`). Carries
+    /// the branch's `BranchSource` — Left/Right cycles between `Tap` and `Buffer`, and on a
+    /// `Buffer` branch also picks *which* open document feeds it. That pick used to live on the
+    /// owning step's own row, which only worked while a step could have at most one branch.
+    BranchHeader(ChainPath),
+    /// "+ Add step" affordance for the list at `path` (`[]` = the main chain, a branch's own
+    /// path = that branch), inserting at `index`.
+    ///
+    /// One per framed segment rather than one per list. A combiner interrupts the frame, so a
+    /// list whose first step combines had no row above it at all and the head of the chain could
+    /// not be reached (user report); the same gap sat between any box and a following join.
+    /// `index` is the position the new step takes, which for the last segment is the end.
+    AddStep { path: ChainPath, index: usize },
+    /// Trailing "+ Branch out" affordance for the list at this *parent* path — beside the
+    /// "+ Add step" row it sits under. Branching out was reachable only by key (`o`), which is
+    /// no help to someone who has not read the hints bar: adding a step and splitting the
+    /// signal are the two things you do at the end of a chain, so they belong side by side.
+    BranchOut(ChainPath),
+    /// Where the result goes. Selectable and cyclable, because it is a real choice — splice
+    /// over the audio the chain read, or open the result as a new document — and a chain built
+    /// to make new material should say so rather than depend on being run the right way.
+    Out,
     Preview,
     Run,
 }
@@ -3582,7 +3759,7 @@ struct ChainEditorState {
     /// this same map, so whichever was used most recently is exactly what the other one shows
     /// next. Never persisted (`CDP-CHAIN-PLAN.md` design decision 4) — reset to empty whenever
     /// a chain (including a freshly loaded preset) is loaded into the editor.
-    buffer_picks: std::collections::HashMap<Vec<usize>, usize>,
+    buffer_picks: std::collections::HashMap<ChainPath, usize>,
     selected: ChainEditorRow,
     error: Option<String>,
     presets: Vec<crate::model::cdp::CdpChain>,
@@ -3595,19 +3772,156 @@ struct ChainEditorState {
     /// `App::cycle_chain_preset`.
     custom_chain: Option<crate::model::cdp::CdpChain>,
     save_prompt: Option<TextInput>,
+    /// The selection duration, in seconds, that the currently-open step editor's envelope grid
+    /// was drawn against. Captured when `open_cdp_chain_step_params` opens the session, because
+    /// that is the only moment it is knowable: `CdpParams` hands values back in absolute
+    /// seconds, and normalizing them into the chain's bank needs the span they were authored
+    /// against. Its absence is the whole reason a saved chain's automation used to drift when
+    /// replayed against a different selection.
+    step_edit_time_max: f64,
+    /// Per parameter of the step currently being edited, the bank envelope its value came from
+    /// (index-parallel to that process's `params`). Lets a re-edit update the curve the step
+    /// already owned rather than adding a near-duplicate to the bank on every visit.
+    step_edit_envelope_names: Vec<Option<String>>,
+    /// Which column the keys act on. The envelope bank is a second list with its own commands
+    /// (delete, duplicate), so it needs to be reachable, and `Focus` is how the rest of this app
+    /// already expresses "which of two lists is the keyboard talking to".
+    focus: ChainFocus,
+    /// A number being typed straight into a parameter row, and which row it belongs to.
+    ///
+    /// The convention everywhere else in this app is that typing a digit on a numeric field
+    /// replaces the value outright, and the inline parameter rows were the one place it did not
+    /// hold — the slider was the only way in (user report, against a mixer's gain). Armed by the
+    /// first numeric character, committed by anything that leaves the row.
+    param_edit: Option<(ChainPath, usize, TextInput)>,
+    /// How many rows the step list showed last frame, recorded by the render so PgUp/PgDn and
+    /// the wheel can move by a screenful. A key handler has no frame area to ask.
+    view_rows: std::cell::Cell<usize>,
+    /// The chain a running preview was made from.
+    ///
+    /// What loops is the result of the values that ran, so the first edit makes it a recording
+    /// of something the editor no longer describes — and a loop, unlike a single pass, would go
+    /// on asserting that stale answer for as long as the dialog stayed open. Comparing the whole
+    /// chain rather than watching for keystrokes is what covers every editing route at once:
+    /// typing, a slider step, a cycled choice, an envelope attached, a branch re-pointed.
+    previewed: Option<crate::model::cdp::CdpChain>,
+    /// The row the view is scrolled to.
+    ///
+    /// **Stored**, unlike every other scroll position in this app, which derives itself from the
+    /// selection so a renderer and a hit-test cannot disagree. A dead zone cannot be derived:
+    /// holding the view still while the selection moves through the middle of it means the top
+    /// row depends on where the view already *was*, which is a fact about history and not about
+    /// the selection.
+    ///
+    /// What the discipline actually guards against is still honoured: the render clamps this and
+    /// writes the clamped value straight back, and builds its row rects from that same local — so
+    /// the stored number is only ever a starting point, and what is drawn and what is clicked
+    /// come from one value computed once per frame. `Cell` because the renderer holds `&self`.
+    scroll_top: std::cell::Cell<usize>,
+    /// An open graphical editor on a *bank* curve — one belonging to no parameter yet.
+    ///
+    /// Hosted here rather than on `Dialog::CdpParams` because such a curve has no process and no
+    /// field behind it. Everything about the editor other than where its bounds come from and
+    /// where a commit lands is shared with the params-dialog sessions; see
+    /// `CdpEnvelopeTarget::BankEnvelope`.
+    envelope: Option<CdpEnvelopeEdit>,
+    /// An open "assign this envelope to…" picker: which bank envelope, every envelope-capable
+    /// parameter in the chain, and which of them is highlighted.
+    ///
+    /// A shared curve is worth having only if pointing more parameters at it is easy, and doing
+    /// that from the parameter's own row means finding each one first. From the bank it is the
+    /// other way round: you have the shape, and the question is where it should go.
+    assign_picker: Option<ChainAssignPicker>,
+    /// Selected row in the envelope bank. Clamped on use rather than on every mutation, so
+    /// deleting the last envelope cannot leave it pointing past the end.
+    bank_selected: usize,
+}
+
+/// One thing a branch can read. Deliberately not `BranchSource` itself: that stores *whether*
+/// a branch reads a file, while which file is a live pick kept outside the chain — the editor
+/// has to talk about both at once.
+#[derive(Debug, Clone, PartialEq)]
+enum ChainBranchInput {
+    /// The signal arriving at the split this branch belongs to.
+    Incoming,
+    /// An earlier step's or branch's finished output.
+    From(ChainPath),
+    /// An open document, by index.
+    Buffer(usize),
+}
+
+/// An open assign-to-parameter picker, raised from the envelope bank.
+struct ChainAssignPicker {
+    envelope: String,
+    /// The list as shown: every envelope-capable parameter in the chain, grouped under the
+    /// process it belongs to. A `None` target is a group heading — not selectable, because
+    /// there is nothing to assign a curve *to* about a process as a whole.
+    targets: Vec<(Option<(ChainPath, usize)>, String)>,
+    selected: usize,
+}
+
+impl ChainAssignPicker {
+    /// Moves the highlight by `delta`, skipping headings, and stopping at the ends rather than
+    /// wrapping — a wrap through a heading reads as the list having lost its place.
+    fn step(&mut self, delta: i32) {
+        let mut at = self.selected as i32;
+        loop {
+            let next = at + delta;
+            if next < 0 || next as usize >= self.targets.len() {
+                return;
+            }
+            at = next;
+            if self.targets[at as usize].0.is_some() {
+                self.selected = at as usize;
+                return;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn clone_for_test(&self) -> Self {
+        Self {
+            envelope: self.envelope.clone(),
+            targets: self.targets.clone(),
+            selected: self.selected,
+        }
+    }
+
+    /// The first selectable row, since the list always opens on a heading.
+    fn first_target(&self) -> usize {
+        self.targets.iter().position(|(t, _)| t.is_some()).unwrap_or(0)
+    }
+}
+
+/// Which column of the chain editor has the keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ChainFocus {
+    #[default]
+    Steps,
+    Bank,
 }
 
 impl ChainEditorState {
     fn fresh() -> Self {
         Self {
-            chain: crate::model::cdp::CdpChain { name: String::new(), steps: Vec::new() },
+            chain: crate::model::cdp::CdpChain::new(String::new()),
             buffer_picks: std::collections::HashMap::new(),
-            selected: ChainEditorRow::AddStep(Vec::new()),
+            selected: ChainEditorRow::AddStep { path: Vec::new(), index: 0 },
             error: None,
             presets: Self::presets_by_recency(),
             preset_selected: None,
             custom_chain: None,
             save_prompt: None,
+            step_edit_time_max: 1.0,
+            step_edit_envelope_names: Vec::new(),
+            focus: ChainFocus::Steps,
+            param_edit: None,
+            envelope: None,
+            assign_picker: None,
+            view_rows: std::cell::Cell::new(1),
+            previewed: None,
+            scroll_top: std::cell::Cell::new(0),
+            bank_selected: 0,
         }
     }
 
@@ -3616,6 +3930,12 @@ impl ChainEditorState {
     /// own "Recent" ordering, just folded into the one preset list rather than a separate
     /// group (a chain preset list is expected to be much shorter than the full process
     /// catalog, so a dedicated group would be overkill here).
+    /// Every envelope in this chain's bank, in order — the list `e` walks a parameter through
+    /// and the pane down the right-hand side lists.
+    fn bank_names(&self) -> Vec<String> {
+        self.chain.bank.envelopes.iter().map(|e| e.name.clone()).collect()
+    }
+
     fn presets_by_recency() -> Vec<crate::model::cdp::CdpChain> {
         let mut chains = crate::model::cdp::chain_preset::list_chains();
         let recent = crate::model::cdp::chain_recent::load_recent();
@@ -3628,32 +3948,117 @@ impl ChainEditorState {
 /// `ChainEditorRow`'s doc comment for the ordering. Rebuilt fresh whenever needed rather than
 /// cached anywhere, so it never goes stale as steps are added/removed/reordered. Recurses
 /// into a dual-input step's own `side_chain` right after that step's own row, before moving
-/// on to its next sibling — depth is unlimited, so this can't be a fixed-level loop.
-fn chain_editor_rows(state: &ChainEditorState, catalog: &crate::model::cdp::CdpCatalog) -> Vec<ChainEditorRow> {
-    let mut rows = vec![ChainEditorRow::Preset];
-    push_chain_step_rows(&mut rows, &state.chain.steps, &[], catalog);
-    rows.push(ChainEditorRow::AddStep(Vec::new()));
-    rows.push(ChainEditorRow::Preview);
-    rows.push(ChainEditorRow::Run);
-    rows
+/// The chain editor's *selectable* rows, in navigation order.
+///
+/// Derived from `chain_display_rows` — which is itself derived from `chain_layout` — rather
+/// than walked separately, so the two can never disagree about what exists or in what order.
+/// They did once: the display gained the OUT anchor and the selectable list did not, which made
+/// a row visible on screen that Up/Down could not reach. One walk removes the whole class.
+fn chain_editor_rows(
+    state: &ChainEditorState,
+    catalog: &crate::model::cdp::CdpCatalog,
+) -> Vec<ChainEditorRow> {
+    chain_display_rows(state, catalog)
+        .into_iter()
+        .filter_map(|row| match row {
+            DisplayRow::Row(row) => Some(row),
+            // The synthetic rows — the PVOC brackets, the split marker, the IN anchor, the
+            // blank — are heads-ups, not controls. Leaving them out here is what makes them
+            // unreachable by keyboard *and* unclickable, since the rects are keyed off the
+            // display list and only `DisplayRow::Row` entries get a hittable one.
+            _ => None,
+        })
+        .collect()
 }
 
-fn push_chain_step_rows(
-    rows: &mut Vec<ChainEditorRow>,
-    steps: &[crate::model::cdp::ChainStep],
-    parent_path: &[usize],
+
+/// The label column width shared by every inline parameter row in the editor — the longest
+/// visible parameter name across the whole chain, capped.
+///
+/// One width for the whole view rather than per step, so the sliders and values form straight
+/// columns down the list instead of stepping in and out with each process's longest name. The
+/// cap is what stops one verbose Praat parameter from pushing every slider off a narrow
+/// terminal; a name past it is ellipsised rather than allowed to shift the column.
+fn chain_param_label_width(
+    state: &ChainEditorState,
     catalog: &crate::model::cdp::CdpCatalog,
-) {
-    for (i, step) in steps.iter().enumerate() {
-        let mut path = parent_path.to_vec();
-        path.push(i);
-        rows.push(ChainEditorRow::Step(path.clone()));
-        if step.is_dual_input(catalog) == Some(true) {
-            push_chain_step_rows(rows, &step.side_chain, &path, catalog);
-            rows.push(ChainEditorRow::AddStep(path));
+) -> usize {
+    const MAX: usize = 26;
+    const MIN: usize = 10;
+    chain_editor_rows(state, catalog)
+        .iter()
+        .filter_map(|row| match row {
+            ChainEditorRow::Param { path, index } => {
+                let step = crate::model::cdp::step_at(&state.chain, path)?;
+                let def = catalog.processes.iter().find(|p| p.key == step.process_key)?;
+                Some(def.params.get(*index)?.name.chars().count())
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(MIN)
+        .clamp(MIN, MAX)
+}
+
+fn truncate_label(name: &str, width: usize) -> String {
+    if name.chars().count() <= width {
+        return name.to_string();
+    }
+    let kept: String = name.chars().take(width.saturating_sub(1)).collect();
+    format!("{kept}\u{2026}")
+}
+
+/// A one-line read-only summary of a parameter whose editor is a whole sub-dialog. Says how
+/// much is there, which is what a reader scanning a chain wants to know; changing it is Enter.
+fn chain_param_summary(value: Option<&crate::model::cdp::ParamValue>) -> String {
+    use crate::model::cdp::ParamValue;
+    match value {
+        Some(ParamValue::List(v)) => format!("{} value(s)", v.len()),
+        Some(ParamValue::Table(rows)) => format!("{} row(s)", rows.len()),
+        Some(ParamValue::MarkerTimeList(v)) => format!("{} time(s)", v.len()),
+        Some(ParamValue::HiliteBand(v)) => format!("{} band(s)", v.len()),
+        Some(ParamValue::FilePath(p)) if !p.is_empty() => {
+            std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.clone())
         }
+        Some(ParamValue::Text(t)) if !t.is_empty() => t.clone(),
+        Some(ParamValue::CrystalVdat(v)) => format!("{} vertices", v.vertices.len()),
+        Some(ParamValue::FormantBufferRef) => "formant buffer".to_string(),
+        _ => "(not set)".to_string(),
     }
 }
+
+/// Which of a step's parameters are worth a row, in order.
+///
+/// Everything, except that a native mixer declares all `MAX_MIX_LEGS` legs' worth of gain and
+/// invert whether or not those legs exist — that fixed list is what keeps `values`
+/// index-parallel to `ProcessDef.params` (see `native::MAX_MIX_LEGS`), and showing six dead
+/// legs on a two-leg mixer would be exactly the noise this view exists to remove. The trailing
+/// limiter pair always shows.
+fn visible_param_indices(
+    step: &crate::model::cdp::ChainStep,
+    catalog: &crate::model::cdp::CdpCatalog,
+) -> Vec<usize> {
+    use crate::model::cdp::native;
+    let Some(def) = catalog.processes.iter().find(|p| p.key == step.process_key) else {
+        return Vec::new();
+    };
+    if def.key == native::MIXER_KEY {
+        // Branch rows first, then the two whole-node ones — reading order, which is the reverse
+        // of the *storage* order (`native::MIX_LIMIT_PARAM` is 0 so that a mixer's used
+        // parameters form a prefix; see the note there).
+        let mut indices = Vec::new();
+        for leg in 0..step.branches.len().min(native::MAX_MIX_LEGS) {
+            indices.push(native::leg_gain_param(leg));
+            indices.push(native::leg_invert_param(leg));
+        }
+        indices.push(native::MIX_LIMIT_PARAM);
+        indices.push(native::MIX_CEILING_PARAM);
+        return indices;
+    }
+    (0..def.params.len()).collect()
+}
+
+
 
 /// One row in the chain editor's *rendered* list (`chain_display_rows`) — either a real
 /// selectable row (wrapping `ChainEditorRow` verbatim) or a synthetic, non-selectable
@@ -3666,7 +4071,22 @@ fn push_chain_step_rows(
 #[derive(Debug, Clone, PartialEq)]
 enum DisplayRow {
     Row(ChainEditorRow),
-    /// `depth` matches the bracketed step's own `path.len()`, for indentation only.
+    /// Where the chain's audio comes from. Non-selectable: it states a fact about the session,
+    /// not a setting. Present from the moment the dialog opens, so an empty chain still shows
+    /// a signal path rather than a blank pane.
+    In,
+    /// The fan-out above a combiner's branch columns. The combiner itself is drawn *below* them
+    /// as the join — an earlier version drew it above its own legs, which read as the mixer
+    /// dividing the signal rather than gathering it (user report, with a screenshot).
+    ///
+    /// Only a native combiner produces one. A dual-input CDP process reads input 0 from the
+    /// running buffer and nothing divides, so its branch is drawn as a row of the step itself
+    /// (`layout_chain_step_rows`) rather than as a column under a split.
+    Split { count: usize },
+    /// `depth` is the bracketed step's nesting depth in *branches* (0 = top level), for
+    /// indentation only — matching what `chain_path_depth` returns for that step's own path.
+    /// It was `path.len()` before paths alternated Step/Branch segments, which no longer
+    /// counts levels.
     PvocAnalyze { depth: usize },
     PvocResynthesize { depth: usize },
     /// A purely visual empty line — currently just the gap set off before "Preview the whole
@@ -3686,7 +4106,8 @@ enum DisplayRow {
 ///   pair at run time, never an approximation of it.
 /// - A dual-input spectral step (`IoKind::DualAna`) never merges with neighbors regardless
 ///   of what they are (`plan_dual_ana` always wraps itself, independent of any adjacent
-///   step) — always its own isolated one-step segment.
+///   step) — always its own isolated one-step segment. See that function for why merging the
+///   steps *after* one changes the sound, which is not obvious and was measured.
 /// `None` for anything that isn't spectral at all (plain time-domain, synthesis, curve).
 struct PvocSegment {
     is_first: bool,
@@ -3719,76 +4140,509 @@ fn pvoc_segment_at(siblings: &[crate::model::cdp::ChainStep], index: usize, cata
     })
 }
 
-/// Builds the chain editor's full *rendered* row list: `chain_editor_rows`' own selectable
-/// rows, with synthetic "PVOC Analyze"/"PVOC Resynthesize" rows interleaved exactly where
-/// the real pipeline would insert them. Recomputed fresh from the current draft every
-/// render — never cached — so it can't go stale as steps are added/removed/reordered/
-/// edited, the same discipline `chain_editor_rows` itself already follows.
-fn chain_display_rows(state: &ChainEditorState, catalog: &crate::model::cdp::CdpCatalog) -> Vec<DisplayRow> {
-    let mut rows = vec![DisplayRow::Row(ChainEditorRow::Preset)];
-    push_chain_display_rows(&mut rows, &state.chain.steps, &[], catalog);
-    rows.push(DisplayRow::Row(ChainEditorRow::AddStep(Vec::new())));
-    rows.push(DisplayRow::Blank);
-    rows.push(DisplayRow::Row(ChainEditorRow::Preview));
-    rows.push(DisplayRow::Row(ChainEditorRow::Run));
-    rows
+/// Where one rendered chain-editor row sits, in the editor's own coordinate space (which can be
+/// wider than the terminal — see `ChainLayout::width`).
+///
+/// `depth` is the indent *within this row's column*, not the row's depth in the chain: a branch
+/// gets its own column, so its steps restart at zero rather than marching further right the
+/// deeper they nest. That is the whole point of laying branches out side by side.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ChainCell {
+    x: u16,
+    y: u16,
+    width: u16,
+    depth: usize,
 }
 
-fn push_chain_display_rows(
-    rows: &mut Vec<DisplayRow>,
-    steps: &[crate::model::cdp::ChainStep],
-    parent_path: &[usize],
+/// A branch column's frame — drawn as a box so a fan-out and the join below it are visible as
+/// shapes rather than having to be read out of indentation.
+#[derive(Debug, Clone, PartialEq)]
+struct ChainBox {
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    /// Title drawn into the top border. `None` for a plain stretch of the main path, which
+    /// needs the frame but has nothing to call itself.
+    label: Option<String>,
+}
+
+/// The chain editor's rendered rows *and* their positions.
+///
+/// Positions and rows come out of one walk rather than two, because the click handler indexes
+/// `dialog_row_rects` by display-row position: a layout that disagreed with the row list about
+/// order — by one row, once — would set values from clicks that landed somewhere else.
+struct ChainLayout {
+    cells: Vec<(DisplayRow, ChainCell)>,
+    boxes: Vec<ChainBox>,
+    /// Total extent, which exceeds the terminal when a step has more legs than fit; the view
+    /// scrolls horizontally to keep the selection visible rather than squeezing the columns,
+    /// since a narrowed column would clip the very parameters it exists to show.
+    width: u16,
+    height: u16,
+}
+
+/// The on-screen rect for a laid-out row or box, or `None` when the scroll has taken it off
+/// either edge. Clips rather than skipping on partial overlap, so a column half off the right
+/// edge still draws its visible half — otherwise scrolling would make whole legs blink away.
+fn chain_visible_rect(
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    area: Rect,
+    scroll_top: usize,
+    scroll_left: u16,
+) -> Option<Rect> {
+    let top = y as usize;
+    let bottom = top + height as usize;
+    if bottom <= scroll_top || top >= scroll_top + area.height as usize {
+        return None;
+    }
+    if x + width <= scroll_left || x >= scroll_left + area.width {
+        return None;
+    }
+    let visible_top = top.max(scroll_top);
+    let visible_bottom = bottom.min(scroll_top + area.height as usize);
+    let visible_left = x.max(scroll_left);
+    let visible_right = (x + width).min(scroll_left + area.width);
+    Some(Rect {
+        x: area.x + (visible_left - scroll_left),
+        y: area.y + (visible_top - scroll_top) as u16,
+        width: visible_right - visible_left,
+        height: (visible_bottom - visible_top) as u16,
+    })
+}
+
+/// The shape a curve made with `n` starts as: a hump, rising to full and falling back.
+///
+/// Not a flat line, which is what attaching from a *parameter* seeds — there it means "no change
+/// from the value you already had", and there is such a value. Made from the bank there is none
+/// to preserve, and a flat line would draw as an empty sparkline: a curve that looks like
+/// nothing and does nothing.
+///
+/// A hump rather than a rise because it begins and ends where it started, so it reads as a
+/// gesture applied to a parameter rather than a permanent move away from it — the same shape
+/// `open_cdp_crystal_envelope_editor` seeds for the same reason.
+const CHAIN_NEW_ENVELOPE_SHAPE: [(f64, f64); 3] = [(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)];
+
+/// How close the selection may come to the top or bottom of the chain editor before the view
+/// scrolls. Fixed rather than a fraction of the height, so the distance feels the same in a
+/// short window and a tall one — one number to learn instead of one per terminal size.
+const CHAIN_SCROLL_MARGIN: usize = 5;
+
+/// Narrowest a branch column is allowed to get. Below this a parameter row has no room for a
+/// label *and* a slider, so more legs scroll rather than shrink.
+const CHAIN_MIN_COL_WIDTH: u16 = 34;
+
+/// Builds the chain editor's rows and their layout in one walk. `width` is the space the top
+/// level has; branch columns divide it, never below [`CHAIN_MIN_COL_WIDTH`].
+fn chain_layout(
+    state: &ChainEditorState,
     catalog: &crate::model::cdp::CdpCatalog,
+    width: u16,
+) -> ChainLayout {
+    let mut layout = ChainLayout { cells: Vec::new(), boxes: Vec::new(), width: 0, height: 0 };
+    let full = ChainCell { x: 0, y: 0, width, depth: 0 };
+    layout.cells.push((DisplayRow::Row(ChainEditorRow::Preset), full));
+    let mut y = 0;
+    layout.cells.push((DisplayRow::In, ChainCell { y, ..full }));
+    y += 1;
+    layout_chain_segments(&mut layout, &state.chain.steps, &[], catalog, 0, &mut y, width);
+    layout.cells.push((DisplayRow::Row(ChainEditorRow::Out), ChainCell { y, ..full }));
+    y += 1;
+    layout.cells.push((DisplayRow::Blank, ChainCell { y, ..full }));
+    y += 1;
+    layout.cells.push((DisplayRow::Row(ChainEditorRow::Preview), ChainCell { y, ..full }));
+    y += 1;
+    layout.cells.push((DisplayRow::Row(ChainEditorRow::Run), ChainCell { y, ..full }));
+    y += 1;
+    layout.height = y;
+    layout.width = layout
+        .cells
+        .iter()
+        .map(|(_, c)| c.x + c.width)
+        .chain(layout.boxes.iter().map(|b| b.x + b.width))
+        .max()
+        .unwrap_or(width);
+    layout
+}
+
+/// Lays out one step list as a top-to-bottom run of framed segments.
+///
+/// A stretch of ordinary steps goes in one box. A step that *combines* branches interrupts it:
+/// the box closes, a `SPLIT` marker opens the fan-out, the branch columns sit side by side, and
+/// the combiner follows **below** them in a box spanning their whole width — so the shape on
+/// screen is the shape of the signal, converging where the audio converges. Whatever comes
+/// after starts a fresh box.
+///
+/// **Every box ends with its own "+ Add step"**, inserting at that boundary rather than at the
+/// end of the list. With one trailing row per list, a list beginning with a combiner had no add
+/// row above it and the head of the chain could not be reached at all (user report); the gap
+/// between a box and a following join had the same problem. An empty chain still draws one
+/// frame, for the same reason it always did.
+fn layout_chain_segments(
+    layout: &mut ChainLayout,
+    steps: &[crate::model::cdp::ChainStep],
+    parent_path: &[crate::model::cdp::PathSeg],
+    catalog: &crate::model::cdp::CdpCatalog,
+    x: u16,
+    y: &mut u16,
+    width: u16,
 ) {
+    use crate::model::cdp::PathSeg;
+    let inner_x = x + 1;
+    let inner_width = width.saturating_sub(2).max(1);
+    // `None` until a segment has something in it, so a chain that opens with a combiner does
+    // not draw an empty frame above the split.
+    let mut segment_top: Option<u16> = None;
+    let open = |_layout: &mut ChainLayout, segment_top: &mut Option<u16>, y: &mut u16| {
+        if segment_top.is_none() {
+            *segment_top = Some(*y);
+            *y += 1; // the box's own top border
+        }
+    };
+    let close = |layout: &mut ChainLayout, segment_top: &mut Option<u16>, y: &mut u16| {
+        if let Some(top) = segment_top.take() {
+            *y += 1; // bottom border
+            layout.boxes.push(ChainBox { x, y: top, width, height: *y - top, label: None });
+        }
+    };
+
+    // The add row for the box that is currently open, inserting at `index` — the position the
+    // new step takes in this list.
+    let add_step = |layout: &mut ChainLayout, y: &mut u16, index: usize| {
+        layout.cells.push((
+            DisplayRow::Row(ChainEditorRow::AddStep { path: parent_path.to_vec(), index }),
+            ChainCell { x: inner_x, y: *y, width: inner_width, depth: 0 },
+        ));
+        *y += 1;
+    };
+
     for (i, step) in steps.iter().enumerate() {
         let mut path = parent_path.to_vec();
-        path.push(i);
-        let segment = pvoc_segment_at(steps, i, catalog);
-        if segment.as_ref().is_some_and(|s| s.is_first) {
-            rows.push(DisplayRow::PvocAnalyze { depth: path.len() });
+        path.push(PathSeg::Step(i));
+        // Only a native combiner is drawn as columns under a split. A dual-input CDP process
+        // also has a branch, but it reads input 0 from the running buffer — nothing divides, so
+        // its branch is a row of the step itself (user report: the split/join framing described
+        // an operation that was not happening).
+        let combines = chain_step_is_combiner(step, catalog);
+        if combines {
+            // The box that closes here gets the add row for this boundary, so a step can go
+            // *before* the combiner. `open` first, because a list starting with one has no box
+            // yet and that is exactly the case with nowhere to add.
+            open(layout, &mut segment_top, y);
+            add_step(layout, y, i);
+            close(layout, &mut segment_top, y);
+            layout_chain_join(layout, step, &path, catalog, x, y, width);
+            continue;
         }
-        rows.push(DisplayRow::Row(ChainEditorRow::Step(path.clone())));
-        if segment.as_ref().is_some_and(|s| s.is_last) {
-            rows.push(DisplayRow::PvocResynthesize { depth: path.len() });
+        open(layout, &mut segment_top, y);
+        layout_chain_step_rows(layout, steps, i, &path, catalog, inner_x, y, inner_width, 0);
+    }
+    open(layout, &mut segment_top, y);
+    add_step(layout, y, steps.len());
+    if chain_path_depth(parent_path) < crate::model::cdp::chain::MAX_SPLIT_DEPTH {
+        layout.cells.push((
+            DisplayRow::Row(ChainEditorRow::BranchOut(parent_path.to_vec())),
+            ChainCell { x: inner_x, y: *y, width: inner_width, depth: 0 },
+        ));
+        *y += 1;
+    }
+    close(layout, &mut segment_top, y);
+}
+
+/// Whether this step gathers *every* input from a branch, and so is drawn as a split with
+/// columns. False for a dual-input CDP process, whose single branch is only its second infile.
+/// An unknown process is not a combiner: the layout it would get is the more elaborate one.
+fn chain_step_is_combiner(
+    step: &crate::model::cdp::ChainStep,
+    catalog: &crate::model::cdp::CdpCatalog,
+) -> bool {
+    !step.branches.is_empty()
+        && catalog
+            .processes
+            .iter()
+            .find(|p| p.key == step.process_key)
+            .is_some_and(|def| !def.consumes_running_buffer())
+}
+
+/// One ordinary step: its PVOC bracket where the pipeline needs one, its own row, its parallel
+/// inputs (a dual-input process's second infile, and any sub-chain on it), and its parameters.
+///
+/// `depth` indents rows *within* this column. It is 0 everywhere except inside a dual-input
+/// step's own branch, which is the one place a step list is drawn inline rather than in a column
+/// or box of its own.
+fn layout_chain_step_rows(
+    layout: &mut ChainLayout,
+    siblings: &[crate::model::cdp::ChainStep],
+    index: usize,
+    path: &[crate::model::cdp::PathSeg],
+    catalog: &crate::model::cdp::CdpCatalog,
+    x: u16,
+    y: &mut u16,
+    width: u16,
+    depth: usize,
+) {
+    use crate::model::cdp::PathSeg;
+    let Some(step) = siblings.get(index) else { return };
+    let cell = |y: u16| ChainCell { x, y, width, depth };
+    // Whether this step needs a PVOC bracket is *derived* from the run of spectral steps around
+    // it (`pvoc_segment_at`), per step list — so each branch decides independently, an adjacent
+    // pair shares one analyse/resynthesise rather than taking one each, and a time-domain step
+    // gets none. Nothing declares it; it follows from what the pipeline will actually do.
+    let segment = pvoc_segment_at(siblings, index, catalog);
+    if segment.as_ref().is_some_and(|s| s.is_first) {
+        layout.cells.push((DisplayRow::PvocAnalyze { depth }, cell(*y)));
+        *y += 1;
+    }
+    layout.cells.push((DisplayRow::Row(ChainEditorRow::Step(path.to_vec())), cell(*y)));
+    *y += 1;
+    // A dual-input process's branch, above the parameters: it is an input, and an input is read
+    // before a setting is applied. Its own steps sit one level in, under the row naming it, so
+    // "where does the second input come from" and "what happens to it on the way in" are one
+    // block rather than a column somewhere else on screen.
+    //
+    // A native combiner is skipped here: `layout_chain_join` has already drawn its legs as the
+    // columns above it, and drawing them again inline would double every one of them.
+    let inline_branches = if chain_step_is_combiner(step, catalog) { &[][..] } else { &step.branches[..] };
+    for (b, branch) in inline_branches.iter().enumerate() {
+        let mut branch_path = path.to_vec();
+        branch_path.push(PathSeg::Branch(b));
+        layout.cells.push((
+            DisplayRow::Row(ChainEditorRow::BranchHeader(branch_path.clone())),
+            cell(*y),
+        ));
+        *y += 1;
+        for (i, inner) in branch.steps.iter().enumerate() {
+            let mut inner_path = branch_path.clone();
+            inner_path.push(PathSeg::Step(i));
+            if chain_step_is_combiner(inner, catalog) {
+                // A combiner inside the input's own sub-chain still gets the split treatment,
+                // since there the signal really does divide.
+                layout.cells.push((
+                    DisplayRow::Row(ChainEditorRow::AddStep { path: branch_path.clone(), index: i }),
+                    ChainCell { depth: depth + 1, ..cell(*y) },
+                ));
+                *y += 1;
+                layout_chain_join(layout, inner, &inner_path, catalog, x, y, width);
+            } else {
+                layout_chain_step_rows(
+                    layout, &branch.steps, i, &inner_path, catalog, x, y, width, depth + 1,
+                );
+            }
         }
-        if step.is_dual_input(catalog) == Some(true) {
-            push_chain_display_rows(rows, &step.side_chain, &path, catalog);
-            rows.push(DisplayRow::Row(ChainEditorRow::AddStep(path)));
+        layout.cells.push((
+            DisplayRow::Row(ChainEditorRow::AddStep {
+                path: branch_path.clone(),
+                index: branch.steps.len(),
+            }),
+            ChainCell { depth: depth + 1, ..cell(*y) },
+        ));
+        *y += 1;
+        if chain_path_depth(&branch_path) < crate::model::cdp::chain::MAX_SPLIT_DEPTH {
+            layout.cells.push((
+                DisplayRow::Row(ChainEditorRow::BranchOut(branch_path)),
+                ChainCell { depth: depth + 1, ..cell(*y) },
+            ));
+            *y += 1;
         }
+    }
+    for index in visible_param_indices(step, catalog) {
+        layout.cells.push((
+            DisplayRow::Row(ChainEditorRow::Param { path: path.to_vec(), index }),
+            cell(*y),
+        ));
+        *y += 1;
+    }
+    if segment.as_ref().is_some_and(|s| s.is_last) {
+        layout.cells.push((DisplayRow::PvocResynthesize { depth }, cell(*y)));
+        *y += 1;
     }
 }
 
-/// After swapping siblings `a`/`b` at depth `depth` (i.e. `parent.len()`, where `parent` is
-/// their shared parent path), remaps every `buffer_picks` key whose path element at that
-/// depth is `a` or `b` to the other — covers the swapped steps themselves *and* everything
-/// nested under either of them (their paths all share that same prefix element).
-fn remap_buffer_picks_after_swap(picks: &mut std::collections::HashMap<Vec<usize>, usize>, depth: usize, a: usize, b: usize) {
+/// A combining step: the split marker, its branch columns, and the combiner itself below them.
+fn layout_chain_join(
+    layout: &mut ChainLayout,
+    step: &crate::model::cdp::ChainStep,
+    path: &[crate::model::cdp::PathSeg],
+    catalog: &crate::model::cdp::CdpCatalog,
+    x: u16,
+    y: &mut u16,
+    width: u16,
+) {
+    use crate::model::cdp::PathSeg;
+    let count = step.branches.len() as u16;
+    // Columns tile the available width exactly, with a single cell of gap between them, so their
+    // outer edges line up with the frames above and below. Dividing the width and giving every
+    // column the same size leaves the remainder unspent at the right, which showed up as boxes
+    // ending a column or two short of the ones around them (user report, with a screenshot).
+    //
+    // Below the floor they stop shrinking and the view scrolls instead: a column too narrow for
+    // a label and a slider shows none of what the layout exists to show.
+    let span = if width / count >= CHAIN_MIN_COL_WIDTH { width } else { CHAIN_MIN_COL_WIDTH * count };
+    let gap = 1;
+    let base = span.saturating_sub(gap * (count - 1)) / count;
+
+    layout.cells.push((
+        DisplayRow::Split { count: count as usize },
+        ChainCell { x, y: *y, width: span, depth: 0 },
+    ));
+    *y += 1;
+
+    let top = *y;
+    let mut tallest = 0u16;
+    let mut columns: Vec<(u16, u16)> = Vec::new();
+    for (b, branch) in step.branches.iter().enumerate() {
+        let bx = x + b as u16 * (base + gap);
+        // The last column absorbs the remainder, so the right-hand edges align exactly rather
+        // than the rounding going unspent.
+        let column = if b as u16 + 1 == count { span - b as u16 * (base + gap) } else { base };
+        let mut branch_path = path.to_vec();
+        branch_path.push(PathSeg::Branch(b));
+        let mut by = top + 1;
+        layout.cells.push((
+            DisplayRow::Row(ChainEditorRow::BranchHeader(branch_path.clone())),
+            ChainCell { x: bx + 1, y: by, width: column.saturating_sub(2).max(1), depth: 0 },
+        ));
+        by += 1;
+        for (i, inner) in branch.steps.iter().enumerate() {
+            let mut inner_path = branch_path.clone();
+            inner_path.push(PathSeg::Step(i));
+            if inner.branches.is_empty() {
+                layout_chain_step_rows(
+                    layout, &branch.steps, i, &inner_path, catalog, bx + 1, &mut by,
+                    column.saturating_sub(2).max(1), 0,
+                );
+            } else {
+                // A branch that itself branches: recurse, and let it divide this column. The add
+                // row goes above it for the reason `layout_chain_segments` puts one before every
+                // join — otherwise nothing can be inserted ahead of a combiner.
+                layout.cells.push((
+                    DisplayRow::Row(ChainEditorRow::AddStep { path: branch_path.clone(), index: i }),
+                    ChainCell { x: bx + 1, y: by, width: column.saturating_sub(2).max(1), depth: 0 },
+                ));
+                by += 1;
+                layout_chain_join(
+                    layout, inner, &inner_path, catalog, bx + 1, &mut by,
+                    column.saturating_sub(2).max(1),
+                );
+            }
+        }
+        layout.cells.push((
+            DisplayRow::Row(ChainEditorRow::AddStep {
+                path: branch_path.clone(),
+                index: branch.steps.len(),
+            }),
+            ChainCell { x: bx + 1, y: by, width: column.saturating_sub(2).max(1), depth: 0 },
+        ));
+        by += 1;
+        // At the deepest level a branch offers no split of its own — see
+        // `chain::MAX_SPLIT_DEPTH`. Offered-and-then-refused would be the worse arrangement:
+        // the button is the only route, so its absence *is* the rule.
+        if chain_path_depth(&branch_path) < crate::model::cdp::chain::MAX_SPLIT_DEPTH {
+            layout.cells.push((
+                DisplayRow::Row(ChainEditorRow::BranchOut(branch_path)),
+                ChainCell { x: bx + 1, y: by, width: column.saturating_sub(2).max(1), depth: 0 },
+            ));
+            by += 1;
+        }
+        tallest = tallest.max(by - top);
+        columns.push((bx, column));
+    }
+    // Every column takes the tallest one's height, so the boxes close level and the join below
+    // reads as one gathering rather than a ragged edge.
+    for (b, (bx, column)) in columns.into_iter().enumerate() {
+        layout.boxes.push(ChainBox {
+            x: bx,
+            y: top,
+            width: column,
+            height: tallest + 1,
+            label: Some(char::from(b'A' + (b.min(25)) as u8).to_string()),
+        });
+    }
+    *y = top + tallest + 1;
+
+    // The combiner, in a box spanning every column it gathers.
+    let join_top = *y;
+    *y += 1;
+    // The combiner is its own one-element list as far as bracketing goes: a `DualAna` process
+    // always wraps itself (`pvoc_segment_at`), and a native one is time-domain.
+    layout_chain_step_rows(
+        layout, std::slice::from_ref(step), 0, path, catalog, x + 1, y,
+        span.saturating_sub(2).max(1), 0,
+    );
+    *y += 1;
+    layout.boxes.push(ChainBox {
+        x,
+        y: join_top,
+        width: span,
+        height: *y - join_top,
+        // The split glyph turned back the way it came: `\u{2443}` fans out, `\u{2442}` gathers in.
+        // Two rotations of one mark, so the pair reads as one idea rather than two symbols.
+        label: Some("\u{2442} JOIN".to_string()),
+    });
+}
+
+/// The rendered row list, without positions. Derived from `chain_layout` rather than walking
+/// the chain a second time: the click handler indexes `dialog_row_rects` by position in *this*
+/// list, so a second walk that ever disagreed by one row would mis-route every click after it.
+/// Width is irrelevant here — it changes where rows are, never which rows exist.
+fn chain_display_rows(
+    state: &ChainEditorState,
+    catalog: &crate::model::cdp::CdpCatalog,
+) -> Vec<DisplayRow> {
+    chain_layout(state, catalog, CHAIN_MIN_COL_WIDTH).cells.into_iter().map(|(row, _)| row).collect()
+}
+
+
+/// After swapping the steps at sibling indices `a`/`b` within the list at `parent`, remaps
+/// every `buffer_picks` key that pointed into either — the swapped steps' own branches and
+/// everything nested under them, all of which share the prefix `parent ++ [Step(a|b)]`.
+///
+/// The prefix is checked, not just the segment at `parent.len()`. An earlier version compared
+/// only that one element, so swapping two steps inside *one* branch also rewrote picks
+/// belonging to a different branch's steps at the same depth — silently repointing an
+/// unrelated step's second input at another document.
+fn remap_buffer_picks_after_swap(
+    picks: &mut std::collections::HashMap<ChainPath, usize>,
+    parent: &[crate::model::cdp::PathSeg],
+    a: usize,
+    b: usize,
+) {
+    use crate::model::cdp::PathSeg;
+    let depth = parent.len();
     let old = std::mem::take(picks);
     for (mut k, v) in old {
-        if k.len() > depth {
-            if k[depth] == a {
-                k[depth] = b;
-            } else if k[depth] == b {
-                k[depth] = a;
+        if k.len() > depth && k[..depth] == *parent {
+            if k[depth] == PathSeg::Step(a) {
+                k[depth] = PathSeg::Step(b);
+            } else if k[depth] == PathSeg::Step(b) {
+                k[depth] = PathSeg::Step(a);
             }
         }
         picks.insert(k, v);
     }
 }
 
-/// After removing sibling index `removed_index` at depth `depth`, drops every `buffer_picks`
-/// entry for that step (and anything nested under it — same "shared prefix element" logic as
-/// `remap_buffer_picks_after_swap`), and shifts every later sibling's index (and its own
-/// nested entries) down by one to match `Vec::remove`'s own shift.
-fn remove_buffer_picks_under(picks: &mut std::collections::HashMap<Vec<usize>, usize>, depth: usize, removed_index: usize) {
+/// After removing the step at sibling index `removed` within the list at `parent`, drops every
+/// `buffer_picks` entry belonging to it (or to anything nested under it) and shifts every later
+/// sibling's entries down by one to match `Vec::remove`'s own shift. Prefix-checked for the
+/// same reason [`remap_buffer_picks_after_swap`] is.
+fn remove_buffer_picks_under(
+    picks: &mut std::collections::HashMap<ChainPath, usize>,
+    parent: &[crate::model::cdp::PathSeg],
+    removed: usize,
+) {
+    use crate::model::cdp::PathSeg;
+    let depth = parent.len();
     let old = std::mem::take(picks);
     for (mut k, v) in old {
-        if k.len() > depth {
-            if k[depth] == removed_index {
-                continue;
-            }
-            if k[depth] > removed_index {
-                k[depth] -= 1;
+        if k.len() > depth && k[..depth] == *parent {
+            match k[depth] {
+                PathSeg::Step(i) if i == removed => continue,
+                PathSeg::Step(i) if i > removed => k[depth] = PathSeg::Step(i - 1),
+                _ => {}
             }
         }
         picks.insert(k, v);
@@ -3842,24 +4696,79 @@ fn ana_run_length(siblings: &[crate::model::cdp::ChainStep], index: usize, catal
     len
 }
 
-/// The path of the first dual-input step (at any depth) that doesn't yet have a
+/// After inserting a step at sibling index `inserted` within the list at `parent`, shifts every
+/// pick belonging to a *later* sibling (and to anything nested under it) up by one. The mirror
+/// of [`remove_buffer_picks_under`], and prefix-checked for the same reason.
+fn shift_buffer_picks_for_insert(
+    picks: &mut std::collections::HashMap<ChainPath, usize>,
+    parent: &[crate::model::cdp::PathSeg],
+    inserted: usize,
+) {
+    use crate::model::cdp::PathSeg;
+    let depth = parent.len();
+    let old = std::mem::take(picks);
+    for (mut k, v) in old {
+        if k.len() > depth && k[..depth] == *parent {
+            if let PathSeg::Step(i) = k[depth] {
+                if i >= inserted {
+                    k[depth] = PathSeg::Step(i + 1);
+                }
+            }
+        }
+        picks.insert(k, v);
+    }
+}
+
+/// After removing branch `removed` from the step at `step_path`, drops that branch's own pick
+/// (and any belonging to steps inside it) and shifts every later branch's entries down by one.
+/// The branch counterpart of [`remove_buffer_picks_under`], which shifts *steps*; both check
+/// the prefix rather than just the segment at that depth, for the reason documented there.
+fn remove_branch_buffer_picks(
+    picks: &mut std::collections::HashMap<ChainPath, usize>,
+    step_path: &[crate::model::cdp::PathSeg],
+    removed: usize,
+) {
+    use crate::model::cdp::PathSeg;
+    let depth = step_path.len();
+    let old = std::mem::take(picks);
+    for (mut k, v) in old {
+        if k.len() > depth && k[..depth] == *step_path {
+            match k[depth] {
+                PathSeg::Branch(b) if b == removed => continue,
+                PathSeg::Branch(b) if b > removed => k[depth] = PathSeg::Branch(b - 1),
+                _ => {}
+            }
+        }
+        picks.insert(k, v);
+    }
+}
+
+/// The path of the first [`BranchSource::Buffer`] branch (at any depth) that doesn't yet have a
 /// `buffer_picks` entry, if any — `run_cdp_chain`'s pre-flight check before submitting
-/// anything, since a missing pick can't be discovered mid-run (there'd be no buffer to feed
-/// that step at all).
+/// anything, since a missing pick can't be discovered mid-run (there'd be no audio to start
+/// that branch from at all).
+///
+/// Keyed by *branch* path, not by the owning step's: which document feeds a branch is a
+/// property of that branch's source, and a step may now have several. A `Tap` branch needs no
+/// pick — it starts from the signal already flowing through the chain.
 fn first_missing_buffer_pick(
     steps: &[crate::model::cdp::ChainStep],
-    parent_path: &[usize],
-    picks: &std::collections::HashMap<Vec<usize>, usize>,
-    catalog: &crate::model::cdp::CdpCatalog,
-) -> Option<Vec<usize>> {
+    parent_path: &[crate::model::cdp::PathSeg],
+    picks: &std::collections::HashMap<ChainPath, usize>,
+) -> Option<ChainPath> {
+    use crate::model::cdp::{BranchSource, PathSeg};
     for (i, step) in steps.iter().enumerate() {
-        let mut path = parent_path.to_vec();
-        path.push(i);
-        if step.is_dual_input(catalog) == Some(true) && !picks.contains_key(&path) {
-            return Some(path);
-        }
-        if let Some(p) = first_missing_buffer_pick(&step.side_chain, &path, picks, catalog) {
-            return Some(p);
+        let mut step_path = parent_path.to_vec();
+        step_path.push(PathSeg::Step(i));
+        for (b, branch) in step.branches.iter().enumerate() {
+            let mut branch_path = step_path.clone();
+            branch_path.push(PathSeg::Branch(b));
+            if branch.source == BranchSource::Buffer && !picks.contains_key(&branch_path) {
+                return Some(branch_path);
+            }
+            if let Some(p) = first_missing_buffer_pick(&branch.steps, &branch_path, picks) {
+                return Some(p);
+            }
         }
     }
     None
@@ -3875,8 +4784,50 @@ fn chain_error_message(err: &crate::model::cdp::ChainError) -> String {
         ChainError::ProcessNotChainable { key } => {
             format!("\"{key}\" can't be used in a chain (not a plain audio-in/audio-out process)")
         }
-        ChainError::SideChainOnSingleInputStep { key } => {
-            format!("\"{key}\" only takes one input — it can't have a side-chain")
+        ChainError::TooManyBranches { key, arity, actual } => match arity {
+            0 => format!("\"{key}\" takes a single input — it can't have parallel branches"),
+            _ => format!("\"{key}\" takes {arity} parallel input(s), but {actual} are configured"),
+        },
+        ChainError::SplitTooDeep { key, depth } => format!(
+            "\"{key}\" splits {depth} levels deep — at most {} is drawable",
+            crate::model::cdp::chain::MAX_SPLIT_DEPTH
+        ),
+        ChainError::BranchNotAvailable { at, wanted } => format!(
+            "Branch {} reads branch {}, which hasn't run by then — pick an earlier branch",
+            chain_path_label(at),
+            chain_path_label(wanted)
+        ),
+        ChainError::MissingBranches { key, required, actual } => {
+            format!("\"{key}\" needs {required} parallel input(s), but only {actual} are configured")
+        }
+        // Not reachable through the editor: a chain step's envelope is converted into the
+        // chain's own bank when the step is committed, precisely so a value in absolute
+        // seconds can't survive into a chain and mis-time itself against a later selection.
+        ChainError::RawEnvelopeInChain { key, param } => {
+            format!("internal error: \"{key}\" parameter {param} holds an unconverted envelope")
+        }
+        ChainError::Bank(err) => chain_bank_error_message(err),
+    }
+}
+
+/// A plain-English message for a `BankError` — the envelope-bank half of `chain_error_message`.
+fn chain_bank_error_message(err: &crate::model::cdp::BankError) -> String {
+    use crate::model::cdp::BankError;
+    match err {
+        BankError::UnknownEnvelope { name } => {
+            format!("This chain references an envelope called \"{name}\", which it doesn't have")
+        }
+        BankError::TooFewPoints { name, count } => {
+            format!("Envelope \"{name}\" has only {count} point(s) — it needs at least two")
+        }
+        BankError::OutOfRange { name, .. } => {
+            format!("internal error: envelope \"{name}\" holds a point outside its 0-1 range")
+        }
+        BankError::TimesNotAscending { name } => {
+            format!("Envelope \"{name}\" has points that run backwards in time")
+        }
+        BankError::DuplicateName { name } => {
+            format!("This chain has two envelopes called \"{name}\"")
         }
     }
 }
@@ -3887,7 +4838,17 @@ fn chain_error_message(err: &crate::model::cdp::ChainError) -> String {
 /// first — modeled as pushing a new frame for that step's `side_chain` and pausing this one;
 /// see `App::submit_current_chain_stage`'s doc comment for the full walk.
 struct ChainRunFrame {
-    parent_path: Vec<usize>,
+    parent_path: ChainPath,
+    /// Branch results collected for the step this frame is currently on, in branch order, each
+    /// with the rate it came out at (branches can diverge in rate — any step that resamples does
+    /// it — and a combiner has to reconcile them).
+    ///
+    /// Per *frame*, not per run. One shared list looks equivalent until a branch's own steps
+    /// include another combiner: its results and the outer one's would pile into the same place,
+    /// and whichever consumed first would take both. It also made a branch's inner step able to
+    /// clear results collected for the step above it, which is what made a two-branch mixer loop
+    /// for ever (user report).
+    pending_inputs: Vec<(Vec<Vec<f32>>, u32)>,
     index: usize,
     running_buffer: Vec<Vec<f32>>,
     running_rate: u32,
@@ -3914,11 +4875,15 @@ enum ChainRunFinish {
 /// tracks one job.
 struct CdpChainRun {
     chain: crate::model::cdp::CdpChain,
-    buffer_picks: std::collections::HashMap<Vec<usize>, usize>,
+    buffer_picks: std::collections::HashMap<ChainPath, usize>,
     frames: Vec<ChainRunFrame>,
     /// Set right after a child frame (a side-chain) finishes, holding its final result until
     /// the parent frame's step — the one that side-chain feeds — actually runs.
-    pending_secondary: Option<Vec<Vec<f32>>>,
+    /// Every step and branch that has finished, by path, so a later branch can *read* one
+    /// instead of recomputing it (`BranchSource::From`). This is what makes the chain a DAG
+    /// rather than a tree: an expensive result feeding two consumers runs once. Only outputs
+    /// already in here are addressable, which is also why a cycle cannot be expressed.
+    finished_outputs: std::collections::HashMap<ChainPath, (Vec<Vec<f32>>, u32)>,
     /// How many chain steps the currently in-flight job represents — 1 for a normal
     /// single-step job, more than 1 when `submit_current_chain_stage` merged a run of
     /// consecutive spectral (`Ana`-Ana) steps into one combined job (see
@@ -4057,6 +5022,8 @@ impl App {
             cdp_slider_geometry: None,
             cdp_choice_value_column: None,
             cdp_slider_drag: None,
+            chain_slider_columns: Vec::new(),
+            chain_slider_drag: None,
             cdp_sub_editor_slider_drag: false,
             cdp_table_drew_sliders: false,
             dialog_row_rects: Vec::new(),
@@ -6745,6 +7712,13 @@ impl App {
                 self.refresh_cdp_browser_filter();
             }
             KeyCode::Delete => {
+                // Deleting the loaded preset comes first, and only fires while the preset row
+                // itself is focused — where there is no text for the key to edit instead. This
+                // was `d`, which sat one slip of the finger from the letters that type into the
+                // search box beside it; every delete in this app is on Delete now.
+                if self.delete_selected_cdp_preset() {
+                    return;
+                }
                 // In MixToMono, Delete is a shortcut for "-inf" (silence that channel).
                 // Only applies when a channel field is focused, not the tanh toggle row.
                 if let Some(Dialog::MixToMono { inputs, focused, .. }) = self.dialog.as_mut() {
@@ -6936,16 +7910,6 @@ impl App {
                 if !self.open_cdp_preset_save_prompt() && self.dialog_accepts('s') {
                     if let Some(input) = self.dialog_input() {
                         input.insert('s');
-                    }
-                    self.refresh_cdp_browser_filter();
-                }
-            }
-            KeyCode::Char('d')
-                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                if !self.delete_selected_cdp_preset() && self.dialog_accepts('d') {
-                    if let Some(input) = self.dialog_input() {
-                        input.insert('d');
                     }
                     self.refresh_cdp_browser_filter();
                 }
@@ -7742,6 +8706,40 @@ impl App {
             Some(Dialog::CdpChainEditor) => {
                 let Some(state) = self.cdp_chain_editor.as_ref() else { return };
                 let rows = chain_display_rows(state, &self.cdp_catalog);
+                // Bank rows are appended after the step rows, so an index past the display list
+                // is one of them. Clicking focuses the pane as well as selecting — the pane owns
+                // its own commands, and a click that selected without focusing would leave `d`
+                // and `D` still talking to the step list.
+                if row >= rows.len() {
+                    let bank_row = row - rows.len();
+                    if let Some(state) = self.cdp_chain_editor.as_mut() {
+                        if bank_row < state.chain.bank.envelopes.len() {
+                            state.focus = ChainFocus::Bank;
+                            state.bank_selected = bank_row;
+                            state.error = None;
+                        }
+                    }
+                    return;
+                }
+                // A click on an inline slider track sets that parameter, and arms a drag so the
+                // value keeps following the pointer. Checked before the row-activation logic
+                // below: on a parameter row the track is the thing you are pointing at, and
+                // selecting the row is a side effect of setting the value rather than a
+                // competing meaning for the same click.
+                if let (Some(DisplayRow::Row(ChainEditorRow::Param { path, index })), Some(Some((start, width)))) =
+                    (rows.get(row), self.chain_slider_columns.get(row))
+                {
+                    let (start, width, path, index) = (*start, *width, path.clone(), *index);
+                    if x_in_row >= start && x_in_row < start + width {
+                        let cell = (x_in_row - start) as usize;
+                        if let Some(state) = self.cdp_chain_editor.as_mut() {
+                            state.selected = ChainEditorRow::Param { path: path.clone(), index };
+                        }
+                        self.set_chain_param_from_cell(&path, index, cell);
+                        self.chain_slider_drag = Some((path, index));
+                        return;
+                    }
+                }
                 if let Some(DisplayRow::Row(clicked)) = rows.get(row) {
                     let clicked = clicked.clone();
                     let was_selected = state.selected == clicked;
@@ -7752,10 +8750,14 @@ impl App {
                     // calling `activate_chain_editor_row` here, so a click and the key it
                     // stands in for can never mean two different things.
                     let activates = match clicked {
-                        ChainEditorRow::AddStep(_)
+                        ChainEditorRow::AddStep { .. }
+                        | ChainEditorRow::BranchOut(_)
+                        | ChainEditorRow::Out
                         | ChainEditorRow::Preview
                         | ChainEditorRow::Run => true,
-                        ChainEditorRow::Step(_) => was_selected && double_click,
+                        ChainEditorRow::Step(_)
+                        | ChainEditorRow::BranchHeader(_)
+                        | ChainEditorRow::Param { .. } => was_selected && double_click,
                         ChainEditorRow::Preset => false,
                     };
                     if activates {
@@ -8396,41 +9398,170 @@ impl App {
             self.handle_cdp_chain_save_prompt_key(key);
             return;
         }
-        let Some(rows) = self.cdp_chain_editor.as_ref().map(|s| chain_editor_rows(s, &self.cdp_catalog)) else {
-            return;
-        };
         let Some(selected) = self.cdp_chain_editor.as_ref().map(|s| s.selected.clone()) else { return };
-        let pos = rows.iter().position(|r| *r == selected).unwrap_or(0);
+        // A curve open for drawing is modal over everything else here.
+        if self.cdp_chain_editor.as_ref().is_some_and(|s| s.envelope.is_some()) {
+            self.handle_bank_envelope_key(key);
+            return;
+        }
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let focus = self.cdp_chain_editor.as_ref().map(|s| s.focus).unwrap_or_default();
+        if focus == ChainFocus::Bank {
+            // The assign picker is modal over the bank, which is itself modal over the editor:
+            // one level per Esc, the same rule `CdpReturn` follows through the CDP dialogs.
+            if self.cdp_chain_editor.as_ref().is_some_and(|s| s.assign_picker.is_some()) {
+                match key.code {
+                    KeyCode::Esc => {
+                        if let Some(state) = self.cdp_chain_editor.as_mut() {
+                            state.assign_picker = None;
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Down => {
+                        let delta: i32 = if key.code == KeyCode::Up { -1 } else { 1 };
+                        if let Some(picker) =
+                            self.cdp_chain_editor.as_mut().and_then(|s| s.assign_picker.as_mut())
+                        {
+                            picker.step(delta);
+                        }
+                    }
+                    KeyCode::Enter => self.commit_chain_assign(),
+                    _ => {}
+                }
+                return;
+            }
+            match key.code {
+                // Esc walks back one level — to the step list — before closing the dialog, the
+                // same one-press-per-level rule `CdpReturn` follows through the CDP dialogs.
+                KeyCode::Esc | KeyCode::Left => self.move_chain_focus(ChainFocus::Steps),
+                KeyCode::Char('e') | KeyCode::Char('E') if ctrl => {
+                    self.move_chain_focus(ChainFocus::Steps)
+                }
+                KeyCode::Up | KeyCode::Down => {
+                    let delta: i32 = if key.code == KeyCode::Up { -1 } else { 1 };
+                    if let Some(state) = self.cdp_chain_editor.as_mut() {
+                        let count = state.chain.bank.envelopes.len() as i32;
+                        if count > 0 {
+                            state.bank_selected =
+                                (state.bank_selected as i32 + delta).rem_euclid(count) as usize;
+                        }
+                    }
+                }
+                KeyCode::Delete => self.delete_bank_envelope(),
+                KeyCode::Char('d') => self.duplicate_bank_envelope(),
+                KeyCode::Char('a') => self.open_chain_assign_picker(),
+                KeyCode::Char('n') => self.new_bank_envelope(),
+                KeyCode::Enter | KeyCode::Char('E') => self.edit_bank_envelope(),
+                _ => {}
+            }
+            return;
+        }
+        // A number being typed owns the keyboard until it is committed or abandoned — otherwise
+        // Backspace and Enter would mean two things at once on the same row.
+        if self.cdp_chain_editor.as_ref().is_some_and(|s| s.param_edit.is_some()) {
+            match key.code {
+                KeyCode::Char(c) if is_cdp_table_edit_char(c) => {
+                    if let Some((_, _, input)) = self
+                        .cdp_chain_editor
+                        .as_mut()
+                        .and_then(|s| s.param_edit.as_mut())
+                    {
+                        input.insert(c);
+                    }
+                    return;
+                }
+                KeyCode::Backspace => {
+                    if let Some((_, _, input)) = self
+                        .cdp_chain_editor
+                        .as_mut()
+                        .and_then(|s| s.param_edit.as_mut())
+                    {
+                        input.backspace();
+                    }
+                    return;
+                }
+                KeyCode::Enter => {
+                    self.commit_chain_param_edit();
+                    return;
+                }
+                KeyCode::Esc => {
+                    // Abandon: the row goes back to whatever it held.
+                    if let Some(state) = self.cdp_chain_editor.as_mut() {
+                        state.param_edit = None;
+                    }
+                    return;
+                }
+                // Anything else means "done here" — commit and let the key do its ordinary job,
+                // so moving off a row you have just typed into keeps what you typed.
+                _ => self.commit_chain_param_edit(),
+            }
+        }
+        // A numeric character on a parameter row starts typing a value, which is what a number
+        // field does everywhere else in this app. Checked before the command letters so it can
+        // never shadow one: `is_cdp_table_edit_char` accepts only digits, `-` and `.`.
+        if let KeyCode::Char(c) = key.code {
+            if self.type_into_chain_param(c) {
+                return;
+            }
+        }
         match key.code {
+            // Ctrl+E crosses to the envelope bank and back. A modifier because every plain
+            // letter here is a command and the bank is a *place*, not an action; `e` beside it
+            // is what attaches an envelope, so the two read as one idea.
+            KeyCode::Char('e') | KeyCode::Char('E') if ctrl => {
+                self.move_chain_focus(ChainFocus::Bank)
+            }
+            KeyCode::Right if shift => self.move_chain_sideways(1),
+            KeyCode::Left if shift => self.move_chain_sideways(-1),
             KeyCode::Esc => {
                 self.cdp_chain_editor = None;
                 self.dialog = None;
             }
             KeyCode::Up if shift => self.reorder_chain_step(-1),
             KeyCode::Down if shift => self.reorder_chain_step(1),
-            KeyCode::Up => {
-                if let Some(state) = self.cdp_chain_editor.as_mut() {
-                    state.selected = rows[pos.saturating_sub(1)].clone();
-                }
-            }
-            KeyCode::Down => {
-                if let Some(state) = self.cdp_chain_editor.as_mut() {
-                    state.selected = rows[(pos + 1).min(rows.len().saturating_sub(1))].clone();
-                }
-            }
+            KeyCode::Up => self.move_chain_selection(-1),
+            KeyCode::Down => self.move_chain_selection(1),
+            // A screenful at a time. Moves the *selection*, not the viewport on its own: the
+            // view follows the selection (see the dead zone at render time), so a viewport that
+            // moved independently would snap back the moment anything else happened.
+            KeyCode::PageUp => self.move_chain_selection(-self.chain_page_rows()),
+            KeyCode::PageDown => self.move_chain_selection(self.chain_page_rows()),
+            KeyCode::Home => self.move_chain_selection(i32::MIN / 2),
+            KeyCode::End => self.move_chain_selection(i32::MAX / 2),
             KeyCode::Left => self.cycle_chain_row(&selected, -1),
             KeyCode::Right => self.cycle_chain_row(&selected, 1),
             KeyCode::Enter => self.activate_chain_editor_row(),
-            KeyCode::Char('d') => self.delete_chain_editor_row(),
+            KeyCode::Delete => self.delete_chain_editor_row(),
             KeyCode::Char('s') => self.open_chain_save_prompt(),
-            KeyCode::Char('l') => self.recall_last_chain(),
-            // 'p' means the same thing here as in a params form — preview what this dialog
-            // describes — which for the chain editor is the *whole* chain, from any row.
-            // Previewing only as far as the selected step is the narrower ask and moved to 'h'
-            // when 'p' took over; both remain plain keys, as every chain-editor command is.
-            KeyCode::Char('p') => self.run_cdp_chain(ChainRunFinish::PreviewWholeChain),
-            KeyCode::Char('h') => self.preview_chain_here(),
+            // `r` for recall. Moved off `l`, which vim navigation wanted, and onto a free key
+            // with a better mnemonic than the one it left.
+            KeyCode::Char('r') => self.recall_last_chain(),
+            // 'b' for the branch source, reachable from either side (see
+            // `toggle_chain_branch_source`). A plain key, like every other chain-editor command.
+            KeyCode::Char('e') => self.cycle_chain_param_envelope(),
+            KeyCode::Char('E') => self.edit_chain_param_envelope(),
+            KeyCode::Char('i') => self.invert_chain_param_envelope(),
+            // Tab steps over a process's parameters to the next one — the long-list shortcut
+            // that folding used to be, without hiding anything.
+            KeyCode::BackTab => self.move_chain_step(-1),
+            KeyCode::Tab if shift => self.move_chain_step(-1),
+            KeyCode::Tab => self.move_chain_step(1),
+            // `p` previews what the selection points at: on a step or one of its parameters,
+            // the chain up to and including it; anywhere else, the whole thing.
+            //
+            // `a` previews all, from any row, for standing on a step but wanting to hear the
+            // finished chain.
+            KeyCode::Char('p')
+                if matches!(
+                    selected,
+                    ChainEditorRow::Step(_) | ChainEditorRow::Param { .. }
+                ) =>
+            {
+                self.preview_chain_here()
+            }
+            KeyCode::Char('p') | KeyCode::Char('a') => {
+                self.run_cdp_chain(ChainRunFinish::PreviewWholeChain)
+            }
             _ => {}
         }
     }
@@ -8440,9 +9571,14 @@ impl App {
     /// except it's never itself in that list (see `chain_last`'s own doc comment for why).
     /// Shows an inline error instead of silently doing nothing if no chain has ever been run.
     fn recall_last_chain(&mut self) {
+        let catalog = &self.cdp_catalog;
         let Some(state) = self.cdp_chain_editor.as_mut() else { return };
         match crate::model::cdp::chain_last::load_last_chain() {
-            Some(chain) => {
+            Some(mut chain) => {
+                // A chain that predates a catalog change can be short the branch its process
+                // now requires; top it up on the way in rather than letting `validate` refuse
+                // to run something the user never edited.
+                chain.normalize_branches(catalog);
                 state.chain = chain;
                 state.buffer_picks = std::collections::HashMap::new();
                 state.preset_selected = None;
@@ -8462,10 +9598,1069 @@ impl App {
     fn cycle_chain_row(&mut self, row: &ChainEditorRow, dir: i32) {
         match row {
             ChainEditorRow::Preset => self.cycle_chain_preset(dir),
-            ChainEditorRow::Step(path) => self.cycle_chain_buffer_pick(path, dir),
+            ChainEditorRow::Param { path, index } => self.adjust_chain_param(path, *index, dir),
+            ChainEditorRow::Out => self.cycle_chain_output(),
+            ChainEditorRow::BranchHeader(path) => self.cycle_chain_branch_input(path, dir),
             _ => {}
         }
     }
+
+    /// Commits whatever is being typed into a parameter row, clamped to that parameter's range.
+    ///
+    /// An unparseable or empty buffer leaves the value alone rather than reading as zero: a
+    /// half-typed "-" or "." is a moment in the middle of typing, not an instruction.
+    fn commit_chain_param_edit(&mut self) {
+        use crate::model::cdp::{ParamKind, ParamValue};
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let Some((path, index, input)) = state.param_edit.take() else { return };
+        let Ok(typed) = input.value().trim().parse::<f64>() else { return };
+        let Some(def) = self
+            .cdp_chain_editor
+            .as_ref()
+            .and_then(|s| crate::model::cdp::step_at(&s.chain, &path))
+            .and_then(|step| self.cdp_catalog.processes.iter().find(|p| p.key == step.process_key))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(ParamKind::Number { min, max, integer, .. }) = def.params.get(index).map(|p| &p.kind)
+        else {
+            return;
+        };
+        let (min, max, integer) = (*min, *max, *integer);
+        let clamped = typed.clamp(min, max);
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let Some(step) = crate::model::cdp::step_at_mut(&mut state.chain, &path) else { return };
+        while step.values.len() < def.params.len() {
+            step.values.push(def.params[step.values.len()].default_value());
+        }
+        step.values[index] = ParamValue::Number(if integer { clamped.round() } else { clamped });
+        state.error = None;
+    }
+
+    /// A numeric character typed on a parameter row: starts (or continues) typing a value.
+    ///
+    /// Returns whether it was consumed, so the caller can fall through to the ordinary keymap
+    /// for a row where typing means nothing — a toggle, a choice, an automated parameter.
+    fn type_into_chain_param(&mut self, c: char) -> bool {
+        use crate::model::cdp::{ParamKind, ParamValue};
+        if !is_cdp_table_edit_char(c) {
+            return false;
+        }
+        let Some((path, index)) = self.selected_chain_param() else { return false };
+        let Some(def) = self
+            .cdp_chain_editor
+            .as_ref()
+            .and_then(|s| crate::model::cdp::step_at(&s.chain, &path))
+            .and_then(|step| self.cdp_catalog.processes.iter().find(|p| p.key == step.process_key))
+            .cloned()
+        else {
+            return false;
+        };
+        let Some(ParamKind::Number { integer, .. }) = def.params.get(index).map(|p| &p.kind) else {
+            return false;
+        };
+        let integer = *integer;
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return false };
+        // An automated parameter's value is its curve; typing over it would silently discard one.
+        let current = crate::model::cdp::step_at(&state.chain, &path).and_then(|s| s.values.get(index).cloned());
+        if matches!(current, Some(ParamValue::EnvelopeRef(_)) | Some(ParamValue::Breakpoints(_))) {
+            return false;
+        }
+        let already = matches!(&state.param_edit, Some((p, i, _)) if *p == path && *i == index);
+        if !already {
+            // `fresh`, so the first character replaces the value rather than appending to it —
+            // the same behaviour the params dialog's own number fields have.
+            let shown = match current {
+                Some(ParamValue::Number(v)) => format_cdp_number_for_display(v, integer),
+                _ => String::new(),
+            };
+            state.param_edit = Some((path.clone(), index, TextInput::fresh(shown)));
+        }
+        if let Some((_, _, input)) = state.param_edit.as_mut() {
+            input.insert(c);
+        }
+        true
+    }
+
+    /// Left/Right on an inline parameter row.
+    ///
+    /// A closed-range number steps through the *same* `param_slider` stops the params dialog
+    /// uses, so a press means the same fraction of the range everywhere and a value typed there
+    /// is drawn at the nearest stop here. An open-ended range (Praat declares many) has no
+    /// honest slider, so it nudges by the parameter's own declared step instead. Toggles and
+    /// choices cycle. Everything else is a sub-editor's business and does nothing — Enter opens
+    /// the step's dialog for those.
+    fn adjust_chain_param(&mut self, path: &[crate::model::cdp::PathSeg], index: usize, dir: i32) {
+        use crate::model::cdp::{ParamKind, ParamValue};
+        use crate::ui::widgets::param_slider;
+        let Some(def) = self
+            .cdp_chain_editor
+            .as_ref()
+            .and_then(|s| crate::model::cdp::step_at(&s.chain, path))
+            .and_then(|step| self.cdp_catalog.processes.iter().find(|p| p.key == step.process_key))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(param) = def.params.get(index) else { return };
+        let path = path.to_vec();
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let Some(step) = crate::model::cdp::step_at_mut(&mut state.chain, &path) else { return };
+        // A step saved before a catalog change can be short a value; grow rather than refuse,
+        // so a chain stays editable instead of silently ignoring half its own rows. Filled from
+        // each parameter's own default so the first press moves off what the row was *showing*
+        // rather than off an arbitrary zero.
+        while step.values.len() < def.params.len() {
+            step.values.push(def.params[step.values.len()].default_value());
+        }
+        let current = step.values[index].clone();
+
+        // Once a parameter carries a curve its value *is* that curve, so there is no number for
+        // the slider to move — and Left/Right did nothing at all there. They now walk the bank
+        // and back to a constant, which is the same walk `e` performs. A parameter holding a
+        // plain number keeps its slider: that is the common case, and taking it away would cost
+        // the slider on every envelope-capable parameter in the CDP catalog.
+        if matches!(current, ParamValue::EnvelopeRef(_) | ParamValue::Breakpoints(_)) {
+            self.cycle_chain_param_envelope_by(dir);
+            return;
+        }
+        let next = match (&param.kind, &current) {
+            (_, ParamValue::EnvelopeRef(_)) | (_, ParamValue::Breakpoints(_)) => return,
+            (ParamKind::Number { min, max, step: nudge, integer, exponential, .. }, value) => {
+                let now = match value {
+                    ParamValue::Number(v) => *v,
+                    _ => *min,
+                };
+                let raw = if param_slider::applies(*min, *max) {
+                    let stops = param_slider::stop_count(*min, *max, *integer);
+                    let at = param_slider::stop_for_value(now, *min, *max, *integer, *exponential) as i32;
+                    let to = (at + dir).clamp(0, stops.saturating_sub(1) as i32) as usize;
+                    param_slider::value_for_stop(to, *min, *max, *integer, *exponential)
+                } else {
+                    now + *nudge * dir as f64
+                };
+                let clamped = raw.clamp(*min, *max);
+                ParamValue::Number(if *integer { clamped.round() } else { clamped })
+            }
+            (ParamKind::Toggle { .. }, value) => {
+                ParamValue::Toggle(!matches!(value, ParamValue::Toggle(true)))
+            }
+            (ParamKind::Choice { options, .. }, value) => {
+                if options.is_empty() {
+                    return;
+                }
+                let now = match value {
+                    ParamValue::Choice(i) => *i as i32,
+                    _ => 0,
+                };
+                ParamValue::Choice((now + dir).rem_euclid(options.len() as i32) as usize)
+            }
+            _ => return,
+        };
+        step.values[index] = next;
+        // Same fill as `apply_script_preset`, which only ran for the params dialog. An inline
+        // chain row comes through here instead, so cycling its preset left every other row
+        // showing stale values (user report).
+        if def.preset_param == Some(index) {
+            if let ParamValue::Choice(chosen) = step.values[index] {
+                if chosen != def.preset_custom_option {
+                    if let Some(preset) = def.script_presets.iter().find(|p| p.option == chosen) {
+                        for (i, value) in preset.pairs().collect::<Vec<_>>() {
+                            match def.params.get(i).map(|p| &p.kind) {
+                                Some(ParamKind::Number { integer, .. }) => {
+                                    step.values[i] =
+                                        ParamValue::Number(if *integer { value.round() } else { value });
+                                }
+                                Some(ParamKind::Toggle { .. }) => {
+                                    step.values[i] = ParamValue::Toggle(value != 0.0);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        state.error = None;
+    }
+
+    /// `e` on an inline parameter row: walks that parameter through the chain's envelope bank
+    /// and back to a constant.
+    ///
+    /// Constant -> the first bank curve -> the second -> ... -> constant again. One key for
+    /// attach, re-point and detach, because they are one question ("what drives this?") and a
+    /// bank rarely holds more than a handful of shapes. A parameter that is not `automatable`
+    /// says so rather than doing nothing, since nothing about the row shows that it cannot take
+    /// a curve.
+    ///
+    /// A parameter with no curve yet contributes one: a flat line at its current value, named
+    /// after the parameter. That is a real shape rather than a placeholder — it runs, and it
+    /// gives the graphical editor (Enter, then `e` in the step's own dialog) something to drag.
+    /// The reference window is the parameter's own declared range, per the auto-map rule.
+    fn cycle_chain_param_envelope(&mut self) {
+        self.cycle_chain_param_envelope_by(1)
+    }
+
+    /// [`App::cycle_chain_param_envelope`] in either direction — what Left/Right does once a
+    /// parameter carries a curve. Wraps, like every other cycler in this dialog, so the constant
+    /// is one press back from the first envelope rather than a whole lap away.
+    fn cycle_chain_param_envelope_by(&mut self, dir: i32) {
+        use crate::model::cdp::{BankEnvelope, EnvelopeRef, ParamKind, ParamValue};
+        let Some((path, index)) = self.selected_chain_param() else { return };
+        let Some(def) = self
+            .cdp_chain_editor
+            .as_ref()
+            .and_then(|s| crate::model::cdp::step_at(&s.chain, &path))
+            .and_then(|step| self.cdp_catalog.processes.iter().find(|p| p.key == step.process_key))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(param) = def.params.get(index).cloned() else { return };
+        let ParamKind::Number { min, max, integer, .. } = param.kind else { return };
+        // Taken before the mutable borrow below, which is the only reason it is up here.
+        let references = self
+            .cdp_chain_editor
+            .as_ref()
+            .map(|s| chain_envelope_references(s, &self.cdp_catalog))
+            .unwrap_or_default();
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        if !param.automatable {
+            state.error = Some(format!("\"{}\" can't take an envelope", param.name));
+            return;
+        }
+
+        let names: Vec<String> = state.bank_names();
+        {
+            let Some(step) = crate::model::cdp::step_at_mut(&mut state.chain, &path) else { return };
+            while step.values.len() < def.params.len() {
+                step.values.push(def.params[step.values.len()].default_value());
+            }
+        }
+        // Taken by value so the bank can be read (and, for a brand-new curve, written) below
+        // without holding a borrow of the step at the same time.
+        let Some(current) = crate::model::cdp::step_at(&state.chain, &path)
+            .and_then(|s| s.values.get(index))
+            .cloned()
+        else {
+            return;
+        };
+
+        let next = match &current {
+            ParamValue::EnvelopeRef(reference) => {
+                // The walk is over `[constant] + every bank curve`, wrapping — so stepping back
+                // from the first envelope lands on the constant rather than a whole lap away.
+                // Slots: the constant, then every curve in the bank, then one more that *makes*
+                // a curve. The last slot is how a parameter gets a shape of its own once the
+                // bank already holds shapes — without it, attaching could only ever point at
+                // something that already existed and there was no way to draw a new one for a
+                // parameter at all (user report).
+                //
+                // It is withheld while the parameter is already sitting on a curve that slot
+                // made and nothing has drawn on: otherwise one more press would make another,
+                // and holding the key would fill the bank with identical flat lines. From there
+                // the walk carries straight on to the constant, which drops the seed.
+                let on_fresh_seed = state
+                    .chain
+                    .bank
+                    .get(&reference.name)
+                    .is_some_and(|e| e.points.len() == 2 && e.points[0].1 == e.points[1].1)
+                    && references.get(&reference.name).map(Vec::len).unwrap_or(0) <= 1;
+                let new_slot = if on_fresh_seed { -1 } else { names.len() as i32 + 1 };
+                let total = names.len() as i32 + if on_fresh_seed { 1 } else { 2 };
+                let at = names.iter().position(|n| *n == reference.name).map(|i| i as i32 + 1);
+                match at.map(|now| (now + dir).rem_euclid(total)) {
+                    // The last slot: a new curve, flat at the value the old one was reading at
+                    // its own start, so landing here does not jump what the parameter is doing.
+                    Some(to) if to == new_slot => {
+                        let held = state
+                            .chain
+                            .bank
+                            .get(&reference.name)
+                            .map(|e| e.project(1.0, reference.min, reference.max, reference.invert))
+                            .and_then(|points| points.first().map(|&(_, v)| v))
+                            .unwrap_or(reference.min);
+                        let level =
+                            if max > min { ((held - min) / (max - min)).clamp(0.0, 1.0) } else { 0.0 };
+                        let flat = BankEnvelope {
+                            name: state.chain.bank.next_name(),
+                            points: vec![(0.0, level), (1.0, level)],
+                        };
+                        let name = state.chain.bank.insert_unique(flat);
+                        ParamValue::EnvelopeRef(EnvelopeRef { name, ..reference.clone() })
+                    }
+                    // Onto (or still on) a curve.
+                    Some(to) if to > 0 => ParamValue::EnvelopeRef(EnvelopeRef {
+                        name: names[(to - 1) as usize].clone(),
+                        ..reference.clone()
+                    }),
+                    // Back to a constant, **at the value the curve was reading at its own
+                    // start**, projected through this reference's window.
+                    //
+                    // Not the bottom of the window, which is what this did first: detaching an
+                    // envelope from a mixer branch then silently slammed it to -60 dB, and from
+                    // any parameter it meant "turn this all the way down" rather than "stop
+                    // automating this". The curve's opening value is the one number the
+                    // reference actually knows, it is always inside the window, and it is what
+                    // the parameter was doing a moment before the automation moved it.
+                    Some(_) => {
+                        let held = state
+                            .chain
+                            .bank
+                            .get(&reference.name)
+                            .map(|e| e.project(1.0, reference.min, reference.max, reference.invert))
+                            .and_then(|points| points.first().map(|&(_, v)| v))
+                            .unwrap_or(reference.min);
+                        // Rounded the way a slider stop is, for the same reason: the row this
+                        // lands on is a slider row, and projecting a normalized curve through a
+                        // window produces a full-precision f64 nobody would ever have typed.
+                        let scale = 10f64.powi(crate::ui::widgets::param_slider::DECIMALS);
+                        ParamValue::Number(if integer {
+                            held.round()
+                        } else {
+                            (held * scale).round() / scale
+                        })
+                    }
+                    // The curve it names is gone: fall back to a legal constant.
+                    None => ParamValue::Number(min),
+                }
+            }
+            // Attaching points at the bank's first shape, and cycling on from there walks the
+            // rest before reaching the slot that makes a new one. Sharing is the common case —
+            // it is why a bank exists — so it is what one press gives you.
+            value => {
+                let now = match value {
+                    ParamValue::Number(v) => *v,
+                    _ => min,
+                };
+                let name = if names.is_empty() {
+                    // Nothing to point at yet, so this parameter contributes the first shape.
+                    let level = if max > min { ((now - min) / (max - min)).clamp(0.0, 1.0) } else { 0.0 };
+                    let flat = BankEnvelope {
+                        name: state.chain.bank.next_name(),
+                        points: vec![(0.0, level), (1.0, level)],
+                    };
+                    state.chain.bank.insert_unique(flat)
+                } else {
+                    names[0].clone()
+                };
+                ParamValue::EnvelopeRef(EnvelopeRef { name, min, max, invert: false })
+            }
+        };
+        // The curve this parameter is leaving, if it is leaving one: it may now be unused.
+        let left = match (&current, &next) {
+            (ParamValue::EnvelopeRef(was), ParamValue::EnvelopeRef(now)) if was.name != now.name => {
+                Some(was.name.clone())
+            }
+            (ParamValue::EnvelopeRef(was), _) => Some(was.name.clone()),
+            _ => None,
+        };
+        let Some(step) = crate::model::cdp::step_at_mut(&mut state.chain, &path) else { return };
+        step.values[index] = next;
+        state.error = None;
+        if let Some(name) = left {
+            self.drop_untouched_seed_envelope(&name);
+        }
+    }
+
+    /// Removes `name` from the bank if attaching created it and nothing came of it: still the
+    /// flat two-point line `cycle_chain_param_envelope_by` seeds, and no longer referenced.
+    ///
+    /// Attaching now always makes a new curve, so without this, cycling a parameter on and off
+    /// an envelope would leave a fresh unused shape behind on every pass. A flat unreferenced
+    /// line carries no information, so dropping it loses nothing — while a curve that was
+    /// actually *drawn* stays, even once nothing points at it, because that is a shape someone
+    /// made and may still want to attach.
+    fn drop_untouched_seed_envelope(&mut self, name: &str) {
+        let Some(references) =
+            self.cdp_chain_editor.as_ref().map(|s| chain_envelope_references(s, &self.cdp_catalog))
+        else {
+            return;
+        };
+        if references.contains_key(name) {
+            return;
+        }
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let untouched = state
+            .chain
+            .bank
+            .envelopes
+            .iter()
+            .find(|e| e.name == name)
+            .is_some_and(|e| e.points.len() == 2 && e.points[0].1 == e.points[1].1);
+        if !untouched {
+            return;
+        }
+        state.chain.bank.envelopes.retain(|e| e.name != name);
+        state.bank_selected =
+            state.bank_selected.min(state.chain.bank.envelopes.len().saturating_sub(1));
+        if state.chain.bank.envelopes.is_empty() {
+            state.focus = ChainFocus::Steps;
+        }
+    }
+
+    /// Sets a chain parameter from a slider *cell* — where the pointer landed on the track.
+    ///
+    /// Shares `param_slider`'s cell-to-stop mapping with the keyboard path, so clicking the cell
+    /// a knob is drawn in produces the value that knob already showed. Past either end of the
+    /// track means that end, which `stop_for_cell` already handles; a click *outside* the track
+    /// never reaches here, because the caller bounds it — the columns either side hold the label
+    /// and the number, and a click on the number meaning "maximum" would be a trap.
+    fn set_chain_param_from_cell(&mut self, path: &[crate::model::cdp::PathSeg], index: usize, cell: usize) {
+        use crate::model::cdp::{ParamKind, ParamValue};
+        use crate::ui::widgets::param_slider;
+        let Some(def) = self
+            .cdp_chain_editor
+            .as_ref()
+            .and_then(|s| crate::model::cdp::step_at(&s.chain, path))
+            .and_then(|step| self.cdp_catalog.processes.iter().find(|p| p.key == step.process_key))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(param) = def.params.get(index) else { return };
+        let ParamKind::Number { min, max, integer, exponential, .. } = param.kind else { return };
+        if !param_slider::applies(min, max) {
+            return;
+        }
+        let stops = param_slider::stop_count(min, max, integer);
+        let value = param_slider::value_for_stop(
+            param_slider::stop_for_cell(cell, stops),
+            min,
+            max,
+            integer,
+            exponential,
+        );
+        let path = path.to_vec();
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let Some(step) = crate::model::cdp::step_at_mut(&mut state.chain, &path) else { return };
+        while step.values.len() < def.params.len() {
+            step.values.push(def.params[step.values.len()].default_value());
+        }
+        step.values[index] = ParamValue::Number(value);
+        state.error = None;
+    }
+
+    /// A slider drag in progress in the chain editor: keeps the parameter following the pointer.
+    ///
+    /// Handled before the Down-only routing in `handle_mouse`, like `cdp_slider_drag`, because
+    /// Drag and Up events never reach the row hit-test. The *parameter* the drag started on is
+    /// what it keeps driving, so wandering off its row does not silently retarget another one.
+    fn handle_chain_slider_drag(&mut self, column: u16) {
+        let Some((path, index)) = self.chain_slider_drag.clone() else { return };
+        let Some(state) = self.cdp_chain_editor.as_ref() else { return };
+        // Locate the parameter's own row, so the track start is the column it was drawn at
+        // rather than whichever row the pointer has since wandered onto.
+        let Some((row_index, (start, width))) = chain_display_rows(state, &self.cdp_catalog)
+            .into_iter()
+            .enumerate()
+            .find_map(|(i, r)| match r {
+                DisplayRow::Row(ChainEditorRow::Param { path: p, index: ix }) if p == path && ix == index => {
+                    self.chain_slider_columns.get(i).copied().flatten().map(|g| (i, g))
+                }
+                _ => None,
+            })
+        else {
+            return;
+        };
+        let Some(rect) = self.dialog_row_rects.get(row_index).copied() else { return };
+        let x = column.saturating_sub(rect.x);
+        let cell = (x.saturating_sub(start) as usize).min(width.saturating_sub(1) as usize);
+        self.set_chain_param_from_cell(&path, index, cell);
+    }
+
+    /// Up/Down (and `k`/`j`): the next selectable row in list order.
+    ///
+    /// List order, not screen position, which in a column layout means walking one leg to its
+    /// end before starting the next. That is a depth-first read of the tree and is what the
+    /// indented list did too; the point of `h`/`l` is that crossing between legs no longer costs
+    /// a press per row.
+    fn move_chain_selection(&mut self, delta: i32) {
+        let Some(rows) = self.cdp_chain_editor.as_ref().map(|s| chain_editor_rows(s, &self.cdp_catalog))
+        else {
+            return;
+        };
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let at = rows.iter().position(|r| *r == state.selected).unwrap_or(0) as i32;
+        let to = at.saturating_add(delta).clamp(0, rows.len().saturating_sub(1) as i32) as usize;
+        state.selected = rows[to].clone();
+    }
+
+    /// What the chain's IN row says: the audio the chain will read, and how much of it.
+    ///
+    /// Stated rather than assumed. A branch can be fed by a different file, and the contrast
+    /// only means anything if the main input is named; and with the dialog covering the screen,
+    /// the waveform behind it is no longer there to answer the question.
+    fn chain_input_summary(&self) -> String {
+        let Some(doc) = self.documents.get(self.active_document) else {
+            return "no buffer open".to_string();
+        };
+        let name = doc
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("_NEW_{:03}", self.active_document + 1));
+        let (start, end) = self.operation_range(self.active_document, self.snap_to_zero).unwrap_or((0, 0));
+        let seconds = (end.saturating_sub(start)) as f64 / doc.sample_rate.max(1) as f64;
+        let extent = if doc.selection.is_some() { "selection" } else { "whole file" };
+        format!(
+            "{name}  \u{00b7}  {extent}  \u{00b7}  {}ch  \u{00b7}  {seconds:.2}s",
+            doc.channels.len().max(1)
+        )
+    }
+
+    /// Flips the OUT row between splicing the result over the audio the chain read and opening
+    /// it as a new document.
+    ///
+    /// A property of the chain, saved with it, because "this chain makes new material" is a fact
+    /// about the chain rather than something to remember at the moment you run it. A step that
+    /// *forces* a new buffer still does — that is the process's shape, not a preference — so the
+    /// row says so rather than pretending the choice is free.
+    fn cycle_chain_output(&mut self) {
+        use crate::model::cdp::ChainOutput;
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        state.chain.output = match state.chain.output {
+            ChainOutput::Splice => ChainOutput::NewBuffer,
+            ChainOutput::NewBuffer => ChainOutput::Splice,
+        };
+        state.error = None;
+    }
+
+    /// `h`/`l`: move sideways — to the sibling branch column beside this one, or, at the top
+    /// level, between the step list and the envelope bank.
+    ///
+    /// Sideways means *sideways on screen*: branches are drawn as columns, so the key that moves
+    /// between columns has to move between branches, not merely between the two panes. Up/Down
+    /// still walks every row in order (so nothing is unreachable), but walking from the top of
+    /// leg A to the top of leg B took as many presses as leg A is tall, which is exactly the
+    /// case the column layout exists for.
+    fn move_chain_sideways(&mut self, delta: i32) {
+        use crate::model::cdp::PathSeg;
+        let Some(state) = self.cdp_chain_editor.as_ref() else { return };
+        if state.focus == ChainFocus::Bank {
+            if delta < 0 {
+                self.move_chain_focus(ChainFocus::Steps);
+            }
+            return;
+        }
+        // The branch this row lives in, if any: the last `Branch` segment of its path.
+        let path = match &state.selected {
+            ChainEditorRow::Step(path)
+            | ChainEditorRow::Param { path, .. }
+            | ChainEditorRow::AddStep { path, .. }
+            | ChainEditorRow::BranchOut(path)
+            | ChainEditorRow::BranchHeader(path) => path.clone(),
+            _ => Vec::new(),
+        };
+        let sibling = path
+            .iter()
+            .rposition(|seg| matches!(seg, PathSeg::Branch(_)))
+            .and_then(|at| {
+                let PathSeg::Branch(b) = path[at] else { return None };
+                let owner = &path[..at];
+                let count = crate::model::cdp::step_at(&state.chain, owner)?.branches.len();
+                let next = b as i32 + delta;
+                (next >= 0 && (next as usize) < count).then(|| {
+                    let mut target = owner.to_vec();
+                    target.push(PathSeg::Branch(next as usize));
+                    target
+                })
+            });
+        match sibling {
+            Some(target) => {
+                if let Some(state) = self.cdp_chain_editor.as_mut() {
+                    state.selected = ChainEditorRow::BranchHeader(target);
+                    state.error = None;
+                }
+            }
+            // Nowhere sideways to go inside the chain: rightwards leaves for the bank.
+            None if delta > 0 => self.move_chain_focus(ChainFocus::Bank),
+            None => {}
+        }
+    }
+
+    /// Moves the keyboard between the step list and the envelope bank.
+    ///
+    /// Shift+Left/Right, because plain Left/Right drive the sliders and Tab steps between
+    /// processes. A no-op toward a bank that is not on screen: the pane is dropped on a narrow
+    /// terminal, and focus on an invisible column reads as the dialog having hung — the same
+    /// reason the process browser skips an empty Groups column.
+    fn move_chain_focus(&mut self, to: ChainFocus) {
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        // Reachable even when empty, which is the state you go there to change: `n` makes a
+        // curve from the panel, without having to find a parameter to hang it on first.
+        state.focus = to;
+        state.error = None;
+    }
+
+    /// `n` in the bank: adds a curve, without needing a parameter to hang it on.
+    ///
+    /// The bank was reachable only *through* a parameter (`e`), which put the two halves of the
+    /// idea the wrong way round: a shared shape is something you draw and then decide the uses
+    /// of. With `n` and `a` the panel is self-sufficient — make one here, point it at whatever
+    /// you like from here.
+    fn new_bank_envelope(&mut self) {
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let name = state.chain.bank.next_name();
+        let points = CHAIN_NEW_ENVELOPE_SHAPE.to_vec();
+        state.chain.bank.envelopes.push(crate::model::cdp::BankEnvelope { name, points });
+        state.bank_selected = state.chain.bank.envelopes.len() - 1;
+        state.focus = ChainFocus::Bank;
+        state.error = None;
+    }
+
+    /// `a` in the bank: opens a list of every envelope-capable parameter in the chain, to point
+    /// one of them at the selected curve.
+    ///
+    /// The inverse of `e` on a parameter row, and the direction that makes a *shared* bank worth
+    /// having: from a row you have the parameter and must find a shape; from the bank you have
+    /// the shape and must find the parameters — which, spread across branches and columns, is
+    /// the harder half.
+    fn open_chain_assign_picker(&mut self) {
+        use crate::model::cdp::ParamValue;
+        let Some(state) = self.cdp_chain_editor.as_ref() else { return };
+        let index = state.bank_selected.min(state.chain.bank.envelopes.len().saturating_sub(1));
+        let Some(envelope) = state.chain.bank.envelopes.get(index).map(|e| e.name.clone()) else {
+            return;
+        };
+        // Grouped by process, each group headed by the process it belongs to: a flat list of
+        // parameter names says nothing about *where* in the chain each one is, and the same
+        // name recurs across steps ("Gain", "Amount") so a bare list is ambiguous as well as
+        // uninformative. Headings are `None` entries, skipped by the selection.
+        let mut targets: Vec<(Option<(ChainPath, usize)>, String)> = Vec::new();
+        let mut current: Option<ChainPath> = None;
+        for row in chain_editor_rows(state, &self.cdp_catalog) {
+            let ChainEditorRow::Param { path, index } = row else { continue };
+            let Some(step) = crate::model::cdp::step_at(&state.chain, &path) else { continue };
+            let Some(def) = self.cdp_catalog.processes.iter().find(|p| p.key == step.process_key)
+            else {
+                continue;
+            };
+            let Some(param) = def.params.get(index) else { continue };
+            // Only what can actually take a curve, so the list is a set of answers rather than a
+            // catalogue with most of it unusable — and so a process with none is not listed at
+            // all rather than heading an empty group.
+            if !param.automatable {
+                continue;
+            }
+            if current.as_ref() != Some(&path) {
+                targets.push((None, format!("{}  {}", chain_path_label(&path), def.title)));
+                current = Some(path.clone());
+            }
+            let held = match step.values.get(index) {
+                Some(ParamValue::EnvelopeRef(r)) => format!("   \u{2190} {}", r.name),
+                _ => String::new(),
+            };
+            targets.push((Some((path.clone(), index)), format!("    {}{held}", param.name)));
+        }
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        if targets.is_empty() {
+            state.error = Some("Nothing in this chain can take an envelope".into());
+            return;
+        }
+        let mut picker = ChainAssignPicker { envelope, targets, selected: 0 };
+        picker.selected = picker.first_target();
+        state.assign_picker = Some(picker);
+        state.error = None;
+    }
+
+    /// Enter in the assign picker: points the chosen parameter at the envelope.
+    fn commit_chain_assign(&mut self) {
+        use crate::model::cdp::{EnvelopeRef, ParamKind};
+        let Some(state) = self.cdp_chain_editor.as_ref() else { return };
+        let Some(picker) = state.assign_picker.as_ref() else { return };
+        let Some((Some((path, index)), _)) = picker.targets.get(picker.selected).cloned() else {
+            return;
+        };
+        let name = picker.envelope.clone();
+        let Some(def) = crate::model::cdp::step_at(&state.chain, &path)
+            .and_then(|step| self.cdp_catalog.processes.iter().find(|p| p.key == step.process_key))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(ParamKind::Number { min, max, .. }) = def.params.get(index).map(|p| &p.kind) else {
+            return;
+        };
+        // The window is the parameter's own declared range, the same auto-fill attaching from
+        // the row does — so a shape lands somewhere runnable however it was pointed at.
+        let (min, max) = (*min, *max);
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        state.assign_picker = None;
+        let Some(step) = crate::model::cdp::step_at_mut(&mut state.chain, &path) else { return };
+        while step.values.len() < def.params.len() {
+            step.values.push(def.params[step.values.len()].default_value());
+        }
+        step.values[index] =
+            crate::model::cdp::ParamValue::EnvelopeRef(EnvelopeRef { name, min, max, invert: false });
+        state.error = None;
+    }
+
+    /// `d` in the bank: removes the selected envelope.
+    ///
+    /// Refused while anything still points at it, with the count. The alternative — deleting it
+    /// and detaching every reference — is a change spread across the whole chain in response to
+    /// one keystroke on a different column, and the references are exactly what the pane's count
+    /// exists to make findable. `e` walks a parameter off a curve; once nothing holds it, this
+    /// works.
+    fn delete_bank_envelope(&mut self) {
+        let references = self
+            .cdp_chain_editor
+            .as_ref()
+            .map(|s| chain_envelope_references(s, &self.cdp_catalog))
+            .unwrap_or_default();
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let index = state.bank_selected.min(state.chain.bank.envelopes.len().saturating_sub(1));
+        let Some(envelope) = state.chain.bank.envelopes.get(index) else { return };
+        match references.get(&envelope.name).map(Vec::len).unwrap_or(0) {
+            0 => {
+                state.chain.bank.envelopes.remove(index);
+                state.bank_selected = index.min(state.chain.bank.envelopes.len().saturating_sub(1));
+                if state.chain.bank.envelopes.is_empty() {
+                    state.focus = ChainFocus::Steps;
+                }
+                state.error = None;
+            }
+            n => {
+                state.error = Some(format!(
+                    "\"{}\" still drives {n} parameter(s) — press e on those rows first",
+                    envelope.name
+                ))
+            }
+        }
+    }
+
+    /// `D` in the bank: copies the selected envelope under the next free name.
+    ///
+    /// The point of it is *divergence*: a shape shared by five parameters is one edit away from
+    /// changing all five, and duplicating is how you break one of them off without redrawing it.
+    /// The copy is unreferenced, so nothing changes until it is attached.
+    fn duplicate_bank_envelope(&mut self) {
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let index = state.bank_selected.min(state.chain.bank.envelopes.len().saturating_sub(1));
+        let Some(source) = state.chain.bank.envelopes.get(index).cloned() else { return };
+        let name = state.chain.bank.next_name();
+        state.chain.bank.envelopes.insert(
+            index + 1,
+            crate::model::cdp::BankEnvelope { name, points: source.points },
+        );
+        state.bank_selected = index + 1;
+        state.error = None;
+    }
+
+    /// Enter in the bank: draws the selected curve, via the first parameter that reads it.
+    ///
+    /// The graphical editor needs a parameter to project the normalized curve *through* — a bank
+    /// curve has no units of its own, so there is no axis to draw it on until something reads
+    /// it. An unreferenced curve therefore says so rather than opening an editor on an
+    /// arbitrary range.
+    fn edit_bank_envelope(&mut self) {
+        let name = self.cdp_chain_editor.as_ref().and_then(|state| {
+            let index = state.bank_selected.min(state.chain.bank.envelopes.len().checked_sub(1)?);
+            state.chain.bank.envelopes.get(index).map(|e| e.name.clone())
+        });
+        let backgrounds = name.map(|n| self.envelope_backgrounds(&n)).unwrap_or_default();
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        if state.chain.bank.envelopes.is_empty() {
+            return;
+        }
+        let index = state.bank_selected.min(state.chain.bank.envelopes.len() - 1);
+        state.bank_selected = index;
+        let points = state.chain.bank.envelopes[index].points.clone();
+        // Drawn on the curve's own normalized axes rather than through some parameter's window.
+        // It used to demand one — "attach it with e, then draw it" — which put the halves of the
+        // idea the wrong way round: a shared shape is something you design and then find uses
+        // for. An unattached curve now opens exactly like an attached one.
+        let label = state.chain.bank.envelopes[index].name.clone();
+        state.envelope = Some(CdpEnvelopeEdit {
+            field_index: index,
+            target: CdpEnvelopeTarget::BankEnvelope,
+            label: Some(label),
+            original: Some(points.clone()),
+            points,
+            selected: 0,
+            time_max: crate::model::cdp::envelope_bank::BANK_MAX,
+            // A bank curve has no parameter to inherit a range from, so the audio it draws over
+            // comes from `backgrounds` instead — which is also why it used to open onto an empty
+            // grid (user report). `range` stays unused for this session.
+            range: (0, 0),
+            backgrounds,
+            background: 0,
+            curve_picker: None,
+            save_prompt: None,
+            presets: crate::model::cdp::envelope_preset::list_presets(),
+            preset_selected: None,
+            custom_points: None,
+        });
+        state.error = None;
+    }
+
+    /// Every audio source worth drawing `envelope` over: the audio the chain itself reads, plus
+    /// the file feeding any branch that holds a parameter this curve drives.
+    ///
+    /// The chain's own input comes first and is always present — it is what most parameters
+    /// operate on, and it is the right answer when a curve drives nothing yet. A picked file is
+    /// added once, however many parameters inside that branch reference the curve, and only when
+    /// one actually does: a background nothing on screen relates to would be noise to cycle past.
+    fn envelope_backgrounds(&self, envelope: &str) -> Vec<EnvelopeBackground> {
+        use crate::model::cdp::{ParamValue, PathSeg};
+        let mut backgrounds = Vec::new();
+        let Some(doc) = self.documents.get(self.active_document) else { return backgrounds };
+        let range = self.operation_range(self.active_document, self.snap_to_zero).unwrap_or((0, 0));
+        let name = doc
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("_NEW_{:03}", self.active_document + 1));
+        backgrounds.push(EnvelopeBackground {
+            label: format!("{name} (chain input)"),
+            document: self.active_document,
+            range,
+        });
+        let Some(state) = self.cdp_chain_editor.as_ref() else { return backgrounds };
+        for row in chain_editor_rows(state, &self.cdp_catalog) {
+            let ChainEditorRow::Param { path, index } = row else { continue };
+            let Some(step) = crate::model::cdp::step_at(&state.chain, &path) else { continue };
+            if !matches!(step.values.get(index), Some(ParamValue::EnvelopeRef(r)) if r.name == envelope)
+            {
+                continue;
+            }
+            // The innermost branch this parameter sits inside that reads a file of its own.
+            let mut prefix: Vec<PathSeg> = Vec::new();
+            let mut source = None;
+            for segment in &path {
+                prefix.push(*segment);
+                if matches!(segment, PathSeg::Branch(_)) {
+                    if let Some(picked) = state.buffer_picks.get(&prefix) {
+                        source = Some(*picked);
+                    }
+                }
+            }
+            let Some(picked) = source else { continue };
+            let Some(other) = self.documents.get(picked) else { continue };
+            if backgrounds.iter().any(|b| b.document == picked) {
+                continue;
+            }
+            let label = other
+                .path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| format!("_NEW_{:03}", picked + 1));
+            backgrounds.push(EnvelopeBackground {
+                label,
+                document: picked,
+                range: (0, other.len_samples()),
+            });
+        }
+        backgrounds
+    }
+
+    /// **Branch out**: inserts a Mixer with two `Tap` branches, so the signal at that point
+    /// splits and rejoins.
+    ///
+    /// Both branches tap, and both are empty, so the chain is unchanged the instant it is
+    /// created apart from the mixer's own default per-branch level: two copies of the same
+    /// signal summed. That is deliberate — an insertion that altered the result before you had
+    /// configured it would be something to undo rather than something to build with.
+    ///
+    /// Reached from the "\u{2443} Branch out" row beside "+ Add step". Deliberately not also a
+    /// key: a row you can see beats a letter you have to have read about, and two routes to one
+    /// action is one more thing for the hints bar to carry.
+    fn insert_branch_out(&mut self, parent: &[crate::model::cdp::PathSeg], at: usize) {
+        use crate::model::cdp::{chain::Branch, native, BranchSource, PathSeg};
+        let Some(def) = self.cdp_catalog.processes.iter().find(|p| p.key == native::MIXER_KEY).cloned()
+        else {
+            return;
+        };
+        let mut mixer = crate::model::cdp::ChainStep::new(
+            def.key.clone(),
+            def.params.iter().map(|p| p.default_value()).collect(),
+        );
+        mixer.branches = vec![Branch { source: BranchSource::Tap, steps: Vec::new() }; 2];
+
+        let parent = parent.to_vec();
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let Some(siblings) = crate::model::cdp::steps_at_mut(&mut state.chain, &parent) else { return };
+        let at = at.min(siblings.len());
+        siblings.insert(at, mixer);
+        // Every later sibling shifted by one, and so did anything nested under them.
+        shift_buffer_picks_for_insert(&mut state.buffer_picks, &parent, at);
+        // Land on branch A's "+ Add step", which is what you came here to do: the mixer itself
+        // needs nothing, and its first branch is empty until something is put in it.
+        let mut branch_path = parent;
+        branch_path.push(PathSeg::Step(at));
+        branch_path.push(PathSeg::Branch(0));
+        state.selected = ChainEditorRow::AddStep { path: branch_path, index: 0 };
+        state.error = None;
+    }
+
+    /// The "\u{2443} Branch out" row: splits at the end of the list it belongs to, beside the
+    /// "+ Add step" that appends there.
+    fn branch_out_at_end(&mut self, parent: &[crate::model::cdp::PathSeg]) {
+        let at = self
+            .cdp_chain_editor
+            .as_ref()
+            .and_then(|s| crate::model::cdp::steps_at(&s.chain, parent))
+            .map(|steps| steps.len())
+            .unwrap_or(0);
+        self.insert_branch_out(parent, at);
+    }
+
+
+    /// `E` on a parameter row: opens the graphical breakpoint editor on the curve driving it.
+    ///
+    /// Routed *through* the step's own `CdpParams` session rather than hosting a second copy of
+    /// the editor here. `CdpEnvelopeEdit` reads and writes `Dialog::CdpParams { fields, .. }` at
+    /// around twenty sites — its keymap, its mouse handling, both renderers, the preset picker,
+    /// the save prompt — and a second host for all of that would be a large refactor whose only
+    /// gain is skipping a dialog the user is about to see anyway.
+    ///
+    /// What matters is where the result lands, and that already works: the reference was
+    /// projected onto real seconds when the dialog opened, and committing runs
+    /// `lift_envelopes_into_bank`, which writes back to the *same* bank entry
+    /// (`step_edit_envelope_names`). So editing a shape here updates every parameter that
+    /// points at it — which is the whole reason the bank is shared.
+    fn edit_chain_param_envelope(&mut self) {
+        let Some((path, index)) = self.selected_chain_param() else { return };
+        let Some(step) = self
+            .cdp_chain_editor
+            .as_ref()
+            .and_then(|s| crate::model::cdp::step_at(&s.chain, &path))
+            .cloned()
+        else {
+            return;
+        };
+        self.open_cdp_chain_step_target(ChainEditTarget::Replace(path));
+        // Focus the parameter before opening the editor: `open_cdp_envelope_editor` acts on
+        // whichever field has focus, and refuses one that cannot carry a curve.
+        if let Some(Dialog::CdpParams { focus, .. }) = self.dialog.as_mut() {
+            *focus = index + 1;
+        }
+        if !self.open_cdp_envelope_editor() {
+            // Not automatable, or the step no longer resolves. The params dialog is open and
+            // focused on the row either way, which is a reasonable place to be left; say why
+            // rather than leaving the key looking broken.
+            if let Some(state) = self.cdp_chain_editor.as_mut() {
+                state.error = Some(format!(
+                    "\"{}\" has no envelope to draw",
+                    self.cdp_catalog
+                        .processes
+                        .iter()
+                        .find(|p| p.key == step.process_key)
+                        .and_then(|d| d.params.get(index))
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| "This parameter".to_string())
+                ));
+            }
+        }
+    }
+
+    /// `i` on a parameter driven by a bank curve: flips it, so one shape can push this
+    /// parameter down as it pushes another up. A no-op on a plain constant.
+    fn invert_chain_param_envelope(&mut self) {
+        use crate::model::cdp::ParamValue;
+        let Some((path, index)) = self.selected_chain_param() else { return };
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let Some(step) = crate::model::cdp::step_at_mut(&mut state.chain, &path) else { return };
+        if let Some(ParamValue::EnvelopeRef(reference)) = step.values.get_mut(index) {
+            reference.invert = !reference.invert;
+            state.error = None;
+        }
+    }
+
+    fn selected_chain_param(&self) -> Option<(ChainPath, usize)> {
+        match self.cdp_chain_editor.as_ref()?.selected.clone() {
+            ChainEditorRow::Param { path, index } => Some((path, index)),
+            _ => None,
+        }
+    }
+
+    /// How many rows a page key moves — a screenful less the dead-zone margins, so a page down
+    /// lands the selection where the eye already is rather than pushing it to the far edge.
+    fn chain_page_rows(&self) -> i32 {
+        let rows = self
+            .cdp_chain_editor
+            .as_ref()
+            .map(|s| s.view_rows.get())
+            .unwrap_or(1)
+            .saturating_sub(CHAIN_SCROLL_MARGIN * 2)
+            .max(1);
+        rows as i32
+    }
+
+    /// Tab / Shift+Tab: jump to the next or previous *landmark* — a step, or a place a step can
+    /// be added — skipping the parameter rows between them.
+    ///
+    /// Replaced folding, which existed to get past a long parameter list and was a worse answer
+    /// to it: hiding the values is the opposite of what this view is for, and a folded chain
+    /// forgets what you folded the moment you reload it. Stepping over them reaches the same
+    /// place in one press without taking anything off the screen.
+    ///
+    /// "+ Add step" rows count, because building a chain is mostly moving between what is there
+    /// and where the next thing goes — a Tab that only found existing steps would stop one row
+    /// short of the thing you were heading for.
+    fn move_chain_step(&mut self, delta: i32) {
+        let Some(rows) = self.cdp_chain_editor.as_ref().map(|s| chain_editor_rows(s, &self.cdp_catalog))
+        else {
+            return;
+        };
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let at = rows.iter().position(|r| *r == state.selected).unwrap_or(0);
+        let landmark =
+            |r: &ChainEditorRow| matches!(r, ChainEditorRow::Step(_) | ChainEditorRow::AddStep { .. });
+        let next = if delta > 0 {
+            rows.iter().enumerate().skip(at + 1).find(|(_, r)| landmark(r))
+        } else {
+            rows.iter().enumerate().take(at).filter(|(_, r)| landmark(r)).last()
+        };
+        if let Some((i, _)) = next {
+            state.selected = rows[i].clone();
+        }
+    }
+
+
+    /// `d` on a branch row: removes it, but never below the step's
+    /// [`ProcessDef::branch_arity_min`] — a dual-input process's second input is mandatory, and
+    /// a combiner with one leg combines nothing. Refused with a message rather than silently
+    /// ignored, so the key does not appear broken on the rows where it cannot apply.
+    fn delete_chain_branch(&mut self, path: &[crate::model::cdp::PathSeg]) {
+        use crate::model::cdp::PathSeg;
+        let Some((&last, step_path)) = path.split_last() else { return };
+        let PathSeg::Branch(index) = last else { return };
+        let floor = self
+            .cdp_chain_editor
+            .as_ref()
+            .and_then(|s| crate::model::cdp::step_at(&s.chain, step_path))
+            .and_then(|step| {
+                self.cdp_catalog
+                    .processes
+                    .iter()
+                    .find(|p| p.key == step.process_key)
+                    .map(|d| d.branch_arity_min())
+            });
+        let Some(floor) = floor else { return };
+        let step_path = step_path.to_vec();
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let Some(step) = crate::model::cdp::step_at_mut(&mut state.chain, &step_path) else { return };
+        if step.branches.len() <= floor {
+            state.error = Some(format!(
+                "This step needs {floor} parallel input(s) — delete the step itself to remove them"
+            ));
+            return;
+        }
+        if index >= step.branches.len() {
+            return;
+        }
+        step.branches.remove(index);
+        remove_branch_buffer_picks(&mut state.buffer_picks, &step_path, index);
+        state.selected = ChainEditorRow::Step(step_path);
+        state.error = None;
+    }
+
 
     /// Left/Right on the preset row: cycles `preset_selected` and loads that chain's steps
     /// wholesale into the draft (name included, so a subsequent Save overwrites the same
@@ -8478,6 +10673,7 @@ impl App {
     /// same fix applied there. `buffer_picks` always resets to empty on any load (never
     /// persisted, see `ChainEditorState.buffer_picks`'s doc comment).
     fn cycle_chain_preset(&mut self, dir: i32) {
+        let catalog = &self.cdp_catalog;
         let Some(state) = self.cdp_chain_editor.as_mut() else { return };
         if state.presets.is_empty() {
             return;
@@ -8501,28 +10697,141 @@ impl App {
             state.chain = state.presets[next].clone();
             state.custom_chain = custom_chain;
         }
+        // Same reason as `recall_last_chain`: a preset saved against an older catalog may be
+        // short a branch its process now requires.
+        state.chain.normalize_branches(catalog);
         state.buffer_picks = std::collections::HashMap::new();
         state.selected = ChainEditorRow::Preset;
     }
 
-    /// Left/Right on a `Step` row: cycles which open document feeds that step's second input
-    /// (or its side-chain's first step, if one is configured) — a no-op for a single-input
-    /// step. Writes to the same `buffer_picks` map `CdpSecondInput` reads from/writes to, so
-    /// this and the picker inside `CdpParams` always agree (see
-    /// `ChainEditorState.buffer_picks`'s doc comment).
-    fn cycle_chain_buffer_pick(&mut self, path: &[usize], dir: i32) {
-        let doc_count = self.documents.len();
-        if doc_count == 0 {
+    /// The choices on a dual-input process's "2nd input" row.
+    ///
+    /// Open documents always; and, when the step is being added to or edited in a chain, the
+    /// outputs the chain has already produced by that point. Built here rather than in the
+    /// chain editor because this row exists in both places and the two must offer the same
+    /// things — a second input you can pick on one screen and not the other is worse than not
+    /// offering it at all.
+    fn second_input_choices(&self) -> CdpSecondInput {
+        let mut sources: Vec<ChainBranchInput> = Vec::new();
+        // Chain outputs first: in a chain they are the interesting answer, and a row that opened
+        // on a document would bury them behind however many buffers happen to be open.
+        if let Some(path) = self.chain_step_position() {
+            if let Some(state) = self.cdp_chain_editor.as_ref() {
+                sources.extend(
+                    crate::model::cdp::chain::outputs_available_to(&state.chain, Some(&path))
+                        .into_iter()
+                        .map(ChainBranchInput::From),
+                );
+            }
+        }
+        let chain_outputs = sources.len();
+        sources.extend((0..self.documents.len()).map(ChainBranchInput::Buffer));
+
+        let names: Vec<String> = sources
+            .iter()
+            .map(|source| match source {
+                ChainBranchInput::From(path) => format!("output of {}", chain_path_label(path)),
+                ChainBranchInput::Buffer(i) => self.buffer_name(*i),
+                ChainBranchInput::Incoming => "the incoming signal".to_string(),
+            })
+            .collect();
+        let doc_indices: Vec<usize> = sources
+            .iter()
+            .map(|source| match source {
+                ChainBranchInput::Buffer(i) => *i,
+                _ => usize::MAX,
+            })
+            .collect();
+        // Default to the first buffer that isn't the one being processed — the common case is
+        // combining against different material; processing against itself (self-convolution and
+        // the like) stays one Left-press away. A chain's own outputs are offered but not
+        // defaulted to: picking one is a deliberate act, and defaulting there would change what
+        // an existing dual-input step means the moment it lands in a chain.
+        let selected = sources
+            .iter()
+            .position(|s| matches!(s, ChainBranchInput::Buffer(i) if *i != self.active_document))
+            .unwrap_or(chain_outputs.min(sources.len().saturating_sub(1)));
+        CdpSecondInput { doc_indices, names, selected, sources }
+    }
+
+    /// The path the step currently being added or edited will occupy, if this is a chain step.
+    /// For an append that is the position at the end of its list — the step does not exist yet,
+    /// so there is nothing to name but where it is going.
+    fn chain_step_position(&self) -> Option<ChainPath> {
+        use crate::model::cdp::PathSeg;
+        match self.cdp_chain_edit_target.as_ref()? {
+            ChainEditTarget::Replace(path) => Some(path.clone()),
+            ChainEditTarget::Insert { parent, index } => {
+                let mut path = parent.clone();
+                path.push(PathSeg::Step(*index));
+                Some(path)
+            }
+        }
+    }
+
+    /// Everything a branch could read, in the order Left/Right walks it.
+    ///
+    /// One list rather than a source *mode* plus a pick within it: with three kinds of input —
+    /// the signal arriving at the split, an earlier branch's finished output, an open file — a
+    /// mode toggle would mean two controls for one question. This is the question.
+    fn chain_branch_input_choices(&self, path: &[crate::model::cdp::PathSeg]) -> Vec<ChainBranchInput> {
+        let mut choices = vec![ChainBranchInput::Incoming];
+        if let Some(state) = self.cdp_chain_editor.as_ref() {
+            // Only outputs that finish before this branch starts — see `outputs_available_to`,
+            // which the validator reads too, so the editor can never offer something the run
+            // would then refuse.
+            choices.extend(
+                crate::model::cdp::chain::outputs_available_to(&state.chain, Some(path))
+                    .into_iter()
+                    .map(ChainBranchInput::From),
+            );
+        }
+        choices.extend((0..self.documents.len()).map(ChainBranchInput::Buffer));
+        choices
+    }
+
+    /// Which of those a branch currently reads.
+    fn chain_branch_input(&self, path: &[crate::model::cdp::PathSeg]) -> ChainBranchInput {
+        use crate::model::cdp::BranchSource;
+        let Some(state) = self.cdp_chain_editor.as_ref() else { return ChainBranchInput::Incoming };
+        match crate::model::cdp::branch_at(&state.chain, path).map(|b| b.source.clone()) {
+            Some(BranchSource::From(source)) => ChainBranchInput::From(source),
+            Some(BranchSource::Buffer) => state
+                .buffer_picks
+                .get(path)
+                .copied()
+                .map(ChainBranchInput::Buffer)
+                .unwrap_or(ChainBranchInput::Incoming),
+            _ => ChainBranchInput::Incoming,
+        }
+    }
+
+    /// Left/Right on a branch row: walks it through everything it could read.
+    fn cycle_chain_branch_input(&mut self, path: &[crate::model::cdp::PathSeg], dir: i32) {
+        use crate::model::cdp::BranchSource;
+        let choices = self.chain_branch_input_choices(path);
+        if choices.is_empty() {
             return;
         }
+        let current = self.chain_branch_input(path);
+        let at = choices.iter().position(|c| *c == current).unwrap_or(0) as i32;
+        let next = choices[(at + dir).rem_euclid(choices.len() as i32) as usize].clone();
+
+        let path = path.to_vec();
         let Some(state) = self.cdp_chain_editor.as_mut() else { return };
-        let Some(step) = crate::model::cdp::step_at(&state.chain, path) else { return };
-        if step.is_dual_input(&self.cdp_catalog) != Some(true) {
-            return;
+        let source = match &next {
+            ChainBranchInput::Incoming => BranchSource::Tap,
+            ChainBranchInput::From(source) => BranchSource::From(source.clone()),
+            ChainBranchInput::Buffer(index) => {
+                // Recorded now, so a `Buffer` branch is never left without one.
+                state.buffer_picks.insert(path.clone(), *index);
+                BranchSource::Buffer
+            }
+        };
+        if let Some(branch) = crate::model::cdp::branch_at_mut(&mut state.chain, &path) {
+            branch.source = source;
         }
-        let current = state.buffer_picks.get(path).map(|&i| i as i32).unwrap_or(-1);
-        let next = (current + dir).rem_euclid(doc_count as i32) as usize;
-        state.buffer_picks.insert(path.to_vec(), next);
+        state.error = None;
     }
 
     /// Reorders the currently-selected step by `delta` (±1), swapping it with its sibling
@@ -8532,9 +10841,11 @@ impl App {
     /// changes along with the swap.
     fn reorder_chain_step(&mut self, delta: i32) {
         let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        use crate::model::cdp::PathSeg;
         let ChainEditorRow::Step(path) = &state.selected else { return };
         let path = path.clone();
-        let Some((&i, parent)) = path.split_last() else { return };
+        let Some((&last, parent)) = path.split_last() else { return };
+        let PathSeg::Step(i) = last else { return };
         let new_i = i as i32 + delta;
         let Some(siblings) = crate::model::cdp::steps_at_mut(&mut state.chain, parent) else { return };
         if new_i < 0 || new_i as usize >= siblings.len() {
@@ -8542,9 +10853,9 @@ impl App {
         }
         let new_i = new_i as usize;
         siblings.swap(i, new_i);
-        remap_buffer_picks_after_swap(&mut state.buffer_picks, parent.len(), i, new_i);
+        remap_buffer_picks_after_swap(&mut state.buffer_picks, parent, i, new_i);
         let mut new_path = parent.to_vec();
-        new_path.push(new_i);
+        new_path.push(PathSeg::Step(new_i));
         state.selected = ChainEditorRow::Step(new_path);
     }
 
@@ -8555,9 +10866,23 @@ impl App {
         match state.selected.clone() {
             ChainEditorRow::Preset => {}
             ChainEditorRow::Step(path) => self.open_cdp_chain_step_target(ChainEditTarget::Replace(path)),
-            ChainEditorRow::AddStep(parent_path) => {
-                self.open_cdp_chain_step_target(ChainEditTarget::Append(parent_path))
+            // Enter cycles it, the same as Left/Right: choosing what a branch reads is one
+            // question with a list of answers, so "activate" and "change" are the same act.
+            ChainEditorRow::BranchHeader(path) => self.cycle_chain_branch_input(&path, 1),
+            ChainEditorRow::AddStep { path, index } => {
+                self.open_cdp_chain_step_target(ChainEditTarget::Insert { parent: path, index })
             }
+            ChainEditorRow::BranchOut(parent_path) => self.branch_out_at_end(&parent_path),
+            // Enter on a parameter opens its step's own dialog. For a slider-driven value that
+            // is redundant with Left/Right, and for everything else — an envelope, a table, a
+            // marker-time list — it is the only way in, so one key covers both rather than
+            // Enter meaning nothing on two rows out of three.
+            ChainEditorRow::Param { path, .. } => {
+                self.open_cdp_chain_step_target(ChainEditTarget::Replace(path))
+            }
+            // Enter on OUT cycles it, the same as Left/Right: it is a two-state choice, so
+            // "activate" and "change" are the same act.
+            ChainEditorRow::Out => self.cycle_chain_output(),
             ChainEditorRow::Preview => self.run_cdp_chain(ChainRunFinish::PreviewWholeChain),
             ChainEditorRow::Run => self.run_cdp_chain(ChainRunFinish::Splice),
         }
@@ -8581,22 +10906,30 @@ impl App {
                 }
             }
             ChainEditorRow::Step(path) => {
-                let Some((&i, parent)) = path.split_last() else { return };
+                use crate::model::cdp::PathSeg;
+                let Some((&last, parent)) = path.split_last() else { return };
+                let PathSeg::Step(i) = last else { return };
                 if let Some(siblings) = crate::model::cdp::steps_at_mut(&mut state.chain, parent) {
                     if i < siblings.len() {
                         siblings.remove(i);
-                        remove_buffer_picks_under(&mut state.buffer_picks, parent.len(), i);
+                        remove_buffer_picks_under(&mut state.buffer_picks, parent, i);
                         state.selected = if i > 0 {
                             let mut prev = parent.to_vec();
-                            prev.push(i - 1);
+                            prev.push(PathSeg::Step(i - 1));
                             ChainEditorRow::Step(prev)
                         } else {
-                            ChainEditorRow::AddStep(parent.to_vec())
+                            ChainEditorRow::AddStep { path: parent.to_vec(), index: 0 }
                         };
                     }
                 }
             }
-            ChainEditorRow::AddStep(_) | ChainEditorRow::Preview | ChainEditorRow::Run => {}
+            ChainEditorRow::BranchHeader(path) => self.delete_chain_branch(&path),
+            ChainEditorRow::Param { .. }
+            | ChainEditorRow::AddStep { .. }
+            | ChainEditorRow::BranchOut(_)
+            | ChainEditorRow::Out
+            | ChainEditorRow::Preview
+            | ChainEditorRow::Run => {}
         }
     }
 
@@ -8609,7 +10942,7 @@ impl App {
             ChainEditTarget::Replace(path) => {
                 self.cdp_chain_editor.as_ref().and_then(|s| crate::model::cdp::step_at(&s.chain, path)).cloned()
             }
-            ChainEditTarget::Append(_) => None,
+            ChainEditTarget::Insert { .. } => None,
         };
         match existing {
             Some(step) => self.open_cdp_chain_step_params(&step, target),
@@ -8637,16 +10970,39 @@ impl App {
             return;
         };
         let (mut fields, mut second_input, variadic_input, photo_input) = self.cdp_fields_for(catalog_index);
-        let def = &self.cdp_catalog.processes[catalog_index];
+        let def = self.cdp_catalog.processes[catalog_index].clone();
+        // The editor works in absolute seconds against the *current* selection, so a bank
+        // reference is projected onto that axis on the way in and normalized back out on
+        // commit. Projecting against the live duration rather than a stored one is what makes a
+        // chain's automation span whatever it is applied to instead of drifting.
+        let time_max = self.cdp_editor_time_axis().1;
+        let bank = self.cdp_chain_editor.as_ref().map(|s| s.chain.bank.clone()).unwrap_or_default();
+        let envelope_names = Self::step_envelope_names(step, &def);
         if step.values.len() == fields.len() {
-            fields = def.params.iter().zip(&step.values).map(|(p, v)| CdpField::from_value(p, v)).collect();
+            let projected = Self::project_step_values(step, &bank, time_max);
+            fields = def.params.iter().zip(&projected).map(|(p, v)| CdpField::from_value(p, v)).collect();
+        }
+        // A mixer declares `MAX_MIX_LEGS` branches' worth of parameters whatever it has, because
+        // every `ParamValue` list in the app is index-parallel to `ProcessDef.params`. Showing
+        // faders for branches that do not exist is exactly the confusion that costs; the used
+        // parameters are a prefix (see `native::MIX_LIMIT_PARAM`), so the dialog is simply given
+        // that many. `cdp_chain_commit_step` pads the rest back with their defaults.
+        if def.key == crate::model::cdp::native::MIXER_KEY {
+            fields.truncate(crate::model::cdp::native::mix_param_count(step.branches.len()));
+        }
+        if let Some(state) = self.cdp_chain_editor.as_mut() {
+            state.step_edit_time_max = time_max;
+            state.step_edit_envelope_names = envelope_names;
         }
         if let ChainEditTarget::Replace(path) = &target {
-            if let Some(picked_doc) = self.cdp_chain_editor.as_ref().and_then(|s| s.buffer_picks.get(path)).copied() {
-                if let Some(second) = second_input.as_mut() {
-                    if let Some(pos) = second.doc_indices.iter().position(|&i| i == picked_doc) {
-                        second.selected = pos;
-                    }
+            let mut branch_path = path.clone();
+            branch_path.push(crate::model::cdp::PathSeg::Branch(0));
+            // Seeded from what the branch actually reads, which since the row gained chain
+            // outputs is no longer always a document.
+            let current = self.chain_branch_input(&branch_path);
+            if let Some(second) = second_input.as_mut() {
+                if let Some(pos) = second.sources.iter().position(|s| *s == current) {
+                    second.selected = pos;
                 }
             }
         }
@@ -8674,6 +11030,90 @@ impl App {
             save_prompt: None,
             scroll: 0,
         });
+    }
+
+    /// The bank envelope each of `step`'s parameters currently reads, index-parallel to
+    /// `def.params`. `None` for a parameter that is a plain constant.
+    fn step_envelope_names(
+        step: &crate::model::cdp::ChainStep,
+        def: &crate::model::cdp::ProcessDef,
+    ) -> Vec<Option<String>> {
+        use crate::model::cdp::ParamValue;
+        (0..def.params.len())
+            .map(|i| match step.values.get(i) {
+                Some(ParamValue::EnvelopeRef(r)) => Some(r.name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `step.values` with every `EnvelopeRef` replaced by the real `Breakpoints` it stands for,
+    /// on a `time_max`-second axis — what the params dialog and its graphical editor understand.
+    ///
+    /// A reference the bank can't resolve degrades to a constant at the low end of its own
+    /// window rather than erroring: this is the *display* path, and `CdpChain::validate` already
+    /// refuses to run a chain with a dangling reference, with a message that says so. Failing to
+    /// open the dialog would leave the user unable to see or repair the step that is broken.
+    fn project_step_values(
+        step: &crate::model::cdp::ChainStep,
+        bank: &crate::model::cdp::EnvelopeBank,
+        time_max: f64,
+    ) -> Vec<crate::model::cdp::ParamValue> {
+        use crate::model::cdp::ParamValue;
+        step.values
+            .iter()
+            .map(|value| match value {
+                ParamValue::EnvelopeRef(reference) => match bank.resolve(reference, time_max) {
+                    Ok(points) => ParamValue::Breakpoints(points),
+                    Err(_) => ParamValue::Number(reference.min),
+                },
+                other => other.clone(),
+            })
+            .collect()
+    }
+
+    /// Normalizes every `Breakpoints` value on `step` into `bank` and replaces it with an
+    /// `EnvelopeRef`, so that no chain step ever stores a curve in absolute seconds.
+    ///
+    /// `authored_time_max` is the duration the curve was drawn against and `prior_names` the
+    /// curve each parameter already referenced, if any. A parameter that had a curve keeps
+    /// updating that same bank entry; one that has just gained an envelope gets a new entry
+    /// named after the parameter itself, deduplicated by `EnvelopeBank::insert_unique`.
+    ///
+    /// The reference window is auto-filled from the parameter's declared range, which is what
+    /// makes attaching an envelope a single action that always produces something runnable —
+    /// narrowing it afterwards is how you get a gentler reading of the same shape.
+    fn lift_envelopes_into_bank(
+        step: &mut crate::model::cdp::ChainStep,
+        def: &crate::model::cdp::ProcessDef,
+        bank: &mut crate::model::cdp::EnvelopeBank,
+        authored_time_max: f64,
+        prior_names: &[Option<String>],
+    ) {
+        use crate::model::cdp::{BankEnvelope, EnvelopeRef, ParamKind, ParamValue};
+        for (i, value) in step.values.iter_mut().enumerate() {
+            let ParamValue::Breakpoints(points) = value else { continue };
+            let Some(param) = def.params.get(i) else { continue };
+            let (min, max) = match &param.kind {
+                ParamKind::Number { min, max, .. } => (*min, *max),
+                // Only a Number field can carry an envelope (`ParamDef::automatable` implies
+                // it), so this is unreachable in practice; 0..1 keeps it lossless rather than
+                // collapsing the shape if it ever isn't.
+                _ => (0.0, 1.0),
+            };
+            let normalized =
+                BankEnvelope::normalized(bank.next_name(), points, authored_time_max, min, max);
+            let name = match prior_names.get(i).and_then(|n| n.clone()) {
+                Some(existing) if bank.contains(&existing) => {
+                    if let Some(slot) = bank.get_mut(&existing) {
+                        slot.points = normalized.points;
+                    }
+                    existing
+                }
+                _ => bank.insert_unique(normalized),
+            };
+            *value = ParamValue::EnvelopeRef(EnvelopeRef { name, min, max, invert: false });
+        }
     }
 
     /// Commits the currently-open `CdpParams` dialog's field values into the chain draft
@@ -8721,48 +11161,98 @@ impl App {
             return;
         }
 
+        use crate::model::cdp::PathSeg;
         let values: Vec<_> = fields.iter().map(CdpField::to_value).collect();
-        let existing_side_chain = match &target {
+        let existing_branches = match &target {
             ChainEditTarget::Replace(path) => self
                 .cdp_chain_editor
                 .as_ref()
                 .and_then(|s| crate::model::cdp::step_at(&s.chain, path))
-                .map(|s| s.side_chain.clone())
+                .map(|s| s.branches.clone())
                 .unwrap_or_default(),
-            ChainEditTarget::Append(_) => Vec::new(),
+            ChainEditTarget::Insert { .. } => Vec::new(),
         };
-        let new_step =
-            crate::model::cdp::ChainStep { process_key: def.key.clone(), values, side_chain: existing_side_chain };
-        let doc_pick = second_input.as_ref().and_then(CdpSecondInput::selected_doc_index);
+        let mut new_step = crate::model::cdp::ChainStep::new(def.key.clone(), values);
+        new_step.branches = existing_branches;
+        new_step.normalize_branches_for(&def);
+        // Restore any parameters the dialog was not shown (a mixer's unused branches), so the
+        // step's values stay index-parallel to its process's declared list.
+        while new_step.values.len() < def.params.len() {
+            new_step.values.push(def.params[new_step.values.len()].default_value());
+        }
+        let picked_source = second_input.as_ref().and_then(CdpSecondInput::selected_source);
+        let authored_time_max = self
+            .cdp_chain_editor
+            .as_ref()
+            .map(|s| s.step_edit_time_max)
+            .unwrap_or_else(|| self.cdp_editor_time_axis().1);
+        let prior_names = self
+            .cdp_chain_editor
+            .as_ref()
+            .map(|s| s.step_edit_envelope_names.clone())
+            .unwrap_or_default();
 
         let Some(state) = self.cdp_chain_editor.as_mut() else {
             self.dialog = None;
             return;
         };
+
+        // The params dialog hands back envelopes in absolute seconds against the selection that
+        // was live when it opened. Inside a chain that value is a bug waiting to happen — see
+        // `model::cdp::envelope_bank` — so it is normalized into the chain's own bank here and
+        // the step keeps only a reference. `prior_names` is what makes re-editing a step update
+        // the curve it already owned instead of piling up a near-duplicate on every visit.
+        Self::lift_envelopes_into_bank(&mut new_step, &def, &mut state.chain.bank, authored_time_max, &prior_names);
+
         let committed_path = match &target {
-            ChainEditTarget::Append(parent_path) => {
-                let Some(siblings) = crate::model::cdp::steps_at_mut(&mut state.chain, parent_path) else {
+            ChainEditTarget::Insert { parent, index } => {
+                let Some(siblings) = crate::model::cdp::steps_at_mut(&mut state.chain, parent) else {
                     self.dialog = None;
                     return;
                 };
-                siblings.push(new_step);
-                let mut path = parent_path.clone();
-                path.push(siblings.len() - 1);
+                let at = (*index).min(siblings.len());
+                siblings.insert(at, new_step);
+                // Inserting ahead of an existing step shifts it and everything nested under it,
+                // so both things addressed by path have to move with it.
+                shift_buffer_picks_for_insert(&mut state.buffer_picks, parent, at);
+                crate::model::cdp::chain::shift_branch_sources_for_insert(&mut state.chain, parent, at);
+                let mut path = parent.clone();
+                path.push(PathSeg::Step(at));
                 path
             }
             ChainEditTarget::Replace(path) => {
-                if let Some((&i, parent)) = path.split_last() {
-                    if let Some(siblings) = crate::model::cdp::steps_at_mut(&mut state.chain, parent) {
-                        if let Some(slot) = siblings.get_mut(i) {
-                            *slot = new_step;
+                if let Some((&last, parent)) = path.split_last() {
+                    if let PathSeg::Step(i) = last {
+                        if let Some(siblings) = crate::model::cdp::steps_at_mut(&mut state.chain, parent) {
+                            if let Some(slot) = siblings.get_mut(i) {
+                                *slot = new_step;
+                            }
                         }
                     }
                 }
                 path.clone()
             }
         };
-        if let Some(pick) = doc_pick {
-            state.buffer_picks.insert(committed_path.clone(), pick);
+        // The choice belongs to the branch that reads it, not to the step: `CdpSecondInput` *is*
+        // a dual-input process's one mandatory branch, which `normalize_branches_for` has just
+        // guaranteed exists. Writing the branch's own `source` here is what makes the row and
+        // the branch row below it the same control seen from two places.
+        if let Some(source) = picked_source {
+            let mut branch_path = committed_path.clone();
+            branch_path.push(PathSeg::Branch(0));
+            let branch_source = match &source {
+                ChainBranchInput::Incoming => crate::model::cdp::BranchSource::Tap,
+                ChainBranchInput::From(from) => {
+                    crate::model::cdp::BranchSource::From(from.clone())
+                }
+                ChainBranchInput::Buffer(index) => {
+                    state.buffer_picks.insert(branch_path.clone(), *index);
+                    crate::model::cdp::BranchSource::Buffer
+                }
+            };
+            if let Some(branch) = crate::model::cdp::branch_at_mut(&mut state.chain, &branch_path) {
+                branch.source = branch_source;
+            }
         }
         state.selected = ChainEditorRow::Step(committed_path);
         state.error = None;
@@ -8830,7 +11320,17 @@ impl App {
             photo_input: photo_input.clone(),
             presets: presets.clone(),
         });
-        self.cdp_chain_edit_target = Some(ChainEditTarget::Append(path));
+        // Append into the step's *branch*, not into the step itself: a path ending at a step
+        // names no step list, so `steps_at_mut` would miss and the commit would bail without
+        // ever popping the suspend stack. Branch 0 is the dual-input second input, which
+        // `normalize_branches` guarantees exists.
+        let mut branch_path = path;
+        branch_path.push(crate::model::cdp::PathSeg::Branch(0));
+        let index =
+            crate::model::cdp::steps_at(&self.cdp_chain_editor.as_ref().map(|s| &s.chain).unwrap(), &branch_path)
+                .map(|s| s.len())
+                .unwrap_or(0);
+        self.cdp_chain_edit_target = Some(ChainEditTarget::Insert { parent: branch_path, index });
         // Esc in this browser goes back to the parent step's suspended session, not to the
         // waveform — the same reason the sibling call site in `open_cdp_chain_step_target`
         // passes a return. Opening it bare left Esc matching no arm at all, so it fell through
@@ -9340,6 +11840,20 @@ impl App {
             return None;
         };
         let def = self.cdp_catalog.processes.get(*catalog_index)?;
+        // **A combiner has nothing to combine outside a chain.** Its inputs are a chain step's
+        // parallel branches, so run on its own it would be handed one buffer and asked to mix
+        // it with nothing. Stated here, with Apply dimmed, rather than hidden from the browser:
+        // the entries are worth finding and reading about, and "open the chain editor" is a
+        // more useful answer than an absence. A property of *where* the dialog was opened
+        // rather than of any field, like every other blocker in this function.
+        if def.backend() == crate::model::cdp::def::Backend::Native
+            && self.cdp_chain_edit_target.is_none()
+        {
+            return Some(format!(
+                "\"{}\" combines a chain step's parallel branches — add it inside an ExtProcess Chain (Ctrl+H)",
+                def.title
+            ));
+        }
         // **Is the backend this process needs even available?** Checked before everything else,
         // because nothing below matters if the tool cannot run at all.
         //
@@ -9352,7 +11866,8 @@ impl App {
         // Apply would otherwise appear to do nothing (or, for CDP, replace the parameters
         // you just filled in with a setup prompt).
         //
-        // Airwindows has no arm: it is compiled into this binary and cannot be unavailable.
+        // Airwindows and the native combiners have no arm: both are compiled into this binary
+        // and cannot be unavailable.
         match def.backend() {
             crate::model::cdp::def::Backend::Cdp => {
                 let dir = std::path::PathBuf::from(&self.config.cdp_dir);
@@ -9373,7 +11888,7 @@ impl App {
                     );
                 }
             }
-            crate::model::cdp::def::Backend::Airwindows => {}
+            crate::model::cdp::def::Backend::Airwindows | crate::model::cdp::def::Backend::Native => {}
         }
         // No buffer at all, for a process that reads one. Checked first because it is the most
         // fundamental of these: with nothing open there is no selection to demand channels of
@@ -9566,18 +12081,8 @@ impl App {
                 }
             }
         }
-        let second_input = matches!(def.input, IoKind::DualWav | IoKind::DualAna).then(|| {
-            let doc_indices: Vec<usize> = (0..self.documents.len()).collect();
-            let names = doc_indices.iter().map(|&i| self.buffer_name(i)).collect();
-            // Default to the first buffer that isn't the one being processed — the common
-            // case is combining against different material; processing against itself
-            // (self-convolution etc.) stays one Left-press away.
-            let selected = doc_indices
-                .iter()
-                .position(|&i| i != self.active_document)
-                .unwrap_or(0);
-            CdpSecondInput { doc_indices, names, selected }
-        });
+        let second_input = matches!(def.input, IoKind::DualWav | IoKind::DualAna)
+            .then(|| self.second_input_choices());
         // Starts with nothing picked — i.e. the selection alone. That's already runnable for
         // `tesselate`/`crystal rotate` (`min_inputs` 1), and for the two `min_inputs = 2`
         // processes the dialog's own plan error names the shortfall, which is a clearer first
@@ -9681,6 +12186,7 @@ impl App {
         };
         *dialog_focus = field_index + 1; // smart-target may have jumped focus to this field
         *dialog_envelope = Some(CdpEnvelopeEdit {
+            label: None,
             field_index,
             target: CdpEnvelopeTarget::NumberField,
             points,
@@ -9690,6 +12196,8 @@ impl App {
             range,
             curve_picker: None,
             save_prompt: None,
+            backgrounds: Vec::new(),
+            background: 0,
             presets: crate::model::cdp::envelope_preset::list_presets(),
             preset_selected: None,
             custom_points: None,
@@ -9753,6 +12261,7 @@ impl App {
         // is the one path that could otherwise leave both open at once.
         *table_edit = None;
         *dialog_envelope = Some(CdpEnvelopeEdit {
+            label: None,
             field_index,
             target: CdpEnvelopeTarget::CrystalEnvelope,
             points,
@@ -9762,6 +12271,8 @@ impl App {
             range,
             curve_picker: None,
             save_prompt: None,
+            backgrounds: Vec::new(),
+            background: 0,
             presets: crate::model::cdp::envelope_preset::list_presets(),
             preset_selected: None,
             custom_points: None,
@@ -11544,7 +14055,108 @@ impl App {
         }
     }
 
+    /// The envelope editor's keys for a *bank* curve.
+    ///
+    /// The gestures are the params-dialog session's — Left/Right select a breakpoint, Shift
+    /// moves it in time, Up/Down move its value, `n` inserts and Delete removes — against fixed
+    /// 0-1 axes, because that is what a bank curve is stored in. Separate from
+    /// `handle_cdp_envelope_key` rather than threaded through it: that function's every closing
+    /// action writes back into a `CdpField`, and a curve with no field behind it would have had
+    /// to be special-cased at each one.
+    fn handle_bank_envelope_key(&mut self, key: KeyEvent) {
+        use crate::model::cdp::envelope_bank::{BANK_MAX, BANK_MIN};
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let Some(edit) = state.envelope.as_mut() else { return };
+        // The same fractions of the axes the params session nudges by, so a curve feels the same
+        // whichever way it was opened.
+        let time_step = (BANK_MAX / 40.0).max(0.001);
+        let value_step = if shift { 0.01 } else { (BANK_MAX - BANK_MIN) / 40.0 };
+
+        match key.code {
+            // The audio drawn behind the curve. A bank shape may drive parameters that do not
+            // all read the same thing — a step inside a branch fed by a picked file operates on
+            // that file — so the background is switchable rather than one waveform that would be
+            // wrong for half of them. Not Tab, which already cycles saved presets here.
+            KeyCode::Char('w') => {
+                if !edit.backgrounds.is_empty() {
+                    edit.background = (edit.background + 1) % edit.backgrounds.len();
+                }
+            }
+            KeyCode::Left if !shift => edit.selected = edit.selected.saturating_sub(1),
+            KeyCode::Right if !shift => {
+                edit.selected = (edit.selected + 1).min(edit.points.len().saturating_sub(1))
+            }
+            KeyCode::Left | KeyCode::Right => {
+                let dir = if key.code == KeyCode::Left { -1.0 } else { 1.0 };
+                let i = edit.selected;
+                // Clamped between its neighbours: a breakpoint list that is not strictly
+                // ascending is not a curve, and the bank's own `validate` refuses one.
+                let lower = if i > 0 { edit.points[i - 1].0 + 0.001 } else { BANK_MIN };
+                let upper =
+                    if i + 1 < edit.points.len() { edit.points[i + 1].0 - 0.001 } else { BANK_MAX };
+                if let Some(point) = edit.points.get_mut(i) {
+                    point.0 = round6((point.0 + dir * time_step).clamp(lower, upper));
+                }
+            }
+            KeyCode::Up | KeyCode::Down => {
+                let dir = if key.code == KeyCode::Up { 1.0 } else { -1.0 };
+                if let Some(point) = edit.points.get_mut(edit.selected) {
+                    point.1 = round6((point.1 + dir * value_step).clamp(BANK_MIN, BANK_MAX));
+                }
+            }
+            KeyCode::Char('n') => {
+                let i = edit.selected;
+                let (at, value) = match (edit.points.get(i), edit.points.get(i + 1)) {
+                    (Some(a), Some(b)) => ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0),
+                    (Some(a), None) => (((a.0 + BANK_MAX) / 2.0).min(BANK_MAX), a.1),
+                    _ => return,
+                };
+                edit.points.insert(i + 1, (round6(at), round6(value)));
+                edit.selected = i + 1;
+            }
+            KeyCode::Delete | KeyCode::Backspace => {
+                // Two is the floor everywhere: fewer is not a curve, and `BankEnvelope::validate`
+                // says so.
+                if edit.points.len() > crate::model::cdp::envelope_bank::MIN_POINTS {
+                    let i = edit.selected;
+                    edit.points.remove(i);
+                    edit.selected = i.min(edit.points.len() - 1);
+                }
+            }
+            KeyCode::Enter => {
+                let index = edit.field_index;
+                let points = edit.points.clone();
+                state.envelope = None;
+                if let Some(envelope) = state.chain.bank.envelopes.get_mut(index) {
+                    envelope.points = points;
+                }
+            }
+            KeyCode::Esc => {
+                // Esc restores what the curve was, the same contract the params session has.
+                let index = edit.field_index;
+                let original = edit.original.clone();
+                state.envelope = None;
+                if let (Some(points), Some(envelope)) =
+                    (original, state.chain.bank.envelopes.get_mut(index))
+                {
+                    envelope.points = points;
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn handle_cdp_envelope_key(&mut self, key: KeyEvent) {
+        // A session lives in one of two places: on the params dialog, where it edits a field, or
+        // on the chain editor, where it edits a bank curve that belongs to no field at all. Only
+        // its bounds and its commit differ; every other key below works on `edit` alone.
+        let bank_session = matches!(self.dialog, Some(Dialog::CdpChainEditor))
+            && self.cdp_chain_editor.as_ref().is_some_and(|s| s.envelope.is_some());
+        if bank_session {
+            self.handle_bank_envelope_key(key);
+            return;
+        }
         let Some(Dialog::CdpParams { envelope: Some(edit), fields, catalog_index, .. }) = self.dialog.as_mut()
         else {
             return;
@@ -11733,6 +14345,9 @@ impl App {
             // Deletes the currently-cycled-to preset immediately, no confirmation — mirrors
             // `App::delete_selected_cdp_preset`. A no-op if nothing's currently selected (a
             // hand-drawn/edited shape with no preset loaded).
+            // `d`, not Del: in *this* editor Del already removes the selected breakpoint, which
+            // is the per-minute gesture and owns the key. Delete moved to Del everywhere else in
+            // the app; this is the one exception, and the hints bar beside it says so.
             KeyCode::Char('d') => {
                 if let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() {
                     if let Some(name) = edit.preset_selected.and_then(|i| edit.presets.get(i)).map(|p| p.name.clone()) {
@@ -12295,12 +14910,18 @@ impl App {
     /// there's no `Dialog::CdpParams` open, another sub-mode is active, or no preset is
     /// currently selected.
     fn delete_selected_cdp_preset(&mut self) -> bool {
-        let Some(Dialog::CdpParams { catalog_index, presets, preset_selected, envelope, save_prompt, .. }) =
-            self.dialog.as_mut()
+        let Some(Dialog::CdpParams {
+            catalog_index, presets, preset_selected, envelope, save_prompt, focus, ..
+        }) = self.dialog.as_mut()
         else {
             return false;
         };
         if envelope.is_some() || save_prompt.is_some() {
+            return false;
+        }
+        // Only from the preset row. Delete means "remove a character" on every other row, and a
+        // key that quietly destroyed a saved preset from a focused text field would be a trap.
+        if *focus != CDP_PRESET_FOCUS {
             return false;
         }
         let Some(index) = *preset_selected else { return false };
@@ -13009,6 +15630,7 @@ impl App {
                             frame.running_rate = output.sample_rate;
                             frame.index += step_count;
                         }
+                        Self::record_finished_step_output(&mut run);
                         self.cdp_pending_chain_run = Some(run);
                         self.submit_current_chain_stage();
                         continue;
@@ -13265,6 +15887,7 @@ impl App {
                             frame.running_rate = output.sample_rate;
                             frame.index += step_count;
                         }
+                        Self::record_finished_step_output(&mut run);
                         self.cdp_pending_chain_run = Some(run);
                         self.submit_current_chain_stage();
                         continue;
@@ -13443,12 +16066,12 @@ impl App {
             return;
         }
         if let Some(path) =
-            first_missing_buffer_pick(&state.chain.steps, &[], &state.buffer_picks, &self.cdp_catalog)
+            first_missing_buffer_pick(&state.chain.steps, &[], &state.buffer_picks)
         {
             if let Some(state) = self.cdp_chain_editor.as_mut() {
                 state.error = Some(format!(
                     "Step at {} needs a second-input buffer picked (Left/Right) before running",
-                    path.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(".")
+                    chain_path_label(&path)
                 ));
             }
             return;
@@ -13531,16 +16154,21 @@ impl App {
         // is why Run merely appears to do nothing where Preview stranded the session.)
         let resume = SuspendedStepEdit { target, catalog_index, fields, second_input, variadic_input, photo_input, presets };
 
-        let Some((parent_path, upstream_count)) = self.cdp_chain_editor.as_ref().map(|state| {
+        let Some((parent_path, upstream_count)) = self.cdp_chain_editor.as_ref().map(|_| {
             match &resume.target {
                 ChainEditTarget::Replace(path) => {
                     let (&last, parent) = path.split_last().expect("Replace target path is never empty");
-                    (parent.to_vec(), last)
+                    let crate::model::cdp::PathSeg::Step(index) = last else {
+                        // A Replace target always ends at a step -- only a step has parameters
+                        // to edit -- so this is unreachable; treating it as "no upstream" is the
+                        // conservative reading if it ever isn't.
+                        return (parent.to_vec(), 0);
+                    };
+                    (parent.to_vec(), index)
                 }
-                ChainEditTarget::Append(parent) => {
-                    let count = crate::model::cdp::steps_at(&state.chain, parent).map(|s| s.len()).unwrap_or(0);
-                    (parent.clone(), count)
-                }
+                // Everything before the insertion point, which for an append is the whole
+                // list and for a step going in ahead of a combiner is only what precedes it.
+                ChainEditTarget::Insert { parent, index } => (parent.clone(), *index),
             }
         }) else {
             self.resume_step_edit_with_error(resume, "The chain editor is no longer open".into());
@@ -13555,10 +16183,11 @@ impl App {
                     state.chain.name.clone(),
                     upstream.iter().take(upstream_count).cloned().collect::<Vec<_>>(),
                     state.buffer_picks.clone(),
+                    state.chain.bank.clone(),
                 )
             })
         });
-        let Some((chain_name, upstream_steps, buffer_picks)) = from_editor else {
+        let Some((chain_name, upstream_steps, buffer_picks, bank)) = from_editor else {
             self.resume_step_edit_with_error(resume, "That step is no longer in the chain".into());
             return;
         };
@@ -13568,8 +16197,16 @@ impl App {
         };
         let mut temp_steps = upstream_steps;
         let values: Vec<_> = resume.fields.iter().map(CdpField::to_value).collect();
-        temp_steps.push(crate::model::cdp::ChainStep { process_key, values, side_chain: Vec::new() });
-        let temp_chain = crate::model::cdp::CdpChain { name: chain_name, steps: temp_steps };
+        temp_steps.push(crate::model::cdp::ChainStep::new(process_key, values));
+        // The bank travels with the temp chain: a preview whose envelope references couldn't
+        // resolve would audition the wrong automation, which is worse than not auditioning.
+        // A preview always auditions; where a *run* would put its result is not its business.
+        let temp_chain = crate::model::cdp::CdpChain {
+            name: chain_name,
+            steps: temp_steps,
+            bank,
+            output: crate::model::cdp::ChainOutput::Splice,
+        };
 
         let (initial_buffer, initial_rate, doc_index, splice_range) = if parent_path.is_empty() {
             let idx = self.active_document;
@@ -13652,21 +16289,32 @@ impl App {
     /// against a truncated slice of already-committed steps instead of an in-progress one.
     fn preview_chain_here(&mut self) {
         let Some(state) = self.cdp_chain_editor.as_ref() else { return };
-        let ChainEditorRow::Step(path) = state.selected.clone() else { return };
-        let Some((&index, parent_path)) = path.split_last() else { return };
+        // A parameter row stands for its step, so `p` means the same thing wherever inside a
+        // step you happen to be standing.
+        let path = match state.selected.clone() {
+            ChainEditorRow::Step(path) | ChainEditorRow::Param { path, .. } => path,
+            _ => return,
+        };
+        let Some((&last, parent_path)) = path.split_last() else { return };
+        let crate::model::cdp::PathSeg::Step(index) = last else { return };
         let parent_path = parent_path.to_vec();
         let Some(siblings) = crate::model::cdp::steps_at(&state.chain, &parent_path) else { return };
         if index >= siblings.len() {
             return;
         }
         let temp_steps: Vec<_> = siblings.iter().take(index + 1).cloned().collect();
-        let temp_chain = crate::model::cdp::CdpChain { name: state.chain.name.clone(), steps: temp_steps };
+        let temp_chain = crate::model::cdp::CdpChain {
+            name: state.chain.name.clone(),
+            steps: temp_steps,
+            bank: state.chain.bank.clone(),
+            output: state.chain.output,
+        };
 
-        if let Some(missing) = first_missing_buffer_pick(&temp_chain.steps, &parent_path, &state.buffer_picks, &self.cdp_catalog) {
+        if let Some(missing) = first_missing_buffer_pick(&temp_chain.steps, &parent_path, &state.buffer_picks) {
             if let Some(state) = self.cdp_chain_editor.as_mut() {
                 state.error = Some(format!(
                     "Step at {} needs a second-input buffer picked (Left/Right) before previewing",
-                    missing.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(".")
+                    chain_path_label(&missing)
                 ));
             }
             return;
@@ -13720,7 +16368,7 @@ impl App {
     fn start_chain_run(
         &mut self,
         chain: crate::model::cdp::CdpChain,
-        buffer_picks: std::collections::HashMap<Vec<usize>, usize>,
+        buffer_picks: std::collections::HashMap<ChainPath, usize>,
         initial_buffer: Vec<Vec<f32>>,
         initial_rate: u32,
         doc_index: usize,
@@ -13733,12 +16381,18 @@ impl App {
             }
         }
         let first_frame =
-            ChainRunFrame { parent_path: Vec::new(), index: 0, running_buffer: initial_buffer, running_rate: initial_rate };
+            ChainRunFrame {
+                parent_path: Vec::new(),
+                index: 0,
+                pending_inputs: Vec::new(),
+                running_buffer: initial_buffer,
+                running_rate: initial_rate,
+            };
         self.cdp_pending_chain_run = Some(CdpChainRun {
             chain,
             buffer_picks,
             frames: vec![first_frame],
-            pending_secondary: None,
+            finished_outputs: std::collections::HashMap::new(),
             pending_step_count: 1,
             doc_index,
             splice_range,
@@ -13771,7 +16425,7 @@ impl App {
         };
         let is_dual = matches!(def.input, crate::model::cdp::IoKind::DualWav | crate::model::cdp::IoKind::DualAna);
         let mut this_path = parent_path.clone();
-        this_path.push(index);
+        this_path.push(crate::model::cdp::PathSeg::Step(index));
 
         // A run of 2+ consecutive spectral (Ana-Ana) steps gets merged into one job — one
         // shared `pvoc anal`/`pvoc synth` pair around every process in the run instead of one
@@ -13782,6 +16436,11 @@ impl App {
         // to the ordinary single-step build below, unchanged.
         if !is_dual && def.input == crate::model::cdp::IoKind::Ana && def.output == crate::model::cdp::IoKind::Ana {
             let run_len = ana_run_length(siblings, index, &self.cdp_catalog);
+            // A merged run produces one result for all its steps, so an intermediate one's
+            // output never exists. If a branch reads one, the run has to stop there — the merge
+            // is an optimisation, and a reference to a result is a requirement that the result
+            // be real. Costs one extra pvoc round trip, and only in a chain that asks for it.
+            let run_len = run_len.min(self.chain_run_length_limit(&parent_path, index, run_len));
             if run_len >= 2 {
                 let merged_steps: Vec<_> = siblings[index..index + run_len].to_vec();
                 let primary = frame.running_buffer.clone();
@@ -13791,37 +16450,124 @@ impl App {
             }
         }
 
-        if is_dual && !step.side_chain.is_empty() && run.pending_secondary.is_none() {
-            let Some((buf, rate)) = self.chain_picked_buffer(&this_path) else {
+        // Every parallel input this step takes is produced before the step itself runs, one
+        // branch at a time, in order — `pending_inputs.len()` is both the count already done and
+        // the index of the next one to start. A branch with no steps of its own contributes its
+        // source directly (an empty `Buffer` branch is "use the picked file as-is", exactly what
+        // a dual-input step with no side-chain has always meant), so it needs no frame at all.
+        if frame.pending_inputs.len() < step.branches.len() {
+            let b = frame.pending_inputs.len();
+            let branch = step.branches[b].clone();
+            let mut branch_path = this_path.clone();
+            branch_path.push(crate::model::cdp::PathSeg::Branch(b));
+            let seed = match &branch.source {
+                // A tap copies the signal arriving at this step, so every leg of a combiner
+                // starts from the same audio and differs only in what its own steps do to it.
+                crate::model::cdp::BranchSource::Tap => {
+                    Some((frame.running_buffer.clone(), frame.running_rate))
+                }
+                crate::model::cdp::BranchSource::Buffer => self.chain_picked_buffer(&branch_path),
+                // An earlier branch's finished output, taken from the memo rather than run
+                // again. `CdpChain::validate` has already refused any reference to a branch that
+                // has not completed by now, so a miss here means the chain was never validated.
+                crate::model::cdp::BranchSource::From(source) => {
+                    run.finished_outputs.get(source).cloned()
+                }
+            };
+            let Some((buf, rate)) = seed else {
                 self.cdp_pending_chain_run = None;
-                let lines = vec!["A side-chain's source buffer is no longer available".into()];
-                    let back = self.cdp_chain_editor.is_some().then_some(Dialog::CdpChainEditor);
-                    self.show_process_error("ExtProcess Chain Error", lines, back);
+                let lines = vec![format!(
+                    "The buffer feeding branch {} is no longer available",
+                    chain_path_label(&branch_path)
+                )];
+                let back = self.cdp_chain_editor.is_some().then_some(Dialog::CdpChainEditor);
+                self.show_process_error("ExtProcess Chain Error", lines, back);
                 return;
             };
             if let Some(run) = self.cdp_pending_chain_run.as_mut() {
-                run.frames.push(ChainRunFrame { parent_path: this_path, index: 0, running_buffer: buf, running_rate: rate });
+                if branch.steps.is_empty() {
+                    // A branch with no steps *is* its source, so it finishes the moment it
+                    // starts — and still has to be recorded, or a later branch reading it would
+                    // find nothing.
+                    run.finished_outputs.insert(branch_path.clone(), (buf.clone(), rate));
+                    if let Some(frame) = run.frames.last_mut() {
+                        frame.pending_inputs.push((buf, rate));
+                    }
+                } else {
+                    run.frames.push(ChainRunFrame {
+                        parent_path: branch_path,
+                        index: 0,
+                        pending_inputs: Vec::new(),
+                        running_buffer: buf,
+                        running_rate: rate,
+                    });
+                }
             }
             self.submit_current_chain_stage();
             return;
         }
 
-        let values = step.values.clone();
+        // Resolve every envelope-bank reference into real `Breakpoints` *here*, against the
+        // duration this step's own input actually has — which is the whole point of the bank
+        // (see `model::cdp::envelope_bank`). Doing it at the step rather than at plan time is
+        // what keeps automation true after a time-stretch or a reverb tail has changed the
+        // length upstream: step 7's curve spans step 7's audio, not step 1's.
+        //
+        // `pipeline::plan_args` refuses an unresolved reference outright, so a path that
+        // skipped this is a loud error rather than silently-wrong automation.
+        let step_frames = frame.running_buffer.iter().map(|c| c.len()).max().unwrap_or(0);
+        let step_duration = if frame.running_rate > 0 {
+            step_frames as f64 / frame.running_rate as f64
+        } else {
+            0.0
+        };
+        let values = match Self::resolve_step_envelopes(&step, &run.chain.bank, step_duration) {
+            Ok(values) => values,
+            Err(err) => {
+                self.cdp_pending_chain_run = None;
+                let lines = vec![chain_bank_error_message(&err)];
+                let back = self.cdp_chain_editor.is_some().then_some(Dialog::CdpChainEditor);
+                self.show_process_error("ExtProcess Chain Error", lines, back);
+                return;
+            }
+        };
+        // **Taken**, not read. The branch results belong to the step about to consume them, and
+        // from here on nothing else may see them.
+        //
+        // They used to be cleared inside each backend's own submit, which was right when a step
+        // could have at most one parallel input: the only submit between collecting it and
+        // consuming it *was* the consumer's. With several branches the results accumulate across
+        // several submits, and a branch's own inner step clearing them sent the combiner back to
+        // re-running its branches — for ever (user report: a two-branch mixer looping on the
+        // second branch's step).
+        let collected: Vec<(Vec<Vec<f32>>, u32)> = self
+            .cdp_pending_chain_run
+            .as_mut()
+            .and_then(|run| run.frames.last_mut())
+            .map(|frame| std::mem::take(&mut frame.pending_inputs))
+            .unwrap_or_default();
+        let Some(run) = self.cdp_pending_chain_run.as_ref() else { return };
+        let Some(frame) = run.frames.last() else { return };
         let primary = frame.running_buffer.clone();
         let primary_rate = frame.running_rate;
-        let secondary: Option<Vec<Vec<f32>>> = if is_dual {
-            if step.side_chain.is_empty() {
-                self.chain_picked_buffer(&this_path).map(|(b, _)| b)
-            } else {
-                run.pending_secondary.clone()
-            }
-        } else {
-            None
-        };
+        let secondary: Option<Vec<Vec<f32>>> =
+            is_dual.then(|| collected.first().map(|(b, _)| b.clone())).flatten();
+
+        // A native combiner is the one step that reads *only* its branches, and the one that
+        // needs no runner at all: it is arithmetic over buffers already in hand, so it renders
+        // and advances the frame inline rather than submitting a job and waiting for a tick.
+        //
+        // Both halves of a backend still have to exist — the 2.8.0 Airwindows chain bug was
+        // exactly a completion path that worked and a submit path that did not — it is just
+        // that here they are the same few lines.
+        if def.backend() == crate::model::cdp::def::Backend::Native {
+            self.submit_native_chain_step(&def, &values, collected);
+            return;
+        }
 
         // A Praat step runs through its own runner, but everything around it is unchanged: the
-        // frame stack, the side-chain that produced `secondary`, and the buffer handed to the
-        // next step are all plain audio, so a chain can mix the two backends freely.
+        // frame stack, the branch that produced `secondary`, and the buffer handed to the
+        // next step are all plain audio, so a chain can mix the backends freely.
         if def.backend() == crate::model::cdp::def::Backend::Praat {
             let mut inputs = vec![primary];
             if let Some(secondary) = secondary {
@@ -13872,7 +16618,6 @@ impl App {
             }
         };
         if let Some(run) = self.cdp_pending_chain_run.as_mut() {
-            run.pending_secondary = None;
             // Reset explicitly: `submit_merged_ana_run` raises this to the length of a merged
             // spectral run and nothing lowered it again, so a single step following such a run
             // advanced the frame by the *previous* run's length and silently skipped steps.
@@ -13989,7 +16734,7 @@ impl App {
                     .iter()
                     .find(|p| p.key == step.process_key)
                     .is_none_or(|def| def.backend() == crate::model::cdp::def::Backend::Cdp);
-                is_cdp || any_cdp(&step.side_chain, catalog)
+                is_cdp || step.branches.iter().any(|b| any_cdp(&b.steps, catalog))
             })
         }
         any_cdp(&chain.steps, &self.cdp_catalog)
@@ -14030,7 +16775,6 @@ impl App {
         };
 
         if let Some(run) = self.cdp_pending_chain_run.as_mut() {
-            run.pending_secondary = None;
             run.pending_step_count = 1;
         }
 
@@ -14122,7 +16866,6 @@ impl App {
             source.iter().filter_map(|&c| input.get(c).cloned()).collect();
 
         if let Some(run) = self.cdp_pending_chain_run.as_mut() {
-            run.pending_secondary = None;
             run.pending_step_count = 1;
         }
 
@@ -14178,8 +16921,35 @@ impl App {
                 self.show_process_error("ExtProcess Chain Error", lines, back);
             return;
         };
+        // Bank references resolve here too, and against the *run's* own input duration: every
+        // step in a merged spectral run shares one `pvoc anal`/`synth` pair, so they all see the
+        // same audio. Missed here originally, which would have reached `plan_args`' deliberate
+        // `UnresolvedEnvelopeRef` refusal rather than silently mis-timing anything — but a
+        // refusal on a valid chain is still a bug.
+        let duration_secs = if primary_rate > 0 {
+            primary.iter().map(|c| c.len()).max().unwrap_or(0) as f64 / primary_rate as f64
+        } else {
+            0.0
+        };
+        let bank = self
+            .cdp_pending_chain_run
+            .as_ref()
+            .map(|r| r.chain.bank.clone())
+            .unwrap_or_default();
+        let resolved: Result<Vec<Vec<crate::model::cdp::ParamValue>>, _> =
+            steps.iter().map(|s| Self::resolve_step_envelopes(s, &bank, duration_secs)).collect();
+        let resolved = match resolved {
+            Ok(values) => values,
+            Err(err) => {
+                self.cdp_pending_chain_run = None;
+                let lines = vec![chain_bank_error_message(&err)];
+                let back = self.cdp_chain_editor.is_some().then_some(Dialog::CdpChainEditor);
+                self.show_process_error("ExtProcess Chain Error", lines, back);
+                return;
+            }
+        };
         let pairs: Vec<(&crate::model::cdp::ProcessDef, &[crate::model::cdp::ParamValue])> =
-            defs.iter().zip(steps.iter()).map(|(def, step)| (def, step.values.as_slice())).collect();
+            defs.iter().zip(resolved.iter()).map(|(def, values)| (def, values.as_slice())).collect();
 
         let input_spec = crate::model::cdp::InputSpec {
             head_tail_marks: Vec::new(),
@@ -14199,7 +16969,6 @@ impl App {
             }
         };
         if let Some(run) = self.cdp_pending_chain_run.as_mut() {
-            run.pending_secondary = None;
             run.pending_step_count = steps.len();
         }
 
@@ -14230,7 +16999,7 @@ impl App {
     /// Called once the top frame's step-list is exhausted (`index` ran past its last
     /// step): pops that frame. If the stack is now empty, the whole run is done — hands off
     /// to `finish_chain_run`. Otherwise the popped frame was a side-chain; its final buffer
-    /// becomes `pending_secondary` for the step (in the now-current parent frame) it feeds,
+    /// is appended to `pending_inputs` for the step (in the now-current parent frame) it feeds,
     /// and `submit_current_chain_stage` runs again to actually invoke that step.
     fn finish_current_chain_frame(&mut self) {
         let Some(mut run) = self.cdp_pending_chain_run.take() else { return };
@@ -14240,7 +17009,17 @@ impl App {
             self.finish_chain_run(finished_frame, finish, doc_index, splice_range, chain);
             return;
         }
-        run.pending_secondary = Some(finished_frame.running_buffer);
+        // The frame that just finished *was* a branch (the stack is non-empty, so it cannot be
+        // the spine), so record its output for anything later that reads it, as well as handing
+        // it to the step it feeds.
+        run.finished_outputs.insert(
+            finished_frame.parent_path.clone(),
+            (finished_frame.running_buffer.clone(), finished_frame.running_rate),
+        );
+        // Onto the frame that was waiting for it — the one whose step owns this branch.
+        if let Some(parent) = run.frames.last_mut() {
+            parent.pending_inputs.push((finished_frame.running_buffer, finished_frame.running_rate));
+        }
         self.cdp_pending_chain_run = Some(run);
         self.submit_current_chain_stage();
     }
@@ -14311,13 +17090,18 @@ impl App {
                 // on its own or as a chain step. Top-level steps only, matching the tolerance
                 // sum above: a side-chain finishes before its owning step and feeds it as an
                 // input rather than contributing to the spine's final width.
-                let opens_new_buffer = chain.steps.iter().any(|s| {
-                    self.cdp_catalog
-                        .processes
-                        .iter()
-                        .find(|p| p.key == s.process_key)
-                        .is_some_and(|d| d.output_new_buffer)
-                });
+                //
+                // The chain's own `output` setting (the editor's OUT row) is the other way in.
+                // It is an *or*, not an override: a preference to splice cannot overrule a
+                // process whose result would not fit the document it came from.
+                let opens_new_buffer = chain.output == crate::model::cdp::ChainOutput::NewBuffer
+                    || chain.steps.iter().any(|s| {
+                        self.cdp_catalog
+                            .processes
+                            .iter()
+                            .find(|p| p.key == s.process_key)
+                            .is_some_and(|d| d.output_new_buffer)
+                    });
                 if opens_new_buffer {
                     let bits_per_sample =
                         self.documents.get(doc_index).map(|d| d.bits_per_sample).unwrap_or(32);
@@ -14361,6 +17145,13 @@ impl App {
                     final_frame.running_rate,
                     PreviewOwner::ChainEditor,
                 );
+                // Snapshot what was auditioned, so the first edit to any of it ends the loop —
+                // see `preview_still_current`. Note this is the *ran* chain, which for
+                // "preview here" is a truncated copy: editing anything at all still invalidates
+                // it, which is the safe direction.
+                if let Some(state) = self.cdp_chain_editor.as_mut() {
+                    state.previewed = Some(chain.clone());
+                }
                 self.dialog = Some(Dialog::CdpChainEditor);
             }
             ChainRunFinish::PreviewStepInProgress(resume) => {
@@ -14397,10 +17188,187 @@ impl App {
         }
     }
 
-    /// The document channels/sample-rate `buffer_picks[path]` points at, if any — shared by
-    /// the "use directly as second input" and "side-chain's own first step's input" paths in
-    /// `submit_current_chain_stage`.
-    fn chain_picked_buffer(&self, path: &[usize]) -> Option<(Vec<Vec<f32>>, u32)> {
+    /// `step.values` with every `ParamValue::EnvelopeRef` replaced by the `Breakpoints` it
+    /// stands for, on an axis `duration_secs` seconds wide.
+    ///
+    /// The counterpart of `lift_envelopes_into_bank`, which put the curve *into* the bank when
+    /// the step was committed. Between the two, a chain's automation is stored once, normalized,
+    /// and re-projected onto whatever the audio actually is each time it runs — so the same
+    /// saved chain is correct against a 3-second selection and a 30-second one alike, which it
+    /// was not before the bank existed.
+    fn resolve_step_envelopes(
+        step: &crate::model::cdp::ChainStep,
+        bank: &crate::model::cdp::EnvelopeBank,
+        duration_secs: f64,
+    ) -> Result<Vec<crate::model::cdp::ParamValue>, crate::model::cdp::BankError> {
+        use crate::model::cdp::ParamValue;
+        step.values
+            .iter()
+            .map(|value| match value {
+                ParamValue::EnvelopeRef(reference) => {
+                    bank.resolve(reference, duration_secs).map(ParamValue::Breakpoints)
+                }
+                other => Ok(other.clone()),
+            })
+            .collect()
+    }
+
+    /// How far a merged spectral run starting at `index` may reach before it would swallow a
+    /// step whose output a branch reads. Returns `available` when nothing does.
+    ///
+    /// The referenced step may be the run's *last* member — its output is the run's output — so
+    /// the limit is "one past the first referenced step", not "up to it".
+    fn chain_run_length_limit(
+        &self,
+        parent_path: &[crate::model::cdp::PathSeg],
+        index: usize,
+        available: usize,
+    ) -> usize {
+        use crate::model::cdp::{BranchSource, PathSeg};
+        let Some(run) = self.cdp_pending_chain_run.as_ref() else { return available };
+        let referenced = |offset: usize| -> bool {
+            let mut path = parent_path.to_vec();
+            path.push(PathSeg::Step(index + offset));
+            crate::model::cdp::chain::outputs_available_to(&run.chain, None).iter().any(|p| {
+                crate::model::cdp::branch_at(&run.chain, p)
+                    .is_some_and(|b| matches!(&b.source, BranchSource::From(source) if *source == path))
+            })
+        };
+        (0..available).find(|&offset| referenced(offset)).map(|o| o + 1).unwrap_or(available)
+    }
+
+    /// Records the output of the step(s) that just completed, so a later branch can read it
+    /// (`BranchSource::From`).
+    ///
+    /// Called from every point a frame advances — the three backend ticks and the native
+    /// combiner's synchronous one — because a backend that forgot it would leave a hole in the
+    /// memo that only shows up as a chain refusing to run.
+    ///
+    /// Called *after* the advance, so the step that just finished is `index - 1`. A merged
+    /// spectral run advances several at once and only its last member has an output that
+    /// exists; that is why `ana_run_length` refuses to merge across a step something reads.
+    fn record_finished_step_output(run: &mut CdpChainRun) {
+        use crate::model::cdp::PathSeg;
+        let Some(frame) = run.frames.last() else { return };
+        let Some(completed) = frame.index.checked_sub(1) else { return };
+        let mut path = frame.parent_path.clone();
+        path.push(PathSeg::Step(completed));
+        run.finished_outputs
+            .insert(path, (frame.running_buffer.clone(), frame.running_rate));
+    }
+
+    /// Renders a native combiner over the branch results already collected for this step, then
+    /// advances the frame and continues the walk — all synchronously, since there is no
+    /// subprocess and nothing to wait for.
+    ///
+    /// Rate reconciliation happens here rather than in `model::cdp::native`, because converting
+    /// one needs the resampler in `commands::resample` and that module deliberately takes plain
+    /// sample data. Legs are brought to the *first* leg's rate: a combiner has no opinion about
+    /// which rate is "right", and leg A is the one the user sees at the top of the list.
+    fn submit_native_chain_step(
+        &mut self,
+        def: &crate::model::cdp::ProcessDef,
+        values: &[crate::model::cdp::ParamValue],
+        legs: Vec<(Vec<Vec<f32>>, u32)>,
+    ) {
+        use crate::model::cdp::native;
+        if legs.len() < 2 {
+            self.cdp_pending_chain_run = None;
+            let lines = vec![format!(
+                "\"{}\" needs at least two branches to combine, but only {} reached it",
+                def.title,
+                legs.len()
+            )];
+            let back = self.cdp_chain_editor.is_some().then_some(Dialog::CdpChainEditor);
+            self.show_process_error("ExtProcess Chain Error", lines, back);
+            return;
+        }
+
+        let target_rate = legs[0].1;
+        let resampled: Vec<Vec<Vec<f32>>> = legs
+            .iter()
+            .map(|(channels, rate)| {
+                if *rate == target_rate {
+                    channels.clone()
+                } else {
+                    // `resample_channel` takes a ratio, matching `ResampleCommand`'s own use.
+                    let ratio = target_rate as f64 / *rate as f64;
+                    channels
+                        .iter()
+                        .map(|c| crate::commands::resample::resample_channel(c, ratio))
+                        .collect()
+                }
+            })
+            .collect();
+
+        let number = |index: usize, fallback: f64| -> f64 {
+            match values.get(index) {
+                Some(crate::model::cdp::ParamValue::Number(v)) => *v,
+                _ => fallback,
+            }
+        };
+        let toggle = |index: usize, fallback: bool| -> bool {
+            match values.get(index) {
+                Some(crate::model::cdp::ParamValue::Toggle(v)) => *v,
+                _ => fallback,
+            }
+        };
+        // A parameter carrying an envelope arrives as `Breakpoints` in real seconds (the chain
+        // runner resolves every bank reference before a step runs), so it is evaluated here
+        // against the output's own length rather than written to a file the way CDP's is.
+        let curve = |index: usize, frames: usize, rate: u32| -> Vec<f64> {
+            match values.get(index) {
+                Some(crate::model::cdp::ParamValue::Breakpoints(points)) if !points.is_empty() => (0
+                    ..frames)
+                    .map(|i| {
+                        crate::ui::widgets::cdp_envelope_image::interp_cdp_envelope(
+                            points,
+                            i as f64 / rate as f64,
+                        )
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+
+        let result = if def.key == native::CROSSFADE_KEY {
+            let frames = resampled.iter().flat_map(|c| c.iter()).map(|c| c.len()).max().unwrap_or(0);
+            let blend = match curve(0, frames, target_rate) {
+                points if points.is_empty() => vec![number(0, 0.5)],
+                points => points,
+            };
+            native::crossfade(&resampled[0], &resampled[1], &blend)
+        } else {
+            let settings: Vec<_> = (0..resampled.len())
+                .map(|leg| native::LegSettings {
+                    gain_db: number(native::leg_gain_param(leg), native::LEG_GAIN_DEFAULT_DB),
+                    invert: toggle(native::leg_invert_param(leg), false),
+                })
+                .collect();
+            let legs: Vec<_> = resampled.iter().zip(&settings).map(|(c, s)| (c, *s)).collect();
+            native::mix(
+                &legs,
+                toggle(native::MIX_LIMIT_PARAM, true),
+                number(native::MIX_CEILING_PARAM, native::MIX_CEILING_DEFAULT_DB),
+            )
+        };
+
+        if let Some(run) = self.cdp_pending_chain_run.as_mut() {
+            let step_count = run.pending_step_count;
+            if let Some(frame) = run.frames.last_mut() {
+                frame.running_buffer = result;
+                frame.running_rate = target_rate;
+                frame.index += step_count;
+            }
+            Self::record_finished_step_output(run);
+        }
+        self.submit_current_chain_stage();
+    }
+
+    /// The document channels/sample-rate `buffer_picks[path]` points at, if any. `path` is a
+    /// *branch* path: which document feeds a branch belongs to that branch's source, whether
+    /// the branch then processes it or hands it straight on.
+    fn chain_picked_buffer(&self, path: &[crate::model::cdp::PathSeg]) -> Option<(Vec<Vec<f32>>, u32)> {
         let run = self.cdp_pending_chain_run.as_ref()?;
         let doc_index = run.buffer_picks.get(path).copied()?;
         let doc = self.documents.get(doc_index)?;
@@ -14707,7 +17675,7 @@ impl App {
         if self.cdp_preview_audio.is_none() {
             return;
         }
-        if !preview_still_current(self.dialog.as_ref(), self.cdp_preview_owner) {
+        if !preview_still_current(self.dialog.as_ref(), self.cdp_preview_owner, self.cdp_chain_editor.as_ref()) {
             self.stop_cdp_preview_audio();
         }
     }
@@ -14923,6 +17891,7 @@ impl App {
                             frame.running_rate = output.sample_rate;
                             frame.index += step_count;
                         }
+                        Self::record_finished_step_output(&mut run);
                         self.cdp_pending_chain_run = Some(run);
                         self.submit_current_chain_stage();
                         continue;
@@ -17279,6 +20248,42 @@ impl App {
             // which is what makes it a slider rather than a row of click targets. Handled here
             // (before the Down-only routing below) for the same reason the envelope editor's
             // mouse is: Drag and Up never reach that path at all.
+            // The chain editor's inline sliders, same shape and same reason as the params
+            // dialog's below: a press grabs one and it follows the pointer until release.
+            if self.chain_slider_drag.is_some() {
+                match mouse.kind {
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        self.handle_chain_slider_drag(mouse.column);
+                        return;
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        self.chain_slider_drag = None;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            // The wheel over the chain editor moves the selection a few rows, which the view
+            // then follows. Moving the viewport on its own would snap back to the selection the
+            // next time anything else happened, since the scroll is clamped to keep it in sight.
+            if matches!(self.dialog, Some(Dialog::CdpChainEditor))
+                && matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
+            {
+                const WHEEL_ROWS: i32 = 3;
+                let delta = if mouse.kind == MouseEventKind::ScrollUp { -WHEEL_ROWS } else { WHEEL_ROWS };
+                if self.cdp_chain_editor.as_ref().is_some_and(|s| s.focus == ChainFocus::Bank) {
+                    if let Some(state) = self.cdp_chain_editor.as_mut() {
+                        let count = state.chain.bank.envelopes.len() as i32;
+                        if count > 0 {
+                            state.bank_selected =
+                                (state.bank_selected as i32 + delta.signum()).rem_euclid(count) as usize;
+                        }
+                    }
+                } else {
+                    self.move_chain_selection(delta);
+                }
+                return;
+            }
             if self.cdp_slider_drag.is_some() || self.cdp_sub_editor_slider_drag {
                 match mouse.kind {
                     MouseEventKind::Drag(MouseButton::Left) => {
@@ -17695,8 +20700,31 @@ impl App {
         }
     }
 
+    /// The value-axis bounds of whichever envelope session is open — on the params dialog, or on
+    /// the chain editor for a bank curve. One lookup, so the mouse never has to know which.
+    fn envelope_session_bounds(&self) -> Option<(f64, f64, f64)> {
+        if let Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) = &self.dialog {
+            return cdp_envelope_bounds(fields, edit);
+        }
+        let edit = self.cdp_chain_editor.as_ref()?.envelope.as_ref()?;
+        // A bank curve's bounds are fixed, so the empty field slice is never consulted.
+        cdp_envelope_bounds(&[], edit)
+    }
+
+    /// The open envelope session itself, from either host. Split from
+    /// [`App::envelope_session_bounds`] because the bounds are read before the session is
+    /// mutated, and a single accessor returning both would hold a borrow across the write.
+    fn envelope_session_mut(&mut self) -> Option<&mut CdpEnvelopeEdit> {
+        if let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() {
+            return Some(edit);
+        }
+        self.cdp_chain_editor.as_mut()?.envelope.as_mut()
+    }
+
     fn try_handle_cdp_envelope_mouse(&mut self, mouse: MouseEvent) -> bool {
-        if !matches!(self.dialog, Some(Dialog::CdpParams { envelope: Some(_), .. })) {
+        let bank_session = matches!(self.dialog, Some(Dialog::CdpChainEditor))
+            && self.cdp_chain_editor.as_ref().is_some_and(|s| s.envelope.is_some());
+        if !bank_session && !matches!(self.dialog, Some(Dialog::CdpParams { envelope: Some(_), .. })) {
             return false;
         }
         // The grid rect is stashed via `render_cdp_envelope_editor`'s return value (see
@@ -17713,10 +20741,8 @@ impl App {
                 if !in_grid {
                     return true;
                 }
-                let Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) = self.dialog.as_mut() else {
-                    return true;
-                };
-                let Some((min, max, _)) = cdp_envelope_bounds(fields, edit) else { return true };
+                let Some((min, max, _)) = self.envelope_session_bounds() else { return true };
+                let Some(edit) = self.envelope_session_mut() else { return true };
                 let time_max = edit.time_max;
                 let (t, v) = cdp_envelope_mouse_to_domain(grid, time_max, min, max, mouse.column, mouse.row);
 
@@ -17727,11 +20753,12 @@ impl App {
                         && y0.abs_diff(mouse.row) <= 1
                 });
 
-                let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() else {
-                    return true;
-                };
+                // Click bookkeeping first: the session accessor borrows all of `self`, so
+                // recording the click afterwards would be a write through a live borrow.
+                self.last_cdp_envelope_click =
+                    if is_double { None } else { Some((now, mouse.column, mouse.row)) };
+                let Some(edit) = self.envelope_session_mut() else { return true };
                 if is_double {
-                    self.last_cdp_envelope_click = None;
                     // One gesture, both directions: on a breakpoint it removes that
                     // breakpoint, anywhere else it adds one. Deleting used to be Shift+click,
                     // which never fired — xterm and kitty both treat Shift as "this click is
@@ -17758,7 +20785,6 @@ impl App {
                     }
                     return true;
                 }
-                self.last_cdp_envelope_click = Some((now, mouse.column, mouse.row));
 
                 let Some((nearest_idx, _)) =
                     cdp_envelope_nearest_point(&edit.points, grid, time_max, min, max, mouse.column, mouse.row)
@@ -17781,10 +20807,8 @@ impl App {
                 let Some((anchor_col, anchor_row, anchor_t, anchor_v)) = self.dragging_cdp_point_anchor else {
                     return true;
                 };
-                let Some(Dialog::CdpParams { envelope: Some(edit), fields, .. }) = self.dialog.as_mut() else {
-                    return true;
-                };
-                let Some((min, max, _)) = cdp_envelope_bounds(fields, edit) else { return true };
+                let Some((min, max, _)) = self.envelope_session_bounds() else { return true };
+                let Some(edit) = self.envelope_session_mut() else { return true };
 
                 // Shift scales the mouse delta down before it's converted to a domain delta,
                 // so the same physical movement produces a smaller change — precision
@@ -20054,6 +23078,30 @@ impl App {
         // Both blockers feed the same `blocked` argument — only one dialog can be open, so
         // at most one of them ever returns Some.
         let blocked = self.cdp_params_blocker().or_else(|| self.export_blocker());
+
+        // While a chain is being built, its editor stays on screen underneath whatever sub-dialog
+        // the flow has detoured into — the browser picking a process, the params form, the
+        // envelope editor over that. The chain is the thing being worked on; having it vanish for
+        // each step and reappear afterwards made the detour feel like leaving, when it is the
+        // middle of one task.
+        //
+        // Drawn *first* and its rects thrown away: whatever is on top owns the click targets
+        // (see the note below), and a backdrop that claimed them would put hittable rows behind a
+        // modal. The state it draws from already survives the detour — that is what
+        // `cdp_chain_editor` is for — so this is a rendering change and nothing more.
+        if self.cdp_chain_editor.is_some()
+            && self.cdp_chain_edit_target.is_some()
+            && !matches!(self.dialog, Some(Dialog::CdpChainEditor))
+        {
+            render_cdp_chain_editor_dialog(
+                frame,
+                area,
+                self.cdp_chain_editor.as_ref(),
+                &self.cdp_catalog,
+                &self.documents,
+                &self.chain_input_summary(),
+            );
+        }
         let dialog_rects = self
             .dialog
             .as_ref()
@@ -20061,7 +23109,8 @@ impl App {
                 render_dialog(
                     frame, area, d, &self.cdp_catalog, &self.curve_histories, &self.curves,
                     &self.formant_buffers, self.cdp_chain_editor.as_ref(), &self.documents,
-                    self.graphics_available(), self.praat_picture.as_ref(),
+                    &self.chain_input_summary(), self.graphics_available(),
+                    self.praat_picture.as_ref(),
                     blocked.as_deref(),
                 )
             })
@@ -20139,6 +23188,21 @@ impl App {
                 .filter(|(width, _)| *width > 0)
                 .map(|(width, track_start)| CdpSliderGeometry { track_start, width }),
             _ => None,
+        };
+        // Same discipline, and captured in the same place: from what the renderer just decided
+        // rather than from what a click handler would guess. The width passed is the step
+        // list's, not the terminal's — the bank pane takes a column off the right.
+        self.chain_slider_columns = match (self.dialog.as_ref(), self.cdp_chain_editor.as_ref()) {
+            (Some(Dialog::CdpChainEditor), Some(state)) => {
+                let inner = area.width.saturating_sub(4);
+                let list_width = if inner >= CHAIN_BANK_PANE_WIDTH * 3 {
+                    inner.saturating_sub(CHAIN_BANK_PANE_WIDTH)
+                } else {
+                    inner
+                };
+                chain_slider_columns(state, &self.cdp_catalog, list_width)
+            }
+            _ => Vec::new(),
         };
         self.cdp_choice_value_column = match self.dialog.as_ref() {
             Some(Dialog::CdpParams { catalog_index, .. }) => self
@@ -20223,22 +23287,63 @@ impl App {
         // redrawn onto the wrong, no-longer-current `Rect`. `save_prompt` (the envelope-preset
         // save overlay) early-returns the exact same empty-rect shape from
         // `render_cdp_envelope_editor`, so it needs the same gate or it'd hit the identical bug.
+        //
+        // A bank curve's session lives on the chain editor rather than on a params dialog, and
+        // is otherwise identical here — the same rasteriser, the same grid rect. Missing this
+        // arm was the whole of why an unattached curve opened onto an empty grid: in graphics
+        // mode the ASCII trace is deliberately *not* drawn, so with no bitmap to occlude it
+        // there was nothing at all (user report, with a screenshot of a blank editor).
+        // Which audio goes behind the curve: the session's selected background when it has one
+        // (a bank curve, which has no parameter to inherit a range from), otherwise the active
+        // document over the range the parameter's own selection named.
+        let background_of = |edit: &CdpEnvelopeEdit, active: usize| {
+            edit.backgrounds
+                .get(edit.background)
+                .map(|b| (b.document, b.range))
+                .unwrap_or((active, edit.range))
+        };
         let envelope_curve = match &self.dialog {
             Some(Dialog::CdpParams { envelope: Some(edit), fields, .. })
                 if edit.curve_picker.is_none() && edit.save_prompt.is_none() =>
             {
-                cdp_envelope_bounds(fields, edit)
-                    .map(|(min, max, _)| (edit.points.clone(), edit.selected, edit.time_max, min, max, edit.range))
+                cdp_envelope_bounds(fields, edit).map(|(min, max, _)| {
+                    (
+                        edit.points.clone(),
+                        edit.selected,
+                        edit.time_max,
+                        min,
+                        max,
+                        background_of(edit, self.active_document),
+                    )
+                })
             }
+            Some(Dialog::CdpChainEditor) => self
+                .cdp_chain_editor
+                .as_ref()
+                .and_then(|s| s.envelope.as_ref())
+                .filter(|edit| edit.curve_picker.is_none() && edit.save_prompt.is_none())
+                .and_then(|edit| {
+                    cdp_envelope_bounds(&[], edit).map(|(min, max, _)| {
+                        (
+                            edit.points.clone(),
+                            edit.selected,
+                            edit.time_max,
+                            min,
+                            max,
+                            background_of(edit, self.active_document),
+                        )
+                    })
+                }),
             _ => None,
         };
-        if let Some((points, selected, time_max, min, max, range)) = envelope_curve {
+        if let Some((points, selected, time_max, min, max, (document, range))) = envelope_curve {
             if self.graphics_mode {
                 if let (Some(picker), Some(&grid)) = (&self.picker, self.dialog_row_rects.first()) {
                     let font = picker.font_size();
                     let pixel_width = grid.width as u32 * font.width.max(1) as u32;
                     let pixel_height = grid.height as u32 * font.height.max(1) as u32;
-                    let waveform_ref = self.cdp_envelope_waveform_ref(range, pixel_width as usize);
+                    let waveform_ref =
+                        self.cdp_envelope_waveform_ref(document, range, pixel_width as usize);
                     let img = cdp_envelope_image::rasterize_cdp_envelope(
                         &points, selected, time_max, min, max, &waveform_ref, pixel_width, pixel_height,
                     );
@@ -20501,10 +23606,10 @@ impl App {
     /// precise measurement. Pixel resolution (not the coarser character-cell grid) matters
     /// here specifically so the traced shape reads as a real waveform silhouette rather than
     /// a blocky staircase of ~8px-wide flat steps.
-    fn cdp_envelope_waveform_ref(&self, range: (usize, usize), cells: usize) -> Vec<f32> {
+    fn cdp_envelope_waveform_ref(&self, document: usize, range: (usize, usize), cells: usize) -> Vec<f32> {
         let cells = cells.max(1);
         let mut peaks = vec![0.0f32; cells];
-        let Some(doc) = self.documents.get(self.active_document) else { return peaks };
+        let Some(doc) = self.documents.get(document) else { return peaks };
         let (start, end) = range;
         let span = end.saturating_sub(start);
         if span == 0 {
@@ -20524,7 +23629,9 @@ impl App {
                 if col_start >= ch_end {
                     continue;
                 }
-                let (mn, mx) = match self.active_caches().get(doc.source_channel(ch_i)) {
+                let caches =
+                    self.waveform_caches.get(document).map(|v| v.as_slice()).unwrap_or(&[]);
+                let (mn, mx) = match caches.get(doc.source_channel(ch_i)) {
                     Some(cache) => cache.min_max(channel, col_start, ch_end),
                     None => channel
                         .with_slice(col_start, ch_end, crate::ui::waveform_cache::raw_min_max),
@@ -21402,6 +24509,7 @@ fn render_dialog(
     formant_buffers: &[crate::model::formant::FormantBuffer],
     chain_editor: Option<&ChainEditorState>,
     documents: &[Document],
+    chain_input: &str,
     graphics_mode: bool,
     // The figure `Dialog::PraatPicture` shows. Passed in rather than read off `App` for the
     // same reason `formant_buffers` is: this function only ever gets `&Dialog`.
@@ -21538,7 +24646,12 @@ fn render_dialog(
             return render_praat_picture_dialog(frame, area, praat_picture, graphics_mode);
         }
         Dialog::CdpChainEditor => {
-            return render_cdp_chain_editor_dialog(frame, area, chain_editor, catalog, documents);
+            // A bank curve open for drawing takes the whole dialog: it is the same editor the
+            // params form hosts, just pointed at a curve that belongs to no field.
+            if let Some(edit) = chain_editor.and_then(|s| s.envelope.as_ref()) {
+                return render_cdp_envelope_editor(frame, area, &[], edit, None, curves, graphics_mode);
+            }
+            return render_cdp_chain_editor_dialog(frame, area, chain_editor, catalog, documents, chain_input);
         }
         Dialog::AutoTrim {
             method, threshold, min_silence, pad_lead, pad_trail, fade_ms, snap, remove_gaps,
@@ -22924,16 +26037,29 @@ fn render_cdp_envelope_editor(
         return Vec::new();
     };
     let param = def.and_then(|d| d.params.get(edit.field_index));
-    let param_name = param.map(|p| p.name.as_str()).unwrap_or("Envelope");
+    let param_name =
+        edit.label.as_deref().or_else(|| param.map(|p| p.name.as_str())).unwrap_or("Envelope");
     let constant_key = edit.target.constant_key(param.is_some_and(|p| p.required_envelope));
     // The crystal envelope is one half of a compound field, so its title says which half —
     // "Envelope: Crystal Data" alone would read as though the whole field were an envelope.
     let title = if edit.target == CdpEnvelopeTarget::CrystalEnvelope {
         format!("Event Envelope: {param_name}  (section 2 of 2)")
+    } else if let Some(background) = edit.backgrounds.get(edit.background) {
+        // Which audio is behind the curve, and whether there is another — `w` cycles them, and a
+        // background with nothing to switch to should not advertise a key that does nothing.
+        let more = if edit.backgrounds.len() > 1 {
+            format!("  ({} of {}, w)", edit.background + 1, edit.backgrounds.len())
+        } else {
+            String::new()
+        };
+        format!("Envelope: {param_name}  \u{00b7}  over {}{more}", background.label)
     } else {
         format!("Envelope: {param_name}")
     };
 
+    // A bank curve's time axis is normalized 0-1, not seconds: it is stored that way precisely
+    // so it can be projected onto whatever duration the audio turns out to have.
+    let time_unit = if edit.target == CdpEnvelopeTarget::BankEnvelope { "" } else { "s" };
     let layout = cdp_envelope_layout(area);
     let popup = layout.popup;
     frame.render_widget(ratatui::widgets::Clear, popup);
@@ -23091,8 +26217,8 @@ fn render_cdp_envelope_editor(
     let time_label = format!(
         "{}{:<width$}{}",
         " ".repeat(Y_LABEL_WIDTH),
-        format!("{:.3}s", 0.0),
-        format!("{:.3}s", edit.time_max),
+        format!("{:.3}{time_unit}", 0.0),
+        format!("{:.3}{time_unit}", edit.time_max),
         width = grid_width.saturating_sub(8),
     );
     lines.push(Line::from(Span::styled(time_label, dim_style)));
@@ -23101,7 +26227,13 @@ fn render_cdp_envelope_editor(
     let selected_point = edit.points.get(edit.selected).copied().unwrap_or((0.0, 0.0));
     lines.push(Line::from(vec![
         Span::styled(
-            format!(" Point {}/{}: t={:.3}s v={}", edit.selected + 1, edit.points.len(), selected_point.0, format_cdp_float_for_display(selected_point.1)),
+            format!(
+                " Point {}/{}: t={:.3}{time_unit} v={}",
+                edit.selected + 1,
+                edit.points.len(),
+                selected_point.0,
+                format_cdp_float_for_display(selected_point.1)
+            ),
             label_style,
         ),
     ]));
@@ -23135,10 +26267,13 @@ fn render_cdp_envelope_editor(
             hint_spans.push(Span::styled("c", hint_style));
             hint_spans.push(Span::styled(":use curve  ", label_style));
         }
-        CdpEnvelopeConstantKey::Unavailable => {
+        // Both targets have no constant to revert to, but only one of them has a vertices half
+        // to switch to — `v` belongs to the crystal editor alone.
+        CdpEnvelopeConstantKey::Unavailable if edit.target == CdpEnvelopeTarget::CrystalEnvelope => {
             hint_spans.push(Span::styled("v", hint_style));
             hint_spans.push(Span::styled(":vertices  ", label_style));
         }
+        CdpEnvelopeConstantKey::Unavailable => {}
     }
     // The Preset row's own keys (Tab/s/d) are hinted on their own line at the very top of
     // the popup instead — see `lines`' header block above.
@@ -25967,7 +29102,7 @@ fn render_cdp_params_dialog(
         Line::from(vec![
             Span::styled(preset_label, if preset_focused { cursor_style } else { label_style }),
             Span::styled(value, base),
-            Span::styled("  s:save  d:delete", hint_style),
+            Span::styled("  s:save  Del:delete", hint_style),
         ])
     };
     lines.push(preset_line);
@@ -26550,20 +29685,279 @@ fn render_cdp_running_dialog(
 /// currently picked for its second input. Mirrors `render_cdp_output_dialog`'s popup-sizing
 /// convention; a save-prompt in progress replaces the list with a simple name-entry line,
 /// the same way `render_cdp_params_dialog`'s own save prompt takes over that dialog.
+/// Where each chain-editor display row's inline slider track sits, index-parallel to the row
+/// rects that row list produces. `None` for a row with no track — every row that is not a
+/// closed-range number, and every row at all when the terminal is too narrow to hold one.
+///
+/// Recorded rather than recomputed at click time, the discipline `CdpSliderGeometry` follows and
+/// for the same reason: the click handler has no frame area to consult, and a view that dropped
+/// its tracks while the handler still believed in them would set values from clicks that landed
+/// on the numbers. Both this and the renderer derive the column from `chain_indent` and
+/// `chain_param_label_width`, so there is one arithmetic and not two.
+fn chain_slider_columns(
+    state: &ChainEditorState,
+    catalog: &crate::model::cdp::CdpCatalog,
+    list_width: u16,
+) -> Vec<Option<(u16, u16)>> {
+    use crate::model::cdp::ParamKind;
+    use crate::ui::widgets::param_slider;
+    let label_width = chain_param_label_width(state, catalog);
+    chain_display_rows(state, catalog)
+        .into_iter()
+        .map(|row| {
+            let DisplayRow::Row(ChainEditorRow::Param { path, index }) = row else { return None };
+            let step = crate::model::cdp::step_at(&state.chain, &path)?;
+            // An automated parameter shows its curve, not a track.
+            if matches!(
+                step.values.get(index),
+                Some(crate::model::cdp::ParamValue::EnvelopeRef(_))
+                    | Some(crate::model::cdp::ParamValue::Breakpoints(_))
+            ) {
+                return None;
+            }
+            let def = catalog.processes.iter().find(|p| p.key == step.process_key)?;
+            let ParamKind::Number { min, max, .. } = def.params.get(index)?.kind else { return None };
+            if !param_slider::applies(min, max) {
+                return None;
+            }
+            let start = chain_indent(chain_path_depth(&path), ChainIndent::Detail).chars().count()
+                + label_width
+                + 2;
+            let width = param_slider::CELLS;
+            // Clipped off the right edge: no track on screen, so none to click.
+            (start + width <= list_width as usize).then_some((start as u16, width as u16))
+        })
+        .collect()
+}
+
+/// Width of the envelope-bank column./// Width of the envelope-bank column. Sized to a name plus a 16-cell sparkline plus the
+/// divider, which is the narrowest a curve can be drawn at and still show its shape.
+const CHAIN_BANK_PANE_WIDTH: u16 = 34;
+
+/// Cells the bank sparkline occupies. Braille packs two columns per cell, so this is 32 points
+/// of curve — enough to tell a swell from a stutter at a glance, which is all it is for.
+const CHAIN_BANK_SPARK_CELLS: usize = 16;
+
+/// The envelope bank, down the right-hand side: what shapes this chain owns and how many
+/// parameters each one drives.
+///
+/// Read-only, deliberately. Attaching, re-pointing and inverting all happen on the parameter
+/// rows (`e` and `i`), because that is where the question "what drives this?" is asked, and
+/// drawing a curve happens in the graphical editor the step's own dialog already opens. A pane
+/// that could also be focused and edited would be a third place envelopes are managed, and the
+/// reference count is the thing no other view can show.
+fn render_chain_bank_pane(
+    frame: &mut Frame,
+    area: Rect,
+    state: &ChainEditorState,
+    catalog: &crate::model::cdp::CdpCatalog,
+) -> Vec<Rect> {
+    let base = Style::default().fg(theme::TEXT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    let dim = Style::default().fg(theme::ANNOTATION).bg(theme::SURFACE0);
+    let curve_style = Style::default().fg(theme::ACTIVE).bg(theme::SURFACE0);
+    let cursor_style = Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
+    let focused = state.focus == ChainFocus::Bank;
+
+    // Focused column headers take the peach accent everywhere in this app; the unfocused
+    // column's selection stays plain rather than wearing a second one.
+    let title_style = if focused {
+        Style::default().fg(theme::FOCUS).add_modifier(ratatui::style::Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::CHROME_FG)
+    };
+    let block = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(if focused { theme::FOCUS } else { theme::BORDER }))
+        .style(base);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled("Envelopes", title_style))).style(base),
+        Rect { height: 1, ..inner },
+    );
+    let inner = Rect { y: inner.y + 1, height: inner.height.saturating_sub(1), ..inner };
+
+    if state.chain.bank.envelopes.is_empty() {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::raw(""),
+                Line::from(Span::styled(" No envelopes yet.", dim)),
+                Line::raw(""),
+                Line::from(Span::styled(" Ctrl+E to come here,", dim)),
+                Line::from(Span::styled(" then n to add one.", dim)),
+            ])
+            .style(base),
+            inner,
+        );
+        return Vec::new();
+    }
+
+    let references = chain_envelope_references(state, catalog);
+    let selected = state.bank_selected.min(state.chain.bank.envelopes.len().saturating_sub(1));
+    const HIDDEN: Rect = Rect { x: 0, y: 0, width: 0, height: 0 };
+    // Two rows of curve, then the parameter list over as many rows as it needs, then a gap.
+    // The list wraps rather than being cut off with an ellipsis: naming what a curve drives is
+    // the point of the line, and "Amount Kept, Scaling, Bran…" answers half the question (user
+    // report). Row positions are therefore accumulated as the lines are pushed instead of
+    // multiplied out — envelopes no longer all take the same height.
+    // Name column, padded so the curve starts at the same column on both of its rows and a
+    // selected envelope highlights as one rectangle rather than two ragged lines.
+    const NAME_WIDTH: usize = 12;
+    const CURVE_INDENT: usize = 3 + NAME_WIDTH + 2;
+    let mut lines = vec![Line::raw("")];
+    let mut rects = Vec::new();
+    // Rows used so far, counted from the first envelope's own first line.
+    let mut row: u16 = 0;
+    for (i, envelope) in state.chain.bank.envelopes.iter().enumerate() {
+        let used = references.get(&envelope.name).map(Vec::as_slice).unwrap_or(&[]);
+        let is_selected = focused && i == selected;
+        let row_style = if is_selected { cursor_style } else { base };
+        let curve = if is_selected { row_style } else { curve_style };
+        let [curve_top, curve_bottom] = chain_bank_sparkline_rows(&envelope.points);
+        lines.push(Line::from(vec![
+            Span::styled(" \u{2314} ", curve),
+            Span::styled(format!("{:<NAME_WIDTH$}", truncate_label(&envelope.name, NAME_WIDTH)), row_style),
+            Span::styled("  ", row_style),
+            Span::styled(curve_top, curve),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(" ".repeat(CURVE_INDENT), row_style),
+            Span::styled(curve_bottom, curve),
+        ]));
+        row += 2;
+        let top = row;
+        if used.is_empty() {
+            lines.push(Line::from(Span::styled("     unused", dim)));
+            row += 1;
+        } else {
+            for wrapped in wrap_words(&used.join(", "), inner.width.saturating_sub(6).max(1) as usize) {
+                lines.push(Line::from(Span::styled(format!("     {wrapped}"), label_style)));
+                row += 1;
+            }
+        }
+        lines.push(Line::raw(""));
+        row += 1;
+        let y = inner.y + 1 + top;
+        rects.push(if y < inner.y + inner.height {
+            Rect { x: inner.x, y, width: inner.width, height: (row - top).saturating_sub(1) }
+        } else {
+            HIDDEN
+        });
+    }
+    frame.render_widget(Paragraph::new(lines).style(base), inner);
+    rects
+}
+
+/// Which parameters across the whole chain point at each bank envelope, in the order the editor
+/// lists them.
+///
+/// Names rather than a count: "3 parameters" says a shape is shared without saying *what with*,
+/// and the thing you go to this pane to check is whether a curve is driving what you meant it to
+/// (user request). A parameter's name alone, with no value — the value is on its own row, and a
+/// curve does not have one anyway.
+fn chain_envelope_references(
+    state: &ChainEditorState,
+    catalog: &crate::model::cdp::CdpCatalog,
+) -> std::collections::HashMap<String, Vec<String>> {
+    use crate::model::cdp::ParamValue;
+    let mut references: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for row in chain_editor_rows(state, catalog) {
+        let ChainEditorRow::Param { path, index } = row else { continue };
+        let Some(step) = crate::model::cdp::step_at(&state.chain, &path) else { continue };
+        if let Some(ParamValue::EnvelopeRef(reference)) = step.values.get(index) {
+            let name = catalog
+                .processes
+                .iter()
+                .find(|p| p.key == step.process_key)
+                .and_then(|def| def.params.get(index))
+                .map(|param| param.name.clone())
+                .unwrap_or_else(|| format!("parameter {}", index + 1));
+            references.entry(reference.name.clone()).or_default().push(name);
+        }
+    }
+    references
+}
+
+/// Splits `text` into lines of at most `width` columns, breaking between words.
+///
+/// A word longer than `width` gets its own line and overhangs rather than being cut: the words
+/// here are parameter names, and half a name is worse than one that runs to the edge.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(line) if line.chars().count() + 1 + word.chars().count() <= width => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// A braille sketch of a normalized curve over **two** terminal rows, using the same
+/// `braille_char` the waveform does: 2 dot-columns per cell, 8 dot-rows tall.
+///
+/// Two rows rather than one because four dot-rows show a curve's shape only roughly and the pane
+/// has the height to spare (user request). Consecutive dot-columns are joined vertically, so a
+/// steep section reads as a line instead of scattered dots.
+fn chain_bank_sparkline_rows(points: &[(f64, f64)]) -> [String; 2] {
+    use crate::ui::widgets::braille::{braille_char, DOT_BITS};
+    use crate::ui::widgets::cdp_envelope_image::interp_cdp_envelope;
+    if points.is_empty() {
+        return [String::new(), String::new()];
+    }
+    let columns = CHAIN_BANK_SPARK_CELLS * 2;
+    // Dot row 0 is the top of the upper cell, 7 the bottom of the lower one, so a high value
+    // must land on a low index.
+    let row_at = |column: usize| -> usize {
+        let t = column as f64 / (columns.saturating_sub(1)).max(1) as f64;
+        let value = interp_cdp_envelope(points, t).clamp(0.0, 1.0);
+        (7.0 - value * 7.0).round().clamp(0.0, 7.0) as usize
+    };
+    let mut top = vec![0u8; CHAIN_BANK_SPARK_CELLS];
+    let mut bottom = vec![0u8; CHAIN_BANK_SPARK_CELLS];
+    for column in 0..columns {
+        let row = row_at(column);
+        let previous = if column == 0 { row } else { row_at(column - 1) };
+        let (from, to) = (previous.min(row), previous.max(row));
+        for r in from..=to {
+            let cell = if r < 4 { &mut top[column / 2] } else { &mut bottom[column / 2] };
+            *cell |= DOT_BITS[r % 4][column % 2];
+        }
+    }
+    [
+        top.into_iter().map(braille_char).collect(),
+        bottom.into_iter().map(braille_char).collect(),
+    ]
+}
+
 fn render_cdp_chain_editor_dialog(
     frame: &mut Frame,
     area: Rect,
     state: Option<&ChainEditorState>,
     catalog: &crate::model::cdp::CdpCatalog,
     documents: &[Document],
+    chain_input: &str,
 ) -> Vec<Rect> {
-    let width = 102u16.min(area.width);
-    let height = 30u16.min(area.height);
+    // Full terminal, less a one-cell margin so the border reads as a window rather than as the
+    // screen edge. This was a fixed 102x30 popup, which was enough for one line per step and
+    // nothing else; a chain's parameters are the point of the view now, and they do not fit in
+    // a box sized for titles. Nothing else in the app claims the whole screen, which is the
+    // other half of why: a chain editor is a place you go to, not something you glance at.
+    let margin = if area.width > 4 && area.height > 4 { 1 } else { 0 };
     let popup = Rect {
-        x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
+        x: area.x + margin,
+        y: area.y + margin,
+        width: area.width.saturating_sub(margin * 2),
+        height: area.height.saturating_sub(margin * 2),
     };
     frame.render_widget(ratatui::widgets::Clear, popup);
 
@@ -26574,8 +29968,12 @@ fn render_cdp_chain_editor_dialog(
     let error_style = Style::default().fg(theme::RED).bg(theme::SURFACE0);
     let disabled_style = Style::default().fg(theme::ANNOTATION).bg(theme::SURFACE0);
 
+    let title = match state.map(|s| s.chain.name.as_str()) {
+        Some(name) if !name.is_empty() => format!("ExtProcess Chain \u{2014} \"{name}\""),
+        _ => "ExtProcess Chain".to_string(),
+    };
     let block = Block::default()
-        .title("ExtProcess Chain")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .style(base);
@@ -26610,7 +30008,18 @@ fn render_cdp_chain_editor_dialog(
         }
     };
 
-    let rows = chain_display_rows(state, catalog);
+    // The step list's width, needed here to lay the rows out and again below to place the
+    // panes. One expression, so the layout and the rects cannot disagree about it.
+    // One right-hand column, holding the map at the top and the envelope bank beneath it — both
+    // are references you glance at rather than work in, so they share the space the step list
+    // gives up rather than each taking a column. Dropped whole below the width threshold rather
+    // than squeezed, the same rule `dest_picker::split` follows.
+    let body_width = if inner.width >= CHAIN_BANK_PANE_WIDTH * 3 {
+        inner.width - CHAIN_BANK_PANE_WIDTH
+    } else {
+        inner.width
+    };
+    let layout = chain_layout(state, catalog, body_width);
 
     // The Preset row (always `rows[0]`, per `chain_display_rows`) renders as a fixed header —
     // a blank line before it and after it, so it doesn't visually run together with the
@@ -26623,61 +30032,152 @@ fn render_cdp_chain_editor_dialog(
     // A selected row uses one uniform highlight for the whole line (see `theme.rs`'s own
     // convention) rather than layering the shortcut accent on top of it.
     let preset_line = if preset_selected {
-        Line::from(Span::styled(format!("{preset_lead}l: Recall last chain"), preset_style))
+        Line::from(Span::styled(format!("{preset_lead}r: Recall last chain"), preset_style))
     } else {
         Line::from(vec![
             Span::styled(preset_lead, preset_style),
-            Span::styled("l", hint_style),
+            Span::styled("r", hint_style),
             Span::styled(": Recall last chain", label_style),
         ])
     };
+    // Blank, the preset row, blank — the map moved out of the header into a column of its own.
     let header_lines = vec![Line::raw(""), preset_line, Line::raw("")];
     let header_height = header_lines.len() as u16;
 
-    let body_rows = &rows[1..];
-    let mut lines: Vec<Line> = Vec::new();
-    for row in body_rows {
+    let body_cells = &layout.cells[1..];
+    let mut rendered: Vec<(ChainCell, Line)> = Vec::new();
+    for (row, cell) in body_cells {
+        let depth = cell.depth;
+        // A row inside a branch column has a fraction of the width, so the explanatory notes
+        // that fit on the main path have to give way there rather than be clipped mid-word.
+        let roomy = cell.width >= 60;
         let row = match row {
             DisplayRow::Row(row) => row,
             // Synthetic, non-selectable heads-up — always the same pale style regardless of
             // selection (nothing here can ever be `state.selected`, so there's no highlight
             // case to fold into). Same indentation convention as a real `Step` row at that
             // depth, so it visually brackets the step(s) it describes.
-            DisplayRow::PvocAnalyze { depth } => {
-                lines.push(Line::from(Span::styled(format!("{}PVOC Analyze", "  ".repeat(*depth)), disabled_style)));
+            DisplayRow::PvocAnalyze { .. } => {
+                rendered.push((*cell, Line::from(Span::styled(
+                    format!("{}PVOC Analyze", chain_indent(depth, ChainIndent::Step)),
+                    disabled_style,
+                ))));
                 continue;
             }
-            DisplayRow::PvocResynthesize { depth } => {
-                lines.push(Line::from(Span::styled(format!("{}PVOC Resynthesize", "  ".repeat(*depth)), disabled_style)));
+            DisplayRow::PvocResynthesize { .. } => {
+                rendered.push((*cell, Line::from(Span::styled(
+                    format!("{}PVOC Resynthesize", chain_indent(depth, ChainIndent::Step)),
+                    disabled_style,
+                ))));
                 continue;
             }
             DisplayRow::Blank => {
-                lines.push(Line::raw(""));
+                rendered.push((*cell, Line::raw("")));
+                continue;
+            }
+            // Where the audio comes from. Stated rather than assumed, so a chain read cold says
+            // what it operates on before it says what it does to it.
+            DisplayRow::In => {
+                rendered.push((*cell, Line::from(Span::styled(
+                    format!(" \u{25b8} IN    {chain_input}"),
+                    disabled_style,
+                ))));
+                continue;
+            }
+            // The fan-out. Drawn above the columns; the combiner that gathers them is below.
+            DisplayRow::Split { count } => {
+                rendered.push((*cell, Line::from(Span::styled(
+                    format!(" \u{2443} SPLIT into {count}"),
+                    Style::default().fg(theme::ACTIVE).bg(theme::SURFACE0),
+                ))));
                 continue;
             }
         };
         let selected = *row == state.selected;
         let style = if selected { cursor_style } else { base };
+        // A selected row is one uniform highlight (see `theme.rs`), so a button only wears its
+        // own accent while it is *not* the selection — the same rule the process names follow.
+        let button_style = |selected: bool| {
+            if selected {
+                cursor_style
+            } else {
+                Style::default().fg(theme::BUTTON).bg(theme::SURFACE0)
+            }
+        };
         let spans: Vec<Span> = match row {
             ChainEditorRow::Preset => unreachable!("Preset is rendered as the fixed header above"),
+            // A step's parallel input: where its audio comes from, and (for a `Buffer` source)
+            // which open document that is. Drawn one level in from its owning step and lettered
+            // A/B/C, so a glance down the list reads as "this step, fed by these legs".
+            ChainEditorRow::BranchHeader(path) => {
+                let Some(branch) = crate::model::cdp::branch_at(&state.chain, path) else {
+                    continue;
+                };
+                // A combiner's leg is the first row inside its own column, so the column framing
+                // supplies the nesting and the row sits at the column's base indent. A
+                // dual-input process's branch is a row of the step instead, and lines up with
+                // the parameters below it.
+                let owner = path.split_last().map(|(_, owner)| owner).unwrap_or(&[]);
+                let inline = crate::model::cdp::step_at(&state.chain, owner)
+                    .and_then(|step| catalog.processes.iter().find(|p| p.key == step.process_key))
+                    .is_some_and(|def| def.consumes_running_buffer());
+                let indent =
+                    chain_indent(depth, if inline { ChainIndent::Detail } else { ChainIndent::Step });
+                // Said in words rather than named: "tap" is the internal term and it read as
+                // jargon to someone opening this cold (user asked what it meant). Both states
+                // are phrased the same way, so the row reads as one choice with two answers.
+                let source = match &branch.source {
+                    crate::model::cdp::BranchSource::Tap => "the incoming signal".to_string(),
+                    crate::model::cdp::BranchSource::Buffer => state
+                        .buffer_picks
+                        .get(path)
+                        .copied()
+                        .map(|i| format!("file: {}", buffer_name(i)))
+                        .unwrap_or_else(|| "file: (none picked)".to_string()),
+                    crate::model::cdp::BranchSource::From(source) => {
+                        format!("output of {}", chain_path_label(source))
+                    }
+                };
+                // A combiner's empty leg is the dry signal, which is worth saying. A second
+                // infile is named rather than described: nothing happens to it either way.
+                let (lead, note) = if inline {
+                    ("2nd input: ", "")
+                } else if branch.steps.is_empty() {
+                    ("", "   (passes through)")
+                } else {
+                    ("", "")
+                };
+                vec![Span::styled(format!("{indent}\u{2190} {lead}{source}{note}"), style)]
+            }
             ChainEditorRow::Step(path) => {
-                let indent = "  ".repeat(path.len());
-                let arrow = if path.len() > 1 { "\u{21b3} " } else { "" };
+                let indent = chain_indent(depth, ChainIndent::Step);
                 let Some(step) = crate::model::cdp::step_at(&state.chain, path) else {
                     continue;
                 };
+                // No disclosure glyph: nothing folds any more, and a triangle that cannot be
+                // pressed is a control that lies. A step is marked by its number and the colour
+                // of its name, which is what you scan for anyway.
+                let arrow = "";
                 let def = catalog.processes.iter().find(|p| p.key == step.process_key);
                 let title = def.map(|d| d.title.as_str()).unwrap_or(&step.process_key);
-                let index = *path.last().unwrap();
-                let main_text = if step.is_dual_input(catalog) == Some(true) {
-                    let picked =
-                        state.buffer_picks.get(path).copied().map(buffer_name).unwrap_or_else(|| "(pick a buffer)".to_string());
-                    let via = if step.side_chain.is_empty() { "2nd input" } else { "side-chain from" };
-                    format!("{indent}{arrow}{}. {title}   [{via}: {picked}]", index + 1)
+                let crate::model::cdp::PathSeg::Step(index) = *path.last().unwrap() else { continue };
+                // The second-input/side-chain decoration this row used to carry now belongs to
+                // the branch row rendered just below it: a step may have several branches, and
+                // one line can only describe one of them.
+                // The name is what you scan a chain for, so it is the one part that is not in
+                // the row's own colour. A *selected* row stays one uniform highlight, per
+                // `theme.rs`'s convention — a second accent on top of it would fight.
+                let mut spans = if selected {
+                    vec![Span::styled(format!("{indent}{arrow}{}. {title}", index + 1), style)]
                 } else {
-                    format!("{indent}{arrow}{}. {title}", index + 1)
+                    vec![
+                        Span::styled(format!("{indent}{arrow}{}. ", index + 1), style),
+                        Span::styled(
+                            title.to_string(),
+                            Style::default().fg(theme::PROCESS_NAME).bg(theme::SURFACE0),
+                        ),
+                    ]
                 };
-                let mut spans = vec![Span::styled(main_text, style)];
                 // Pale, same muted color/rationale as the CDP Process browser's own "[pvoc]"
                 // badge (`cdp_process_badges`) — a heads-up that this step is spectral (and so
                 // eligible to merge with an adjacent spectral step into one shared anal/synth
@@ -26698,51 +30198,355 @@ fn render_cdp_chain_editor_dialog(
                 }
                 spans
             }
-            ChainEditorRow::AddStep(parent_path) => {
-                let indent = "  ".repeat(parent_path.len() + 1);
-                let label = if parent_path.is_empty() { "Add step" } else { "Add side-chain step" };
-                vec![Span::styled(format!("{indent}+ {label}"), style)]
+            ChainEditorRow::AddStep { path: parent_path, .. } => {
+                // One level in from the branch's own row, so it lines up with that branch's
+                // steps rather than with its sibling branches.
+                let indent = chain_indent(depth, ChainIndent::Step);
+                // A dual-input process's branch is its second input, and the row says so — the
+                // word "branch" belongs to a combiner's legs.
+                let owner = parent_path.split_last().map(|(_, owner)| owner).unwrap_or(&[]);
+                let into_second_input = !parent_path.is_empty()
+                    && crate::model::cdp::step_at(&state.chain, owner)
+                        .and_then(|step| catalog.processes.iter().find(|p| p.key == step.process_key))
+                        .is_some_and(|def| def.consumes_running_buffer());
+                let label = match (parent_path.is_empty(), into_second_input) {
+                    (true, _) => "Add step",
+                    (false, true) => "Add step to this input",
+                    (false, false) => "Add step to this branch",
+                };
+                vec![Span::styled(format!("{indent}+ {label}"), button_style(selected))]
             }
-            ChainEditorRow::Preview => vec![Span::styled(" \u{25b6} Preview the whole chain", style)],
-            ChainEditorRow::Run => vec![Span::styled(" \u{25b6} Run", style)],
+            // One parameter, inline. Reuses `param_slider` so a stop here means exactly what it
+            // means in the params dialog, and `automatable_label_style` so a curve-capable
+            // parameter is as identifiable here as it is there.
+            ChainEditorRow::Param { path, index } => {
+                use crate::model::cdp::{ParamKind, ParamValue};
+                use crate::ui::widgets::param_slider;
+                let indent = chain_indent(depth, ChainIndent::Detail);
+                let Some(step) = crate::model::cdp::step_at(&state.chain, path) else { continue };
+                let Some(def) = catalog.processes.iter().find(|p| p.key == step.process_key) else {
+                    continue;
+                };
+                let Some(param) = def.params.get(*index) else { continue };
+                // A step can hold fewer values than its process has parameters (a chain saved
+                // before the catalog grew one). Show the declared default for those, not the
+                // bottom of the range — see `ParamDef::default_value`.
+                let fallback = param.default_value();
+                let value = Some(step.values.get(*index).unwrap_or(&fallback));
+
+                let label_width = chain_param_label_width(state, catalog);
+                let label = format!("{indent}{:<label_width$}  ", truncate_label(&param.name, label_width));
+                let label_span = if selected {
+                    Span::styled(label, style)
+                } else if param.automatable {
+                    // The same green the params dialog gives a curve-capable parameter, so the
+                    // two views agree about which rows will take an envelope.
+                    Span::styled(label, Style::default().fg(theme::ACTIVE).bg(theme::SURFACE0))
+                } else {
+                    Span::styled(label, label_style)
+                };
+
+                let mut spans = vec![label_span];
+                match (&param.kind, value) {
+                    // An automated parameter reads as what drives it, not as a number: the bank
+                    // curve, the window it is read through, and whether it is flipped.
+                    (_, Some(ParamValue::EnvelopeRef(reference))) => {
+                        // The span the curve actually reaches through this reference's window,
+                        // not the window itself — see `EnvelopeBank::produced_span`. A shared
+                        // shape reads in each parameter's own units, which is the point of it.
+                        let (lo, hi) = state
+                            .chain
+                            .bank
+                            .produced_span(reference)
+                            .unwrap_or((reference.min, reference.max));
+                        let flip = if reference.invert { "  inv" } else { "" };
+                        spans.push(Span::styled(
+                            format!(
+                                "\u{2190} \u{2314} {}   {} \u{2026} {}{flip}",
+                                reference.name,
+                                format_cdp_number_for_display(round3(lo), false),
+                                format_cdp_number_for_display(round3(hi), false),
+                            ),
+                            if selected { style } else { base },
+                        ));
+                    }
+                    (_, Some(ParamValue::Breakpoints(points))) => {
+                        spans.push(Span::styled(
+                            format!("\u{2314} {} points", points.len()),
+                            if selected { style } else { base },
+                        ));
+                    }
+                    (ParamKind::Number { min, max, integer, exponential, .. }, value) => {
+                        let now = match value {
+                            Some(ParamValue::Number(v)) => *v,
+                            _ => *min,
+                        };
+                        let now = now.clamp(*min, *max);
+                        // Mid-typing: show what is being typed, with a caret, rather than the
+                        // value it will become — the slider still tracks the committed number,
+                        // so the row says "this is what you have, this is what you are entering".
+                        let typing = state.param_edit.as_ref().and_then(|(p, i, input)| {
+                            (p == path && i == index).then(|| input.value().to_string())
+                        });
+                        if param_slider::applies(*min, *max) {
+                            if selected {
+                                // A selected row is one uniform highlight, per `theme.rs`'s
+                                // convention — the knob's own accent would be a second one.
+                                spans.push(Span::styled(
+                                    param_slider::track(now, *min, *max, *integer, *exponential),
+                                    style,
+                                ));
+                            } else {
+                                spans.extend(param_slider::spans(
+                                    now, *min, *max, *integer, *exponential, false,
+                                ));
+                            }
+                            spans.push(Span::styled("  ", if selected { style } else { base }));
+                        }
+                        match typing {
+                            Some(text) => {
+                                spans.push(Span::styled(text, if selected { style } else { base }));
+                                spans.push(Span::styled(
+                                    "\u{2588}",
+                                    Style::default().fg(theme::FOCUS).bg(theme::SURFACE0),
+                                ));
+                            }
+                            None => spans.push(Span::styled(
+                                format_cdp_number_for_display(now, *integer),
+                                if selected { style } else { base },
+                            )),
+                        }
+                    }
+                    (ParamKind::Toggle { .. }, value) => {
+                        let on = matches!(value, Some(ParamValue::Toggle(true)));
+                        spans.push(Span::styled(
+                            if on { "on" } else { "off" },
+                            if selected { style } else { base },
+                        ));
+                    }
+                    (ParamKind::Choice { options, .. }, value) => {
+                        let i = match value {
+                            Some(ParamValue::Choice(i)) => *i,
+                            _ => 0,
+                        };
+                        let text = options.get(i).map(String::as_str).unwrap_or("?");
+                        spans.push(Span::styled(
+                            format!("\u{25c4} {text} \u{25ba}"),
+                            if selected { style } else { base },
+                        ));
+                    }
+                    // Everything with a sub-editor of its own: say what is there and leave
+                    // changing it to Enter, rather than reimplementing a table inline.
+                    (_, value) => {
+                        spans.push(Span::styled(
+                            format!("{}   \u{21b5}", chain_param_summary(value)),
+                            if selected { style } else { disabled_style },
+                        ));
+                    }
+                }
+                spans
+            }
+            ChainEditorRow::BranchOut(_) => {
+                let indent = chain_indent(depth, ChainIndent::Step);
+                let mut spans =
+                    vec![Span::styled(format!("{indent}\u{2443} Branch out"), button_style(selected))];
+                if roomy {
+                    spans.push(Span::styled(
+                        "   split the signal here and mix it back",
+                        if selected { style } else { disabled_style },
+                    ));
+                }
+                spans
+            }
+            ChainEditorRow::Out => {
+                let (label, note) = match state.chain.output {
+                    crate::model::cdp::ChainOutput::Splice => {
+                        ("splice into the selection", "replaces the audio, one undo step")
+                    }
+                    crate::model::cdp::ChainOutput::NewBuffer => {
+                        ("open as a new buffer", "leaves the source untouched")
+                    }
+                };
+                let mut spans =
+                    vec![Span::styled(format!(" \u{25b8} OUT   \u{25c4} {label} \u{25ba}"), style)];
+                if roomy {
+                    spans.push(Span::styled(
+                        format!("   {note}"),
+                        if selected { style } else { disabled_style },
+                    ));
+                }
+                spans
+            }
+            ChainEditorRow::Preview => {
+                vec![Span::styled(" \u{25b6} Preview the whole chain", button_style(selected))]
+            }
+            ChainEditorRow::Run => vec![Span::styled(" \u{25b6} Run", button_style(selected))],
         };
-        lines.push(Line::from(spans));
+        rendered.push((*cell, Line::from(spans)));
     }
 
-    // error line + blank gap + two hints lines. Two because one no longer fits: the bar names
-    // nine keys, and at the popup's 100 columns of inner width the single line ran seven
-    // columns past the right border, clipping `Esc:close` down to `Es` (user report, with a
-    // screenshot). Splitting it by *kind* — motion above, actions below — rather than merely
-    // wrapping at the width, so the break lands somewhere meaningful and stays put as keys are
-    // added or renamed.
-    let footer_height = 4u16;
+    // error line + blank gap + three hints lines. One line stopped fitting long ago (the bar
+    // clipped `Esc:close` down to `Es`, user report with a screenshot); two stopped fitting once
+    // branching and envelopes added their keys. Split by *kind* — motion, structure, actions —
+    // rather than wrapped at the width, so a break lands somewhere meaningful and stays put as
+    // keys are added or renamed.
+    let footer_height = 5u16;
+    // The envelope bank gets a fixed column on the right, dropped entirely when the terminal is
+    // too narrow to give the step list a fair share — the same rule and the same shape as
+    // `dest_picker::split`. Narrowing it instead would make the sparklines meaningless, and the
+    // pane is a reference rather than something you have to reach.
+    let side_pane = (body_width < inner.width).then(|| Rect {
+        x: inner.x + body_width,
+        y: inner.y + header_height,
+        width: CHAIN_BANK_PANE_WIDTH,
+        height: inner.height.saturating_sub(header_height + footer_height),
+    });
     let list_height = inner.height.saturating_sub(header_height + footer_height) as usize;
     let header_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: header_height };
     let list_area = Rect {
         x: inner.x,
         y: inner.y + header_height,
-        width: inner.width,
+        width: body_width,
         height: inner.height.saturating_sub(header_height + footer_height),
     };
     let error_area = Rect { x: inner.x, y: inner.y + header_height + list_area.height, width: inner.width, height: 1 };
     let hints_area =
-        Rect { x: inner.x, y: inner.y + header_height + list_area.height + 2, width: inner.width, height: 2 };
+        Rect { x: inner.x, y: inner.y + header_height + list_area.height + 2, width: inner.width, height: 3 };
     // Only the *actions* row is reported as the dialog's hints rect, and that is why `Enter`
     // and `Esc` both live on it: `capture_dialog_hints` scrapes a single row (`rect.y`) and
     // `hint_segment_at` indexes it by column alone, so a click on a two-row bar would read the
     // wrong line's text. Keeping the clickable keys together on the reported row is what lets
     // the bar grow without teaching either of those about a second dimension.
-    let hints_click_area = Rect { height: 1, y: hints_area.y + 1, ..hints_area };
+    let hints_click_area = Rect { height: 1, y: hints_area.y + hints_area.height - 1, ..hints_area };
 
     frame.render_widget(Paragraph::new(header_lines), header_area);
 
-    // Scroll so the selected row always stays on screen, same "clamp to keep selection
-    // visible" idea as every other scrollable list dialog here.
-    let selected_pos =
-        body_rows.iter().position(|r| matches!(r, DisplayRow::Row(row) if *row == state.selected)).unwrap_or(0);
-    let scroll_top = selected_pos.saturating_sub(list_height.saturating_sub(1));
-    let visible: Vec<Line> = lines.into_iter().skip(scroll_top).take(list_height).collect();
-    frame.render_widget(Paragraph::new(visible), list_area);
+    // Scroll on both axes so the selected row stays on screen, and derived from the selection
+    // rather than stored — the discipline every scrolling dialog here follows, and the reason a
+    // renderer and a click handler cannot disagree about where a row is.
+    let selected_cell = body_cells
+        .iter()
+        .find(|(r, _)| matches!(r, DisplayRow::Row(row) if *row == state.selected))
+        .map(|(_, c)| *c);
+    // A dead zone, not a follow: the view holds still while the selection moves through the
+    // middle of it, and scrolls a line at a time only once the selection comes within
+    // `CHAIN_SCROLL_MARGIN` of an edge. Vim's `scrolloff`.
+    //
+    // Both of the obvious alternatives were tried and were worse on a layout made of framed
+    // boxes and columns. Chunked jumping sat still and then moved ten rows at once, which the
+    // frames cannot absorb. Centre-locking pinned the selection to the middle, which means the
+    // whole picture slides on *every* press and nothing is ever stationary. Holding still for
+    // most movement is what lets the boxes read as objects rather than as scenery.
+    let selected_y = selected_cell.map(|c| c.y as usize).unwrap_or(0);
+    let max_top = (layout.height as usize).saturating_sub(list_height.min(layout.height as usize));
+    // On a window too short to hold two margins and a row between them, the margin gives way
+    // rather than the two clamps fighting each other.
+    let margin = CHAIN_SCROLL_MARGIN.min(list_height.saturating_sub(1) / 2);
+    let mut top = state.scroll_top.get().min(max_top);
+    if selected_y < top + margin {
+        top = selected_y.saturating_sub(margin);
+    } else if selected_y + margin >= top + list_height {
+        top = (selected_y + margin + 1).saturating_sub(list_height);
+    }
+    let scroll_top = top.min(max_top);
+    state.scroll_top.set(scroll_top);
+    state.view_rows.set(list_height);
+    // Horizontal: only ever non-zero when a step has more legs than fit at the column floor.
+    // Columns are never narrowed to fit, because a column too thin for a label and a slider
+    // shows none of what the layout exists to show.
+    let scroll_left = selected_cell
+        .map(|c| (c.x + c.width).saturating_sub(list_area.width))
+        .unwrap_or(0)
+        .min(layout.width.saturating_sub(list_area.width.min(layout.width)));
+
+    for chain_box in &layout.boxes {
+        let Some(rect) = chain_visible_rect(
+            chain_box.x, chain_box.y, chain_box.width, chain_box.height, list_area, scroll_top, scroll_left,
+        ) else {
+            continue;
+        };
+        // A frame clipped by the viewport must not draw the edge it lost. Ratatui would close
+        // the box at whatever row the clip left it on, which says "that was the last parameter"
+        // when in fact there are more below (user report, on a process with 20 of them).
+        let mut sides = Borders::LEFT | Borders::RIGHT;
+        if chain_box.y as usize >= scroll_top {
+            sides |= Borders::TOP;
+        }
+        if (chain_box.y + chain_box.height) as usize <= scroll_top + list_height {
+            sides |= Borders::BOTTOM;
+        }
+        let mut block = Block::default()
+            .borders(sides)
+            .border_style(Style::default().fg(theme::BORDER))
+            .style(base);
+        if let Some(label) = &chain_box.label {
+            // A lane's letter, or the join. Accented, because these two are the labels that
+            // carry the topology — an unlabelled frame is just a stretch of the main path.
+            block = block.title(Span::styled(
+                format!(" {label} "),
+                Style::default().fg(theme::ACTIVE).bg(theme::SURFACE0),
+            ));
+        }
+        frame.render_widget(block, rect);
+    }
+    for (cell, line) in &rendered {
+        let Some(rect) =
+            chain_visible_rect(cell.x, cell.y, cell.width, 1, list_area, scroll_top, scroll_left)
+        else {
+            continue;
+        };
+        frame.render_widget(Paragraph::new(line.clone()).style(base), rect);
+    }
+
+    let bank_rects = match side_pane {
+        Some(pane) => render_chain_bank_pane(frame, pane, state, catalog),
+        None => Vec::new(),
+    };
+
+    // The assign picker is drawn over the step list rather than inside the bank column: it lists
+    // parameters by chain position and name, which do not fit in 34 columns, and it is modal —
+    // there is nothing behind it worth reading while it is up.
+    if let Some(picker) = &state.assign_picker {
+        let width = list_area.width.min(72).max(20);
+        let rows = picker.targets.len().min(list_area.height.saturating_sub(4) as usize).max(1);
+        let popup = Rect {
+            x: list_area.x + (list_area.width.saturating_sub(width)) / 2,
+            y: list_area.y + 1,
+            width,
+            height: rows as u16 + 4,
+        };
+        frame.render_widget(ratatui::widgets::Clear, popup);
+        let block = Block::default()
+            .title(Span::styled(
+                format!(" Assign \u{2314} {} to \u{2026} ", picker.envelope),
+                Style::default().fg(theme::FOCUS),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::FOCUS))
+            .style(base);
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+        // Scrolled to keep the highlight visible, derived from it as everywhere else.
+        let top = picker.selected.saturating_sub(rows.saturating_sub(1));
+        let lines: Vec<Line> = picker
+            .targets
+            .iter()
+            .enumerate()
+            .skip(top)
+            .take(rows)
+            .map(|(i, (target, label))| {
+                // A heading takes the process-name colour the step rows use, so the grouping
+                // reads as the same idea in both places; only a real target can be selected.
+                let style = match (target, i == picker.selected) {
+                    (Some(_), true) => cursor_style,
+                    (Some(_), false) => base,
+                    (None, _) => Style::default().fg(theme::PROCESS_NAME).bg(theme::SURFACE0),
+                };
+                Line::from(Span::styled(format!(" {label}"), style))
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines).style(base), inner);
+    }
 
     if let Some(error) = &state.error {
         frame.render_widget(Paragraph::new(Line::from(Span::styled(format!(" {error}"), error_style))), error_area);
@@ -26752,38 +30556,100 @@ fn render_cdp_chain_editor_dialog(
     // de-emphasized hints/annotations) rather than hidden, so the key doesn't appear to
     // vanish depending on selection. "p:preview" (the whole chain) is always available and
     // sits directly before it, so the pair reads as one idea with a narrower second half.
-    let preview_here_enabled = matches!(state.selected, ChainEditorRow::Step(_));
+    // `p` narrows to "up to here" only where there is a step to stop at; elsewhere it is the
+    // whole chain, which `a` always is. Greyed rather than hidden, so the key does not appear
+    // to come and go.
+    let preview_here_enabled =
+        matches!(state.selected, ChainEditorRow::Step(_) | ChainEditorRow::Param { .. });
+    // The bank is a modal panel with its own commands, so it gets its own legend — a bar still
+    // advertising `Tab:process` while `d` duplicates an envelope would be describing a different
+    // screen from the one in front of you.
+    let bank_focused = state.focus == ChainFocus::Bank;
+    let assigning = state.assign_picker.is_some();
     let preview_here_key_style = if preview_here_enabled { hint_style } else { disabled_style };
     let preview_here_label_style = if preview_here_enabled { label_style } else { disabled_style };
-    frame.render_widget(
-        Paragraph::new(vec![
+    // Three legends, one per panel, because the bank is modal over the editor and the assign
+    // picker is modal over the bank. A bar still advertising the editor's keys while `d`
+    // duplicates an envelope would be describing a different screen from the one in front of you.
+    let hint_lines: Vec<Line> = if assigning {
+        vec![
+            Line::raw(""),
+            Line::from(Span::styled(" Assign an envelope", label_style)),
+            Line::from(vec![
+                Span::styled(" \u{2191}\u{2193}", hint_style),
+                Span::styled(":choose a parameter  ", label_style),
+                Span::styled("Enter", hint_style),
+                Span::styled(":assign  ", label_style),
+                Span::styled("Esc", hint_style),
+                Span::styled(":cancel", label_style),
+            ]),
+        ]
+    } else if bank_focused {
+        vec![
+            Line::raw(""),
+            Line::from(Span::styled(" Envelope bank", label_style)),
+            Line::from(vec![
+                Span::styled(" \u{2191}\u{2193}", hint_style),
+                Span::styled(":select  ", label_style),
+                Span::styled("n", hint_style),
+                Span::styled(":new  ", label_style),
+                Span::styled("Enter", hint_style),
+                Span::styled(":draw  ", label_style),
+                Span::styled("a", hint_style),
+                Span::styled(":assign to a parameter  ", label_style),
+                Span::styled("d", hint_style),
+                Span::styled(":duplicate  ", label_style),
+                Span::styled("Del", hint_style),
+                Span::styled(":delete  ", label_style),
+                Span::styled("Esc", hint_style),
+                Span::styled(":back", label_style),
+            ]),
+        ]
+    } else {
+        vec![
             // Motion.
             Line::from(vec![
                 Span::styled(" \u{2191}\u{2193}", hint_style),
                 Span::styled(":move  ", label_style),
+                Span::styled("PgUp/PgDn", hint_style),
+                Span::styled(":page  ", label_style),
+                Span::styled("Tab", hint_style),
+                Span::styled(":next process  ", label_style),
                 Span::styled("\u{2190}\u{2192}", hint_style),
-                Span::styled(":pick  ", label_style),
+                Span::styled(":adjust  ", label_style),
                 Span::styled("Shift+\u{2191}\u{2193}", hint_style),
                 Span::styled(":reorder", label_style),
+            ]),
+            Line::from(vec![
+                Span::styled(" e", hint_style),
+                Span::styled(":envelope  ", label_style),
+                Span::styled("E", hint_style),
+                Span::styled(":draw  ", label_style),
+                Span::styled("i", hint_style),
+                Span::styled(":invert  ", label_style),
+                Span::styled("Ctrl+E", hint_style),
+                Span::styled(":envelope bank", label_style),
             ]),
             // Actions — the reported, clickable row (see `hints_click_area`).
             Line::from(vec![
                 Span::styled(" Enter", hint_style),
                 Span::styled(":open/run  ", label_style),
-                Span::styled("p", hint_style),
-                Span::styled(":preview  ", label_style),
-                Span::styled("h", preview_here_key_style),
+                Span::styled("p", preview_here_key_style),
                 Span::styled(":preview here  ", preview_here_label_style),
-                Span::styled("d", hint_style),
+                Span::styled("a", hint_style),
+                Span::styled(":preview all  ", label_style),
+                Span::styled("r", hint_style),
+                Span::styled(":recall  ", label_style),
+                Span::styled("Del", hint_style),
                 Span::styled(":delete  ", label_style),
                 Span::styled("s", hint_style),
                 Span::styled(":save  ", label_style),
                 Span::styled("Esc", hint_style),
                 Span::styled(":close", label_style),
             ]),
-        ]),
-        hints_area,
-    );
+        ]
+    };
+    frame.render_widget(Paragraph::new(hint_lines), hints_area);
 
     // Click targets, one per row in the *display* list (`chain_display_rows`) — including the
     // Preset header at index 0, which renders outside the scrolled body but is a selectable
@@ -26796,21 +30662,20 @@ fn render_cdp_chain_editor_dialog(
     // must not be able to put it there.
     const HIDDEN: Rect = Rect { x: 0, y: 0, width: 0, height: 0 };
     let mut rects = vec![Rect { x: header_area.x, y: header_area.y + 1, width: header_area.width, height: 1 }];
-    for (i, row) in body_rows.iter().enumerate() {
-        let visible_row = i
-            .checked_sub(scroll_top)
-            .filter(|v| *v < list_height)
-            .filter(|_| matches!(row, DisplayRow::Row(_)));
-        rects.push(match visible_row {
-            Some(v) => Rect {
-                x: list_area.x,
-                y: list_area.y + v as u16,
-                width: list_area.width,
-                height: 1,
-            },
-            None => HIDDEN,
-        });
+    for (row, cell) in body_cells {
+        // A selectable row that is on screen gets its laid-out rect — the same one it was drawn
+        // into, not a recomputed guess. Everything else gets an unhittable one, so `row` stays
+        // the display index directly and the handler never re-derives the scroll.
+        let rect = matches!(row, DisplayRow::Row(_))
+            .then(|| {
+                chain_visible_rect(cell.x, cell.y, cell.width, 1, list_area, scroll_top, scroll_left)
+            })
+            .flatten();
+        rects.push(rect.unwrap_or(HIDDEN));
     }
+    // Envelope-bank rows follow the step rows, so an index past the display list is a bank row
+    // and the handler needs no second rect vec to consult.
+    rects.extend(bank_rects);
     // The hints bar is the generic trailing "submit" slot; Enter in this dialog opens/runs
     // whatever is selected, which is the right thing for a click there.
     rects.push(hints_click_area);
@@ -28622,10 +32487,10 @@ mod tests {
         // `+ Add step` is the row after the preset row on an empty chain.
         let rows = chain_editor_rows(app.cdp_chain_editor.as_ref().unwrap(), &app.cdp_catalog);
         let display = chain_display_rows(app.cdp_chain_editor.as_ref().unwrap(), &app.cdp_catalog);
-        assert!(rows.contains(&ChainEditorRow::AddStep(Vec::new())));
+        assert!(rows.iter().any(|r| matches!(r, ChainEditorRow::AddStep { path, .. } if path.is_empty())));
         let index = display
             .iter()
-            .position(|r| matches!(r, DisplayRow::Row(ChainEditorRow::AddStep(p)) if p.is_empty()))
+            .position(|r| matches!(r, DisplayRow::Row(ChainEditorRow::AddStep { path, .. }) if path.is_empty()))
             .expect("+ Add step row");
         let rect = app.dialog_row_rects[index];
         assert!(rect.width > 0, "+ Add step must have a hittable rect");
@@ -29007,6 +32872,7 @@ mod tests {
             envelope: Some(vec![(0.0, 220.0), (1.0, 9000.0), (2.0, 220.0)]),
         }];
         let edit = CdpEnvelopeEdit {
+            label: None,
             field_index: 0,
             target: CdpEnvelopeTarget::NumberField,
             points: vec![(0.0, 220.0), (1.0, 9000.0), (2.0, 220.0)],
@@ -29014,6 +32880,8 @@ mod tests {
             original: None,
             time_max: 2.0,
             range: (0, 96_000),
+            backgrounds: Vec::new(),
+            background: 0,
             curve_picker: None,
             save_prompt: None,
             presets: Vec::new(),
@@ -29496,11 +33364,11 @@ mod tests {
                 crate::model::cdp::ChainStep {
                     process_key: def.key.clone(),
                     values: def.params.iter().map(|p| p.kind.default_value()).collect(),
-                    side_chain: Vec::new(),
+                    branches: Vec::new(), legacy_side_chain: Vec::new(),
                 }
             })
             .collect();
-        crate::model::cdp::CdpChain { name: "test".into(), steps }
+        crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(), name: "test".into(), steps }
     }
 
     fn drain_chain_run(app: &mut App) {
@@ -29600,12 +33468,12 @@ mod tests {
     #[test]
     fn a_chain_with_an_unknown_step_still_requires_cdp() {
         let app = new_app(Some(doc(0.25, 100)), None);
-        let chain = crate::model::cdp::CdpChain {
+        let chain = crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
             name: "broken".into(),
             steps: vec![crate::model::cdp::ChainStep {
                 process_key: "no_such_process".into(),
                 values: Vec::new(),
-                side_chain: Vec::new(),
+                branches: Vec::new(), legacy_side_chain: Vec::new(),
             }],
         };
         assert!(app.chain_uses_cdp(&chain));
@@ -33806,7 +37674,7 @@ mod tests {
             stream: None,
         };
         let app = new_app(Some(document), None);
-        let peaks = app.cdp_envelope_waveform_ref((0, 1000), 10);
+        let peaks = app.cdp_envelope_waveform_ref(0, (0, 1000), 10);
         assert_eq!(peaks.len(), 10);
         for (i, &p) in peaks.iter().enumerate().take(4) {
             assert!(p < 0.1, "cell {i} in the quiet half should have a low peak, got {p}");
@@ -34154,7 +38022,7 @@ mod tests {
     fn esc_from_a_chain_step_pick_returns_to_the_chain_editor() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
         app.cdp_chain_editor = Some(ChainEditorState::fresh());
-        app.cdp_chain_edit_target = Some(ChainEditTarget::Append(Vec::new()));
+        app.cdp_chain_edit_target = Some(ChainEditTarget::Insert { parent: Vec::new(), index: 0 });
         app.open_cdp_browser_returning_to(Some(CdpReturn::ChainEditor));
 
         // Down into a process, then all the way back out one level at a time.
@@ -34294,7 +38162,7 @@ mod tests {
                 state.chain.steps.push(crate::model::cdp::ChainStep {
                     process_key: def.key.clone(),
                     values: def.params.iter().map(|p| p.kind.default_value()).collect(),
-                    side_chain: Vec::new(),
+                    branches: Vec::new(), legacy_side_chain: Vec::new(),
                 });
             }
             state.selected = ChainEditorRow::Preset;
@@ -35280,7 +39148,7 @@ mod tests {
         app.open_cdp_params(catalog_index);
         app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)); // select "ToDelete"
 
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
 
         match &app.dialog {
             Some(Dialog::CdpParams { presets, preset_selected, .. }) => {
@@ -36171,14 +40039,14 @@ mod tests {
         app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
         let original_channels = app.documents[0].channels.clone();
 
-        let chain = crate::model::cdp::CdpChain {
+        let chain = crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
             name: "Double Invert".into(),
             steps: vec![
-                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), side_chain: Vec::new() },
-                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), branches: Vec::new(), legacy_side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), branches: Vec::new(), legacy_side_chain: Vec::new() },
             ],
         };
-        app.cdp_chain_editor = Some(ChainEditorState {
+        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_names: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
             chain,
             buffer_picks: std::collections::HashMap::new(),
             selected: ChainEditorRow::Run,
@@ -36244,14 +40112,14 @@ mod tests {
             Marker { position: 190, label: "after".into() },
         ];
 
-        let chain = crate::model::cdp::CdpChain {
+        let chain = crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
             name: "Double Invert".into(),
             steps: vec![
-                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), side_chain: Vec::new() },
-                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), branches: Vec::new(), legacy_side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), branches: Vec::new(), legacy_side_chain: Vec::new() },
             ],
         };
-        app.cdp_chain_editor = Some(ChainEditorState {
+        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_names: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
             chain,
             buffer_picks: std::collections::HashMap::new(),
             selected: ChainEditorRow::Run,
@@ -36315,15 +40183,15 @@ mod tests {
         let (fields, ..) = app.cdp_fields_for(blur_index);
         let values: Vec<_> = fields.iter().map(CdpField::to_value).collect();
 
-        let chain = crate::model::cdp::CdpChain {
+        let chain = crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
             name: "Triple Blur".into(),
             steps: vec![
-                crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values: values.clone(), side_chain: Vec::new() },
-                crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values: values.clone(), side_chain: Vec::new() },
-                crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values, side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values: values.clone(), branches: Vec::new(), legacy_side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values: values.clone(), branches: Vec::new(), legacy_side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values, branches: Vec::new(), legacy_side_chain: Vec::new() },
             ],
         };
-        app.cdp_chain_editor = Some(ChainEditorState {
+        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_names: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
             chain,
             buffer_picks: std::collections::HashMap::new(),
             selected: ChainEditorRow::Run,
@@ -36378,14 +40246,14 @@ mod tests {
         let (fields, ..) = app.cdp_fields_for(blur_index);
         let values: Vec<_> = fields.iter().map(CdpField::to_value).collect();
 
-        let chain = crate::model::cdp::CdpChain {
+        let chain = crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
             name: "Merged Blur".into(),
             steps: vec![
-                crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values: values.clone(), side_chain: Vec::new() },
-                crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values, side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values: values.clone(), branches: Vec::new(), legacy_side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values, branches: Vec::new(), legacy_side_chain: Vec::new() },
             ],
         };
-        app.cdp_chain_editor = Some(ChainEditorState {
+        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_names: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
             chain,
             buffer_picks: std::collections::HashMap::new(),
             selected: ChainEditorRow::Run,
@@ -36430,17 +40298,17 @@ mod tests {
         let mut app = new_app(Some(doc(0.5, 200)), None);
         app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
 
-        app.cdp_chain_editor = Some(ChainEditorState {
-            chain: crate::model::cdp::CdpChain {
+        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_names: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
+            chain: crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
                 name: "Preview Test".into(),
                 steps: vec![crate::model::cdp::ChainStep {
                     process_key: "phase_phase_1".into(),
                     values: Vec::new(),
-                    side_chain: Vec::new(),
+                    branches: Vec::new(), legacy_side_chain: Vec::new(),
                 }],
             },
             buffer_picks: std::collections::HashMap::new(),
-            selected: ChainEditorRow::AddStep(Vec::new()),
+            selected: ChainEditorRow::AddStep { path: Vec::new(), index: 0 },
             error: None,
             presets: Vec::new(),
             preset_selected: None,
@@ -36448,7 +40316,7 @@ mod tests {
             save_prompt: None,
         });
 
-        app.open_cdp_chain_step_target(ChainEditTarget::Append(Vec::new()));
+        app.open_cdp_chain_step_target(ChainEditTarget::Insert { parent: Vec::new(), index: 1 });
         let phase_index = app.cdp_catalog.processes.iter().position(|p| p.key == "phase_phase_1").expect("phase_phase_1 in catalog");
         app.open_cdp_params(phase_index);
         assert!(matches!(app.dialog, Some(Dialog::CdpParams { .. })));
@@ -36475,7 +40343,7 @@ mod tests {
         );
     }
 
-    /// End-to-end against the real CDP binaries: `h` ("preview here") on the *first* step of
+    /// End-to-end against the real CDP binaries: `p` ("preview here") on the *first* step of
     /// a real 2-step committed chain must run only that one step (not the second), play real
     /// audio, and leave everything else untouched -- no splice, no undo entry, the draft
     /// still has both its committed steps, and the recalled-last-chain slot is still whatever
@@ -36491,20 +40359,20 @@ mod tests {
         app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
         assert!(crate::model::cdp::chain_last::load_last_chain().is_none(), "sanity: nothing auto-saved yet");
 
-        let chain = crate::model::cdp::CdpChain {
+        let chain = crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
             name: "Double Invert".into(),
             steps: vec![
-                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), side_chain: Vec::new() },
-                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), branches: Vec::new(), legacy_side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), branches: Vec::new(), legacy_side_chain: Vec::new() },
             ],
         };
         let mut state = fresh_chain_editor_state(chain);
-        state.selected = ChainEditorRow::Step(vec![0]);
+        state.selected = ChainEditorRow::Step(vec![crate::model::cdp::PathSeg::Step(0)]);
         app.cdp_chain_editor = Some(state);
         app.dialog = Some(Dialog::CdpChainEditor);
 
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
-        assert!(matches!(app.dialog, Some(Dialog::CdpRunning { .. })), "'h' should start a real async run");
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::CdpRunning { .. })), "'p' should start a real async run");
 
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         while matches!(app.dialog, Some(Dialog::CdpRunning { .. })) && std::time::Instant::now() < deadline {
@@ -36536,16 +40404,16 @@ mod tests {
     /// column alone, so `Enter`/`Esc` landing on the other line would make clicking them read
     /// the wrong text.
     #[test]
-    fn the_chain_editor_hints_wrap_to_two_lines_with_the_clickable_keys_on_the_reported_row() {
+    fn the_chain_editor_hints_wrap_with_the_clickable_keys_on_the_reported_row() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
         let mut app = new_app(Some(doc(0.1, 100)), None);
-        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
             name: "t".into(),
             steps: vec![chain_step("blur_avrg")],
         });
-        state.selected = ChainEditorRow::Step(vec![0]);
+        state.selected = ChainEditorRow::Step(vec![crate::model::cdp::PathSeg::Step(0)]);
         app.cdp_chain_editor = Some(state);
         app.dialog = Some(Dialog::CdpChainEditor);
 
@@ -36555,12 +40423,19 @@ mod tests {
 
         for hint in [
             "\u{2191}\u{2193}:move",
-            "\u{2190}\u{2192}:pick",
+            "PgUp/PgDn:page",
+            "Tab:next process",
+            "\u{2190}\u{2192}:adjust",
             "Shift+\u{2191}\u{2193}:reorder",
+            "e:envelope",
+            "E:draw",
+            "i:invert",
+            "Ctrl+E:envelope bank",
             "Enter:open/run",
-            "p:preview",
-            "h:preview here",
-            "d:delete",
+            "p:preview here",
+            "a:preview all",
+            "r:recall",
+            "Del:delete",
             "s:save",
             "Esc:close",
         ] {
@@ -36583,13 +40458,13 @@ mod tests {
     /// render in the muted `theme::ANNOTATION` color instead of the normal shortcut accent,
     /// so the key doesn't look pressable when it'd be a no-op.
     #[test]
-    fn preview_here_hint_is_greyed_out_unless_a_step_is_selected() {
+    fn preview_here_hint_is_greyed_out_unless_a_step_or_parameter_is_selected() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
         let mut app = new_app(Some(doc(0.1, 100)), None);
         let mut state =
-            fresh_chain_editor_state(crate::model::cdp::CdpChain { name: "t".into(), steps: vec![chain_step("blur_avrg")] });
+            fresh_chain_editor_state(crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(), name: "t".into(), steps: vec![chain_step("blur_avrg")] });
         state.selected = ChainEditorRow::Run;
         app.cdp_chain_editor = Some(state);
         app.dialog = Some(Dialog::CdpChainEditor);
@@ -36601,27 +40476,27 @@ mod tests {
             let area = *buffer.area();
             for y in area.y..area.y + area.height {
                 let row_text: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
-                if let Some(byte_col) = row_text.find("h:preview here") {
+                if let Some(byte_col) = row_text.find("p:preview here") {
                     // `find` returns a byte offset, not a column -- the row contains
                     // multi-byte glyphs (the arrow hints) before this point, so convert.
                     let col = row_text[..byte_col].chars().count();
                     return buffer[(area.x + col as u16, y)].fg;
                 }
             }
-            panic!("hints bar with 'h:preview here' should be visible: no row matched");
+            panic!("hints bar with 'p:preview here' should be visible: no row matched");
         };
 
         assert_eq!(
             find_preview_here_cell(&mut app),
             theme::ANNOTATION,
-            "with Run selected, the 'h' hint should render in the muted/disabled color"
+            "with Run selected, the 'p' hint should render in the muted/disabled color"
         );
 
-        app.cdp_chain_editor.as_mut().unwrap().selected = ChainEditorRow::Step(vec![0]);
+        app.cdp_chain_editor.as_mut().unwrap().selected = ChainEditorRow::Step(vec![crate::model::cdp::PathSeg::Step(0)]);
         assert_eq!(
             find_preview_here_cell(&mut app),
             theme::SHORTCUT,
-            "with a Step selected, the 'h' hint should render in the normal shortcut color"
+            "with a Step selected, the 'p' hint should render in the normal shortcut color"
         );
     }
 
@@ -37086,11 +40961,14 @@ mod tests {
                 Backend::Cdp => "[cdp]",
                 Backend::Praat => "[pr]",
                 Backend::Airwindows => "[air]",
+                Backend::Native => "[mix]",
             };
             // Exactly one, never two and never none — an entry showing no engine would read
             // as "the default one" and there is no longer a default.
-            let carried: Vec<&&str> =
-                badges.iter().filter(|b| ["[cdp]", "[pr]", "[air]"].contains(b)).collect();
+            let carried: Vec<&&str> = badges
+                .iter()
+                .filter(|b| ["[cdp]", "[pr]", "[air]", "[mix]"].contains(b))
+                .collect();
             assert_eq!(carried, vec![&expected], "{}: wrong backend badges {badges:?}", p.key);
             if p.backend() == Backend::Praat {
                 praat += 1;
@@ -37164,7 +41042,7 @@ mod tests {
         use ratatui::Terminal;
 
         let mut app = new_app(Some(doc(0.1, 100)), None);
-        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
             name: "t".into(),
             steps: vec![chain_step("blur_avrg"), chain_step("phase_phase_1")],
         });
@@ -37278,7 +41156,7 @@ mod tests {
     fn an_airwindows_chain_step_reaches_its_own_runner_not_a_cdp_binary() {
         for finish in [ChainRunFinish::Splice, ChainRunFinish::PreviewWholeChain] {
             let mut app = new_app(Some(doc(0.1, 4410)), None);
-            let chain = crate::model::cdp::CdpChain {
+            let chain = crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
                 name: "t".into(),
                 steps: vec![chain_step("airwindows_density")],
             };
@@ -37306,6 +41184,115 @@ mod tests {
         }
     }
 
+    /// A dual-input process's "2nd input" row must offer what the chain has already made, not
+    /// only open documents — the point of a two-input process in a chain, and the thing that
+    /// otherwise forces the same material to be built twice (user report, with a screenshot of
+    /// the row cycling files alone).
+    #[test]
+    fn the_second_input_row_offers_earlier_chain_outputs() {
+        use crate::model::cdp::PathSeg::Step as S;
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step("blur_avrg")],
+        };
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+
+        // Outside a chain the row is a buffer picker, exactly as it always was.
+        assert!(app.cdp_chain_edit_target.is_none());
+        let plain = app.second_input_choices();
+        assert!(
+            plain.sources.iter().all(|s| matches!(s, ChainBranchInput::Buffer(_))),
+            "no chain, no chain outputs: {:?}",
+            plain.names
+        );
+
+        // Appending a second step: step 0's output has finished by the time it runs.
+        app.cdp_chain_edit_target = Some(ChainEditTarget::Insert { parent: Vec::new(), index: 1 });
+        let in_chain = app.second_input_choices();
+        assert_eq!(
+            in_chain.sources.first(),
+            Some(&ChainBranchInput::From(vec![S(0)])),
+            "an earlier step's output comes first: {:?}",
+            in_chain.names
+        );
+        assert_eq!(in_chain.names[0], "output of 1");
+        // It is offered, not defaulted to — landing there would change what an existing
+        // dual-input step means the moment it joins a chain.
+        assert!(matches!(
+            in_chain.sources[in_chain.selected],
+            ChainBranchInput::Buffer(_)
+        ));
+        // And `selected_doc_index` must not claim a chain output is a document.
+        let mut on_output = in_chain;
+        on_output.selected = 0;
+        assert_eq!(on_output.selected_doc_index(), None);
+    }
+
+    /// A combiner whose branches each hold a step must **finish**.
+    ///
+    /// It looped forever (user report: a two-branch Mixer stuck re-running the second branch's
+    /// step). Each backend's submit cleared the collected branch results, which was right while
+    /// a step could have at most one parallel input — the only submit between collecting it and
+    /// consuming it *was* the consumer's. With several branches the results accumulate across
+    /// several submits, so a branch's own inner step wiped them and sent the combiner back to
+    /// the start. All-Airwindows, so this runs in-process in milliseconds and needs no install.
+    #[test]
+    fn a_combiner_with_steps_in_both_branches_finishes_instead_of_looping() {
+        use crate::model::cdp::{chain::Branch, BranchSource};
+        let mut app = new_app(Some(doc(0.1, 4410)), None);
+        let mut mixer = chain_step(crate::model::cdp::native::MIXER_KEY);
+        mixer.values = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .find(|p| p.key == crate::model::cdp::native::MIXER_KEY)
+            .map(|d| d.params.iter().map(|p| p.default_value()).collect())
+            .unwrap();
+        mixer.branches = vec![
+            Branch { source: BranchSource::Tap, steps: vec![chain_step("airwindows_density")] },
+            Branch { source: BranchSource::Tap, steps: vec![chain_step("airwindows_density")] },
+        ];
+        let chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![mixer],
+        };
+        assert_eq!(chain.validate(&app.cdp_catalog), Ok(()));
+
+        app.start_chain_run(
+            chain,
+            std::collections::HashMap::new(),
+            vec![vec![0.25; 4410], vec![0.25; 4410]],
+            44_100,
+            0,
+            (0, 4410),
+            ChainRunFinish::Splice,
+        );
+
+        // Bounded, because the failure mode under test is *not terminating*. Two branch steps
+        // plus the join is three dispatches; a hundred ticks is two orders of magnitude of slack.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut dispatches = 0;
+        while app.cdp_pending_chain_run.is_some() && std::time::Instant::now() < deadline {
+            if app.tick_airwindows() {
+                dispatches += 1;
+                assert!(dispatches <= 100, "the chain is looping rather than progressing");
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        assert!(app.cdp_pending_chain_run.is_none(), "the chain never finished");
+        assert!(
+            !matches!(app.dialog, Some(Dialog::CdpOutput { .. })),
+            "the run ended in an error dialog: {}",
+            app.dialog.as_ref().map(dialog_kind_name).unwrap_or("none")
+        );
+    }
+
     /// A step keeps the engine tag it carried in the browser (user report: they vanished the
     /// moment a process was inserted into a chain). A chain is the one place all three
     /// backends sit in a single list, so it is where the tag matters most — and the pale
@@ -37317,19 +41304,25 @@ mod tests {
 
         let mut app = new_app(Some(doc(0.1, 100)), None);
         // One step per backend, which is the case that motivates the badge at all.
-        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
-            name: "t".into(),
-            steps: vec![
-                chain_step("phase_phase_1"),
-                chain_step("airwindows_density"),
-                chain_step("praat_distortion_chaos_distortion"),
-            ],
-        });
+        // Tall enough for three processes' worth of parameter rows: this is about the badge on
+        // a *step* row, and every step has to be on screen for the assertion to see it.
+        let mut state = fresh_chain_editor_state(
+            crate::model::cdp::CdpChain {
+                bank: Default::default(),
+                output: Default::default(),
+                name: "t".into(),
+                steps: vec![
+                    chain_step("phase_phase_1"),
+                    chain_step("airwindows_density"),
+                    chain_step("praat_distortion_chaos_distortion"),
+                ],
+            },
+        );
         state.selected = ChainEditorRow::Run; // suppression applies only to a row's own badge
         app.cdp_chain_editor = Some(state);
         app.dialog = Some(Dialog::CdpChainEditor);
 
-        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(140, 80)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
         let buffer = terminal.backend().buffer();
         let area = *buffer.area();
@@ -37375,7 +41368,7 @@ mod tests {
         use ratatui::Terminal;
 
         let mut app = new_app(Some(doc(0.1, 100)), None);
-        let state = fresh_chain_editor_state(crate::model::cdp::CdpChain { name: "t".into(), steps: vec![chain_step("blur_avrg")] });
+        let state = fresh_chain_editor_state(crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(), name: "t".into(), steps: vec![chain_step("blur_avrg")] });
         app.cdp_chain_editor = Some(state);
         app.dialog = Some(Dialog::CdpChainEditor);
         app.open_chain_save_prompt();
@@ -37430,18 +41423,18 @@ mod tests {
         std::fs::create_dir_all(&temp_dir).unwrap();
         unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
 
-        crate::model::cdp::chain_preset::save_chain(&crate::model::cdp::CdpChain {
+        crate::model::cdp::chain_preset::save_chain(&crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
             name: "Alpha".into(),
             steps: vec![chain_step("blur_avrg")],
         });
-        crate::model::cdp::chain_preset::save_chain(&crate::model::cdp::CdpChain {
+        crate::model::cdp::chain_preset::save_chain(&crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
             name: "Zebra".into(),
             steps: vec![chain_step("phase_phase_1")],
         });
 
         let mut app = new_app(Some(doc(0.1, 100)), None);
         let hand_built =
-            crate::model::cdp::CdpChain { name: "My Draft".into(), steps: vec![chain_step("blur_avrg"), chain_step("phase_phase_1")] };
+            crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(), name: "My Draft".into(), steps: vec![chain_step("blur_avrg"), chain_step("phase_phase_1")] };
         let mut state = fresh_chain_editor_state(hand_built.clone());
         state.presets = ChainEditorState::presets_by_recency();
         app.cdp_chain_editor = Some(state);
@@ -37478,13 +41471,13 @@ mod tests {
 
         // A pre-existing preset that sorts after "Mine" (the one about to be saved), so two
         // Rights are needed to wrap all the way back around to "(none)".
-        crate::model::cdp::chain_preset::save_chain(&crate::model::cdp::CdpChain {
+        crate::model::cdp::chain_preset::save_chain(&crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
             name: "Zebra".into(),
             steps: vec![chain_step("phase_phase_1")],
         });
 
         let mut app = new_app(Some(doc(0.1, 100)), None);
-        let hand_built = crate::model::cdp::CdpChain { name: "Mine".into(), steps: vec![chain_step("blur_avrg")] };
+        let hand_built = crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(), name: "Mine".into(), steps: vec![chain_step("blur_avrg")] };
         let mut state = fresh_chain_editor_state(hand_built.clone());
         state.presets = ChainEditorState::presets_by_recency();
         app.cdp_chain_editor = Some(state);
@@ -37522,7 +41515,7 @@ mod tests {
         use ratatui::Terminal;
 
         let mut app = new_app(Some(doc(0.1, 100)), None);
-        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
             name: "t".into(),
             steps: vec![chain_step("phase_phase_1"), chain_step("blur_avrg")],
         });
@@ -37877,7 +41870,7 @@ mod tests {
     #[test]
     fn chain_edit_mode_excludes_synthesis_and_glob_output_processes_from_the_browser() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
-        app.cdp_chain_edit_target = Some(ChainEditTarget::Append(Vec::new()));
+        app.cdp_chain_edit_target = Some(ChainEditTarget::Insert { parent: Vec::new(), index: 0 });
         let entries = app.cdp_filter_entries("", CdpDomainRow::All, CdpGroupChoice::AllInDomain, &[]);
         let keys: Vec<&str> = entries.iter().map(|&i| app.cdp_catalog.processes[i].key.as_str()).collect();
 
@@ -38469,7 +42462,7 @@ mod tests {
     #[test]
     fn chain_edit_mode_excludes_variadic_input_processes_from_the_browser() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
-        app.cdp_chain_edit_target = Some(ChainEditTarget::Append(Vec::new()));
+        app.cdp_chain_edit_target = Some(ChainEditTarget::Insert { parent: Vec::new(), index: 0 });
         let entries = app.cdp_filter_entries("", CdpDomainRow::All, CdpGroupChoice::AllInDomain, &[]);
         let keys: Vec<&str> = entries.iter().map(|&i| app.cdp_catalog.processes[i].key.as_str()).collect();
         for key in ["pulser_multi_1", "pulser_multi_2", "pulser_multi_3", "tesselate_tesselate", "repair_repair"] {
@@ -38478,11 +42471,44 @@ mod tests {
     }
 
     fn chain_step(key: &str) -> crate::model::cdp::ChainStep {
-        crate::model::cdp::ChainStep { process_key: key.into(), values: Vec::new(), side_chain: Vec::new() }
+        crate::model::cdp::ChainStep::new(key, Vec::new())
+    }
+
+    /// The rendered rows with the parameter rows filtered out.
+    ///
+    /// For the tests that assert on the *structure* of the list — PVOC bracketing, nesting,
+    /// where a combiner sits — which would otherwise have to restate every process's whole
+    /// parameter list to say anything about it. This used to be done by folding the steps;
+    /// folding is gone, and stripping the rows here is the same idea without a UI feature
+    /// existing only to serve a test.
+    fn structural_rows(
+        state: &ChainEditorState,
+        catalog: &crate::model::cdp::CdpCatalog,
+    ) -> Vec<DisplayRow> {
+        chain_display_rows(state, catalog)
+            .into_iter()
+            .filter(|r| !matches!(r, DisplayRow::Row(ChainEditorRow::Param { .. })))
+            .collect()
+    }
+
+    /// A branch fed by a separately picked document — what every "side-chain" in these tests
+    /// was before branches existed.
+    fn buffer_branch(steps: Vec<crate::model::cdp::ChainStep>) -> crate::model::cdp::chain::Branch {
+        crate::model::cdp::chain::Branch { source: crate::model::cdp::BranchSource::Buffer, steps }
     }
 
     fn fresh_chain_editor_state(chain: crate::model::cdp::CdpChain) -> ChainEditorState {
         ChainEditorState {
+            step_edit_time_max: 1.0,
+            step_edit_envelope_names: Vec::new(),
+            focus: Default::default(),
+            param_edit: None,
+            envelope: None,
+            assign_picker: None,
+            view_rows: std::cell::Cell::new(1),
+            previewed: None,
+            scroll_top: Default::default(),
+            bank_selected: 0,
             chain,
             buffer_picks: std::collections::HashMap::new(),
             selected: ChainEditorRow::Preset,
@@ -38494,45 +42520,58 @@ mod tests {
         }
     }
 
-    /// `chain_editor_rows` must place a dual-input step's side-chain steps directly beneath
-    /// it, followed by its own "add side-chain step" row, before moving on to the next main
-    /// step — the ordering the chain editor's Up/Down navigation and rendering both rely on.
-    /// Nested 3 levels deep (a side-chain step that's itself dual-input with its own
-    /// side-chain) to prove the unlimited-depth rewrite actually recurses, not just handles
-    /// one extra level.
+    /// `chain_editor_rows` must place a dual-input step's second input directly beneath the
+    /// step, its sub-chain beneath that, and its "add step" row after — the ordering the chain
+    /// editor's Up/Down navigation and rendering both rely on. Nested 3 levels deep (a step on
+    /// the second input that is itself dual-input, with a second input of its own) to prove the
+    /// walk really recurses rather than handling one extra level.
     #[test]
-    fn chain_editor_rows_nests_side_chain_steps_to_any_depth() {
+    fn chain_editor_rows_nests_second_inputs_to_any_depth_under_the_steps_that_read_them() {
+        use crate::model::cdp::PathSeg::{Branch as B, Step as S};
         let app = new_app(Some(doc(0.1, 100)), None);
-        let mut middle_dual = crate::model::cdp::ChainStep {
-            process_key: "combine_mean_1".into(),
-            values: Vec::new(),
-            side_chain: vec![chain_step("blur_avrg")],
-        };
-        let outer_dual = crate::model::cdp::ChainStep {
-            process_key: "combine_mean_1".into(),
-            values: Vec::new(),
-            side_chain: vec![{
-                middle_dual.side_chain.push(chain_step("focus_freeze_1"));
-                middle_dual
-            }],
-        };
-        let state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
-            name: "test".into(),
-            steps: vec![outer_dual, chain_step("blur_avrg")],
-        });
-        let rows = chain_editor_rows(&state, &app.cdp_catalog);
+        // A branch step that is itself dual-input with a branch of its own, to prove the walk
+        // really recurses rather than handling one extra level.
+        let mut middle_dual = chain_step("combine_mean_1");
+        middle_dual.branches =
+            vec![buffer_branch(vec![chain_step("blur_avrg"), chain_step("focus_freeze_1")])];
+        let mut outer_dual = chain_step("combine_mean_1");
+        outer_dual.branches = vec![buffer_branch(vec![middle_dual])];
+        let state = fresh_chain_editor_state(
+            crate::model::cdp::CdpChain {
+                bank: Default::default(),
+                output: Default::default(),
+                name: "test".into(),
+                steps: vec![outer_dual, chain_step("blur_avrg")],
+            },
+        );
+        // Parameters filtered out: this is about *structure* — where a combiner sits relative
+        // to the branches it gathers — not about any process's parameter list.
+        let rows: Vec<_> = chain_editor_rows(&state, &app.cdp_catalog)
+            .into_iter()
+            .filter(|r| !matches!(r, ChainEditorRow::Param { .. }))
+            .collect();
         assert_eq!(
             rows,
             vec![
                 ChainEditorRow::Preset,
-                ChainEditorRow::Step(vec![0]),                      // outer_dual
-                ChainEditorRow::Step(vec![0, 0]),                   // middle_dual, nested under step 0's side-chain
-                ChainEditorRow::Step(vec![0, 0, 0]),                // blur_avrg, nested under [0,0]'s side-chain
-                ChainEditorRow::Step(vec![0, 0, 1]),                // focus_freeze_1, blur_avrg's sibling (neither is dual-input, so no AddStep between them)
-                ChainEditorRow::AddStep(vec![0, 0]),                // "+ Add step" for middle_dual's own side-chain (it IS dual-input)
-                ChainEditorRow::AddStep(vec![0]),                   // "+ Add step" for outer_dual's own side-chain
-                ChainEditorRow::Step(vec![1]),                      // blur_avrg, sibling of outer_dual at the top level
-                ChainEditorRow::AddStep(Vec::new()),                // "+ Add step" for the main chain itself
+                // The outer dual-input step, then the row naming its second input, then that
+                // input's own sub-chain one level in — the step and everything feeding it read
+                // as one block, top down.
+                ChainEditorRow::Step(vec![S(0)]),
+                ChainEditorRow::BranchHeader(vec![S(0), B(0)]),
+                ChainEditorRow::Step(vec![S(0), B(0), S(0)]),                // middle dual-input
+                ChainEditorRow::BranchHeader(vec![S(0), B(0), S(0), B(0)]),
+                ChainEditorRow::Step(vec![S(0), B(0), S(0), B(0), S(0)]),    // blur_avrg
+                ChainEditorRow::Step(vec![S(0), B(0), S(0), B(0), S(1)]),    // focus_freeze_1
+                ChainEditorRow::AddStep { path: vec![S(0), B(0), S(0), B(0)], index: 2 },
+                // No "Branch out" here: this branch is at `MAX_SPLIT_DEPTH`, so it offers no
+                // split of its own — the button's absence *is* the rule.
+                ChainEditorRow::AddStep { path: vec![S(0), B(0)], index: 1 },
+                ChainEditorRow::BranchOut(vec![S(0), B(0)]),
+                ChainEditorRow::Step(vec![S(1)]),                            // blur_avrg, top level
+                ChainEditorRow::AddStep { path: Vec::new(), index: 2 },
+                ChainEditorRow::BranchOut(Vec::new()),
+                ChainEditorRow::Out,
                 ChainEditorRow::Preview,
                 ChainEditorRow::Run,
             ]
@@ -38546,26 +42585,193 @@ mod tests {
     #[test]
     fn chain_display_rows_brackets_a_run_of_adjacent_spectral_steps() {
         let app = new_app(Some(doc(0.1, 100)), None);
-        let state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
-            name: "test".into(),
-            steps: vec![chain_step("phase_phase_1"), chain_step("blur_avrg"), chain_step("blur_avrg")],
-        });
-        let rows = chain_display_rows(&state, &app.cdp_catalog);
+        // Folded: this is about where the PVOC brackets land, not about parameter rows.
+        let state = fresh_chain_editor_state(
+            crate::model::cdp::CdpChain {
+                bank: Default::default(),
+                output: Default::default(),
+                name: "test".into(),
+                steps: vec![chain_step("phase_phase_1"), chain_step("blur_avrg"), chain_step("blur_avrg")],
+            },
+        );
+        let rows = structural_rows(&state, &app.cdp_catalog);
         assert_eq!(
             rows,
             vec![
                 DisplayRow::Row(ChainEditorRow::Preset),
-                DisplayRow::Row(ChainEditorRow::Step(vec![0])), // phase_phase_1 -- time-domain, no bracket
-                DisplayRow::PvocAnalyze { depth: 1 },
-                DisplayRow::Row(ChainEditorRow::Step(vec![1])), // blur_avrg
-                DisplayRow::Row(ChainEditorRow::Step(vec![2])), // blur_avrg -- merged into the same run, no anal/synth between them
-                DisplayRow::PvocResynthesize { depth: 1 },
-                DisplayRow::Row(ChainEditorRow::AddStep(Vec::new())),
+                DisplayRow::In,
+                DisplayRow::Row(ChainEditorRow::Step(vec![crate::model::cdp::PathSeg::Step(0)])), // phase_phase_1 -- time-domain, no bracket
+                DisplayRow::PvocAnalyze { depth: 0 },
+                DisplayRow::Row(ChainEditorRow::Step(vec![crate::model::cdp::PathSeg::Step(1)])), // blur_avrg
+                DisplayRow::Row(ChainEditorRow::Step(vec![crate::model::cdp::PathSeg::Step(2)])), // blur_avrg -- merged into the same run, no anal/synth between them
+                DisplayRow::PvocResynthesize { depth: 0 },
+                DisplayRow::Row(ChainEditorRow::AddStep { path: Vec::new(), index: 3 }),
+                DisplayRow::Row(ChainEditorRow::BranchOut(Vec::new())),
+                DisplayRow::Row(ChainEditorRow::Out),
                 DisplayRow::Blank,
                 DisplayRow::Row(ChainEditorRow::Preview),
                 DisplayRow::Row(ChainEditorRow::Run),
             ]
         );
+    }
+
+    /// The bank's curve is drawn over two rows, so it has eight dot-rows to place a value in
+    /// rather than four, and a selected envelope highlights as a rectangle across both.
+    #[test]
+    fn a_bank_curve_is_drawn_two_rows_tall() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        // A ramp: the top row must carry the high half and the bottom row the low half.
+        let [top, bottom] = chain_bank_sparkline_rows(&[(0.0, 0.0), (1.0, 1.0)]);
+        assert_eq!(top.chars().count(), CHAIN_BANK_SPARK_CELLS);
+        assert_eq!(bottom.chars().count(), CHAIN_BANK_SPARK_CELLS);
+        assert!(top.chars().any(|c| c != '\u{2800}'), "the high half of the ramp is on the top row");
+        assert!(bottom.chars().any(|c| c != '\u{2800}'), "and the low half on the bottom row");
+        // A flat curve at the very top leaves the bottom row empty, which is the proof that the
+        // two rows are one 8-row space and not the same 4 rows drawn twice.
+        let [_, flat_bottom] = chain_bank_sparkline_rows(&[(0.0, 1.0), (1.0, 1.0)]);
+        assert!(
+            flat_bottom.chars().all(|c| c == '\u{2800}'),
+            "a curve pinned at maximum uses only the upper row: {flat_bottom:?}"
+        );
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step("blur_avrg")],
+        };
+        chain.bank.envelopes.push(crate::model::cdp::envelope_bank::BankEnvelope {
+            name: "Env 1".into(),
+            points: vec![(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)],
+        });
+        let mut state = fresh_chain_editor_state(chain);
+        state.focus = ChainFocus::Bank;
+        app.cdp_chain_editor = Some(state);
+        app.dialog = Some(Dialog::CdpChainEditor);
+
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        // Find the row holding the envelope's name, and check the highlight covers the row below
+        // it too — the selected envelope is one two-row block.
+        let row_text = |y: u16| -> String {
+            (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect()
+        };
+        let name_row = (0..buffer.area.height)
+            .find(|&y| row_text(y).contains("Env 1"))
+            .expect("the envelope is on screen");
+        let name_x = row_text(name_row).find("Env 1").unwrap() as u16;
+        let reversed = |x: u16, y: u16| {
+            buffer[(x, y)].modifier.contains(ratatui::style::Modifier::REVERSED)
+        };
+        assert!(reversed(name_x, name_row), "the selected envelope's name row is highlighted");
+        assert!(reversed(name_x, name_row + 1), "and so is the curve's second row");
+        assert!(
+            !reversed(name_x, name_row + 2),
+            "the reference count below it is not part of the block"
+        );
+    }
+
+    /// A chain whose only step is a combiner still offers somewhere to add a step *before* it.
+    ///
+    /// The add row used to be one per list, at the end. A combiner is drawn as columns under a
+    /// split rather than in an ordinary box, so with it at the head of the chain there was no
+    /// row above it and the position feeding it could not be reached at all (user report).
+    #[test]
+    fn a_chain_beginning_with_a_combiner_can_still_take_a_step_ahead_of_it() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step("blur_avrg"), chain_step(crate::model::cdp::native::MIXER_KEY)],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+
+        // Delete the first step, exactly as reported: the combiner is now the head of the chain.
+        app.cdp_chain_editor.as_mut().unwrap().selected =
+            ChainEditorRow::Step(vec![crate::model::cdp::PathSeg::Step(0)]);
+        app.delete_chain_editor_row();
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert_eq!(state.chain.steps.len(), 1);
+        assert_eq!(state.chain.steps[0].process_key, crate::model::cdp::native::MIXER_KEY);
+
+        let rows = chain_editor_rows(state, &app.cdp_catalog);
+        let add_rows: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match r {
+                ChainEditorRow::AddStep { path, index } if path.is_empty() => Some(*index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(add_rows, vec![0, 1], "one add row ahead of the combiner, one after it");
+
+        // And the head row is where the deletion left the cursor, so Enter goes straight there.
+        assert_eq!(
+            state.selected,
+            ChainEditorRow::AddStep { path: Vec::new(), index: 0 },
+            "deleting the first step lands on the row that replaces it"
+        );
+    }
+
+    /// A dual-input CDP process reads input 0 from the running buffer, so its branch is drawn
+    /// as a row of the step — "2nd input: ..." above its parameters — not as a column under a
+    /// split with the step in a JOIN box below. It read "SPLIT into 1" once, describing an
+    /// operation that does not happen (user report). A native combiner still splits.
+    #[test]
+    fn a_dual_input_step_shows_its_second_input_as_a_row_of_the_step() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let render = |key: &str| -> String {
+            let mut app = new_app(Some(doc(0.1, 100)), None);
+            let mut chain = crate::model::cdp::CdpChain {
+                bank: Default::default(),
+                output: Default::default(),
+                name: "t".into(),
+                steps: vec![chain_step(key)],
+            };
+            chain.normalize_branches(&app.cdp_catalog);
+            app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+            app.dialog = Some(Dialog::CdpChainEditor);
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let dual = render("combine_mean_1");
+        assert!(dual.contains("2nd input:"), "the branch is named as the step's second input");
+        assert!(!dual.contains("SPLIT"), "nothing is split there:\n{dual}");
+        assert!(!dual.contains("JOIN"), "and nothing is joined:\n{dual}");
+        assert!(
+            dual.contains("Add step to this input"),
+            "its sub-chain is an input's, not a branch's:\n{dual}"
+        );
+
+        // The row sits between the step and its parameters: an input is read before a setting
+        // is applied to it.
+        let lines: Vec<&str> = dual.lines().collect();
+        let step_row = lines.iter().position(|l| l.contains("combine")).expect("the step is drawn");
+        let input_row =
+            lines.iter().position(|l| l.contains("2nd input:")).expect("the input row is drawn");
+        assert!(input_row > step_row, "the second input belongs under its own step");
+
+        // The native combiner, which really does divide the signal, is unchanged.
+        let mixer = render(crate::model::cdp::native::MIXER_KEY);
+        assert!(mixer.contains("SPLIT into 2"), "a mixer fans out:\n{mixer}");
+        assert!(mixer.contains("JOIN"), "and gathers again");
+        assert!(!mixer.contains("2nd input:"), "a leg is not a second input");
     }
 
     /// A dual-input spectral step (`combine_mean_1`, `IoKind::DualAna`) never merges into a
@@ -38575,24 +42781,40 @@ mod tests {
     /// `ana_run_length`'s own exclusion of dual-input steps from a mergeable run.
     #[test]
     fn chain_display_rows_never_merges_a_dual_input_spectral_step_with_a_neighbor() {
+        use crate::model::cdp::PathSeg::{Branch as B, Step as S};
         let app = new_app(Some(doc(0.1, 100)), None);
-        let state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
             name: "test".into(),
             steps: vec![chain_step("blur_avrg"), chain_step("combine_mean_1")],
-        });
-        let rows = chain_display_rows(&state, &app.cdp_catalog);
+        };
+        // A dual-input step always carries its one mandatory branch, empty or not.
+        chain.normalize_branches(&app.cdp_catalog);
+        let state = fresh_chain_editor_state(chain);
+        let rows = structural_rows(&state, &app.cdp_catalog);
         assert_eq!(
             rows,
             vec![
                 DisplayRow::Row(ChainEditorRow::Preset),
-                DisplayRow::PvocAnalyze { depth: 1 },
-                DisplayRow::Row(ChainEditorRow::Step(vec![0])), // blur_avrg -- its own isolated bracket
-                DisplayRow::PvocResynthesize { depth: 1 },
-                DisplayRow::PvocAnalyze { depth: 1 },
-                DisplayRow::Row(ChainEditorRow::Step(vec![1])), // combine_mean_1 -- its own isolated bracket, not merged with blur_avrg
-                DisplayRow::PvocResynthesize { depth: 1 },
-                DisplayRow::Row(ChainEditorRow::AddStep(vec![1])), // combine_mean_1 is dual-input -- has its own side-chain "+ Add step"
-                DisplayRow::Row(ChainEditorRow::AddStep(Vec::new())),
+                DisplayRow::In,
+                // blur_avrg, in the main path's own frame, with its own bracket.
+                DisplayRow::PvocAnalyze { depth: 0 },
+                DisplayRow::Row(ChainEditorRow::Step(vec![S(0)])),
+                DisplayRow::PvocResynthesize { depth: 0 },
+                // The dual-input step does not interrupt the frame: it is an ordinary step that
+                // happens to read a second file, so it sits in the same box with its input named
+                // as a row of its own. Its bracket is still its own — a DualAna step never
+                // merges with a neighbour.
+                DisplayRow::PvocAnalyze { depth: 0 },
+                DisplayRow::Row(ChainEditorRow::Step(vec![S(1)])),
+                DisplayRow::Row(ChainEditorRow::BranchHeader(vec![S(1), B(0)])),
+                DisplayRow::Row(ChainEditorRow::AddStep { path: vec![S(1), B(0)], index: 0 }),
+                DisplayRow::Row(ChainEditorRow::BranchOut(vec![S(1), B(0)])),
+                DisplayRow::PvocResynthesize { depth: 0 },
+                DisplayRow::Row(ChainEditorRow::AddStep { path: Vec::new(), index: 2 }),
+                DisplayRow::Row(ChainEditorRow::BranchOut(Vec::new())),
+                DisplayRow::Row(ChainEditorRow::Out),
                 DisplayRow::Blank,
                 DisplayRow::Row(ChainEditorRow::Preview),
                 DisplayRow::Row(ChainEditorRow::Run),
@@ -38609,24 +42831,32 @@ mod tests {
     #[test]
     fn reordering_steps_moves_the_pvoc_bracket_to_follow_the_step() {
         let app = new_app(Some(doc(0.1, 100)), None);
-        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
-            name: "test".into(),
-            steps: vec![chain_step("blur_avrg"), chain_step("phase_phase_1")],
-        });
-        let before = chain_display_rows(&state, &app.cdp_catalog);
-        assert_eq!(before[1], DisplayRow::PvocAnalyze { depth: 1 }, "sanity: bracket starts around step 0 (blur_avrg)");
+        let mut state = fresh_chain_editor_state(
+            crate::model::cdp::CdpChain {
+                bank: Default::default(),
+                output: Default::default(),
+                name: "test".into(),
+                steps: vec![chain_step("blur_avrg"), chain_step("phase_phase_1")],
+            },
+        );
+        let before = structural_rows(&state, &app.cdp_catalog);
+        // [0] is the Preset row and [1] the IN anchor, so the first step's bracket is [2].
+        assert_eq!(before[2], DisplayRow::PvocAnalyze { depth: 0 }, "sanity: bracket starts around step 0 (blur_avrg)");
 
         state.chain.steps.swap(0, 1); // now [phase_phase_1, blur_avrg]
-        let after = chain_display_rows(&state, &app.cdp_catalog);
+        let after = structural_rows(&state, &app.cdp_catalog);
         assert_eq!(
             after,
             vec![
                 DisplayRow::Row(ChainEditorRow::Preset),
-                DisplayRow::Row(ChainEditorRow::Step(vec![0])), // phase_phase_1, now first -- no bracket
-                DisplayRow::PvocAnalyze { depth: 1 },
-                DisplayRow::Row(ChainEditorRow::Step(vec![1])), // blur_avrg, now second -- bracket followed it here
-                DisplayRow::PvocResynthesize { depth: 1 },
-                DisplayRow::Row(ChainEditorRow::AddStep(Vec::new())),
+                DisplayRow::In,
+                DisplayRow::Row(ChainEditorRow::Step(vec![crate::model::cdp::PathSeg::Step(0)])), // phase_phase_1, now first -- no bracket
+                DisplayRow::PvocAnalyze { depth: 0 },
+                DisplayRow::Row(ChainEditorRow::Step(vec![crate::model::cdp::PathSeg::Step(1)])), // blur_avrg, now second -- bracket followed it here
+                DisplayRow::PvocResynthesize { depth: 0 },
+                DisplayRow::Row(ChainEditorRow::AddStep { path: Vec::new(), index: 2 }),
+                DisplayRow::Row(ChainEditorRow::BranchOut(Vec::new())),
+                DisplayRow::Row(ChainEditorRow::Out),
                 DisplayRow::Blank,
                 DisplayRow::Row(ChainEditorRow::Preview),
                 DisplayRow::Row(ChainEditorRow::Run),
@@ -38641,7 +42871,7 @@ mod tests {
     #[test]
     fn pvoc_display_rows_are_absent_from_the_selectable_row_list() {
         let app = new_app(Some(doc(0.1, 100)), None);
-        let state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+        let state = fresh_chain_editor_state(crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
             name: "test".into(),
             steps: vec![chain_step("blur_avrg"), chain_step("blur_avrg"), chain_step("combine_mean_1")],
         });
@@ -38672,9 +42902,9 @@ mod tests {
         app.handle_action(Action::CdpChain);
         assert!(matches!(app.dialog, Some(Dialog::CdpChainEditor)), "Ctrl+H should open the chain editor directly (valid cdp_dir)");
 
-        app.open_cdp_chain_step_target(ChainEditTarget::Append(Vec::new()));
+        app.open_cdp_chain_step_target(ChainEditTarget::Insert { parent: Vec::new(), index: 0 });
         assert!(matches!(app.dialog, Some(Dialog::CdpBrowser { .. })), "adding a step opens the (filtered) browser");
-        assert_eq!(app.cdp_chain_edit_target, Some(ChainEditTarget::Append(Vec::new())));
+        assert_eq!(app.cdp_chain_edit_target, Some(ChainEditTarget::Insert { parent: Vec::new(), index: 0 }));
 
         let blur_avrg_index =
             app.cdp_catalog.processes.iter().position(|p| p.key == "blur_avrg").expect("blur_avrg in catalog");
@@ -38699,17 +42929,17 @@ mod tests {
     fn deleting_and_reordering_steps_keeps_buffer_picks_in_lockstep() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
         let mut state =
-            fresh_chain_editor_state(crate::model::cdp::CdpChain { name: "t".into(), steps: vec![chain_step("blur_avrg"), chain_step("focus_freeze_1")] });
-        state.selected = ChainEditorRow::Step(vec![0]);
+            fresh_chain_editor_state(crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(), name: "t".into(), steps: vec![chain_step("blur_avrg"), chain_step("focus_freeze_1")] });
+        state.selected = ChainEditorRow::Step(vec![crate::model::cdp::PathSeg::Step(0)]);
         app.cdp_chain_editor = Some(state);
 
         app.reorder_chain_step(1);
         let state = app.cdp_chain_editor.as_ref().unwrap();
         assert_eq!(state.chain.steps[0].process_key, "focus_freeze_1");
         assert_eq!(state.chain.steps[1].process_key, "blur_avrg");
-        assert_eq!(state.selected, ChainEditorRow::Step(vec![1]));
+        assert_eq!(state.selected, ChainEditorRow::Step(vec![crate::model::cdp::PathSeg::Step(1)]));
 
-        app.cdp_chain_editor.as_mut().unwrap().selected = ChainEditorRow::Step(vec![0]);
+        app.cdp_chain_editor.as_mut().unwrap().selected = ChainEditorRow::Step(vec![crate::model::cdp::PathSeg::Step(0)]);
         app.delete_chain_editor_row();
         let state = app.cdp_chain_editor.as_ref().unwrap();
         assert_eq!(state.chain.steps.len(), 1);
@@ -38721,13 +42951,13 @@ mod tests {
     /// draft — end to end through the real key-handling path, not the lower-level helper
     /// directly — clearing any stale `buffer_picks`/`preset_selected` from before the load.
     #[test]
-    fn l_key_recalls_the_last_run_chain_via_real_key_handling() {
+    fn r_key_recalls_the_last_run_chain_via_real_key_handling() {
         let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_chain_last_key_test_{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
 
-        let last_chain = crate::model::cdp::CdpChain {
+        let last_chain = crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
             name: "Auto-saved run".into(),
             steps: vec![chain_step("blur_avrg"), chain_step("focus_freeze_1")],
         };
@@ -38735,17 +42965,17 @@ mod tests {
 
         let mut app = new_app(Some(doc(0.1, 100)), None);
         let mut stale_picks = std::collections::HashMap::new();
-        stale_picks.insert(vec![0], 3usize);
-        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain { name: "draft".into(), steps: Vec::new() });
+        stale_picks.insert(vec![crate::model::cdp::PathSeg::Step(0), crate::model::cdp::PathSeg::Branch(0)], 3usize);
+        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(), name: "draft".into(), steps: Vec::new() });
         state.buffer_picks = stale_picks;
         state.preset_selected = Some(0);
         app.cdp_chain_editor = Some(state);
         app.dialog = Some(Dialog::CdpChainEditor);
 
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
 
         let state = app.cdp_chain_editor.as_ref().expect("chain editor still open");
-        assert_eq!(state.chain, last_chain, "'l' should load the auto-saved chain into the draft");
+        assert_eq!(state.chain, last_chain, "'r' should load the auto-saved chain into the draft");
         assert!(state.buffer_picks.is_empty(), "loading a chain must clear stale buffer picks, same as loading a named preset");
         assert_eq!(state.preset_selected, None, "the recalled chain isn't itself a named preset entry");
         assert!(state.error.is_none());
@@ -38754,22 +42984,22 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
-    /// 'l' with no chain ever run shows an inline error instead of silently doing nothing.
+    /// 'r' with no chain ever run shows an inline error instead of silently doing nothing.
     #[test]
-    fn l_key_with_no_last_chain_shows_an_inline_error() {
+    fn r_key_with_no_last_chain_shows_an_inline_error() {
         let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp_dir = std::env::temp_dir().join(format!("tui_wave_cdp_chain_last_key_empty_test_{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
 
         let mut app = new_app(Some(doc(0.1, 100)), None);
-        app.cdp_chain_editor = Some(fresh_chain_editor_state(crate::model::cdp::CdpChain { name: "draft".into(), steps: Vec::new() }));
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(), name: "draft".into(), steps: Vec::new() }));
         app.dialog = Some(Dialog::CdpChainEditor);
 
-        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
 
         let state = app.cdp_chain_editor.as_ref().expect("chain editor still open");
-        assert!(state.error.is_some(), "no chain has ever been run — 'l' should surface an error, not silently no-op");
+        assert!(state.error.is_some(), "no chain has ever been run — 'r' should surface an error, not silently no-op");
 
         unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
         std::fs::remove_dir_all(&temp_dir).ok();
@@ -38782,24 +43012,1005 @@ mod tests {
     #[test]
     fn reordering_a_step_with_nested_buffer_picks_remaps_them() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
-        let dual_with_side_chain = crate::model::cdp::ChainStep {
-            process_key: "combine_mean_1".into(),
-            values: Vec::new(),
-            side_chain: vec![chain_step("blur_avrg")],
-        };
+        use crate::model::cdp::PathSeg::{Branch as B, Step as S};
+        let mut dual_with_branch = chain_step("combine_mean_1");
+        dual_with_branch.branches = vec![buffer_branch(vec![chain_step("blur_avrg")])];
         let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
             name: "t".into(),
-            steps: vec![chain_step("focus_freeze_1"), dual_with_side_chain],
+            steps: vec![chain_step("focus_freeze_1"), dual_with_branch],
         });
-        state.buffer_picks.insert(vec![1], 2); // step 1's own second input
-        state.selected = ChainEditorRow::Step(vec![1]);
+        // Keyed by *branch* path: the pick belongs to the branch's source, not to the step.
+        state.buffer_picks.insert(vec![S(1), B(0)], 2);
+        state.selected = ChainEditorRow::Step(vec![S(1)]);
         app.cdp_chain_editor = Some(state);
 
         app.reorder_chain_step(-1); // swap step 1 into position 0
         let state = app.cdp_chain_editor.as_ref().unwrap();
         assert_eq!(state.chain.steps[0].process_key, "combine_mean_1");
-        assert_eq!(state.buffer_picks.get(&vec![0]), Some(&2), "the pick must follow the step to its new path");
-        assert!(state.buffer_picks.get(&vec![1]).is_none());
+        assert_eq!(
+            state.buffer_picks.get(&vec![S(0), B(0)]),
+            Some(&2),
+            "the pick must follow the step to its new path"
+        );
+        assert!(state.buffer_picks.get(&vec![S(1), B(0)]).is_none());
+    }
+
+    /// The envelope bank is a second navigable list with its own commands. Delete refuses while
+    /// anything still reads the curve — the count in the pane is what makes those findable.
+    #[test]
+    fn the_envelope_bank_can_be_navigated_and_edited_as_its_own_column() {
+        use crate::model::cdp::PathSeg::Step as S;
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step(crate::model::cdp::native::MIXER_KEY)],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+        let gain = crate::model::cdp::native::leg_gain_param(0);
+        app.cdp_chain_editor.as_mut().unwrap().selected =
+            ChainEditorRow::Param { path: vec![S(0)], index: gain };
+        app.cycle_chain_param_envelope(); // "Env 1", referenced once
+
+        // Focus crosses to the bank, and back.
+        app.move_chain_sideways(1);
+        assert_eq!(app.cdp_chain_editor.as_ref().unwrap().focus, ChainFocus::Bank);
+        app.move_chain_sideways(-1);
+        assert_eq!(app.cdp_chain_editor.as_ref().unwrap().focus, ChainFocus::Steps);
+        app.move_chain_focus(ChainFocus::Bank);
+
+        // A referenced curve is not deletable, and says why.
+        app.delete_bank_envelope();
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert_eq!(state.chain.bank.envelopes.len(), 1, "still there");
+        assert!(state.error.as_deref().unwrap_or_default().contains("1 parameter"), "{:?}", state.error);
+
+        // Duplicating gives an unreferenced copy of the same shape under the next free name.
+        app.duplicate_bank_envelope();
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert_eq!(state.chain.bank.envelopes.len(), 2);
+        assert_eq!(state.chain.bank.envelopes[1].name, "Env 2");
+        assert_eq!(state.chain.bank.envelopes[1].points, state.chain.bank.envelopes[0].points);
+        assert_eq!(state.bank_selected, 1, "selection follows the copy");
+
+        // The copy is unreferenced, so it deletes.
+        app.delete_bank_envelope();
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert_eq!(state.chain.bank.envelopes.len(), 1);
+        assert_eq!(state.chain.bank.envelopes[0].name, "Env 1");
+    }
+
+    /// `h`/`l` move between the branch columns beside each other, which is the whole reason the
+    /// legs are drawn as columns — walking there with Up/Down costs a press per row of the leg.
+    #[test]
+    fn moving_sideways_crosses_between_sibling_branch_columns() {
+        use crate::model::cdp::PathSeg::{Branch as B, Step as S};
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step(crate::model::cdp::native::MIXER_KEY)],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        chain.steps[0].branches[0].steps = vec![chain_step("blur_avrg"), chain_step("blur_avrg")];
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+
+        // Standing deep inside leg A, one press reaches leg B.
+        app.cdp_chain_editor.as_mut().unwrap().selected =
+            ChainEditorRow::Step(vec![S(0), B(0), S(1)]);
+        app.move_chain_sideways(1);
+        assert_eq!(
+            app.cdp_chain_editor.as_ref().unwrap().selected,
+            ChainEditorRow::BranchHeader(vec![S(0), B(1)])
+        );
+        app.move_chain_sideways(-1);
+        assert_eq!(
+            app.cdp_chain_editor.as_ref().unwrap().selected,
+            ChainEditorRow::BranchHeader(vec![S(0), B(0)])
+        );
+        // Past the last leg there is nowhere sideways left inside the chain, so it leaves for
+        // the bank — reachable even when empty, since that is the state you go there to change.
+        app.cdp_chain_editor.as_mut().unwrap().selected =
+            ChainEditorRow::BranchHeader(vec![S(0), B(1)]);
+        app.move_chain_sideways(1);
+        assert_eq!(app.cdp_chain_editor.as_ref().unwrap().focus, ChainFocus::Bank);
+    }
+
+    /// "\u{2442} Branch out" appends a two-branch Mixer, so parallelism can be added without
+    /// knowing that a combiner exists or finding one in the browser.
+    #[test]
+    fn branching_out_appends_a_two_branch_mixer() {
+        use crate::model::cdp::PathSeg::Step as S;
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step("blur_avrg"), chain_step("focus_freeze_1")],
+        };
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+
+        app.branch_out_at_end(&[]);
+
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert_eq!(state.chain.steps.len(), 3, "appended, not replaced");
+        assert_eq!(state.chain.steps[0].process_key, "blur_avrg");
+        assert_eq!(state.chain.steps[1].process_key, "focus_freeze_1");
+        assert_eq!(state.chain.steps[2].process_key, crate::model::cdp::native::MIXER_KEY);
+        assert_eq!(state.chain.steps[2].branches.len(), 2);
+        assert!(
+            state.chain.steps[2].branches.iter().all(|b| b.source == crate::model::cdp::BranchSource::Tap
+                && b.steps.is_empty()),
+            "two empty taps: nothing about the signal changes until a branch is filled"
+        );
+        // The cursor lands where the work continues: branch A's own "+ Add step".
+        assert_eq!(
+            state.selected,
+            ChainEditorRow::AddStep {
+                path: vec![S(2), crate::model::cdp::PathSeg::Branch(0)],
+                index: 0,
+            },
+            "selection follows into the first branch"
+        );
+        // Values are the process's declared defaults, so the mixer is immediately runnable.
+        assert_eq!(state.chain.validate(&app.cdp_catalog), Ok(()));
+    }
+
+    /// Inserting shifts every later sibling's buffer picks, exactly as removing shifts them back.
+    #[test]
+    fn branching_out_shifts_the_picks_of_everything_after_it() {
+        use crate::model::cdp::PathSeg::{Branch as B, Step as S};
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step("blur_avrg"), chain_step("combine_mean_1")],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        let mut state = fresh_chain_editor_state(chain);
+        state.buffer_picks.insert(vec![S(1), B(0)], 3);
+        app.cdp_chain_editor = Some(state);
+
+        // Insert at the head, so everything after it shifts.
+        app.insert_branch_out(&[], 0);
+
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert_eq!(state.chain.steps[2].process_key, "combine_mean_1");
+        assert_eq!(state.buffer_picks.get(&vec![S(2), B(0)]), Some(&3), "the pick followed its step");
+        assert!(state.buffer_picks.get(&vec![S(1), B(0)]).is_none(), "and did not stay behind");
+    }
+
+    /// PVOC bracketing is derived per step list, so each branch decides independently whether it
+    /// needs an analyse/resynthesise pair — a spectral leg gets one, a time-domain leg does not,
+    /// and the top level is unaffected by either. This is what "auto-observed" has to mean once
+    /// branches exist, and it is exactly what a column layout could silently break.
+    #[test]
+    fn pvoc_bracketing_is_decided_inside_each_branch_independently() {
+        use crate::model::cdp::PathSeg::{Branch as B, Step as S};
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step(crate::model::cdp::native::MIXER_KEY)],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        // Leg A: two adjacent spectral steps, which must share one bracket, not take one each.
+        chain.steps[0].branches[0].steps = vec![chain_step("blur_avrg"), chain_step("blur_avrg")];
+        // Leg B: a time-domain step, which must get none at all.
+        chain.steps[0].branches[1].steps = vec![chain_step("phase_phase_1")];
+        let state = fresh_chain_editor_state(chain);
+        let rows = chain_display_rows(&state, &app.cdp_catalog);
+
+        let position = |needle: &DisplayRow| rows.iter().position(|r| r == needle);
+        let a_open = position(&DisplayRow::PvocAnalyze { depth: 0 }).expect("leg A opens a bracket");
+        let a_first = position(&DisplayRow::Row(ChainEditorRow::Step(vec![S(0), B(0), S(0)]))).unwrap();
+        let a_second = position(&DisplayRow::Row(ChainEditorRow::Step(vec![S(0), B(0), S(1)]))).unwrap();
+        let a_close = position(&DisplayRow::PvocResynthesize { depth: 0 }).unwrap();
+        assert!(a_open < a_first && a_first < a_second && a_second < a_close, "one bracket around both");
+
+        let brackets = rows
+            .iter()
+            .filter(|r| matches!(r, DisplayRow::PvocAnalyze { .. } | DisplayRow::PvocResynthesize { .. }))
+            .count();
+        assert_eq!(brackets, 2, "exactly one pair, in leg A only: {rows:?}");
+    }
+
+    /// The headline of the editor rework: a step's parameters are rows in the chain view, so
+    /// the values are legible without opening anything — and Tab steps over them to the next
+    /// process, which is what folding used to be for.
+    #[test]
+    fn a_steps_parameters_are_rows_and_tab_steps_over_them() {
+        use crate::model::cdp::PathSeg::Step as S;
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step("blur_avrg"), chain_step("focus_freeze_1")],
+        };
+        let params = app.cdp_catalog.processes.iter().find(|p| p.key == "blur_avrg").unwrap().params.len();
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+
+        let rows = chain_editor_rows(app.cdp_chain_editor.as_ref().unwrap(), &app.cdp_catalog);
+        let shown = rows
+            .iter()
+            .filter(|r| matches!(r, ChainEditorRow::Param { path, .. } if *path == vec![S(0)]))
+            .count();
+        assert_eq!(shown, params, "every parameter gets a row, always visible");
+
+        // Tab from the first step reaches the second without walking its parameters.
+        app.cdp_chain_editor.as_mut().unwrap().selected = ChainEditorRow::Step(vec![S(0)]);
+        app.move_chain_step(1);
+        assert_eq!(app.cdp_chain_editor.as_ref().unwrap().selected, ChainEditorRow::Step(vec![S(1)]));
+        app.move_chain_step(-1);
+        assert_eq!(app.cdp_chain_editor.as_ref().unwrap().selected, ChainEditorRow::Step(vec![S(0)]));
+        // And stops at the ends rather than wrapping.
+        app.move_chain_step(-1);
+        assert_eq!(app.cdp_chain_editor.as_ref().unwrap().selected, ChainEditorRow::Step(vec![S(0)]));
+    }
+
+    /// A mixer declares all `MAX_MIX_LEGS` legs' parameters whether or not those legs exist, so
+    /// the view must show only the ones a given mixer actually has — otherwise a two-leg mixer
+    /// lists six dead faders.
+    #[test]
+    fn a_mixer_shows_parameters_only_for_the_legs_it_has() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step(crate::model::cdp::native::MIXER_KEY)],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        let indices = visible_param_indices(&chain.steps[0], &app.cdp_catalog);
+        // Two legs of (gain, invert), plus the limiter pair.
+        assert_eq!(indices.len(), 2 * 2 + 2);
+        assert!(indices.contains(&crate::model::cdp::native::MIX_LIMIT_PARAM));
+        assert!(!indices.contains(&crate::model::cdp::native::leg_gain_param(2)), "leg C has no branch");
+    }
+
+    /// Left/Right on a parameter row steps the same `param_slider` stops the params dialog
+    /// uses, so a press means the same fraction of the range in both places.
+    #[test]
+    fn adjusting_a_parameter_inline_walks_the_slider_stops() {
+        use crate::model::cdp::{ParamKind, ParamValue, PathSeg::Step as S};
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step(crate::model::cdp::native::MIXER_KEY)],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+        let gain = crate::model::cdp::native::leg_gain_param(0);
+
+        app.adjust_chain_param(&[S(0)], gain, 1);
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        let ParamValue::Number(after) = state.chain.steps[0].values[gain] else { panic!("a number") };
+
+        let def = app.cdp_catalog.processes.iter().find(|p| p.key == crate::model::cdp::native::MIXER_KEY).unwrap();
+        let ParamKind::Number { min, max, integer, exponential, .. } = def.params[gain].kind else {
+            panic!("a number param")
+        };
+        let expected_stop = crate::ui::widgets::param_slider::stop_for_value(
+            crate::model::cdp::native::LEG_GAIN_DEFAULT_DB, min, max, integer, exponential,
+        ) + 1;
+        assert_eq!(
+            after,
+            crate::ui::widgets::param_slider::value_for_stop(expected_stop, min, max, integer, exponential)
+        );
+
+        // A toggle flips rather than being nudged.
+        let limit = crate::model::cdp::native::MIX_LIMIT_PARAM;
+        app.adjust_chain_param(&[S(0)], limit, 1);
+        assert_eq!(app.cdp_chain_editor.as_ref().unwrap().chain.steps[0].values[limit], ParamValue::Toggle(false));
+    }
+
+    /// `e` walks a parameter through the bank and back to a constant. The detach value is the
+    /// point of the test: it used to be the *bottom* of the window, which silently slammed a
+    /// mixer leg to -60 dB instead of merely stopping the automation.
+    #[test]
+    fn cycling_an_envelope_attaches_then_detaches_without_dropping_the_value() {
+        use crate::model::cdp::{ParamValue, PathSeg::Step as S};
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step(crate::model::cdp::native::MIXER_KEY)],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+        let gain = crate::model::cdp::native::leg_gain_param(0);
+        app.cdp_chain_editor.as_mut().unwrap().selected =
+            ChainEditorRow::Param { path: vec![S(0)], index: gain };
+
+        app.cycle_chain_param_envelope();
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert_eq!(state.chain.bank.envelopes.len(), 1, "the first attach contributes a shape");
+        let ParamValue::EnvelopeRef(reference) = &state.chain.steps[0].values[gain] else {
+            panic!("attached")
+        };
+        // The window is auto-filled from the parameter's own declared range.
+        assert_eq!(reference.min, crate::model::cdp::native::LEG_GAIN_MIN_DB);
+        assert_eq!(reference.max, crate::model::cdp::native::LEG_GAIN_MAX_DB);
+
+        // `i` flips it in place.
+        app.invert_chain_param_envelope();
+        let ParamValue::EnvelopeRef(reference) =
+            &app.cdp_chain_editor.as_ref().unwrap().chain.steps[0].values[gain]
+        else {
+            panic!("still attached")
+        };
+        assert!(reference.invert);
+
+        // Past the end of a one-curve bank: back to a constant, holding what the (flat) curve
+        // was reading -- which is where the parameter started, not the bottom of the range.
+        app.invert_chain_param_envelope(); // flip back first, so the held value is unambiguous
+        app.cycle_chain_param_envelope();
+        let ParamValue::Number(held) = app.cdp_chain_editor.as_ref().unwrap().chain.steps[0].values[gain]
+        else {
+            panic!("detached to a constant")
+        };
+        assert!(
+            (held - crate::model::cdp::native::LEG_GAIN_DEFAULT_DB).abs() < 0.01,
+            "detached to {held}, expected roughly the value it started at"
+        );
+        assert!(held > crate::model::cdp::native::LEG_GAIN_MIN_DB, "must not slam to the bottom");
+    }
+
+    /// A curve opened from the Envelopes panel draws over real audio, and says which. It opened
+    /// onto a bare grid before: a bank shape has no parameter to inherit a selection from, so
+    /// nothing supplied a waveform (user report). The chain's own input is always the first
+    /// background; a branch fed by a picked file adds its own, and `w` cycles them.
+    #[test]
+    fn a_bank_curve_draws_over_the_chains_audio_and_can_switch_to_a_branchs_own() {
+        use crate::model::cdp::PathSeg::{Branch as B, Step as S};
+        let mut app = new_app(Some(doc(0.4, 500)), None);
+        // A second buffer, picked as the side-chain's input.
+        app.documents.push(doc(0.2, 300));
+        app.histories.push(crate::model::history::History::new());
+        app.waveform_caches.push(Vec::new());
+        app.rebuild_waveform_caches();
+
+        // A mixer whose second leg reads the picked file rather than tapping the signal.
+        let mut mixer = chain_step(crate::model::cdp::native::MIXER_KEY);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![std::mem::replace(&mut mixer, chain_step("blur_avrg"))],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        crate::model::cdp::branch_at_mut(&mut chain, &[S(0), B(1)]).unwrap().source =
+            crate::model::cdp::BranchSource::Buffer;
+        let mut state = fresh_chain_editor_state(chain);
+        state.buffer_picks.insert(vec![S(0), B(1)], 1);
+        app.cdp_chain_editor = Some(state);
+        app.dialog = Some(Dialog::CdpChainEditor);
+
+        // A curve driving the mixer's own leg gain: only the chain's own input applies.
+        let gain = crate::model::cdp::native::leg_gain_param(0);
+        app.cdp_chain_editor.as_mut().unwrap().selected =
+            ChainEditorRow::Param { path: vec![S(0)], index: gain };
+        app.cycle_chain_param_envelope();
+        app.move_chain_focus(ChainFocus::Bank);
+        app.edit_bank_envelope();
+        {
+            let edit = app.cdp_chain_editor.as_ref().unwrap().envelope.as_ref().expect("it opened");
+            assert_eq!(edit.backgrounds.len(), 1, "just the chain input: {:?}", edit.backgrounds);
+            assert_eq!(edit.backgrounds[0].document, 0);
+            assert!(edit.backgrounds[0].range.1 > 0, "and a real span to draw over");
+        }
+
+        // Point a parameter *inside the picked branch* at the same curve, and its file joins.
+        {
+            let state = app.cdp_chain_editor.as_mut().unwrap();
+            state.envelope = None;
+            let branch = crate::model::cdp::branch_at_mut(&mut state.chain, &[S(0), B(1)]).unwrap();
+            branch.steps.push(chain_step("blur_avrg"));
+            state.focus = ChainFocus::Steps;
+        }
+        let curve = app.cdp_chain_editor.as_ref().unwrap().chain.bank.envelopes[0].name.clone();
+        app.cdp_chain_editor.as_mut().unwrap().selected =
+            ChainEditorRow::Param { path: vec![S(0), B(1), S(0)], index: 0 };
+        // Attaching lands on the bank's first shape, which is the one the leg gain already uses.
+        app.cycle_chain_param_envelope();
+        assert!(
+            matches!(
+                crate::model::cdp::step_at(&app.cdp_chain_editor.as_ref().unwrap().chain, &[S(0), B(1), S(0)])
+                    .and_then(|s| s.values.first()),
+                Some(crate::model::cdp::ParamValue::EnvelopeRef(r)) if r.name == curve
+            ),
+            "one shape now drives a parameter on each side"
+        );
+
+        app.move_chain_focus(ChainFocus::Bank);
+        app.cdp_chain_editor.as_mut().unwrap().bank_selected = 0;
+        app.edit_bank_envelope();
+        let edit = app.cdp_chain_editor.as_ref().unwrap().envelope.as_ref().expect("it opened");
+        assert_eq!(
+            edit.backgrounds.iter().map(|b| b.document).collect::<Vec<_>>(),
+            vec![0, 1],
+            "the chain input first, then the file feeding the branch: {:?}",
+            edit.backgrounds
+        );
+        assert_eq!(edit.background, 0, "opens on the chain's own audio");
+
+        // `w` switches, and wraps.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        assert_eq!(app.cdp_chain_editor.as_ref().unwrap().envelope.as_ref().unwrap().background, 1);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        assert_eq!(app.cdp_chain_editor.as_ref().unwrap().envelope.as_ref().unwrap().background, 0);
+    }
+
+    /// The bank pane names the parameters each shape drives, which is what makes a shared bank
+    /// worth having over a curve per parameter.
+    #[test]
+    fn the_bank_pane_names_every_parameter_each_envelope_drives() {
+        use crate::model::cdp::PathSeg::Step as S;
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step(crate::model::cdp::native::MIXER_KEY)],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+
+        let gain = |leg: usize| crate::model::cdp::native::leg_gain_param(leg);
+        let select = |app: &mut App, index: usize| {
+            app.cdp_chain_editor.as_mut().unwrap().selected =
+                ChainEditorRow::Param { path: vec![S(0)], index };
+        };
+
+        // Attaching both legs' gains points them at the same shape, which is the case a shared
+        // bank exists for.
+        for leg in 0..2 {
+            select(&mut app, gain(leg));
+            app.cycle_chain_param_envelope();
+        }
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert_eq!(state.chain.bank.envelopes.len(), 1, "the second attach reuses the first shape");
+        let references = chain_envelope_references(state, &app.cdp_catalog);
+        assert_eq!(
+            references.get(&state.chain.bank.envelopes[0].name).map(Vec::as_slice),
+            Some(&["Branch A gain".to_string(), "Branch B gain".to_string()][..]),
+            "the pane lists what the shared curve drives, by name"
+        );
+    }
+
+    /// Clicking an inline slider track sets that parameter, and the cell a knob is drawn in
+    /// produces the value that knob already showed. The project rule is that every dialog is
+    /// fully mouse-driveable, and an inline slider with no pointer path would break it.
+    #[test]
+    fn clicking_an_inline_slider_sets_the_parameter_it_points_at() {
+        use crate::model::cdp::{ParamValue, PathSeg::Step as S};
+        use crate::ui::widgets::param_slider;
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step(crate::model::cdp::native::MIXER_KEY)],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+        let gain = crate::model::cdp::native::leg_gain_param(0);
+
+        // The far right of the track is the top of the range, whatever the cell arithmetic.
+        app.set_chain_param_from_cell(&[S(0)], gain, param_slider::CELLS - 1);
+        let ParamValue::Number(top) = app.cdp_chain_editor.as_ref().unwrap().chain.steps[0].values[gain]
+        else {
+            panic!("a number")
+        };
+        assert_eq!(top, crate::model::cdp::native::LEG_GAIN_MAX_DB);
+
+        app.set_chain_param_from_cell(&[S(0)], gain, 0);
+        let ParamValue::Number(bottom) = app.cdp_chain_editor.as_ref().unwrap().chain.steps[0].values[gain]
+        else {
+            panic!("a number")
+        };
+        assert_eq!(bottom, crate::model::cdp::native::LEG_GAIN_MIN_DB);
+    }
+
+    /// The recorded-geometry rule: a row with no track must report none, so a click on the
+    /// columns either side of one cannot be read as a slider cell.
+    #[test]
+    fn only_rows_that_actually_draw_a_track_report_slider_geometry() {
+        use crate::model::cdp::PathSeg::Step as S;
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step(crate::model::cdp::native::MIXER_KEY)],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        let columns = chain_slider_columns(state, &app.cdp_catalog, 120);
+        let rows = chain_display_rows(state, &app.cdp_catalog);
+        assert_eq!(columns.len(), rows.len(), "index-parallel to the rendered rows");
+        for (row, column) in rows.iter().zip(&columns) {
+            let is_gain = matches!(
+                row,
+                DisplayRow::Row(ChainEditorRow::Param { index, .. })
+                    if *index == crate::model::cdp::native::leg_gain_param(0)
+                        || *index == crate::model::cdp::native::leg_gain_param(1)
+                        || *index == crate::model::cdp::native::MIX_CEILING_PARAM
+            );
+            assert_eq!(column.is_some(), is_gain, "{row:?} reported {column:?}");
+        }
+
+        // A parameter driven by a curve shows the curve, not a track — so no track to click.
+        app.cdp_chain_editor.as_mut().unwrap().selected = ChainEditorRow::Param {
+            path: vec![S(0)],
+            index: crate::model::cdp::native::leg_gain_param(0),
+        };
+        app.cycle_chain_param_envelope();
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        let columns = chain_slider_columns(state, &app.cdp_catalog, 120);
+        let rows = chain_display_rows(state, &app.cdp_catalog);
+        let automated = rows
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Row(ChainEditorRow::Param { index, .. })
+                if *index == crate::model::cdp::native::leg_gain_param(0)))
+            .expect("the gain row is still there");
+        assert!(columns[automated].is_none(), "an automated parameter draws no track");
+
+        // Too narrow for the track to fit: nothing reports geometry at all.
+        let narrow = chain_slider_columns(state, &app.cdp_catalog, 12);
+        assert!(narrow.iter().all(Option::is_none), "a clipped track must not be clickable");
+    }
+
+
+    /// Typing a number straight into a parameter row, which is what a numeric field does
+    /// everywhere else in this app and was the one place it did not (user report, against a
+    /// mixer's gain: the slider was the only way in).
+    #[test]
+    fn typing_a_number_on_a_parameter_row_replaces_the_value() {
+        use crate::model::cdp::{ParamValue, PathSeg::Step as S};
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step(crate::model::cdp::native::MIXER_KEY)],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+        app.dialog = Some(Dialog::CdpChainEditor);
+        let gain = crate::model::cdp::native::leg_gain_param(0);
+        app.cdp_chain_editor.as_mut().unwrap().selected =
+            ChainEditorRow::Param { path: vec![S(0)], index: gain };
+
+        // The first character *replaces* rather than appends, so -6.0 does not become -6.0-1.
+        for c in "-12.5".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(
+            app.cdp_chain_editor.as_ref().unwrap().param_edit.as_ref().map(|(_, _, i)| i.value().to_string()),
+            Some("-12.5".to_string())
+        );
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.cdp_chain_editor.as_ref().unwrap().chain.steps[0].values[gain],
+            ParamValue::Number(-12.5)
+        );
+
+        // Out of range is clamped, not refused.
+        for c in "-999".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.cdp_chain_editor.as_ref().unwrap().chain.steps[0].values[gain],
+            ParamValue::Number(crate::model::cdp::native::LEG_GAIN_MIN_DB)
+        );
+
+        // Moving off the row commits, rather than discarding what was typed.
+        for c in "3".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            app.cdp_chain_editor.as_ref().unwrap().chain.steps[0].values[gain],
+            ParamValue::Number(3.0)
+        );
+        assert!(app.cdp_chain_editor.as_ref().unwrap().param_edit.is_none());
+
+        // Esc abandons it.
+        app.cdp_chain_editor.as_mut().unwrap().selected =
+            ChainEditorRow::Param { path: vec![S(0)], index: gain };
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            app.cdp_chain_editor.as_ref().unwrap().chain.steps[0].values[gain],
+            ParamValue::Number(3.0),
+            "Esc must leave the value alone"
+        );
+        assert!(matches!(app.dialog, Some(Dialog::CdpChainEditor)), "and must not close the dialog");
+    }
+
+    /// Once a parameter carries a curve, Left/Right walks the bank and back to a constant —
+    /// filling the gap where they did nothing — while a parameter holding a plain number keeps
+    /// its slider, which is the common case across the whole CDP catalog. Attaching itself makes
+    /// a new shape; the walk is how a parameter is pointed at one that already exists.
+    #[test]
+    fn arrows_walk_the_bank_only_once_a_parameter_is_automated() {
+        use crate::model::cdp::{ParamValue, PathSeg::Step as S};
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step(crate::model::cdp::native::MIXER_KEY)],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+        let gain = crate::model::cdp::native::leg_gain_param(0);
+        let row = ChainEditorRow::Param { path: vec![S(0)], index: gain };
+        app.cdp_chain_editor.as_mut().unwrap().selected = row.clone();
+
+        // Two curves in the bank, made from the panel itself.
+        app.new_bank_envelope();
+        app.new_bank_envelope();
+        app.cdp_chain_editor.as_mut().unwrap().selected = row.clone();
+
+        // Holding a constant, the arrows still move the slider.
+        app.cycle_chain_row(&row, 1);
+        let ParamValue::Number(nudged) = app.cdp_chain_editor.as_ref().unwrap().chain.steps[0].values[gain]
+        else {
+            panic!("still a constant")
+        };
+        assert!(nudged > crate::model::cdp::native::LEG_GAIN_DEFAULT_DB, "the slider moved");
+
+        // Attach, and now they walk the bank instead.
+        app.cycle_chain_param_envelope();
+        let name_of = |app: &App| match &app.cdp_chain_editor.as_ref().unwrap().chain.steps[0].values[gain] {
+            ParamValue::EnvelopeRef(r) => Some(r.name.clone()),
+            _ => None,
+        };
+        assert_eq!(name_of(&app).as_deref(), Some("Env 1"), "attaching points at the first shape");
+        app.cycle_chain_row(&row, 1);
+        assert_eq!(name_of(&app).as_deref(), Some("Env 2"));
+
+        // Past the last existing shape is the slot that makes one, which is how a parameter
+        // gets a curve of its own without leaving the row.
+        app.cycle_chain_row(&row, 1);
+        assert_eq!(name_of(&app).as_deref(), Some("Env 3"), "one more press draws a new curve");
+        assert_eq!(app.cdp_chain_editor.as_ref().unwrap().chain.bank.envelopes.len(), 3);
+
+        // Past that is the constant again, and the curve just made — never drawn on, and now
+        // pointed at by nothing — goes with it rather than littering the bank.
+        app.cycle_chain_row(&row, 1);
+        assert_eq!(name_of(&app), None, "past the new-curve slot is a constant");
+        assert_eq!(
+            app.cdp_chain_editor.as_ref().unwrap().chain.bank.envelopes.len(),
+            2,
+            "the untouched seed is gone; the two drawn shapes stay"
+        );
+        // And backward from the first curve reaches the constant, not a whole lap away.
+        app.cycle_chain_param_envelope();
+        app.cycle_chain_row(&row, -1);
+        assert_eq!(name_of(&app), None, "back from the first curve is the constant");
+    }
+
+    /// `cycling_the_internal_preset_fills_the_form_immediately` for an inline chain row. That
+    /// path runs through `adjust_chain_param`, which had no preset fill, so cycling a preset in
+    /// a chain step changed none of the values on screen (user report).
+    #[test]
+    fn cycling_the_internal_preset_fills_a_chain_step_immediately() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let def = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .find(|p| p.key == "praat_distortion_hysteresis_distortion")
+            .cloned()
+            .expect("hysteresis distortion in catalog");
+        let preset_param = def.preset_param.expect("it has an internal preset row");
+        let preset = def
+            .script_presets
+            .iter()
+            .find(|p| p.option == 1)
+            .expect("option 1 should be a preset")
+            .clone();
+
+        let chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step(&def.key)],
+        };
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+        let row = ChainEditorRow::Param {
+            path: vec![crate::model::cdp::PathSeg::Step(0)],
+            index: preset_param,
+        };
+        app.cdp_chain_editor.as_mut().unwrap().selected = row.clone();
+
+        app.cycle_chain_row(&row, 1);
+
+        let values = &app.cdp_chain_editor.as_ref().unwrap().chain.steps[0].values;
+        assert_eq!(
+            values[preset_param],
+            crate::model::cdp::ParamValue::Choice(preset.option),
+            "the row must keep naming the preset it applied"
+        );
+        for (param, value) in preset.pairs() {
+            match &values[param] {
+                crate::model::cdp::ParamValue::Number(n) => {
+                    assert!((n - value).abs() < 1e-9, "field {param} shows {n}, preset sets {value}")
+                }
+                crate::model::cdp::ParamValue::Toggle(on) => assert_eq!(*on, value != 0.0),
+                other => panic!("preset targeted an unexpected value kind: {other:?}"),
+            }
+        }
+    }
+
+    /// Enter in the bank opens *any* curve for drawing, attached or not — it used to demand a
+    /// parameter first, which put the halves of the idea the wrong way round (user report).
+    #[test]
+    fn an_unattached_curve_opens_for_drawing_on_its_own_axes() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step("blur_avrg")],
+        };
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+        app.dialog = Some(Dialog::CdpChainEditor);
+        app.move_chain_focus(ChainFocus::Bank);
+        app.new_bank_envelope();
+
+        // Nothing references it, and it opens anyway.
+        assert!(chain_envelope_references(
+            app.cdp_chain_editor.as_ref().unwrap(),
+            &app.cdp_catalog
+        )
+        .is_empty());
+        app.edit_bank_envelope();
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        let edit = state.envelope.as_ref().expect("the editor opened");
+        assert_eq!(edit.target, CdpEnvelopeTarget::BankEnvelope);
+        // On the curve's own normalized axes, not some parameter's units.
+        assert_eq!(
+            CdpEnvelopeTarget::BankEnvelope.fixed_bounds().map(|(lo, hi, _)| (lo, hi)),
+            Some((crate::model::cdp::envelope_bank::BANK_MIN, crate::model::cdp::envelope_bank::BANK_MAX))
+        );
+        assert_eq!(edit.points, CHAIN_NEW_ENVELOPE_SHAPE.to_vec());
+
+        // Editing then committing writes back to the bank. Up, not Down: the first point sits
+        // at the floor of the range, where Down is correctly a no-op.
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert!(state.envelope.is_none(), "the editor closed");
+        assert_ne!(
+            state.chain.bank.envelopes[0].points,
+            CHAIN_NEW_ENVELOPE_SHAPE.to_vec(),
+            "the edit landed in the bank"
+        );
+        assert_eq!(state.chain.bank.validate(), Ok(()), "and left it valid");
+
+        // Esc puts back what it was.
+        let before = state.chain.bank.envelopes[0].points.clone();
+        app.edit_bank_envelope();
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.cdp_chain_editor.as_ref().unwrap().chain.bank.envelopes[0].points, before);
+    }
+
+    /// The assign list is grouped by process, with the process named above its own parameters —
+    /// a flat list says nothing about *where* in the chain each one is, and names like "Gain"
+    /// recur across steps.
+    #[test]
+    fn the_assign_picker_groups_parameters_under_their_process() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step("blur_avrg"), chain_step(crate::model::cdp::native::MIXER_KEY)],
+        };
+        let mut chain = chain;
+        chain.normalize_branches(&app.cdp_catalog);
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+        app.move_chain_focus(ChainFocus::Bank);
+        app.new_bank_envelope();
+        app.open_chain_assign_picker();
+
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        let picker = state.assign_picker.as_ref().expect("the picker opened");
+        // Opens on a real target, never on a heading.
+        assert!(picker.targets[picker.selected].0.is_some());
+        // A heading precedes each group, and carries the process's own title.
+        let headings: Vec<&String> =
+            picker.targets.iter().filter(|(t, _)| t.is_none()).map(|(_, l)| l).collect();
+        assert!(headings.iter().any(|h| h.contains("Mixer")), "{headings:?}");
+        assert!(picker.targets.first().map(|(t, _)| t.is_none()).unwrap_or(false), "starts with one");
+        // Moving never lands on a heading.
+        let mut picker = picker.clone_for_test();
+        for _ in 0..picker.targets.len() + 2 {
+            picker.step(1);
+            assert!(picker.targets[picker.selected].0.is_some(), "landed on a heading");
+        }
+    }
+
+    /// The dead zone: moving through the middle of the view costs no scrolling at all, and only
+    /// the last few rows before an edge push it — one line at a time, never in jumps.
+    #[test]
+    fn the_view_holds_still_until_the_selection_nears_an_edge() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        // Enough steps that the chain is far taller than the window.
+        let steps: Vec<_> = (0..40).map(|_| chain_step("blur_avrg")).collect();
+        let mut state = fresh_chain_editor_state(
+            crate::model::cdp::CdpChain {
+                bank: Default::default(),
+                output: Default::default(),
+                name: "t".into(),
+                steps,
+            },
+        );
+        state.selected = ChainEditorRow::Preset;
+        app.cdp_chain_editor = Some(state);
+        app.dialog = Some(Dialog::CdpChainEditor);
+
+        let draw = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            app.cdp_chain_editor.as_ref().unwrap().scroll_top.get()
+        };
+
+        assert_eq!(draw(&mut app), 0, "starts at the top");
+
+        // Walk down through the middle of the view: nothing moves.
+        for _ in 0..6 {
+            app.move_chain_selection(1);
+            assert_eq!(draw(&mut app), 0, "the view must hold still in the dead zone");
+        }
+
+        // Keep going until it does move, then confirm it moved by exactly one row per press.
+        let mut previous = 0;
+        let mut scrolled = false;
+        for _ in 0..30 {
+            app.move_chain_selection(1);
+            let top = draw(&mut app);
+            assert!(top == previous || top == previous + 1, "{previous} -> {top} is not one line");
+            scrolled |= top > previous;
+            previous = top;
+        }
+        assert!(scrolled, "the view never scrolled at all");
+    }
+
+    /// A combiner's branch count is fixed at two, so nothing in the editor offers to change it:
+    /// no "+ Add branch" row anywhere, and `normalize_branches` supplies both on load.
+    #[test]
+    fn a_combiner_has_exactly_two_branches_and_no_way_to_add_more() {
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step(crate::model::cdp::native::MIXER_KEY), chain_step("combine_mean_1")],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        assert_eq!(chain.steps[0].branches.len(), 2, "a mixer opens with both its branches");
+        assert_eq!(chain.steps[1].branches.len(), 1, "a dual-input CDP step still takes one");
+        assert_eq!(chain.validate(&app.cdp_catalog), Ok(()));
+    }
+
+    /// Splits nest to `MAX_SPLIT_DEPTH` and no further: at the deepest level no "Branch out" row
+    /// is offered at all, because the button is the only route and its absence *is* the rule.
+    #[test]
+    fn branch_out_is_not_offered_past_the_split_depth_limit() {
+        use crate::model::cdp::{chain::Branch, BranchSource, PathSeg::Branch as B, PathSeg::Step as S};
+        let app = new_app(Some(doc(0.1, 100)), None);
+        let deep = |steps: Vec<crate::model::cdp::ChainStep>| Branch { source: BranchSource::Tap, steps };
+
+        // A split inside a split: the inner branches sit at the depth limit.
+        let mut inner = chain_step(crate::model::cdp::native::MIXER_KEY);
+        inner.branches = vec![deep(Vec::new()), deep(Vec::new())];
+        let mut outer = chain_step(crate::model::cdp::native::MIXER_KEY);
+        outer.branches = vec![deep(vec![inner]), deep(Vec::new())];
+        let chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![outer],
+        };
+        assert_eq!(chain.validate(&app.cdp_catalog), Ok(()), "two levels is allowed");
+
+        let rows = chain_editor_rows(&fresh_chain_editor_state(chain.clone()), &app.cdp_catalog);
+        assert!(
+            rows.contains(&ChainEditorRow::BranchOut(vec![S(0), B(0)])),
+            "a first-level branch may still split"
+        );
+        assert!(
+            !rows.contains(&ChainEditorRow::BranchOut(vec![S(0), B(0), S(0), B(0)])),
+            "a second-level branch may not: {rows:?}"
+        );
+        // And the top level always may.
+        assert!(rows.contains(&ChainEditorRow::BranchOut(Vec::new())));
+
+        // A third level is refused outright, which is what a hand-edited file would hit.
+        let mut third = chain_step(crate::model::cdp::native::MIXER_KEY);
+        third.branches = vec![deep(Vec::new()), deep(Vec::new())];
+        let mut chain = chain;
+        chain.steps[0].branches[0].steps[0].branches[0].steps.push(third);
+        assert!(matches!(
+            chain.validate(&app.cdp_catalog),
+            Err(crate::model::cdp::ChainError::SplitTooDeep { .. })
+        ));
+    }
+
+    /// A branch can be removed back down to the process's floor and no further — and removing
+    /// one must take its own buffer pick with it while shifting the later branches' down.
+    #[test]
+    fn deleting_a_branch_stops_at_the_floor_and_remaps_the_picks() {
+        use crate::model::cdp::PathSeg::{Branch as B, Step as S};
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step(crate::model::cdp::native::MIXER_KEY)],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        chain.steps[0].branches.push(crate::model::cdp::chain::Branch {
+            source: crate::model::cdp::BranchSource::Buffer,
+            steps: Vec::new(),
+        });
+        let mut state = fresh_chain_editor_state(chain);
+        state.buffer_picks.insert(vec![S(0), B(1)], 4);
+        state.buffer_picks.insert(vec![S(0), B(2)], 7);
+        app.cdp_chain_editor = Some(state);
+
+        app.delete_chain_branch(&[S(0), B(1)]);
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert_eq!(state.chain.steps[0].branches.len(), 2);
+        assert!(state.buffer_picks.get(&vec![S(0), B(1)]).is_some(), "branch 2's pick shifted down");
+        assert_eq!(state.buffer_picks.get(&vec![S(0), B(1)]), Some(&7));
+
+        // Now at the floor of two: a further delete is refused with a message, not ignored.
+        app.delete_chain_branch(&[S(0), B(0)]);
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert_eq!(state.chain.steps[0].branches.len(), 2, "the floor holds");
+        assert!(state.error.is_some(), "and says why");
+    }
+
+    /// The prefix check in `remap_buffer_picks_after_swap`/`remove_buffer_picks_under`: two
+    /// branches of *different* steps hold picks at the same depth, and reordering inside one
+    /// must leave the other alone. Comparing only the path element at that depth — which an
+    /// earlier version did — silently repointed the untouched branch at another document.
+    #[test]
+    fn remapping_picks_does_not_touch_a_different_parents_branches() {
+        use crate::model::cdp::PathSeg::{Branch as B, Step as S};
+        let mut picks = std::collections::HashMap::new();
+        picks.insert(vec![S(0), B(0), S(0), B(0)], 7usize);
+        picks.insert(vec![S(1), B(0), S(0), B(0)], 9usize);
+
+        // Swap steps 0 and 1 *inside step 0's branch* -- nothing under step 1 may move.
+        remap_buffer_picks_after_swap(&mut picks, &[S(0), B(0)], 0, 1);
+
+        assert_eq!(picks.get(&vec![S(0), B(0), S(1), B(0)]), Some(&7), "swapped as asked");
+        assert_eq!(picks.get(&vec![S(1), B(0), S(0), B(0)]), Some(&9), "left alone");
     }
 
     /// The core "fully working picker" fix: reopening a dual-input step for editing must
@@ -38811,14 +44022,24 @@ mod tests {
     fn reopening_a_chain_step_seeds_the_second_input_from_its_existing_pick() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
         app.push_document(doc(0.2, 100)); // a second open document to pick as the buffer
-        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
             name: "t".into(),
             steps: vec![chain_step("combine_mean_1")],
-        });
-        state.buffer_picks.insert(vec![0], 1); // pick document index 1, not the default
+        };
+        // As every real load does: a dual-input step's one mandatory branch is what the pick
+        // hangs off, and what the row now seeds through.
+        chain.normalize_branches(&app.cdp_catalog);
+        let mut state = fresh_chain_editor_state(chain);
+        // A branch path: the dual step's one mandatory branch.
+        state.buffer_picks.insert(
+            vec![crate::model::cdp::PathSeg::Step(0), crate::model::cdp::PathSeg::Branch(0)],
+            1,
+        );
         app.cdp_chain_editor = Some(state);
 
-        app.open_cdp_chain_step_target(ChainEditTarget::Replace(vec![0]));
+        app.open_cdp_chain_step_target(ChainEditTarget::Replace(vec![crate::model::cdp::PathSeg::Step(0)]));
         let Some(Dialog::CdpParams { second_input: Some(second), .. }) = &app.dialog else {
             panic!("expected CdpParams with a second_input row for a dual-input step");
         };
@@ -38839,12 +44060,16 @@ mod tests {
         app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
         let combine_index =
             app.cdp_catalog.processes.iter().position(|p| p.key == "combine_mean_1").expect("combine_mean_1 in catalog");
-        app.cdp_chain_editor = Some(fresh_chain_editor_state(crate::model::cdp::CdpChain {
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
             name: "t".into(),
-            steps: vec![crate::model::cdp::ChainStep { process_key: "combine_mean_1".into(), values: Vec::new(), side_chain: Vec::new() }],
-        }));
+            steps: vec![chain_step("combine_mean_1")],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
 
-        app.open_cdp_chain_step_target(ChainEditTarget::Replace(vec![0]));
+        app.open_cdp_chain_step_target(ChainEditTarget::Replace(vec![crate::model::cdp::PathSeg::Step(0)]));
         assert!(matches!(app.dialog, Some(Dialog::CdpParams { .. })), "an existing step's Replace target jumps straight to CdpParams");
         // Focus the second-input row so `configure_chain_side_chain` recognizes it.
         if let Some(Dialog::CdpParams { focus, fields, second_input, .. }) = app.dialog.as_mut() {
@@ -38871,8 +44096,9 @@ mod tests {
         assert!(matches!(app.dialog, Some(Dialog::CdpChainEditor)));
         let state = app.cdp_chain_editor.as_ref().unwrap();
         assert_eq!(state.chain.steps.len(), 1);
-        assert_eq!(state.chain.steps[0].side_chain.len(), 1);
-        assert_eq!(state.chain.steps[0].side_chain[0].process_key, "blur_avrg");
+        assert_eq!(state.chain.steps[0].branches.len(), 1);
+        assert_eq!(state.chain.steps[0].branches[0].steps.len(), 1);
+        assert_eq!(state.chain.steps[0].branches[0].steps[0].process_key, "blur_avrg");
     }
 
     /// The other half of the side-chain flow: *abandoning* the pick. `configure_chain_side_chain`
@@ -38891,12 +44117,12 @@ mod tests {
         app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
         let combine_index =
             app.cdp_catalog.processes.iter().position(|p| p.key == "combine_mean_1").expect("combine_mean_1 in catalog");
-        app.cdp_chain_editor = Some(fresh_chain_editor_state(crate::model::cdp::CdpChain {
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
             name: "t".into(),
-            steps: vec![crate::model::cdp::ChainStep { process_key: "combine_mean_1".into(), values: Vec::new(), side_chain: Vec::new() }],
+            steps: vec![crate::model::cdp::ChainStep { process_key: "combine_mean_1".into(), values: Vec::new(), branches: Vec::new(), legacy_side_chain: Vec::new() }],
         }));
 
-        app.open_cdp_chain_step_target(ChainEditTarget::Replace(vec![0]));
+        app.open_cdp_chain_step_target(ChainEditTarget::Replace(vec![crate::model::cdp::PathSeg::Step(0)]));
         if let Some(Dialog::CdpParams { focus, fields, .. }) = app.dialog.as_mut() {
             *focus = cdp_params_focus_extra_input(fields.len());
         }
@@ -46586,11 +51812,11 @@ mod tests {
             .join("cdp")
             .to_string_lossy()
             .to_string();
-        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain {
+        let mut state = fresh_chain_editor_state(crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
             name: "Double Invert".into(),
             steps: vec![
-                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), side_chain: Vec::new() },
-                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), branches: Vec::new(), legacy_side_chain: Vec::new() },
+                crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), branches: Vec::new(), legacy_side_chain: Vec::new() },
             ],
         });
         // The Run row: `h` does nothing here (no step to preview "up to"), which is exactly
@@ -46651,14 +51877,14 @@ mod tests {
         });
 
         assert!(
-            preview_still_current(app.dialog.as_ref(), Some(PreviewOwner::Params)),
+            preview_still_current(app.dialog.as_ref(), Some(PreviewOwner::Params), None),
             "untouched, the preview still describes what the dialog says"
         );
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE));
 
         assert!(
-            !preview_still_current(app.dialog.as_ref(), Some(PreviewOwner::Params)),
+            !preview_still_current(app.dialog.as_ref(), Some(PreviewOwner::Params), None),
             "one keystroke into a parameter and the looping preview is stale — it must stop"
         );
     }

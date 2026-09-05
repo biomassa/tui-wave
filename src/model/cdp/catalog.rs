@@ -155,6 +155,9 @@ impl CdpCatalog {
         {
             warnings.push(w);
         }
+        // Built in code rather than parsed from a TOML — see `native::process_defs` for why.
+        // Appended before the user directory so a user definition can still override one.
+        by_key.extend(super::native::process_defs());
         // After every `[[process]]` source, so a title override can name a Praat entry too.
         if let Some(w) = apply_title_overrides(&mut by_key, TITLE_OVERRIDES_TOML) {
             warnings.push(w);

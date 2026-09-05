@@ -163,9 +163,11 @@ pub fn stop_for_cell(cell: usize, stops: usize) -> usize {
 
 /// The track as a plain string, knob included.
 ///
-/// The rendering path uses `spans` (it needs the knob styled separately); this is the same
-/// track without the styling, which is what makes it the thing to assert against.
-#[cfg(test)]
+/// The unstyled track. `spans` is what most rendering uses, since it needs the knob styled
+/// separately from the dots; this is the same track as one plain string, for the two places
+/// that must not style it — a *selected* row in the chain editor, which is one uniform
+/// highlight by convention (`theme.rs`) so a second accent on the knob would fight it — and for
+/// tests, which is what it originally existed for.
 pub fn track(value: f64, min: f64, max: f64, integer: bool, exponential: bool) -> String {
     let stops = stop_count(min, max, integer);
     let knob = cell_for_stop(stop_for_value(value, min, max, integer, exponential), stops);

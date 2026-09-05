@@ -102,6 +102,11 @@ pub const PRAAT_GROUPS: &[&str] = &[
 /// Groups column deliberately never scrolls, so a 24th category arriving upstream is a real
 /// (if quiet) constraint — `airwindows_groups_fit_the_browser_list` fails rather than letting
 /// a group become unreachable.
+/// The native backend's only group. One entry rather than none because the Groups column is
+/// driven by this list, and a domain with no groups renders as an empty column that focus
+/// deliberately skips — fine for `All`/`Recent`, wrong for a domain holding real processes.
+pub const NATIVE_GROUPS: &[&str] = &["Combine"];
+
 pub const AIRWINDOWS_GROUPS: &[&str] = &[
     "Ambience",
     "Amp Sims",
@@ -323,17 +328,27 @@ pub fn cdp_group(def: &ProcessDef) -> Option<CdpGroup> {
         let name = AIRWINDOWS_GROUPS.iter().find(|g| **g == cat).copied()?;
         return Some(CdpGroup { category: def.category, name });
     }
+    // The native combiners follow the same `<Group>/<Name>` convention, with one group.
+    if def.category == Category::Native {
+        let cat = def.bin.split('/').next()?;
+        let name = NATIVE_GROUPS.iter().find(|g| **g == cat).copied()?;
+        return Some(CdpGroup { category: def.category, name });
+    }
     let name = if def.bin == "fractal" {
         match def.category {
             Category::Time => "DISTORT",
             Category::Pvoc => "SPECNU",
-            Category::Praat | Category::Airwindows => unreachable!("handled above"),
+            Category::Praat | Category::Airwindows | Category::Native => {
+                unreachable!("handled above")
+            }
         }
     } else {
         let table = match def.category {
             Category::Time => TIME_BINS,
             Category::Pvoc => PVOC_BINS,
-            Category::Praat | Category::Airwindows => unreachable!("handled above"),
+            Category::Praat | Category::Airwindows | Category::Native => {
+                unreachable!("handled above")
+            }
         };
         table.iter().find(|(bin, _)| *bin == def.bin).map(|(_, group)| *group)?
     };
@@ -347,6 +362,7 @@ pub fn groups_for(category: Category) -> &'static [&'static str] {
         Category::Pvoc => PVOC_GROUPS,
         Category::Praat => PRAAT_GROUPS,
         Category::Airwindows => AIRWINDOWS_GROUPS,
+        Category::Native => NATIVE_GROUPS,
     }
 }
 
@@ -413,8 +429,8 @@ mod tests {
             let expected = match p.category {
                 Category::Time => "DISTORT",
                 Category::Pvoc => "SPECNU",
-                Category::Praat | Category::Airwindows => {
-                    unreachable!("no Praat or Airwindows entry has bin `fractal`")
+                Category::Praat | Category::Airwindows | Category::Native => {
+                    unreachable!("only a CDP entry has bin `fractal`")
                 }
             };
             assert_eq!(cdp_group(p).unwrap().name, expected, "{}", p.key);
