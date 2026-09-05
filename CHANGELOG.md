@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-09-05 (2.11.7)
 
 ### ExtProcess chains: parallel branches, native combiners, a per-chain envelope bank
 
