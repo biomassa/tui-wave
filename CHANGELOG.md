@@ -1,5 +1,50 @@
 # Changelog
 
+## 2026-09-08 (2.11.10)
+
+### An internal preset now moves the parameters it sets
+
+A Praat script can put some of its settings on a second dialog page. This app removes that page
+and adds those settings to the process dialog. Such a script frequently also has an internal
+preset menu, and that menu sets the same values.
+
+The menu did not move them. You selected a different preset and no number on the dialog changed.
+`Stereo Micro Macro Time Collapser` shows seven preset names and moved nothing (user report).
+
+The catalog builder matched a preset against the parameters of the first dialog page only. The
+settings from the second page were not in that list, so no match was possible. Some processes got
+no preset table. Others got a table with only part of their values, which is worse: the menu moved
+some fields and left the others at the previous value.
+
+**219 preset values across 37 processes** now reach the catalog. The builder also gives a table to
+every entry a script makes, not only to the last one.
+
+Six processes still have no table. Four set no catalogued value. Two use a different name for the
+same setting in each part of the script, and no safe rule can connect the two.
+
+### Parameter defaults come from the script, not from its last preset
+
+A script frequently states its defaults, then changes them in an `if preset = N` chain. The
+builder read the last value before the dialog, so the values of the final preset became the
+defaults. `Coupled Mesh String` showed `Custom (baseline values)` together with the numbers of
+preset 6.
+
+A value in a branch can no longer replace one the script states outright. A branch can still
+supply a value that nothing else gives. **196 defaults across 27 processes** are now correct.
+
+### praatAudioTools 5e29c16
+
+Three new processes: `AllpassDiffuser`, `Giant_FFT_Recomposer` and `SpectralPermute`. The last one
+needed two changes. Its advanced page is now part of the dialog, and the builder reads a
+`fixed$(x, 2)` default.
+
+`AcousticDNAResonator` stays in the catalog. Upstream gave it a Windows path to a Python program,
+and the app replaces that path before each run. `DDSPNeuralRevoicing` has the same line, and it is
+still not in the catalog. Its reason is now correct: the `ddsp` libraries do not build on Python
+3.12 or later.
+
+All 47 changed processes ran in Praat, in mono and in stereo. No process failed.
+
 ## 2026-09-05 (2.11.9)
 
 ### A percent-of-window-count parameter says what it comes to
