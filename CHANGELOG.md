@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+### Every internal preset now moves the dialog, and a check keeps it that way
+
+Release 2.11.10 made a preset move the parameters on a pause-hoisted script. Three more causes
+stayed, and each one hid the same fault: the preset changes the sound, but the dialog continues to
+show the previous numbers. `Giant FFT Recomposer` was the report.
+
+- Praat accepts `elif` as well as `elsif`. The catalog builder read only `elsif`, so it read a
+  full chain of preset branches as one branch.
+- A script frequently copies a value into a different name before it uses it. It does this for the
+  menu itself (`presetCode = preset`) and for the values (`depth = transformation_depth`). The
+  builder matched only the name of the dialog field.
+- A chain is frequently inside an `if preset > 1` guard, which makes its branches indented. The
+  builder read only branches that start at column one.
+
+The builder now follows a copy in both directions, accepts `elif`, and reads an indented chain
+when each guard around it tests the same menu. A guard on a different menu still stops it: the
+values of `Advanced Stereo Panner` apply in one pan mode only, and a table would tell the dialog
+something the run does not do.
+
+**377 of 378 processes with a preset menu are now complete.** The one exception is the panner
+above.
+
+### A check for the same fault
+
+This fault is invisible to every other check here. The process runs, makes audio, and passes the
+Praat sweep, while the numbers on screen describe a different setting. Each of the four causes
+came from a user who saw a menu that changed nothing.
+
+The catalog builder now examines each preset menu against the script, per menu option, and stops
+with an error if an option can set a value that the dialog will not show. The examination uses its
+own reading of the script, not the code it examines, so a new idiom in a future release shows as
+an error instead of as a menu that does nothing. A process whose values are correctly not in the
+table needs an entry that gives the reason.
+
 ## 2026-09-08 (2.11.10)
 
 ### An internal preset now moves the parameters it sets

@@ -1244,6 +1244,12 @@ def praat_variable(label: str) -> str:
     return label[:1].lower() + label[1:] if label else label
 
 
+# `<name> = <name>`, a plain copy of one variable into another, at the *start* of a line so an
+# indented (conditional) copy does not count. Applied repeatedly because a script may chain them.
+ALIAS_RE = re.compile(r"^([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\s*$", re.M)
+ALIAS_PASSES = 3
+
+
 def mentions_variable(code: str, variable: str) -> bool:
     """Whether `code` reads `variable` as a whole identifier.
 
@@ -1302,6 +1308,105 @@ def preset_variable(label: str, source: str, code: str) -> str:
     return derived
 
 
+# Processes whose preset branches deliberately do NOT become a table, with the reason. Every
+# entry is a script where the values are real but *not* the menu's unconditional answer, so
+# publishing them would make the dialog assert something the run does not do.
+PRESET_COVERAGE_EXEMPT: dict[str, str] = {
+    "Spatial & Surround/Advanced_Stereo_Panner.praat":
+        "chain sits under `if pan_mode = 1`, so its pan_position holds in one mode only",
+    "Spectral/Spectral_Effects_Suite.praat":
+        "preset 1's Modulation_phase_span is set inside the PulsingDualRate effect branch, "
+        "so it applies to one effect rather than to the preset",
+}
+
+
+def reachable_preset_targets(
+    source: str, params: list[Param], preset_index: int
+) -> dict[int, set[int]]:
+    """Per menu option, every param index that option's branch could plausibly set.
+
+    Per option rather than pooled, so a branch read into the *wrong* option is caught as well as
+    one read into none. Dropping `elif` support loses no parameter -- the branch is simply
+    attributed to the option above it -- so a pooled check calls that correct.
+
+    Deliberately re-derived rather than shared with `extract_script_presets`: a check that reuses
+    the code it is checking can only confirm that code agrees with itself. This scan is coarse
+    and over-collects on purpose -- it is an upper bound, and anything it finds that extraction
+    did not has to be explained, either by a fix or by a `PRESET_COVERAGE_EXEMPT` entry.
+    """
+    code = code_only(source)
+    by_variable: dict[str, int] = {}
+    for i, param in enumerate(params):
+        for name in {praat_variable(param.name), preset_variable(param.name, source, code)}:
+            by_variable.setdefault(name, i)
+    selector = {praat_variable(params[preset_index].name)}
+    for _ in range(ALIAS_PASSES):
+        for match in ALIAS_RE.finditer(source):
+            lhs, rhs = match.group(1), match.group(2)
+            if rhs in by_variable and lhs not in by_variable:
+                by_variable[lhs] = by_variable[rhs]
+            if rhs in selector:
+                selector.add(lhs)
+
+    names = "|".join(re.escape(n) for n in sorted(selector))
+    head = re.compile(rf"^\s*(?:els?)?if\s+(?:{names})\s*=\s*(\d+)\s*$")
+    found: dict[int, set[int]] = {}
+    option: int | None = None
+    for line in source.split("\n"):
+        match = head.match(line)
+        if match:
+            option = int(match.group(1))
+            found.setdefault(option, set())
+            continue
+        if option is None:
+            continue
+        stripped = line.strip()
+        if stripped.startswith(("else", "endif")) and not stripped.startswith(("elsif", "elif")):
+            option = None
+            continue
+        assignment = ASSIGNMENT_RE.match(line)
+        if assignment:
+            target = by_variable.get(assignment.group(1))
+            if target is not None and target != preset_index:
+                found[option].add(target)
+    return {opt: targets for opt, targets in found.items() if targets}
+
+
+def preset_coverage_gap(proc: "Process", source: str) -> str | None:
+    """A description of the preset values this entry's table fails to carry, or None.
+
+    An internal preset that moves the sound and not the dialog is invisible to every other check
+    here: the process runs, produces audio, and passes the smoke sweep, while the numbers on
+    screen describe a different setting. Three separate causes shipped that way before this
+    existed -- `elif` in place of `elsif`, a selector copied to a working name
+    (`presetCode = preset`), and a target copied the same way (`depth = transformation_depth`) --
+    and each was found by a user noticing a menu that changed nothing.
+    """
+    # Located here rather than read from `proc.preset_param`, which is only set once a table was
+    # built. A process that produced *no* table is precisely the case this has to catch --
+    # `Stereo_Micro_Macro_Time_Collapser` and `Giant_FFT_Recomposer` both shipped that way.
+    preset_index = next(
+        (i for i, p in enumerate(proc.params)
+         if p.kind == "choice" and PRESET_NAME_RE.match(p.name)),
+        None,
+    )
+    if preset_index is None:
+        return None
+    reachable = reachable_preset_targets(source, proc.params, preset_index)
+    problems: list[str] = []
+    for option in sorted(reachable):
+        # `script_presets` is keyed in the script's own 1-based numbering; the emitter is what
+        # subtracts one on the way to TOML.
+        covered = set(proc.script_presets.get(option, {}))
+        missing = reachable[option] - covered
+        if missing:
+            names = ", ".join(sorted(proc.params[i].name for i in missing))
+            problems.append(f"option {option} does not set {names}")
+    if not problems:
+        return None
+    return "; ".join(problems)
+
+
 def extract_script_presets(source: str, params: list[Param]):
     """Return `(preset_index, custom_option, {option_index: {param_index: value}})`, or None.
 
@@ -1319,23 +1424,85 @@ def extract_script_presets(source: str, params: list[Param]):
     code = code_only(source)
     variable = praat_variable(params[preset_index].name)
     by_variable = {preset_variable(p.name, source, code): i for i, p in enumerate(params)}
-    # Only whole-line `if`/`elsif` comparisons against a literal, so a compound condition
-    # (`if preset = 2 and stereo`) is skipped rather than half-understood.
-    head = re.compile(rf"^(?:els)?if\s+{re.escape(variable)}\s*=\s*(\d+)\s*$")
+
+    # A script frequently copies a form value into a working name before using it --
+    # `depth = transformation_depth`, `presetCode = preset` -- and then the preset branches
+    # assign the working name. Matching only the field's own variable missed every one of
+    # those, so the branch moved the sound while the dialog went on showing the old number.
+    # Both directions of the copy are followed, since scripts write it each way.
+    #
+    # Only *unindented* copies count, the same rule `script_variables` follows: one inside an
+    # `if` is conditional, so it does not establish that the two names mean the same thing.
+    # A name that is already a field's own variable is never redirected.
+    selector_names = {variable}
+    for _ in range(ALIAS_PASSES):
+        for match in ALIAS_RE.finditer(source):
+            lhs, rhs = match.group(1), match.group(2)
+            if rhs in by_variable and lhs not in by_variable:
+                by_variable[lhs] = by_variable[rhs]
+            if rhs in selector_names:
+                selector_names.add(lhs)
+
+    # Only a whole condition comparing the selector against a literal, so a compound one
+    # (`if preset = 2 and stereo`) is skipped rather than half-understood. Praat accepts `elif`
+    # as well as `elsif` (verified against 7.0.02); `Giant_FFT_Recomposer` writes `elif`
+    # throughout, and matching only `elsif` read its whole chain as one branch.
+    selector = "|".join(re.escape(n) for n in sorted(selector_names))
+    option_re = re.compile(rf"^(?:{selector})\s*=\s*(\d+)$")
+    guard_re = re.compile(rf"^(?:{selector})\s*(?:=|<>|<=|>=|<|>)\s*\S+$")
+    open_re = re.compile(r"^if\s+(.+)$")
+    else_re = re.compile(r"^(?:elsif|elif)\s+(.+)$")
 
     blocks: dict[int, dict[int, float]] = {}
+    # One entry per open `if`, holding whether that block's *current* condition tests the
+    # selector. A chain is frequently wrapped in `if preset > 1` -- four scripts do it -- and the
+    # branches inside are then indented. Reading them is safe exactly when every enclosing
+    # condition is about the same menu, since `preset = 3` implies `preset > 1`.
+    # `Advanced_Stereo_Panner` is why the check is not simply "is it indented": its chain sits
+    # under `if pan_mode = 1`, so its values hold in one mode only and are not the menu's answer.
+    guards: list[bool] = []
     current: int | None = None
+    depth: int | None = None
+
+    def start(option: int | None, level: int) -> None:
+        nonlocal current, depth
+        current, depth = option, level
+        if option is not None:
+            blocks.setdefault(option, {})
+
     for line in source.split("\n"):
-        match = head.match(line)
-        if match:
-            current = int(match.group(1))
-            blocks.setdefault(current, {})
+        stripped = line.strip()
+        if stripped.startswith("endif"):
+            if guards:
+                guards.pop()
+            if depth is not None and len(guards) < depth:
+                start(None, 0)
+            continue
+        chained = else_re.match(stripped)
+        if chained or stripped.startswith("else"):
+            condition = chained.group(1) if chained else ""
+            if guards:
+                guards[-1] = bool(guard_re.match(condition))
+            option = option_re.match(condition) if chained else None
+            # Same block as the branch being read, so this ends it and may open the next.
+            if depth is not None and len(guards) == depth:
+                start(int(option.group(1)) if option else None, depth)
+            elif option and all(guards[:-1]):
+                start(int(option.group(1)), len(guards))
+            continue
+        opened = open_re.match(stripped)
+        if opened:
+            condition = opened.group(1)
+            guards.append(bool(guard_re.match(condition)))
+            option = option_re.match(condition)
+            if option and all(guards[:-1]):
+                start(int(option.group(1)), len(guards))
             continue
         if current is None:
             continue
-        stripped = line.strip()
-        if stripped.startswith(("else", "endif")) and not stripped.startswith("elsif"):
-            current = None
+        # Only the branch's own body. An assignment inside a deeper `if` runs conditionally, so
+        # it is not what the menu sets.
+        if len(guards) != depth:
             continue
         assignment = ASSIGNMENT_RE.match(line)
         if assignment and assignment.group(1) in by_variable:
@@ -2703,6 +2870,7 @@ def check_stale_keys() -> list[str]:
 
 def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
     processes: list[Process] = []
+    preset_gaps: list[str] = []
     excluded: list[tuple[str, str, str]] = []  # (relative path, reason slug, detail)
 
     for path in sorted(PLUGIN.rglob("*.praat")):
@@ -2899,8 +3067,23 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
         # Preset row of its own -- tui-wave's saved parameter sets -- so two rows called
         # "Preset" sat one above the other with no way to tell which was which. This one is the
         # script's own, hence "Internal".
+        # Checked *before* the rename below: the check re-derives the selector from the preset
+        # param's label, and "Internal Preset" is not the name the script knows it by.
+        for proc in processes[first_new:]:
+            gap = preset_coverage_gap(proc, source)
+            if gap and rel_key not in PRESET_COVERAGE_EXEMPT:
+                preset_gaps.append(f"{rel_key}: {gap}")
+
         for row in preset_rows:
             row.name = "Internal Preset"
+
+    if preset_gaps:
+        raise SystemExit(
+            "preset coverage check failed -- an internal preset would move the sound while the\n"
+            "dialog kept showing the old numbers. Fix `extract_script_presets`, or add a\n"
+            "PRESET_COVERAGE_EXEMPT entry saying why the values are not the menu's answer.\n\n  "
+            + "\n  ".join(preset_gaps)
+        )
 
     return processes, excluded
 
