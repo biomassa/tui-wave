@@ -602,8 +602,8 @@ else
     else
       info "Optional: analysis libraries — ${BLUE}$missing${RESET} (the rest are already installed)"
     fi
-    info "  enables ${GREEN}AI Conductor Mix, Dereverberation, IdentitySeparation, Recomposer (x2),${RESET}"
-    info "  ${GREEN}ThermodynamicTransform, AcousticDNAResonator${RESET}"
+    info "  enables ${GREEN}AI Conductor Mix, Dereverberation, IdentitySeparation, Recomposer (x2)${RESET}"
+    info "  and ${GREEN}ThermodynamicTransform${RESET}"
     if confirm "Install the analysis libraries?"; then
       for pkg in $missing; do
         run_with_progress "installing ${BLUE}$pkg${RESET}" "$PIP" install --disable-pip-version-check \
@@ -625,7 +625,8 @@ else
     else
       info "Optional: machine-learning libraries — ${BLUE}$missing${RESET} (the rest are already installed)"
     fi
-    info "  enables ${GREEN}HierarchicalRecomposition${RESET} and ${GREEN}NeuralResynthesisVocoder${RESET}"
+    info "  enables ${GREEN}HierarchicalRecomposition, NeuralResynthesisVocoder${RESET}"
+    info "  and ${GREEN}AcousticDNAResonator${RESET}"
     info "  some ML processes additionally need model files you supply yourself"
     [ -n "$TORCH_INDEX" ] && info "  CPU builds of ${BLUE}torch${RESET}/${BLUE}torchaudio${RESET} — the CUDA ones add 2.7 GB nothing here uses"
     if confirm "Install the machine-learning libraries? (large download)"; then

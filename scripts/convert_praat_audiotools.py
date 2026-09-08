@@ -132,8 +132,19 @@ PY_ALLOWED_IMPORTS = {
     "torchaudio",
     "dac",
     "encodec",
-    "ddsp",
-    "gin",
+    #
+    # `ddsp` and `gin` are deliberately NOT here, for the reason `pedalboard` is not: the stack
+    # does not build on the Python these installers produce. `crepe`, which `ddsp` requires,
+    # does `import imp` while resolving its build requirements, and `imp` was removed in Python
+    # 3.12 -- so `pip install ddsp` dies at "Failed to build 'crepe'". TensorFlow, its other
+    # dependency, publishes no wheel past 3.13. `ddsp` therefore needs Python <= 3.11, while
+    # `PYTHON_CANDIDATES` prefers 3.13 and 3.12.
+    #
+    # Listing them would not buy the usual bargain either. That bargain is that the process
+    # appears and names its missing library when run, and `DDSPNeuralRevoicing` cannot: it calls
+    # `nocheck runSubprocess`, which swallows the helper's `ModuleNotFoundError`, so the user
+    # sees only "DDSP revoicing failed - no output produced". Measured 2026-09-07 on Python
+    # 3.14.7. One process depends on this stack; nothing else in the plugin imports either.
 }
 
 # Standard-library modules that mean the helper opens a window and waits for the user.
@@ -685,6 +696,19 @@ PAUSE_HOISTS: dict[str, dict] = {
         "lock_on": ["Edit_analysis_settings", "Edit_engine_settings"],
         "why": "two settings pages (wavelet analysis/triggers, then grain engine/output)",
     },
+    # Arrived new in the 2026-09-07 bump. One block, guarded by `if show_advanced`, holding the
+    # 13 fields the author kept off the main form "so the form fits on a laptop screen".
+    #
+    # Locked on, unlike `Pitch_Processor` above, because the guard here *is* a bare toggle that
+    # exists only to reveal the dialog -- there is no third meaning to preserve. Its own comment
+    # records the trap that makes the hoist safe to verify: under `praat --run` the block
+    # auto-continues and "creates NO variables, not even for `integer:` or `real:` fields", so
+    # every name it uses is already assigned from the chosen preset just above the guard. The
+    # hoisted assignments therefore overwrite values that are known-good rather than absent.
+    "py/SpectralPermute.praat": {
+        "lock_on": ["Show_advanced"],
+        "why": "advanced page (axis, bands, ordering, STFT, phase) kept off the main form",
+    },
 }
 
 # Scripts that ask for a folder with `chooseDirectory$`, hoisted into a `ParamKind::FolderPath`
@@ -856,6 +880,50 @@ def code_only(source: str) -> str:
 # whatever detector happened to fire next.
 CODE = "code"    # match against code_only(source)
 RAW = "raw"      # match against the source as written
+PATHS = "paths"  # match against without_interpreter_assignments(source)
+
+
+# A Praat string literal that names a Python interpreter rather than mentioning one, mirroring
+# `model::praat::python::is_interpreter_literal` on the Rust side. A command never contains
+# whitespace and the prose that mentions Python always does, which is the whole discriminator.
+def _is_interpreter_literal(literal: str) -> bool:
+    if not literal or any(c.isspace() for c in literal):
+        return False
+    name = re.split(r"[/\\]", literal)[-1]
+    if name.endswith(".exe"):
+        name = name[: -len(".exe")]
+    if name in ("py", "python"):
+        return True
+    rest = name[len("python"):] if name.startswith("python") else None
+    return bool(rest) and all(c.isdigit() or c == "." for c in rest)
+
+
+# `<var>$ = "<one plain literal>"`, the only shape the venv rewrite touches. Deliberately as
+# strict as `python::split_literal_assignment`: an assignment built by concatenation is left
+# alone there, so it must still count as a hardcoded path here.
+_INTERPRETER_ASSIGN_RE = re.compile(r'^([ \t]*[^=\n]*\$[ \t]*=[ \t]*)"([^"\n]*)"[ \t]*$', re.M)
+
+
+def without_interpreter_assignments(source: str) -> str:
+    """`source` with every Python-interpreter assignment blanked.
+
+    The `py` group's scripts resolve their own interpreter from a list of candidates, and
+    upstream writes the Windows one as a literal venv path (`C:/Users/user/.../python.exe`).
+    That is a hardcoded path by the letter of the `hardcoded_path` rule and not by its meaning:
+    `praat::runner` rewrites every one of these to the app-owned venv before the script runs
+    (`python::rewrite_for_venv`), so the path the author typed never reaches Praat.
+
+    Blanking them is what keeps the rule pointed at the paths that *do* survive -- a
+    `Read from file:` argument, an output folder on the author's disk. Without this,
+    `AcousticDNAResonator` left the catalog on the 2026-09-07 bump for a line the app repoints,
+    while its own helper needs only the ML tier this project already installs. `DDSPNeuralRevoicing`
+    carries the same line and is still excluded, now for its real obstacle -- see the note against
+    `ddsp` in `PY_ALLOWED_IMPORTS`.
+    """
+    def blank(m: re.Match) -> str:
+        return m.group(1) + '""' if _is_interpreter_literal(m.group(2)) else m.group(0)
+
+    return _INTERPRETER_ASSIGN_RE.sub(blank, source)
 
 # `<var>$ = chooseDirectory$` as a *statement*. Matched against `code_only`, so a script that
 # discusses the call in its changelog -- `CorpusMap` does, twice -- is not read as making it.
@@ -1091,7 +1159,10 @@ EXCLUSIONS: list[tuple[str, re.Pattern, str, str]] = [
         "hardcoded_path",
         re.compile(r"\"[A-Za-z]:[\\/]|/home/[a-z]+/|\.praat-dir"),
         "contains a hardcoded absolute path that only resolves on its author's machine",
-        RAW,
+        # Read past the interpreter assignments: those are rewritten to the app-owned venv
+        # before the script runs, so a Windows venv path in that position is not an obstacle.
+        # See `without_interpreter_assignments`.
+        PATHS,
     ),
 ]
 
@@ -1173,6 +1244,64 @@ def praat_variable(label: str) -> str:
     return label[:1].lower() + label[1:] if label else label
 
 
+def mentions_variable(code: str, variable: str) -> bool:
+    """Whether `code` reads `variable` as a whole identifier.
+
+    Mirrors `rewrite::mentions_variable`: a `$` or `.` before the match rules out a string
+    variable's tail and a field access, both different names that merely end the same way.
+    """
+    pattern = re.compile(rf"(?<![A-Za-z0-9_$.]){re.escape(variable)}(?![A-Za-z0-9_])")
+    return pattern.search(code) is not None
+
+
+PAUSE_FIELD_DEFAULT_RE = re.compile(r"\"([^\"]+)\"\s*,\s*([A-Za-z_]\w*\$?)\s*$")
+
+
+def field_default_variable(label: str, source: str) -> str | None:
+    """The bare variable a pause field passes as its **default**, if it passes one.
+
+    `positive: "Window size (ms)", window_size_ms` pre-fills the field from
+    `window_size_ms`, while Praat writes the user's answer to `window_size` -- the name derived
+    from the label, with the parenthetical dropped (verified against praat 7.0.02: a form field
+    `Window_size_(ms)` declares `window_size`, and `window_size_ms` is an unknown variable).
+
+    Mirrors `rewrite::default_expression_variable`, which is what the runtime rewrite already
+    uses to write the variable the script actually reads. Only the converter lacked it, so
+    `extract_script_presets` could not match a preset branch's `window_size_ms = 40` to the
+    "Window size (ms)" field and shipped no table at all.
+
+    Deliberately narrow, as on the Rust side: only a bare identifier counts. A default that is
+    an expression names no single variable to write back to.
+    """
+    quoted = f'"{label}"'
+    for line in source.split("\n"):
+        if quoted not in line:
+            continue
+        match = PAUSE_FIELD_DEFAULT_RE.search(line.strip())
+        if match and match.group(1) == label:
+            return match.group(2)
+    return None
+
+
+def preset_variable(label: str, source: str, code: str) -> str:
+    """The variable a preset branch must assign to move the field called `label`.
+
+    `praat_variable`'s answer -- what Praat derives -- unless the script shows the
+    label/variable defect, under `rewrite::corrected_variable`'s own guard: the derived name
+    must be read nowhere and the candidate must be read.
+    """
+    derived = praat_variable(label)
+    candidate = field_default_variable(label, source)
+    if (
+        candidate
+        and candidate != derived
+        and not mentions_variable(code, derived)
+        and mentions_variable(code, candidate)
+    ):
+        return candidate
+    return derived
+
+
 def extract_script_presets(source: str, params: list[Param]):
     """Return `(preset_index, custom_option, {option_index: {param_index: value}})`, or None.
 
@@ -1187,8 +1316,9 @@ def extract_script_presets(source: str, params: list[Param]):
     if preset_index is None:
         return None
 
+    code = code_only(source)
     variable = praat_variable(params[preset_index].name)
-    by_variable = {praat_variable(p.name): i for i, p in enumerate(params)}
+    by_variable = {preset_variable(p.name, source, code): i for i, p in enumerate(params)}
     # Only whole-line `if`/`elsif` comparisons against a literal, so a compound condition
     # (`if preset = 2 and stereo`) is skipped rather than half-understood.
     head = re.compile(rf"^(?:els)?if\s+{re.escape(variable)}\s*=\s*(\d+)\s*$")
@@ -1652,6 +1782,12 @@ ASSIGNMENT_RE = re.compile(
     r"^\s*(\w+\$?(?:#\[\d+\])?)\s*=\s*(\"[^\"]*\"|[-+]?[\d.]+(?:[eE][-+]?\d+)?)\s*$", re.M
 )
 
+# `if`/`endif` alone, not `for` or `while`: an assignment in a loop body still runs, while one
+# in a branch runs only if that branch is taken. `elsif`/`else` neither open nor close a block,
+# so they fall through both patterns and leave the depth where it is.
+CONDITIONAL_OPEN_RE = re.compile(r"^if[\s(]")
+CONDITIONAL_CLOSE_RE = re.compile(r"^endif\b")
+
 
 def script_variables(source: str, before: int | None = None) -> dict[str, str]:
     """`name = <literal>` assignments, optionally only those before offset `before`.
@@ -1666,8 +1802,28 @@ def script_variables(source: str, before: int | None = None) -> dict[str, str]:
     """
     text = source if before is None else source[:before]
     out: dict[str, str] = {}
-    for name, value in ASSIGNMENT_RE.findall(text):
-        out[name] = value.strip('"')
+    unconditional: set[str] = set()
+    depth = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if CONDITIONAL_CLOSE_RE.match(stripped):
+            depth = max(0, depth - 1)
+            continue
+        if CONDITIONAL_OPEN_RE.match(stripped):
+            depth += 1
+            continue
+        match = ASSIGNMENT_RE.match(line)
+        if not match:
+            continue
+        name, value = match.group(1), match.group(2).strip('"')
+        if depth:
+            # A branch may supply a value nothing else does, but it may not overrule one the
+            # script states outright.
+            if name not in unconditional:
+                out[name] = value
+        else:
+            out[name] = value
+            unconditional.add(name)
     return out
 
 
@@ -1717,6 +1873,13 @@ def split_label_and_value(rest: str, colon_form: bool) -> tuple[str | None, str]
 # whole script, which is how it was found.
 STRING_CAST_RE = re.compile(r"^string\$\s*\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)$")
 
+# `fixed$ (decorrelation, 2)` -- the same seeding as `string$`, with the decimal places the
+# author wants the field to open on. The second argument must be a literal count of digits: it
+# is formatting, and the value still comes from the identifier in the first.
+FIXED_CAST_RE = re.compile(
+    r"^fixed\$\s*\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*,\s*\d+\s*\)$"
+)
+
 
 def unwrap_string_cast(value: str) -> str:
     """`string$(minimum_frequency_Hz)` -> `minimum_frequency_Hz`, else the value unchanged.
@@ -1728,12 +1891,23 @@ def unwrap_string_cast(value: str) -> str:
     reported a "non-numeric default" (`AI & Adaptive/CWT_Granular_Resampler.praat`, whose two
     pages spell all seventeen numeric defaults this way).
 
-    Deliberately narrow: only a cast wrapping a single bare identifier. Anything else -- an
-    arithmetic expression, a nested call, `fixed$(x, 2)` -- is left alone to fail loudly as a
-    non-numeric default, which is the honest outcome for a value this cannot know.
+    `fixed$(x, 2)` is the same seeding with a decimal count attached, and resolves the same way:
+    the value is the identifier in the first argument, the second only says how many places to
+    show. `py/SpectralPermute.praat` (2026-09-07) spells three of its thirteen pause fields this
+    way and is the only script in the plugin that does. It was excluded on arrival, because one
+    unparseable field drops the whole block.
+
+    Deliberately narrow: a cast wrapping a single bare identifier, and for `fixed$` a literal
+    digit count beside it. Anything else -- an arithmetic expression, a nested call, a computed
+    precision -- is left alone to fail loudly as a non-numeric default, which is the honest
+    outcome for a value this cannot know.
     """
-    match = STRING_CAST_RE.match(value.strip())
-    return match.group(1) if match else value.strip()
+    value = value.strip()
+    for pattern in (STRING_CAST_RE, FIXED_CAST_RE):
+        match = pattern.match(value)
+        if match:
+            return match.group(1)
+    return value
 
 
 def parse_fields(body: str, variables: dict[str, str] | None = None) -> list[Param] | str:
@@ -2585,7 +2759,11 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
         # Each detector says which text it reads (see `CODE`/`RAW` above): a construct
         # detector must not read prose, and a string-contents detector must not have its
         # strings blanked out from under it.
-        scannable = {CODE: code_only(source), RAW: source}
+        scannable = {
+            CODE: code_only(source),
+            RAW: source,
+            PATHS: without_interpreter_assignments(source),
+        }
         rel_key = str(rel).replace("\\", "/")
         override = GUI_BLOCKING_OVERRIDES.get(rel_key)
         # A pause hoist answers `gui_blocking` the same way an override does, by removing the
@@ -2693,20 +2871,36 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
                 # emitter fall back to its wav/dual_wav default.
                 input_kind=zero_or_photo_input_kind(rel_key),
             ))
+        # Per built process, against that process's *own* params -- not the shared form list.
+        # A pause-hoisted script's preset branches assign the variables the hoist moved off the
+        # form, so matching against `params` (which holds only what the form declared) found
+        # nothing and the Preset row shipped inert. Measured before this: 304 preset values
+        # across 48 processes never reached the catalog, 10 of them with no table at all --
+        # `Stereo_Micro_Macro_Time_Collapser` cycled seven preset labels and moved nothing
+        # (user report, 2026-09-08). Per process rather than `processes[-1]` for the second
+        # half of the same bug: a `split_on` hoist turns one script into several entries, and
+        # only the last of them was getting a table.
+        preset_rows = []
         for proc in processes[first_new:]:
             proc.python_rewrite = needs_python_rewrite
-
-        presets = extract_script_presets(source, params)
-        if presets:
+            presets = extract_script_presets(source, proc.params)
+            if not presets:
+                continue
             index, custom, blocks = presets
-            processes[-1].preset_param = index
-            processes[-1].preset_custom_option = custom
-            processes[-1].script_presets = blocks
-            # Renamed *after* extraction, which maps assignments back to fields by their
-            # original label. The dialog already has a Preset row of its own -- tui-wave's saved
-            # parameter sets -- so two rows called "Preset" sat one above the other with no way
-            # to tell which was which. This one is the script's own, hence "Internal".
-            params[index].name = "Internal Preset"
+            proc.preset_param = index
+            proc.preset_custom_option = custom
+            proc.script_presets = blocks
+            preset_rows.append(proc.params[index])
+
+        # Renamed *after* every extraction, which maps assignments back to fields by their
+        # original label. `params = list(form_params)` is a shallow copy, so sibling entries of
+        # a split hoist share one Preset `Param` -- renaming inside the loop would leave
+        # `PRESET_NAME_RE` unable to find it on the next sibling. The dialog already has a
+        # Preset row of its own -- tui-wave's saved parameter sets -- so two rows called
+        # "Preset" sat one above the other with no way to tell which was which. This one is the
+        # script's own, hence "Internal".
+        for row in preset_rows:
+            row.name = "Internal Preset"
 
     return processes, excluded
 
@@ -3121,9 +3315,20 @@ def selftest() -> int:
     check("string$ unwrap -- space both sides", unwrap_string_cast("string$ ( x )"), "x")
     check("string$ unwrap -- plain name untouched", unwrap_string_cast("voices"), "voices")
     check("string$ unwrap -- literal untouched", unwrap_string_cast("60"), "60")
+    # `fixed$(x, N)` is the same seeding with a decimal count attached: the value is still the
+    # identifier, and N only says how many places the field opens showing. Three of
+    # `py/SpectralPermute.praat`'s thirteen pause fields spell it this way, and one unparseable
+    # field drops the whole block -- which is how the script arrived excluded on 2026-09-07.
+    check("fixed$ unwrap -- identifier and precision", unwrap_string_cast("fixed$(x, 2)"), "x")
+    check("fixed$ unwrap -- space before paren", unwrap_string_cast("fixed$ (decorrelation, 2)"),
+          "decorrelation")
+    check("fixed$ unwrap -- spaces throughout", unwrap_string_cast("fixed$ ( edge_fade_ms , 1 )"),
+          "edge_fade_ms")
     # Deliberately NOT unwrapped: this parser cannot evaluate these, and guessing is worse than
-    # the loud "non-numeric default" the caller reports.
-    for expr in ("string$(a + b)", "fixed$(x, 2)", "string$(f(x))", "string$(x) + y"):
+    # the loud "non-numeric default" the caller reports. A *computed* precision goes here too --
+    # the value is knowable but the field's shape is not.
+    for expr in ("string$(a + b)", "fixed$(a + b, 2)", "fixed$(x, places)", "string$(f(x))",
+                 "string$(x) + y"):
         check(f"string$ unwrap -- {expr} left alone", unwrap_string_cast(expr), expr)
 
     # --- the two together, which is the shape that actually arrived ------------------

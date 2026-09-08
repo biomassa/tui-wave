@@ -519,7 +519,12 @@ python_command$ = \"py\"
         // 2026-08-17, when the a7f9583 submodule bump brought `SPEAR_Fast_Resynthesis` — a new
         // py-group script with its own Tk editor, which is also the fifth entry in
         // `only_generative_praat_processes_open_a_new_buffer`'s interactive canary.
-        assert_eq!(flagged, 47, "the py group is 47 processes");
+        // 47 -> 48 on 2026-09-07: the 5e29c16 bump brought `SpectralPermute`, and narrowing
+        // `hardcoded_path` past the interpreter assignments returned `AcousticDNAResonator`,
+        // which upstream had just given a Windows venv path the app repoints anyway.
+        // `DDSPNeuralRevoicing` carries the same line and stays out, on its own obstacle: the
+        // `ddsp` stack does not build past Python 3.11. See `PY_ALLOWED_IMPORTS`.
+        assert_eq!(flagged, 48, "the py group is 48 processes");
     }
 
     /// End to end through the planner: a py-group process must come out asking for a rewritten
