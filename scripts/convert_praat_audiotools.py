@@ -262,6 +262,13 @@ GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
     "Time & Granular/Sound_atom_composer.praat": {
         "why": "chooseDirectory$ is a fallback for a blank Folder field, which cannot be blank",
     },
+    # New in the 2026-09-10 bump, the same fallback shape again: `if inputDirectory$ == ""`
+    # around the `chooseFolder$` call, and `Input_folder` is already a `sentence` field --
+    # `FOLDER_NAME_RE` turns it into a `folder_path` param automatically, so it is unpickable-
+    # empty and the fallback is unreachable.
+    "py/Spectral_Noise_Shaping.praat": {
+        "why": "chooseFolder$ is a fallback for a blank Input_folder field, which cannot be blank",
+    },
     # The only `View & Edit` here, and it sits under one option of one menu: pan mode 8 is a
     # two-pass "draw the pan curve by hand" workflow that opens a RealTier editor and asks the
     # user to come back. The other seven modes never touch it. Dropping that option leaves a
@@ -708,6 +715,24 @@ PAUSE_HOISTS: dict[str, dict] = {
     "py/SpectralPermute.praat": {
         "lock_on": ["Show_advanced"],
         "why": "advanced page (axis, bands, ordering, STFT, phase) kept off the main form",
+    },
+    # New in the 2026-09-10 bump. One block, guarded by `if advanced_settings`, holding the
+    # per-topology decay/damping/comb/early-reflection/output detail the two-field main form
+    # doesn't show. Locked on for the same reason as `SpectralPermute`: the guard is a bare
+    # toggle with no other meaning, and every field it hoists is seeded from the chosen
+    # topology/preset's own block just above the guard, so a run with the dialog untouched
+    # reproduces the same numbers it always did.
+    "Reverb/Historic_Reverberators.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "advanced page (decay, damping, comb/allpass, early reflections, output)",
+    },
+    # New in the same bump. Guarded by `boolean Edit_details 0`, a bare toggle with no other
+    # meaning, so locked on. Its own `endPause: "Cancel", "Run", 2, 1` already declares "Run"
+    # (button 2) as the default -- the auto-detected value -- so no `PAUSE_BUTTON_OVERRIDES`
+    # entry is needed; button 1 is the one that `exitScript`s.
+    "py/TinySOL_Retrieval.praat": {
+        "lock_on": ["Edit_details"],
+        "why": "details page (frame analysis, retrieval/render, descriptor weights, quality)",
     },
 }
 
@@ -1317,6 +1342,14 @@ PRESET_COVERAGE_EXEMPT: dict[str, str] = {
     "Spectral/Spectral_Effects_Suite.praat":
         "preset 1's Modulation_phase_span is set inside the PulsingDualRate effect branch, "
         "so it applies to one effect rather than to the preset",
+    # New in the 2026-09-10 bump: the same shape as `Advanced_Stereo_Panner` above, one level
+    # deeper. Each `if preset = N` branch sits inside `if topology = 1/2/3`, so option 2 means
+    # Schroeder Classic under topology 1, Moorer Classic under topology 2, and Gardner Small
+    # under topology 3 -- three different answers for the one index, not one the menu can state.
+    "Reverb/Historic_Reverberators.praat":
+        "preset branches sit under `if topology = 1/2/3`, so a preset index's values hold "
+        "within one topology only (option 2 is Schroeder Classic, Moorer Classic, or Gardner "
+        "Small depending on which topology is selected)",
 }
 
 
