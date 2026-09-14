@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-09-14 (2.11.11)
 
 ### Every internal preset now moves the dialog, and a check keeps it that way
 
