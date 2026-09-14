@@ -734,6 +734,31 @@ PAUSE_HOISTS: dict[str, dict] = {
         "lock_on": ["Edit_details"],
         "why": "details page (frame analysis, retrieval/render, descriptor weights, quality)",
     },
+    # New in the 2026-09-14 bump. Five `beginPause` blocks, only one of which is a bare
+    # "reveal a settings page" toggle: `Advanced_settings` gates analysis detail (band edges,
+    # block size, tail-compensation, start rule, trim margin, results table) that the script
+    # always uses at its own defaults whether or not the page is shown, so it is locked on --
+    # same shape as `SpectralPermute`/`Historic_Reverberators` above.
+    #
+    # The other three -- `Prepare_convolution_ready_IR`, `Creative_IR_processing`,
+    # `Audition_on_another_Sound` -- are deliberately **not** locked, for the reason
+    # `Pitch_Processor` above is not: each gates a whole optional extra stage (build a
+    # convolution-ready IR, sculpt it creatively, audition it through another Sound) that
+    # defaults off, and forcing all three on would turn every run of an IR analyser into a
+    # 4-stage pipeline nobody asked for. Left unlocked, their fields still hoist into the
+    # ordinary dialog -- editable, and live only once the user ticks the stage on, exactly
+    # the control's own meaning.
+    #
+    # The script's own header names the trap this avoids: under `praat --run` on 6.4.63+, a
+    # live `beginPause` does not segfault here, it terminates the whole script *silently* --
+    # exit 0, no message, no output -- which is why every one of these five blocks seeds its
+    # fields from a variable assigned just above the guard, the same idiom the hoist already
+    # depends on elsewhere.
+    "Analysis/IR_Analysis.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "advanced analysis page, plus three optional stages (prepare/sculpt/audition) "
+               "left unlocked since each defaults off and gates real extra processing",
+    },
 }
 
 # Scripts that ask for a folder with `chooseDirectory$`, hoisted into a `ParamKind::FolderPath`
@@ -2183,6 +2208,13 @@ def parse_fields(body: str, variables: dict[str, str] | None = None) -> list[Par
             if SILENCE_RE.match(name):
                 on = False
             params.append(Param(name=name, kind="toggle", default=on))
+        elif keyword == "folder":
+            # Praat's own colon-syntax field for a folder picker (verified against 7.0.02),
+            # first seen in `Universal_Audio_Export.praat`'s 2026-09 bump -- distinct from a
+            # `sentence`/`word`/`text` field that merely happens to be *named* like one, which
+            # is what `FOLDER_NAME_RE` below infers for. Here the keyword already says so, so
+            # there is nothing to infer: it becomes a `folder_path` unconditionally.
+            params.append(Param(name=name, kind="folder_path", default=0.0))
         elif keyword in NUMERIC_KEYWORDS:
             token = value_text.split()[0] if value_text else "0"
             try:
@@ -3633,6 +3665,18 @@ def selftest() -> int:
                 fields[1].default if len(fields) > 1 else None,
                 3.5,
             )
+
+    # --- `folder:` field ---------------------------------------------------------------
+    # Praat's own colon-syntax folder picker, first seen in `Universal_Audio_Export.praat`'s
+    # 2026-09 bump. Reaching it was "unsupported form field 'folder'", which dropped the whole
+    # script -- unlike `sentence`/`word`, whose folder-ness has to be inferred from the field's
+    # name, this keyword already says so.
+    fields = parse_fields('    folder: "Output folder", "."\n')
+    if isinstance(fields, str):
+        failures.append(f"folder field: refused to parse -- {fields}")
+    else:
+        check("folder field: one field", len(fields), 1)
+        check("folder field: kind", fields[0].kind if fields else None, "folder_path")
 
     for failure in failures:
         print(f"  FAIL  {failure}")
