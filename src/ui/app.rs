@@ -28984,6 +28984,30 @@ fn cdp_params_leading_rows(
     rows
 }
 
+/// The index of a script-declared preset menu the converter found **no table for** — a `Choice`
+/// param named `Preset...` (case-insensitively, mirroring the Python converter's
+/// `PRESET_NAME_RE`) while `def.preset_param` stayed `None`. `extract_script_presets` only
+/// leaves it `None` when the script's own branches assign nothing catalogue-visible; the row
+/// also stays named plain `"Preset"` in that case, since the rename to `"Internal Preset"`
+/// happens only on a successful extraction (see the converter's own `preset_rows` loop).
+///
+/// Real example: `HierarchicalRecomposition.praat`'s branches only set a name string
+/// (`presetName$ = "LatentCounterpoint"`) that reaches the Python engine, which maps it to real
+/// values *there* — its own comment says so ("preset values override the corresponding form
+/// controls in the engine"). Nothing about that is representable as `param = value` in the
+/// Praat script, so there is nothing for this app to preview (user report, 2026-09-14: picking
+/// a preset changed nothing on screen, having been mistaken at first for the chain-editor/
+/// pause-hoist extraction bugs already fixed elsewhere — a different, structural case).
+fn unresolved_preset_field(def: &crate::model::cdp::ProcessDef) -> Option<usize> {
+    if def.preset_param.is_some() {
+        return None;
+    }
+    def.params.iter().position(|p| {
+        matches!(p.kind, crate::model::cdp::ParamKind::Choice { .. })
+            && p.name.to_ascii_lowercase().starts_with("preset")
+    })
+}
+
 /// The display plan for the scrolling region: every field, with its notes and section headings
 /// interleaved in the order the source form declared them.
 ///
@@ -28996,6 +29020,7 @@ fn cdp_params_rows(
     width: usize,
 ) -> Vec<CdpParamsRow> {
     let mut rows = Vec::new();
+    let unresolved_preset = unresolved_preset_field(def);
     for i in 0..field_count {
         // Field 0's notes are the ones `cdp_params_leading_rows` did *not* pin above the Preset
         // row — see `cdp_leading_note_count`.
@@ -29003,6 +29028,16 @@ fn cdp_params_rows(
         let notes = def.param_notes.iter().filter(|n| n.before == i).skip(skip);
         push_cdp_param_notes(&mut rows, notes, width);
         rows.push(CdpParamsRow::Field(i));
+        if unresolved_preset == Some(i) {
+            let body = width.saturating_sub(CDP_NOTE_INDENT.len()).max(1);
+            for line in wrap_to_width(
+                "applied inside the script's own engine, not previewable here — the fields \
+                 below won't reflect what this picks",
+                body,
+            ) {
+                rows.push(CdpParamsRow::Note(format!("{CDP_NOTE_INDENT}{line}")));
+            }
+        }
     }
     push_cdp_param_notes(
         &mut rows,
@@ -33998,6 +34033,52 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 100, "expected many processes with script presets, saw {checked}");
+    }
+
+    /// `HierarchicalRecomposition.praat` declares a `Preset` menu whose branches assign only a
+    /// name string (`presetName$ = "LatentCounterpoint"`) for the Python engine to interpret --
+    /// nothing catalogue-visible, so `extract_script_presets` correctly builds no table and the
+    /// row stays named plain `"Preset"` rather than being renamed `"Internal Preset"`. A user
+    /// picking one of its options saw every other field hold still and, having seen that exact
+    /// symptom fixed elsewhere (the chain editor's preset row, the pause-hoist extractor), took
+    /// it for a regression of one of those (user report, 2026-09-14). It is neither -- there is
+    /// nothing here for this app to extract -- so the dialog should say so inline rather than
+    /// silently doing nothing.
+    #[test]
+    fn a_preset_menu_with_no_extracted_table_gets_an_inline_note() {
+        let mut app = new_app(Some(doc(0.25, 100)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "praat_py_hierarchicalrecomposition")
+            .expect("HierarchicalRecomposition is in the shipped catalog");
+        let def = app.cdp_catalog.processes[index].clone();
+        assert!(def.preset_param.is_none(), "this process is the fixture for the *unextracted* case");
+        assert_eq!(def.params[0].name, "Preset", "its row keeps the script's own, un-renamed label");
+
+        app.open_cdp_params(index);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 45)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(
+            text.contains("applied inside the script's own engine"),
+            "no inline note explaining the situation:\n{text}"
+        );
+    }
+
+    /// The counterpart: a process whose preset table *did* extract must not carry the note --
+    /// it would contradict a row that, in that case, genuinely does move the other fields.
+    #[test]
+    fn an_extracted_preset_table_gets_no_such_note() {
+        let mut app = new_app(Some(doc(0.25, 100)), None);
+        let index = hysteresis_index(&app);
+        assert!(app.cdp_catalog.processes[index].preset_param.is_some());
+        app.open_cdp_params(index);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 45)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(!text.contains("applied inside the script's own engine"), "must not appear:\n{text}");
     }
 
     /// Right must walk *up* through every preset and Left back *down* through them.

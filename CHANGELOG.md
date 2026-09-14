@@ -36,6 +36,19 @@ own reading of the script, not the code it examines, so a new idiom in a future 
 an error instead of as a menu that does nothing. A process whose values are correctly not in the
 table needs an entry that gives the reason.
 
+### A preset menu that changes nothing now says why
+
+Some scripts pick a preset by name only. The name goes to a Python engine inside the script, and
+the engine turns it into real values there, not in Praat code. The catalog builder cannot put
+those values in the dialog, because they are not in the script to find.
+
+`Hierarchical Neural Recomposition` works this way. Picking a preset there looked broken: no field
+on screen moved. It is not broken. The preset does change the render. The dialog just cannot show
+what will change.
+
+The dialog now says so, right under the preset row: "applied inside the script's own engine, not
+previewable here — the fields below won't reflect what this picks."
+
 ## 2026-09-08 (2.11.10)
 
 ### An internal preset now moves the parameters it sets
