@@ -392,6 +392,16 @@ fn apply_form_locks(
         // the 2026-08-22 bump are written that way.
         let position = lines.iter().position(|l| {
             let rest = l.trim().strip_prefix("boolean").unwrap_or("");
+            // The modern colon syntax quotes its label: `boolean: "Advanced_settings", 0`,
+            // first seen in `IR_Analysis.praat`'s 2026-09-14 bump. Every prior `lock_on` script
+            // used the classic `boolean Label value` shape, which is why this arm did not exist
+            // until a colon-syntax *main form* (not merely a pause page, which already goes
+            // through the same `parse_fields` either way) needed a field locked out of it.
+            if let Some(after_colon) = rest.strip_prefix(':') {
+                return after_colon.trim_start().strip_prefix('"').is_some_and(|after_quote| {
+                    after_quote.strip_prefix(label.as_str()).is_some_and(|after| after.starts_with('"'))
+                });
+            }
             let Some(rest) = rest.strip_prefix(char::is_whitespace) else { return false };
             rest.trim_start().strip_prefix(label.as_str()).is_some_and(|after| {
                 let after = after.strip_prefix(':').unwrap_or(after);
@@ -1396,11 +1406,40 @@ mod form_lock_tests {
         assert!(after_endform.starts_with("edit_details = 1"), "assigned after the form:\n{out}");
     }
 
+    /// The modern colon syntax quotes its label: `boolean: "Advanced_settings", 0`. Every
+    /// prior `lock_on` script used the classic `boolean Label value` shape, which is what let
+    /// this arm go unexercised until `IR_Analysis.praat` (2026-09-14) declared its main form
+    /// entirely in colon syntax — the field parsed into the catalog fine (the Python converter
+    /// already handles both), but this matcher only knew the classic one, so the run failed
+    /// "script's form no longer declares the boolean Advanced_settings" on a script that
+    /// plainly does.
+    #[test]
+    fn a_colon_syntax_form_field_is_still_found() {
+        let source = "form: \"Test\"\n    boolean: \"Advanced_settings\", 0\nendform\n\
+                      if advanced_settings\n    x = 1\nendif\n";
+        let out = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Advanced_settings".into(), 1.0)], None)
+            .expect("rewrites");
+
+        assert!(!out.contains("boolean: \"Advanced_settings\""), "the field must be gone:\n{out}");
+        let after_endform = out.split("endform\n").nth(1).expect("an endform");
+        assert!(after_endform.starts_with("advanced_settings = 1"), "assigned after the form:\n{out}");
+    }
+
     /// A label that shares a prefix with the locked one must not be mistaken for it — the match
     /// has to end on a whitespace boundary, not merely start with the name.
     #[test]
     fn a_longer_label_sharing_the_prefix_is_not_matched() {
         let source = "form Test\n    boolean Edit_details_extra 0\nendform\n";
+        let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Edit_details".into(), 1.0)], None)
+            .expect_err("must not match the longer label");
+        assert!(matches!(err, RewriteError::MissingFormLock { .. }));
+    }
+
+    /// The same boundary check, in colon syntax: `"Edit_details_extra"` must not satisfy a lock
+    /// on `Edit_details` merely because it starts with it.
+    #[test]
+    fn a_longer_colon_syntax_label_sharing_the_prefix_is_not_matched() {
+        let source = "form: \"Test\"\n    boolean: \"Edit_details_extra\", 0\nendform\n";
         let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Edit_details".into(), 1.0)], None)
             .expect_err("must not match the longer label");
         assert!(matches!(err, RewriteError::MissingFormLock { .. }));
