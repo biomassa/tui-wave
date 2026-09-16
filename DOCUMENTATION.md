@@ -816,6 +816,7 @@ Each process opens a form of fields.
 | `e` | Open the envelope, list, table or curve editor of that field |
 | `b` | Pick a buffer for a field that wants one |
 | `p` | Preview, from any row |
+| `Ctrl+B` | Apply to a new buffer, or replace the selection |
 | `Enter` | Run the process |
 | `Esc` | Go back one level |
 
@@ -837,6 +838,13 @@ key, not a reopen and a re-search.
 
 Apply runs the process on your selection, or on the whole file when nothing is selected, and
 splices the result back in.
+
+`Ctrl+B` makes Apply write the result to a new buffer instead. The source buffer does not
+change. The hints bar shows the current setting, and you can click it. The setting is saved in
+the config file. Some processes always write to a new buffer: synthesis, the multichannel
+processes, and the Praat processes that generate new material. For these, the hint shows
+`write to new buffer` in grey and `Ctrl+B` does nothing. The hint is not shown when you edit a
+chain step, because a chain has its own output setting.
 
 **Preview** hears the result first and changes nothing on disk. It loops, because one pass over
 a short selection decides nothing. `p` starts one from any row of the form. It stops on its own
