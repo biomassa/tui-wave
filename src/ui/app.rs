@@ -52502,6 +52502,11 @@ mod tests {
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
         assert!(!app.process_new_buffer, "Ctrl+B does nothing on a forced process");
+        render_params(&mut app);
+        let col = app.dialog_hints_text.find("Ctrl+B").expect("the hint is shown");
+        let col = app.dialog_hints_text[..col].chars().count() as u16;
+        app.handle_dialog_row_click(app.dialog_n_interactive, col, false);
+        assert!(!app.process_new_buffer, "a click on the greyed hint does nothing");
 
         let buffer = render_params(&mut app);
         let area = *buffer.area();
