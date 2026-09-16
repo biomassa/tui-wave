@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Apply can write to a new buffer.** Press `Ctrl+B` in a process dialog to write the result to
+  a new buffer and keep the source buffer unchanged. Press it again to replace the selection.
+  The hints bar shows the setting and you can click it. The setting is saved in the config file.
+  A process that always writes to a new buffer shows the hint in grey. An Airwindows effect
+  written to a new buffer keeps its full reverb tail.
+
 ## 2026-09-14 (2.11.11)
 
 ### Every internal preset now moves the dialog, and a check keeps it that way

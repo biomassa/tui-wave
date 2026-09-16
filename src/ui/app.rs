@@ -2172,6 +2172,17 @@ struct FormantBufferPicker {
 enum HintAction {
     Submit,
     Cancel,
+    ToggleNewBuffer,
+}
+
+/// What the params dialog's Ctrl+B hint shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NewBufferHint {
+    Hidden,
+    Splice,
+    NewBuffer,
+    /// The process always writes to a new buffer, so the toggle is greyed out.
+    Forced,
 }
 
 /// Which embedded file browser is currently on screen. At most one ever is, so this is a
@@ -2773,11 +2784,14 @@ fn cdp_params_accepts_char(fields: &[CdpField], focus: usize, naming_a_preset: b
     }
 }
 
-/// The narrowest a params dialog may render: enough for its own hints bar, whose longest form
-/// (`Enter:pick`, on a variadic process's extra-input row) is 55 columns plus two of border.
-/// A terminal narrower than this still clips — `width.min(area.width)` has the last word — but
-/// the dialog no longer chooses to.
+/// The narrowest a params dialog may render: enough for its own hints bar without the Ctrl+B
+/// hint (55 columns with `Enter:pick`) plus two of border. A terminal narrower than this still
+/// clips, because `width.min(area.width)` has the last word.
 const CDP_PARAMS_MIN_WIDTH: u16 = 57;
+
+/// Columns the Ctrl+B hint adds to the params hints bar, measured on its longer label so the
+/// dialog does not change width when the toggle flips.
+const CDP_PARAMS_NEW_BUFFER_HINT_WIDTH: u16 = "Ctrl+B:write to new buffer  ".len() as u16;
 
 fn cdp_params_preview_focus(field_count: usize, has_extra_input: bool) -> usize {
     field_count + has_extra_input as usize
@@ -3112,6 +3126,8 @@ pub struct App {
     /// `Config.time_ruler`. Toggled with `Action::ToggleTimeRuler` (View menu, no default
     /// keybinding).
     pub time_ruler: bool,
+    /// Mirrors `Config.process_new_buffer`: Apply in the params dialog writes to a new buffer.
+    pub process_new_buffer: bool,
     /// Set by `load_file_streaming` to ask the main loop to build the waveform pyramid on its
     /// next turn (`build_streaming_caches`).
     ///
@@ -5021,6 +5037,7 @@ impl App {
             graphics_mode: config.graphics_mode,
             dot_matrix_gradient: config.dot_matrix_gradient,
             time_ruler: config.time_ruler,
+            process_new_buffer: config.process_new_buffer,
             pending_cache_build: false,
             pending_streamed_save: None,
             pending_open: None,
@@ -7941,6 +7958,15 @@ impl App {
                     self.refresh_cdp_browser_filter();
                 }
             }
+            // Ctrl+B in the params dialog switches Apply between replacing the selection and
+            // writing to a new buffer. Hardcoded like the dialog's other keys; the global
+            // Ctrl+B (Technical Fades) never reaches here while a dialog is open.
+            KeyCode::Char('b') | KeyCode::Char('B')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(self.dialog, Some(Dialog::CdpParams { .. })) =>
+            {
+                self.toggle_process_new_buffer();
+            }
             // 'b' opens the "pick a buffer" picker for a focused `FormantBufferRef` field
             // (CDP-Ext-Plan.md Phase 5), or the file browser for a focused `FilePath` field
             // (only one ever applies to a given field, same "one returns false, falls
@@ -8423,12 +8449,12 @@ impl App {
         // motion keys (`Tab`, `←→`, `Space`) that name no outcome — now does nothing, which is
         // the right answer when there is nothing under the pointer to act on.
         if row >= self.dialog_n_interactive {
-            let key = match self.hint_segment_at(x_in_row) {
-                Some(HintAction::Submit) => KeyCode::Enter,
-                Some(HintAction::Cancel) => KeyCode::Esc,
+            let event = match self.hint_segment_at(x_in_row) {
+                Some(HintAction::Submit) => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                Some(HintAction::Cancel) => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                Some(HintAction::ToggleNewBuffer) => KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
                 None => return,
             };
-            let event = KeyEvent::new(key, KeyModifiers::NONE);
             if self.save_as_active {
                 self.handle_save_as_key(event);
             } else {
@@ -15297,13 +15323,11 @@ impl App {
         if matches!(purpose, crate::cdp::JobPurpose::Apply) {
             if let Some(cached) = &preview {
                 if Self::cdp_preview_matches(cached, &values, range, doc.sample_rate, second_doc_index, &variadic_docs, &formant_field_selections(&fields)) {
-                    // A zero-input process (SYNTH, or a Photo sonifier) has nothing to splice
-                    // into — same reasoning as the completion-side arm in `tick_cdp` — and may
-                    // have been previewed with no document open at all, in which case `idx`
-                    // names nothing in `self.documents` and `self.documents[idx]` below would
-                    // panic rather than merely mis-splice. The cached result becomes a new
-                    // buffer instead, exactly like a fresh run would.
-                    if matches!(def.input, IoKind::None | IoKind::Photo) {
+                    // The cached result goes to a new buffer when Ctrl+B asks for one or the
+                    // process always opens one. A zero-input process (SYNTH, a Photo sonifier)
+                    // is in the second group and may have been previewed with no document open,
+                    // so `self.documents[idx]` below would panic for it.
+                    if self.process_writes_new_buffer(&def) {
                         let bits_per_sample = self
                             .documents
                             .get(idx)
@@ -15821,17 +15845,15 @@ impl App {
 
                     match purpose {
                         crate::cdp::JobPurpose::Apply => {
-                            // A generative process defines its own length and rate, so its
-                            // result belongs in a new buffer rather than over the selection it
-                            // was launched from — the same "one new buffer per result" shape a
-                            // glob-output CDP process already uses. This is also what lets a
-                            // process synthesise at a rate other than the document's: there is
-                            // nothing to splice into, so nothing to refuse.
+                            // A new buffer when Ctrl+B asks for one, or when the process
+                            // always opens one (see `praat_opens_new_buffer`). A new buffer has
+                            // nothing to splice into, so a rate that differs from the
+                            // document's is not refused.
                             let opens_new_buffer = self
                                 .cdp_catalog
                                 .processes
                                 .get(pending.catalog_index)
-                                .is_some_and(Self::praat_opens_new_buffer);
+                                .is_some_and(|d| self.process_writes_new_buffer(d));
                             if opens_new_buffer {
                                 let bits_per_sample = self
                                     .documents
@@ -16051,6 +16073,37 @@ impl App {
                     };
 
                     match purpose {
+                        crate::cdp::JobPurpose::Apply
+                            if self
+                                .cdp_catalog
+                                .processes
+                                .get(pending.catalog_index)
+                                .is_some_and(|d| self.process_writes_new_buffer(d)) =>
+                        {
+                            // The new buffer holds the processed selection plus the whole tail.
+                            // Nothing follows it, so no dry audio is mixed into the tail.
+                            let bits_per_sample = self.documents[pending.doc_index].bits_per_sample;
+                            self.push_generated_document(Document {
+                                head_tail_marks: Vec::new(),
+                                channels: output.result,
+                                sample_rate: output.sample_rate,
+                                bits_per_sample,
+                                selection: None,
+                                cursor: 0,
+                                dirty: true,
+                                path: None,
+                                markers: Vec::new(),
+                                bext: None,
+                                stream: None,
+                            });
+                            self.viewport = None;
+                            self.rebuild_audio();
+                            self.rebuild_waveform_caches();
+                            self.dialog = None;
+                            if let Some(key) = &recent_key {
+                                Self::record_process_applied(key, &last_process_values, &Vec::new());
+                            }
+                        }
                         crate::cdp::JobPurpose::Apply => {
                             // The tail rings over whatever follows the selection rather than
                             // pushing it later — an insert effect's decay spilling into the
@@ -16839,6 +16892,43 @@ impl App {
     /// "do not hand-edit" header, so a column here would be reverted by the next converter run.
     /// The group test also reads the plugin's own taxonomy — a process filed under Generative &
     /// Synthesis generates — and the folder test reads a fact about the process's own inputs.
+    /// Whether a process always writes to a new buffer, whatever the Ctrl+B setting is.
+    /// CDP glob-output processes also do, but that is only known once they have run.
+    fn process_forces_new_buffer(def: &crate::model::cdp::ProcessDef) -> bool {
+        def.output_new_buffer
+            || matches!(def.input, crate::model::cdp::IoKind::None | crate::model::cdp::IoKind::Photo)
+            || Self::praat_opens_new_buffer(def)
+    }
+
+    /// Whether Apply in the params dialog writes this process's result to a new buffer.
+    fn process_writes_new_buffer(&self, def: &crate::model::cdp::ProcessDef) -> bool {
+        self.process_new_buffer || Self::process_forces_new_buffer(def)
+    }
+
+    /// The state of the Ctrl+B hint in the open params dialog. Hidden while the dialog edits a
+    /// chain step, because a step's result feeds the next step rather than a buffer.
+    fn cdp_params_new_buffer_hint(&self) -> NewBufferHint {
+        let Some(Dialog::CdpParams { catalog_index, .. }) = &self.dialog else {
+            return NewBufferHint::Hidden;
+        };
+        if self.cdp_chain_edit_target.is_some() {
+            return NewBufferHint::Hidden;
+        }
+        match self.cdp_catalog.processes.get(*catalog_index) {
+            None => NewBufferHint::Hidden,
+            Some(def) if Self::process_forces_new_buffer(def) => NewBufferHint::Forced,
+            Some(_) if self.process_new_buffer => NewBufferHint::NewBuffer,
+            Some(_) => NewBufferHint::Splice,
+        }
+    }
+
+    fn toggle_process_new_buffer(&mut self) {
+        if matches!(self.cdp_params_new_buffer_hint(), NewBufferHint::Splice | NewBufferHint::NewBuffer) {
+            self.process_new_buffer = !self.process_new_buffer;
+            self.save_config();
+        }
+    }
+
     fn praat_opens_new_buffer(def: &crate::model::cdp::ProcessDef) -> bool {
         if def.backend() != crate::model::cdp::def::Backend::Praat {
             return false;
@@ -18064,7 +18154,7 @@ impl App {
                     let recent_key = process_def.map(|d| d.key.clone());
                     // Read here rather than in the arm below, which needs `&mut self` and so
                     // can't still be holding the catalog borrow `process_def` is.
-                    let output_new_buffer = process_def.is_some_and(|d| d.output_new_buffer);
+                    let output_new_buffer = process_def.is_some_and(|d| self.process_writes_new_buffer(d));
                     let timing_tolerance = crate::commands::cdp::timing_tolerance(
                         process_def.map(|d| d.category).unwrap_or(crate::model::cdp::Category::Time),
                         crate::model::cdp::PvocSettings::default().points,
@@ -18138,12 +18228,9 @@ impl App {
                                 // already use, rather than being spliced into the selection —
                                 // there's no single "the result" to splice.
                                 //
-                                // A process declaring `output_new_buffer` (the multichannel
-                                // spatialisers) lands here too, with exactly one result: it has
-                                // a single "the result", but splicing it would rewrite the
-                                // source document's own channel count — see that field's doc
-                                // comment. Same destination, different reason, so the two share
-                                // an arm rather than duplicating the buffer-building below.
+                                // A single result also lands here when Ctrl+B asks for a new
+                                // buffer, or when the process declares `output_new_buffer` (the
+                                // multichannel spatialisers, which change the channel count).
                                 let bits_per_sample = self
                                     .documents
                                     .get(pending.doc_index)
@@ -18359,6 +18446,7 @@ impl App {
             graphics_mode: self.graphics_mode,
             dot_matrix_gradient: self.dot_matrix_gradient,
             time_ruler: self.time_ruler,
+            process_new_buffer: self.process_new_buffer,
             cdp_dir,
             praat_bin,
             praat_audiotools_dir,
@@ -23270,6 +23358,7 @@ impl App {
                     self.graphics_available(),
                     self.praat_picture.as_ref(),
                     blocked.as_deref(),
+                    self.cdp_params_new_buffer_hint(),
                 )
             })
             .unwrap_or_default();
@@ -23673,6 +23762,7 @@ impl App {
         match segment.split(':').next().unwrap_or("").trim() {
             "Enter" | "Ret" => Some(HintAction::Submit),
             "Esc" => Some(HintAction::Cancel),
+            "Ctrl+B" => Some(HintAction::ToggleNewBuffer),
             _ => None,
         }
     }
@@ -24680,6 +24770,7 @@ fn render_dialog(
     // Why the open `CdpParams` process can't run yet (see `App::cdp_params_blocker`), or
     // `None` when it can — shown in place of the error line, with Preview/Apply dimmed.
     blocked: Option<&str>,
+    new_buffer_hint: NewBufferHint,
 ) -> Vec<Rect> {
     match dialog {
         Dialog::MixToMono { inputs, focused, tanh_clip } => {
@@ -24779,7 +24870,7 @@ fn render_dialog(
             return render_cdp_params_dialog(
                 frame, area, def, fields, second_input.as_ref(), variadic_input.as_ref(), photo_input.as_ref(), *focus, error, preview,
                 presets, *preset_selected, save_prompt.as_ref(), *scroll, formant_buffers, blocked,
-                graphics_mode,
+                graphics_mode, new_buffer_hint,
             );
         }
         Dialog::CdpRunning { title, step_label, step_index, step_total, started, purpose, .. } => {
@@ -29164,6 +29255,7 @@ fn render_cdp_params_dialog(
     // Whether a bitmap can be put on screen at all (`App::graphics_available`). Only ever used
     // to grey the drawing toggles, which cannot produce anything visible without it.
     graphics_available: bool,
+    new_buffer_hint: NewBufferHint,
 ) -> Vec<Rect> {
     let Some(def) = def else { return Vec::new() };
     let (label_width, range_width, value_width) = cdp_params_column_widths(def);
@@ -29183,12 +29275,11 @@ fn render_cdp_params_dialog(
     // would fall off the right edge.
     let (slider_width, _) = cdp_params_slider_column(def, area.width);
     let number_width = cdp_params_number_width(def);
-    // The floor is the hints bar, not a round number: " \u{2190}\u{2192}:adjust  \u{2191}\u{2193}:field  p:preview  Enter:pick
-    // Esc:cancel" is 55 columns of text plus two of border, and a dialog narrower than that
-    // clips its own trailing hint (which is how `p:preview` was first noticed missing — the
-    // wrapped-error test lost `Esc:cancel` off the right edge the moment the bar grew).
+    // The floor is the width of the hints bar, so the dialog does not clip its own last hint.
+    let min_width = CDP_PARAMS_MIN_WIDTH
+        + if new_buffer_hint == NewBufferHint::Hidden { 0 } else { CDP_PARAMS_NEW_BUFFER_HINT_WIDTH };
     let width = (14 + label_width + range_width + slider_width + value_width)
-        .max(CDP_PARAMS_MIN_WIDTH as usize) as u16;
+        .max(min_width as usize) as u16;
     let width = width.min(area.width);
     let has_extra_input = cdp_has_extra_input(second_input, variadic_input, photo_input) as usize;
     // The inline error is the one piece of content that can be far wider than the form —
@@ -29706,18 +29797,32 @@ fn render_cdp_params_dialog(
     let unavailable_style = Style::default().fg(theme::ANNOTATION).bg(theme::SURFACE0);
     let preview_key_style = if preview_key_available { hint_style } else { unavailable_style };
     let preview_key_label_style = if preview_key_available { label_style } else { unavailable_style };
-    lines.push(Line::from(vec![
+    let mut hints = vec![
         Span::styled(" \u{2190}\u{2192}", hint_style),
         Span::styled(":adjust  ", label_style),
         Span::styled("\u{2191}\u{2193}", hint_style),
         Span::styled(":field  ", label_style),
         Span::styled("p", preview_key_style),
         Span::styled(":preview  ", preview_key_label_style),
+    ];
+    // The label names where Apply writes. Greyed when the process always opens a new buffer.
+    let new_buffer_label = match new_buffer_hint {
+        NewBufferHint::Hidden => None,
+        NewBufferHint::Splice => Some((":replace selection  ", hint_style, label_style)),
+        NewBufferHint::NewBuffer => Some((":write to new buffer  ", hint_style, label_style)),
+        NewBufferHint::Forced => Some((":write to new buffer  ", unavailable_style, unavailable_style)),
+    };
+    if let Some((label, key_style, text_style)) = new_buffer_label {
+        hints.push(Span::styled("Ctrl+B", key_style));
+        hints.push(Span::styled(label, text_style));
+    }
+    hints.extend([
         Span::styled("Enter", hint_style),
         Span::styled(enter_hint, label_style),
         Span::styled("Esc", hint_style),
         Span::styled(":cancel", label_style),
-    ]));
+    ]);
+    lines.push(Line::from(hints));
 
     frame.render_widget(Paragraph::new(lines), inner);
 
@@ -52343,6 +52448,109 @@ mod tests {
             _ => panic!("'p' should have started a preview run"),
         }
         app.cdp_runner.cancel();
+    }
+
+    fn render_params(app: &mut App) -> ratatui::buffer::Buffer {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 50)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn catalog_position(app: &App, key: &str) -> usize {
+        app.cdp_catalog.processes.iter().position(|p| p.key == key).expect(key)
+    }
+
+    #[test]
+    fn ctrl_b_switches_apply_to_a_new_buffer_and_persists_it() {
+        let _guard = crate::config::XDG_CONFIG_HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = std::env::temp_dir().join(format!("tui_wave_process_new_buffer_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &temp_dir) };
+
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_params(catalog_position(&app, "blur_avrg"));
+        render_params(&mut app);
+        assert!(app.dialog_hints_text.contains("Ctrl+B:replace selection"), "{}", app.dialog_hints_text);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert!(app.process_new_buffer);
+        assert!(Config::load().process_new_buffer, "the setting is written to disk");
+        assert!(matches!(app.dialog, Some(Dialog::CdpParams { .. })), "the dialog stays open");
+        render_params(&mut app);
+        assert!(app.dialog_hints_text.contains("Ctrl+B:write to new buffer"), "{}", app.dialog_hints_text);
+
+        let col = app.dialog_hints_text.find("Ctrl+B").unwrap();
+        let col = app.dialog_hints_text[..col].chars().count() as u16;
+        app.handle_dialog_row_click(app.dialog_n_interactive, col, false);
+        assert!(!app.process_new_buffer, "clicking the hint toggles it back");
+
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn a_process_that_always_opens_a_new_buffer_greys_the_toggle() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|d| d.output_new_buffer)
+            .expect("some process declares output_new_buffer");
+        app.open_cdp_params(index);
+        assert_eq!(app.cdp_params_new_buffer_hint(), NewBufferHint::Forced);
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert!(!app.process_new_buffer, "Ctrl+B does nothing on a forced process");
+
+        let buffer = render_params(&mut app);
+        let area = *buffer.area();
+        let color = (area.y..area.y + area.height)
+            .find_map(|y| {
+                let row: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
+                let byte_col = row.find("Ctrl+B:write to new buffer")?;
+                Some(buffer[(area.x + row[..byte_col].chars().count() as u16, y)].fg)
+            })
+            .expect("the hint shows 'write to new buffer'");
+        assert_eq!(color, theme::ANNOTATION);
+    }
+
+    #[test]
+    fn the_toggle_is_hidden_while_editing_a_chain_step() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_params(catalog_position(&app, "blur_avrg"));
+        app.cdp_chain_edit_target = Some(ChainEditTarget::Insert { parent: Vec::new(), index: 0 });
+        assert_eq!(app.cdp_params_new_buffer_hint(), NewBufferHint::Hidden);
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert!(!app.process_new_buffer);
+    }
+
+    #[test]
+    fn apply_from_a_cached_preview_writes_a_new_buffer_when_toggled() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.process_new_buffer = true;
+        let index = catalog_position(&app, "blur_avrg");
+        app.open_cdp_params(index);
+        let def = app.cdp_catalog.processes[index].clone();
+        let range = app.cdp_process_range(0, &def).unwrap();
+        let result = vec![vec![0.7_f32; 40]];
+        if let Some(Dialog::CdpParams { fields, preview, .. }) = app.dialog.as_mut() {
+            *preview = Some(CdpPreview {
+                values: fields.iter().map(CdpField::to_value).collect(),
+                range,
+                channels: result.clone(),
+                sample_rate: 44_100,
+                second_input_doc: None,
+                variadic_docs: Vec::new(),
+                formant_selections: formant_field_selections(fields),
+            });
+        }
+
+        app.cdp_run(crate::cdp::JobPurpose::Apply);
+
+        assert_eq!(app.documents.len(), 2, "the result is a new buffer");
+        assert_eq!(app.documents[1].channels, result);
+        assert!(app.documents[0].channels[0].iter().all(|s| *s == 0.1), "the source is untouched");
     }
 
     /// The hints bar says so, and greys the key exactly where it would be typed instead — asked

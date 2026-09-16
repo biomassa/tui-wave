@@ -36,6 +36,10 @@ pub struct Config {
     /// View menu (`Action::ToggleTimeRuler`, no default keybinding). Costs one terminal row
     /// of waveform height, which is why it's a toggle at all.
     pub time_ruler: bool,
+    /// Whether a process applied from the ExtProcess params dialog writes its result to a new
+    /// buffer instead of replacing the selection. Toggled with Ctrl+B in that dialog. Ignored
+    /// for processes that always open a new buffer.
+    pub process_new_buffer: bool,
     /// Path to the directory containing CDP (Composer's Desktop Project) binaries. Defaults
     /// to `~/cdp` (see `default_cdp_dir`, `~` resolved against the real `$HOME` at startup,
     /// not stored as a literal `~` — nothing downstream expands one) but still just a guess:
@@ -108,6 +112,7 @@ impl Default for Config {
             graphics_mode: true,
             dot_matrix_gradient: true,
             time_ruler: true,
+            process_new_buffer: false,
             cdp_dir: default_cdp_dir(),
             praat_bin: String::new(),
             praat_audiotools_dir: default_praat_audiotools_dir(),
@@ -357,6 +362,7 @@ mod tests {
             graphics_mode: false,
             dot_matrix_gradient: true,
             time_ruler: false,
+            process_new_buffer: true,
             cdp_dir: "/opt/cdp/bin".into(),
             praat_bin: "/usr/bin/praat".into(),
             praat_audiotools_dir: "/opt/audiotools".into(),
@@ -460,6 +466,7 @@ mod tests {
             graphics_mode: false,
             dot_matrix_gradient: true,
             time_ruler: false,
+            process_new_buffer: true,
             cdp_dir: String::new(),
             praat_bin: String::new(),
             praat_audiotools_dir: String::new(),
