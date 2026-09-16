@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-09-16 (2.12.0)
 
 - **Apply can write to a new buffer.** Press `Ctrl+B` in a process dialog to write the result to
   a new buffer and keep the source buffer unchanged. Press it again to replace the selection.
