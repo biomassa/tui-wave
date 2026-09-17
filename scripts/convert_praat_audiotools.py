@@ -409,6 +409,18 @@ PAUSE_HOISTS: dict[str, dict] = {
         "lock_on": ["Edit_operator_details"],
         "why": "three-page wizard (Routing/Ops 1-2, Ops 3-4, Ops 5-6 and Timing)",
     },
+    # New in the 2026-09-17 bump, and the same `boolean Edit_details 0` + `beginPause` shape as
+    # the `Edit_details` cluster below rather than the unconditional-page shape of the twelve
+    # that follow: `edit_details` guards the whole "Details" page (hexachord source, array
+    # operation, entry order, rhythm/rearticulation, register/decay, sample rate/output peak,
+    # random seed, MusicXML export), and the script assigns every one of those variables to its
+    # preset default just above the `if`, so a locked-on hoist changes nothing about what a run
+    # produces unless a field is touched. `endPause: "Run", 1` already names the only button as
+    # the default, so no `PAUSE_BUTTON_OVERRIDES` entry is needed.
+    "Generative & Synthesis/Babbitt_s_Combinatorial_Arrays.praat": {
+        "lock_on": ["Edit_details"],
+        "why": "Details page (hexachord source, array operation, rhythm, register, seed, MusicXML)",
+    },
     # The rest of the 2026-08 Generative rewrite, which gave twelve scripts the same shape:
     # the `form` became page one and every remaining setting moved into `beginPause` pages
     # ending in `endPause: "Run", 1` (or `"Next"` where there are several). Under `--run` that
