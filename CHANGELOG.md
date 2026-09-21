@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-09-21 (2.14.0)
 
 - **Renamed CDP processes now show their old name.** 234 CDP processes were renamed to
   plain-English titles, and each of them now ends with its old CDP name, after the family and a
