@@ -77,6 +77,52 @@ struct TitleOverridesFile {
     entries: Vec<TitleOverride>,
 }
 
+/// The old name to show after a renamed title, or `None` when it would add nothing.
+///
+/// A renamed process is still known by its old name in CDP's own documentation and in
+/// SoundThread, so the new title ends with it: `Granulate (Multi-Source) — modify / multi-brassage`.
+/// Search reads the title, so this also makes the old name findable.
+///
+/// The old name loses its leading family word, because the title already ends in that word
+/// (`modify` in the example). It is lowercase, so it reads as a note and not as a second title.
+/// `None` when the old name is empty after that, or says the same as the new title.
+fn old_name_note(old: &str, new: &str, bin: &str) -> Option<String> {
+    if old == new {
+        return None;
+    }
+    let rest = match old.get(..bin.len()) {
+        Some(head) if head.eq_ignore_ascii_case(bin) => {
+            let rest = &old[bin.len()..];
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) { rest.trim() } else { old }
+        }
+        _ => old,
+    };
+    let note = rest.to_lowercase();
+    // Compared without punctuation and case, so "Move Peak To Time" and "move-peak to time" match.
+    let words = |s: &str| -> String {
+        s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+    };
+    let suffix = format!(" — {bin}");
+    let base = new.strip_suffix(&suffix).unwrap_or(new);
+    if note.is_empty() || words(&note) == words(base) || words(&note) == words(new) {
+        return None;
+    }
+    Some(note)
+}
+
+/// The title a process shows after an override: the new title, then ` — <family>` if the new
+/// title does not already end with it, then ` / <old name>` when there is one.
+fn renamed_title(old: &str, new: &str, bin: &str) -> String {
+    let Some(note) = old_name_note(old, new, bin) else {
+        return new.to_string();
+    };
+    if new.ends_with(&format!(" — {bin}")) {
+        format!("{new} / {note}")
+    } else {
+        format!("{new} — {bin} / {note}")
+    }
+}
+
 /// Applies `text` (a `catalog_titles.toml`-shaped source) as title-only overrides onto
 /// `by_key`. Returns a warning (rather than erroring) on a parse failure, or when an
 /// override's `key` doesn't match any loaded process — the latter is the signal that a
@@ -88,7 +134,9 @@ fn apply_title_overrides(by_key: &mut [ProcessDef], text: &str) -> Option<String
             let mut missing = Vec::new();
             for over in parsed.entries {
                 match by_key.iter_mut().find(|p| p.key == over.key) {
-                    Some(existing) => existing.title = over.title,
+                    Some(existing) => {
+                        existing.title = renamed_title(&existing.title, &over.title, &existing.bin);
+                    }
                     None => missing.push(over.key),
                 }
             }
@@ -502,6 +550,42 @@ mod tests {
     /// blur's own "Blur" entry) trivially satisfy this too, so there's no exclusion list to
     /// maintain — this only ever needs updating if a new hand-authored entry's title
     /// forgets the bin name.
+    /// The old CDP-facing name follows the new one after the family, in lowercase and without
+    /// the family word: `modify / multi-brassage`.
+    #[test]
+    fn a_renamed_title_ends_with_its_old_name_after_the_family() {
+        assert_eq!(
+            renamed_title("Modify Multi-Brassage", "Granulate (Multi-Source) — modify", "modify"),
+            "Granulate (Multi-Source) — modify / multi-brassage"
+        );
+        // A new title without the family suffix gets one, so the old name always follows it.
+        assert_eq!(
+            renamed_title("Clip Fraction", "Clip Half-Waves", "clip"),
+            "Clip Half-Waves — clip / fraction"
+        );
+        // Nothing to add: the old name says the same as the new one, or nothing at all.
+        assert_eq!(
+            renamed_title("Retime Move Peak To Time", "Move Peak To Time — retime", "retime"),
+            "Move Peak To Time — retime"
+        );
+        assert_eq!(renamed_title("Blur", "Spectral Blur", "blur"), "Spectral Blur");
+        assert_eq!(renamed_title("Subtract", "Subtract", "subtract"), "Subtract");
+        // A family word only counts as a prefix when it is a whole word.
+        assert_eq!(
+            renamed_title("Pitchfork Chord", "Chord Tone — pitch", "pitch"),
+            "Chord Tone — pitch / pitchfork chord"
+        );
+    }
+
+    /// The process named in the report: it is still in the catalog, and its old name is now in
+    /// its title, so the browser search (which reads the title) finds it.
+    #[test]
+    fn multi_brassage_is_found_by_its_old_name() {
+        let (catalog, _) = CdpCatalog::load(None);
+        let sausage = catalog.processes.iter().find(|p| p.key == "modify_sausage").expect("modify_sausage");
+        assert_eq!(sausage.title, "Granulate (Multi-Source) — modify / multi-brassage");
+    }
+
     #[test]
     fn builtin_titles_reveal_their_own_cdp_binary() {
         use super::super::def::Backend;

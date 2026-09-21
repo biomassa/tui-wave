@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Renamed CDP processes now show their old name.** Each of the 317 processes that were renamed to
+  plain-English titles now ends with its old CDP name, after the family and a slash. For example,
+  "Modify Multi-Brassage" is now "Granulate (Multi-Source) — modify / multi-brassage". The browser
+  search reads the title, so typing the old name finds the process. A title stays as it is when the
+  old name says the same thing. Long titles are cut off on screen, but the search still matches
+  the hidden part.
+
 ## 2026-09-21 (2.13.0)
 
 ### One setup script, `setup.sh`

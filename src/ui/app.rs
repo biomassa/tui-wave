@@ -45177,6 +45177,21 @@ mod tests {
     /// fixes: `blur_avrg`'s key is "blur_avrg", and its description happens to say "adjacent
     /// channels" — a word neither its key nor its CDP-WASM-SUITE-style title ("Spectral
     /// Average — blur", see `CDP-WASM-SUITE-analysis.md`'s rename pass) mentions).
+    /// A CDP process renamed in the CDP-WASM-SUITE pass keeps its old name in its title, so
+    /// typing the old name in the browser finds it. "Modify Multi-Brassage" is now titled
+    /// "Granulate (Multi-Source) — modify / multi-brassage".
+    #[test]
+    fn search_finds_a_renamed_process_by_its_old_name() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let sausage = app.cdp_catalog.processes.iter().position(|p| p.key == "modify_sausage").expect("modify_sausage in catalog");
+        app.open_cdp_browser();
+        for c in "multi-brassage".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let Some(Dialog::CdpBrowser { entries, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(entries.contains(&sausage), "the old name \"multi-brassage\" must find the process");
+    }
+
     #[test]
     fn search_matches_process_name_not_description() {
         let mut app = new_app(Some(doc(0.1, 100)), None);

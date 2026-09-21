@@ -4,6 +4,11 @@
 # renames, applied). Safe to hand-edit; each entry only ever touches `title`, never the
 # rest of the process definition, so it survives catalog.toml being regenerated.
 #
+# The loader adds the old name after each new title: `Granulate (Multi-Source) -- modify /
+# multi-brassage`. It is derived from the generated catalog (`old_name_note` in catalog.rs), so
+# this file stays new-titles-only and the old name cannot go stale. Search reads the title, so
+# the old name is searchable.
+#
 # Titles that wouldn't otherwise reveal their own CDP binary get an "-- <bin>" suffix
 # (e.g. "Waveset Average -- distort") to satisfy
 # catalog::tests::builtin_titles_reveal_their_own_cdp_binary, which exists so a
