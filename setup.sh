@@ -8,6 +8,7 @@
 #     ./setup.sh --no-praat      # skip the installation of Praat itself
 #     ./setup.sh --no-build      # set up the environment only and leave the binary alone
 #     ./setup.sh --keep-build    # keep the Rust build directory (source builds only)
+#     ./setup.sh --rebuild       # build again even if the installed binary is up to date
 #     ./setup.sh --dry-run       # print every command, change nothing
 #
 # The script looks at what is beside it and does the matching work:
@@ -15,7 +16,9 @@
 #   * A source checkout (Cargo.toml is beside the script). The script installs the Rust
 #     toolchain and the build libraries if they are missing. Then it builds tui-wave and
 #     installs it to ~/.cargo/bin. The Rust build directory is about 500 MB. It is temporary,
-#     and the script deletes it when it ends.
+#     and the script deletes it when it ends. If the installed binary was built from exactly
+#     this source, the script skips the build. The compiled Airwindows library (28 MB) is kept in
+#     ~/.cache/tui-wave, so a build after a change to the Rust code does not compile the C++ again.
 #   * An unpacked release tarball (a tui-wave binary is beside the script). The script copies
 #     the binary to ~/.local/bin.
 #   * A .deb or .rpm package (this script is in /usr/share/tui-wave/), or the copy that is
@@ -69,11 +72,17 @@ SCRIPTS="$STATE/audiotools"
 VENV="$STATE/pyenv"
 CONFIG="$CONFIG_HOME/tui-wave/config.toml"
 
+# The cache folder. The build script of the Airwindows library (crates/airwindows-sys/build.rs)
+# keeps its compiled library here, and this script keeps the "installed from" stamp here.
+CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/tui-wave"
+STAMP_FILE="$CACHE_HOME/installed-from"
+
 ASSUME_YES=0
 WANT_PYTHON=1
 WANT_PRAAT=1
 WANT_BUILD=1
 KEEP_BUILD=0
+FORCE_BUILD=0
 DRY_RUN=0
 
 for arg in "$@"; do
@@ -83,6 +92,7 @@ for arg in "$@"; do
     --no-praat)    WANT_PRAAT=0 ;;
     --no-build)    WANT_BUILD=0 ;;
     --keep-build)  KEEP_BUILD=1 ;;
+    --rebuild)     FORCE_BUILD=1 ;;
     --dry-run)     DRY_RUN=1 ;;
     # Print the header up to the commit-pin note. That note is for the person who maintains
     # this file, not for the person who runs it.
@@ -346,6 +356,31 @@ tkinter_remedy() {
       fi
       ;;
   esac
+}
+
+# --- Has the source changed since the last install? ---------------------------------------
+
+# Print a checksum of the program that reads standard input.
+hash_stdin() {
+  if have sha256sum; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi
+}
+
+# Print one checksum that describes the source in this checkout, or print nothing when it cannot
+# be worked out (the folder is not a git checkout). The checksum changes when any of these change:
+# the commit, the commit of each submodule, a change to a tracked file (staged or not), or a new
+# file that git does not ignore.
+source_stamp() {
+  [ -e .git ] || return 1
+  have git || return 1
+  {
+    git rev-parse HEAD
+    git submodule status
+    git diff HEAD
+    git ls-files --others --exclude-standard -z | while IFS= read -r -d '' file; do
+      printf '%s\n' "$file"
+      cat "$file"
+    done
+  } 2>/dev/null | hash_stdin
 }
 
 # --- What is this run? --------------------------------------------------------------------
@@ -783,8 +818,27 @@ cleanup_build_dir() {
 # The trap runs when the script ends for any reason: success, error, or Ctrl+C.
 trap cleanup_build_dir EXIT
 
+# The binary that "cargo install" writes. The build is skipped only if this file exists and the
+# stamp shows that it was built from the source that is here now.
+INSTALLED_BIN="${CARGO_HOME:-$HOME/.cargo}/bin/tui-wave"
+SOURCE_STAMP=""
+UP_TO_DATE=0
 if [ "$BUILDING" = 1 ]; then
+  SOURCE_STAMP="$(source_stamp || true)"
+  if [ "$FORCE_BUILD" = 0 ] && [ -n "$SOURCE_STAMP" ] && [ -x "$INSTALLED_BIN" ] \
+     && [ "$(cat "$STAMP_FILE" 2>/dev/null || true)" = "$SOURCE_STAMP" ]; then
+    UP_TO_DATE=1
+  fi
+fi
+
+if [ "$UP_TO_DATE" = 1 ]; then
   step "Build and install tui-wave"
+  ok "already up to date: $INSTALLED_BIN was built from exactly this source"
+  info "use --rebuild to build it again"
+elif [ "$BUILDING" = 1 ]; then
+  step "Build and install tui-wave"
+  # Remove the stamp first. If the build fails or stops, the next run must build again.
+  [ "$DRY_RUN" = 1 ] || rm -f "$STAMP_FILE"
   # cargo install --path . builds in a target directory and leaves it there. That directory
   # is about 500 MB. The installed binary does not need it, and on a machine where nobody
   # expects it, it fills the disk. So the build goes to a temporary directory that the script
@@ -801,6 +855,7 @@ if [ "$BUILDING" = 1 ]; then
       BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tui-wave-build.XXXXXX")" || die "could not make a temporary build directory"
     fi
     info "build files go to $BUILD_DIR and are deleted when the script ends"
+    info "the compiled Airwindows library is kept in $CACHE_HOME/airwindows (28 MB), so it is not compiled again"
     info "(use --keep-build to keep them in ./target instead)"
     info "cargo install --path . (release build, a few minutes the first time)"
     run cargo install --path . --locked --target-dir "$BUILD_DIR"
@@ -808,10 +863,18 @@ if [ "$BUILDING" = 1 ]; then
     [ "$DRY_RUN" = 1 ] && BUILD_DIR=""
   fi
   if [ "$DRY_RUN" = 0 ]; then
-    if have tui-wave; then
-      ok "installed: $(command -v tui-wave)"
-    else
-      warn "installed to ~/.cargo/bin, which is not on your PATH. Add it to your shell profile."
+    ok "installed: $INSTALLED_BIN"
+    # Another tui-wave that comes first on PATH (for example one from a .deb) hides this one.
+    first_on_path="$(command -v tui-wave || true)"
+    if [ -z "$first_on_path" ]; then
+      warn "$(dirname "$INSTALLED_BIN") is not on your PATH. Add it to your shell profile."
+    elif [ "$first_on_path" != "$INSTALLED_BIN" ]; then
+      warn "another tui-wave comes first on your PATH: $first_on_path"
+      info "it hides the one that was just installed. Remove it, or put $(dirname "$INSTALLED_BIN") first on PATH."
+    fi
+    # Save the stamp. It says which source the installed binary was built from.
+    if [ -n "$SOURCE_STAMP" ]; then
+      mkdir -p "$CACHE_HOME" && printf '%s\n' "$SOURCE_STAMP" > "$STAMP_FILE" || true
     fi
     if [ "$KEEP_BUILD" = 0 ]; then
       cleanup_build_dir

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **`setup.sh` no longer builds again when nothing changed.** It saves a checksum of the source
+  after each install. If you run it again and the source is the same, and the installed binary is
+  still there, it skips the build. Use `--rebuild` to build anyway. It also warns when another
+  `tui-wave` comes first on your `PATH` and hides the new one.
+- **A release build reuses the compiled Airwindows library.** The library is 28 MB and takes
+  minutes to compile. Since `setup.sh` builds in a temporary folder that it deletes, every install
+  compiled it again. The build script now keeps the library in `~/.cache/tui-wave/airwindows`,
+  named by a checksum of the sources, the compiler, its flags, and the target. A change to the
+  Rust code then builds in about a minute. Only release builds use the cache, and it holds one
+  file. It is safe to delete. Set `TUI_WAVE_NO_BUILD_CACHE=1` to turn it off.
+
 ## 2026-09-21 (2.14.0)
 
 - **Renamed CDP processes now show their old name.** 234 CDP processes were renamed to

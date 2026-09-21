@@ -72,8 +72,10 @@ It installs the toolchain, the build libraries, Praat, the praatAudioTools scrip
 optional Python environment. Then it builds and installs tui-wave. It asks before any step that
 needs `sudo`. `--dry-run` shows every command and changes nothing. The script never changes your
 system Python. It deletes its Rust build files (about 500 MB) when it ends. Use `--keep-build` to
-keep them. It does not install CDP, because those programs are a separate licensed download (see
-below).
+keep them. It skips the build when the installed binary already comes from the same source. Use
+`--rebuild` to build anyway. It keeps the compiled Airwindows library (28 MB) in
+`~/.cache/tui-wave`, so a later build does not compile the C++ code again. It does not install
+CDP, because those programs are a separate licensed download (see below).
 
 Everything after this section is what that script automates, for anyone who would rather do it
 by hand.

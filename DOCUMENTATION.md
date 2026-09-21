@@ -57,7 +57,11 @@ environment for the `py` process group, after it asks you. Then it builds and in
 It asks before any step that needs `sudo`. `./setup.sh --dry-run` prints every command and
 changes nothing. The script builds in a temporary folder and deletes that folder when it ends. So
 the 500 MB of Rust build files do not stay on your disk. Use `--keep-build` if you want to keep
-them in `./target`. The script does not install CDP, which is a separate licensed download.
+them in `./target`. If the installed binary already comes from exactly this source, the script
+skips the build. Use `--rebuild` to build anyway. The compiled Airwindows library (28 MB) stays in
+`~/.cache/tui-wave/airwindows`, so a later build does not compile the C++ code again. You can
+delete that folder at any time. The script does not install CDP, which is a separate licensed
+download.
 
 Everything you may want to install lives in this section: tui-wave itself, and the two optional
 external tool suites it can drive. Only tui-wave is required — it opens, edits, plays and saves
