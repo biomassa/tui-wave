@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-09-21 (2.13.0)
 
 ### One setup script, `setup.sh`
 
