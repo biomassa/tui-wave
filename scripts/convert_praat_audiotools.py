@@ -421,6 +421,30 @@ PAUSE_HOISTS: dict[str, dict] = {
         "lock_on": ["Edit_details"],
         "why": "Details page (hexachord source, array operation, rhythm, register, seed, MusicXML)",
     },
+    # New in the 2026-09-21 bump: four scripts with one `if <toggle>` guarding one `beginPause`
+    # page that ends `endPause: "Cancel", "Continue", 2, 1` (Evolving_Convolution_Field says
+    # "OK"). The declared default is button 2, the one that continues, so no
+    # `PAUSE_BUTTON_OVERRIDES` entry is needed. Button 1 only calls `exitScript`. Each script
+    # assigns every page variable above the `if`, so a locked-on hoist starts from the same
+    # defaults a run without the page would use.
+    # `IRCAM_Pan_to_Binaural` was a working catalog entry before this bump. The bump added the
+    # page, and without a hoist it left the catalog as `gui_blocking`.
+    "py/IRCAM_Pan_to_Binaural.praat": {
+        "lock_on": ["Advanced_movement_settings"],
+        "why": "movement details page (chunk duration, crossfade)",
+    },
+    "Analysis/Correlation-Based_Pitch_Class_Extraction.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "advanced page (pitch analysis, gate, templates, mask)",
+    },
+    "Analysis/SpectraScore.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "advanced settings page (search, peaks, microtone precision)",
+    },
+    "Spectral/Evolving_Convolution_Field.praat": {
+        "lock_on": ["advanced_options"],
+        "why": "advanced page, pre-filled from the character preset",
+    },
     # The rest of the 2026-08 Generative rewrite, which gave twelve scripts the same shape:
     # the `form` became page one and every remaining setting moved into `beginPause` pages
     # ending in `endPause: "Run", 1` (or `"Next"` where there are several). Under `--run` that
