@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-09-21 (2.14.0)
 
 - **`setup.sh` no longer builds again when nothing changed.** It saves a checksum of the source
   after each install. If you run it again and the source is the same, and the installed binary is
@@ -12,9 +12,6 @@
   named by a checksum of the sources, the compiler, its flags, and the target. A change to the
   Rust code then builds in about a minute. Only release builds use the cache, and it holds one
   file. It is safe to delete. Set `TUI_WAVE_NO_BUILD_CACHE=1` to turn it off.
-
-## 2026-09-21 (2.14.0)
-
 - **Renamed CDP processes now show their old name.** 234 CDP processes were renamed to
   plain-English titles, and each of them now ends with its old CDP name, after the family and a
   slash. For example, "Modify Multi-Brassage" is now "Granulate (Multi-Source) — modify /
