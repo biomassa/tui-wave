@@ -90,7 +90,7 @@ PY_ALLOWED_IMPORTS = {
     "numpy",
     "scipy",
     "soundfile",
-    # The optional extras `install.sh` offers, needed only by the interactive editors:
+    # The optional extras `setup.sh` offers, needed only by the interactive editors:
     # `sounddevice` for Arranger and Performance Launcher, `PIL` (pillow) for Spectral Eraser.
     # Listing them here means those three appear in the browser whether or not the extras were
     # installed -- and if they were not, the script's own dependency check reports it by name.
@@ -101,7 +101,7 @@ PY_ALLOWED_IMPORTS = {
     # Praat` could not work even with it installed.
     "sounddevice",
     "PIL",
-    # ---- The optional tiers `install.sh` and `setup-environment.sh` offer -----------------
+    # ---- The optional tiers `setup.sh` offers -----------------
     #
     # Same bargain as `sounddevice`/`PIL` above, and for the same reason: a process listed here
     # appears in the browser whether or not its library was installed, and if it was not, the

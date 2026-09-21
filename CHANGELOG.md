@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+### One setup script, `setup.sh`
+
+- **`setup.sh` replaces `install.sh` and `setup-environment.sh`.** One script now installs and
+  configures tui-wave. It looks at what is beside it. From a source checkout it builds and
+  installs tui-wave. From a macOS tarball it copies the binary to `~/.local/bin`. From a `.deb`,
+  an `.rpm`, or the copy on the release page it sets up the environment only. Every mode then
+  sets up Praat, the praatAudioTools scripts, the `praat_audiotools_dir` setting, and the Python
+  environment.
+- **A source build no longer leaves Praat "version mismatch" warnings.** `install.sh` never
+  wrote `praat_audiotools_dir`. A config left by an earlier `setup-environment.sh` kept pointing
+  at an old clone, so the scripts did not match the new catalog. `setup.sh` fetches the scripts at
+  the pinned commit and rewrites that setting on every run.
+- **The Rust build files are deleted after a source build.** `cargo install --path .` left about
+  500 MB in `./target`. `setup.sh` builds in a temporary folder and removes it when it ends, also
+  when the build fails. A `./target` folder that you already have is not touched. Use
+  `--keep-build` to build in `./target` and keep it.
+- The packages and the release tarballs now carry `setup.sh`. The `.deb` and `.rpm` install it to
+  `/usr/share/tui-wave/setup.sh`.
+
+### Praat scripts and Airwindows
+
+- **praatAudioTools updated to `90642e2`.** New: `Correlation-Based_Pitch_Class_Extraction`,
+  `SpectraScore` (replaces `SpectraScore - Orchestration Matcher`, which upstream deleted), and
+  `Evolving_Convolution_Field`. The catalog has 482 Praat processes. The old process key
+  `praat_analysis_spectrascore_orchestration_matcher` no longer exists.
+- **Advanced settings pages now work for four scripts.** `IRCAM_Pan_to_Binaural` and the three new
+  scripts above have their advanced settings on a pause page. Praat cannot show a pause page when
+  a script runs without a window. The settings are now normal parameters in the process dialog.
+- **Two `SpectraScore` controls now work.** The labels "Peak floor dB" and "Minimum peak prominence
+  dB" set variables that the script never reads. The two controls did nothing. tui-wave now
+  sets the variables that the script reads.
+- **Babbitt's Combinatorial Arrays** is now a process. Its Details page has the same fix.
+- **Airwindows updated to `b6eef0a`.** New effect: `Ultralight2`.
+
 ## 2026-09-16 (2.12.0)
 
 - **Apply can write to a new buffer.** Press `Ctrl+B` in a process dialog to write the result to

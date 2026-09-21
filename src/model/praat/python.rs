@@ -3,7 +3,7 @@
 //! ## The problem
 //!
 //! The 34 `py`-group processes shell out to a sibling `.py` helper, so they need `numpy`,
-//! `scipy` and `soundfile`. `install.sh` puts those in a virtual environment the app owns, and
+//! `scipy` and `soundfile`. `setup.sh` puts those in a virtual environment the app owns, and
 //! the runner prepends that venv's `bin` to the Praat child's `PATH`.
 //!
 //! That works on Linux and only on Linux, for a reason the scripts make plain:

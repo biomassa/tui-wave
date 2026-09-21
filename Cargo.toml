@@ -88,20 +88,20 @@ assets = [
     ["target/release/tui-wave", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/tui-wave/README.md", "644"],
     ["THIRD_PARTY_NOTICES.md", "usr/share/doc/tui-wave/THIRD_PARTY_NOTICES.md", "644"],
-    ["setup-environment.sh", "usr/share/tui-wave/setup-environment.sh", "755"],
+    ["setup.sh", "usr/share/tui-wave/setup.sh", "755"],
     ["packaging/tui-wave.desktop", "usr/share/applications/tui-wave.desktop", "644"],
     ["icon.png", "usr/share/icons/hicolor/256x256/apps/tui-wave.png", "644"],
 ]
 
 # cargo-generate-rpm. Unlike cargo-deb this does *not* auto-resolve dependencies from the
 # binary, so ALSA is named explicitly — `alsa-lib` is the runtime package on Fedora/RHEL and
-# openSUSE alike (`alsa-lib-devel` is the build-time one install.sh asks for).
+# openSUSE alike (`alsa-lib-devel` is the build-time one setup.sh asks for).
 [package.metadata.generate-rpm]
 assets = [
     { source = "target/release/tui-wave", dest = "/usr/bin/tui-wave", mode = "755" },
     { source = "README.md", dest = "/usr/share/doc/tui-wave/README.md", mode = "644" },
     { source = "THIRD_PARTY_NOTICES.md", dest = "/usr/share/doc/tui-wave/THIRD_PARTY_NOTICES.md", mode = "644" },
-    { source = "setup-environment.sh", dest = "/usr/share/tui-wave/setup-environment.sh", mode = "755" },
+    { source = "setup.sh", dest = "/usr/share/tui-wave/setup.sh", mode = "755" },
     { source = "packaging/tui-wave.desktop", dest = "/usr/share/applications/tui-wave.desktop", mode = "644" },
     { source = "icon.png", dest = "/usr/share/icons/hicolor/256x256/apps/tui-wave.png", mode = "644" },
 ]

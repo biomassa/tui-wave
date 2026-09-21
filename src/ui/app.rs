@@ -9448,7 +9448,7 @@ impl App {
         let (expected, found) =
             crate::praat::runner::checkout_staleness(&self.config.praat_audiotools_path())?;
         Some(format!(
-            "scripts are at {} but this build expects {} — re-run setup-environment.sh",
+            "scripts are at {} but this build expects {} — re-run setup.sh",
             &found[..7.min(found.len())],
             &expected[..7.min(expected.len())],
         ))

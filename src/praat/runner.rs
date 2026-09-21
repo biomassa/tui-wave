@@ -709,7 +709,7 @@ pub fn catalog_commit() -> Option<&'static str> {
 ///
 /// Reads `.git` directly rather than shelling out to `git`: this runs on a UI path, `git` may
 /// not be installed, and the two files involved are trivial to parse. A detached HEAD — which is
-/// what `setup-environment.sh` produces, since this is a pinned dependency — holds the SHA
+/// what `setup.sh` produces, since this is a pinned dependency — holds the SHA
 /// itself; a branch holds `ref: refs/heads/...`, which is one more file read.
 pub fn checkout_commit(dir: &Path) -> Option<String> {
     let head = std::fs::read_to_string(dir.join(".git").join("HEAD")).ok()?;
@@ -750,11 +750,10 @@ pub fn checkout_staleness(dir: &Path) -> Option<(String, String)> {
 /// What to tell a user who has no praatAudioTools scripts. Named once so every path that can
 /// report the condition says the same thing.
 pub const SETUP_HINT: &str = "About 439 of this app's processes are scripts from the \
-praatAudioTools project, which the packages do not bundle. Run setup-environment.sh to fetch \
-them: it is in /usr/share/tui-wave/ if you installed a .deb or .rpm, beside the binary if you \
-unpacked a tarball, and attached to every release at \
-https://github.com/biomassa/tui-wave/releases. Or set praat_audiotools_dir in the config to \
-your own checkout.";
+praatAudioTools project, which the packages do not bundle. Run setup.sh to fetch them: it is \
+in /usr/share/tui-wave/ if you installed a .deb or .rpm, beside the binary if you unpacked a \
+tarball, and attached to every release at https://github.com/biomassa/tui-wave/releases. Or \
+set praat_audiotools_dir in the config to your own checkout.";
 
 pub fn validate_audiotools_dir(dir: &Path) -> Result<(), String> {
     // An empty path renders as nothing at all, so the generic message below became the
@@ -1167,7 +1166,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&state);
     }
 
-    /// `setup-environment.sh` pins the praatAudioTools commit it checks out, and that pin must
+    /// `setup.sh` pins the praatAudioTools commit it checks out, and that pin must
     /// equal the one this build's catalog was generated from.
     ///
     /// The catalog carries every script's parameter order, and Praat fills a `form`
@@ -1178,17 +1177,17 @@ mod tests {
     fn praat_setup_commit_matches_the_catalog() {
         let expected = catalog_commit().expect("the catalog header names its source commit");
         let script = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("setup-environment.sh"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("setup.sh"),
         )
-        .expect("setup-environment.sh ships with the repo");
+        .expect("setup.sh ships with the repo");
         let pinned = script
             .lines()
             .find_map(|l| l.trim().strip_prefix("PINNED_COMMIT="))
             .map(|v| v.trim().trim_matches('"').to_string())
-            .expect("setup-environment.sh declares PINNED_COMMIT");
+            .expect("setup.sh declares PINNED_COMMIT");
         assert_eq!(
             pinned, expected,
-            "setup-environment.sh checks out {pinned}, but this build's catalog was generated \
+            "setup.sh checks out {pinned}, but this build's catalog was generated \
              from {expected} — re-run update-praat-scripts.sh and update PINNED_COMMIT together"
         );
     }

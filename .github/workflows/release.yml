@@ -4,7 +4,7 @@
 #   macOS Apple Silicon  tui-wave-<ver>-aarch64-apple-darwin.tar.gz
 #   Debian/Ubuntu        tui-wave_<ver>_amd64.deb
 #   Fedora/RHEL/SUSE     tui-wave-<ver>-1.x86_64.rpm
-#   Every release        setup-environment.sh (standalone, and inside each package)
+#   Every release        setup.sh (standalone, and inside each package)
 #
 # No AppImage: it is a single self-contained file with no room for the praatAudioTools scripts
 # or a setup script, and tui-wave without its Praat and CDP integrations is not worth shipping.
@@ -12,7 +12,7 @@
 # **Linux and macOS only.** Windows is not a target: the terminal there cannot give this program
 # the graphics-protocol image output or the mouse reporting the editor is built around, and a
 # waveform editor without either is not worth shipping. Every artifact therefore ships the binary
-# alone and leaves setup-environment.sh to clone praatAudioTools at the pinned commit.
+# alone and leaves setup.sh to clone praatAudioTools at the pinned commit.
 #
 # Triggered by a `v*` tag, or by hand from the Actions tab (`workflow_dispatch`) — the manual
 # run builds and uploads artifacts but publishes no Release, which is what makes it safe to use
@@ -110,7 +110,7 @@ jobs:
           mkdir -p "$staging"
           cp "target/${{ matrix.target }}/release/tui-wave" "$staging/"
           cp README.md CHANGELOG.md LICENSE THIRD_PARTY_NOTICES.md \
-             install.sh setup-environment.sh "$staging/"
+             setup.sh "$staging/"
           # Reproducible-ish: sort entries and zero the mtimes, so rebuilding the same tag
           # produces the same tarball rather than one differing only by timestamps.
           tar --format=ustar -czf "${staging}.tar.gz" "$staging"
@@ -230,7 +230,7 @@ jobs:
             *.sha256
             # Attached to the release standalone as well as installed by the packages, which
             # bury it under /usr/share — no help to someone deciding whether to install at all.
-            setup-environment.sh
+            setup.sh
           if-no-files-found: error
 
   # ---- Publish -----------------------------------------------------------------------------
@@ -268,7 +268,7 @@ jobs:
 
             **Praat and CDP are installed separately** and are not bundled in any of these
             packages — tui-wave shells out to them and reports what is missing at run time.
-            `install.sh` sets both up; the packages carry only the editor. Run
-            `setup-environment.sh` after installing to fetch the praatAudioTools scripts.
+            `setup.sh` sets both up; the packages carry only the editor. Run
+            `setup.sh` after installing to fetch the praatAudioTools scripts.
 
             Verify a download with the matching `.sha256` file.

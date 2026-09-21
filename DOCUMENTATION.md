@@ -5,47 +5,59 @@
 Releases carry a macOS build for Intel and Apple Silicon and a `.deb`/`.rpm` for Linux. They
 contain the tui-wave binary and nothing else.
 
-**Run `setup-environment.sh` after installing.** 457 of tui-wave's processes are scripts
-from the praatAudioTools project, which no package bundles — without them tui-wave lists every
-Praat process and can run none of them. The script fetches the scripts, writes their location
-into your config, and (after asking) sets up the Python environment the 46 processes in the `py`
-group need. It also checks whether Praat itself is installed and says where to get it.
+**Run `setup.sh` after installing.** 457 of the processes in tui-wave are scripts from the
+praatAudioTools project, and no package includes them. Without the scripts, tui-wave lists every
+Praat process and can run none. The script fetches the scripts and writes their location into
+your config. It can also set up the Python environment that the 46 processes in the `py` group
+need, after it asks you. It checks whether Praat is installed and offers to install it.
 
 The 500 Airwindows effects need none of this. They are compiled into the binary, so section 16
 works on a fresh install with nothing fetched and nothing configured.
 
+`setup.sh` is the same script for every way of installing tui-wave:
+
 | how you installed | where the script is |
 | --- | --- |
-| `.deb` or `.rpm` | `/usr/share/tui-wave/setup-environment.sh` |
+| `.deb` or `.rpm` | `/usr/share/tui-wave/setup.sh` |
 | macOS tarball | beside the binary, where you unpacked it |
 | any release | attached to the release page on its own |
 | source checkout | the repository root |
 
 ```sh
-./setup-environment.sh              # fetch the scripts, configure, set up Python
-./setup-environment.sh --dry-run    # print every command, change nothing
-./setup-environment.sh --yes        # take every prompt as yes
-./setup-environment.sh --no-python  # skip the venv; the 'py' group stays unavailable
+./setup.sh              # install what is missing and set up the environment
+./setup.sh --dry-run    # print every command, change nothing
+./setup.sh --yes        # take every prompt as yes
+./setup.sh --no-python  # skip the venv; the 'py' group stays unavailable
+./setup.sh --no-build   # set up the environment only; leave the binary alone
 ```
 
-It clones praatAudioTools at the **exact commit** your build's process catalog was generated
-from, and re-running it moves an existing checkout to that commit. The pin is not cosmetic: the
-catalog records every script's parameter names, types and *order*, and Praat fills a script's
-form positionally — a checkout at a different commit does not error, it hands arguments to
-fields that have moved and produces plausible, wrong audio. If the two ever drift apart, the
-process dialog says so.
+From the macOS tarball, the script also copies the binary to `~/.local/bin`. This needs no
+`sudo`. From a source checkout, it builds and installs tui-wave. From a `.deb`, an `.rpm`, or the
+copy on the release page, the binary is already installed. Then the script sets up the
+environment only.
+
+The script clones praatAudioTools at the **exact commit** that the process catalog of your build
+came from. If you run it again, it moves an existing checkout to that commit. It also corrects the
+`praat_audiotools_dir` setting if that setting points to an older copy. The commit must match. The
+catalog records the name, type, and *order* of every script parameter, and Praat fills a script
+form by position. If the commit is different, Praat does not report an error. It gives the wrong
+arguments to fields that moved, and the audio sounds plausible and is wrong. The process dialog
+shows a warning if the two ever differ. Run `setup.sh` again after every update.
 
 It does not install CDP: that is a separate download with no installer on any platform, and
 tui-wave asks for its directory the first time you run a CDP process.
 
 ### If you are building from source
 
-**Start here: run `./install.sh` from the repository.** On macOS and Linux it does the whole of
-this section for you — it installs the Rust toolchain if missing, the build dependencies for your
-platform, Praat, the script submodule, and (after asking) the Python environment the `py` process
-group needs, then builds and installs tui-wave. It asks before anything requiring `sudo`, and
-`./install.sh --dry-run` prints every command it would run without changing anything. It does not
-install CDP, which is a separate licensed download.
+**Start here: run `./setup.sh` from the repository.** On macOS and Linux, it does the whole of
+this section for you. It installs the Rust toolchain if it is missing. It installs the build
+libraries for your platform, Praat, and the praatAudioTools scripts. It can also install the Python
+environment for the `py` process group, after it asks you. Then it builds and installs tui-wave.
+
+It asks before any step that needs `sudo`. `./setup.sh --dry-run` prints every command and
+changes nothing. The script builds in a temporary folder and deletes that folder when it ends. So
+the 500 MB of Rust build files do not stay on your disk. Use `--keep-build` if you want to keep
+them in `./target`. The script does not install CDP, which is a separate licensed download.
 
 Everything you may want to install lives in this section: tui-wave itself, and the two optional
 external tool suites it can drive. Only tui-wave is required — it opens, edits, plays and saves
@@ -127,7 +139,7 @@ Praat is a speech-analysis program with a scripting language. praatAudioTools is
 collection of sound-transformation scripts written for it by Shai Cohen. Section 15 covers using
 them.
 
-**`./install.sh` installs both of the things below.** If you ran it, skip to section 15. What
+**`./setup.sh` installs both of the things below.** If you ran it, skip to section 15. What
 follows is the manual route.
 
 You need two things.
@@ -192,8 +204,8 @@ praat_audiotools_dir = "/home/you/praat-audiotools"
 You do **not** need to install the scripts into Praat itself. tui-wave runs them by path and
 never writes to your Praat preferences folder, so an existing Praat setup is left alone.
 
-**Python, for the `py` group only** — and again, `./install.sh` offers to do all of this for you,
-into a virtual environment it owns. 46 of the scripts do their work in Python instead of in
+**Python, for the `py` group only.** `./setup.sh` offers to do all of this for you. It uses a
+virtual environment that it owns. 46 of the scripts do their work in Python instead of in
 Praat: they hand the audio to a helper and read back the result. They sit in their own **py**
 group in the browser so you can see the extra requirement before choosing one. The other
 thirteen groups need nothing beyond Praat.
@@ -204,7 +216,7 @@ thirteen groups need nothing beyond Praat.
 | `sounddevice` | Arranger, Performance Launcher — they audition as you work |
 | `pillow` | Spectral Eraser — it paints on a spectrogram image |
 
-`./install.sh` asks whether to install these and puts them in a virtual environment tui-wave
+`./setup.sh` asks whether to install these and puts them in a virtual environment tui-wave
 owns, at `~/.config/tui-wave/praat/pyenv`. Your system Python is never modified. That is not
 only tidiness: Arch and recent Debian mark the system interpreter externally-managed, and
 `pip install` there fails outright.

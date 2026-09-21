@@ -166,7 +166,7 @@ additionally carries, per process, the parameter values each script defines for 
 extracted from the same sources by the converter above.
 
 **No release artifact redistributes these scripts.** Every package carries the binary alone and
-leaves `setup-environment.sh` to fetch the scripts from upstream, at the pinned commit the
+leaves `setup.sh` to fetch the scripts from upstream, at the pinned commit the
 bundled catalog was generated against.
 
 ```
