@@ -226,6 +226,10 @@ const PAUSE_VARIABLE_FIXES: &[(&str, &str)] = &[
     ("Scale peak ceiling", "scale_peak"),
     // Time & Granular/HFD-Driven_Time_Warping.praat, v2.3. Label gained " relative RMS".
     ("Silence gate dB relative RMS", "silence_gate_dB"),
+    // Analysis/SpectraScore.praat, v0.9.0, in the advanced settings page. Both labels end in
+    // "dB" (capital B), so Praat derives `..._dB`, but the script assigns and reads `..._db`.
+    ("Peak floor dB", "peak_floor_db"),
+    ("Minimum peak prominence dB", "minimum_peak_prominence_db"),
 ];
 
 /// The variable an assignment for `label` must write, given the script it is being spliced into.
