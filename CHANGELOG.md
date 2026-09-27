@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-09-27 (2.15.0)
 
 - **praatAudioTools updated to `c77176f`.** `Grisey_Spectral_Becoming_Engine` and
   `8-channel_speed_deviations` were reworked; `Corpus_Concatenative_Codec` was reworked and stays
