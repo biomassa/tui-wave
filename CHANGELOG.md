@@ -20,6 +20,10 @@
   only offers a pair between two channels that were actually adjacent before anything was removed.
   A channel whose original partner is gone now opens as Mono instead of pairing with a neighbor it
   was never recorded next to.
+- **Mix Multichannel to Stereo has the same fix.** Its default Left/Right routing alternated by
+  position too, so removing one channel could flip every channel after it to the wrong leg (an
+  originally-Right channel shifting into a position that defaults to Left). It now routes and
+  numbers rows by original channel number, the same as Export Channels.
 
 ## 2026-09-21 (2.14.0)
 

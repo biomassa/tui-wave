@@ -74,16 +74,26 @@ pub fn parse_ceiling_db(raw: &str) -> f32 {
 /// Value a gain field holds to mean "contributes nothing", matching `Dialog::MixToMono`.
 pub const SILENCE_TOKEN: &str = "-inf";
 
-/// Opening routing: channel 1 left, channel 2 right, channel 3 left, and so on.
+/// Opening routing: channel 1 left, channel 2 right, channel 3 left, and so on — by *original*
+/// channel number, not by position in this list.
 ///
-/// Stated in *channel numbers* because that is what the user sees and what the request was
-/// phrased in — odd-numbered channels left, even-numbered right — which is even indices left and
-/// odd indices right. The same interleaving `dsp::Fold` uses, so the dialog opens on the routing
-/// the file was already playing back through and every edit is a departure from a known state.
-pub fn default_dests(channel_count: usize) -> Vec<StereoMixDest> {
-    (0..channel_count)
-        .map(|i| {
-            if i % 2 == 0 {
+/// Stated in channel numbers because that is what the user sees and what the request was phrased
+/// in — odd-numbered channels left, even-numbered right, the same interleaving `dsp::Fold` uses,
+/// so the dialog opens on the routing the file was already playing back through.
+///
+/// **Position is not the same question once a channel has been removed.** Remove Empty Channels
+/// closes the gap it leaves, so every channel after the one removed shifts down by one position —
+/// exactly the mechanism behind the Export Channels bug this mirrors (see `channel_export::
+/// default_modes_for`). Pairing by position here would flip L and R for every surviving channel
+/// after the removed one: channel 4 (originally Right) would shift into channel 3's old position
+/// and default to Left. `original_channels[i]` is what `i` was numbered before anything was ever
+/// removed, so the parity check reads the number a person would recognize rather than a position
+/// that only means that by accident.
+pub fn default_dests_for(original_channels: &[usize]) -> Vec<StereoMixDest> {
+    original_channels
+        .iter()
+        .map(|&original| {
+            if original % 2 == 0 {
                 StereoMixDest::Left
             } else {
                 StereoMixDest::Right
@@ -249,6 +259,17 @@ pub fn mix_to_stereo(
     vec![left, right]
 }
 
+/// Test-only identity-case convenience. The real caller (the Mix to Stereo dialog) always has
+/// original channel numbers to give `default_dests_for`; a test with no removed channel to think
+/// about just wants the plain count `default_dests` used to take as a production function. `cfg
+/// (test)` rather than a third production function for the same reason `channel_export::
+/// default_modes`/`plan` are: nothing outside a test has called this since the dialog started
+/// tracking original numbers, and `cargo build` catches exactly that as dead code.
+#[cfg(test)]
+pub(crate) fn default_dests(channel_count: usize) -> Vec<StereoMixDest> {
+    default_dests_for(&(0..channel_count).collect::<Vec<_>>())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +308,26 @@ mod tests {
             let fold_leg_is_left = index % 2 == 0;
             assert_eq!(dest == StereoMixDest::Left, fold_leg_is_left, "channel index {index}");
         }
+    }
+
+    /// The same mechanism the Export Channels report exposed: original channels 1-6, channel 3
+    /// removed, so the four survivors sit at positions 0-3 but their original numbers are
+    /// 1, 2, 4, 5. Position-based routing would flip channel 4 (originally Right) to Left,
+    /// because it now sits where channel 3 (Left) used to. Routing by original number must keep
+    /// it Right.
+    #[test]
+    fn default_dests_for_follows_original_numbers_not_position() {
+        let original = vec![0usize, 1, 3, 4, 5]; // channel index 2 (original channel 3) removed
+        assert_eq!(
+            default_dests_for(&original),
+            vec![
+                StereoMixDest::Left,  // original 1
+                StereoMixDest::Right, // original 2
+                StereoMixDest::Right, // original 4 -- must stay Right, not flip to Left
+                StereoMixDest::Left,  // original 5
+                StereoMixDest::Right, // original 6
+            ]
+        );
     }
 
     #[test]

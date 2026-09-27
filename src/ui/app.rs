@@ -272,8 +272,12 @@ fn ms_ceiling_column() -> u16 {
     checkbox + MS_CEILING_LABEL.chars().count() as u16
 }
 
-fn ms_columns(channel_count: usize) -> MsColumns {
-    let digits = channel_export::digit_width(channel_count).max(2) as u16;
+/// `digits` is the width of the Ch column — [`channel_export::original_digit_width`], not a
+/// channel count, for the same reason [`ec_columns`] takes one: it must grow with the largest
+/// *original* channel number, which after Remove Empty Channels can differ from how many
+/// channels are left.
+fn ms_columns(digits: usize) -> MsColumns {
+    let digits = digits.max(2) as u16;
     let dest = 1 + digits + 2;
     MsColumns { dest, gain: dest + MS_DEST_CELL_WIDTH + 2 }
 }
@@ -1408,6 +1412,12 @@ enum Dialog {
         /// `"take01.wav — 30 ch · 96 kHz · 24-bit"`, built once when the dialog opens: none of
         /// it can change while the dialog is up, and `render_dialog` only gets `&Dialog`.
         header: String,
+        /// `original_channels[i]` is what channel `i` was numbered before any channel was ever
+        /// removed from this document — see `Dialog::ExportChannels::original_channels`, the
+        /// same field for the same reason: a row must be labelled and the default L/R routing
+        /// decided by the number a person recognizes, not by a position that shifts under a
+        /// removed channel.
+        original_channels: Vec<usize>,
     },
     /// File ▸ Export: writes the active buffer as FLAC or MP3. Separate from Save/Save As,
     /// which own the WAV working file. Both the FLAC depth and the MP3 bitrate are kept
@@ -7383,7 +7393,7 @@ impl App {
                     self.apply_mix_to_mono(&inputs_snapshot, clip);
                 }
                 Some(Dialog::MixToStereo {
-                    dests, gains, selected, focused, limiter, ceiling, header,
+                    dests, gains, selected, focused, limiter, ceiling, header, original_channels,
                 }) => {
                     let gains_db: Vec<Option<f32>> = gains
                         .iter()
@@ -7396,6 +7406,7 @@ impl App {
                         // process having failed rather than as the routing being empty.
                         self.dialog = Some(Dialog::MixToStereo {
                             dests, gains, selected, focused, limiter, ceiling, header,
+                            original_channels,
                         });
                         return;
                     }
@@ -8586,7 +8597,7 @@ impl App {
             // recomputed from the same `selected` the renderer used, so a click cannot land on
             // a different channel than the one drawn there.
             Some(Dialog::MixToStereo {
-                dests, gains, selected, focused, limiter, ceiling, ..
+                dests, gains, selected, focused, limiter, ceiling, original_channels, ..
             }) => {
                 let visible = ms_visible_rows(self.last_frame_area, dests.len());
                 let top = ms_scroll_top(*selected, visible, dests.len());
@@ -8596,7 +8607,9 @@ impl App {
                     if clicked < dests.len() {
                         *focused = ms_focus::CHANNELS;
                         *selected = clicked;
-                        let cols = ms_columns(dests.len());
+                        // Same digit width the renderer drew the row-number column with — see
+                        // the matching comment in the Export Channels click handler.
+                        let cols = ms_columns(channel_export::original_digit_width(original_channels));
                         // Three zones across a row, so a mouse user can reach either control:
                         // on the destination cell the click cycles it (how a choice is
                         // committed everywhere in this dialog family), on the attenuation
@@ -21930,8 +21943,10 @@ impl App {
                     format_sample_rate(doc.sample_rate),
                     BitDepth::from_bits(doc.bits_per_sample).label(),
                 );
+                let original_channels: Vec<usize> =
+                    (0..n).map(|i| doc.original_channel_number(i)).collect();
                 self.dialog = Some(Dialog::MixToStereo {
-                    dests: stereo_mix::default_dests(n),
+                    dests: stereo_mix::default_dests_for(&original_channels),
                     gains: (0..n)
                         .map(|_| TextInput::new(format_attenuation(stereo_mix::DEFAULT_ATTENUATION_DB)))
                         .collect(),
@@ -21946,6 +21961,7 @@ impl App {
                         stereo_mix::DEFAULT_LIMIT_CEILING_DB,
                     )),
                     header,
+                    original_channels,
                 });
             }
             return;
@@ -24859,9 +24875,9 @@ fn render_dialog(
                 frame, area, modes, *selected, folder_input, *focused, header, stem, original_channels,
             );
         }
-        Dialog::MixToStereo { dests, gains, selected, focused, limiter, ceiling, header } => {
+        Dialog::MixToStereo { dests, gains, selected, focused, limiter, ceiling, header, original_channels } => {
             return render_mix_to_stereo_dialog(
-                frame, area, dests, gains, *selected, *focused, *limiter, ceiling, header,
+                frame, area, dests, gains, *selected, *focused, *limiter, ceiling, header, original_channels,
             );
         }
         Dialog::Info { message } => {
@@ -25597,9 +25613,9 @@ fn render_export_channels_dialog(
 }
 
 /// The Mix to Stereo column header, built from [`ms_columns`] so it cannot drift from the rows
-/// beneath it.
-fn ms_header_line(channel_count: usize) -> String {
-    let cols = ms_columns(channel_count);
+/// beneath it. `digits` is the Ch column's width — see [`ms_columns`].
+fn ms_header_line(digits: usize) -> String {
+    let cols = ms_columns(digits);
     let mut line = String::from(" Ch");
     while line.chars().count() < cols.dest as usize {
         line.push(' ');
@@ -25629,8 +25645,10 @@ fn render_mix_to_stereo_dialog(
     limiter: bool,
     ceiling_input: &TextInput,
     header: &str,
+    original_channels: &[usize],
 ) -> Vec<Rect> {
     let n = dests.len();
+    let ch_digits = channel_export::original_digit_width(original_channels);
     // Wide enough for the hints bar, which is the longest fixed line here — the header's
     // filename tail and the channel rows both sit comfortably inside it.
     // Sized to the hints bar (75 columns with its Esc hint), for the reason given in
@@ -25657,13 +25675,12 @@ fn render_mix_to_stereo_dialog(
     let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
     let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
 
-    let w = channel_export::digit_width(n).max(2);
     let mut lines: Vec<Line> = vec![
         Line::from(""),
         Line::from(Span::styled(format!("  {header}"), label_style)),
         Line::from(""),
         Line::from(Span::styled(
-            ms_header_line(n),
+            ms_header_line(ch_digits),
             Style::default().fg(theme::COLUMN_HEADER).bg(theme::SURFACE0),
         )),
     ];
@@ -25679,7 +25696,8 @@ fn render_mix_to_stereo_dialog(
     for (row, ch) in (scroll_top..end).enumerate() {
         let is_sel = ch == selected && focused == ms_focus::CHANNELS;
         let marker = if is_sel { "▸" } else { " " };
-        let num = format!("{marker}{:>w$}  ", ch + 1, w = w);
+        let shown = original_channels.get(ch).copied().unwrap_or(ch) + 1;
+        let num = format!("{marker}{:>w$}  ", shown, w = ch_digits.max(2));
 
         let label = dests[ch].label();
         // The arrows appear only on the selected row, but the cell is padded to the same width
@@ -48813,6 +48831,41 @@ mod tests {
         assert_eq!(*focused, ms_focus::CHANNELS);
     }
 
+    /// The same report Export Channels had, for Mix to Stereo: original channels 1-6 in the
+    /// usual L/R/L/R/L/R interleave, original channel 3 removed. Before the fix the survivors'
+    /// *positions* decided L/R, so channel 4 (originally Right) would flip to Left the moment
+    /// it shifted into position 2 (where channel 3, Left, used to sit). The dialog must route
+    /// by original number instead, and must number its rows 1, 2, 4, 5, 6 — not 1-5 — so the
+    /// gap is visible.
+    #[test]
+    fn mix_to_stereo_dialog_routes_by_original_number_after_a_removal() {
+        let channels: Vec<Vec<f32>> = (0..6).map(|c| vec![(c as f32 + 1.0) / 100.0; 8]).collect();
+        let mut app = new_app(Some(doc_with_channels(channels)), None);
+        crate::model::command::Command::execute(
+            &mut crate::commands::remove_channels::RemoveChannelsCommand::new(vec![2]),
+            &mut app.documents[0],
+        );
+        assert_eq!(app.documents[0].channel_count(), 5);
+
+        app.handle_action(Action::MixToStereo);
+        match &app.dialog {
+            Some(Dialog::MixToStereo { dests, original_channels, .. }) => {
+                assert_eq!(original_channels, &[0, 1, 3, 4, 5]);
+                assert_eq!(
+                    dests,
+                    &[
+                        StereoMixDest::Left,  // original 1
+                        StereoMixDest::Right, // original 2
+                        StereoMixDest::Right, // original 4 -- must not flip to Left
+                        StereoMixDest::Left,  // original 5
+                        StereoMixDest::Right, // original 6
+                    ]
+                );
+            }
+            _ => panic!("expected the Mix to Stereo dialog"),
+        }
+    }
+
     /// Below three channels there is nothing this dialog can express that Gain and Mix to Mono
     /// don't already do, so it declines with a message rather than opening.
     #[test]
@@ -49120,24 +49173,37 @@ mod tests {
     }
 
     /// The destination cell and the attenuation field must not overlap, and the number column
-    /// has to widen for a 100-channel file without the columns crossing.
+    /// has to widen for a three-digit original channel number without the columns crossing.
+    /// `ms_columns`/`ms_header_line` take the Ch column's digit width directly — see
+    /// `channel_export::original_digit_width` — not a channel count.
     #[test]
     fn mix_to_stereo_columns_stay_ordered_as_the_channel_count_grows() {
-        for n in [4usize, 30, 100] {
-            let cols = ms_columns(n);
-            assert!(cols.dest < cols.gain, "{n} ch: destination and gain columns overlap");
+        for digits in [1usize, 2, 3] {
+            let cols = ms_columns(digits);
+            assert!(cols.dest < cols.gain, "{digits} digits: destination and gain columns overlap");
             assert!(
                 cols.gain - cols.dest >= MS_DEST_CELL_WIDTH,
-                "{n} ch: the destination cell has no room"
+                "{digits} digits: the destination cell has no room"
             );
             // The header line agrees with the columns the rows use.
-            let header = ms_header_line(n);
+            let header = ms_header_line(digits);
             assert_eq!(
                 header.chars().skip(cols.dest as usize).take(4).collect::<String>(),
                 "Send",
             );
         }
-        assert!(ms_columns(100).dest > ms_columns(30).dest, "the number column widens");
+        assert!(ms_columns(3).dest > ms_columns(2).dest, "the number column widens");
+    }
+
+    /// `ms_columns`' width must track the largest *surviving original* channel number, not the
+    /// count of channels being mixed — the same report Export Channels had: after Remove Empty
+    /// Channels drops low-numbered channels, a two- or three-digit original number still needs
+    /// its column even though only a few channels are left.
+    #[test]
+    fn mix_to_stereo_original_digit_width_follows_the_surviving_original_numbers() {
+        let original = vec![1usize, 50, 100];
+        assert_eq!(channel_export::original_digit_width(&original), 3);
+        assert!(ms_columns(channel_export::original_digit_width(&original)).dest > ms_columns(1).dest);
     }
 
     /// A 30-channel document with real audio on four channels collapses to those four, and
