@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **praatAudioTools updated to `c77176f`.** `Grisey_Spectral_Becoming_Engine` and
+  `8-channel_speed_deviations` were reworked; `Corpus_Concatenative_Codec` was reworked and stays
+  excluded (already `gui_blocking`). `PhraseRewriter` gained a confirmation page asking whether
+  to draw its Transformation Map, which briefly took it out of the catalog — it is now a process
+  again, and the confirmation always answers "draw it" since the run's own `Draw_transformation_map`
+  checkbox already says so before the page would ask again.
+
 - **Export Channels no longer mis-pairs stereo channels after Remove Empty Channels.** Removing
   a channel closes the gap: every channel after it moves down by one position, and Export
   Channels used to pair *positions*, not the channels themselves. Removing one channel of an

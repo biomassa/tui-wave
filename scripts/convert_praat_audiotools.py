@@ -326,6 +326,14 @@ GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
 # *finishes*; `the_pause_button_override_still_terminates` is the guard that it still does.
 PAUSE_BUTTON_OVERRIDES: dict[str, int] = {
     "Reverb/Universal Convolution Generator.praat": 3,  # "OK" -- apply once, close the session
+    # New in the 2026-09-27 bump. The pause has no fields at all -- just two comment lines and
+    # "Keep panels" / "Draw map" -- asking whether to draw the Transformation Map now, since it
+    # replaces the current picture. It is reached only when the run's own `Draw_transformation_map`
+    # form checkbox (default on) is set, so the checkbox already states the user's intent; the
+    # declared default, "Keep panels" (button 1), would silently discard that intent every
+    # headless run and make the checkbox permanently inert through this app. "Draw map" (button 2)
+    # is the button that acts on what the form already asked for.
+    "py/PhraseRewriter.praat": 2,
 }
 
 PAUSE_HOISTS: dict[str, dict] = {
@@ -334,6 +342,16 @@ PAUSE_HOISTS: dict[str, dict] = {
     # variable: random_seed') because Praat only supports one `form` per script run."
     "Distortion/Sidechain_Feedback_VCA.praat": {
         "why": "second settings page (Spatial/Output/Debug); Praat allows one form per script",
+    },
+    # New in the 2026-09-27 bump. Deliberately **no** `lock_on`: the guard is
+    # `if draw_transformation_map and nEvParsed > 0` outside, `if draw_visualization` inside, and
+    # both booleans are ordinary form fields the run already has an answer for rather than a
+    # toggle invented to reveal this page -- there is nothing to lock, only to leave as the run's
+    # own facts. The pause itself has no fields (two `comment:` lines), so there is nothing for
+    # the rewrite to assign either; its only effect is `mapClicked`, corrected by
+    # `PAUSE_BUTTON_OVERRIDES` above.
+    "py/PhraseRewriter.praat": {
+        "why": "\"draw the Transformation Map now?\" confirmation before overwriting the picture",
     },
     # Guarded by `if preset = 1` (Custom). Its `else` branch already assigns the same variables
     # to the same defaults, which is what makes the rewrite verifiable by inspection: the

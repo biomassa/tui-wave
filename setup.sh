@@ -62,7 +62,7 @@ set -euo pipefail
 # The praatAudioTools commit that this build's catalog was made from. A test compares this
 # value with the header of src/model/cdp/praat_catalog.toml. Change it only together with the
 # catalog. The update-praat-scripts.sh script does both.
-PINNED_COMMIT="90642e21fb7f09754f0fafc034736b6d9d613fb9"
+PINNED_COMMIT="c77176f3620acb2c9db36153d2ae41db89f984d1"
 UPSTREAM="https://github.com/ShaiCohen-ops/Praat-plugin_AudioTools"
 
 # Where tui-wave keeps its state. These paths must match config_home() in src/config.rs.
