@@ -422,3 +422,26 @@ cargo test       # run the test suite
 
 `CHANGELOG.md` records what changed in each version. `MANUAL_TESTING.md` holds the checklist for
 the parts that no test can cover, such as real audio hardware and real terminal quirks.
+
+## Disclaimer
+
+tui-wave is provided "AS IS", without warranty of any kind, express or implied, including but not
+limited to the warranties of merchantability, fitness for a particular purpose, and
+non-infringement — see [LICENSE](LICENSE) for the full MIT license text.
+
+In no event shall the author or copyright holders be liable for any claim, damages, or other
+liability — including without limitation any loss of data, corrupted audio files, or lost work —
+arising from, out of, or in connection with tui-wave or the use or other dealings in it, whether
+in an action of contract, tort, or otherwise, even if advised of the possibility of such damage.
+This extends to every optional component tui-wave drives or bundles (CDP, Praat and
+praatAudioTools, and the built-in Airwindows effects), and to any third-party plugin or script you
+point it at.
+
+tui-wave writes to disk: Save overwrites the working file, and several operations replace a
+buffer's contents outright. `model/atomic.rs` stages every write and renames it into place so a
+crash or a full disk cannot leave a half-written file, and undo covers in-session edits — but
+neither of those is a substitute for your own backup, and no software of this kind can promise
+that every input file, every codec path, and every third-party process behaves as expected on
+every system. **Keep independent backups of any audio you cannot afford to lose, and test on a
+copy before relying on tui-wave for material that matters.** You use this software, and everything
+it drives, entirely at your own risk.
