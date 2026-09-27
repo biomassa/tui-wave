@@ -42,6 +42,13 @@ pub struct Document {
     /// `wavread::WavInfo::resident_bytes` against `Config.max_resident_mb`, and which
     /// *actions* a streamed document permits is gated in one place, `App::handle_action`.
     pub stream: Option<std::sync::Arc<super::stream::StreamedSamples>>,
+    /// Resident-only record of what each current channel was originally numbered, read through
+    /// [`Self::original_channel_number`] — see that method for why this exists alongside
+    /// `source_channel` rather than replacing it. Empty means identity (every channel is still
+    /// at its original position), which is both the default for a freshly loaded document and
+    /// the fallback the accessor uses, so most construction sites never need to touch this.
+    /// `RemoveChannelsCommand` is the only writer.
+    pub original_channels: Vec<usize>,
     pub sample_rate: u32,
     /// Bit depth from the source WAV header (16, 24, or 32). Always 32 for synthesized
     /// buffers (CopyToNew, MixToMono, etc.) since the working format is f32. Does not
@@ -85,6 +92,7 @@ impl Default for Document {
             head_tail_marks: Vec::new(),
             bext: None,
             stream: None,
+            original_channels: Vec::new(),
         }
     }
 }
@@ -258,6 +266,33 @@ impl Document {
         match &self.stream {
             Some(stream) => stream.channel_map().get(channel).copied().unwrap_or(channel),
             None => channel,
+        }
+    }
+
+    /// The number logical channel `channel` was known by before any channel was ever removed
+    /// from this document — what File ▸ Export Channels shows and names files after, so a
+    /// gap from a removed channel is visible instead of every survivor silently renumbering.
+    ///
+    /// **Not the same question as [`Self::source_channel`].** That answers "which pyramid slot
+    /// holds this channel's peaks", which for a resident document is always the identity —
+    /// `App::rebuild_waveform_caches` rebuilds the pyramid from `channels` fresh, in current
+    /// order, after every edit, so position *is* the pyramid slot. This answers "what did a
+    /// human call this channel", which removing channel 3 does not change for channel 5 even
+    /// though its pyramid slot and its position both shift down by one. Conflating the two
+    /// would break every existing `source_channel` caller, which is why this is a second method
+    /// rather than a change to that one.
+    ///
+    /// For a streamed document the channel map already carries this — a streamed document
+    /// never physically removes anything, so `source_channel` already answers both questions
+    /// at once. For a resident document it reads `original_channels`, whose only writer is
+    /// `RemoveChannelsCommand`; empty (nothing has ever been removed, the common case) falls
+    /// back to the identity, which is exactly the answer for a document that has never had a
+    /// channel removed.
+    pub fn original_channel_number(&self, channel: usize) -> usize {
+        if self.stream.is_some() {
+            self.source_channel(channel)
+        } else {
+            self.original_channels.get(channel).copied().unwrap_or(channel)
         }
     }
 
@@ -487,6 +522,7 @@ mod tests {
 
     fn doc(samples: Vec<f32>) -> Document {
         Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![samples],
             sample_rate: 44100,

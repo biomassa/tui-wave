@@ -33,6 +33,16 @@ pub fn digit_width(channel_count: usize) -> usize {
     channel_count.max(1).to_string().len()
 }
 
+/// Digits needed for the largest number in `original_channels`, or 1 if it is empty.
+///
+/// Against the largest *surviving original number*, not the count of channels — after Remove
+/// Empty Channels those differ, and [`plan_for`] and the Export Channels dialog's Ch column
+/// both need the same answer or a click on the mode column would land on the wrong x offset
+/// (`ec_columns` in `ui::app`, sized from this).
+pub fn original_digit_width(original_channels: &[usize]) -> usize {
+    digit_width(original_channels.iter().copied().max().map_or(0, |m| m + 1))
+}
+
 /// True when `i` is the lower half of a pair, i.e. its own stored mode is inert.
 ///
 /// Only the immediately preceding channel can claim it, and only if that channel is not
@@ -48,10 +58,34 @@ fn can_pair(modes: &[ChannelExportMode], i: usize) -> bool {
     i + 1 < modes.len() && !is_consumed(modes, i) && !is_consumed(modes, i + 1)
 }
 
-/// The files a mode list produces, top to bottom. Consumed channels never appear on their own
-/// — they are folded into the pair above them regardless of what their own mode says.
+/// The files a mode list produces, top to bottom, with every channel numbered by its position
+/// — channel 0 is always "1", whether or not anything upstream of this function has ever
+/// removed a channel. Use [`plan_for`] when the list's positions do not necessarily match the
+/// numbers a person would recognize (after Remove Empty Channels, for instance): this is the
+/// identity case of that function, kept as its own name because the overwhelming majority of
+/// calls — everywhere a document has never had a channel removed — have no other numbering to
+/// give it.
 pub fn plan(modes: &[ChannelExportMode]) -> Vec<ChannelExportFile> {
-    let w = digit_width(modes.len());
+    plan_for(modes, &(0..modes.len()).collect::<Vec<_>>())
+}
+
+/// [`plan`], but each output is numbered by `original_channels[i]` rather than by its position
+/// `i` — what a channel *reads from* (`channels`, i.e. which positions in the source) is
+/// unaffected, since reading is always by position; only what the file and the dialog *call*
+/// that channel changes.
+///
+/// This is what keeps a gap from a removed channel visible instead of every survivor silently
+/// renumbering to fill it: exporting three channels whose original numbers were 1, 2 and 4
+/// (channel 3 having been dropped by Remove Empty Channels) names its files `ch1-2.wav` and
+/// `ch4.wav`, not `ch1-2.wav` and `ch3.wav` — the latter would claim to be the original
+/// channel 3, which no longer exists in this document at all.
+///
+/// `original_channels` shorter than `modes` is tolerated the same way [`Document::
+/// original_channel_number`](crate::model::document::Document::original_channel_number) is: a
+/// missing entry falls back to the identity, position `i`.
+pub fn plan_for(modes: &[ChannelExportMode], original_channels: &[usize]) -> Vec<ChannelExportFile> {
+    let w = original_digit_width(original_channels);
+    let number = |i: usize| original_channels.get(i).copied().unwrap_or(i) + 1;
     let mut files = Vec::new();
     for (i, mode) in modes.iter().enumerate() {
         if is_consumed(modes, i) {
@@ -61,12 +95,12 @@ pub fn plan(modes: &[ChannelExportMode]) -> Vec<ChannelExportFile> {
             ChannelExportMode::Skip => {}
             ChannelExportMode::Mono => files.push(ChannelExportFile {
                 channels: vec![i],
-                suffix: format!("ch{:0w$}", i + 1, w = w),
+                suffix: format!("ch{:0w$}", number(i), w = w),
             }),
             ChannelExportMode::PairWithNext if i + 1 < modes.len() => {
                 files.push(ChannelExportFile {
                     channels: vec![i, i + 1],
-                    suffix: format!("ch{:0w$}-{:0w$}", i + 1, i + 2, w = w),
+                    suffix: format!("ch{:0w$}-{:0w$}", number(i), number(i + 1), w = w),
                 })
             }
             // `PairWithNext` on the last channel has nothing to pair with. `cycle_mode` and
@@ -74,7 +108,7 @@ pub fn plan(modes: &[ChannelExportMode]) -> Vec<ChannelExportFile> {
             // hand-built mode list; treat it as mono rather than dropping the channel.
             ChannelExportMode::PairWithNext => files.push(ChannelExportFile {
                 channels: vec![i],
-                suffix: format!("ch{:0w$}", i + 1, w = w),
+                suffix: format!("ch{:0w$}", number(i), w = w),
             }),
         }
     }
@@ -221,10 +255,42 @@ pub fn export_streaming(
 /// Opening state: stereo pairs from the top, with a trailing odd channel as its own mono
 /// file. Pairs are the overwhelmingly common intent for a multichannel capture, and an odd
 /// channel left over has nothing to pair with.
+///
+/// The identity case of [`default_modes_for`] — see that function for what changes once a
+/// channel has been removed from the document. Kept as its own name for the same reason
+/// [`plan`] is: everywhere a document has never had a channel removed (which is most callers,
+/// and every existing test here) has no other numbering to give it.
 pub fn default_modes(channel_count: usize) -> Vec<ChannelExportMode> {
-    (0..channel_count)
+    default_modes_for(&(0..channel_count).collect::<Vec<_>>())
+}
+
+/// [`default_modes`], but a pair is only ever offered between two channels that were adjacent
+/// in the *original* numbering — position doesn't decide it once channels have been removed.
+///
+/// **The bug this exists for.** Position-based pairing (`i` pairs with `i+1`) is exactly right
+/// until a channel in between is removed: original channels 1-6 in pairs (1,2)(3,4)(5,6), then
+/// Remove Empty Channels drops channel 3, and the four survivors renumber by *position* to
+/// 1,2,3,4 — so the old default would offer (position 3, position 4), which is original
+/// channels **4 and 5**: the R of one pair glued to the L of the next. The Export Channels
+/// dialog showed this as an ordinary-looking "Stereo pair" and gave no way to tell (user
+/// report). Pairing by original number instead means position 3 (original 4) has no original
+/// partner adjacent to it any more — original 3 is gone — so it opens as Mono, and the two
+/// survivors that *were* a real pair (originally 5 and 6) still pair with each other.
+///
+/// A pair still requires the *left* half to be a conventionally-even original channel
+/// (`original % 2 == 0`, 0-based — channel 1, 3, 5… in the 1-based numbers a user sees), the
+/// same odd/even convention `dsp::Fold` already uses for which leg a channel sums into. Without
+/// that check, two channels that both survived and happen to sit next to each other after
+/// removal (original 4 and 5, in the example above) would still look pairable by adjacency
+/// alone despite never having been a pair.
+pub fn default_modes_for(original_channels: &[usize]) -> Vec<ChannelExportMode> {
+    (0..original_channels.len())
         .map(|i| {
-            if i % 2 == 0 && i + 1 < channel_count {
+            let is_left = original_channels[i] % 2 == 0;
+            let partner_survived = original_channels
+                .get(i + 1)
+                .is_some_and(|&next| next == original_channels[i] + 1);
+            if is_left && partner_survived {
                 ChannelExportMode::PairWithNext
             } else {
                 ChannelExportMode::Mono
@@ -310,6 +376,62 @@ mod tests {
         assert_eq!(suffixes(&default_modes(5)), vec!["ch1-2", "ch3-4", "ch5"]);
         assert_eq!(suffixes(&default_modes(1)), vec!["ch1"]);
         assert!(plan(&default_modes(0)).is_empty());
+    }
+
+    /// The report this module exists to fix: original channels 1-6 in pairs (1,2)(3,4)(5,6),
+    /// channel 3 removed by Remove Empty Channels. Position-based pairing would offer
+    /// (position 3, position 4) — original 4 and 5 — gluing the R of the second pair to the L
+    /// of the third. Pairing by original number must instead leave original 4 alone (its real
+    /// partner, 3, is gone) and still pair the real survivors, 5 and 6.
+    #[test]
+    fn default_modes_for_refuses_to_pair_across_a_removed_channel() {
+        let original = vec![0, 1, 3, 4, 5]; // channel index 2 (original 3, 1-based) removed
+        let modes = default_modes_for(&original);
+        assert_eq!(modes, vec![
+            PairWithNext, // original 1 + 2: both survived, still adjacent
+            Mono,         // original 2: already claimed above
+            Mono,         // original 4: its partner, original 3, did not survive
+            PairWithNext, // original 5 + 6: both survived, still adjacent
+            Mono,         // original 6: already claimed above
+        ]);
+        assert_eq!(plan_for(&modes, &original).into_iter().map(|f| f.suffix).collect::<Vec<_>>(),
+            vec!["ch1-2".to_string(), "ch4".to_string(), "ch5-6".to_string()],
+            "filenames must use original numbers, with the gap at 3 visible");
+    }
+
+    /// Removing the *first* half of a pair (not the second) must leave its former partner
+    /// alone rather than pairing it with whatever now sits next to it.
+    #[test]
+    fn default_modes_for_leaves_an_orphaned_right_channel_mono() {
+        let original = vec![1, 2, 3]; // original channel 1 (0-based 0) removed
+        assert_eq!(default_modes_for(&original), vec![
+            Mono,         // original 2: was the right half of (1,2); its partner is gone
+            PairWithNext, // original 3 + 4: both survived, still adjacent
+            Mono,
+        ]);
+    }
+
+    /// `default_modes` (the identity case) and `default_modes_for` given an identity list must
+    /// agree exactly — the split between the two is only about where the numbering comes from,
+    /// not a second, different pairing rule.
+    #[test]
+    fn default_modes_agrees_with_default_modes_for_on_the_identity_case() {
+        for n in 0..12 {
+            let identity: Vec<usize> = (0..n).collect();
+            assert_eq!(default_modes(n), default_modes_for(&identity));
+        }
+    }
+
+    /// `plan_for`'s width is the largest *surviving original number*, not the count of channels
+    /// in the export — so a removal near the top of a 12-channel file still zero-pads to two
+    /// digits even though only, say, 9 channels remain.
+    #[test]
+    fn plan_for_pads_to_the_largest_original_number_not_the_surviving_count() {
+        let original: Vec<usize> = (0..12).filter(|&i| i != 0 && i != 1 && i != 2).collect(); // 9 left, up to original 12
+        let modes = default_modes_for(&original);
+        let suffixes = plan_for(&modes, &original).into_iter().map(|f| f.suffix).collect::<Vec<_>>();
+        assert_eq!(suffixes, vec!["ch04", "ch05-06", "ch07-08", "ch09-10", "ch11-12"],
+            "expected two-digit padding throughout, matching the file's own 12-channel numbering");
     }
 
     #[test]

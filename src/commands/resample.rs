@@ -183,6 +183,7 @@ mod tests {
 
     fn doc(channels: Vec<Vec<f32>>, rate: u32) -> Document {
         Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels,
             sample_rate: rate,

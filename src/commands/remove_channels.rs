@@ -11,10 +11,13 @@ use crate::model::document::Document;
 /// `App::apply_remove_empty_channels` for the three that do and the one that needed the
 /// per-frame `Viewport::clamp_channel_scroll`.
 ///
-/// `removed` holds `(original index, samples)` ascending, populated by `execute` and consumed
-/// (cloned, so redo works) by `undo`. The whole point of storing the index is that undo can
-/// re-insert ascending and land every channel back exactly where it was, rather than
-/// appending them all at the end.
+/// `removed` holds `(position, samples, original channel number)` ascending, populated by
+/// `execute` and consumed (cloned, so redo works) by `undo`. The whole point of storing the
+/// position is that undo can re-insert ascending and land every channel back exactly where it
+/// was, rather than appending them all at the end. The original number travels alongside the
+/// samples for the same reason `doc.channels` and `doc.original_channels` are edited in
+/// lockstep below: undo must restore both or a later removal would report the wrong number for
+/// a channel that was never touched.
 ///
 /// Memory: this keeps every removed channel's samples alive in the undo stack. Dropping 26
 /// channels of a 30-channel file therefore holds most of the file. That is the same trade
@@ -22,7 +25,7 @@ use crate::model::document::Document;
 #[derive(Debug)]
 pub struct RemoveChannelsCommand {
     indices: Vec<usize>,
-    removed: Vec<(usize, Vec<f32>)>,
+    removed: Vec<(usize, Vec<f32>, usize)>,
 }
 
 impl RemoveChannelsCommand {
@@ -38,11 +41,19 @@ impl RemoveChannelsCommand {
 impl Command for RemoveChannelsCommand {
     fn execute(&mut self, doc: &mut Document) {
         self.removed.clear();
+        // `original_channels` is empty until the first-ever removal on this document (every
+        // construction site leaves it that way — see its doc comment), so this brings it to
+        // identity, in step with `channels`, the moment it is actually needed. A document that
+        // has already had channels removed keeps whatever it has.
+        if doc.original_channels.len() != doc.channels.len() {
+            doc.original_channels = (0..doc.channels.len()).collect();
+        }
         // Descending, so removing one channel never shifts the index of another still to be
         // removed. The stash is re-sorted ascending afterwards for `undo`'s benefit.
         for &i in self.indices.iter().rev() {
             if i < doc.channels.len() {
-                self.removed.push((i, doc.channels.remove(i)));
+                let original = doc.original_channels.remove(i);
+                self.removed.push((i, doc.channels.remove(i), original));
             }
         }
         self.removed.reverse();
@@ -51,10 +62,13 @@ impl Command for RemoveChannelsCommand {
 
     fn undo(&mut self, doc: &mut Document) {
         // Ascending: re-inserting at the original index works only if every lower-numbered
-        // channel is already back in place, which ascending order guarantees.
-        for (i, samples) in &self.removed {
+        // channel is already back in place, which ascending order guarantees. `channels` and
+        // `original_channels` stay the same length throughout, so the same `at` is correct for
+        // both inserts.
+        for (i, samples, original) in &self.removed {
             let at = (*i).min(doc.channels.len());
             doc.channels.insert(at, samples.clone());
+            doc.original_channels.insert(at, *original);
         }
         doc.dirty = true;
     }
@@ -131,6 +145,7 @@ mod tests {
 
     fn doc(channel_count: usize) -> Document {
         Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             // Each channel is filled with its own index, so a misplaced channel is obvious.
             channels: (0..channel_count).map(|i| vec![i as f32; 4]).collect(),
@@ -156,6 +171,55 @@ mod tests {
         assert_eq!(d.channels[1][0], 2.0);
         assert_eq!(d.channels[2][0], 5.0);
         assert!(d.dirty);
+    }
+
+    /// The report this exists for: removing channel 3 (0-based index 2) out of six must leave
+    /// channel 4 (originally paired with channel 3) reporting itself as 4, not renumbering to
+    /// 3 — which is exactly the silent shift that made Export Channels pair the wrong channels
+    /// together after Remove Empty Channels.
+    #[test]
+    fn original_channel_numbers_survive_a_removal_in_the_middle() {
+        let mut d = doc(6);
+        let mut cmd = RemoveChannelsCommand::new(vec![2]);
+        cmd.execute(&mut d);
+        assert_eq!(
+            (0..d.channel_count()).map(|i| d.original_channel_number(i)).collect::<Vec<_>>(),
+            vec![0, 1, 3, 4, 5],
+            "surviving channels must keep their own original numbers, not renumber to fill the gap"
+        );
+    }
+
+    /// A document that has never had a channel removed reports the identity — the common case,
+    /// and the fallback `original_channel_number` uses for an untouched `original_channels`.
+    #[test]
+    fn original_channel_number_is_the_identity_before_any_removal() {
+        let d = doc(6);
+        for i in 0..6 {
+            assert_eq!(d.original_channel_number(i), i);
+        }
+    }
+
+    /// Undo must restore `original_channels` in lockstep with `channels`, not just leave it at
+    /// whatever `execute` last computed — otherwise a second, different removal after an undo
+    /// would report numbers left over from the first.
+    #[test]
+    fn undo_restores_original_channel_numbers_too() {
+        let mut d = doc(6);
+        let mut cmd = RemoveChannelsCommand::new(vec![1, 3, 4]);
+        cmd.execute(&mut d);
+        cmd.undo(&mut d);
+        for i in 0..6 {
+            assert_eq!(d.original_channel_number(i), i, "channel {i} did not restore its own number");
+        }
+
+        // A different removal afterward must be computed against the restored numbering, not
+        // against whatever the first removal left behind.
+        let mut cmd2 = RemoveChannelsCommand::new(vec![0]);
+        cmd2.execute(&mut d);
+        assert_eq!(
+            (0..d.channel_count()).map(|i| d.original_channel_number(i)).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
     }
 
     #[test]

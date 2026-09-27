@@ -208,6 +208,7 @@ mod tests {
 
     fn doc_with_markers(markers: Vec<Marker>) -> Document {
         Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![0.0; 1000]],
             sample_rate: 44100,

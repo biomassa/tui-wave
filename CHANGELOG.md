@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **Export Channels no longer mis-pairs stereo channels after Remove Empty Channels.** Removing
+  a channel closes the gap: every channel after it moves down by one position, and Export
+  Channels used to pair *positions*, not the channels themselves. Removing one channel of an
+  original stereo pair could silently glue the surviving channel to whatever now sat next to it
+  — for example original channels 1-6 in pairs (1,2)(3,4)(5,6), channel 3 removed, and the old
+  default paired what the dialog called "channel 3 and 4" but were really original channels 4
+  and 5 (user report: "wrong stereo pairs" on a 30-channel file). The dialog now numbers each row
+  and each output file by its original channel number, with a gap where a channel was removed, and
+  only offers a pair between two channels that were actually adjacent before anything was removed.
+  A channel whose original partner is gone now opens as Mono instead of pairing with a neighbor it
+  was never recorded next to.
+
 ## 2026-09-21 (2.14.0)
 
 - **`setup.sh` no longer builds again when nothing changed.** It saves a checksum of the source

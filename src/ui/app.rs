@@ -327,10 +327,12 @@ struct EcColumns {
 const EC_MODE_CELL_WIDTH: usize = 15;
 
 /// The `Ch / Export as / Output file` header, padded so each label sits exactly over the
-/// column it names.
-fn ec_header_line(channel_count: usize) -> String {
-    let cols = ec_columns(channel_count);
-    let mut line = format!(" {:<w$}", "Ch", w = channel_export::digit_width(channel_count).max(2));
+/// column it names. `digits` is the width of the Ch column — [`channel_export::
+/// original_digit_width`], not a channel count, so it grows with the largest *original*
+/// channel number in the export rather than with how many channels are left after removal.
+fn ec_header_line(digits: usize) -> String {
+    let cols = ec_columns(digits);
+    let mut line = format!(" {:<w$}", "Ch", w = digits.max(2));
     let pad_to = |line: &mut String, col: usize| {
         while line.chars().count() < col {
             line.push(' ');
@@ -343,8 +345,9 @@ fn ec_header_line(channel_count: usize) -> String {
     line
 }
 
-fn ec_columns(channel_count: usize) -> EcColumns {
-    let digits = channel_export::digit_width(channel_count).max(2);
+/// `digits` is the width of the Ch column — see [`ec_header_line`].
+fn ec_columns(digits: usize) -> EcColumns {
+    let digits = digits.max(2);
     let mode = 1 + digits + 2 + 1 + 1;
     EcColumns { mode, mode_label: mode + 2, file: mode + EC_MODE_CELL_WIDTH + 2 }
 }
@@ -1432,6 +1435,13 @@ enum Dialog {
         header: String,
         /// The source stem the suffixes attach to, for the Output file column.
         stem: String,
+        /// `original_channels[i]` is what channel `i` was numbered before any channel was ever
+        /// removed from this document — `Document::original_channel_number` for every current
+        /// channel, snapshotted once when the dialog opens for the same reason `header` is.
+        /// Index-parallel with `modes`. Threaded through row numbers, `default_modes_for`, and
+        /// `plan_for` so a gap from a removed channel stays visible instead of every survivor
+        /// silently renumbering into a pairing that never existed on the original recording.
+        original_channels: Vec<usize>,
     },
     /// Remove Empty Channels: drops every channel whose peak is below `input` dBFS. One
     /// field and no preview — the effect is visible in the waveform the moment it applies,
@@ -7291,18 +7301,18 @@ impl App {
                     };
                     self.run_export(&name, settings);
                 }
-                Some(Dialog::ExportChannels { modes, folder_input, selected, focused: _, header, stem }) => {
+                Some(Dialog::ExportChannels { modes, folder_input, selected, focused: _, header, stem, original_channels }) => {
                     let folder = folder_input.value().trim().to_string();
                     if folder.is_empty() {
                         // Matches the dimmed Enter hint: re-created unchanged rather than
                         // writing files into the source directory itself.
                         self.dialog = Some(Dialog::ExportChannels {
-                            modes, folder_input, selected, header, stem,
+                            modes, folder_input, selected, header, stem, original_channels,
                             focused: ec_focus::SUBFOLDER,
                         });
                         return;
                     }
-                    self.export_channels(&folder, &modes);
+                    self.export_channels(&folder, &modes, &original_channels);
                 }
                 Some(Dialog::RemoveEmptyChannels { input }) => {
                     match input.value().trim().parse::<f32>() {
@@ -8633,7 +8643,7 @@ impl App {
                     }
                 }
             }
-            Some(Dialog::ExportChannels { modes, selected, focused, .. }) => {
+            Some(Dialog::ExportChannels { modes, selected, focused, original_channels, .. }) => {
                 let visible = ec_visible_rows(self.last_frame_area, modes.len());
                 let top = ec_scroll_top(*selected, visible, modes.len());
                 let channel_rows = visible.min(modes.len());
@@ -8643,9 +8653,13 @@ impl App {
                         *focused = ec_focus::CHANNELS;
                         *selected = clicked;
                         // Left of the mode column only moves the highlight; on the arrow it
-                        // steps back, on the label or past it forward.
-                        if let Some(forward) =
-                            choice_click_step(ec_columns(modes.len()).mode, x_in_row)
+                        // steps back, on the label or past it forward. The column offset must
+                        // use the same digit width the renderer drew the row-number column
+                        // with — `ec_digits`, not `modes.len()` — or a click misses the mode
+                        // column by however many extra digits a removed channel's original
+                        // number needs that the survivor count alone would not.
+                        let digits = channel_export::original_digit_width(original_channels);
+                        if let Some(forward) = choice_click_step(ec_columns(digits).mode, x_in_row)
                         {
                             channel_export::cycle_mode(modes, clicked, forward);
                         }
@@ -15334,6 +15348,7 @@ impl App {
                             .map(|d| d.bits_per_sample)
                             .unwrap_or(32);
                         self.push_generated_document(Document {
+                            original_channels: Vec::new(),
                             head_tail_marks: Vec::new(),
                             channels: cached.channels.clone(),
                             sample_rate: cached.sample_rate,
@@ -15861,6 +15876,7 @@ impl App {
                                     .map(|d| d.bits_per_sample)
                                     .unwrap_or(32);
                                 self.push_generated_document(Document {
+                                    original_channels: Vec::new(),
                                     head_tail_marks: Vec::new(),
                                     channels: output.result,
                                     sample_rate: output.sample_rate,
@@ -16084,6 +16100,7 @@ impl App {
                             // Nothing follows it, so no dry audio is mixed into the tail.
                             let bits_per_sample = self.documents[pending.doc_index].bits_per_sample;
                             self.push_generated_document(Document {
+                                original_channels: Vec::new(),
                                 head_tail_marks: Vec::new(),
                                 channels: output.result,
                                 sample_rate: output.sample_rate,
@@ -17345,6 +17362,7 @@ impl App {
                     let bits_per_sample =
                         self.documents.get(doc_index).map(|d| d.bits_per_sample).unwrap_or(32);
                     self.push_document(Document {
+                        original_channels: Vec::new(),
                         head_tail_marks: Vec::new(),
                         channels: final_frame.running_buffer,
                         sample_rate: final_frame.running_rate,
@@ -18199,6 +18217,7 @@ impl App {
                                     .unwrap_or(32);
                                 let channels = output.results.into_iter().next().unwrap_or_default();
                                 self.push_generated_document(Document {
+                                    original_channels: Vec::new(),
                                     head_tail_marks: Vec::new(),
                                     channels,
                                     sample_rate: output.sample_rate,
@@ -18238,6 +18257,7 @@ impl App {
                                     .unwrap_or(32);
                                 for channels in output.results.drain(..) {
                                     self.push_document(Document {
+                                        original_channels: Vec::new(),
                                         head_tail_marks: Vec::new(),
                                         channels,
                                         sample_rate: output.sample_rate,
@@ -19445,6 +19465,7 @@ impl App {
         }
 
         let new_doc = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![mixed],
             sample_rate,
@@ -19513,6 +19534,7 @@ impl App {
         );
 
         let new_doc = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels,
             sample_rate,
@@ -19671,6 +19693,7 @@ impl App {
                 }
             }
             let region_doc = Document {
+                original_channels: Vec::new(),
                 head_tail_marks: Vec::new(),
                 channels: region_channels,
                 sample_rate,
@@ -19803,14 +19826,22 @@ impl App {
     /// Unlike `export_regions`, markers and head/tail marks are carried over **verbatim**:
     /// the timeline is unchanged here, so every position is still valid and rebasing them
     /// would be wrong. `bext` is dropped, matching every other new-file path in the app.
-    fn export_channels(&mut self, subfolder: &str, modes: &[ChannelExportMode]) {
+    fn export_channels(
+        &mut self,
+        subfolder: &str,
+        modes: &[ChannelExportMode],
+        original_channels: &[usize],
+    ) {
         let idx = self.active_document;
         // The parent the user chose in the dialog's own destination list — taken before the
         // borrow below and dropped either way, the dialog being finished with by now.
         let chosen_parent = self.dest_picker.take();
         let Some(doc) = self.documents.get(idx) else { return };
 
-        let files = channel_export::plan(modes);
+        // Named by original channel number, not position — see `plan_for`'s doc comment for
+        // why a removed channel must leave a visible gap rather than every survivor
+        // renumbering into a pairing that never existed on the original recording.
+        let files = channel_export::plan_for(modes, original_channels);
         if files.is_empty() {
             self.dialog = Some(Dialog::Info {
                 message: "Every channel is set to Skip — nothing to export.".to_string(),
@@ -19995,6 +20026,7 @@ impl App {
                 .collect();
 
         let document = Document {
+            original_channels: Vec::new(),
             channels: Vec::new(),
             stream: Some(stream),
             sample_rate: info.sample_rate,
@@ -21834,6 +21866,7 @@ impl App {
             });
             if let Some((samples, markers, sample_rate, bits_per_sample)) = result {
                 let new_doc = Document {
+                    original_channels: Vec::new(),
                     head_tail_marks: Vec::new(),
                     channels: samples,
                     sample_rate,
@@ -22013,14 +22046,17 @@ impl App {
                         .and_then(|p| p.parent())
                         .map(|p| p.to_path_buf());
                     let parent = parent.unwrap_or_else(|| self.file_panel.directory.clone());
+                    let original_channels: Vec<usize> =
+                        (0..channels).map(|i| doc.original_channel_number(i)).collect();
                     self.dest_picker = Some(crate::ui::dest_picker::DestPicker::new(parent));
                     self.dialog = Some(Dialog::ExportChannels {
-                        modes: channel_export::default_modes(channels),
+                        modes: channel_export::default_modes_for(&original_channels),
                         selected: 0,
                         folder_input: TextInput::new("channels"),
                         focused: ec_focus::CHANNELS,
                         header,
                         stem,
+                        original_channels,
                     });
                 }
             }
@@ -22132,6 +22168,7 @@ impl App {
             });
             if let Some((channels, markers, sample_rate, bits_per_sample)) = result {
                 let new_doc = Document {
+                    original_channels: Vec::new(),
                     head_tail_marks: Vec::new(),
                     channels,
                     sample_rate,
@@ -24817,9 +24854,9 @@ fn render_dialog(
                 frame, area, name_input, *format, *flac_depth, *mp3_bitrate, *focused, blocked,
             );
         }
-        Dialog::ExportChannels { modes, selected, folder_input, focused, header, stem } => {
+        Dialog::ExportChannels { modes, selected, folder_input, focused, header, stem, original_channels } => {
             return render_export_channels_dialog(
-                frame, area, modes, *selected, folder_input, *focused, header, stem,
+                frame, area, modes, *selected, folder_input, *focused, header, stem, original_channels,
             );
         }
         Dialog::MixToStereo { dests, gains, selected, focused, limiter, ceiling, header } => {
@@ -25341,8 +25378,10 @@ fn render_export_channels_dialog(
     focused: usize,
     header: &str,
     stem: &str,
+    original_channels: &[usize],
 ) -> Vec<Rect> {
-    let files = channel_export::plan(modes);
+    let files = channel_export::plan_for(modes, original_channels);
+    let ch_digits = channel_export::original_digit_width(original_channels);
     // Wide enough that a long stem plus a `_chNN-MM.wav` suffix still fits beside the mode
     // selector without the Output file column running into the border.
     // The form's own width plus the destination column beside it.
@@ -25376,7 +25415,6 @@ fn render_export_channels_dialog(
     let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
     let dim_style = Style::default().fg(theme::BORDER).bg(theme::SURFACE0);
 
-    let w = channel_export::digit_width(modes.len());
     // Which output file each channel belongs to, so a row can show the name it contributes to
     // — including on the lower half of a pair, where the name sits on the upper row.
     // Blank rows separate the four parts of this dialog — header, channel list, summary,
@@ -25388,7 +25426,7 @@ fn render_export_channels_dialog(
         Line::from(Span::styled(format!("  {header}"), label_style)),
         Line::from(""),
         Line::from(Span::styled(
-            ec_header_line(modes.len()),
+            ec_header_line(ch_digits),
             Style::default().fg(theme::COLUMN_HEADER).bg(theme::SURFACE0),
         )),
     ];
@@ -25413,7 +25451,8 @@ fn render_export_channels_dialog(
             " "
         };
         let marker = if is_sel { "▸" } else { " " };
-        let num = format!("{marker}{:>w$}  {bracket} ", ch + 1, w = w.max(2));
+        let shown = original_channels.get(ch).copied().unwrap_or(ch) + 1;
+        let num = format!("{marker}{:>w$}  {bracket} ", shown, w = ch_digits.max(2));
 
         // A consumed row shows nothing in the mode column — the pair above it owns the choice.
         let (mode_text, file_text) = if consumed {
@@ -32476,6 +32515,7 @@ mod tests {
 
     fn doc(val: f32, len: usize) -> Document {
         Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![val; len]],
             sample_rate: 44100,
@@ -32492,6 +32532,7 @@ mod tests {
 
     fn stereo_doc(left: f32, right: f32, len: usize) -> Document {
         Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![left; len], vec![right; len]],
             sample_rate: 44100,
@@ -32510,6 +32551,7 @@ mod tests {
     /// Remove Empty Channels, Export Channels) that `stereo_doc` can't express.
     fn doc_with_channels(channels: Vec<Vec<f32>>) -> Document {
         Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels,
             sample_rate: 44100,
@@ -33335,6 +33377,7 @@ mod tests {
         let mut channel = vec![0.01f32; quiet_frames * FRAME_LEN];
         channel.extend(std::iter::repeat(0.5f32).take(loud_frames * FRAME_LEN));
         Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![channel],
             sample_rate: 44100,
@@ -33448,6 +33491,7 @@ mod tests {
         let channel: Vec<f32> =
             segments.iter().flat_map(|&(level, frames)| std::iter::repeat(level).take(frames * FRAME_LEN)).collect();
         Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![channel],
             sample_rate: 44100,
@@ -38029,6 +38073,7 @@ mod tests {
             *s = 0.9;
         }
         let document = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![channel],
             sample_rate: 44100,
@@ -45591,6 +45636,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tuiwave_export_norm_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let document = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![samples],
             sample_rate: 44100,
@@ -45640,6 +45686,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tuiwave_export_limit_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let document = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![samples],
             sample_rate: 1000,
@@ -45686,6 +45733,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tuiwave_export_limit_short_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let document = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![samples],
             sample_rate: 1000,
@@ -45834,6 +45882,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tuiwave_export_subsample_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let document = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![0.5f32; 100]],
             sample_rate: 44100,
@@ -46709,15 +46758,16 @@ mod tests {
         std::fs::copy(&src_a, &src_b).unwrap();
 
         let modes = channel_export::default_modes(6); // three stereo pairs
+        let identity: Vec<usize> = (0..6).collect();
         let mut resident_app = new_app(None, None);
         resident_app.load_file(src_a.clone());
         assert!(!resident_app.documents[0].is_streaming(), "control must be resident");
-        resident_app.export_channels("out", &modes);
+        resident_app.export_channels("out", &modes, &identity);
 
         let mut streamed_app = streaming_app();
         streamed_app.load_file(src_b.clone());
         assert!(streamed_app.documents[0].is_streaming(), "subject must be streamed");
-        streamed_app.export_channels("out", &modes);
+        streamed_app.export_channels("out", &modes, &identity);
 
         for suffix in ["ch1-2", "ch3-4", "ch5-6"] {
             let name = format!("take_{suffix}.wav");
@@ -48427,7 +48477,8 @@ mod tests {
         doc.path = Some(src);
 
         let mut app = new_app(Some(doc), Some(dir.clone()));
-        app.export_channels("out", &modes);
+        let identity: Vec<usize> = (0..channel_count).collect();
+        app.export_channels("out", &modes, &identity);
         (dir, channels)
     }
 
@@ -48468,6 +48519,111 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The exact report: original channels 1-6 in pairs (1,2)(3,4)(5,6), original channel 3
+    /// (0-based index 2) removed as empty, then File ▸ Export Channels opened for real through
+    /// `Action::ExportChannels`. Before the fix this offered a "Stereo pair" between what is
+    /// now position 2 and position 3 — original channels 4 and 5 — gluing the R of the second
+    /// pair to the L of the third, and the dialog gave no way to see it because it numbered
+    /// rows 1-5 by position with no reference to what was removed.
+    #[test]
+    fn export_channels_dialog_pairs_by_original_number_after_a_removal() {
+        let channels: Vec<Vec<f32>> = (0..6).map(|c| vec![(c as f32 + 1.0) / 100.0; 8]).collect();
+        let mut app = new_app(Some(doc_with_channels(channels)), None);
+        crate::model::command::Command::execute(
+            &mut crate::commands::remove_channels::RemoveChannelsCommand::new(vec![2]),
+            &mut app.documents[0],
+        );
+        assert_eq!(app.documents[0].channel_count(), 5);
+
+        app.handle_action(Action::ExportChannels);
+        match &app.dialog {
+            Some(Dialog::ExportChannels { modes, original_channels, .. }) => {
+                assert_eq!(original_channels, &[0, 1, 3, 4, 5], "channel 3 (index 2) is gone; nothing else renumbers");
+                use crate::model::channel_export::ChannelExportMode::*;
+                assert_eq!(
+                    modes,
+                    &[PairWithNext, Mono, Mono, PairWithNext, Mono],
+                    "position 2 (original channel 4) must open as Mono — its real partner, \
+                     original channel 3, did not survive — and positions 3-4 (original 5 and 6, \
+                     a real surviving pair) must still pair with each other"
+                );
+            }
+            _ => panic!("expected the Export Channels dialog"),
+        }
+    }
+
+    /// The same removal, taken all the way to the files actually written: original channel 4
+    /// (index 2 after removal) must land alone in `ch4.wav` holding its own audio, and original
+    /// channels 5 and 6 must land together in `ch5-6.wav` — never original 4 paired with
+    /// original 5, which is what the position-based bug produced.
+    #[test]
+    fn export_channels_writes_correct_pairs_after_a_removal() {
+        let dir = std::env::temp_dir().join(format!("tui_wave_expch_removal_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let channels: Vec<Vec<f32>> = (0..6).map(|c| vec![(c as f32 + 1.0) / 100.0; 8]).collect();
+        let mut doc = doc_with_channels(channels.clone());
+        crate::model::command::Command::execute(
+            &mut crate::commands::remove_channels::RemoveChannelsCommand::new(vec![2]),
+            &mut doc,
+        );
+        doc.bits_per_sample = 32;
+        let src = dir.join("take01.wav");
+        crate::model::io::save_wav(&doc, &src).unwrap();
+        doc.path = Some(src);
+
+        let mut app = new_app(Some(doc), Some(dir.clone()));
+        let original_channels = vec![0usize, 1, 3, 4, 5];
+        let modes = crate::model::channel_export::default_modes_for(&original_channels);
+        app.export_channels("out", &modes, &original_channels);
+
+        let solo = crate::model::io::load_wav(dir.join("out/take01_ch4.wav")).unwrap();
+        assert_eq!(solo.channel_count(), 1);
+        assert_eq!(solo.channels[0], channels[3], "ch4.wav must hold original channel 4's own audio");
+
+        let pair = crate::model::io::load_wav(dir.join("out/take01_ch5-6.wav")).unwrap();
+        assert_eq!(pair.channels[0], channels[4], "ch5-6.wav's first channel must be original 5");
+        assert_eq!(pair.channels[1], channels[5], "ch5-6.wav's second channel must be original 6");
+
+        assert!(!dir.join("out/take01_ch4-5.wav").exists(),
+            "must never produce the buggy position-based pairing of original 4 and 5");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The same removal-in-the-middle scenario, on a **streamed** document. Streamed removal
+    /// already preserves original numbers through `channel_map` (unlike the resident path,
+    /// which needed the new `original_channels` field), so this is the check that `Document::
+    /// original_channel_number`'s two branches agree on the answer the dialog needs.
+    #[test]
+    fn export_channels_dialog_pairs_by_original_number_after_a_streamed_removal() {
+        let dir = std::env::temp_dir()
+            .join(format!("tuiwave_expch_stream_removal_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("take.wav");
+        multichannel_float_wav(&path, 6, 200);
+
+        let mut app = streaming_app();
+        app.load_file(path.clone());
+        assert!(app.documents[0].is_streaming(), "fixture must take the streamed path");
+        crate::model::command::Command::execute(
+            &mut crate::commands::remove_channels::RemoveStreamedChannelsCommand::new(vec![2]),
+            &mut app.documents[0],
+        );
+        assert_eq!(app.documents[0].channel_count(), 5);
+
+        app.handle_action(Action::ExportChannels);
+        match &app.dialog {
+            Some(Dialog::ExportChannels { modes, original_channels, .. }) => {
+                assert_eq!(original_channels, &[0, 1, 3, 4, 5]);
+                use crate::model::channel_export::ChannelExportMode::*;
+                assert_eq!(modes, &[PairWithNext, Mono, Mono, PairWithNext, Mono]);
+            }
+            _ => panic!("expected the Export Channels dialog"),
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Unlike Export Regions, the timeline is unchanged here, so markers must survive at
     /// exactly their original positions rather than being rebased.
     #[test]
@@ -48484,7 +48640,7 @@ mod tests {
         doc.path = Some(src);
 
         let mut app = new_app(Some(doc), Some(dir.clone()));
-        app.export_channels("out", &channel_export::default_modes(2));
+        app.export_channels("out", &channel_export::default_modes(2), &[0, 1]);
 
         let out = crate::model::io::load_wav(dir.join("out/take01_ch1-2.wav")).unwrap();
         assert_eq!(out.markers.len(), 2);
@@ -48576,24 +48732,40 @@ mod tests {
     /// which shifts everything after it.
     #[test]
     fn the_export_channels_header_lines_up_with_its_columns() {
-        for count in [2usize, 30, 100] {
-            let cols = ec_columns(count);
-            let header = ec_header_line(count);
+        // `ec_columns`/`ec_header_line` take the Ch column's digit width directly, not a
+        // channel count — see `channel_export::original_digit_width`, which is what computes
+        // it from the largest surviving original channel number in the real dialog.
+        for digits in [1usize, 2, 3] {
+            let cols = ec_columns(digits);
+            let header = ec_header_line(digits);
             assert_eq!(
                 header.char_indices().nth(cols.mode_label).map(|(_, c)| c),
                 Some('E'),
-                "'Export as' must start at the mode label column for {count} channels: {header:?}",
+                "'Export as' must start at the mode label column for {digits} digits: {header:?}",
             );
             assert!(
                 header[cols.file..].starts_with("Output file"),
-                "'Output file' must start at the file column for {count} channels: {header:?}",
+                "'Output file' must start at the file column for {digits} digits: {header:?}",
             );
             // The mode cell has to leave room for the widest label plus its arrows.
             assert_eq!(cols.file - cols.mode, EC_MODE_CELL_WIDTH + 2);
         }
-        // More channels means a wider number column, so every later column shifts right.
-        assert!(ec_columns(100).mode > ec_columns(30).mode);
-        assert_eq!(ec_columns(2).mode, ec_columns(30).mode, "1 and 2 digits both pad to two");
+        // A wider Ch column shifts every later column right.
+        assert!(ec_columns(3).mode > ec_columns(2).mode);
+        assert_eq!(ec_columns(1).mode, ec_columns(2).mode, "1 and 2 digits both pad to two");
+    }
+
+    /// `ec_columns`/`ec_header_line`'s width tracks the largest *surviving original* channel
+    /// number, not the count of channels in the export — the report this whole feature exists
+    /// for: after Remove Empty Channels drops low-numbered channels, the Ch column and the
+    /// mode-column click target must still widen for a two- or three-digit original number
+    /// even though only a few channels are left.
+    #[test]
+    fn original_digit_width_follows_the_surviving_original_numbers_not_the_count() {
+        // Three channels left, but their original numbers run up to 100.
+        let original = vec![1usize, 50, 100];
+        assert_eq!(channel_export::original_digit_width(&original), 3);
+        assert!(ec_columns(channel_export::original_digit_width(&original)).mode > ec_columns(1).mode);
     }
 
     /// The list scrolls, and the click handler must resolve a screen row to the same channel
@@ -51525,6 +51697,7 @@ mod tests {
         // so snapping always moves both endpoints to the same position → the bug triggers.
         let samples = vec![0.5f32; 20];
         let document = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![samples],
             sample_rate: 44100,
@@ -51557,6 +51730,7 @@ mod tests {
     fn fade_out_on_tiny_selection_is_applied_not_silently_skipped() {
         let samples = vec![0.5f32; 20];
         let document = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![samples],
             sample_rate: 44100,

@@ -77,6 +77,7 @@ mod tests {
     #[test]
     fn execute_then_undo_restores_original_buffer() {
         let mut doc = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![1.0, 2.0, 3.0, 4.0, 5.0]],
             sample_rate: 44100,

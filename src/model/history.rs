@@ -81,6 +81,7 @@ mod tests {
 
     fn doc() -> Document {
         Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![0.0]],
             sample_rate: 44100,
@@ -121,6 +122,7 @@ mod tests {
     fn multiple_undos_undo_in_reverse_order() {
         let mut history = History::new();
         let mut document = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![0.0, 1.0, 2.0, 3.0, 4.0]],
             sample_rate: 44100,

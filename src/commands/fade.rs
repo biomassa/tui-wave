@@ -210,6 +210,7 @@ mod tests {
     #[test]
     fn fade_in_linear_ramps_up() {
         let mut doc = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![1.0; 100]],
             sample_rate: 44100,
@@ -232,6 +233,7 @@ mod tests {
     #[test]
     fn fade_out_linear_ramps_down() {
         let mut doc = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![1.0; 100]],
             sample_rate: 44100,
@@ -253,6 +255,7 @@ mod tests {
     #[test]
     fn fade_then_undo_restores_original() {
         let mut doc = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![1.0; 50]],
             sample_rate: 44100,
@@ -275,6 +278,7 @@ mod tests {
     #[test]
     fn fade_exp_curve_bounds() {
         let mut doc = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![1.0; 50]],
             sample_rate: 44100,
@@ -297,6 +301,7 @@ mod tests {
     #[test]
     fn fade_log_curve_bounds() {
         let mut doc = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![0.8; 30]],
             sample_rate: 44100,
@@ -319,6 +324,7 @@ mod tests {
     #[test]
     fn fade_with_zero_escapes() {
         let mut doc = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![1.0; 5]],
             sample_rate: 44100,
@@ -339,6 +345,7 @@ mod tests {
 
     fn loud_doc(len: usize) -> Document {
         Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![1.0; len]],
             sample_rate: 44100,

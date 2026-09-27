@@ -83,6 +83,7 @@ mod tests {
     #[test]
     fn execute_applies_linear_gain() {
         let mut doc = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![0.5, 0.3, 0.1]],
             sample_rate: 44100,
@@ -105,6 +106,7 @@ mod tests {
     #[test]
     fn execute_tanh_clip_saturates() {
         let mut doc = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![2.0, -2.0, 0.5]],
             sample_rate: 44100,
@@ -129,6 +131,7 @@ mod tests {
     #[test]
     fn execute_then_undo_restores_original() {
         let mut doc = Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![vec![0.5, 0.3, 0.1]],
             sample_rate: 44100,

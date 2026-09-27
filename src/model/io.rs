@@ -142,6 +142,7 @@ fn load_symphonia(path: &Path) -> color_eyre::Result<Document> {
         .collect();
 
     Ok(Document {
+        original_channels: Vec::new(),
         head_tail_marks,
         channels,
         sample_rate,
@@ -213,6 +214,7 @@ pub fn load_wav(path: impl AsRef<Path>) -> color_eyre::Result<Document> {
         .collect();
 
     Ok(Document {
+        original_channels: Vec::new(),
         head_tail_marks,
         channels,
         sample_rate: info.sample_rate,
@@ -652,6 +654,7 @@ mod tests {
 
     fn approx_doc(samples: Vec<f32>) -> Document {
         Document {
+            original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
             channels: vec![samples],
             sample_rate: 44100,
