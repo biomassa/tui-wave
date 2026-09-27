@@ -58,18 +58,7 @@ fn can_pair(modes: &[ChannelExportMode], i: usize) -> bool {
     i + 1 < modes.len() && !is_consumed(modes, i) && !is_consumed(modes, i + 1)
 }
 
-/// The files a mode list produces, top to bottom, with every channel numbered by its position
-/// — channel 0 is always "1", whether or not anything upstream of this function has ever
-/// removed a channel. Use [`plan_for`] when the list's positions do not necessarily match the
-/// numbers a person would recognize (after Remove Empty Channels, for instance): this is the
-/// identity case of that function, kept as its own name because the overwhelming majority of
-/// calls — everywhere a document has never had a channel removed — have no other numbering to
-/// give it.
-pub fn plan(modes: &[ChannelExportMode]) -> Vec<ChannelExportFile> {
-    plan_for(modes, &(0..modes.len()).collect::<Vec<_>>())
-}
-
-/// [`plan`], but each output is numbered by `original_channels[i]` rather than by its position
+/// Each output is numbered by `original_channels[i]` rather than by its position
 /// `i` — what a channel *reads from* (`channels`, i.e. which positions in the source) is
 /// unaffected, since reading is always by position; only what the file and the dialog *call*
 /// that channel changes.
@@ -253,19 +242,8 @@ pub fn export_streaming(
 }
 
 /// Opening state: stereo pairs from the top, with a trailing odd channel as its own mono
-/// file. Pairs are the overwhelmingly common intent for a multichannel capture, and an odd
-/// channel left over has nothing to pair with.
-///
-/// The identity case of [`default_modes_for`] — see that function for what changes once a
-/// channel has been removed from the document. Kept as its own name for the same reason
-/// [`plan`] is: everywhere a document has never had a channel removed (which is most callers,
-/// and every existing test here) has no other numbering to give it.
-pub fn default_modes(channel_count: usize) -> Vec<ChannelExportMode> {
-    default_modes_for(&(0..channel_count).collect::<Vec<_>>())
-}
-
-/// [`default_modes`], but a pair is only ever offered between two channels that were adjacent
-/// in the *original* numbering — position doesn't decide it once channels have been removed.
+/// file, offered only between two channels that were adjacent in the *original* numbering —
+/// position doesn't decide it once channels have been removed.
 ///
 /// **The bug this exists for.** Position-based pairing (`i` pairs with `i+1`) is exactly right
 /// until a channel in between is removed: original channels 1-6 in pairs (1,2)(3,4)(5,6), then
@@ -297,6 +275,22 @@ pub fn default_modes_for(original_channels: &[usize]) -> Vec<ChannelExportMode> 
             }
         })
         .collect()
+}
+
+/// Test-only identity-case conveniences. Every real caller (the Export Channels dialog) has
+/// original channel numbers to give `default_modes_for`/`plan_for`; a test that has no reason
+/// to think about a removed channel just wants the plain count/position it always did. `cfg
+/// (test)` rather than a third production function, because nothing outside a test has used
+/// either name since the dialog started tracking original numbers — keeping them reachable
+/// from ordinary code would be exactly the unused API `cargo build`'s dead-code warning caught.
+#[cfg(test)]
+pub(crate) fn default_modes(channel_count: usize) -> Vec<ChannelExportMode> {
+    default_modes_for(&(0..channel_count).collect::<Vec<_>>())
+}
+
+#[cfg(test)]
+pub(crate) fn plan(modes: &[ChannelExportMode]) -> Vec<ChannelExportFile> {
+    plan_for(modes, &(0..modes.len()).collect::<Vec<_>>())
 }
 
 #[cfg(test)]
