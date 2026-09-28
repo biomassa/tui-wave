@@ -408,6 +408,10 @@ pub fn save_wav(doc: &Document, path: impl AsRef<Path>) -> color_eyre::Result<()
     save_wav_with(doc, path, BitDepth::from_bits(doc.bits_per_sample), false)
 }
 
+/// The largest `data` chunk `save_wav_with` gives to hound. 1MiB below `u32::MAX` leaves room
+/// for hound's header and for the marker and `bext` chunks appended after it.
+const HOUND_MAX_DATA_BYTES: u64 = u32::MAX as u64 - (1 << 20);
+
 /// Saves at the requested bit depth. Integer depths re-quantize from f32; `dither` adds
 /// TPDF noise before quantization to decorrelate quantization error (ignored for Float32).
 pub fn save_wav_with(
@@ -416,7 +420,18 @@ pub fn save_wav_with(
     depth: BitDepth,
     dither: bool,
 ) -> color_eyre::Result<()> {
-    let path = path.as_ref();
+    save_wav_with_hound_limit(doc, path.as_ref(), depth, dither, HOUND_MAX_DATA_BYTES)
+}
+
+/// `save_wav_with` with the hound size limit as a parameter, so a test can force the `wavwrite`
+/// path without writing 4GB.
+fn save_wav_with_hound_limit(
+    doc: &Document,
+    path: &Path,
+    depth: BitDepth,
+    dither: bool,
+    hound_limit: u64,
+) -> color_eyre::Result<()> {
     // A streamed document keeps its samples on disk and its `channels` deliberately empty, so
     // the write loops below would emit a header claiming the stream's channel count and then
     // no audio at all — a valid, empty WAV, staged and renamed over a take that may be 30GB.
@@ -443,6 +458,27 @@ pub fn save_wav_with(
     // chunks are appended *inside* the staging window too, so what is published is the finished
     // article rather than a file that gains its metadata a moment after appearing.
     super::atomic::write_atomically(path, |staging| -> color_eyre::Result<()> {
+        // hound counts data bytes in an unchecked `u32`. Past 4GB a release build wraps it and
+        // writes a header with the wrong size, and the rename above then puts that file over the
+        // original. So a document that large goes through `wavwrite`, which switches to RF64.
+        // Smaller files stay on hound, so their headers do not change.
+        let data_bytes = doc.len_samples() as u64
+            * spec.channels as u64
+            * (depth.bits() as u64 / 8);
+        if data_bytes > hound_limit {
+            let mut writer = super::wavwrite::WavWriter::create(
+                staging,
+                spec.channels as usize,
+                doc.sample_rate,
+                depth,
+                dither,
+            )?;
+            let planes: Vec<&[f32]> = doc.channels.iter().map(|c| c.as_slice()).collect();
+            writer.write_planes(&planes, doc.len_samples())?;
+            writer.finalize()?;
+            super::bwf::append_aux_chunks(staging, &doc.markers, &doc.bext)?;
+            return Ok(());
+        }
         let mut writer = WavWriter::create(staging, spec)?;
         match depth {
             BitDepth::Float32 => {
@@ -775,6 +811,38 @@ mod tests {
         // Samples must still load correctly with the extra chunks present.
         assert_eq!(reloaded.len_samples(), 2000);
         std::fs::remove_file(&tmp).unwrap();
+    }
+
+    /// The path a document over hound's 4GB limit takes, forced with a limit of 0 so the test
+    /// does not need 4GB. It must give the same audio, markers and bext as the hound path.
+    #[test]
+    fn a_save_past_the_hound_limit_round_trips_through_wavwrite() {
+        use crate::model::document::Marker;
+        let mut doc = approx_doc((0..3000).map(|i| (i as f32 / 3000.0) - 0.5).collect());
+        doc.channels.push(doc.channels[0].iter().map(|s| -s).collect());
+        doc.channels.push(vec![0.25; 3000]);
+        doc.markers = vec![Marker { position: 1234, label: "Take 2".into() }];
+        doc.bext = Some(vec![9, 8, 7]);
+        for depth in [BitDepth::Float32, BitDepth::Int24, BitDepth::Int16] {
+            let tmp = std::env::temp_dir()
+                .join(format!("tui_wave_hound_limit_{}_{}.wav", depth.bits(), std::process::id()));
+            save_wav_with_hound_limit(&doc, &tmp, depth, false, 0).unwrap();
+            let reloaded = load_wav(&tmp).unwrap();
+            assert_eq!(reloaded.channels.len(), 3);
+            assert_eq!(reloaded.bits_per_sample, depth.bits());
+            let tolerance = if depth == BitDepth::Float32 { 0.0 } else { 1.0 / 16000.0 };
+            for (want, got) in doc.channels.iter().zip(&reloaded.channels) {
+                assert_eq!(got.len(), 3000);
+                for (a, b) in want.iter().zip(got) {
+                    assert!((a - b).abs() <= tolerance, "{depth:?}: {a} vs {b}");
+                }
+            }
+            assert_eq!(reloaded.markers.len(), 1);
+            assert_eq!(reloaded.markers[0].position, 1234);
+            assert_eq!(reloaded.markers[0].label, "Take 2");
+            assert_eq!(reloaded.bext, Some(vec![9, 8, 7]));
+            std::fs::remove_file(&tmp).unwrap();
+        }
     }
 
     #[test]

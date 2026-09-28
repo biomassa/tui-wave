@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Saving a WAV larger than 4GB no longer corrupts it.** Save and Save As wrote through a
+  library that stores the data size in 32 bits. Past 4GB the size wrapped, the file got a wrong
+  header, and it replaced the original. This needed a buffer in memory that had grown past 4GB,
+  for example through a time-stretch or a raised `max_resident_mb`. Such a file is now written as
+  RF64. Files under 4GB are written exactly as before.
+
 ## 2026-09-27 (2.15.0)
 
 - **praatAudioTools updated to `c77176f`.** `Grisey_Spectral_Becoming_Engine` and
