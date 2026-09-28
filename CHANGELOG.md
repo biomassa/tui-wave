@@ -71,6 +71,11 @@
   of the same name without a word. Now they ask; `n` goes back to the name you typed.
 - **Renaming a FLAC or AIFF file keeps its extension.** A rename used to add `.wav`, so
   `take.flac` became `take2.wav`, which the app then could not open.
+- **Chains and envelope presets named in other scripts no longer replace each other.** A name was
+  turned into a file name by replacing every non-Latin letter with `_`, so for example `Эхо` and
+  `Бас` were both saved as `___.toml`. Letters of any script are now kept. Names that still share
+  a file (such as `My Chain` and `My_Chain`) make the save prompt ask before replacing. A chain or
+  preset saved under the old rule keeps its old file and still loads.
 - **The executable is about 8MB smaller** (28MB to 20MB on Linux x86-64). Unused audio decoders
   are no longer linked, the built-in process catalogs are stored compressed, and the release
   build uses link-time optimization. Release builds take longer.

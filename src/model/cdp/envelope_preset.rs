@@ -54,17 +54,21 @@ pub fn delete_preset(name: &str) {
     delete_preset_in(&presets_dir(), name);
 }
 
-/// Turns a preset name into a safe filename: anything that isn't alphanumeric, `-`, or `_`
-/// becomes `_` — mirrors `chain_preset::sanitize_name` exactly (a preset name is free-typed
-/// text, not already filesystem-safe like a process key). Two different names that sanitize
-/// to the same filename will collide (last save wins); accepted as a rare-in-practice edge
-/// case rather than adding a disambiguation scheme for it.
-fn sanitize_name(name: &str) -> String {
-    name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
+/// The name of a *different* envelope preset already stored in the file `name` would be saved
+/// to, if any. Saving would replace it, so the caller asks first.
+pub fn other_preset_in_file_for(name: &str) -> Option<String> {
+    other_preset_in_file_for_in(&presets_dir(), name)
 }
 
+fn other_preset_in_file_for_in(dir: &Path, name: &str) -> Option<String> {
+    let text = std::fs::read_to_string(preset_file_path(dir, name)).ok()?;
+    let stored = toml::from_str::<EnvelopePreset>(&text).ok()?.name;
+    (stored != name).then_some(stored)
+}
+
+/// Where the envelope preset named `name` is stored; see `preset::file_stem`.
 fn preset_file_path(dir: &Path, name: &str) -> PathBuf {
-    dir.join(format!("{}.toml", sanitize_name(name)))
+    dir.join(format!("{}.toml", super::preset::file_stem(name)))
 }
 
 /// A missing directory yields an empty `Vec`. Each file is parsed independently: one
@@ -123,6 +127,19 @@ mod tests {
 
     fn sample_preset(name: &str) -> EnvelopePreset {
         EnvelopePreset { name: name.into(), points: vec![(0.0, 0.0), (0.5, 100.0), (1.0, 20.0)] }
+    }
+
+    /// Presets named in another script keep separate files, and a name sharing a file with a
+    /// different preset is reported for the prompt to ask about.
+    #[test]
+    fn preset_names_keep_their_letters_and_shared_files_are_reported() {
+        let dir = TempDir::new("names");
+        save_preset_in(&dir.0, &sample_preset("Эхо"));
+        save_preset_in(&dir.0, &sample_preset("Бас"));
+        assert_eq!(list_presets_in(&dir.0).len(), 2, "one replaced the other");
+        save_preset_in(&dir.0, &sample_preset("Soft Rise"));
+        assert_eq!(other_preset_in_file_for_in(&dir.0, "Soft_Rise"), Some("Soft Rise".to_string()));
+        assert_eq!(other_preset_in_file_for_in(&dir.0, "Soft Rise"), None);
     }
 
     #[test]

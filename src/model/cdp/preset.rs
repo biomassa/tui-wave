@@ -73,7 +73,21 @@ pub fn delete_preset(process_key: &str, name: &str) {
 }
 
 fn preset_file_path(dir: &Path, process_key: &str) -> PathBuf {
-    dir.join(format!("{process_key}.toml"))
+    dir.join(format!("{}.toml", file_stem(process_key)))
+}
+
+/// The file name stem a preset, chain or envelope named `name` is stored under.
+///
+/// Letters and digits of any script are kept, so `Эхо` and `Бас` get files of their own; they
+/// used to both become `___.toml` and replace each other. Everything else, including `.` and
+/// path separators, becomes `_`, so no name can reach outside its directory. Distinct names can
+/// still share a stem (`My Chain`, `My_Chain`), which the save prompts ask about.
+pub fn file_stem(name: &str) -> String {
+    let stem: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    if stem.is_empty() { "_".to_string() } else { stem }
 }
 
 /// A missing or malformed file yields an empty `Vec` (never blocks opening the params
@@ -145,6 +159,25 @@ mod tests {
         }
     }
 
+
+    /// Letters of any script are kept; `.`, separators and spaces become `_`, so a name or key
+    /// can never name a path outside its directory.
+    #[test]
+    fn file_stem_keeps_letters_and_blocks_paths() {
+        assert_eq!(file_stem("Эхо"), "Эхо");
+        assert_eq!(file_stem("Réverb 2"), "Réverb_2");
+        assert_eq!(file_stem("../../etc/passwd"), "______etc_passwd");
+        assert_eq!(file_stem("a\\b"), "a_b");
+        assert_eq!(file_stem(""), "_");
+    }
+
+    /// A process key from a custom catalog goes through the same rule.
+    #[test]
+    fn a_process_key_cannot_leave_the_presets_directory() {
+        let dir = std::path::Path::new("/presets");
+        assert_eq!(preset_file_path(dir, "../outside").parent(), Some(dir));
+        assert_eq!(preset_file_path(dir, "blur_avrg"), dir.join("blur_avrg.toml"), "ordinary keys keep their files");
+    }
     #[test]
     fn loading_presets_for_an_unknown_process_returns_empty() {
         let dir = TempDir::new("unknown");

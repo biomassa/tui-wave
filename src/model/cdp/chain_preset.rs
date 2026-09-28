@@ -43,20 +43,22 @@ pub fn delete_chain(name: &str) {
     delete_chain_in(&chains_dir(), name);
 }
 
-/// Turns a chain name into a safe filename: anything that isn't alphanumeric, `-`, or `_`
-/// becomes `_` (a chain name is free-typed text, unlike a process key, so — unlike
-/// `preset.rs`, which can use `process_key` directly — this can't assume the name is already
-/// filesystem-safe). Two different names that sanitize to the same filename will collide
-/// (last save wins); accepted as a rare-in-practice edge case rather than adding a
-/// disambiguation scheme for it.
-fn sanitize_name(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect()
+/// Where the chain named `name` is stored; see `preset::file_stem`. Two names can share a
+/// file, which `other_chain_in_file_for` reports so the save prompt can ask.
+fn chain_file_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{}.toml", super::preset::file_stem(name)))
 }
 
-fn chain_file_path(dir: &Path, name: &str) -> PathBuf {
-    dir.join(format!("{}.toml", sanitize_name(name)))
+/// The name of a *different* chain already stored in the file `name` would be saved to, if
+/// any. Saving would replace it, so the caller asks first.
+pub fn other_chain_in_file_for(name: &str) -> Option<String> {
+    other_chain_in_file_for_in(&chains_dir(), name)
+}
+
+fn other_chain_in_file_for_in(dir: &Path, name: &str) -> Option<String> {
+    let text = std::fs::read_to_string(chain_file_path(dir, name)).ok()?;
+    let stored = toml::from_str::<CdpChain>(&text).ok()?.name;
+    (stored != name).then_some(stored)
 }
 
 /// A missing directory yields an empty `Vec`. Each file is parsed independently: one
@@ -131,6 +133,36 @@ mod tests {
             bank: Default::default(),
             output: Default::default(),
         }
+    }
+
+    /// Names in other scripts get files of their own. They used to reduce to underscores, so
+    /// `Эхо` and `Бас` were the same `___.toml` and each save replaced the other.
+    #[test]
+    fn chains_named_in_another_script_do_not_replace_each_other() {
+        let dir = TempDir::new("cyrillic");
+        save_chain_in(&dir.0, &sample_chain("Эхо"));
+        save_chain_in(&dir.0, &sample_chain("Бас"));
+        let names: Vec<String> = list_chains_in(&dir.0).into_iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["Бас".to_string(), "Эхо".to_string()]);
+    }
+
+    /// A name that shares a file with a different saved chain is reported, so the prompt can
+    /// ask; the chain's own name, or a free file, is not.
+    #[test]
+    fn a_name_that_shares_another_chains_file_is_reported() {
+        let dir = TempDir::new("shared_stem");
+        save_chain_in(&dir.0, &sample_chain("My Chain"));
+        assert_eq!(other_chain_in_file_for_in(&dir.0, "My_Chain"), Some("My Chain".to_string()));
+        assert_eq!(other_chain_in_file_for_in(&dir.0, "My Chain"), None, "saving over itself");
+        assert_eq!(other_chain_in_file_for_in(&dir.0, "Something else"), None);
+    }
+
+    /// A name cannot reach outside the chains directory.
+    #[test]
+    fn a_chain_name_cannot_leave_its_directory() {
+        let dir = TempDir::new("traversal");
+        let path = chain_file_path(&dir.0, "../../escape");
+        assert_eq!(path.parent(), Some(dir.0.as_path()));
     }
 
     #[test]

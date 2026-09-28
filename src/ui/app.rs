@@ -3210,6 +3210,16 @@ enum Confirm {
     OverwriteOnRename { what: RenameWhat, name: String, typed: String },
     /// A Save As to a file that already exists and is not the buffer's own.
     OverwriteOnSaveAs { path: PathBuf, depth: BitDepth, dither: bool },
+    /// Saving a chain or envelope preset under a name whose file already holds `other`, a
+    /// different name (`My Chain` and `My_Chain` share `My_Chain.toml`). Saving replaces it.
+    ReplaceSavedByName { kind: SavedKind, name: String, other: String },
+}
+
+/// Which save prompt a `ReplaceSavedByName` came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SavedKind {
+    Chain,
+    Envelope,
 }
 
 /// What an `OverwriteOnRename` renames.
@@ -6819,6 +6829,8 @@ impl App {
                 self.rename_file(&path, &name);
             }
             Confirm::OverwriteOnSaveAs { path, depth, dither } => self.finish_save_as(path, depth, dither),
+            Confirm::ReplaceSavedByName { kind: SavedKind::Chain, name, .. } => self.commit_chain_save(name),
+            Confirm::ReplaceSavedByName { kind: SavedKind::Envelope, name, .. } => self.commit_envelope_save(name),
         }
     }
 
@@ -11763,6 +11775,22 @@ impl App {
     /// Key handling while the chain editor's save prompt is open — Enter saves (empty name
     /// cancels without saving), Esc cancels outright. Mirrors
     /// `handle_cdp_preset_save_prompt_key`'s shape.
+    /// Saves the chain being edited as `name` and closes the save prompt.
+    fn commit_chain_save(&mut self, name: String) {
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        state.save_prompt = None;
+        // Saving is also a transition away from "(none)" -- if the user never cycled
+        // with Left/Right first, custom_chain would otherwise never get snapshotted
+        // (mirrors the same fix applied to the envelope editor and CdpParams).
+        if state.preset_selected.is_none() && state.custom_chain.is_none() {
+            state.custom_chain = Some(state.chain.clone());
+        }
+        state.chain.name = name;
+        crate::model::cdp::chain_preset::save_chain(&state.chain);
+        state.presets = ChainEditorState::presets_by_recency();
+        state.preset_selected = state.presets.iter().position(|c| c.name == state.chain.name);
+    }
+
     fn handle_cdp_chain_save_prompt_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
@@ -11772,21 +11800,17 @@ impl App {
             }
             KeyCode::Enter => {
                 let Some(state) = self.cdp_chain_editor.as_mut() else { return };
-                let Some(prompt) = state.save_prompt.take() else { return };
+                let Some(prompt) = state.save_prompt.as_ref() else { return };
                 let name = prompt.value().trim().to_string();
                 if name.is_empty() {
+                    state.save_prompt = None;
                     return;
                 }
-                // Saving is also a transition away from "(none)" -- if the user never cycled
-                // with Left/Right first, custom_chain would otherwise never get snapshotted
-                // (mirrors the same fix applied to the envelope editor and CdpParams).
-                if state.preset_selected.is_none() && state.custom_chain.is_none() {
-                    state.custom_chain = Some(state.chain.clone());
+                if let Some(other) = crate::model::cdp::chain_preset::other_chain_in_file_for(&name) {
+                    self.confirm = Some(Confirm::ReplaceSavedByName { kind: SavedKind::Chain, name, other });
+                    return;
                 }
-                state.chain.name = name;
-                crate::model::cdp::chain_preset::save_chain(&state.chain);
-                state.presets = ChainEditorState::presets_by_recency();
-                state.preset_selected = state.presets.iter().position(|c| c.name == state.chain.name);
+                self.commit_chain_save(name);
             }
             KeyCode::Backspace => {
                 if let Some(input) = self.cdp_chain_editor.as_mut().and_then(|s| s.save_prompt.as_mut()) {
@@ -14906,6 +14930,26 @@ impl App {
     /// newly saved one (mirroring `handle_cdp_preset_save_prompt_key`'s own post-save
     /// refresh); an empty/whitespace-only name is treated as "cancel," matching Esc. Mirrors
     /// `handle_cdp_chain_save_prompt_key`'s shape.
+    /// Saves the envelope being edited as preset `name` and closes the save prompt.
+    fn commit_envelope_save(&mut self, name: String) {
+        let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() else { return };
+        edit.save_prompt = None;
+        let points = edit.points.clone();
+        crate::model::cdp::envelope_preset::save_preset(&crate::model::cdp::envelope_preset::EnvelopePreset {
+            name: name.clone(),
+            points,
+        });
+        edit.presets = crate::model::cdp::envelope_preset::list_presets();
+        // Saving is also a transition away from "(none)" -- if the user never cycled
+        // with Tab first, `custom_points` would otherwise never get snapshotted, so
+        // cycling back around to "(none)" later would silently show a stale shape
+        // instead of restoring what was actually drawn (user report).
+        if edit.preset_selected.is_none() && edit.custom_points.is_none() {
+            edit.custom_points = Some(edit.points.clone());
+        }
+        edit.preset_selected = edit.presets.iter().position(|p| p.name == name);
+    }
+
     fn handle_envelope_save_prompt_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
@@ -14915,25 +14959,17 @@ impl App {
             }
             KeyCode::Enter => {
                 let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = self.dialog.as_mut() else { return };
-                let Some(prompt) = edit.save_prompt.take() else { return };
+                let Some(prompt) = edit.save_prompt.as_ref() else { return };
                 let name = prompt.value().trim().to_string();
                 if name.is_empty() {
+                    edit.save_prompt = None;
                     return;
                 }
-                let points = edit.points.clone();
-                crate::model::cdp::envelope_preset::save_preset(&crate::model::cdp::envelope_preset::EnvelopePreset {
-                    name: name.clone(),
-                    points,
-                });
-                edit.presets = crate::model::cdp::envelope_preset::list_presets();
-                // Saving is also a transition away from "(none)" -- if the user never cycled
-                // with Tab first, `custom_points` would otherwise never get snapshotted, so
-                // cycling back around to "(none)" later would silently show a stale shape
-                // instead of restoring what was actually drawn (user report).
-                if edit.preset_selected.is_none() && edit.custom_points.is_none() {
-                    edit.custom_points = Some(edit.points.clone());
+                if let Some(other) = crate::model::cdp::envelope_preset::other_preset_in_file_for(&name) {
+                    self.confirm = Some(Confirm::ReplaceSavedByName { kind: SavedKind::Envelope, name, other });
+                    return;
                 }
-                edit.preset_selected = edit.presets.iter().position(|p| p.name == name);
+                self.commit_envelope_save(name);
             }
             KeyCode::Backspace => {
                 if let Some(input) = self.envelope_save_prompt_input() {
@@ -24106,6 +24142,9 @@ impl App {
                 Confirm::OverwriteOnRename { name, .. } => {
                     format!(" \"{name}\" already exists — (y) replace it · (n) choose another name ")
                 }
+                Confirm::ReplaceSavedByName { name, other, .. } => format!(
+                    " Saving \"{name}\" would replace the saved \"{other}\" (same file name) — (y) replace · (n) choose another name "
+                ),
                 Confirm::OverwriteOnSaveAs { path, .. } => {
                     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                     format!(" \"{name}\" already exists — (y) replace it · (n) choose another name ")
@@ -50008,6 +50047,31 @@ mod tests {
         assert_eq!(std::fs::read(&other).unwrap(), b"theirs");
         assert!(own.exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Saving a chain under a name whose file holds a different chain asks first: `n` keeps
+    /// the prompt open and the old chain, `y` replaces it.
+    #[test]
+    fn saving_a_chain_over_another_chains_file_asks_first() {
+        let _config = crate::config::TestConfigHome::new("chain_name_collision");
+        let mut first = app_with_chain_of(1);
+        if let Some(state) = first.cdp_chain_editor.as_mut() { state.save_prompt = Some(TextInput::new("My Chain")); }
+        first.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(first.confirm.is_none(), "a free name saves at once");
+
+        let mut app = app_with_chain_of(2);
+        if let Some(state) = app.cdp_chain_editor.as_mut() { state.save_prompt = Some(TextInput::new("My_Chain")); }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(&app.confirm, Some(Confirm::ReplaceSavedByName { other, .. }) if other == "My Chain"));
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(app.cdp_chain_editor.as_ref().unwrap().save_prompt.is_some(), "the prompt closed on n");
+        let names = |_: ()| crate::model::cdp::chain_preset::list_chains().into_iter().map(|c| c.name).collect::<Vec<_>>();
+        assert_eq!(names(()), vec!["My Chain".to_string()]);
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(names(()), vec!["My_Chain".to_string()]);
+        assert!(app.cdp_chain_editor.as_ref().unwrap().save_prompt.is_none());
     }
 
     /// A graphics-mode app on a stereo ramp, drawn once at 120x40.
