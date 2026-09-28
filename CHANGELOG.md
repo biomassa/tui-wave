@@ -67,6 +67,10 @@
 - **Praat text parameters accept every letter.** Typing `s`, `e` or `b` into a text field opened
   the preset prompt, a list editor or a file picker instead, so a word like "base" could not be
   typed. This affected the 32 Praat processes with a text parameter.
+- **Rename and Save As ask before replacing another file.** Both used to replace an existing file
+  of the same name without a word. Now they ask; `n` goes back to the name you typed.
+- **Renaming a FLAC or AIFF file keeps its extension.** A rename used to add `.wav`, so
+  `take.flac` became `take2.wav`, which the app then could not open.
 - **The executable is about 8MB smaller** (28MB to 20MB on Linux x86-64). Unused audio decoders
   are no longer linked, the built-in process catalogs are stored compressed, and the release
   build uses link-time optimization. Release builds take longer.

@@ -3205,6 +3205,18 @@ enum Confirm {
     /// back only a chain that has run, so one Esc used to lose a chain that was built but never
     /// saved or run. Carries the count so the question can say what it costs.
     DiscardChain { steps: usize },
+    /// A rename whose new name is an existing file, which the rename would replace. `typed` is
+    /// what was in the field, so a cancel reopens the rename dialog as it was.
+    OverwriteOnRename { what: RenameWhat, name: String, typed: String },
+    /// A Save As to a file that already exists and is not the buffer's own.
+    OverwriteOnSaveAs { path: PathBuf, depth: BitDepth, dither: bool },
+}
+
+/// What an `OverwriteOnRename` renames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RenameWhat {
+    Buffer(usize),
+    File(PathBuf),
 }
 
 /// What to do once `App::save_as_queue` (buffers waiting for a filename before some other
@@ -6728,6 +6740,14 @@ impl App {
             );
         let proceed = save || matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
         if !proceed {
+            // A declined rename goes back to its dialog with the name typed, so it can be
+            // changed. (Save As is still open underneath its confirm.)
+            if let Some(Confirm::OverwriteOnRename { what, typed, .. }) = self.confirm.take() {
+                self.dialog = Some(match what {
+                    RenameWhat::Buffer(index) => Dialog::RenameBuffer { index, input: TextInput::new(typed) },
+                    RenameWhat::File(path) => Dialog::RenameFile { path, input: TextInput::new(typed) },
+                });
+            }
             // Any other key cancels.
             self.confirm = None;
             return;
@@ -6792,7 +6812,66 @@ impl App {
                 self.remove_chain_split_now(&path);
             }
             Confirm::DiscardChain { .. } => self.close_chain_editor(),
+            Confirm::OverwriteOnRename { what: RenameWhat::Buffer(index), name, .. } => {
+                self.rename_buffer(index, &name);
+            }
+            Confirm::OverwriteOnRename { what: RenameWhat::File(path), name, .. } => {
+                self.rename_file(&path, &name);
+            }
+            Confirm::OverwriteOnSaveAs { path, depth, dither } => self.finish_save_as(path, depth, dither),
         }
+    }
+
+    /// Writes the active buffer for Save As, then moves the queue on. Called directly, or from
+    /// the confirm that asked whether `path` may be replaced.
+    fn finish_save_as(&mut self, path: PathBuf, depth: BitDepth, dither: bool) {
+        if self.active_doc().is_some_and(|d| d.is_streaming()) {
+            // A streamed buffer cannot go through `save_wav_with`, which walks a
+            // resident `Vec<Vec<f32>>`. It is also far too slow to do inline: the
+            // write is the size of the file. Queued for the main loop, which owns
+            // the terminal the progress panel needs.
+            //
+            // Refused outright if it would write over the file being read. The
+            // handle stays open for the whole session, so this is not a
+            // hypothetical — it would truncate the source out from under the very
+            // reads that are supposed to be producing the output.
+            let same_file = self
+                .active_doc()
+                .and_then(|d| d.path.as_ref())
+                .map(|src| paths_point_at_the_same_file(src, &path))
+                .unwrap_or(false);
+            if same_file {
+                self.dialog = Some(Dialog::Info {
+                    message: "That is the file being read. Choose a different name — \
+                              a streamed buffer cannot be saved over its own source."
+                        .to_string(),
+                });
+            } else {
+                self.pending_streamed_save = Some((path, depth, dither));
+            }
+        } else if let Some(document) = self.active_doc_mut() {
+            match save_wav_with(document, &path, depth, dither) {
+                Ok(()) => {
+                    document.path = Some(path.clone());
+                    document.dirty = false;
+                    self.file_panel.mark_dirty(&path, false);
+                    self.file_panel.scan();
+                }
+                Err(e) => {
+                    // Stop here: the rest of the queue, and the close or quit it
+                    // leads to, must not go ahead with this buffer unsaved.
+                    self.save_as_active = false;
+                    self.dest_picker = None;
+                    self.save_as_queue.clear();
+                    self.save_as_queue_then = None;
+                    self.report_save_error(format!("Could not save {}:\n{e}", path.display()));
+                    return;
+                }
+            }
+        }
+        // Plain one-off Save As (no pending queue) just closes; mid-queue, this
+        // moves on to the next never-saved buffer, or finishes (e.g. actually quits).
+        self.advance_save_as_queue();
     }
 
     fn handle_save_as_key(&mut self, key: KeyEvent) {
@@ -6830,53 +6909,16 @@ impl App {
                     };
                     let depth = self.save_as_depth;
                     let dither = self.save_as_dither && depth.supports_dither();
-                    if self.active_doc().is_some_and(|d| d.is_streaming()) {
-                        // A streamed buffer cannot go through `save_wav_with`, which walks a
-                        // resident `Vec<Vec<f32>>`. It is also far too slow to do inline: the
-                        // write is the size of the file. Queued for the main loop, which owns
-                        // the terminal the progress panel needs.
-                        //
-                        // Refused outright if it would write over the file being read. The
-                        // handle stays open for the whole session, so this is not a
-                        // hypothetical — it would truncate the source out from under the very
-                        // reads that are supposed to be producing the output.
-                        let same_file = self
-                            .active_doc()
-                            .and_then(|d| d.path.as_ref())
-                            .map(|src| paths_point_at_the_same_file(src, &path))
-                            .unwrap_or(false);
-                        if same_file {
-                            self.dialog = Some(Dialog::Info {
-                                message: "That is the file being read. Choose a different name — \
-                                          a streamed buffer cannot be saved over its own source."
-                                    .to_string(),
-                            });
-                        } else {
-                            self.pending_streamed_save = Some((path, depth, dither));
-                        }
-                    } else if let Some(document) = self.active_doc_mut() {
-                        match save_wav_with(document, &path, depth, dither) {
-                            Ok(()) => {
-                                document.path = Some(path.clone());
-                                document.dirty = false;
-                                self.file_panel.mark_dirty(&path, false);
-                                self.file_panel.scan();
-                            }
-                            Err(e) => {
-                                // Stop here: the rest of the queue, and the close or quit it
-                                // leads to, must not go ahead with this buffer unsaved.
-                                self.save_as_active = false;
-                                self.dest_picker = None;
-                                self.save_as_queue.clear();
-                                self.save_as_queue_then = None;
-                                self.report_save_error(format!("Could not save {}:\n{e}", path.display()));
-                                return;
-                            }
-                        }
+                    let own = self.active_doc().and_then(|d| d.path.clone());
+                    if rename_would_replace(own.as_deref(), &path) {
+                        self.confirm = Some(Confirm::OverwriteOnSaveAs { path, depth, dither });
+                        return;
                     }
+                    self.finish_save_as(path, depth, dither);
+                    return;
                 }
-                // Plain one-off Save As (no pending queue) just closes; mid-queue, this
-                // moves on to the next never-saved buffer, or finishes (e.g. actually quits).
+                // An empty name saves nothing: a one-off Save As just closes, and mid-queue this
+                // moves on to the next buffer.
                 self.advance_save_as_queue();
             }
             KeyCode::Esc => {
@@ -7527,10 +7569,25 @@ impl App {
                 }
                 Some(Dialog::OpenDirectory { input }) => self.open_directory(input.value()),
                 Some(Dialog::RenameBuffer { index, input }) => {
-                    self.rename_buffer(index, &ensure_wav_extension(input.value().trim()));
+                    let own = self.documents.get(index).and_then(|d| d.path.clone());
+                    let name = ensure_extension(input.value().trim(), &extension_or_wav(own.as_deref()));
+                    let target = self.rename_buffer_target(index, &name);
+                    if rename_would_replace(own.as_deref(), &target) {
+                        let typed = input.value().to_string();
+                        self.confirm = Some(Confirm::OverwriteOnRename { what: RenameWhat::Buffer(index), name, typed });
+                    } else {
+                        self.rename_buffer(index, &name);
+                    }
                 }
                 Some(Dialog::RenameFile { path, input }) => {
-                    self.rename_file(&path, &ensure_wav_extension(input.value().trim()));
+                    let name = ensure_extension(input.value().trim(), &extension_or_wav(Some(&path)));
+                    let target = path.parent().map(|p| p.join(&name)).unwrap_or_else(|| self.file_panel.directory.join(&name));
+                    if rename_would_replace(Some(&path), &target) {
+                        let typed = input.value().to_string();
+                        self.confirm = Some(Confirm::OverwriteOnRename { what: RenameWhat::File(path), name, typed });
+                    } else {
+                        self.rename_file(&path, &name);
+                    }
                 }
                 Some(Dialog::SaveCurveAs { curve_index, input, .. }) => {
                     self.save_curve_as(curve_index, &ensure_curve_extension(input.value().trim()));
@@ -18991,17 +19048,24 @@ impl App {
 
     /// Renames buffer `idx` to `new_name`, renaming the file on disk if it has one (kept in
     /// the same directory). For an unsaved buffer it just sets the path for the next save.
+    /// The path `rename_buffer` would give buffer `idx`: `new_name` beside its current file,
+    /// or in the Files panel's directory for a buffer that was never saved.
+    fn rename_buffer_target(&self, idx: usize, new_name: &str) -> PathBuf {
+        self.documents
+            .get(idx)
+            .and_then(|d| d.path.as_ref())
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.file_panel.directory.clone())
+            .join(new_name)
+    }
+
     fn rename_buffer(&mut self, idx: usize, new_name: &str) {
         if new_name.is_empty() || idx >= self.documents.len() {
             return;
         }
         let old_path = self.documents[idx].path.clone();
-        let parent = old_path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| self.file_panel.directory.clone());
-        let new_path = parent.join(new_name);
+        let new_path = self.rename_buffer_target(idx, new_name);
         if let Some(old) = old_path.as_ref() {
             if old.exists() && std::fs::rename(old, &new_path).is_err() {
                 return; // leave the buffer untouched if the disk rename failed
@@ -24039,6 +24103,13 @@ impl App {
                     let plural = if *steps == 1 { "step" } else { "steps" };
                     format!(" Close the chain editor? The chain's {steps} {plural} will be lost — (y) close · (n) keep editing ")
                 }
+                Confirm::OverwriteOnRename { name, .. } => {
+                    format!(" \"{name}\" already exists — (y) replace it · (n) choose another name ")
+                }
+                Confirm::OverwriteOnSaveAs { path, .. } => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    format!(" \"{name}\" already exists — (y) replace it · (n) choose another name ")
+                }
             };
             render_confirm(frame, area, &text);
         }
@@ -24251,6 +24322,22 @@ fn ensure_extension(name: &str, ext: &str) -> String {
     } else {
         format!("{name}.{ext}")
     }
+}
+
+/// The extension of `path` for a rename to keep, or `wav` when there is none. Renaming
+/// `take.flac` to `take2` gives `take2.flac`; forcing `.wav` gave `take2.wav`, a FLAC file
+/// the app then read as WAV and could not open.
+fn extension_or_wav(path: Option<&Path>) -> String {
+    path.and_then(|p| p.extension())
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_else(|| "wav".to_string())
+}
+
+/// Whether moving `from` to `target` would replace a different existing file. `rename` replaces
+/// its target without asking, so the caller asks first. The file itself, or a case-only
+/// change of its name on a case-insensitive disk, is not "another file".
+fn rename_would_replace(from: Option<&Path>, target: &Path) -> bool {
+    target.exists() && !from.is_some_and(|from| paths_point_at_the_same_file(from, target))
 }
 
 /// Ensures a save/rename target ends in `.wav`.
@@ -49807,6 +49894,120 @@ mod tests {
         if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() { *focus = param + 1; }
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         assert!(matches!(app.dialog, Some(Dialog::CdpParams { save_prompt: Some(_), .. })));
+    }
+
+    /// A fresh temp directory for one test.
+    fn temp_dir_for(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tui_wave_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn key(app: &mut App, code: KeyCode) {
+        app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    /// Save As to a name that is already a different file asks first. `n` leaves that file
+    /// alone and the Save As open; `y` replaces it.
+    #[test]
+    fn save_as_over_another_file_asks_first() {
+        let dir = temp_dir_for("saveas_overwrite");
+        let other = dir.join("other.wav");
+        std::fs::write(&other, b"not ours").unwrap();
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.handle_action(Action::SaveAs);
+        app.dest_picker = None;
+        app.save_as_input = TextInput::new(other.to_string_lossy().to_string());
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.confirm, Some(Confirm::OverwriteOnSaveAs { .. })));
+        key(&mut app, KeyCode::Char('n'));
+        assert_eq!(std::fs::read(&other).unwrap(), b"not ours", "replaced after n");
+        assert!(app.save_as_active, "Save As closed on n");
+
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char('y'));
+        assert_ne!(std::fs::read(&other).unwrap(), b"not ours", "not replaced after y");
+        assert_eq!(app.documents[0].path.as_deref(), Some(other.as_path()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Save As over the buffer's own file is an ordinary save and does not ask.
+    #[test]
+    fn save_as_over_the_buffers_own_file_does_not_ask() {
+        let dir = temp_dir_for("saveas_own");
+        let own = dir.join("own.wav");
+        let mut d = doc(0.1, 100);
+        crate::model::io::save_wav(&d, &own).unwrap();
+        d.path = Some(own.clone());
+        let mut app = new_app(Some(d), None);
+        app.handle_action(Action::SaveAs);
+        app.dest_picker = None;
+        app.save_as_input = TextInput::new(own.to_string_lossy().to_string());
+        key(&mut app, KeyCode::Enter);
+        assert!(app.confirm.is_none());
+        assert!(!app.save_as_active);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Renaming a file onto an existing one asks first. `n` reopens the rename with the typed
+    /// name and changes nothing on disk; `y` replaces.
+    #[test]
+    fn renaming_onto_an_existing_file_asks_first() {
+        let dir = temp_dir_for("rename_overwrite");
+        let a = dir.join("a.wav");
+        let b = dir.join("b.wav");
+        std::fs::write(&a, b"A").unwrap();
+        std::fs::write(&b, b"B").unwrap();
+        let mut app = new_app(None, None);
+        app.dialog = Some(Dialog::RenameFile { path: a.clone(), input: TextInput::new("b.wav") });
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.confirm, Some(Confirm::OverwriteOnRename { .. })));
+        key(&mut app, KeyCode::Char('n'));
+        assert_eq!((std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap()), (b"A".to_vec(), b"B".to_vec()));
+        let Some(Dialog::RenameFile { input, .. }) = &app.dialog else { panic!("the rename did not reopen") };
+        assert_eq!(input.value(), "b.wav");
+
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char('y'));
+        assert!(!a.exists());
+        assert_eq!(std::fs::read(&b).unwrap(), b"A");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A renamed FLAC keeps its extension. Forcing `.wav` made `take.flac` into `take2.wav`,
+    /// FLAC data the app then tried to read as WAV.
+    #[test]
+    fn renaming_a_flac_file_keeps_flac() {
+        let dir = temp_dir_for("rename_flac");
+        let src = dir.join("take.flac");
+        std::fs::copy("tests/fixtures/stereo_sine.flac", &src).unwrap();
+        let mut app = new_app(None, None);
+        app.dialog = Some(Dialog::RenameFile { path: src.clone(), input: TextInput::new("take2") });
+        key(&mut app, KeyCode::Enter);
+        assert!(dir.join("take2.flac").exists(), "not renamed to take2.flac");
+        assert!(!dir.join("take2.wav").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Renaming a buffer onto an existing file asks too.
+    #[test]
+    fn renaming_a_buffer_onto_an_existing_file_asks_first() {
+        let dir = temp_dir_for("rename_buffer_overwrite");
+        let own = dir.join("mine.wav");
+        let other = dir.join("theirs.wav");
+        let mut d = doc(0.1, 100);
+        crate::model::io::save_wav(&d, &own).unwrap();
+        std::fs::write(&other, b"theirs").unwrap();
+        d.path = Some(own.clone());
+        let mut app = new_app(Some(d), None);
+        app.dialog = Some(Dialog::RenameBuffer { index: 0, input: TextInput::new("theirs") });
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.confirm, Some(Confirm::OverwriteOnRename { .. })));
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(std::fs::read(&other).unwrap(), b"theirs");
+        assert!(own.exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A graphics-mode app on a stereo ramp, drawn once at 120x40.
