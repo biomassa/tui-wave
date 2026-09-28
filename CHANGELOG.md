@@ -53,6 +53,14 @@
   whole chain at once, and only a chain that has run can be brought back with Ctrl+R. Now, when the
   chain has steps, the editor asks before closing: `y` closes it, `n` keeps editing. An empty
   chain still closes at once.
+- **A save that fails now says so, and nothing closes or quits after it.** Save, Save All and
+  Save As ignored a failed write (a full disk, a folder you cannot write to), and "save & close"
+  and "save all & quit" then closed or quit anyway, losing the edits. Now the error is shown and
+  the buffer stays open.
+- **"Save all & quit" no longer loses edits to a FLAC or AIFF buffer.** Such a buffer cannot be
+  saved in place, so it was skipped, and the app quit. It now gets a Save As prompt first, like a
+  buffer that was never saved. "Save & close" on such a buffer also waits for the Save As instead
+  of closing at once.
 - **The executable is about 8MB smaller** (28MB to 20MB on Linux x86-64). Unused audio decoders
   are no longer linked, the built-in process catalogs are stored compressed, and the release
   build uses link-time optimization. Release builds take longer.

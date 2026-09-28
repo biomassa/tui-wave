@@ -6002,13 +6002,21 @@ impl App {
     /// `Ctrl+S` on a curve row in a focused Buffers panel — saves straight to `path` if the
     /// curve already has one (mirroring a document with a known path), otherwise prompts
     /// for a filename via `Dialog::SaveCurveAs`.
-    fn save_or_prompt_curve(&mut self, curve_index: usize) {
-        let Some(curve) = self.curves.get(curve_index) else { return };
+    /// Saves a curve to its own file, or opens Save As for one without a file. Returns whether
+    /// it was written now; a failed write is shown to the user.
+    fn save_or_prompt_curve(&mut self, curve_index: usize) -> bool {
+        let Some(curve) = self.curves.get(curve_index) else { return false };
         if let Some(path) = curve.path.clone() {
-            if crate::model::curve::save_curve(curve, &path).is_ok() {
-                self.curves[curve_index].dirty = false;
-            }
-            return;
+            return match crate::model::curve::save_curve(curve, &path) {
+                Ok(()) => {
+                    self.curves[curve_index].dirty = false;
+                    true
+                }
+                Err(e) => {
+                    self.report_save_error(format!("Could not save {}:\n{e}", path.display()));
+                    false
+                }
+            };
         }
         let default_name =
             format!("{}.{}", curve.name.replace(' ', "_"), crate::model::curve::CURVE_EXTENSION);
@@ -6019,6 +6027,7 @@ impl App {
             input: TextInput::fresh(default_name),
             dest_focused: false,
         });
+        false
     }
 
     /// Enter from `Dialog::SaveCurveAs` — saves into the Files panel's current directory
@@ -6635,7 +6644,9 @@ impl App {
                 // Contextual buffer commands (^r/^a/^l differ from the global Reverse/SelectAll/SaveAll).
                 KeyCode::Char('s') | KeyCode::Char('S') if ctrl => {
                     match self.buffer_panel.selected.checked_sub(self.documents.len()) {
-                        Some(curve_index) => self.save_or_prompt_curve(curve_index),
+                        Some(curve_index) => {
+                            self.save_or_prompt_curve(curve_index);
+                        }
                         None => self.handle_action(Action::Save),
                     }
                     true
@@ -6735,13 +6746,19 @@ impl App {
             }
             Confirm::CloseBuffer(idx) => {
                 if save {
-                    if self.documents.get(idx).is_some_and(|d| d.path.is_none()) {
+                    // Any buffer that cannot be saved in place (no path, or FLAC/AIFF) goes to
+                    // Save As and closes only after it. `save_buffer` would redirect such a
+                    // buffer too, but with no close to follow, and the close below then ran at
+                    // once and lost the edits.
+                    if self.documents.get(idx).is_some_and(|d| Self::wav_save_path(d).is_none()) {
                         // Never saved — needs a filename before it can actually be saved,
                         // so defer closing until that Save As prompt is done.
                         self.queue_save_as(vec![idx], Some(SaveAsQueueThen::CloseBuffer(idx)));
                         return;
                     }
-                    self.save_buffer(idx);
+                    if !self.save_buffer(idx) {
+                        return; // the failure is on screen; closing would lose the edits
+                    }
                 }
                 self.close_buffer(idx);
             }
@@ -6752,9 +6769,7 @@ impl App {
                     // through that prompt (the curve Save-As flow has no queue-then hook the
                     // way documents do), so a curve without a path is saved-then-kept-open;
                     // one with a path saves straight to it and closes now.
-                    let has_path = self.curves.get(curve_index).is_some_and(|c| c.path.is_some());
-                    self.save_or_prompt_curve(curve_index);
-                    if has_path {
+                    if self.save_or_prompt_curve(curve_index) {
                         self.close_curve(curve_index);
                     }
                 } else {
@@ -6840,11 +6855,23 @@ impl App {
                             self.pending_streamed_save = Some((path, depth, dither));
                         }
                     } else if let Some(document) = self.active_doc_mut() {
-                        if save_wav_with(document, &path, depth, dither).is_ok() {
-                            document.path = Some(path.clone());
-                            document.dirty = false;
-                            self.file_panel.mark_dirty(&path, false);
-                            self.file_panel.scan();
+                        match save_wav_with(document, &path, depth, dither) {
+                            Ok(()) => {
+                                document.path = Some(path.clone());
+                                document.dirty = false;
+                                self.file_panel.mark_dirty(&path, false);
+                                self.file_panel.scan();
+                            }
+                            Err(e) => {
+                                // Stop here: the rest of the queue, and the close or quit it
+                                // leads to, must not go ahead with this buffer unsaved.
+                                self.save_as_active = false;
+                                self.dest_picker = None;
+                                self.save_as_queue.clear();
+                                self.save_as_queue_then = None;
+                                self.report_save_error(format!("Could not save {}:\n{e}", path.display()));
+                                return;
+                            }
                         }
                     }
                 }
@@ -18692,7 +18719,41 @@ impl App {
         is_wav.then(|| path.clone())
     }
 
-    fn save_buffer(&mut self, idx: usize) {
+    /// Writes document `idx` over its own file. The error names the file and the reason, for
+    /// the user. Every in-place save goes through here, so none can fail silently.
+    fn save_in_place(&mut self, idx: usize) -> Result<(), String> {
+        let name = self.buffer_name(idx);
+        let Some(doc) = self.documents.get_mut(idx) else { return Ok(()) };
+        let Some(path) = Self::wav_save_path(doc) else {
+            return Err(format!("\"{name}\" cannot be saved in place. Use Save As."));
+        };
+        save_wav(doc, &path).map_err(|e| format!("Could not save {}:\n{e}", path.display()))?;
+        doc.dirty = false;
+        self.file_panel.mark_dirty(&path, false);
+        Ok(())
+    }
+
+    /// Shows a failed save. The edits are still in the buffer, which stays open and dirty.
+    fn report_save_error(&mut self, message: String) {
+        self.dialog = Some(Dialog::Info {
+            message: format!("{message}\n\nThe buffer was not saved and is still open."),
+        });
+    }
+
+    /// Indices of dirty buffers that cannot be saved in place: never saved, or loaded from a
+    /// format this app does not write (FLAC/AIFF). They need a name from Save As.
+    fn dirty_buffers_needing_a_name(&self) -> Vec<usize> {
+        self.documents
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.dirty && Self::wav_save_path(d).is_none())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Saves buffer `idx`. Returns whether it was written: `false` when it went to Save As
+    /// instead, or when the write failed (which is shown to the user).
+    fn save_buffer(&mut self, idx: usize) -> bool {
         // A non-WAV-backed buffer routes through Save As, the same as a never-saved one —
         // both are "this buffer has no file we may write to in place".
         let redirect = self
@@ -18701,14 +18762,13 @@ impl App {
             .is_some_and(|d| d.path.is_some() && Self::wav_save_path(d).is_none());
         if redirect {
             self.queue_save_as(vec![idx], None);
-            return;
+            return false;
         }
-        if let Some(doc) = self.documents.get_mut(idx) {
-            if let Some(path) = Self::wav_save_path(doc) {
-                if save_wav(doc, &path).is_ok() {
-                    doc.dirty = false;
-                    self.file_panel.mark_dirty(&path, false);
-                }
+        match self.save_in_place(idx) {
+            Ok(()) => true,
+            Err(message) => {
+                self.report_save_error(message);
+                false
             }
         }
     }
@@ -20427,19 +20487,20 @@ impl App {
             + self.curves.iter().filter(|c| c.dirty).count()
     }
 
-    fn save_all(&mut self) {
-        for document in &mut self.documents {
-            if !document.dirty {
-                continue;
-            }
+    /// Saves every dirty buffer and curve that can be saved in place. Returns the failures, one
+    /// message each, for the caller to show; a failed one stays dirty.
+    fn save_all(&mut self) -> Vec<String> {
+        let mut failures = Vec::new();
+        for idx in 0..self.documents.len() {
             // A buffer loaded from a FLAC/AIFF has no path we may write WAV bytes to (see
             // `wav_save_path`). It is skipped and stays dirty rather than interrupting the
             // batch with a modal — the same treatment an unnamed curve already gets below.
-            if let Some(path) = Self::wav_save_path(document) {
-                if save_wav(document, &path).is_ok() {
-                    document.dirty = false;
-                    self.file_panel.mark_dirty(&path, false);
-                }
+            let document = &self.documents[idx];
+            if !document.dirty || Self::wav_save_path(document).is_none() {
+                continue;
+            }
+            if let Err(message) = self.save_in_place(idx) {
+                failures.push(message);
             }
         }
         // Curves that already have a path save straight to it, same as documents. A curve
@@ -20453,20 +20514,37 @@ impl App {
                 continue;
             }
             if let Some(path) = curve.path.clone() {
-                if crate::model::curve::save_curve(curve, &path).is_ok() {
-                    curve.dirty = false;
+                match crate::model::curve::save_curve(curve, &path) {
+                    Ok(()) => curve.dirty = false,
+                    Err(e) => failures.push(format!("Could not save {}:\n{e}", path.display())),
                 }
             }
         }
+        failures
+    }
+
+    /// Shows the failures `save_all` returned, if any. Returns whether everything saved.
+    fn report_save_all(&mut self, failures: Vec<String>) -> bool {
+        if failures.is_empty() {
+            return true;
+        }
+        self.dialog = Some(Dialog::Info {
+            message: format!("{}\n\nThose were not saved and are still open.", failures.join("\n\n")),
+        });
+        false
     }
 
     /// Saves every dirty buffer that already has a path immediately, then walks any
     /// never-saved dirty buffers through a Save As prompt each, one at a time, before
     /// actually quitting — `save_all` alone would otherwise silently skip (and lose) them.
     fn begin_save_all_then_quit(&mut self) {
-        self.save_all();
-        let unnamed: Vec<usize> =
-            self.documents.iter().enumerate().filter(|(_, d)| d.dirty && d.path.is_none()).map(|(i, _)| i).collect();
+        let failures = self.save_all();
+        if !self.report_save_all(failures) {
+            return; // quitting now would lose what failed to save
+        }
+        // Never-saved buffers and FLAC/AIFF ones alike: both need a WAV name before quitting.
+        // Asking only for the never-saved ones let the others be lost.
+        let unnamed = self.dirty_buffers_needing_a_name();
         if unnamed.is_empty() {
             self.should_quit = true;
             return;
@@ -21727,7 +21805,8 @@ impl App {
         }
 
         if action == Action::SaveAll {
-            self.save_all();
+            let failures = self.save_all();
+            self.report_save_all(failures);
             return;
         }
 
@@ -22613,6 +22692,8 @@ impl App {
                 if Self::wav_save_path(doc).is_none() {
                     return self.handle_action(Action::SaveAs);
                 }
+                self.save_buffer(idx);
+                return;
             }
             // Undoing a process that *generated* a buffer removes that buffer, because there is
             // nothing else for it to undo — a generative process splices nothing and so records
@@ -22692,14 +22773,7 @@ impl App {
             Action::Redo => {
                 self.histories[idx].redo(document);
             }
-            Action::Save => {
-                if let Some(path) = Self::wav_save_path(document) {
-                    if save_wav(document, &path).is_ok() {
-                        document.dirty = false;
-                        self.file_panel.mark_dirty(&path, false);
-                    }
-                }
-            }
+            Action::Save => {} // saved before the document was borrowed, above
             Action::SaveAs => {
                 // Built from the *stem*, not the file name: a buffer loaded from `beta.flac`
                 // must prefill `beta.wav`, since Save As only ever writes WAV and
@@ -49536,6 +49610,103 @@ mod tests {
         assert!(!waveform_mouse_seeks(MouseEventKind::Drag(MouseButton::Left), true));
         assert!(waveform_mouse_seeks(MouseEventKind::Up(MouseButton::Left), true));
         assert!(!waveform_mouse_seeks(MouseEventKind::Up(MouseButton::Left), false), "a plain click's release");
+    }
+
+    /// An app whose one buffer is dirty and points at a file that cannot be written.
+    fn app_with_unwritable_dirty_buffer() -> App {
+        let mut d = doc(0.1, 100);
+        d.path = Some(PathBuf::from("/nonexistent_dir_tui_wave_test/take.wav"));
+        d.dirty = true;
+        new_app(Some(d), None)
+    }
+
+    fn info_message(app: &App) -> String {
+        match &app.dialog {
+            Some(Dialog::Info { message }) => message.clone(),
+            _ => panic!("expected an error message"),
+        }
+    }
+
+    /// Close → save, when the save fails: the buffer stays open and dirty, and the failure is
+    /// shown. It used to close anyway and lose the edits.
+    #[test]
+    fn a_failed_save_does_not_close_the_buffer() {
+        let mut app = app_with_unwritable_dirty_buffer();
+        app.confirm = Some(Confirm::CloseBuffer(0));
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert_eq!(app.documents.len(), 1, "the buffer was closed");
+        assert!(app.documents[0].dirty);
+        assert!(info_message(&app).contains("Could not save"));
+    }
+
+    /// Quit → save all, when a save fails: the app does not quit.
+    #[test]
+    fn a_failed_save_all_does_not_quit() {
+        let mut app = app_with_unwritable_dirty_buffer();
+        app.confirm = Some(Confirm::Quit);
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert!(!app.should_quit, "quit with an unsaved buffer");
+        assert!(info_message(&app).contains("take.wav"));
+    }
+
+    /// A plain Save that fails says so, instead of doing nothing visible.
+    #[test]
+    fn a_failed_quick_save_is_reported() {
+        let mut app = app_with_unwritable_dirty_buffer();
+        app.handle_action(Action::Save);
+        assert!(app.documents[0].dirty);
+        assert!(info_message(&app).contains("Could not save"));
+    }
+
+    /// Save All reports what it could not save.
+    #[test]
+    fn a_failed_save_all_is_reported() {
+        let mut app = app_with_unwritable_dirty_buffer();
+        app.handle_action(Action::SaveAll);
+        assert!(app.documents[0].dirty);
+        assert!(info_message(&app).contains("take.wav"));
+    }
+
+    /// Quit → save all with an edited FLAC buffer, which cannot be saved in place: it gets a
+    /// Save As prompt before quitting. It used to be skipped and the app quit, losing the edits.
+    #[test]
+    fn quit_and_save_asks_for_a_name_for_an_edited_flac_buffer() {
+        let mut app = new_app(None, None);
+        app.load_file(PathBuf::from("tests/fixtures/stereo_sine.flac"));
+        app.documents[0].dirty = true;
+        app.confirm = Some(Confirm::Quit);
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert!(!app.should_quit);
+        assert!(app.save_as_active, "no Save As for the FLAC buffer");
+        assert_eq!(app.save_as_queue_then, Some(SaveAsQueueThen::Quit));
+    }
+
+    /// Close → save on an edited FLAC buffer goes to Save As and closes only after it. It used
+    /// to open Save As and close the buffer at the same moment.
+    #[test]
+    fn close_and_save_on_a_flac_buffer_waits_for_save_as() {
+        let mut app = new_app(None, None);
+        app.load_file(PathBuf::from("tests/fixtures/stereo_sine.flac"));
+        app.documents[0].dirty = true;
+        app.confirm = Some(Confirm::CloseBuffer(0));
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert_eq!(app.documents.len(), 1, "closed before it was saved");
+        assert!(app.save_as_active);
+        assert_eq!(app.save_as_queue_then, Some(SaveAsQueueThen::CloseBuffer(0)));
+    }
+
+    /// A Save As that fails in the middle of save-then-quit stops there: no quit.
+    #[test]
+    fn a_failed_save_as_stops_the_quit() {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.documents[0].dirty = true;
+        app.queue_save_as(vec![0], Some(SaveAsQueueThen::Quit));
+        app.dest_picker = None;
+        app.save_as_input = TextInput::new("/nonexistent_dir_tui_wave_test/new.wav");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.should_quit, "quit after a failed Save As");
+        assert!(app.save_as_queue_then.is_none());
+        assert!(info_message(&app).contains("Could not save"));
     }
 
     /// A graphics-mode app on a stereo ramp, drawn once at 120x40.
