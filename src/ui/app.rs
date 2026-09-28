@@ -545,6 +545,24 @@ fn finish_head_tail_drag(marks: &mut Vec<usize>, dragged: usize, start: Option<u
     }
 }
 
+/// One click on a dialog row, kept to recognise the second click of a double-click.
+struct DialogClick {
+    at: Instant,
+    row: usize,
+    /// Which dialog it was in. Row numbers restart in every dialog, so a click that opened a
+    /// new dialog must not pair with a click on the same row number of that one.
+    dialog: Option<std::mem::Discriminant<Dialog>>,
+}
+
+impl DialogClick {
+    /// Whether this click and `previous` make a double-click.
+    fn completes(&self, previous: Option<&DialogClick>) -> bool {
+        previous.is_some_and(|p| {
+            p.row == self.row && p.dialog == self.dialog && self.at.duration_since(p.at) < DOUBLE_CLICK
+        })
+    }
+}
+
 /// Whether a waveform mouse event re-seeks playback that is running.
 ///
 /// The click seeks, and so does the release of a drag that changed the selection, so looped or
@@ -3363,7 +3381,7 @@ pub struct App {
     /// Time and index of the last click on a `dialog_row_rects` row, for double-click
     /// detection. A dialog row that opens something (a chain step's editor) wants the second
     /// click, so a stray one cannot open a whole params session by accident.
-    last_dialog_row_click: Option<(Instant, usize)>,
+    last_dialog_row_click: Option<DialogClick>,
     pub waveform_area: Rect,
     /// Absolute channel indices whose panes were drawn in the last frame — the range
     /// `channel_pane_rects` returned. Cached for the same reason `waveform_area` is: mouse
@@ -20656,11 +20674,15 @@ impl App {
                 if let Some((row, x_in_row)) = hit {
                     // Same 400ms window the Files panel and the marker labels use, so a
                     // double-click means one thing across the whole app.
-                    let now = Instant::now();
-                    let double_click = self
-                        .last_dialog_row_click
-                        .is_some_and(|(t, r)| r == row && now.duration_since(t) < DOUBLE_CLICK);
-                    self.last_dialog_row_click = Some((now, row));
+                    let click = DialogClick {
+                        at: Instant::now(),
+                        row,
+                        dialog: self.dialog.as_ref().map(std::mem::discriminant),
+                    };
+                    let double_click = click.completes(self.last_dialog_row_click.as_ref());
+                    // A double-click consumes its first click, so a triple-click is one
+                    // double-click, not two.
+                    self.last_dialog_row_click = (!double_click).then_some(click);
                     self.handle_dialog_row_click(row, x_in_row, double_click);
                 }
             }
@@ -49339,6 +49361,22 @@ mod tests {
         app.handle_mouse(left_mouse(MouseEventKind::Drag(MouseButton::Left), area.x + area.width + 3, area.y + 1));
         assert!(app.documents[0].selection.is_none());
         assert_eq!(app.documents[0].cursor, before);
+    }
+
+    /// Two quick clicks on one row of one dialog are a double-click; the same row number in
+    /// another dialog, or a later row, or a slow second click, are not.
+    #[test]
+    fn a_dialog_double_click_needs_the_same_row_of_the_same_dialog() {
+        let help = Some(std::mem::discriminant(&Dialog::Info { message: String::new() }));
+        let other = Some(std::mem::discriminant(&Dialog::CdpChainEditor));
+        let t = Instant::now();
+        let click = |at, row, dialog| DialogClick { at, row, dialog };
+        let first = click(t, 3, help);
+        assert!(click(t + Duration::from_millis(100), 3, help).completes(Some(&first)));
+        assert!(!click(t + Duration::from_millis(100), 3, other).completes(Some(&first)), "another dialog");
+        assert!(!click(t + Duration::from_millis(100), 4, help).completes(Some(&first)), "another row");
+        assert!(!click(t + DOUBLE_CLICK, 3, help).completes(Some(&first)), "too slow");
+        assert!(!first.completes(None));
     }
 
     /// While playing, the click seeks and so does the release of a drag that changed the
