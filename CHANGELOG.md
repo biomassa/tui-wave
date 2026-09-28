@@ -76,6 +76,9 @@
   `Бас` were both saved as `___.toml`. Letters of any script are now kept. Names that still share
   a file (such as `My Chain` and `My_Chain`) make the save prompt ask before replacing. A chain or
   preset saved under the old rule keeps its old file and still loads.
+- **Esc in the envelope editor asks before discarding a changed shape.** It used to discard the
+  drawn curve at once, with no undo. This applies to a parameter's envelope and to a curve in the
+  chain editor's bank. An unchanged envelope still closes at once.
 - **The executable is about 8MB smaller** (28MB to 20MB on Linux x86-64). Unused audio decoders
   are no longer linked, the built-in process catalogs are stored compressed, and the release
   build uses link-time optimization. Release builds take longer.

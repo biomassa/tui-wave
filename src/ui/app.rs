@@ -2220,6 +2220,8 @@ struct CdpEnvelopeEdit {
     /// Which part of `fields[field_index]` this session edits — see `CdpEnvelopeTarget`.
     target: CdpEnvelopeTarget,
     points: Vec<(f64, f64)>,
+    /// `points` as the editor opened, so Esc can tell whether there is a changed shape to lose.
+    opened_with: Vec<(f64, f64)>,
     selected: usize,
     original: Option<Vec<(f64, f64)>>,
     time_max: f64,
@@ -3213,6 +3215,9 @@ enum Confirm {
     /// Saving a chain or envelope preset under a name whose file already holds `other`, a
     /// different name (`My Chain` and `My_Chain` share `My_Chain.toml`). Saving replaces it.
     ReplaceSavedByName { kind: SavedKind, name: String, other: String },
+    /// Esc in an envelope editor whose shape was changed. Like the chain draft, a drawn shape
+    /// has no undo, so Esc asks before it discards one.
+    DiscardEnvelope,
 }
 
 /// Which save prompt a `ReplaceSavedByName` came from.
@@ -6831,6 +6836,13 @@ impl App {
             Confirm::OverwriteOnSaveAs { path, depth, dither } => self.finish_save_as(path, depth, dither),
             Confirm::ReplaceSavedByName { kind: SavedKind::Chain, name, .. } => self.commit_chain_save(name),
             Confirm::ReplaceSavedByName { kind: SavedKind::Envelope, name, .. } => self.commit_envelope_save(name),
+            Confirm::DiscardEnvelope => {
+                if matches!(self.dialog, Some(Dialog::CdpChainEditor)) {
+                    self.discard_bank_envelope_edit();
+                } else {
+                    self.discard_cdp_envelope_edit();
+                }
+            }
         }
     }
 
@@ -10735,6 +10747,7 @@ impl App {
             target: CdpEnvelopeTarget::BankEnvelope,
             label: Some(label),
             original: Some(points.clone()),
+            opened_with: points.clone(),
             points,
             selected: 0,
             time_max: crate::model::cdp::envelope_bank::BANK_MAX,
@@ -12620,6 +12633,7 @@ impl App {
             label: None,
             field_index,
             target: CdpEnvelopeTarget::NumberField,
+            opened_with: points.clone(),
             points,
             selected: 0,
             original,
@@ -12695,6 +12709,7 @@ impl App {
             label: None,
             field_index,
             target: CdpEnvelopeTarget::CrystalEnvelope,
+            opened_with: points.clone(),
             points,
             selected: 0,
             original,
@@ -14564,14 +14579,12 @@ impl App {
                 }
             }
             KeyCode::Esc => {
-                // Esc restores what the curve was, the same contract the params session has.
-                let index = edit.field_index;
-                let original = edit.original.clone();
-                state.envelope = None;
-                if let (Some(points), Some(envelope)) =
-                    (original, state.chain.bank.envelopes.get_mut(index))
-                {
-                    envelope.points = points;
+                // Esc restores what the curve was, the same contract the params session has,
+                // and asks first when there is a changed shape to lose.
+                if edit.points != edit.opened_with {
+                    self.confirm = Some(Confirm::DiscardEnvelope);
+                } else {
+                    self.discard_bank_envelope_edit();
                 }
             }
             _ => {}
@@ -14595,7 +14608,7 @@ impl App {
         let field_index = edit.field_index;
         let Some((min, max, step)) = cdp_envelope_bounds(fields, edit) else { return };
         let committed_points = edit.points.clone();
-        let original = edit.original.clone();
+        let changed = edit.points != edit.opened_with;
         let required_envelope = self
             .cdp_catalog
             .processes
@@ -14713,11 +14726,10 @@ impl App {
         // longer borrowed past this point, so `self.dialog` can be freely re-borrowed.
         match key.code {
             KeyCode::Esc => {
-                if let Some(Dialog::CdpParams { fields, envelope, .. }) = self.dialog.as_mut() {
-                    if let Some(edit) = envelope.as_ref() {
-                        cdp_envelope_write_back(fields, edit, original);
-                    }
-                    *envelope = None;
+                if changed {
+                    self.confirm = Some(Confirm::DiscardEnvelope);
+                } else {
+                    self.discard_cdp_envelope_edit();
                 }
             }
             // A `required_envelope` field has no valid constant representation to revert to
@@ -14809,6 +14821,26 @@ impl App {
     /// you start browsing presets (user report). `custom_points` snapshots that starting shape
     /// the first time the cycle leaves "(none)"; a later save/edit doesn't touch the snapshot.
     /// A no-op if there are no saved presets (nothing to cycle to besides "(none)" itself).
+    /// Closes a parameter's envelope editor and puts back what the field held before it opened.
+    fn discard_cdp_envelope_edit(&mut self) {
+        if let Some(Dialog::CdpParams { fields, envelope, .. }) = self.dialog.as_mut() {
+            if let Some(edit) = envelope.as_ref() {
+                let original = edit.original.clone();
+                cdp_envelope_write_back(fields, edit, original);
+            }
+            *envelope = None;
+        }
+    }
+
+    /// Closes a bank curve's editor and puts back the curve it opened with.
+    fn discard_bank_envelope_edit(&mut self) {
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let Some(edit) = state.envelope.take() else { return };
+        if let (Some(points), Some(envelope)) = (edit.original, state.chain.bank.envelopes.get_mut(edit.field_index)) {
+            envelope.points = points;
+        }
+    }
+
     fn envelope_cycle_preset(&mut self, forward: bool) {
         let (new_slot, custom_points) = {
             let Some(Dialog::CdpParams { envelope: Some(edit), .. }) = &self.dialog else { return };
@@ -24141,6 +24173,9 @@ impl App {
                 }
                 Confirm::OverwriteOnRename { name, .. } => {
                     format!(" \"{name}\" already exists — (y) replace it · (n) choose another name ")
+                }
+                Confirm::DiscardEnvelope => {
+                    " Discard the changes to this envelope? — (y) discard · (n) keep editing ".to_string()
                 }
                 Confirm::ReplaceSavedByName { name, other, .. } => format!(
                     " Saving \"{name}\" would replace the saved \"{other}\" (same file name) — (y) replace · (n) choose another name "
@@ -33779,6 +33814,7 @@ mod tests {
             field_index: 0,
             target: CdpEnvelopeTarget::NumberField,
             points: vec![(0.0, 220.0), (1.0, 9000.0), (2.0, 220.0)],
+            opened_with: vec![(0.0, 220.0), (1.0, 9000.0), (2.0, 220.0)],
             selected: 0,
             original: None,
             time_max: 2.0,
@@ -35768,7 +35804,8 @@ mod tests {
 
     /// Esc discards every edit made in the session and leaves the field a plain constant —
     /// opening the editor and immediately backing out must be a true no-op, not a silent
-    /// "envelope with 2 identical points" left behind.
+    /// "envelope with 2 identical points" left behind. The shape was changed here, so Esc asks
+    /// first (`Confirm::DiscardEnvelope`) and `y` answers it.
     #[test]
     fn esc_discards_envelope_edits_and_restores_constant_mode() {
         let mut app = new_app(Some(doc(0.1, 44100)), None);
@@ -35778,6 +35815,8 @@ mod tests {
         app.handle_dialog_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)); // nudge it
 
         app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.confirm, Some(Confirm::DiscardEnvelope)), "a changed shape must ask");
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
 
         let Some(Dialog::CdpParams { envelope, fields, focus, .. }) = &app.dialog else {
             panic!("expected CdpParams to still be open (Esc closes the editor, not the dialog)");
@@ -50072,6 +50111,62 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         assert_eq!(names(()), vec!["My_Chain".to_string()]);
         assert!(app.cdp_chain_editor.as_ref().unwrap().save_prompt.is_none());
+    }
+
+    /// A params dialog with an envelope editor open on its first automatable number field.
+    fn app_in_envelope_editor() -> App {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        let (index, param) = app.cdp_catalog.processes.iter().enumerate().find_map(|(i, d)| {
+            d.params.iter().position(|p| p.automatable && matches!(p.kind, crate::model::cdp::ParamKind::Number { .. })).map(|p| (i, p))
+        }).unwrap();
+        app.open_cdp_params(index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() { *focus = param + 1; }
+        assert!(app.open_cdp_envelope_editor());
+        app
+    }
+
+    fn envelope_is_open(app: &App) -> bool {
+        matches!(app.dialog, Some(Dialog::CdpParams { envelope: Some(_), .. }))
+    }
+
+    /// Esc on an untouched envelope closes at once; on a changed one it asks, `n` keeps the
+    /// shape, and `y` discards it.
+    #[test]
+    fn esc_asks_before_discarding_a_changed_envelope() {
+        let mut app = app_in_envelope_editor();
+        key(&mut app, KeyCode::Esc);
+        assert!(app.confirm.is_none() && !envelope_is_open(&app), "an untouched envelope asked");
+
+        let mut app = app_in_envelope_editor();
+        key(&mut app, KeyCode::Up);
+        let changed = match &app.dialog { Some(Dialog::CdpParams { envelope: Some(e), .. }) => e.points.clone(), _ => unreachable!() };
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.confirm, Some(Confirm::DiscardEnvelope)));
+        key(&mut app, KeyCode::Char('n'));
+        let kept = match &app.dialog { Some(Dialog::CdpParams { envelope: Some(e), .. }) => e.points.clone(), _ => panic!("closed on n") };
+        assert_eq!(kept, changed);
+        key(&mut app, KeyCode::Esc);
+        key(&mut app, KeyCode::Char('y'));
+        assert!(!envelope_is_open(&app));
+        assert!(matches!(app.dialog, Some(Dialog::CdpParams { .. })), "y closed the params dialog too");
+    }
+
+    /// The bank curve editor in the chain editor asks the same way.
+    #[test]
+    fn esc_asks_before_discarding_a_changed_bank_curve() {
+        let mut app = app_with_chain_of(1);
+        app.new_bank_envelope();
+        app.edit_bank_envelope();
+        assert!(app.cdp_chain_editor.as_ref().unwrap().envelope.is_some(), "the bank curve editor opened");
+        let before = app.cdp_chain_editor.as_ref().unwrap().chain.bank.envelopes[0].points.clone();
+        key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.confirm, Some(Confirm::DiscardEnvelope)));
+        key(&mut app, KeyCode::Char('y'));
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert!(state.envelope.is_none());
+        assert_eq!(state.chain.bank.envelopes[0].points, before, "not restored");
+        assert!(chain_editor_is_open(&app));
     }
 
     /// A graphics-mode app on a stereo ramp, drawn once at 120x40.
