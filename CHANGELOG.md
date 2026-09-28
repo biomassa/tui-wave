@@ -20,8 +20,7 @@
   working. Such errors are recorded, with details, in `~/.config/tui-wave/panic.log`.
 - **A large buffer uses half the memory while nothing is playing.** The audio engine kept its own
   full copy of the buffer at all times and made a new one after every edit. Now it copies the
-  audio when you press Play and frees the copy when you pause, or at the next edit after
-  playback reaches the end. On a very large buffer, pressing Play can take a moment longer while
+  audio when you press Play and frees the copy when playback pauses or reaches the end. On a very large buffer, pressing Play can take a moment longer while
   the copy is made.
 - **Undo history no longer grows without a memory limit.** Each whole-file edit such as Gain or
   Normalize keeps a copy of the audio for undo, and the history kept up to 100 of them, so a large

@@ -6361,6 +6361,9 @@ impl App {
             }
             let playhead_before = self.playhead_position;
             self.sync_playhead_from_audio();
+            if let Some(audio) = &self.audio {
+                audio.release_if_finished();
+            }
             self.tick_audition();
             // A drained CDP event may have replaced/closed the dialog (job finished) with
             // no input event to trigger the repaint — without this the finished dialog

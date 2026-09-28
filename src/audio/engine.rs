@@ -61,6 +61,9 @@ pub struct AudioEngine {
     /// `playing` atomic, because that atomic changes only when the audio thread gets to the
     /// command, and an edit can arrive in between.
     active: Cell<bool>,
+    /// Whether `release_if_finished` has seen the current playback running. Until it has, a
+    /// stopped `playing` flag can mean a Play the audio thread has not handled yet.
+    seen_playing: Cell<bool>,
 }
 
 /// Builds the right source for `data` and hands it to `player`. Returns the stop flag for the
@@ -284,6 +287,7 @@ impl AudioEngine {
             lazy,
             loaded: Cell::new(!lazy),
             active: Cell::new(false),
+            seen_playing: Cell::new(false),
         })
     }
 
@@ -293,6 +297,26 @@ impl AudioEngine {
         if self.lazy && !self.loaded.get() {
             let _ = self.cmd_tx.send(AudioCmd::Reload(channels.to_vec()));
             self.loaded.set(true);
+        }
+    }
+
+    /// Drops a lazy engine's copy once playback has reached its end by itself. Call once per
+    /// frame. Pause already drops it; this covers the end of the file or of a bounded range.
+    ///
+    /// Releases only after seeing playback running and then stopped, so a Play the audio
+    /// thread has not handled yet is not taken for a finished one. A playback shorter than one
+    /// frame can be missed; its copy is then dropped at the next edit or Pause instead.
+    pub fn release_if_finished(&self) {
+        if !self.lazy || !self.active.get() {
+            return;
+        }
+        if self.is_playing() {
+            self.seen_playing.set(true);
+        } else if self.seen_playing.get() {
+            let _ = self.cmd_tx.send(AudioCmd::Release);
+            self.loaded.set(false);
+            self.active.set(false);
+            self.seen_playing.set(false);
         }
     }
 
@@ -311,6 +335,7 @@ impl AudioEngine {
     pub fn play(&self, from_frame: usize) {
         debug_assert!(self.loaded.get(), "a lazy engine needs load_if_needed before Play");
         self.active.set(true);
+        self.seen_playing.set(false);
         let _ = self
             .cmd_tx
             .send(AudioCmd::Play { from_frame, loop_start: None, loop_end: None });
@@ -319,6 +344,7 @@ impl AudioEngine {
     pub fn play_looped(&self, from_frame: usize, loop_start: usize, loop_end: usize) {
         debug_assert!(self.loaded.get(), "a lazy engine needs load_if_needed before Play");
         self.active.set(true);
+        self.seen_playing.set(false);
         let _ = self.cmd_tx.send(AudioCmd::Play {
             from_frame,
             loop_start: Some(loop_start),
@@ -333,6 +359,7 @@ impl AudioEngine {
     pub fn play_bounded(&self, from_frame: usize, end_frame: usize) {
         debug_assert!(self.loaded.get(), "a lazy engine needs load_if_needed before Play");
         self.active.set(true);
+        self.seen_playing.set(false);
         let _ = self.cmd_tx.send(AudioCmd::Play {
             from_frame,
             loop_start: None,
@@ -453,6 +480,32 @@ mod tests {
         engine.seek(48000);
         wait_for("playback after the seek", || engine.position.load(Ordering::Relaxed) > 48000 + 4800);
         assert!(engine.is_playing(), "the seek played the data, not an empty buffer");
+    }
+
+    /// The per-frame check drops the copy once playback has ended by itself, and the next Play
+    /// sends the audio again and plays it.
+    #[test]
+    fn the_copy_is_dropped_when_playback_ends_by_itself() {
+        let Some(engine) = AudioEngine::try_new_lazy(48000) else { return };
+        let short = stereo_seconds(0.2);
+        engine.load_if_needed(&short);
+        engine.play(0);
+        engine.release_if_finished();
+        assert!(engine.loaded.get(), "a Play not yet handled is not a finished playback");
+        wait_for("the release", || {
+            engine.release_if_finished();
+            !engine.loaded.get()
+        });
+        assert!(!engine.is_playing());
+
+        engine.position.store(usize::MAX, Ordering::Relaxed);
+        engine.load_if_needed(&short);
+        assert!(engine.loaded.get());
+        engine.play(0);
+        wait_for("replay", || {
+            let at = engine.position.load(Ordering::Relaxed);
+            at != usize::MAX && at > 2400
+        });
     }
 
     /// Playback that ended by itself leaves the engine's copy in place, and the next edit drops
