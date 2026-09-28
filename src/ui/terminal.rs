@@ -104,16 +104,48 @@ pub fn restore() -> color_eyre::Result<()> {
 /// Only for a panic on the main thread, which is the one that ends the app. A panic on any
 /// other thread leaves the app running: a job worker catches it and reports it as a job error.
 /// Restoring the terminal then would leave the running app drawing into a cooked, non-alternate
-/// screen, and printing the message would write over the UI.
+/// screen, and printing the message would write over the UI. So such a panic is appended to
+/// `config::panic_log_path` instead, with a backtrace, and the screen is left alone.
 pub fn install_panic_hook() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
-        if std::thread::current().name() != Some("main") {
+        let thread = std::thread::current();
+        if thread.name() != Some("main") {
+            let entry = panic_log_entry(
+                thread.name().unwrap_or("unnamed"),
+                panic_info,
+                &std::backtrace::Backtrace::force_capture(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs()),
+            );
+            let _ = append_panic_log(&crate::config::panic_log_path(), &entry);
             return;
         }
         let _ = restore();
         original_hook(panic_info);
     }));
+}
+
+/// One panic, as text for the log. `unix_secs` rather than a formatted date, because the
+/// standard library has no calendar and a log only needs an order.
+fn panic_log_entry(
+    thread: &str,
+    info: &dyn std::fmt::Display,
+    backtrace: &dyn std::fmt::Display,
+    unix_secs: u64,
+) -> String {
+    format!("--- panic at unix time {unix_secs}, thread '{thread}'\n{info}\nbacktrace:\n{backtrace}\n")
+}
+
+/// Appends `entry` to the log at `path`, creating the file and its directory if needed.
+fn append_panic_log(path: &std::path::Path, entry: &str) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(entry.as_bytes())
 }
 
 #[cfg(test)]
@@ -123,6 +155,22 @@ mod tests {
 
     fn env_lookup<'a>(vars: &'a HashMap<&str, &str>) -> impl Fn(&str) -> Result<String, VarError> + 'a {
         move |name| vars.get(name).map(|v| v.to_string()).ok_or(VarError::NotPresent)
+    }
+
+    /// Panics are appended, not written over: a second panic keeps the first one's record.
+    #[test]
+    fn the_panic_log_appends_and_creates_its_directory() {
+        let dir = std::env::temp_dir().join(format!("tui_wave_panic_log_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("nested").join("panic.log");
+        let first = panic_log_entry("worker", &"boom one", &"frame 0", 100);
+        let second = panic_log_entry("audio", &"boom two", &"frame 1", 200);
+        append_panic_log(&path, &first).unwrap();
+        append_panic_log(&path, &second).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, format!("{first}{second}"));
+        assert!(first.contains("thread 'worker'") && first.contains("boom one") && first.contains("frame 0"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -705,6 +705,7 @@ fn internal_error_lines(message: &str) -> Vec<String> {
         "Internal error: this is a bug in tui-wave, not in the process.".into(),
         message.to_string(),
         String::new(),
+        format!("Details are in {}.", crate::config::panic_log_path().display()),
         "Save your work before trying again.".into(),
     ]
 }

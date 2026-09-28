@@ -17,7 +17,7 @@
   dialog waited for the job to report back, and a job that crashed never did, so the dialog stayed
   up and nothing, including Save, could be reached. The crash also switched the terminal out of
   the app's screen mode. Now the job ends with an "Internal error" message and the app keeps
-  working.
+  working. Such errors are recorded, with details, in `~/.config/tui-wave/panic.log`.
 - **A large buffer uses half the memory while nothing is playing.** The audio engine kept its own
   full copy of the buffer at all times and made a new one after every edit. Now it copies the
   audio when you press Play and frees the copy when you pause, or at the next edit after

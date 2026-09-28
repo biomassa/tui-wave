@@ -115,7 +115,11 @@ impl std::fmt::Display for Error {
             Error::Instantiate(name) => write!(f, "could not create the {name} processor"),
             Error::EmptyInput => write!(f, "nothing selected to process"),
             Error::Cancelled => write!(f, "cancelled"),
-            Error::Panicked(message) => write!(f, "internal error (a bug in tui-wave): {message}"),
+            Error::Panicked(message) => write!(
+                f,
+                "internal error (a bug in tui-wave): {message}. Details are in {}.",
+                crate::config::panic_log_path().display()
+            ),
         }
     }
 }

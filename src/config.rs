@@ -202,6 +202,13 @@ pub(crate) fn config_home() -> PathBuf {
     PathBuf::from(home).join(".config")
 }
 
+/// Where panics on threads other than the main one are recorded (see
+/// `ui::terminal::install_panic_hook`). Next to the config, because that is the one directory
+/// this app always owns.
+pub fn panic_log_path() -> PathBuf {
+    config_home().join("tui-wave").join("panic.log")
+}
+
 impl Config {
     fn path() -> PathBuf {
         config_home().join("tui-wave").join("config.toml")
