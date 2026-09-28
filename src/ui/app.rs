@@ -522,6 +522,14 @@ fn engine_for(document: &Document) -> Option<AudioEngine> {
     }
 }
 
+/// A new undo history for one document. Its sample data is capped at `max_resident_mb`, the
+/// same budget that decides whether a file is held in memory at all, so undo can never hold
+/// more than one more such buffer.
+fn history_for(config: &Config) -> History {
+    let bytes = config.max_resident_mb.saturating_mul(1024 * 1024);
+    History::new().with_byte_limit(usize::try_from(bytes).unwrap_or(usize::MAX))
+}
+
 /// Number of samples covered by `ms` milliseconds at `sample_rate` (rounded).
 fn ms_to_samples(ms: f32, sample_rate: u32) -> usize {
     ((ms / 1000.0) * sample_rate as f32).round() as usize
@@ -5053,7 +5061,7 @@ impl App {
             .iter()
             .map(|doc| doc.channels.iter().map(|c| WaveformCache::build(c)).collect())
             .collect();
-        let histories = documents.iter().map(|_| History::new()).collect();
+        let histories = documents.iter().map(|_| history_for(&config)).collect();
         let menu_shortcuts = build_action_display_map(&config.keybindings, false);
         let toolbar_shortcuts = build_action_display_map(&config.keybindings, true);
         let user_cdp_dir = crate::model::cdp::CdpCatalog::user_dir();
@@ -5198,7 +5206,7 @@ impl App {
 
     fn push_document(&mut self, document: Document) {
         self.documents.push(document);
-        self.histories.push(History::new());
+        self.histories.push(history_for(&self.config));
         // Index-parallel with `documents`, like `histories`: a buffer without its own slot would
         // render against whichever one happened to be at its index.
         self.waveform_caches.push(Vec::new());
@@ -18636,7 +18644,7 @@ impl App {
             }
         };
         self.documents[idx] = document;
-        self.histories[idx] = crate::model::history::History::new();
+        self.histories[idx] = history_for(&self.config);
         self.file_panel.mark_dirty(&path, false);
         if idx == self.active_document {
             self.viewport = None;
@@ -20068,7 +20076,7 @@ impl App {
         if let Some(pos) = self.documents.iter().position(|d| d.path == Some(path.clone())) {
             self.active_document = pos;
             self.documents[pos] = document;
-            self.histories[pos] = History::new();
+            self.histories[pos] = history_for(&self.config);
         } else {
             self.push_document(document);
         }

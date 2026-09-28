@@ -85,6 +85,14 @@ impl Command for TrimCommand {
         doc.dirty = true;
     }
 
+    fn stored_bytes(&self) -> usize {
+        self.before.as_deref().map_or(0, crate::model::command::sample_bytes) + self.after.as_deref().map_or(0, crate::model::command::sample_bytes)
+    }
+
+    fn is_noop(&self) -> bool {
+        self.before.is_none()
+    }
+
     fn label(&self) -> &str {
         "Trim"
     }

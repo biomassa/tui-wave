@@ -61,6 +61,14 @@ impl Command for RemoveRangeCommand {
         doc.dirty = true;
     }
 
+    fn stored_bytes(&self) -> usize {
+        self.removed.as_deref().map_or(0, crate::model::command::sample_bytes)
+    }
+
+    fn is_noop(&self) -> bool {
+        self.removed.as_ref().is_some_and(|r| r.iter().all(|c| c.is_empty()))
+    }
+
     fn label(&self) -> &str {
         self.label
     }

@@ -86,6 +86,14 @@ impl Command for HighPassCommand {
         doc.dirty = true;
     }
 
+    fn stored_bytes(&self) -> usize {
+        self.original.as_deref().map_or(0, crate::model::command::sample_bytes)
+    }
+
+    fn is_noop(&self) -> bool {
+        self.original.is_none()
+    }
+
     fn label(&self) -> &str {
         "High-Pass Filter"
     }

@@ -115,6 +115,14 @@ impl Command for FadeCommand {
         doc.dirty = true;
     }
 
+    fn stored_bytes(&self) -> usize {
+        self.original.as_deref().map_or(0, crate::model::command::sample_bytes)
+    }
+
+    fn is_noop(&self) -> bool {
+        self.original.is_none()
+    }
+
     fn label(&self) -> &str {
         if self.fade_in { "Fade In" } else { "Fade Out" }
     }
@@ -192,6 +200,14 @@ impl Command for TechnicalFadesCommand {
             }
         }
         doc.dirty = true;
+    }
+
+    fn stored_bytes(&self) -> usize {
+        self.original_head.as_deref().map_or(0, crate::model::command::sample_bytes) + self.original_tail.as_deref().map_or(0, crate::model::command::sample_bytes)
+    }
+
+    fn is_noop(&self) -> bool {
+        self.original_head.is_none()
     }
 
     fn label(&self) -> &str {

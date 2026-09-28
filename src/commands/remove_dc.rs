@@ -94,6 +94,10 @@ impl Command for RemoveDcCommand {
         doc.dirty = true;
     }
 
+    fn is_noop(&self) -> bool {
+        self.offsets.as_ref().is_none_or(|o| o.iter().all(|&m| m == 0.0))
+    }
+
     fn label(&self) -> &str {
         "Remove DC Offset"
     }

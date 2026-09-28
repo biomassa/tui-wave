@@ -73,6 +73,14 @@ impl Command for RemoveChannelsCommand {
         doc.dirty = true;
     }
 
+    fn stored_bytes(&self) -> usize {
+        self.removed.iter().map(|(_, samples, _)| samples.len() * std::mem::size_of::<f32>()).sum()
+    }
+
+    fn is_noop(&self) -> bool {
+        self.removed.is_empty()
+    }
+
     fn label(&self) -> &str {
         "Remove Empty Channels"
     }

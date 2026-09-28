@@ -147,6 +147,14 @@ impl Command for ResampleCommand {
         doc.dirty = true;
     }
 
+    fn stored_bytes(&self) -> usize {
+        self.original.as_ref().map_or(0, |(channels, ..)| crate::model::command::sample_bytes(channels))
+    }
+
+    fn is_noop(&self) -> bool {
+        self.original.is_none()
+    }
+
     fn label(&self) -> &str {
         "Resample"
     }

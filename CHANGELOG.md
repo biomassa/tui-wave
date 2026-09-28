@@ -23,6 +23,13 @@
   audio when you press Play and frees the copy when you pause, or at the next edit after
   playback reaches the end. On a very large buffer, pressing Play can take a moment longer while
   the copy is made.
+- **Undo history no longer grows without a memory limit.** Each whole-file edit such as Gain or
+  Normalize keeps a copy of the audio for undo, and the history kept up to 100 of them, so a large
+  buffer could use many times its own size. Each buffer's history now keeps at most
+  `max_resident_mb` of such copies (4GB by default) and forgets the oldest steps past that. The
+  most recent step is always kept.
+- **An edit that changes nothing no longer uses an undo step.** For example, Normalize on silence
+  used to add a step that did nothing when undone, and it cleared Redo.
 - **The executable is about 8MB smaller** (28MB to 20MB on Linux x86-64). Unused audio decoders
   are no longer linked, the built-in process catalogs are stored compressed, and the release
   build uses link-time optimization. Release builds take longer.

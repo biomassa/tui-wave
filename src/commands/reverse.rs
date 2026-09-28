@@ -40,6 +40,10 @@ impl Command for ReverseCommand {
         doc.dirty = true;
     }
 
+    fn is_noop(&self) -> bool {
+        self.range.0 >= self.range.1
+    }
+
     fn label(&self) -> &str {
         "Reverse"
     }

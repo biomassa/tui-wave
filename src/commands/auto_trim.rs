@@ -244,6 +244,18 @@ impl Command for AutoTrimCommand {
         doc.dirty = true;
     }
 
+    fn stored_bytes(&self) -> usize {
+        let planes = |p: &Option<Vec<Vec<f32>>>| p.as_deref().map_or(0, crate::model::command::sample_bytes);
+        let gaps: usize = self.gap_audio.iter().flatten().map(|g| crate::model::command::sample_bytes(g)).sum();
+        let edges: usize =
+            self.fade_edges.iter().flatten().map(|(h, t)| crate::model::command::sample_bytes(h) + crate::model::command::sample_bytes(t)).sum();
+        planes(&self.before) + planes(&self.after) + gaps + edges
+    }
+
+    fn is_noop(&self) -> bool {
+        self.before.is_none()
+    }
+
     fn label(&self) -> &str {
         "Auto-Trim Silence"
     }

@@ -7,6 +7,9 @@ pub struct History {
     undo_stack: Vec<Box<dyn Command>>,
     redo_stack: Vec<Box<dyn Command>>,
     limit: usize,
+    /// The most sample data (`Command::stored_bytes`) the undo and redo stacks may hold
+    /// together. Unlimited unless set with `with_byte_limit`.
+    byte_limit: usize,
     /// Set when this history belongs to a buffer created by CopyToNew. When the undo
     /// stack is empty and this flag is set, `Action::Undo` closes the buffer silently
     /// instead of doing nothing — "undoing the creation" of the buffer.
@@ -19,8 +22,15 @@ impl History {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             limit: DEFAULT_LIMIT,
+            byte_limit: usize::MAX,
             created_by_copy_to_new: false,
         }
+    }
+
+    /// This history with a memory budget; see `byte_limit`.
+    pub fn with_byte_limit(mut self, bytes: usize) -> Self {
+        self.byte_limit = bytes;
+        self
     }
 
     pub fn can_undo(&self) -> bool {
@@ -29,10 +39,29 @@ impl History {
 
     pub fn apply(&mut self, mut cmd: Box<dyn Command>, doc: &mut Document) {
         cmd.execute(doc);
+        if cmd.is_noop() {
+            return;
+        }
         self.undo_stack.push(cmd);
         self.redo_stack.clear();
         if self.undo_stack.len() > self.limit {
             self.undo_stack.remove(0);
+        }
+        self.enforce_byte_limit();
+    }
+
+    /// Drops the oldest undo steps until the stored sample data fits `byte_limit`. The newest
+    /// step is always kept, even when it alone is over the budget: losing the undo of the edit
+    /// just made would be worse than the memory.
+    fn enforce_byte_limit(&mut self) {
+        let mut total: usize = self
+            .undo_stack
+            .iter()
+            .chain(&self.redo_stack)
+            .map(|cmd| cmd.stored_bytes())
+            .sum();
+        while total > self.byte_limit && self.undo_stack.len() > 1 {
+            total -= self.undo_stack.remove(0).stored_bytes();
         }
     }
 
@@ -77,6 +106,88 @@ mod tests {
         fn label(&self) -> &str {
             "Increment"
         }
+    }
+
+    /// Holds `bytes` of pretend sample data, or changes nothing when `noop`.
+    #[derive(Debug)]
+    struct Sized {
+        bytes: usize,
+        noop: bool,
+    }
+    impl Command for Sized {
+        fn execute(&mut self, doc: &mut Document) {
+            if !self.noop {
+                doc.channels[0][0] += 1.0;
+            }
+        }
+        fn undo(&mut self, doc: &mut Document) {
+            doc.channels[0][0] -= 1.0;
+        }
+        fn label(&self) -> &str {
+            "Sized"
+        }
+        fn stored_bytes(&self) -> usize {
+            self.bytes
+        }
+        fn is_noop(&self) -> bool {
+            self.noop
+        }
+    }
+
+    fn sized(bytes: usize) -> Box<dyn Command> {
+        Box::new(Sized { bytes, noop: false })
+    }
+
+    /// Past the byte budget the oldest steps go first, and what is left fits.
+    #[test]
+    fn the_byte_limit_drops_the_oldest_steps() {
+        let mut history = History::new().with_byte_limit(250);
+        let mut document = doc();
+        for _ in 0..5 {
+            history.apply(sized(100), &mut document);
+        }
+        assert_eq!(history.undo_stack.len(), 2, "two 100-byte steps fit in 250");
+        assert!(history.undo(&mut document) && history.undo(&mut document));
+        assert!(!history.undo(&mut document));
+        assert_eq!(document.channels[0][0], 3.0, "the three oldest steps can no longer be undone");
+    }
+
+    /// One step larger than the whole budget is still kept: the edit just made can be undone.
+    #[test]
+    fn the_newest_step_is_kept_even_over_the_byte_limit() {
+        let mut history = History::new().with_byte_limit(250);
+        let mut document = doc();
+        history.apply(sized(100), &mut document);
+        history.apply(sized(1000), &mut document);
+        assert_eq!(history.undo_stack.len(), 1);
+        assert!(history.undo(&mut document));
+        assert_eq!(document.channels[0][0], 1.0);
+    }
+
+    /// Redo data counts toward the budget too, since it is held in memory just the same.
+    #[test]
+    fn redo_steps_count_toward_the_byte_limit() {
+        let mut history = History::new().with_byte_limit(250);
+        let mut document = doc();
+        history.apply(sized(100), &mut document);
+        history.apply(sized(100), &mut document);
+        history.undo(&mut document); // 100 on each stack
+        history.apply(sized(100), &mut document); // clears redo: 200 total, fits
+        assert_eq!(history.undo_stack.len(), 2);
+    }
+
+    /// A command that changed nothing is not kept: Undo is not spent on it, and it does not
+    /// clear what could be redone.
+    #[test]
+    fn a_noop_command_is_not_kept_and_keeps_redo() {
+        let mut history = History::new();
+        let mut document = doc();
+        history.apply(sized(0), &mut document);
+        history.undo(&mut document);
+        history.apply(Box::new(Sized { bytes: 0, noop: true }), &mut document);
+        assert!(!history.can_undo(), "the no-op is not an undo step");
+        assert!(history.redo(&mut document), "and the earlier undo can still be redone");
+        assert_eq!(document.channels[0][0], 1.0);
     }
 
     fn doc() -> Document {

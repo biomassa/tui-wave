@@ -215,6 +215,10 @@ impl Command for CdpProcessCommand {
         doc.dirty = true;
     }
 
+    fn stored_bytes(&self) -> usize {
+        crate::model::command::sample_bytes(&self.new_data) + self.removed.as_deref().map_or(0, crate::model::command::sample_bytes)
+    }
+
     fn label(&self) -> &str {
         &self.label
     }

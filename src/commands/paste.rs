@@ -33,6 +33,14 @@ impl Command for PasteCommand {
         doc.dirty = true;
     }
 
+    fn stored_bytes(&self) -> usize {
+        crate::model::command::sample_bytes(&self.data)
+    }
+
+    fn is_noop(&self) -> bool {
+        self.inserted_len == 0
+    }
+
     fn label(&self) -> &str {
         "Paste"
     }
