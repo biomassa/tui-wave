@@ -64,6 +64,9 @@
 - **The "switch back to constant?" question in the envelope editor is visible in graphics mode.**
   The editor's picture was drawn on top of it, so pressing `c` asked a question you could not
   see, and the next key answered it.
+- **Praat text parameters accept every letter.** Typing `s`, `e` or `b` into a text field opened
+  the preset prompt, a list editor or a file picker instead, so a word like "base" could not be
+  typed. This affected the 32 Praat processes with a text parameter.
 - **The executable is about 8MB smaller** (28MB to 20MB on Linux x86-64). Unused audio decoders
   are no longer linked, the built-in process catalogs are stored compressed, and the release
   build uses link-time optimization. Release builds take longer.

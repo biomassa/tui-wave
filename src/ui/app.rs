@@ -7130,6 +7130,17 @@ impl App {
     }
 
     /// Whether a typed `c` is accepted by the active dialog (numeric dialogs restrict input).
+    /// Whether the focus is on a free-text parameter of a params dialog, where every character
+    /// is text and none is a shortcut.
+    fn focused_on_free_text(&self) -> bool {
+        match &self.dialog {
+            Some(Dialog::CdpParams { fields, focus, save_prompt: None, .. }) if *focus != CDP_PRESET_FOCUS => {
+                matches!(fields.get(*focus - 1), Some(CdpField::Text { .. }))
+            }
+            _ => false,
+        }
+    }
+
     fn dialog_accepts(&self, c: char) -> bool {
         match &self.dialog {
             Some(Dialog::Normalize { .. })
@@ -8097,6 +8108,19 @@ impl App {
             // — checked before the generic accepts-a-char arm below since a focused Number
             // field's `dialog_accepts` normally rejects 'e' anyway (digit/minus/dot only),
             // leaving this free to repurpose without a conflict.
+            // A focused free-text field takes every plain character before any letter shortcut
+            // below. `s`, `e` and `b` used to open the preset prompt, another field's list editor
+            // and a file picker instead of typing, so a Praat text parameter could not hold a
+            // word like "base". `p`'s arm already asked `cdp_params_accepts_char`; this asks it
+            // once for all of them.
+            KeyCode::Char(c)
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && self.focused_on_free_text() =>
+            {
+                if let Some(input) = self.dialog_input() {
+                    input.insert(c);
+                }
+            }
             KeyCode::Char('e')
                 if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
@@ -49744,6 +49768,45 @@ mod tests {
                 "the question is hidden (graphics mode: {graphics})"
             );
         }
+    }
+
+    /// Every letter types into a focused free-text parameter, including the ones that are
+    /// shortcuts elsewhere in the params dialog. `s`, `e` and `b` used to open the preset
+    /// prompt, a list editor and a file picker instead.
+    #[test]
+    fn shortcut_letters_type_into_a_free_text_parameter() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        let (index, param) = app.cdp_catalog.processes.iter().enumerate().find_map(|(i, d)| {
+            d.params.iter().position(|p| matches!(p.kind, crate::model::cdp::ParamKind::Text { .. })).map(|p| (i, p))
+        }).expect("a process with a free-text parameter");
+        app.open_cdp_params(index);
+        if let Some(Dialog::CdpParams { focus, fields, .. }) = app.dialog.as_mut() {
+            *focus = param + 1;
+            if let Some(CdpField::Text { input }) = fields.get_mut(param) { *input = TextInput::new(""); }
+        }
+        for c in "base sexpdb".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let Some(Dialog::CdpParams { fields, save_prompt, list_edit, file_picker, formant_picker, .. }) = &app.dialog else {
+            panic!("the params dialog closed")
+        };
+        assert!(save_prompt.is_none() && list_edit.is_none() && file_picker.is_none() && formant_picker.is_none(), "a sub-editor opened");
+        let Some(CdpField::Text { input }) = fields.get(param) else { panic!("not text") };
+        assert_eq!(input.value(), "base sexpdb");
+    }
+
+    /// Away from a text field the letters keep their shortcuts: `s` on a number field still
+    /// opens the preset prompt.
+    #[test]
+    fn s_still_opens_the_preset_prompt_on_a_number_field() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        let (index, param) = app.cdp_catalog.processes.iter().enumerate().find_map(|(i, d)| {
+            d.params.iter().position(|p| matches!(p.kind, crate::model::cdp::ParamKind::Number { .. })).map(|p| (i, p))
+        }).unwrap();
+        app.open_cdp_params(index);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() { *focus = param + 1; }
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::CdpParams { save_prompt: Some(_), .. })));
     }
 
     /// A graphics-mode app on a stereo ramp, drawn once at 120x40.
