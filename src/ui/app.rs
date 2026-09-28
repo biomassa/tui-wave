@@ -545,6 +545,20 @@ fn finish_head_tail_drag(marks: &mut Vec<usize>, dragged: usize, start: Option<u
     }
 }
 
+/// Whether a waveform mouse event re-seeks playback that is running.
+///
+/// The click seeks, and so does the release of a drag that changed the selection, so looped or
+/// bounded playback picks up the new range. The drag events in between do not: every seek
+/// clears the player and starts again, so seeking on each one restarted playback for as long as
+/// the mouse moved.
+fn waveform_mouse_seeks(kind: MouseEventKind, dragged_a_selection: bool) -> bool {
+    match kind {
+        MouseEventKind::Down(MouseButton::Left) => true,
+        MouseEventKind::Up(MouseButton::Left) => dragged_a_selection,
+        _ => false,
+    }
+}
+
 /// A new undo history for one document. Its sample data is capped at `max_resident_mb`, the
 /// same budget that decides whether a file is held in memory at all, so undo can never hold
 /// more than one more such buffer.
@@ -20750,16 +20764,26 @@ impl App {
 
         // Waveform click/drag → seek + select.
         let area = self.waveform_area;
-        if mouse.column < area.x
+        let outside = mouse.column < area.x
             || mouse.column >= area.x + area.width
             || mouse.row < area.y
-            || mouse.row >= area.y + area.height
-        {
+            || mouse.row >= area.y + area.height;
+        // A selection drag that leaves the waveform keeps going, clamped to the nearest column,
+        // so a selection can be dragged to the edge. Everything else outside is ignored.
+        let dragging_out = outside
+            && area.width > 0
+            && self.mouse_down_anchor.is_some()
+            && matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left));
+        if outside && !dragging_out {
             if matches!(mouse.kind, MouseEventKind::Up(_)) {
                 self.mouse_down_anchor = None;
             }
             return;
         }
+        let mouse = MouseEvent {
+            column: mouse.column.clamp(area.x, area.x + area.width.saturating_sub(1)),
+            ..mouse
+        };
         // The wheel scrolls the *channel* window, not the timeline — it's the primary gesture
         // for reaching channels 7..30 of a multichannel file, and it was previously unhandled
         // here (the match below only ever covered Down/Drag/Up), so nothing is displaced. Runs
@@ -20796,6 +20820,7 @@ impl App {
             (viewport.scroll_offset as f64 + (col + 1.0) * viewport.samples_per_column) as usize;
         let sel_edge = if col_end >= total_len { total_len } else { target };
 
+        let mut dragged_a_selection = false;
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let now = Instant::now();
@@ -20870,6 +20895,7 @@ impl App {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 if let Some(anchor) = self.mouse_down_anchor {
+                    dragged_a_selection = anchor != target;
                     if anchor != target {
                         let start = anchor.min(target);
                         document.cursor = start;
@@ -20884,6 +20910,9 @@ impl App {
             _ => return,
         }
 
+        if !waveform_mouse_seeks(mouse.kind, dragged_a_selection) {
+            return;
+        }
         if let Some(audio) = &self.audio {
             if audio.is_playing() {
                 match playback_bound {
@@ -49275,6 +49304,51 @@ mod tests {
                 && summary.contains("Both: 2 ch") && summary.contains("0 dropped"),
             "summary must partition the six channels, got {summary:?}"
         );
+    }
+
+    fn left_mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE }
+    }
+
+    /// A selection dragged out past the right edge of the waveform reaches the last column,
+    /// instead of stopping at the last event that was still inside.
+    #[test]
+    fn a_selection_drag_past_the_edge_reaches_the_last_column() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        render_dialog_rows(&mut app, 120, 40);
+        let area = app.waveform_area;
+        let row = area.y + 1;
+        app.handle_mouse(left_mouse(MouseEventKind::Down(MouseButton::Left), area.x + 5, row));
+        app.handle_mouse(left_mouse(MouseEventKind::Drag(MouseButton::Left), area.x + area.width + 10, row));
+        app.handle_mouse(left_mouse(MouseEventKind::Up(MouseButton::Left), area.x + area.width + 10, row));
+        let (start, end) = app.documents[0].selection.expect("the drag made a selection").normalized();
+        let vp = app.viewport.as_ref().unwrap();
+        let last_column_start =
+            (vp.scroll_offset as f64 + (area.width - 1) as f64 * vp.samples_per_column) as usize;
+        assert!(start < end);
+        assert!(end >= last_column_start, "end {end} short of the last column at {last_column_start}");
+    }
+
+    /// Outside a drag, events past the waveform still do nothing.
+    #[test]
+    fn a_click_outside_the_waveform_makes_no_selection() {
+        let mut app = new_app(Some(doc(0.1, 44100)), None);
+        render_dialog_rows(&mut app, 120, 40);
+        let area = app.waveform_area;
+        let before = app.documents[0].cursor;
+        app.handle_mouse(left_mouse(MouseEventKind::Drag(MouseButton::Left), area.x + area.width + 3, area.y + 1));
+        assert!(app.documents[0].selection.is_none());
+        assert_eq!(app.documents[0].cursor, before);
+    }
+
+    /// While playing, the click seeks and so does the release of a drag that changed the
+    /// selection; the drag events in between do not, since each seek restarts playback.
+    #[test]
+    fn only_the_click_and_the_end_of_a_drag_seek_playback() {
+        assert!(waveform_mouse_seeks(MouseEventKind::Down(MouseButton::Left), false));
+        assert!(!waveform_mouse_seeks(MouseEventKind::Drag(MouseButton::Left), true));
+        assert!(waveform_mouse_seeks(MouseEventKind::Up(MouseButton::Left), true));
+        assert!(!waveform_mouse_seeks(MouseEventKind::Up(MouseButton::Left), false), "a plain click's release");
     }
 
     /// Every terminal size down to 1x1 renders without a panic, with a marker and a head/tail

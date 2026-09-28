@@ -38,6 +38,12 @@
 - **A very small terminal no longer crashes the app.** In a terminal only a few rows high, for
   example a small tmux pane, a marker or head/tail mark on screen made the app crash, losing any
   unsaved work.
+- **Dragging a selection during playback no longer restarts the audio over and over.** Every
+  mouse movement during the drag sent playback back to the start of the selection. Now playback
+  jumps when you click, and once more when you release a drag that changed the selection, so a
+  loop picks up the new range.
+- **A selection can be dragged to the edge of the waveform.** Moving the mouse past the edge used
+  to freeze the selection at the last position inside it.
 - **The executable is about 8MB smaller** (28MB to 20MB on Linux x86-64). Unused audio decoders
   are no longer linked, the built-in process catalogs are stored compressed, and the release
   build uses link-time optimization. Release builds take longer.
