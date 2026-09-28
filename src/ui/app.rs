@@ -545,6 +545,30 @@ fn finish_head_tail_drag(marks: &mut Vec<usize>, dragged: usize, start: Option<u
     }
 }
 
+/// Everything a graphics-mode pane's base image (`waveform_image::WaveformBase`) is drawn
+/// from. The base is reused while this is equal, so a field missing here would leave a stale
+/// image on screen. The audio is identified by the waveform cache's build id, which changes on
+/// every rebuild, i.e. after every edit. Marker labels are not here because the labels are
+/// drawn in the finish; their positions are, because the base draws their lines.
+#[derive(Debug, Clone, PartialEq)]
+struct PaneImageKey {
+    document: usize,
+    source_channel: usize,
+    cache_id: Option<u64>,
+    samples_len: usize,
+    scroll_offset: usize,
+    samples_per_column: u64,
+    amplitude_scale: u32,
+    selection: Option<(usize, usize)>,
+    cursor: usize,
+    markers: Vec<usize>,
+    head_tail_marks: Vec<usize>,
+    cell_width: u16,
+    pixel_width: u32,
+    pixel_height: u32,
+    gradient: bool,
+}
+
 /// One click on a dialog row, kept to recognise the second click of a double-click.
 struct DialogClick {
     at: Instant,
@@ -3264,6 +3288,9 @@ pub struct App {
     /// one channel the image state cached for another and repaint its waveform.
     graphics_protocols:
         std::collections::HashMap<usize, ratatui_image::protocol::StatefulProtocol>,
+    /// Graphics-mode pane images without playhead or labels, keyed by absolute channel like
+    /// `graphics_protocols`, each with the inputs it was drawn from. See `PaneImageKey`.
+    graphics_bases: std::collections::HashMap<usize, (PaneImageKey, waveform_image::WaveformBase)>,
     /// The CDP envelope editor's own graphics-mode protocol slot — deliberately separate
     /// from `graphics_protocols` (the per-channel waveform ones): the waveform's own
     /// graphics rendering is skipped entirely while any dialog is open (`overlay_active`,
@@ -5138,6 +5165,7 @@ impl App {
             pending_streamed_save: None,
             pending_open: None,
             graphics_protocols: std::collections::HashMap::new(),
+            graphics_bases: std::collections::HashMap::new(),
             cdp_envelope_graphics_protocol: None,
             cdp_formant_graphics_protocol: None,
             praat_picture: None,
@@ -6178,6 +6206,7 @@ impl App {
             // in a different document — `render`'s truncate cannot fix an index whose meaning
             // changed, only one that no longer exists.
             self.graphics_protocols.clear();
+            self.graphics_bases.clear();
             self.viewport = None;
         }
     }
@@ -19308,6 +19337,7 @@ impl App {
             // index *i* means a different source channel than the cached bitmap at *i* holds.
             // `render` only truncates, which cannot fix an index whose meaning changed.
             self.graphics_protocols.clear();
+            self.graphics_bases.clear();
             // Same reasoning for the fold gains: dropping channels re-indexes the survivors, so
             // which leg each one feeds changes. This path deliberately skips
             // `after_sample_mutation` (nothing about the samples moved), so it asks directly.
@@ -23043,6 +23073,7 @@ impl App {
         // Drop stale per-channel image state from a previous document with more channels
         // — never reuse it for a channel index that no longer exists.
         self.graphics_protocols.retain(|&channel, _| channel < channel_count);
+        self.graphics_bases.retain(|&channel, _| channel < channel_count);
         // Same backstop as `clamp_zoom_to_content` above, for the vertical axis: a terminal
         // resize, a buffer switch, or an edit that removes channels (Remove Empty Channels)
         // can all leave the channel window pointing past the end.
@@ -23218,24 +23249,59 @@ impl App {
                     let font = picker.font_size();
                     let pixel_width = channel_inner.width as u32 * font.width.max(1) as u32;
                     let pixel_height = channel_inner.height as u32 * font.height.max(1) as u32;
-                    let img = waveform_image::rasterize_waveform(
-                        samples,
-                        viewport,
-                        cache,
+                    let cursor = self.documents[doc_idx].cursor;
+                    // The pane's base image is rebuilt only when something it shows changed;
+                    // during playback only the playhead moves, and that is in the finish.
+                    let key = PaneImageKey {
+                        document: doc_idx,
+                        source_channel: self.documents[doc_idx].source_channel(i),
+                        cache_id: cache.map(|c| c.id()),
+                        samples_len: samples.len(),
+                        scroll_offset: viewport.scroll_offset,
+                        samples_per_column: viewport.samples_per_column.to_bits(),
+                        amplitude_scale: viewport.amplitude_scale.to_bits(),
                         selection,
-                        self.documents[doc_idx].cursor,
-                        self.playhead_position,
-                        &marker_refs,
-                        &head_tail_refs,
-                        // Marker labels go on the topmost *drawn* pane, not on absolute
-                        // channel 0 — with a channel window open, scrolling past channel 0
-                        // would otherwise take the labels off screen entirely.
-                        pane == 0,
-                        channel_inner.width,
+                        cursor,
+                        markers: self.documents[doc_idx].markers.iter().map(|m| m.position).collect(),
+                        head_tail_marks: head_tail_refs.clone(),
+                        cell_width: channel_inner.width,
                         pixel_width,
                         pixel_height,
-                        self.dot_matrix_gradient,
-                    );
+                        gradient: self.dot_matrix_gradient,
+                    };
+                    if self.graphics_bases.get(&i).is_none_or(|(cached, _)| *cached != key) {
+                        let base = waveform_image::rasterize_waveform_base(
+                            samples,
+                            viewport,
+                            cache,
+                            selection,
+                            cursor,
+                            &marker_refs,
+                            &head_tail_refs,
+                            channel_inner.width,
+                            pixel_width,
+                            pixel_height,
+                            self.dot_matrix_gradient,
+                        );
+                        self.graphics_bases.insert(i, (key, base));
+                    }
+                    let base = &self.graphics_bases[&i].1;
+                    let mut img = base.image.clone();
+                    if base.has_content {
+                        waveform_image::finish_waveform(
+                            &mut img,
+                            viewport,
+                            cursor,
+                            self.playhead_position,
+                            &marker_refs,
+                            &head_tail_refs,
+                            // Marker labels go on the topmost *drawn* pane, not on absolute
+                            // channel 0 — with a channel window open, scrolling past channel 0
+                            // would otherwise take the labels off screen entirely.
+                            pane == 0,
+                            channel_inner.width,
+                        );
+                    }
                     let protocol = picker.new_resize_protocol(image::DynamicImage::ImageRgba8(img));
                     // Replaced, not inserted-if-absent: the waveform's pixel content changes on
                     // essentially every redraw (see the comment above), so keeping an existing
@@ -49387,6 +49453,97 @@ mod tests {
         assert!(!waveform_mouse_seeks(MouseEventKind::Drag(MouseButton::Left), true));
         assert!(waveform_mouse_seeks(MouseEventKind::Up(MouseButton::Left), true));
         assert!(!waveform_mouse_seeks(MouseEventKind::Up(MouseButton::Left), false), "a plain click's release");
+    }
+
+    /// A graphics-mode app on a stereo ramp, drawn once at 120x40.
+    fn graphics_app() -> (App, ratatui::Terminal<ratatui::backend::TestBackend>) {
+        let mut document = doc(0.1, 44100);
+        let ramp: Vec<f32> = (0..44100).map(|i| (i as f32 / 44100.0) - 0.5).collect();
+        document.channels = vec![ramp.clone(), ramp.iter().map(|s| -s).collect()];
+        let mut app = new_app(Some(document), None);
+        let mut picker = ratatui_image::picker::Picker::halfblocks();
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+        app.set_picker(Some(picker));
+        app.graphics_mode = true;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        (app, terminal)
+    }
+
+    fn base_of(app: &App, channel: usize) -> image::RgbaImage {
+        app.graphics_bases.get(&channel).expect("a cached base").1.image.clone()
+    }
+
+    /// While only the playhead moves, the pane's base image is not rebuilt: that is the whole
+    /// point of the cache (rasterizing six panes took 48ms a frame).
+    #[test]
+    fn the_pane_base_image_is_kept_while_only_the_playhead_moves() {
+        let (mut app, mut terminal) = graphics_app();
+        let before = app.graphics_bases[&0].1.image.as_raw().as_ptr();
+        for at in [1000, 5000, 20000] {
+            app.playhead_position = Some(at);
+            terminal.draw(|frame| app.render(frame)).unwrap();
+        }
+        assert_eq!(app.graphics_bases[&0].1.image.as_raw().as_ptr(), before, "rebuilt for a playhead move");
+    }
+
+    /// After every kind of change the base image shows, the cached image equals one drawn from
+    /// scratch. A change missing from `PaneImageKey` would leave the old image on screen, and
+    /// this is the test that catches it.
+    #[test]
+    fn the_pane_base_image_follows_every_change_it_shows() {
+        let changes: Vec<(&str, Box<dyn Fn(&mut App)>)> = vec![
+            ("selection", Box::new(|app| app.documents[0].selection = Some(Selection { start: 2000, end: 20000 }))),
+            ("cursor", Box::new(|app| app.documents[0].cursor = 30000)),
+            ("marker", Box::new(|app| app.handle_action(Action::InsertMarker))),
+            ("head/tail mark", Box::new(|app| app.handle_action(Action::InsertHeadTailMark))),
+            ("zoom", Box::new(|app| app.handle_action(Action::ZoomIn))),
+            ("vertical zoom", Box::new(|app| app.handle_action(Action::ZoomInVertical))),
+            ("gradient", Box::new(|app| app.handle_action(Action::ToggleDotMatrixGradient))),
+            ("an edit", Box::new(|app| {
+                app.documents[0].selection = Some(Selection { start: 0, end: 30000 });
+                app.handle_action(Action::Reverse);
+            })),
+        ];
+        let (mut app, mut terminal) = graphics_app();
+        for (name, change) in changes {
+            change(&mut app);
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let cached = base_of(&app, 0);
+            app.graphics_bases.clear();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            assert!(cached == base_of(&app, 0), "after the {name} change the cached image is stale");
+        }
+    }
+
+    /// Marker labels are drawn over the playhead line, as before the cache split the image in
+    /// two. Checked on the pixels where a label and the playhead cross.
+    #[test]
+    fn marker_labels_stay_on_top_of_the_playhead() {
+        use crate::ui::widgets::waveform_image::{finish_waveform, rasterize_waveform_base};
+        let samples: Vec<f32> = (0..8000).map(|i| ((i as f32) * 0.01).sin() * 0.5).collect();
+        let vp = crate::ui::viewport::Viewport::fit_to_width(samples.len(), 80);
+        let markers = [(0usize, "Marker 1")];
+        let draw = |playhead| {
+            let base = rasterize_waveform_base(
+                crate::model::stream::SampleSource::Resident(&samples), &vp, None, None, 7000,
+                &markers, &[], 80, 800, 200, true,
+            );
+            let mut img = base.image;
+            finish_waveform(&mut img, &vp, 7000, playhead, &markers, &[], true, 80);
+            img
+        };
+        // 8000 samples over 800 pixels: sample 300 is pixel column 30, inside the label, which
+        // starts one pixel right of the marker at column 0 and is 8 glyphs of 8px on rows 0-7.
+        let without = draw(None);
+        let with = draw(Some(300));
+        for y in 0..8 {
+            for x in 1..65 {
+                assert_eq!(without.get_pixel(x, y), with.get_pixel(x, y), "label pixel ({x},{y}) covered");
+            }
+        }
+        assert!((8..200).any(|y| without.get_pixel(30, y) != with.get_pixel(30, y)), "the playhead is drawn below the label");
     }
 
     /// Every terminal size down to 1x1 renders without a panic, with a marker and a head/tail

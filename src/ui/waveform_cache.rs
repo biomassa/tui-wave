@@ -39,6 +39,16 @@ impl MinMaxLevel {
 pub struct WaveformCache {
     levels: Vec<MinMaxLevel>,
     peak: f32,
+    /// Unique per build. Anything derived from this cache (the graphics-mode pane images) keys
+    /// on it, so a rebuild after any edit invalidates it without a list of edit sites.
+    id: u64,
+}
+
+/// Source of `WaveformCache::id`.
+static NEXT_CACHE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_cache_id() -> u64 {
+    NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Accumulates base bins from samples arriving in arbitrarily-sized blocks, then folds the
@@ -116,7 +126,7 @@ impl Builder {
             self.maxs.push(self.acc_max);
         }
         if self.mins.is_empty() {
-            return WaveformCache { levels: Vec::new(), peak: 0.0 };
+            return WaveformCache { levels: Vec::new(), peak: 0.0, id: next_cache_id() };
         }
 
         let mut levels = vec![MinMaxLevel { bin_size: BASE_BIN, mins: self.mins, maxs: self.maxs }];
@@ -135,11 +145,16 @@ impl Builder {
             .zip(base.maxs.iter())
             .fold(0.0f32, |p, (&mn, &mx)| p.max(mn.abs()).max(mx.abs()));
 
-        WaveformCache { levels, peak }
+        WaveformCache { levels, peak, id: next_cache_id() }
     }
 }
 
 impl WaveformCache {
+    /// This build's identity; see the field.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     pub fn build(samples: &[f32]) -> Self {
         let mut builder = Builder::new();
         builder.push(samples);

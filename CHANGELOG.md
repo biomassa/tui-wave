@@ -44,6 +44,11 @@
   loop picks up the new range.
 - **A selection can be dragged to the edge of the waveform.** Moving the mouse past the edge used
   to freeze the selection at the last position inside it.
+- **Graphics mode uses much less CPU during playback.** Every frame used to redraw each channel's
+  waveform picture from scratch, about 48ms for six channels, which is three times the time a
+  frame has. The picture is now kept and redrawn only when something in it changes; during
+  playback only the playhead is drawn again (under 1ms). The picture is still re-sent to the
+  terminal every frame, which on a Sixel terminal still costs about 70ms.
 - **The executable is about 8MB smaller** (28MB to 20MB on Linux x86-64). Unused audio decoders
   are no longer linked, the built-in process catalogs are stored compressed, and the release
   build uses link-time optimization. Release builds take longer.

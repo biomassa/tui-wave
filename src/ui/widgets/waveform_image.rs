@@ -116,6 +116,11 @@ fn dot_matrix_pixel_color(row: u32, mid_y: f64, half_height: f64, gradient: bool
 /// because `viewport.samples_per_column` is defined in *character columns*, not pixels, so
 /// converting it to samples-per-pixel-column requires knowing how many pixel columns one
 /// character column actually spans.
+///
+/// The same as [`rasterize_waveform_base`] followed by [`finish_waveform`], which is how the app
+/// calls it; this one-call form is the reference the tests hold both halves to.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub fn rasterize_waveform(
     samples: SampleSource<'_>,
     viewport: &Viewport,
@@ -131,6 +136,47 @@ pub fn rasterize_waveform(
     pixel_height: u32,
     gradient: bool,
 ) -> RgbaImage {
+    let base = rasterize_waveform_base(
+        samples, viewport, cache, selection, cursor, markers, head_tail_marks, cell_width,
+        pixel_width, pixel_height, gradient,
+    );
+    let mut img = base.image;
+    if base.has_content {
+        finish_waveform(&mut img, viewport, cursor, playhead, markers, head_tail_marks, show_marker_labels, cell_width);
+    }
+    img
+}
+
+/// A pane image without its playhead and marker labels, which [`finish_waveform`] draws on
+/// top. Everything else in the image depends on the view, the selection and the audio, which
+/// stay the same while only the playhead moves. So the app keeps this and redraws only the
+/// finish during playback, instead of rasterizing every pane each frame (measured: 48ms for six
+/// panes, against a 16ms frame).
+///
+/// The labels belong to the finish because they are drawn over the playhead line.
+pub struct WaveformBase {
+    pub image: RgbaImage,
+    /// False for an empty channel or a zero-width pane, which get only the zero line and no
+    /// finish, as they always did.
+    pub has_content: bool,
+}
+
+/// The cacheable part of the pane image: background, selection, zero line, trace, marker
+/// lines, head/tail lines and the cursor.
+#[allow(clippy::too_many_arguments)]
+pub fn rasterize_waveform_base(
+    samples: SampleSource<'_>,
+    viewport: &Viewport,
+    cache: Option<&WaveformCache>,
+    selection: Option<(usize, usize)>,
+    cursor: usize,
+    markers: &[(usize, &str)],
+    head_tail_marks: &[usize],
+    cell_width: u16,
+    pixel_width: u32,
+    pixel_height: u32,
+    gradient: bool,
+) -> WaveformBase {
     let pixel_width = pixel_width.max(1);
     let pixel_height = pixel_height.max(1);
     let mut img = RgbaImage::new(pixel_width, pixel_height);
@@ -143,7 +189,7 @@ pub fn rasterize_waveform(
         // A silent/empty channel still gets the zero axis — the reference matters most
         // exactly where there's no trace to infer it from (mirrors the text renderer).
         draw_zero_line(&mut img);
-        return img;
+        return WaveformBase { image: img, has_content: false };
     }
 
     let samples_per_pixel_column = viewport.span(cell_width) as f64 / pixel_width as f64;
@@ -277,8 +323,25 @@ pub fn rasterize_waveform(
     }
 
     draw_marker_line(&mut img, viewport, cursor, samples_per_pixel_column, cursor_color);
+    WaveformBase { image: img, has_content: true }
+}
+
+/// Draws the playhead and, when `show_marker_labels`, the marker labels onto a copy of a
+/// [`WaveformBase`] image. Cheap: one line and a few glyphs.
+#[allow(clippy::too_many_arguments)]
+pub fn finish_waveform(
+    img: &mut RgbaImage,
+    viewport: &Viewport,
+    cursor: usize,
+    playhead: Option<usize>,
+    markers: &[(usize, &str)],
+    head_tail_marks: &[usize],
+    show_marker_labels: bool,
+    cell_width: u16,
+) {
+    let samples_per_pixel_column = viewport.span(cell_width) as f64 / img.width().max(1) as f64;
     if let Some(ph) = playhead {
-        draw_marker_line(&mut img, viewport, ph, samples_per_pixel_column, color_to_rgba(theme::PLAYHEAD));
+        draw_marker_line(img, viewport, ph, samples_per_pixel_column, color_to_rgba(theme::PLAYHEAD));
     }
 
     // Labels are rasterized directly into the bitmap (only by the topmost channel, mirroring
@@ -286,11 +349,9 @@ pub fn rasterize_waveform(
     // marker lines moved in here: a plain character cell drawn over a kitty image cell fights
     // the image for control of that row's escape sequence and corrupts the terminal display.
     if show_marker_labels {
-        draw_marker_labels(&mut img, viewport, markers, cursor, samples_per_pixel_column);
-        draw_head_tail_labels(&mut img, viewport, head_tail_marks, samples_per_pixel_column);
+        draw_marker_labels(img, viewport, markers, cursor, samples_per_pixel_column);
+        draw_head_tail_labels(img, viewport, head_tail_marks, samples_per_pixel_column);
     }
-
-    img
 }
 
 /// Draws the amplitude-zero axis, centred *exactly* on `mid_y` — the same centreline the
