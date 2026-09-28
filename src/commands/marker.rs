@@ -128,29 +128,33 @@ pub fn rename_marker_command(position: usize, new_label: String) -> Box<dyn Comm
 pub struct MoveMarkerCommand {
     from: usize,
     to: usize,
+    /// The moved marker's label. A drag can drop a marker onto another one's position, and
+    /// position alone then matches both: undo moved whichever came first, which swapped the two
+    /// markers' labels. Position and label together pick the one that was dragged.
+    label: String,
 }
 
 impl MoveMarkerCommand {
-    pub fn new(from: usize, to: usize) -> Self {
-        Self { from, to }
+    pub fn new(from: usize, to: usize, label: String) -> Self {
+        Self { from, to, label }
+    }
+
+    fn shift(&self, doc: &mut Document, from: usize, to: usize) {
+        if let Some(m) = doc.markers.iter_mut().find(|m| m.position == from && m.label == self.label) {
+            m.position = to;
+        }
+        doc.markers.sort_by_key(|m| m.position);
+        doc.dirty = true;
     }
 }
 
 impl Command for MoveMarkerCommand {
     fn execute(&mut self, doc: &mut Document) {
-        if let Some(m) = doc.markers.iter_mut().find(|m| m.position == self.from) {
-            m.position = self.to;
-        }
-        doc.markers.sort_by_key(|m| m.position);
-        doc.dirty = true;
+        self.shift(doc, self.from, self.to);
     }
 
     fn undo(&mut self, doc: &mut Document) {
-        if let Some(m) = doc.markers.iter_mut().find(|m| m.position == self.to) {
-            m.position = self.from;
-        }
-        doc.markers.sort_by_key(|m| m.position);
-        doc.dirty = true;
+        self.shift(doc, self.to, self.from);
     }
 
     fn label(&self) -> &str {
@@ -158,8 +162,8 @@ impl Command for MoveMarkerCommand {
     }
 }
 
-pub fn move_marker_command(from: usize, to: usize) -> Box<dyn Command> {
-    Box::new(MoveMarkerCommand::new(from, to))
+pub fn move_marker_command(from: usize, to: usize, label: String) -> Box<dyn Command> {
+    Box::new(MoveMarkerCommand::new(from, to, label))
 }
 
 /// Inserts a whole batch of markers (one per detected transient — see
@@ -268,7 +272,7 @@ mod tests {
             Marker { position: 50, label: "Dragged".to_string() },
             Marker { position: 90, label: "Other".to_string() },
         ]);
-        let mut cmd = MoveMarkerCommand::new(50, 120);
+        let mut cmd = MoveMarkerCommand::new(50, 120, "Dragged".to_string());
         cmd.execute(&mut doc);
         assert_eq!(
             doc.markers,
@@ -279,6 +283,31 @@ mod tests {
             doc.markers,
             vec![Marker { position: 50, label: "Dragged".to_string() }, Marker { position: 90, label: "Other".to_string() }]
         );
+    }
+
+    /// A drag that drops a marker exactly onto another one leaves two markers at the same
+    /// position. Undo and redo must move the dragged one, whichever of the two sorts first.
+    /// Both directions, because the sort order of the pair depends on where the drag started.
+    #[test]
+    fn a_marker_dropped_onto_another_undoes_and_redoes_the_right_one() {
+        for (dragged_from, other_at) in [(100, 50), (10, 50)] {
+            let mut doc = doc_with_markers(vec![
+                Marker { position: other_at, label: "Other".to_string() },
+                Marker { position: dragged_from, label: "Dragged".to_string() },
+            ]);
+            doc.markers.sort_by_key(|m| m.position);
+            // The drag has already moved it when the command is built, as in the mouse handler.
+            doc.markers.iter_mut().find(|m| m.label == "Dragged").unwrap().position = other_at;
+            doc.markers.sort_by_key(|m| m.position);
+            let mut history = crate::model::history::History::new();
+            history.apply(move_marker_command(dragged_from, other_at, "Dragged".to_string()), &mut doc);
+
+            let at = |doc: &Document, label: &str| doc.markers.iter().find(|m| m.label == label).unwrap().position;
+            history.undo(&mut doc);
+            assert_eq!((at(&doc, "Dragged"), at(&doc, "Other")), (dragged_from, other_at), "undo from {dragged_from}");
+            history.redo(&mut doc);
+            assert_eq!((at(&doc, "Dragged"), at(&doc, "Other")), (other_at, other_at), "redo from {dragged_from}");
+        }
     }
 
     #[test]

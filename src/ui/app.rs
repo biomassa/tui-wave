@@ -21352,11 +21352,11 @@ impl App {
                         // indices, then collapse the whole drag gesture into one undoable
                         // `MoveMarkerCommand` — skipped entirely if nothing actually moved
                         // (e.g. a plain click with no drag in between).
-                        let end_pos = doc.markers.get(mi).map(|m| m.position);
+                        let dragged = doc.markers.get(mi).map(|m| (m.position, m.label.clone()));
                         doc.markers.sort_by_key(|m| m.position);
-                        if let (Some(from), Some(to)) = (start_pos, end_pos) {
+                        if let (Some(from), Some((to, label))) = (start_pos, dragged) {
                             if from != to {
-                                self.histories[idx].apply(move_marker_command(from, to), doc);
+                                self.histories[idx].apply(move_marker_command(from, to, label), doc);
                             }
                         }
                     }

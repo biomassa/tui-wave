@@ -30,6 +30,9 @@
   most recent step is always kept.
 - **An edit that changes nothing no longer uses an undo step.** For example, Normalize on silence
   used to add a step that did nothing when undone, and it cleared Redo.
+- **Undoing a marker drag no longer swaps two markers' names.** If you dragged a marker onto
+  another marker and then pressed Undo, the other marker moved back instead, so the two names
+  changed places.
 - **The executable is about 8MB smaller** (28MB to 20MB on Linux x86-64). Unused audio decoders
   are no longer linked, the built-in process catalogs are stored compressed, and the release
   build uses link-time optimization. Release builds take longer.
