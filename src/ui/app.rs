@@ -23682,48 +23682,6 @@ impl App {
             self.dialog_n_interactive = 0;
             self.dialog_row_rects.clear();
         }
-        // The confirm modal, drawn *last* so it sits on top of everything above it.
-        //
-        // It used to be drawn first, which was invisible only because no confirm could be
-        // raised over a dialog — `Confirm::RevertEnvelopeToConstant` is, and the dialog
-        // beneath it would have painted straight over the question being asked.
-        if let Some(confirm) = &self.confirm {
-            let text = match confirm {
-                Confirm::Quit => {
-                    let n = self.dirty_buffer_count();
-                    let noun = if n == 1 { "buffer" } else { "buffers" };
-                    format!(" {n} unsaved {noun} — (s)ave all & quit · (y) quit anyway · (Esc) cancel ")
-                }
-                Confirm::CloseBuffer(_) => {
-                    " Unsaved buffer — (s)ave & close · (y) close anyway · (Esc) cancel ".to_string()
-                }
-                Confirm::CloseCurve(_) => {
-                    " Unsaved curve — (s)ave & close · (y) close anyway · (Esc) cancel ".to_string()
-                }
-                Confirm::ResetConfig => {
-                    " Reset all keybindings to defaults? (existing config saved as .bak) — (y) reset · (Esc) cancel ".to_string()
-                }
-                Confirm::DeleteFile(path) => {
-                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                    format!(" Delete \"{name}\" from disk? — (y) delete · (Esc) cancel ")
-                }
-                Confirm::ReloadBuffer(_) => {
-                    " Unsaved changes will be lost — (y) reload from disk · (Esc) cancel ".to_string()
-                }
-                Confirm::RevertEnvelopeToConstant => {
-                    " Delete envelope and switch back to constant value? — (y) delete · (Esc) cancel ".to_string()
-                }
-                Confirm::RemoveChainSplit { steps, .. } => {
-                    let plural = if *steps == 1 { "step" } else { "steps" };
-                    format!(" Remove this split? {steps} {plural} in its branches go too — (y) remove · (Esc) cancel ")
-                }
-                Confirm::DiscardChain { steps } => {
-                    let plural = if *steps == 1 { "step" } else { "steps" };
-                    format!(" Close the chain editor? The chain's {steps} {plural} will be lost — (y) close · (n) keep editing ")
-                }
-            };
-            render_confirm(frame, area, &text);
-        }
 
         // Recorded from the same decision the renderer just made, for the click handler — see
         // `CdpSliderGeometry` and `cdp_table_draws_sliders`.
@@ -23891,8 +23849,11 @@ impl App {
                 }),
             _ => None,
         };
+        // No dialog image is drawn while a confirm is up: a graphics image covers whatever text
+        // is in its cells, including the question.
+        let images_allowed = self.confirm.is_none();
         if let Some((points, selected, time_max, min, max, (document, range))) = envelope_curve {
-            if self.graphics_mode {
+            if self.graphics_mode && images_allowed {
                 if let (Some(picker), Some(&grid)) = (&self.picker, self.dialog_row_rects.first()) {
                     let font = picker.font_size();
                     let pixel_width = grid.width as u32 * font.width.max(1) as u32;
@@ -23917,7 +23878,7 @@ impl App {
         // bytes — rather than anything stashed from a previous frame's render, specifically
         // to avoid the class of bug the envelope editor's `curve_picker` gate above fixes
         // (a stale `dialog_row_rects` entry surviving into a frame it no longer describes).
-        if self.graphics_mode {
+        if self.graphics_mode && images_allowed {
             if let Some(Dialog::FormantInfo { buffer_index }) = &self.dialog {
                 let buffer = self.formant_buffers.get(*buffer_index);
                 if let (Some(picker), Some(buffer)) = (&self.picker, buffer) {
@@ -23958,6 +23919,7 @@ impl App {
         // renderer is told — it sizes itself to the picture only under that same condition, and
         // the two must not compute different rects for the same frame.
         if self.graphics_mode
+            && images_allowed
             && self.picker.is_some()
             && matches!(self.dialog, Some(Dialog::PraatPicture { .. }))
         {
@@ -23996,6 +23958,7 @@ impl App {
         // misrepresents what the sonifiers will read — the analysis grid samples the source's
         // real columns, so a 64px-wide image should *look* like a small image.
         if self.graphics_mode
+            && images_allowed
             && self.picker.is_some()
             && matches!(self.dialog, Some(Dialog::CdpParams { photo_picker: Some(_), .. }))
         {
@@ -24009,6 +23972,51 @@ impl App {
                     protocol,
                 );
             }
+        }
+        // The confirm modal, drawn *last* so it sits on top of everything above it: the popups
+        // and, since the images above are skipped while it is up, the graphics too. It used to
+        // be drawn before them, and in graphics mode the envelope editor's image covered the
+        // "switch back to constant?" question completely.
+        //
+        // It used to be drawn first, which was invisible only because no confirm could be
+        // raised over a dialog — `Confirm::RevertEnvelopeToConstant` is, and the dialog
+        // beneath it would have painted straight over the question being asked.
+        if let Some(confirm) = &self.confirm {
+            let text = match confirm {
+                Confirm::Quit => {
+                    let n = self.dirty_buffer_count();
+                    let noun = if n == 1 { "buffer" } else { "buffers" };
+                    format!(" {n} unsaved {noun} — (s)ave all & quit · (y) quit anyway · (Esc) cancel ")
+                }
+                Confirm::CloseBuffer(_) => {
+                    " Unsaved buffer — (s)ave & close · (y) close anyway · (Esc) cancel ".to_string()
+                }
+                Confirm::CloseCurve(_) => {
+                    " Unsaved curve — (s)ave & close · (y) close anyway · (Esc) cancel ".to_string()
+                }
+                Confirm::ResetConfig => {
+                    " Reset all keybindings to defaults? (existing config saved as .bak) — (y) reset · (Esc) cancel ".to_string()
+                }
+                Confirm::DeleteFile(path) => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    format!(" Delete \"{name}\" from disk? — (y) delete · (Esc) cancel ")
+                }
+                Confirm::ReloadBuffer(_) => {
+                    " Unsaved changes will be lost — (y) reload from disk · (Esc) cancel ".to_string()
+                }
+                Confirm::RevertEnvelopeToConstant => {
+                    " Delete envelope and switch back to constant value? — (y) delete · (Esc) cancel ".to_string()
+                }
+                Confirm::RemoveChainSplit { steps, .. } => {
+                    let plural = if *steps == 1 { "step" } else { "steps" };
+                    format!(" Remove this split? {steps} {plural} in its branches go too — (y) remove · (Esc) cancel ")
+                }
+                Confirm::DiscardChain { steps } => {
+                    let plural = if *steps == 1 { "step" } else { "steps" };
+                    format!(" Close the chain editor? The chain's {steps} {plural} will be lost — (y) close · (n) keep editing ")
+                }
+            };
+            render_confirm(frame, area, &text);
         }
     }
 
@@ -49707,6 +49715,35 @@ mod tests {
         assert!(!app.should_quit, "quit after a failed Save As");
         assert!(app.save_as_queue_then.is_none());
         assert!(info_message(&app).contains("Could not save"));
+    }
+
+    /// The "switch back to constant?" question over the envelope editor is readable in text
+    /// and graphics mode alike. In graphics mode the editor's image used to be drawn after the
+    /// question and covered it completely, so the next key answered a question nobody could see.
+    #[test]
+    fn the_envelope_revert_question_is_visible_in_graphics_mode() {
+        for graphics in [false, true] {
+            let mut app = new_app(Some(doc(0.1, 44100)), None);
+            let (index, param) = app.cdp_catalog.processes.iter().enumerate().find_map(|(i, d)| {
+                d.params.iter().position(|p| p.automatable && matches!(p.kind, crate::model::cdp::ParamKind::Number { .. })).map(|p| (i, p))
+            }).expect("a process with an automatable number");
+            app.open_cdp_params(index);
+            if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() { *focus = param + 1; }
+            assert!(app.open_cdp_envelope_editor());
+            if graphics {
+                let mut picker = ratatui_image::picker::Picker::halfblocks();
+                picker.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
+                app.set_picker(Some(picker));
+                app.graphics_mode = true;
+            }
+            render_dialog_rows(&mut app, 120, 40);
+            app.confirm = Some(Confirm::RevertEnvelopeToConstant);
+            let rows = render_dialog_rows(&mut app, 120, 40);
+            assert!(
+                rows.iter().any(|r| r.contains("switch back to constant")),
+                "the question is hidden (graphics mode: {graphics})"
+            );
+        }
     }
 
     /// A graphics-mode app on a stereo ramp, drawn once at 120x40.

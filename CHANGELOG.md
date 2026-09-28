@@ -61,6 +61,9 @@
   saved in place, so it was skipped, and the app quit. It now gets a Save As prompt first, like a
   buffer that was never saved. "Save & close" on such a buffer also waits for the Save As instead
   of closing at once.
+- **The "switch back to constant?" question in the envelope editor is visible in graphics mode.**
+  The editor's picture was drawn on top of it, so pressing `c` asked a question you could not
+  see, and the next key answered it.
 - **The executable is about 8MB smaller** (28MB to 20MB on Linux x86-64). Unused audio decoders
   are no longer linked, the built-in process catalogs are stored compressed, and the release
   build uses link-time optimization. Release builds take longer.
