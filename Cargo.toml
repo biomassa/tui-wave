@@ -33,13 +33,30 @@ image = { version = "0.25.10", default-features = false }
 mp3lame-encoder = "0.2"
 ratatui = "0.30.2"
 ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
-rodio = "0.22.2"
+# Playback only. The defaults add MP3/AAC/Vorbis/MP4 decoders, recording and a noise generator,
+# none of which this app uses; import goes through the symphonia dependency below.
+rodio = { version = "0.22.2", default-features = false, features = ["playback"] }
 serde = { version = "1.0.228", features = ["derive"] }
-symphonia = { version = "0.5.5", default-features = false, features = ["flac", "aiff"] }
+# `pcm` is the codec inside an AIFF. It used to come in through rodio's default features, so
+# without it here AIFF import fails at run time ("unsupported codec").
+symphonia = { version = "0.5.5", default-features = false, features = ["flac", "aiff", "pcm"] }
 toml = "1.1.2"
+# Inflates the built-in catalogs that build.rs compresses. Already in the tree through `png`.
+miniz_oxide = "0.8"
 # The Airwindows effects. A path dependency rather than code in this crate, so a version bump
 # here leaves its compiled archive alone -- see that crate's manifest.
 airwindows-sys = { path = "crates/airwindows-sys" }
+
+[build-dependencies]
+miniz_oxide = "0.8"
+
+# Whole-program optimization for the shipped binary: smaller and a little faster, at the cost of
+# a longer release build. Symbols are kept, so a panic backtrace still names its functions.
+# `panic` stays `unwind`: with `abort`, a panic in any thread, including a CDP/Praat/Airwindows
+# worker, would end the whole app at once, with unsaved buffers.
+[profile.release]
+lto = "fat"
+codegen-units = 1
 
 # ---- Packaging ---------------------------------------------------------------------------
 #

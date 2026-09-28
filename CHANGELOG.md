@@ -13,6 +13,9 @@
   read-ahead ran out, playback waited on the audio thread for up to 5 seconds and then stopped.
   Now it plays silence until the audio arrives, and it stops only if nothing arrives for 5
   seconds.
+- **The executable is about 8MB smaller** (28MB to 20MB on Linux x86-64). Unused audio decoders
+  are no longer linked, the built-in process catalogs are stored compressed, and the release
+  build uses link-time optimization. Release builds take longer.
 
 ## 2026-09-27 (2.15.0)
 
