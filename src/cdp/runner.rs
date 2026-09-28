@@ -499,6 +499,15 @@ fn resolve_matrix_gain_calibration(job: &Job, temp_dir: &Path) -> Result<(), Cdp
     Ok(())
 }
 
+/// Reads a child's pipe to the end as text. Lossy, because `read_to_string` returns an error
+/// and keeps nothing when the output has one byte that is not UTF-8, and then the error message
+/// of a failed run is lost.
+pub(crate) fn drain_lossy(mut pipe: impl std::io::Read) -> String {
+    let mut bytes = Vec::new();
+    let _ = pipe.read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 fn run_step(
     cdp_dir: &Path,
     bin: &str,
@@ -519,21 +528,8 @@ fn run_step(
 
     // Drained on helper threads so a chatty program can't deadlock us by filling a pipe
     // buffer while we're busy polling `try_wait` instead of reading.
-    use std::io::Read;
-    let stdout_handle = child.stdout.take().map(|mut s| {
-        thread::spawn(move || {
-            let mut buf = String::new();
-            let _ = s.read_to_string(&mut buf);
-            buf
-        })
-    });
-    let stderr_handle = child.stderr.take().map(|mut s| {
-        thread::spawn(move || {
-            let mut buf = String::new();
-            let _ = s.read_to_string(&mut buf);
-            buf
-        })
-    });
+    let stdout_handle = child.stdout.take().map(|s| thread::spawn(move || drain_lossy(s)));
+    let stderr_handle = child.stderr.take().map(|s| thread::spawn(move || drain_lossy(s)));
 
     let status = loop {
         if cancel.load(Ordering::Relaxed) {
@@ -698,6 +694,14 @@ mod tests {
     use super::*;
     use crate::model::cdp::pipeline::{Invocation, OutputWavSpec, TempWavSpec};
     use std::time::Instant;
+
+    /// One byte that is not UTF-8 (a Latin-1 "é" here) must not lose the rest of the message.
+    #[test]
+    fn drain_lossy_keeps_output_with_a_non_utf8_byte() {
+        let out = drain_lossy(&b"ERROR: caf\xe9 not found\n"[..]);
+        assert!(out.starts_with("ERROR: caf"), "{out:?}");
+        assert!(out.ends_with(" not found\n"), "{out:?}");
+    }
 
     /// The startup sweep removes this PID's leftover job directories and nothing else.
     ///

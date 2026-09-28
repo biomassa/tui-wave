@@ -7,6 +7,8 @@
   header, and it replaced the original. This needed a buffer in memory that had grown past 4GB,
   for example through a time-stretch or a raised `max_resident_mb`. Such a file is now written as
   RF64. Files under 4GB are written exactly as before.
+- **A failed CDP or Praat run now always shows the program's output.** If the output had one
+  byte that was not valid UTF-8, all of it was dropped and the error message was empty.
 
 ## 2026-09-27 (2.15.0)
 

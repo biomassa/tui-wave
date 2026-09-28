@@ -503,21 +503,8 @@ fn run_praat(
     // Drained on helper threads so a chatty script can't deadlock us by filling a pipe buffer
     // while we're polling `try_wait` instead of reading. Praat is chatty by default: most of
     // these scripts write a progress report to the Info window, which lands on stdout.
-    use std::io::Read;
-    let stdout_handle = child.stdout.take().map(|mut s| {
-        thread::spawn(move || {
-            let mut buf = String::new();
-            let _ = s.read_to_string(&mut buf);
-            buf
-        })
-    });
-    let stderr_handle = child.stderr.take().map(|mut s| {
-        thread::spawn(move || {
-            let mut buf = String::new();
-            let _ = s.read_to_string(&mut buf);
-            buf
-        })
-    });
+    let stdout_handle = child.stdout.take().map(|s| thread::spawn(move || crate::cdp::runner::drain_lossy(s)));
+    let stderr_handle = child.stderr.take().map(|s| thread::spawn(move || crate::cdp::runner::drain_lossy(s)));
 
     let started = Instant::now();
     let status = loop {
