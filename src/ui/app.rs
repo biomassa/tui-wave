@@ -664,7 +664,18 @@ fn cdp_error_lines(err: &crate::cdp::CdpError) -> Vec<String> {
             vec![format!("Failed to read '{path}': {message}")]
         }
         CdpError::Cancelled => vec!["Cancelled.".into()],
+        CdpError::Panicked { message } => internal_error_lines(message),
     }
+}
+
+/// The lines for a job that panicked, shared by the CDP and Praat error dialogs.
+fn internal_error_lines(message: &str) -> Vec<String> {
+    vec![
+        "Internal error: this is a bug in tui-wave, not in the process.".into(),
+        message.to_string(),
+        String::new(),
+        "Save your work before trying again.".into(),
+    ]
 }
 
 /// Where the app keeps Praat state it owns — today just the redirected preferences directory
@@ -712,6 +723,7 @@ fn praat_error_lines(err: &crate::praat::PraatError) -> Vec<String> {
              legitimately exceed this."
                 .into(),
         ],
+        PraatError::Panicked { message } => internal_error_lines(message),
     }
 }
 

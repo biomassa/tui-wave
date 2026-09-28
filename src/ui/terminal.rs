@@ -100,9 +100,17 @@ pub fn restore() -> color_eyre::Result<()> {
 
 /// Ensures the terminal is restored to a usable state even if the app panics,
 /// since raw mode + alt-screen left enabled would otherwise lock up the shell.
+///
+/// Only for a panic on the main thread, which is the one that ends the app. A panic on any
+/// other thread leaves the app running: a job worker catches it and reports it as a job error.
+/// Restoring the terminal then would leave the running app drawing into a cooked, non-alternate
+/// screen, and printing the message would write over the UI.
 pub fn install_panic_hook() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
+        if std::thread::current().name() != Some("main") {
+            return;
+        }
         let _ = restore();
         original_hook(panic_info);
     }));

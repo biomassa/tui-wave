@@ -105,6 +105,8 @@ pub enum CdpError {
     NoOutput { step: String },
     OutputRead { path: String, message: String },
     Cancelled,
+    /// The job panicked. Reported as an error so the Running dialog closes; see `run_catching`.
+    Panicked { message: String },
 }
 
 pub enum CdpEvent {
@@ -133,7 +135,10 @@ impl CdpRunner {
                 cancel_for_thread.store(false, Ordering::Relaxed);
                 let id = job.id;
                 let purpose = job.purpose;
-                let result = run_job(&job, &event_tx, &cancel_for_thread);
+                let result = run_catching(
+                    || run_job(&job, &event_tx, &cancel_for_thread),
+                    |message| CdpError::Panicked { message },
+                );
                 let _ = event_tx.send(CdpEvent::Finished { job: id, purpose, result });
             }
         });
@@ -499,6 +504,26 @@ fn resolve_matrix_gain_calibration(job: &Job, temp_dir: &Path) -> Result<(), Cdp
     Ok(())
 }
 
+/// Runs one job and turns a panic into an error, so the worker still sends `Finished`.
+///
+/// Without this a panicking job ended the worker thread without an event. The Running dialog
+/// waits for that event and is hard-modal, so it stayed up for good and Save was unreachable.
+/// Shared by all three runners. The temp directories are removed by their guards as the panic
+/// unwinds.
+pub(crate) fn run_catching<T, E>(
+    run: impl FnOnce() -> Result<T, E>,
+    panicked: impl FnOnce(String) -> E,
+) -> Result<T, E> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|payload| {
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_string());
+        Err(panicked(message))
+    })
+}
+
 /// Reads a child's pipe to the end as text. Lossy, because `read_to_string` returns an error
 /// and keeps nothing when the output has one byte that is not UTF-8, and then the error message
 /// of a failed run is lost.
@@ -694,6 +719,19 @@ mod tests {
     use super::*;
     use crate::model::cdp::pipeline::{Invocation, OutputWavSpec, TempWavSpec};
     use std::time::Instant;
+
+    /// A panicking job becomes an error carrying the panic message, for both payload types
+    /// `panic!` produces, and a job that returns normally is passed through.
+    #[test]
+    fn run_catching_turns_a_panic_into_an_error() {
+        let literal: Result<(), String> = run_catching(|| panic!("plain literal"), |m| m);
+        assert_eq!(literal, Err("plain literal".to_string()));
+        let n = 7;
+        let formatted: Result<(), String> = run_catching(|| panic!("formatted {n}"), |m| m);
+        assert_eq!(formatted, Err("formatted 7".to_string()));
+        let fine: Result<u8, String> = run_catching(|| Ok(3), |m| m);
+        assert_eq!(fine, Ok(3));
+    }
 
     /// One byte that is not UTF-8 (a Latin-1 "é" here) must not lose the rest of the message.
     #[test]

@@ -132,6 +132,8 @@ pub enum PraatError {
     OutputRead { path: String, message: String },
     Cancelled,
     TimedOut { seconds: u64 },
+    /// The job panicked; see `crate::cdp::runner::run_catching`.
+    Panicked { message: String },
 }
 
 /// Turns a spawn failure into something actionable rather than an OS-phrased error. `praat`
@@ -168,6 +170,9 @@ impl std::fmt::Display for PraatError {
             PraatError::TimedOut { seconds } => {
                 write!(f, "the script did not finish within {seconds}s and was stopped")
             }
+            PraatError::Panicked { message } => {
+                write!(f, "internal error (a bug in tui-wave): {message}")
+            }
         }
     }
 }
@@ -200,7 +205,10 @@ impl PraatRunner {
                     job: id,
                     label: job.planned.label.clone(),
                 });
-                let result = run_job(&job, &cancel_for_thread);
+                let result = crate::cdp::runner::run_catching(
+                    || run_job(&job, &cancel_for_thread),
+                    |message| PraatError::Panicked { message },
+                );
                 let _ = event_tx.send(PraatEvent::Finished { job: id, purpose, result });
             }
         });

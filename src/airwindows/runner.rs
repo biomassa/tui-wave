@@ -105,6 +105,8 @@ pub enum Error {
     /// The selection had no channels, or no samples.
     EmptyInput,
     Cancelled,
+    /// The job panicked; see `crate::cdp::runner::run_catching`.
+    Panicked(String),
 }
 
 impl std::fmt::Display for Error {
@@ -113,6 +115,7 @@ impl std::fmt::Display for Error {
             Error::Instantiate(name) => write!(f, "could not create the {name} processor"),
             Error::EmptyInput => write!(f, "nothing selected to process"),
             Error::Cancelled => write!(f, "cancelled"),
+            Error::Panicked(message) => write!(f, "internal error (a bug in tui-wave): {message}"),
         }
     }
 }
@@ -142,7 +145,10 @@ impl Runner {
                 let id = job.id;
                 let purpose = job.purpose;
                 let _ = event_tx.send(Event::Started { job: id, label: job.label.clone() });
-                let result = run_job(&job, &cancel_for_thread);
+                let result = crate::cdp::runner::run_catching(
+                    || run_job(&job, &cancel_for_thread),
+                    Error::Panicked,
+                );
                 let _ = event_tx.send(Event::Finished { job: id, purpose, result });
             }
         });
