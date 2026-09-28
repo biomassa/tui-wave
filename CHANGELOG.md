@@ -18,6 +18,11 @@
   up and nothing, including Save, could be reached. The crash also switched the terminal out of
   the app's screen mode. Now the job ends with an "Internal error" message and the app keeps
   working.
+- **A large buffer uses half the memory while nothing is playing.** The audio engine kept its own
+  full copy of the buffer at all times and made a new one after every edit. Now it copies the
+  audio when you press Play and frees the copy when you pause, or at the next edit after
+  playback reaches the end. On a very large buffer, pressing Play can take a moment longer while
+  the copy is made.
 - **The executable is about 8MB smaller** (28MB to 20MB on Linux x86-64). Unused audio decoders
   are no longer linked, the built-in process catalogs are stored compressed, and the release
   build uses link-time optimization. Release builds take longer.

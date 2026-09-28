@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -16,7 +17,9 @@ use crate::model::stream::StreamedSamples;
 /// protocol, the position atomic, loop handling) is shared, which is what keeps a streamed
 /// buffer's transport behaving exactly like an ordinary one from the UI's side.
 enum PlaybackData {
-    /// A fully-loaded document. The engine owns a second copy of its samples.
+    /// A fully-loaded document. The engine owns a second copy of its samples. For a lazy engine
+    /// (`try_new_lazy`) the copy exists only from Play until playback stops, and is empty
+    /// otherwise.
     Resident(Arc<Vec<Vec<f32>>>),
     /// A disk-backed document. The engine owns only a handle; each play spawns a reader thread
     /// that streams blocks in (see `stream_source`), so playback costs a bounded ring buffer
@@ -38,6 +41,8 @@ enum AudioCmd {
         loop_end: Option<usize>,
     },
     Reload(Vec<Vec<f32>>),
+    /// Drop the resident copy, unless a source is still queued. Only a lazy engine sends it.
+    Release,
     SetFold(Fold),
 }
 
@@ -48,6 +53,14 @@ pub struct AudioEngine {
     cmd_tx: Sender<AudioCmd>,
     pub position: Arc<AtomicUsize>,
     pub playing: Arc<AtomicBool>,
+    /// Holds a copy of the audio only while it plays: see [`Self::try_new_lazy`].
+    lazy: bool,
+    /// UI-side record of whether the engine thread has (or has been sent) the current audio.
+    loaded: Cell<bool>,
+    /// UI-side record of a Play not yet followed by a Pause. Kept here, not read from the
+    /// `playing` atomic, because that atomic changes only when the audio thread gets to the
+    /// command, and an edit can arrive in between.
+    active: Cell<bool>,
 }
 
 /// Builds the right source for `data` and hands it to `player`. Returns the stop flag for the
@@ -104,7 +117,17 @@ impl AudioEngine {
     /// should treat that as "playback disabled," not a fatal error, since editing/viewing
     /// a waveform shouldn't require a working audio device.
     pub fn try_new(channels: Vec<Vec<f32>>, sample_rate: u32) -> Option<Self> {
-        Self::spawn(PlaybackData::Resident(Arc::new(channels)), sample_rate)
+        Self::spawn(PlaybackData::Resident(Arc::new(channels)), sample_rate, false)
+    }
+
+    /// A resident engine that holds no copy of the audio until it plays.
+    ///
+    /// `try_new` keeps a second copy of the document for its whole life and gets a new one on
+    /// every edit, so a 4GB buffer cost 8GB even when nothing was playing. This engine gets the
+    /// audio in [`Self::load_if_needed`] just before Play, and drops it when playback is paused
+    /// or has ended ([`Self::audio_changed`]).
+    pub fn try_new_lazy(sample_rate: u32) -> Option<Self> {
+        Self::spawn(PlaybackData::Resident(Arc::new(Vec::new())), sample_rate, true)
     }
 
     /// The streamed counterpart to [`Self::try_new`]: plays a disk-backed document without ever
@@ -116,10 +139,10 @@ impl AudioEngine {
     /// `try_new` above takes an owned `Vec<Vec<f32>>`. Streaming the audio in retires only the
     /// second of those.
     pub fn try_new_streamed(stream: Arc<StreamedSamples>, sample_rate: u32) -> Option<Self> {
-        Self::spawn(PlaybackData::Streamed(stream), sample_rate)
+        Self::spawn(PlaybackData::Streamed(stream), sample_rate, false)
     }
 
-    fn spawn(data: PlaybackData, sample_rate: u32) -> Option<Self> {
+    fn spawn(data: PlaybackData, sample_rate: u32, lazy: bool) -> Option<Self> {
         // Probe device availability on the calling thread so `try_new` can report failure
         // synchronously instead of the caller having to poll the spawned thread. Silence
         // log-on-drop first — otherwise dropping this throwaway probe immediately prints a
@@ -171,6 +194,16 @@ impl AudioEngine {
                             data = PlaybackData::Resident(Arc::new(channels));
                         }
                     }
+                    // Ignored while a source is queued: a Play sent just before an edit may
+                    // not have been handled when the edit asked for the release, and a Seek
+                    // during that playback still needs the data.
+                    AudioCmd::Release => {
+                        if player.empty() {
+                            if let PlaybackData::Resident(_) = data {
+                                data = PlaybackData::Resident(Arc::new(Vec::new()));
+                            }
+                        }
+                    }
                     AudioCmd::Play {
                         from_frame,
                         loop_start,
@@ -196,7 +229,17 @@ impl AudioEngine {
                         fold = new_fold;
                     }
                     AudioCmd::Pause => {
-                        player.pause();
+                        // A lazy engine clears the source too, so its copy of the audio is
+                        // freed. Nothing resumes a paused source: Play always builds a new one.
+                        if lazy {
+                            stop_reader(&mut reader_stop);
+                            player.clear();
+                            if let PlaybackData::Resident(_) = data {
+                                data = PlaybackData::Resident(Arc::new(Vec::new()));
+                            }
+                        } else {
+                            player.pause();
+                        }
                         playing_for_thread.store(false, Ordering::Relaxed);
                     }
                     AudioCmd::Stop => {
@@ -238,16 +281,44 @@ impl AudioEngine {
             cmd_tx,
             position,
             playing,
+            lazy,
+            loaded: Cell::new(!lazy),
+            active: Cell::new(false),
         })
     }
 
+    /// Sends the audio to a lazy engine that does not have it. Call before any Play. Does
+    /// nothing for other engines, which were given their audio at construction.
+    pub fn load_if_needed(&self, channels: &[Vec<f32>]) {
+        if self.lazy && !self.loaded.get() {
+            let _ = self.cmd_tx.send(AudioCmd::Reload(channels.to_vec()));
+            self.loaded.set(true);
+        }
+    }
+
+    /// The document's audio changed. While playing, the engine gets the new audio, so a Seek
+    /// plays it. Otherwise a lazy engine drops its copy and gets the audio again at the next
+    /// Play; a non-lazy engine gets the new audio at once, as it always did.
+    pub fn audio_changed(&self, channels: &[Vec<f32>]) {
+        if !self.lazy || (self.active.get() && self.is_playing()) {
+            let _ = self.cmd_tx.send(AudioCmd::Reload(channels.to_vec()));
+        } else {
+            let _ = self.cmd_tx.send(AudioCmd::Release);
+            self.loaded.set(false);
+        }
+    }
+
     pub fn play(&self, from_frame: usize) {
+        debug_assert!(self.loaded.get(), "a lazy engine needs load_if_needed before Play");
+        self.active.set(true);
         let _ = self
             .cmd_tx
             .send(AudioCmd::Play { from_frame, loop_start: None, loop_end: None });
     }
 
     pub fn play_looped(&self, from_frame: usize, loop_start: usize, loop_end: usize) {
+        debug_assert!(self.loaded.get(), "a lazy engine needs load_if_needed before Play");
+        self.active.set(true);
         let _ = self.cmd_tx.send(AudioCmd::Play {
             from_frame,
             loop_start: Some(loop_start),
@@ -260,6 +331,8 @@ impl AudioEngine {
     /// already treats as "stop here," it just wasn't exposed as its own entry point before.
     /// Used to keep playback from continuing past a selection when loop playback is off.
     pub fn play_bounded(&self, from_frame: usize, end_frame: usize) {
+        debug_assert!(self.loaded.get(), "a lazy engine needs load_if_needed before Play");
+        self.active.set(true);
         let _ = self.cmd_tx.send(AudioCmd::Play {
             from_frame,
             loop_start: None,
@@ -268,6 +341,10 @@ impl AudioEngine {
     }
 
     pub fn pause(&self) {
+        self.active.set(false);
+        if self.lazy {
+            self.loaded.set(false);
+        }
         let _ = self.cmd_tx.send(AudioCmd::Pause);
     }
 
@@ -307,13 +384,6 @@ impl AudioEngine {
         let _ = self.cmd_tx.send(AudioCmd::SetFold(fold));
     }
 
-    /// Refreshes the audio thread's sample data after a document edit (cut/paste/etc).
-    /// Only affects future `play`/`seek` calls — a source already playing keeps the data it
-    /// captured when it started.
-    pub fn reload(&self, channels: Vec<Vec<f32>>) {
-        let _ = self.cmd_tx.send(AudioCmd::Reload(channels));
-    }
-
     pub fn is_playing(&self) -> bool {
         self.playing.load(Ordering::Relaxed)
     }
@@ -322,5 +392,132 @@ impl AudioEngine {
 impl Drop for AudioEngine {
     fn drop(&mut self) {
         let _ = self.cmd_tx.send(AudioCmd::Stop);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Waits until `done` holds, failing after 3 seconds with `what`.
+    fn wait_for(what: &str, done: impl Fn() -> bool) {
+        let started = Instant::now();
+        while !done() {
+            assert!(started.elapsed() < Duration::from_secs(3), "timed out waiting: {what}");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn stereo_seconds(seconds: f32) -> Vec<Vec<f32>> {
+        vec![vec![0.0f32; (48000.0 * seconds) as usize]; 2]
+    }
+
+    /// An edit while stopped only drops the engine's copy. The next Play must then play the
+    /// *edited* audio, not the copy from before: here the edit shortens 5s to 50ms, so playback
+    /// ends at once instead of running for 5s.
+    #[test]
+    fn play_after_an_edit_while_stopped_plays_the_edited_audio() {
+        let Some(engine) = AudioEngine::try_new_lazy(48000) else { return };
+        let long = stereo_seconds(5.0);
+        engine.load_if_needed(&long);
+        engine.play(0);
+        wait_for("first playback", || engine.position.load(Ordering::Relaxed) > 4800);
+        engine.pause();
+
+        wait_for("the pause", || !engine.is_playing());
+        // Overwritten by the audio thread when it handles the next Play, so the waits below
+        // cannot be satisfied by the state left over from the first playback.
+        engine.position.store(usize::MAX, Ordering::Relaxed);
+
+        let short = stereo_seconds(0.05);
+        engine.audio_changed(&short);
+        engine.load_if_needed(&short);
+        engine.play(0);
+        wait_for("the Play to be handled", || engine.position.load(Ordering::Relaxed) != usize::MAX);
+        wait_for("the 50ms edit to finish", || !engine.is_playing());
+        assert!(engine.position.load(Ordering::Relaxed) <= 2400, "played past the edited end");
+    }
+
+    /// The race `Release` guards against: Play is sent, and an edit asks for a release before
+    /// the audio thread has handled the Play. The release must be ignored while a source is
+    /// queued, or a Seek during that playback would build its source from empty data and stop.
+    #[test]
+    fn a_release_while_a_source_is_queued_keeps_the_data_for_seek() {
+        let Some(engine) = AudioEngine::try_new_lazy(48000) else { return };
+        let audio = stereo_seconds(5.0);
+        engine.load_if_needed(&audio);
+        engine.play(0);
+        let _ = engine.cmd_tx.send(AudioCmd::Release);
+        wait_for("playing", || engine.is_playing());
+        engine.seek(48000);
+        wait_for("playback after the seek", || engine.position.load(Ordering::Relaxed) > 48000 + 4800);
+        assert!(engine.is_playing(), "the seek played the data, not an empty buffer");
+    }
+
+    /// Playback that ended by itself leaves the engine's copy in place, and the next edit drops
+    /// it rather than sending new audio to an engine that is not playing.
+    #[test]
+    fn an_edit_after_playback_ended_drops_the_copy() {
+        let Some(engine) = AudioEngine::try_new_lazy(48000) else { return };
+        let short = stereo_seconds(0.05);
+        engine.load_if_needed(&short);
+        engine.play(0);
+        wait_for("playing", || engine.is_playing() || engine.position.load(Ordering::Relaxed) > 0);
+        wait_for("the end", || !engine.is_playing());
+        engine.audio_changed(&short);
+        assert!(!engine.loaded.get(), "the next Play must send the audio again");
+    }
+
+    /// Preview and audition engines are built with their audio (`try_new`) and never given it
+    /// again. Pausing one must not drop it, or its next Play would be silent.
+    #[test]
+    fn a_non_lazy_engine_still_plays_after_a_pause() {
+        let Some(engine) = AudioEngine::try_new(stereo_seconds(5.0), 48000) else { return };
+        engine.play(0);
+        wait_for("first playback", || engine.position.load(Ordering::Relaxed) > 4800);
+        engine.pause();
+        engine.play(0);
+        wait_for("replay", || engine.is_playing() && engine.position.load(Ordering::Relaxed) > 4800);
+    }
+
+    /// Needs an output device, and passes without checking anything when there is none (CI).
+    ///
+    /// A lazy engine starts with no audio, gets it just before Play, and loses it at Pause. The
+    /// playhead moving is what shows the audio arrived: empty data ends playback at once.
+    #[test]
+    fn a_lazy_engine_plays_the_audio_it_is_given_at_play_time() {
+        let Some(engine) = AudioEngine::try_new_lazy(48000) else {
+            eprintln!("no audio device; skipped");
+            return;
+        };
+        assert!(!engine.loaded.get(), "a lazy engine starts without a copy");
+        let audio = vec![vec![0.0f32; 48000 * 5]; 2];
+
+        engine.audio_changed(&audio);
+        assert!(!engine.loaded.get(), "an edit while stopped does not send the audio");
+
+        engine.load_if_needed(&audio);
+        assert!(engine.loaded.get());
+        engine.play(0);
+        let started = Instant::now();
+        while engine.position.load(Ordering::Relaxed) < 4800 {
+            assert!(started.elapsed() < Duration::from_secs(3), "playback did not advance");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(engine.is_playing());
+
+        engine.audio_changed(&audio);
+        assert!(engine.loaded.get(), "an edit while playing sends the new audio");
+
+        engine.pause();
+        assert!(!engine.loaded.get(), "pausing drops the copy");
+        engine.load_if_needed(&audio);
+        engine.play(0);
+        let started = Instant::now();
+        while !engine.is_playing() || engine.position.load(Ordering::Relaxed) < 4800 {
+            assert!(started.elapsed() < Duration::from_secs(3), "replay did not advance");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }

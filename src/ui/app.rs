@@ -518,7 +518,7 @@ enum PreviewOwner {
 fn engine_for(document: &Document) -> Option<AudioEngine> {
     match &document.stream {
         Some(stream) => AudioEngine::try_new_streamed(stream.clone(), document.sample_rate),
-        None => AudioEngine::try_new(document.channels.clone(), document.sample_rate),
+        None => AudioEngine::try_new_lazy(document.sample_rate),
     }
 }
 
@@ -9431,7 +9431,7 @@ impl App {
         } else if self.documents[idx].is_streaming() {
             // Nothing to do.
         } else if let Some(audio) = &self.audio {
-            audio.reload(self.documents[idx].channels.clone());
+            audio.audio_changed(&self.documents[idx].channels);
         }
         self.rebuild_waveform_caches();
         if self.viewport.as_ref().is_some_and(|v| v.auto_vertical_zoom) {
@@ -22783,6 +22783,7 @@ impl App {
             let Some(document) = self.active_doc() else {
                 return;
             };
+            audio.load_if_needed(&document.channels);
             match self.playback_bound() {
                 PlaybackBound::Looped(ls, le) => audio.play_looped(document.cursor, ls, le),
                 PlaybackBound::Bounded(ls, le) => {
@@ -32087,6 +32088,98 @@ mod tests {
 
     fn new_app(document: Option<Document>, directory: Option<PathBuf>) -> App {
         App::new_with_config(document, directory, Config::default())
+    }
+
+    /// `app` showing the Running dialog for job 7 of an ordinary Apply, as it does while any
+    /// backend's job runs. The pending is what every tick hands the result to.
+    fn app_running_job_7() -> App {
+        let mut app = new_app(Some(doc(0.1, 1000)), None);
+        app.cdp_pending = Some(CdpPending {
+            doc_index: 0,
+            range: (0, 1000),
+            label: "test".into(),
+            catalog_index: 0,
+            restore: None,
+            fields: Vec::new(),
+            second_input: None,
+            variadic_input: None,
+            photo_input: None,
+            focus: 0,
+            presets: Vec::new(),
+            preset_selected: None,
+            custom_values: None,
+        });
+        app.dialog = Some(Dialog::CdpRunning {
+            job_id: 7,
+            title: "test".into(),
+            step_label: String::new(),
+            step_index: 0,
+            step_total: 1,
+            started: std::time::Instant::now(),
+            purpose: crate::cdp::JobPurpose::Apply,
+        });
+        app
+    }
+
+    /// What the dialog shows once the Running dialog has closed, as one string.
+    fn dialog_text_after_running(app: &App) -> String {
+        match &app.dialog {
+            Some(Dialog::CdpRunning { .. }) => panic!("the Running dialog is still up"),
+            Some(Dialog::CdpOutput { lines, .. }) => lines.join("\n"),
+            Some(Dialog::Info { message }) => message.clone(),
+            other => panic!("expected an error dialog, got {:?}", other.as_ref().map(std::mem::discriminant)),
+        }
+    }
+
+    /// A panicked job reaches the UI as an error, the Running dialog closes, and the message is
+    /// shown. Before `run_catching`, a panic sent nothing, so the hard-modal dialog stayed up and
+    /// Save could not be reached. One test per backend, because each has its own tick.
+    #[test]
+    fn a_panicked_cdp_job_closes_the_running_dialog_with_its_message() {
+        let mut app = app_running_job_7();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.cdp_runner.events = rx;
+        tx.send(crate::cdp::CdpEvent::Finished {
+            job: 7,
+            purpose: crate::cdp::JobPurpose::Apply,
+            result: Err(crate::cdp::CdpError::Panicked { message: "boom in cdp".into() }),
+        })
+        .unwrap();
+        app.tick_cdp();
+        let text = dialog_text_after_running(&app);
+        assert!(text.contains("Internal error") && text.contains("boom in cdp"), "{text}");
+    }
+
+    #[test]
+    fn a_panicked_praat_job_closes_the_running_dialog_with_its_message() {
+        let mut app = app_running_job_7();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.praat_runner.events = rx;
+        tx.send(crate::praat::PraatEvent::Finished {
+            job: 7,
+            purpose: crate::cdp::JobPurpose::Apply,
+            result: Err(crate::praat::PraatError::Panicked { message: "boom in praat".into() }),
+        })
+        .unwrap();
+        app.tick_praat();
+        let text = dialog_text_after_running(&app);
+        assert!(text.contains("Internal error") && text.contains("boom in praat"), "{text}");
+    }
+
+    #[test]
+    fn a_panicked_airwindows_job_closes_the_running_dialog_with_its_message() {
+        let mut app = app_running_job_7();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.airwindows_runner.events = rx;
+        tx.send(crate::airwindows::runner::Event::Finished {
+            job: 7,
+            purpose: crate::cdp::JobPurpose::Apply,
+            result: Err(crate::airwindows::runner::Error::Panicked("boom in air".into())),
+        })
+        .unwrap();
+        app.tick_airwindows();
+        let text = dialog_text_after_running(&app);
+        assert!(text.to_lowercase().contains("internal error") && text.contains("boom in air"), "{text}");
     }
 
     /// A process that changes the channel count in place must get a **new** audio engine, not a

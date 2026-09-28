@@ -546,6 +546,18 @@ mod tests {
         assert!(!playing.load(Ordering::Relaxed));
     }
 
+    /// A buffer whose channels were all removed has zero output channels. The underrun path
+    /// takes a remainder by the channel count, and must not divide by zero.
+    #[test]
+    fn a_zero_channel_source_does_not_divide_by_zero() {
+        let (mut source, tx, _) = hand_fed();
+        source.out_channels = 0;
+        assert_eq!(source.next(), Some(0.0));
+        assert_eq!(source.next(), Some(0.0));
+        drop(tx);
+        assert_eq!(source.next(), None);
+    }
+
     /// A reader that has produced nothing for `STALL_TIMEOUT` is stuck, and playback ends.
     #[test]
     fn a_stalled_reader_ends_playback() {

@@ -845,6 +845,62 @@ mod tests {
         }
     }
 
+    /// Which writer made `path`: `wavwrite` reserves a `JUNK` chunk at offset 12 for a possible
+    /// `ds64`, and hound puts `fmt ` there.
+    fn chunk_at_12(path: &Path) -> [u8; 4] {
+        let bytes = std::fs::read(path).unwrap();
+        bytes[12..16].try_into().unwrap()
+    }
+
+    /// A data chunk exactly at the limit stays on hound; one byte over goes to `wavwrite`. So
+    /// the switch happens only where hound's `u32` would overflow, never for ordinary files.
+    #[test]
+    fn the_hound_limit_is_exact() {
+        let doc = approx_doc(vec![0.1; 1000]);
+        let data_bytes = 1000 * 4; // mono f32
+        let tmp = std::env::temp_dir().join(format!("tui_wave_limit_{}.wav", std::process::id()));
+        save_wav_with_hound_limit(&doc, &tmp, BitDepth::Float32, false, data_bytes).unwrap();
+        assert_eq!(&chunk_at_12(&tmp), b"fmt ", "at the limit: hound");
+        save_wav_with_hound_limit(&doc, &tmp, BitDepth::Float32, false, data_bytes - 1).unwrap();
+        assert_eq!(&chunk_at_12(&tmp), b"JUNK", "one byte over: wavwrite");
+        std::fs::remove_file(&tmp).unwrap();
+    }
+
+    /// An ordinary save must be byte-for-byte what hound itself writes, at every depth and for
+    /// a multichannel file (which hound writes as WAVE_FORMAT_EXTENSIBLE). CDP reads these
+    /// headers, and its binaries are strict about fields such as the channel mask.
+    #[test]
+    fn an_ordinary_save_is_byte_identical_to_hound() {
+        let mut doc = approx_doc((0..500).map(|i| (i as f32 / 500.0) - 0.5).collect());
+        doc.channels.push(vec![0.3; 500]);
+        doc.channels.push(vec![-0.2; 500]);
+        let dir = std::env::temp_dir();
+        for depth in [BitDepth::Float32, BitDepth::Int24, BitDepth::Int16] {
+            let ours = dir.join(format!("tui_wave_ours_{}_{}.wav", depth.bits(), std::process::id()));
+            let theirs = dir.join(format!("tui_wave_hound_{}_{}.wav", depth.bits(), std::process::id()));
+            save_wav_with(&doc, &ours, depth, false).unwrap();
+            let spec = WavSpec {
+                channels: 3,
+                sample_rate: doc.sample_rate,
+                bits_per_sample: depth.bits(),
+                sample_format: depth.sample_format(),
+            };
+            let mut w = WavWriter::create(&theirs, spec).unwrap();
+            for i in 0..500 {
+                for c in &doc.channels {
+                    match depth {
+                        BitDepth::Float32 => w.write_sample(c[i]).unwrap(),
+                        _ => w.write_sample(quantize(c[i], depth.bits(), None)).unwrap(),
+                    }
+                }
+            }
+            w.finalize().unwrap();
+            assert!(std::fs::read(&ours).unwrap() == std::fs::read(&theirs).unwrap(), "{depth:?}");
+            std::fs::remove_file(&ours).unwrap();
+            std::fs::remove_file(&theirs).unwrap();
+        }
+    }
+
     #[test]
     fn fixture_without_markers_loads_empty() {
         let doc = load_wav("tests/fixtures/mono_sine.wav").unwrap();

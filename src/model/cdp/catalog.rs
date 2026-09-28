@@ -286,6 +286,23 @@ impl CdpCatalog {
 mod tests {
     use super::*;
 
+    /// What the binary embeds is the catalog source exactly: `build.rs` compressed it and
+    /// `inflate` recovers every byte. A mismatch would mean a stale or corrupt `OUT_DIR` file.
+    #[test]
+    fn every_embedded_catalog_inflates_to_its_source_file() {
+        for (packed, source) in [
+            (BUILTIN_CATALOG_TOML, include_str!("catalog.toml")),
+            (EXTRA_CATALOG_TOML, include_str!("catalog_extra.toml")),
+            (TITLE_OVERRIDES_TOML, include_str!("catalog_titles.toml")),
+            (PRAAT_CATALOG_TOML, include_str!("praat_catalog.toml")),
+            (AIRWINDOWS_CATALOG_TOML, include_str!("airwindows_catalog.toml")),
+        ] {
+            assert!(packed.len() < source.len(), "stored compressed");
+            assert!(inflate(packed) == source, "inflated text differs from the source file");
+        }
+        assert!(praat_catalog_source() == include_str!("praat_catalog.toml"));
+    }
+
     #[test]
     fn builtin_catalog_parses() {
         let (catalog, warnings) = CdpCatalog::load(None);
