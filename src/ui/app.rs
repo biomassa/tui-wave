@@ -3201,6 +3201,10 @@ enum Confirm {
     /// Removing a combiner and everything its branches hold. Carries the count so the question
     /// can say what it costs.
     RemoveChainSplit { path: ChainPath, steps: usize },
+    /// Closing the chain editor with a chain in it. The draft has no undo, and Ctrl+R brings
+    /// back only a chain that has run, so one Esc used to lose a chain that was built but never
+    /// saved or run. Carries the count so the question can say what it costs.
+    DiscardChain { steps: usize },
 }
 
 /// What to do once `App::save_as_queue` (buffers waiting for a filename before some other
@@ -6772,6 +6776,7 @@ impl App {
             Confirm::RemoveChainSplit { path, .. } => {
                 self.remove_chain_split_now(&path);
             }
+            Confirm::DiscardChain { .. } => self.close_chain_editor(),
         }
     }
 
@@ -9734,8 +9739,13 @@ impl App {
             KeyCode::Right if shift => self.move_chain_sideways(1),
             KeyCode::Left if shift => self.move_chain_sideways(-1),
             KeyCode::Esc => {
-                self.cdp_chain_editor = None;
-                self.dialog = None;
+                // Asks only when there is something to lose, like `remove_chain_split`.
+                let steps = self.cdp_chain_editor.as_ref().map_or(0, |s| chain_steps_deep(&s.chain.steps));
+                if steps == 0 {
+                    self.close_chain_editor();
+                } else {
+                    self.confirm = Some(Confirm::DiscardChain { steps });
+                }
             }
             KeyCode::Up if shift => self.reorder_chain_step(-1),
             KeyCode::Down if shift => self.reorder_chain_step(1),
@@ -9790,6 +9800,12 @@ impl App {
     /// Previewed) chain into the draft, same as picking it from the named-preset list would —
     /// except it's never itself in that list (see `chain_last`'s own doc comment for why).
     /// Shows an inline error instead of silently doing nothing if no chain has ever been run.
+    /// Closes the chain editor and drops its draft.
+    fn close_chain_editor(&mut self) {
+        self.cdp_chain_editor = None;
+        self.dialog = None;
+    }
+
     fn recall_last_chain(&mut self) {
         let catalog = &self.cdp_catalog;
         let Some(state) = self.cdp_chain_editor.as_mut() else { return };
@@ -23626,6 +23642,10 @@ impl App {
                 Confirm::RemoveChainSplit { steps, .. } => {
                     let plural = if *steps == 1 { "step" } else { "steps" };
                     format!(" Remove this split? {steps} {plural} in its branches go too — (y) remove · (Esc) cancel ")
+                }
+                Confirm::DiscardChain { steps } => {
+                    let plural = if *steps == 1 { "step" } else { "steps" };
+                    format!(" Close the chain editor? The chain's {steps} {plural} will be lost — (y) close · (n) keep editing ")
                 }
             };
             render_confirm(frame, area, &text);
@@ -38714,6 +38734,69 @@ mod tests {
         let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("reopened") };
         let Some(CdpField::Number { input, .. }) = fields.first() else { panic!("a Number") };
         assert_eq!(input.value(), original, "reopening gives the defaults back");
+    }
+
+    /// The chain editor open on a chain of `steps` copies of the first catalog process.
+    fn app_with_chain_of(steps: usize) -> App {
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        app.open_cdp_chain_entry();
+        let def = app.cdp_catalog.processes[0].clone();
+        let state = app.cdp_chain_editor.as_mut().expect("the chain editor is open");
+        for _ in 0..steps {
+            state.chain.steps.push(crate::model::cdp::ChainStep {
+                process_key: def.key.clone(),
+                values: def.params.iter().map(|p| p.kind.default_value()).collect(),
+                branches: Vec::new(), legacy_side_chain: Vec::new(),
+            });
+        }
+        state.selected = ChainEditorRow::Preset;
+        app
+    }
+
+    fn chain_editor_is_open(app: &App) -> bool {
+        matches!(app.dialog, Some(Dialog::CdpChainEditor)) && app.cdp_chain_editor.is_some()
+    }
+
+    /// Esc on a chain with steps asks first, and `n` keeps the chain as it was.
+    #[test]
+    fn esc_in_the_chain_editor_asks_before_discarding_and_n_keeps_the_chain() {
+        let mut app = app_with_chain_of(2);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.confirm, Some(Confirm::DiscardChain { steps: 2 })));
+        assert!(chain_editor_is_open(&app), "nothing is closed while it asks");
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(app.confirm.is_none());
+        assert!(chain_editor_is_open(&app));
+        assert_eq!(app.cdp_chain_editor.as_ref().unwrap().chain.steps.len(), 2, "the chain is intact");
+    }
+
+    #[test]
+    fn y_confirms_closing_the_chain_editor() {
+        let mut app = app_with_chain_of(1);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(app.dialog.is_none() && app.cdp_chain_editor.is_none());
+    }
+
+    /// An empty chain has nothing to lose, so Esc closes it at once.
+    #[test]
+    fn esc_closes_an_empty_chain_editor_without_asking() {
+        let mut app = app_with_chain_of(0);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.confirm.is_none());
+        assert!(app.dialog.is_none() && app.cdp_chain_editor.is_none());
+    }
+
+    /// Clicking the Esc hint goes through the same question.
+    #[test]
+    fn clicking_the_esc_hint_of_the_chain_editor_asks_too() {
+        let mut app = app_with_chain_of(1);
+        let rows = render_dialog_rows(&mut app, 120, 40);
+        let (y, line) = rows.iter().enumerate().rev().find(|(_, l)| l.contains("Esc")).expect("an Esc hint");
+        let x = line.find("Esc").map(|b| line[..b].chars().count()).unwrap() as u16;
+        app.handle_mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y as u16, modifiers: KeyModifiers::NONE });
+        assert!(matches!(app.confirm, Some(Confirm::DiscardChain { .. })), "the click asked instead of closing");
+        assert!(chain_editor_is_open(&app));
     }
 
     /// A browser opened *from the chain editor* returns there, and the chain-mode filtering

@@ -49,6 +49,10 @@
   frame has. The picture is now kept and redrawn only when something in it changes; during
   playback only the playhead is drawn again (under 1ms). The picture is still re-sent to the
   terminal every frame, which on a Sixel terminal still costs about 70ms.
+- **Closing the chain editor with Esc now asks first.** Esc used to close the editor and lose the
+  whole chain at once, and only a chain that has run can be brought back with Ctrl+R. Now, when the
+  chain has steps, the editor asks before closing: `y` closes it, `n` keeps editing. An empty
+  chain still closes at once.
 - **The executable is about 8MB smaller** (28MB to 20MB on Linux x86-64). Unused audio decoders
   are no longer linked, the built-in process catalogs are stored compressed, and the release
   build uses link-time optimization. Release builds take longer.
