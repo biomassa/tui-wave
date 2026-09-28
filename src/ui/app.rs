@@ -23291,7 +23291,8 @@ impl App {
             // `show_marker_labels` in `rasterize_waveform`); only draw the buffer-cell text
             // when that row genuinely has no image underneath it.
             let label_row_has_image = channel_image_rows.iter().flatten().any(|&(start, end)| wf.y >= start && wf.y < end);
-            if shown_w > 0 && !label_row_has_image {
+            // A terminal too short for any waveform row puts `wf.y` below the buffer.
+            if shown_w > 0 && !label_row_has_image && wf.height > 0 {
                 buf.set_string(lx, wf.y, &shown, style);
                 for cx in lx..lx + shown_w {
                     buf[(cx, wf.y)].set_diff_option(CellDiffOption::AlwaysUpdate);
@@ -23350,7 +23351,7 @@ impl App {
                 .iter()
                 .flatten()
                 .any(|&(start, end)| label_row >= start && label_row < end);
-            if shown_w > 0 && !label_row_has_image {
+            if shown_w > 0 && !label_row_has_image && wf.height > 0 {
                 buf.set_string(lx, label_row, &shown, head_tail_style);
                 for cx in lx..lx + shown_w {
                     buf[(cx, label_row)].set_diff_option(CellDiffOption::AlwaysUpdate);
@@ -49274,6 +49275,22 @@ mod tests {
                 && summary.contains("Both: 2 ch") && summary.contains("0 dropped"),
             "summary must partition the six channels, got {summary:?}"
         );
+    }
+
+    /// Every terminal size down to 1x1 renders without a panic, with a marker and a head/tail
+    /// mark on screen. A terminal short enough to leave the waveform zero rows high put the
+    /// label passes one row below the buffer, and indexing it panicked (found by fuzzing).
+    #[test]
+    fn every_small_terminal_size_renders_with_marks_on_screen() {
+        let mut document = doc(0.1, 44100);
+        document.markers.push(crate::model::document::Marker { position: 0, label: "Marker 1".into() });
+        document.head_tail_marks.push(10);
+        let mut app = new_app(Some(document), None);
+        for height in 1..=12 {
+            for width in 1..=40 {
+                render_dialog_rows(&mut app, width, height);
+            }
+        }
     }
 
     /// Renders the app to a `TestBackend` and returns its rows, for dialog assertions that are

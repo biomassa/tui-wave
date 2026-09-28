@@ -35,6 +35,9 @@
 - **Dropping a head/tail mark onto another mark no longer deletes one of them.** The two
   marks merged into one, and Undo could not bring the other back. Such a drop is now refused,
   and the dragged mark goes back to where it started.
+- **A very small terminal no longer crashes the app.** In a terminal only a few rows high, for
+  example a small tmux pane, a marker or head/tail mark on screen made the app crash, losing any
+  unsaved work.
 - **The executable is about 8MB smaller** (28MB to 20MB on Linux x86-64). Unused audio decoders
   are no longer linked, the built-in process catalogs are stored compressed, and the release
   build uses link-time optimization. Release builds take longer.
