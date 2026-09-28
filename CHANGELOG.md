@@ -9,6 +9,10 @@
   RF64. Files under 4GB are written exactly as before.
 - **A failed CDP or Praat run now always shows the program's output.** If the output had one
   byte that was not valid UTF-8, all of it was dropped and the error message was empty.
+- **Playback of a streamed (very large) file no longer stops when the disk is slow.** If the
+  read-ahead ran out, playback waited on the audio thread for up to 5 seconds and then stopped.
+  Now it plays silence until the audio arrives, and it stops only if nothing arrives for 5
+  seconds.
 
 ## 2026-09-27 (2.15.0)
 

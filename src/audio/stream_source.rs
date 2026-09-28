@@ -20,9 +20,9 @@ use std::num::NonZero;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, SendTimeoutError, Sender};
+use crossbeam_channel::{bounded, Receiver, SendTimeoutError, Sender, TryRecvError};
 use rodio::{ChannelCount, SampleRate, Source};
 
 use crate::model::dsp;
@@ -44,12 +44,12 @@ const BLOCK_FRAMES: usize = 8_192;
 /// ring's size is independent of the source's channel count.
 const RING_BLOCKS: usize = 12;
 
-/// How long `next()` waits for a block before giving up and ending playback.
+/// How long `next()` plays silence while waiting for a block before it ends playback.
 ///
-/// The reader keeps ~2s ahead, so reaching this means it is genuinely stuck (a disk that stopped
-/// answering, a file pulled out from under us) rather than merely behind. Ending playback is the
-/// right response: blocking the mixer thread indefinitely would take the audio device down with
-/// it and leave `Stop` with nothing to interrupt.
+/// `next()` runs on the audio callback, so it never waits: an empty ring gives silence, and a
+/// read that is only slow (a drive waking up) resumes the audio when it arrives. The reader keeps
+/// ~2s ahead, so this much continuous silence means it is really stuck (a disk that stopped
+/// answering, a file pulled out from under us), and playback ends.
 const STALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long the reader waits on a full ring before re-checking whether it has been cancelled.
@@ -75,6 +75,11 @@ pub struct StreamedSource {
     current: Option<PlaybackBlock>,
     /// Index into `current.samples`, in samples (not frames).
     cursor: usize,
+    /// Samples of silence played since the last block, while the ring was empty.
+    silent_samples: usize,
+    /// When the current run of silence started. Wall-clock time, not a sample count, because a
+    /// consumer faster than real time (a test) would reach a sample limit in milliseconds.
+    silence_started: Option<Instant>,
     channel_count: ChannelCount,
     out_channels: usize,
     sample_rate: SampleRate,
@@ -125,6 +130,8 @@ impl StreamedSource {
             rx,
             current: None,
             cursor: 0,
+            silent_samples: 0,
+            silence_started: None,
             channel_count,
             out_channels,
             sample_rate: sample_rate_nz,
@@ -162,14 +169,30 @@ impl Iterator for StreamedSource {
                     return Some(value as rodio::Sample);
                 }
             }
-            match self.rx.recv_timeout(STALL_TIMEOUT) {
+            // Silence is played in whole frames. A block that started in the middle of a silent
+            // frame would put every later sample on the wrong leg.
+            if self.silent_samples % self.out_channels.max(1) != 0 {
+                self.silent_samples += 1;
+                return Some(0.0);
+            }
+            match self.rx.try_recv() {
                 Ok(block) => {
                     self.current = Some(block);
                     self.cursor = 0;
+                    self.silent_samples = 0;
+                    self.silence_started = None;
+                }
+                Err(TryRecvError::Empty)
+                    if self.silence_started.get_or_insert_with(Instant::now).elapsed()
+                        < STALL_TIMEOUT =>
+                {
+                    self.silent_samples += 1;
+                    return Some(0.0);
                 }
                 // Disconnected is the ordinary end of playback: the reader finished the file (or
-                // the bounded range) and dropped its sender. Timeout is the stall guard.
-                Err(RecvTimeoutError::Disconnected) | Err(RecvTimeoutError::Timeout) => {
+                // the bounded range) and dropped its sender. Empty here means `STALL_TIMEOUT` of
+                // silence has passed with no block.
+                Err(TryRecvError::Disconnected) | Err(TryRecvError::Empty) => {
                     self.current = None;
                     self.playing.store(false, Ordering::Relaxed);
                     return None;
@@ -312,6 +335,18 @@ mod tests {
         (channel as f32 + 1.0) / 100.0 + frame as f32 / 1000.0
     }
 
+    /// The next sample that is not underrun silence. These tests read faster than real time, so
+    /// the ring is often empty and the source plays silence while the reader catches up. No
+    /// fixture sample is exactly 0.0 (`sample` is always positive), so skipping zeros removes the
+    /// silence and nothing else.
+    fn next_audible(source: &mut StreamedSource) -> Option<f32> {
+        source.find(|&s| s != 0.0)
+    }
+
+    fn audible(mut source: StreamedSource) -> Vec<f32> {
+        std::iter::from_fn(|| next_audible(&mut source)).collect()
+    }
+
     fn tmp(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("tuiwave_play_{tag}_{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
@@ -362,7 +397,7 @@ mod tests {
 
         let (source, _, playing) = start(&path, 0, None, None);
         assert_eq!(source.channels().get(), 2, "7 channels are announced as stereo");
-        let got: Vec<f32> = source.collect();
+        let got = audible(source);
 
         // The same audio as a resident document, folded by the per-frame path.
         let resident: Vec<Vec<f32>> =
@@ -393,8 +428,8 @@ mod tests {
         let (mut source, position, _) = start(&path, 0, None, None);
         // Pull one whole frame at a time and check the counter tracks it.
         for expected in 1..=(BLOCK_FRAMES + 10) {
-            source.next().unwrap();
-            source.next().unwrap();
+            next_audible(&mut source).unwrap();
+            next_audible(&mut source).unwrap();
             assert_eq!(
                 position.load(Ordering::Relaxed),
                 expected,
@@ -414,13 +449,13 @@ mod tests {
         assert_eq!(position.load(Ordering::Relaxed), 1_500, "before a single sample is pulled");
 
         let ceiling = dsp::Fold::default().ceiling;
-        let left = source.next().unwrap();
-        let right = source.next().unwrap();
+        let left = next_audible(&mut source).unwrap();
+        let right = next_audible(&mut source).unwrap();
         assert!((left - dsp::tanh_limit(sample(0, 1500) + sample(2, 1500), ceiling)).abs() < 1e-6);
         assert!((right - dsp::tanh_limit(sample(1, 1500) + sample(3, 1500), ceiling)).abs() < 1e-6);
         assert_eq!(position.load(Ordering::Relaxed), 1_501);
 
-        let rest: Vec<f32> = source.collect();
+        let rest = audible(source);
         assert_eq!(rest.len(), (2_000 - 1_501) * 2, "and it plays to the end of the file");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -432,7 +467,7 @@ mod tests {
         let dir = tmp("bounded");
         let path = wav(&dir, 6, 5_000);
         let (source, _, playing) = start(&path, 100, None, Some(600));
-        assert_eq!(source.count(), 500 * 2, "frames 100..600, as stereo");
+        assert_eq!(audible(source).len(), 500 * 2, "frames 100..600, as stereo");
         assert!(!playing.load(Ordering::Relaxed));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -447,7 +482,7 @@ mod tests {
 
         // Three times round a 100-frame loop, plus a bit.
         for _ in 0..(100 * 3 + 25) * 2 {
-            assert!(source.next().is_some(), "a looping source never ends");
+            assert!(next_audible(&mut source).is_some(), "a looping source never ends");
         }
         assert!(playing.load(Ordering::Relaxed), "and never clears `playing`");
         let at = position.load(Ordering::Relaxed);
@@ -467,11 +502,59 @@ mod tests {
         let path = wav(&dir, 2, 500);
         let (source, _, _) = start(&path, 0, None, None);
         assert_eq!(source.channels().get(), 2);
-        let got: Vec<f32> = source.collect();
+        let got = audible(source);
         let want: Vec<f32> =
             (0..500).flat_map(|f| [sample(0, f), sample(1, f)]).collect();
         assert_eq!(got, want, "stereo passes through verbatim, interleaved");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A stereo source fed by hand through `tx`, with no reader thread.
+    fn hand_fed() -> (StreamedSource, Sender<PlaybackBlock>, Arc<AtomicBool>) {
+        let (tx, rx) = bounded(RING_BLOCKS);
+        let playing = Arc::new(AtomicBool::new(true));
+        let source = StreamedSource {
+            rx,
+            current: None,
+            cursor: 0,
+            silent_samples: 0,
+            silence_started: None,
+            channel_count: NonZero::new(2).unwrap(),
+            out_channels: 2,
+            sample_rate: NonZero::new(48000).unwrap(),
+            position: Arc::new(AtomicUsize::new(0)),
+            playing: playing.clone(),
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        (source, tx, playing)
+    }
+
+    /// An empty ring gives silence instead of blocking the audio callback. A block that arrives
+    /// while a silent frame is half played must wait for that frame to finish, or its left
+    /// sample would come out on the right leg.
+    #[test]
+    fn an_empty_ring_plays_silence_in_whole_frames() {
+        let (mut source, tx, playing) = hand_fed();
+        assert_eq!(source.next(), Some(0.0), "silence, not a wait");
+        tx.send(PlaybackBlock { start_frame: 0, samples: vec![0.1, 0.2] }).unwrap();
+        assert_eq!(source.next(), Some(0.0), "the right leg of the silent frame");
+        assert_eq!(source.next(), Some(0.1));
+        assert_eq!(source.next(), Some(0.2));
+        assert!(playing.load(Ordering::Relaxed));
+        drop(tx);
+        assert_eq!(source.next(), None, "a finished reader still ends playback");
+        assert!(!playing.load(Ordering::Relaxed));
+    }
+
+    /// A reader that has produced nothing for `STALL_TIMEOUT` is stuck, and playback ends.
+    #[test]
+    fn a_stalled_reader_ends_playback() {
+        let (mut source, _tx, playing) = hand_fed();
+        assert_eq!(source.next(), Some(0.0));
+        assert_eq!(source.next(), Some(0.0));
+        source.silence_started = Some(Instant::now() - STALL_TIMEOUT);
+        assert_eq!(source.next(), None);
+        assert!(!playing.load(Ordering::Relaxed));
     }
 
     /// Dropping the source must stop the reader rather than leaving a thread pulling a 30GB file
