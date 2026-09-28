@@ -522,6 +522,29 @@ fn engine_for(document: &Document) -> Option<AudioEngine> {
     }
 }
 
+/// Ends a drag of the head/tail mark at index `dragged`, which the drag has already moved.
+/// Returns the move to record, or `None` when there is nothing to undo.
+///
+/// A drop exactly onto another mark is refused and the mark goes back to `start`. Two marks at
+/// one position would merge into one, and the move command could not bring the lost one back.
+/// The list is sorted afterwards in every case, because a mark's role (Head or Tail) is derived
+/// from its index, and a mark left out of order would read as the wrong half of a pair.
+fn finish_head_tail_drag(marks: &mut Vec<usize>, dragged: usize, start: Option<usize>) -> Option<(usize, usize)> {
+    let end = marks.get(dragged).copied();
+    let collides = end.is_some_and(|end| marks.iter().enumerate().any(|(i, &m)| i != dragged && m == end));
+    if collides {
+        if let (Some(start), Some(slot)) = (start, marks.get_mut(dragged)) {
+            *slot = start;
+        }
+    }
+    marks.sort_unstable();
+    marks.dedup();
+    match (start, end) {
+        (Some(from), Some(to)) if from != to && !collides => Some((from, to)),
+        _ => None,
+    }
+}
+
 /// A new undo history for one document. Its sample data is capped at `max_resident_mb`, the
 /// same budget that decides whether a file is held in memory at all, so undo can never hold
 /// more than one more such buffer.
@@ -21233,18 +21256,9 @@ impl App {
                 let Some(hi) = self.dragging_head_tail_mark.take() else { return false };
                 let start_pos = self.dragging_head_tail_mark_start_position.take();
                 if let Some(doc) = self.documents.get_mut(idx) {
-                    // Capture the live-dragged-to position before sorting reshuffles indices,
-                    // then collapse the whole gesture into one undoable command — exactly as
-                    // the marker lane does. Sorting matters more here: role is derived from
-                    // index, so a mark left out of order would silently read as the wrong
-                    // half of a pair.
-                    let end_pos = doc.head_tail_marks.get(hi).copied();
-                    doc.head_tail_marks.sort_unstable();
-                    doc.head_tail_marks.dedup();
-                    if let (Some(from), Some(to)) = (start_pos, end_pos) {
-                        if from != to {
-                            self.histories[idx].apply(move_head_tail_mark_command(from, to), doc);
-                        }
+                    // The whole gesture becomes one undoable command, as in the marker lane.
+                    if let Some((from, to)) = finish_head_tail_drag(&mut doc.head_tail_marks, hi, start_pos) {
+                        self.histories[idx].apply(move_head_tail_mark_command(from, to), doc);
                     }
                 }
                 true
@@ -32096,6 +32110,26 @@ mod tests {
 
     fn new_app(document: Option<Document>, directory: Option<PathBuf>) -> App {
         App::new_with_config(document, directory, Config::default())
+    }
+
+    /// A drop onto another head/tail mark is refused: the dragged mark goes back where it
+    /// started, no mark is lost, and there is nothing to undo. Before, the two merged and undo
+    /// could not bring the lost one back.
+    #[test]
+    fn a_head_tail_mark_dropped_onto_another_goes_back() {
+        let mut marks = vec![50, 200, 200]; // the mark from 100 has been dragged onto 200
+        assert_eq!(finish_head_tail_drag(&mut marks, 1, Some(100)), None);
+        assert_eq!(marks, vec![50, 100, 200]);
+    }
+
+    /// An ordinary drop is recorded as a move, and the list is left sorted for the role rule.
+    #[test]
+    fn a_head_tail_mark_dropped_on_free_space_is_a_move() {
+        let mut marks = vec![50, 300, 200]; // 100 dragged past 200 to 300
+        assert_eq!(finish_head_tail_drag(&mut marks, 1, Some(100)), Some((100, 300)));
+        assert_eq!(marks, vec![50, 200, 300]);
+        let mut unmoved = vec![50, 100];
+        assert_eq!(finish_head_tail_drag(&mut unmoved, 1, Some(100)), None, "a click is not a move");
     }
 
     /// `app` showing the Running dialog for job 7 of an ordinary Apply, as it does while any
