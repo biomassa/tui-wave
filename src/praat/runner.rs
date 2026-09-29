@@ -1183,7 +1183,8 @@ mod tests {
         assert_eq!(
             pinned, expected,
             "setup.sh checks out {pinned}, but this build's catalog was generated \
-             from {expected} — re-run update-praat-scripts.sh and update PINNED_COMMIT together"
+             from {expected} — set PINNED_COMMIT in setup.sh to the catalog's commit \
+             (update-praat-scripts.sh does not change it)"
         );
     }
 

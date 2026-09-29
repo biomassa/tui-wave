@@ -353,6 +353,17 @@ PAUSE_HOISTS: dict[str, dict] = {
     "py/PhraseRewriter.praat": {
         "why": "\"draw the Transformation Map now?\" confirmation before overwriting the picture",
     },
+    # New in the 2026-09-29 bump (a new script, not a rework). Six advanced fields -- analysis
+    # range, bands per octave, A4 reference, target emphasis, keep-outside-range -- sit on a
+    # `beginPause` page behind `if advanced_settings`, a plain form boolean, so it is locked
+    # like the other `*advanced_settings` toggles here. The script assigns every one of them
+    # above the `if`, so a run that skips the page gets the author's defaults. `Bands per
+    # octave` is an optionmenu the script maps to 12/24/36/48 *after* the page, so the hoisted
+    # index still lands on the right value.
+    "Spectral/Pitch_Class_Spectral_Gravity.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "advanced analysis settings, moved off the main form",
+    },
     # Guarded by `if preset = 1` (Custom). Its `else` branch already assigns the same variables
     # to the same defaults, which is what makes the rewrite verifiable by inspection: the
     # hoisted assignments and the script's own placeholder block must agree.

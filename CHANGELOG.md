@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **praatAudioTools updated to `cf9d820`**, which adds one new process: **Pitch Class Spectral
+  Gravity** (Spectral). It pulls the spectrum toward a chosen scale or set of pitch classes
+  without tracking or retuning anything, so noise and percussion take on a tonal colour. Its
+  advanced analysis settings are in the same dialog. No existing process changed.
+
 - **Saving a WAV larger than 4GB no longer corrupts it.** Save and Save As wrote through a
   library that stores the data size in 32 bits. Past 4GB the size wrapped, the file got a wrong
   header, and it replaced the original. This needed a buffer in memory that had grown past 4GB,
