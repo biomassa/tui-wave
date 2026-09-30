@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-09-30 (2.16.0)
 
 - **praatAudioTools updated to `a4c0921`**, which adds one new process: **Scattering Texture
   Generator** (py group). It makes a new sound with the same texture as the selected one (band
