@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **praatAudioTools updated to `a4c0921`**, which adds one new process: **Scattering Texture
+  Generator** (py group). It makes a new sound with the same texture as the selected one (band
+  energy, modulation, coarse dynamics) and lets the exact waveform and pitch go. It needs the
+  Python package `kymatio`, a small one that `setup.sh` now installs with the others. If you
+  already have the Python environment, add it with
+  `~/.config/tui-wave/praat/pyenv/bin/pip install kymatio`. No existing process changed.
+
 - **praatAudioTools updated to `cf9d820`**, which adds one new process: **Pitch Class Spectral
   Gravity** (Spectral). It pulls the spectrum toward a chosen scale or set of pitch classes
   without tracking or retuning anything, so noise and percussion take on a tonal colour. Its

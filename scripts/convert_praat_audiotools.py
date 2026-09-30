@@ -101,6 +101,13 @@ PY_ALLOWED_IMPORTS = {
     # Praat` could not work even with it installed.
     "sounddevice",
     "PIL",
+    # Wavelet scattering, for `Scattering_Texture_Generator` (the a4c0921 bump, 2026-09-30).
+    # Installed with the base set rather than offered in a tier: it is an 86 KB pure-Python
+    # wheel (~2 MB installed with `appdirs`, `configparser` and `packaging`) whose only real
+    # dependencies are numpy and scipy, which the base set already has. Its last release is
+    # 0.3.0 from 2022, so it was checked on Python 3.14 / numpy 2.5 / scipy 1.18 before it was
+    # admitted: the helper's two imports load and a `Scattering1D` transform runs.
+    "kymatio",
     # ---- The optional tiers `setup.sh` offers -----------------
     #
     # Same bargain as `sounddevice`/`PIL` above, and for the same reason: a process listed here

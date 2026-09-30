@@ -524,7 +524,9 @@ python_command$ = \"py\"
         // which upstream had just given a Windows venv path the app repoints anyway.
         // `DDSPNeuralRevoicing` carries the same line and stays out, on its own obstacle: the
         // `ddsp` stack does not build past Python 3.11. See `PY_ALLOWED_IMPORTS`.
-        assert_eq!(flagged, 48, "the py group is 48 processes");
+        // 48 -> 49 on 2026-09-30: the a4c0921 bump brought `Scattering_Texture_Generator`, and
+        // `kymatio`, which its helper needs, was admitted to the base set.
+        assert_eq!(flagged, 49, "the py group is 49 processes");
     }
 
     /// End to end through the planner: a py-group process must come out asking for a rewritten

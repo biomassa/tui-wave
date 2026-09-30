@@ -339,13 +339,14 @@ helper script and read the result back. They appear under their own **py** group
 so the extra requirement is visible before you pick one rather than a surprise when you run it.
 Everything in the other thirteen groups works without any of this.
 
-They need three Python packages, and two more for the interactive ones:
+They need three Python packages, and three more for particular processes:
 
 | Package | Needed for |
 |---|---|
 | `numpy`, `scipy`, `soundfile` | all 46 — the array maths and WAV I/O every helper uses |
 | `sounddevice` | Arranger and Performance Launcher, which audition while you work |
 | `pillow` | Spectral Eraser, which paints on a spectrogram image |
+| `kymatio` | Scattering Texture Generator, which uses its wavelet scattering transform |
 
 `./setup.sh` asks whether to install them and puts them in a virtual environment tui-wave
 owns, at `~/.config/tui-wave/praat/pyenv`. **Your system Python is never modified** — which
@@ -362,7 +363,7 @@ To do it by hand:
 
 ```sh
 python3 -m venv ~/.config/tui-wave/praat/pyenv
-~/.config/tui-wave/praat/pyenv/bin/pip install numpy scipy soundfile sounddevice pillow
+~/.config/tui-wave/praat/pyenv/bin/pip install numpy scipy soundfile sounddevice pillow kymatio
 ```
 
 tui-wave puts that environment ahead of your `PATH` for the Praat process it starts, so the

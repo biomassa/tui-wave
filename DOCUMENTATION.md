@@ -219,6 +219,7 @@ thirteen groups need nothing beyond Praat.
 | `numpy`, `scipy`, `soundfile` | all 46 — array maths and WAV reading/writing |
 | `sounddevice` | Arranger, Performance Launcher — they audition as you work |
 | `pillow` | Spectral Eraser — it paints on a spectrogram image |
+| `kymatio` | Scattering Texture Generator — it uses its wavelet scattering transform |
 
 `./setup.sh` asks whether to install these and puts them in a virtual environment tui-wave
 owns, at `~/.config/tui-wave/praat/pyenv`. Your system Python is never modified. That is not
@@ -235,7 +236,7 @@ By hand:
 
 ```sh
 python3 -m venv ~/.config/tui-wave/praat/pyenv
-~/.config/tui-wave/praat/pyenv/bin/pip install numpy scipy soundfile sounddevice pillow
+~/.config/tui-wave/praat/pyenv/bin/pip install numpy scipy soundfile sounddevice pillow kymatio
 ```
 
 tui-wave runs each of these scripts from a temporary *copy* whose interpreter is repointed at

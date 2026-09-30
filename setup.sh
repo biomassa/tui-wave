@@ -63,7 +63,7 @@ set -euo pipefail
 # value with the header of src/model/cdp/praat_catalog.toml. Change it only together with the
 # catalog, by hand: update-praat-scripts.sh moves the submodule and regenerates the catalog, but
 # does not edit this line.
-PINNED_COMMIT="cf9d8201b3ceaf35ed782728730192a01edf1361"
+PINNED_COMMIT="a4c092187d39e884e3da9271e90fe78442775a82"
 UPSTREAM="https://github.com/ShaiCohen-ops/Praat-plugin_AudioTools"
 
 # Where tui-wave keeps its state. These paths must match config_home() in src/config.rs.
@@ -647,6 +647,13 @@ else
       && ok "${BLUE}numpy, scipy, soundfile${RESET} import correctly" \
       || die "the venv exists but the packages do not import"
   fi
+
+  # One process needs this package (Scattering Texture Generator). It is a small pure-Python
+  # wheel that uses the numpy and scipy installed above, so it has no prompt. A failure is not
+  # fatal: the loss is that one process, and it names the missing library when you run it.
+  run_with_progress "installing ${BLUE}kymatio${RESET} (Scattering Texture Generator)" \
+    "$PIP" install --disable-pip-version-check --progress-bar off kymatio \
+    || warn "${BLUE}kymatio${RESET} failed. Scattering Texture Generator says so when you run it."
 
   # Only three interactive editors need these two packages (Arranger, Performance Launcher,
   # Spectral Eraser). A failure is not fatal. sounddevice needs PortAudio at run time, and a
