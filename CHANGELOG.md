@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **praatAudioTools updated to `2c78bca`**, which adds one new process: **Latent Pbind** (py
+  group). It learns a small latent space from the selected sound and plays a SuperCollider-style
+  Pbind pattern through it, either from one of seven presets or from pattern text you type. Its
+  advanced settings are in the same dialog.
+- **Spectral Permute** has a new Energy mode setting. Saved presets for it may need checking,
+  because the settings after it moved down by one.
+- **IRCAM Partial Stretch and IRCAM RAVE Model** were reworked upstream and stay in the
+  browser, with their extra settings pages in the same dialog. Both still need IRCAM's own tools
+  (the PM2 binary, a RAVE model), which tui-wave does not install.
+
 ## 2026-09-30 (2.16.0)
 
 - **praatAudioTools updated to `a4c0921`**, which adds one new process: **Scattering Texture

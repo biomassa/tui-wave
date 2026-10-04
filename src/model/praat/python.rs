@@ -89,7 +89,9 @@ fn split_literal_assignment(line: &str) -> Option<(&str, &str, &str)> {
     }
     let name = lhs.trim();
     let name = name.strip_suffix('$')?;
-    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+    // `'` is Praat's variable interpolation: `candidate'nCand'$ = "python3"` fills one of a
+    // numbered list of candidates (`IRCAM_rave_model`, from the 2026-10-04 bump).
+    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '\'') {
         return None;
     }
     if name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
@@ -231,6 +233,14 @@ mod tests {
         ] {
             assert!(is_interpreter_literal(literal), "{literal:?} should be an interpreter");
         }
+    }
+
+    #[test]
+    fn an_interpolated_candidate_name_is_repointed() {
+        let source = "    candidate'nCand'$ = \"python3\"\n";
+        let (out, replaced) = rewrite_for_venv(source, "/venv/bin/python3", "/plugin/py");
+        assert_eq!(replaced, 1);
+        assert!(out.contains("candidate'nCand'$ = \"/venv/bin/python3\""), "{out}");
     }
 
     #[test]
@@ -526,7 +536,8 @@ python_command$ = \"py\"
         // `ddsp` stack does not build past Python 3.11. See `PY_ALLOWED_IMPORTS`.
         // 48 -> 49 on 2026-09-30: the a4c0921 bump brought `Scattering_Texture_Generator`, and
         // `kymatio`, which its helper needs, was admitted to the base set.
-        assert_eq!(flagged, 49, "the py group is 49 processes");
+        // 49 -> 50 on 2026-10-04: the 2c78bca bump brought `LatentPbind` (numpy/scipy only).
+        assert_eq!(flagged, 50, "the py group is 50 processes");
     }
 
     /// End to end through the planner: a py-group process must come out asking for a rewritten

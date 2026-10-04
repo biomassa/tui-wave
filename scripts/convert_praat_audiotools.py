@@ -371,6 +371,24 @@ PAUSE_HOISTS: dict[str, dict] = {
         "lock_on": ["Advanced_settings"],
         "why": "advanced analysis settings, moved off the main form",
     },
+    # New in the 2026-10-04 bump, all three in `py/`. The two IRCAM reworks were catalogued
+    # before and would otherwise drop out; neither gets `lock_on`, so each page's assignments
+    # stay inside the script's own guard. Partial Stretch: one unconditional page whose fields
+    # depend on `mode`, then an analysis page behind `advanced_analysis_settings`. RAVE: an
+    # advanced page behind `advanced_settings`, a latent-transform page under `action = 2`,
+    # and an energy page nested under `energy_mode > 1` inside it.
+    "py/IRCAM_Partial_Stretch.praat": {
+        "why": "per-mode settings page plus a PM2 analysis page",
+    },
+    "py/IRCAM_rave_model.praat": {
+        "why": "advanced page, latent-transform page (Action 2) and its energy page",
+    },
+    # A new script. Its advanced page sits behind a plain form boolean, locked like the other
+    # `*advanced_settings` toggles here.
+    "py/LatentPbind.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "advanced settings page, moved off the main form",
+    },
     # Guarded by `if preset = 1` (Custom). Its `else` branch already assigns the same variables
     # to the same defaults, which is what makes the rewrite verifiable by inspection: the
     # hoisted assignments and the script's own placeholder block must agree.
@@ -1002,7 +1020,7 @@ def code_only(source: str) -> str:
 # whatever detector happened to fire next.
 CODE = "code"    # match against code_only(source)
 RAW = "raw"      # match against the source as written
-PATHS = "paths"  # match against without_interpreter_assignments(source)
+PATHS = "paths"  # match against without_ignored_paths(source)
 
 
 # A Praat string literal that names a Python interpreter rather than mentioning one, mirroring
@@ -1046,6 +1064,38 @@ def without_interpreter_assignments(source: str) -> str:
         return m.group(1) + '""' if _is_interpreter_literal(m.group(2)) else m.group(0)
 
     return _INTERPRETER_ASSIGN_RE.sub(blank, source)
+
+
+# A form field that becomes a `folder_path` param, with its default. Both spellings: the colon
+# form (`sentence: "Models directory", "C:\\..."`, with an optional height before a `text:`
+# label) and the old one (`sentence Models_directory C:\\...`).
+_FOLDER_FIELD_COLON_RE = re.compile(
+    r'^([ \t]*(sentence|word|text|folder)[ \t]*:[ \t]*(?:\d+[ \t]*,[ \t]*)?"([^"\n]*)"[ \t]*,[ \t]*)"[^"\n]*"',
+    re.M)
+_FOLDER_FIELD_OLD_RE = re.compile(r"^([ \t]*(sentence|word|text|folder)[ \t]+(\S+))[ \t]+\S[^\n]*", re.M)
+
+
+def without_folder_field_defaults(source: str) -> str:
+    """`source` with the default of every folder field blanked.
+
+    A field that becomes a `folder_path` param never passes its default to Praat: the param
+    starts unpicked and `cdp_validate_fields` blocks Apply until the user picks a folder. So an
+    author's `C:\\Users\\...` default there is not a hardcoded path in the sense of the rule.
+    Both IRCAM scripts in `py/` carry one, and were catalogued for it until the 2026-10-04 bump
+    moved them to the colon syntax, whose quotes made the rule see the literal.
+    """
+    def blank(m: re.Match) -> str:
+        keyword, label = m.group(2), m.group(3)
+        if keyword == "folder" or FOLDER_NAME_RE.search(label):
+            return m.group(1) + ('""' if m.re is _FOLDER_FIELD_COLON_RE else "")
+        return m.group(0)
+
+    return _FOLDER_FIELD_OLD_RE.sub(blank, _FOLDER_FIELD_COLON_RE.sub(blank, source))
+
+
+def without_ignored_paths(source: str) -> str:
+    """What `hardcoded_path` reads: the source without the paths this app replaces."""
+    return without_folder_field_defaults(without_interpreter_assignments(source))
 
 # `<var>$ = chooseDirectory$` as a *statement*. Matched against `code_only`, so a script that
 # discusses the call in its changelog -- `CorpusMap` does, twice -- is not read as making it.
@@ -1283,7 +1333,7 @@ EXCLUSIONS: list[tuple[str, re.Pattern, str, str]] = [
         "contains a hardcoded absolute path that only resolves on its author's machine",
         # Read past the interpreter assignments: those are rewritten to the app-owned venv
         # before the script runs, so a Windows venv path in that position is not an obstacle.
-        # See `without_interpreter_assignments`.
+        # Folder-field defaults are skipped for the same reason. See `without_ignored_paths`.
         PATHS,
     ),
 ]
@@ -2374,7 +2424,9 @@ LIST_SEPARATORS = (", ", ",", " ", "_")
 # `Corpus_A_folder`). Deliberately not `*_file`/`*_path` in general: `Reference_filename` names a
 # file *inside* the chosen folder and is ordinary text, and `File_path` on the SPEAR parser is a
 # single .txt whose picker filters by extension.
-FOLDER_NAME_RE = re.compile(r"(^|_)(folder|dir|directory)(_|$)", re.I)
+# The colon syntax keeps the label's spaces (`"Models directory"`), so a space separates words
+# as well as an underscore.
+FOLDER_NAME_RE = re.compile(r"(^|[_ ])(folder|dir|directory)([_ ]|$)", re.I)
 
 # A `sentence` field holding `key=value` pairs, which the receiving script picks apart with
 # Praat's `extractNumber(field$, "key=")`. Because `extractNumber` searches for the key rather
@@ -3067,7 +3119,7 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
         scannable = {
             CODE: code_only(source),
             RAW: source,
-            PATHS: without_interpreter_assignments(source),
+            PATHS: without_ignored_paths(source),
         }
         rel_key = str(rel).replace("\\", "/")
         override = GUI_BLOCKING_OVERRIDES.get(rel_key)
@@ -3303,7 +3355,8 @@ BUILTINS = [
 # exactly these scripts, and its `no_real_script_can_still_reach_a_hardcoded_interpreter` test is
 # what keeps the two honest -- this only has to decide *whether* a script needs the treatment.
 PYTHON_LITERAL_RE = re.compile(r'^(?:.*[/\\])?(?:py|python[0-9.]*)(?:\.exe)?$')
-PYTHON_ASSIGN_RE = re.compile(r'^\s*[A-Za-z_][A-Za-z0-9_]*\$\s*=\s*"([^"]*)"\s*$')
+# `'` admits Praat's interpolation (`candidate'nCand'$`), as `split_literal_assignment` does.
+PYTHON_ASSIGN_RE = re.compile(r'^\s*[A-Za-z_][A-Za-z0-9_\']*\$\s*=\s*"([^"]*)"\s*$')
 
 
 def counts_python_assignments(source: str) -> int:
@@ -3749,6 +3802,26 @@ def selftest() -> int:
     else:
         check("folder field: one field", len(fields), 1)
         check("folder field: kind", fields[0].kind if fields else None, "folder_path")
+
+    # --- folder-named fields in the colon syntax ----------------------------------------
+    # The colon syntax keeps the label's spaces. Both IRCAM scripts in `py/` moved to it on the
+    # 2026-10-04 bump, and `"Models directory"` stopped being read as a folder: it became free
+    # text, and its `C:\...` default, now quoted, tripped `hardcoded_path` and dropped the script.
+    fields = parse_fields('    sentence: "Models directory", "C:\\Users\\User\\models"\n')
+    if isinstance(fields, str):
+        failures.append(f"spaced folder name: refused to parse -- {fields}")
+    else:
+        check("spaced folder name: kind", fields[0].kind if fields else None, "folder_path")
+    path_rule = next(p for slug, p, _, _ in EXCLUSIONS if slug == "hardcoded_path")
+    for source, label in [
+        ('    sentence: "Models directory", "C:\\Users\\User\\models"\n', "colon syntax"),
+        ('    sentence Models_directory C:\\Users\\User\\models\n', "old syntax"),
+    ]:
+        check(f"folder default ignored -- {label}",
+              bool(path_rule.search(without_ignored_paths(source))), False)
+    check("non-folder path still caught",
+          bool(path_rule.search(without_ignored_paths('    sentence: "Model", "C:\\m.ts"\n'))),
+          True)
 
     for failure in failures:
         print(f"  FAIL  {failure}")
