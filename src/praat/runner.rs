@@ -1913,6 +1913,158 @@ mod tests {
         }
     }
 
+    /// `Creative Convolution` opens a "which of the two Sounds is the source?" page. Its options
+    /// are the Sounds' names in the script, so the catalog relabels them, and the dialog's pick
+    /// reaches the script only as an index. The smoke sweep says the run finishes; it cannot say
+    /// the choice is wired. A click train and a long tone are not interchangeable as source and
+    /// kernel, so swapping the roles must change the audio: the dry part of the mix is the source.
+    #[test]
+    fn creative_convolution_source_choice_swaps_the_roles() {
+        require_praat!();
+        let checkout =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/praat-audiotools");
+        if crate::praat::validate_audiotools_dir(&checkout).is_err() {
+            return; // submodule not initialised
+        }
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let Some(def) = catalog.processes.iter().find(|d| d.key == "praat_reverb_creative_convolution")
+        else {
+            panic!("Creative Convolution is not in the catalog");
+        };
+        let source_param = def
+            .params
+            .iter()
+            .position(|p| p.name == "Source")
+            .expect("the role page must be hoisted as a Source row");
+        let crate::model::cdp::ParamKind::Choice { options, .. } = &def.params[source_param].kind else {
+            panic!("Source is not a choice");
+        };
+        assert_eq!(
+            options,
+            &["First input is the source", "Second input is the source"],
+            "the raw script variables nameA$/nameB$ must not reach the dialog"
+        );
+
+        let state = std::env::temp_dir().join(format!("praat-cc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        let prefs = prepare_prefs_dir(&state, &checkout);
+        let sample_rate = 44_100u32;
+        let len = sample_rate as usize / 2;
+        let clicks: Vec<f32> =
+            (0..len).map(|i| if i % 5_000 == 0 { 0.8 } else { 0.0 }).collect();
+        let tone: Vec<f32> = (0..len)
+            .map(|i| (i as f32 * 330.0 * std::f32::consts::TAU / sample_rate as f32).sin() * 0.4)
+            .collect();
+
+        let mut rendered: Vec<Vec<f32>> = Vec::new();
+        for choice in [0usize, 1] {
+            let mut values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+            values[source_param] = crate::model::cdp::ParamValue::Choice(choice);
+            let planned = crate::model::praat::plan_praat_job_with(
+                def,
+                &values,
+                &checkout,
+                python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref(),
+                2,
+            )
+            .unwrap_or_else(|e| panic!("plan failed: {e}"));
+            let job = PraatJob {
+                id: 0,
+                praat_bin: praat_bin_for(""),
+                inputs: vec![vec![clicks.clone()], vec![tone.clone()]],
+                photo_path: None,
+                planned,
+                input_sample_rate: sample_rate,
+                purpose: JobPurpose::Apply,
+                timeout: Duration::from_secs(60),
+                prefs_dir: prefs.clone(),
+                python_venv_bin: python_venv_bin(&state_dir()),
+            };
+            let out = run(&job).unwrap_or_else(|e| panic!("source {}: {e}", choice + 1));
+            let first = out.result.first().cloned().unwrap_or_default();
+            let peak = first.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+            assert!(peak > 0.01, "source {}: peak {peak} — rendered silence", choice + 1);
+            rendered.push(first);
+        }
+        let _ = std::fs::remove_dir_all(&state);
+        assert!(
+            rendered[0] != rendered[1],
+            "choosing the other Sound as the source rendered identical audio — the Source row \
+             is not reaching the script"
+        );
+    }
+
+    /// The FDN synthesizer's network and excitation settings sit on two `beginPause` pages behind
+    /// `Show parameters`, which the catalog locks on. The smoke sweep only says the run finishes;
+    /// this checks the hoisted values reach the script, by changing one that no form field
+    /// carries and requiring different audio at a fixed random seed.
+    #[test]
+    fn fdn_synthesizer_hoisted_settings_reach_the_script() {
+        require_praat!();
+        let checkout =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/praat-audiotools");
+        if crate::praat::validate_audiotools_dir(&checkout).is_err() {
+            return; // submodule not initialised
+        }
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog
+            .processes
+            .iter()
+            .find(|d| d.key == "praat_generative_synthesis_self_oscillating_fdn_synthesizer")
+            .expect("the FDN synthesizer is not in the catalog");
+        assert!(
+            def.params.iter().all(|p| p.name != "Show parameters"),
+            "the toggle is locked and must not be a dialog row"
+        );
+        let base_delay = def
+            .params
+            .iter()
+            .position(|p| p.name == "Base delay (ms)")
+            .expect("the network page must be hoisted");
+
+        let state = std::env::temp_dir().join(format!("praat-fdn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        let prefs = prepare_prefs_dir(&state, &checkout);
+
+        let mut rendered: Vec<Vec<f32>> = Vec::new();
+        for delay in [None, Some(23.0)] {
+            let mut values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+            if let Some(ms) = delay {
+                values[base_delay] = crate::model::cdp::ParamValue::Number(ms);
+            }
+            let planned = crate::model::praat::plan_praat_job_with(
+                def,
+                &values,
+                &checkout,
+                python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref(),
+                0,
+            )
+            .unwrap_or_else(|e| panic!("plan failed: {e}"));
+            let job = PraatJob {
+                id: 0,
+                praat_bin: praat_bin_for(""),
+                inputs: Vec::new(),
+                photo_path: None,
+                planned,
+                input_sample_rate: 44_100,
+                purpose: JobPurpose::Apply,
+                timeout: Duration::from_secs(60),
+                prefs_dir: prefs.clone(),
+                python_venv_bin: python_venv_bin(&state_dir()),
+            };
+            let out = run(&job).unwrap_or_else(|e| panic!("base delay {delay:?}: {e}"));
+            let first = out.result.first().cloned().unwrap_or_default();
+            let peak = first.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+            assert!(peak > 0.01, "base delay {delay:?}: peak {peak} — rendered silence");
+            rendered.push(first);
+        }
+        let _ = std::fs::remove_dir_all(&state);
+        assert!(
+            rendered[0] != rendered[1],
+            "a different Base delay rendered identical audio — the hoisted pages are not applied"
+        );
+    }
+
     /// sweep does not double in cost.
     #[test]
     fn praat_draw_smoke_test() {

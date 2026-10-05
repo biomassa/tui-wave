@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **praatAudioTools updated to `bb0947e`**, which adds two processes. **Self-Oscillating FDN
+  Synthesizer** (Generative) builds a sound from nothing with a feedback delay network that
+  rings and goes unstable under its own feedback; it needs no buffer open, and its network and
+  excitation settings are in the same dialog. **Creative Convolution** (Reverb) convolves two
+  buffers, one as the source and one as the kernel, with kernel shaping and a wet/dry mix. A
+  "Source" row says which input is the source, first or second. Its kernel and mix settings are
+  in the same dialog and apply on the Custom preset or with Show parameters on, as the author
+  wrote it. That mix page has its own "Wet dry (%)" row below the main one. No existing process
+  changed.
+- **Airwindows updated to the latest upstream**, which adds one effect: **kRockstar2**, a hall
+  reverb that uses a larger feedback matrix than kRockstar. No existing effect changed.
+
 ## 2026-10-05 (2.16.1)
 
 - **praatAudioTools updated to `2c78bca`**, which adds one new process: **Latent Pbind** (py

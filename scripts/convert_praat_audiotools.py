@@ -389,6 +389,23 @@ PAUSE_HOISTS: dict[str, dict] = {
         "lock_on": ["Advanced_settings"],
         "why": "advanced settings page, moved off the main form",
     },
+    # New in the 2026-10-05 bump. Two pages behind `if show_parameters or preset = 21`; the
+    # toggle is a plain form boolean, locked like the other `*_settings` toggles here, so the
+    # pages always apply (the user chose this over leaving presets 1-20 as the author's own).
+    "Generative & Synthesis/Self_Oscillating_FDN_Synthesizer.praat": {
+        "lock_on": ["Show parameters"],
+        "why": "network and excitation/advanced pages, moved off the Show parameters toggle",
+    },
+    # New in the 2026-10-05 bump. Three pages: an unconditional "which Sound is the source?"
+    # page, then kernel and mix pages behind `if show_parameters or preset = 10`. Hoisted without
+    # `lock_on` (the chosen design), so the two detail pages apply only on Custom or with Show
+    # parameters on, as the author wrote it.
+    "Reverb/Creative_Convolution.praat": {
+        "why": "role page (which Sound is the source) plus kernel and mix pages",
+        # The role page's options are the two Sounds' names, `option: nameA$` / `nameB$`. The
+        # driver reads the inputs in order, so option 1 is the first input.
+        "relabel_options": {"Source": ["First input is the source", "Second input is the source"]},
+    },
     # Guarded by `if preset = 1` (Custom). Its `else` branch already assigns the same variables
     # to the same defaults, which is what makes the rewrite verifiable by inspection: the
     # hoisted assignments and the script's own placeholder block must agree.
@@ -1166,11 +1183,23 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
         if isinstance(block["fields"], str):
             return f"block {i} ({block['title']!r}): {block['fields']}"
 
+    problems: list[str] = []
+
     def tag(fields, index):
         out = []
         for param in fields:
             copied = replace(param)
             copied.pause_block = index
+            # A choice whose labels are script variables (`option: nameA$`) reads as raw text
+            # in the dialog. Only the labels change: the rewrite writes the 1-based index, which
+            # is what the script reads, and the label to `<name>$`, which it does not.
+            labels = hoist.get("relabel_options", {}).get(copied.name)
+            if labels is not None and copied.kind == "choice":
+                if len(labels) != len(copied.options):
+                    problems.append(f"{copied.name!r} has {len(copied.options)} options, "
+                                    f"relabel gives {len(labels)} (upstream changed it?)")
+                else:
+                    copied.options = list(labels)
             # A hoisted `Play`/`Draw` toggle is the same hazard as a form one -- `Play` blocks
             # for the audio's real duration -- so it gets the same forced-off default.
             if copied.kind == "toggle" and SILENCE_RE.match(copied.name):
@@ -1183,6 +1212,13 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
         params = list(form_params)
         for i, block in enumerate(blocks):
             params.extend(tag(block["fields"], i))
+        # Loud, like a stale `lock_on`: a relabel for a field the script no longer has means
+        # upstream renamed it, and the labels would be applied to nothing.
+        for name in hoist.get("relabel_options", {}):
+            if not any(p.name == name and p.kind == "choice" for p in params):
+                return f"no hoisted choice named {name!r} to relabel (upstream renamed it?)"
+        if problems:
+            return problems[0]
         return [Process(key=key_for(top, stem), bin=str(rel).replace("\\", "/"),
                         title=title_for(stem), group=GROUP_DIRS[top], params=params,
                         inputs=inputs, description=description,
@@ -2505,6 +2541,12 @@ GENERATORS: dict[str, str] = {
     # `play_result`, which SILENCE_RE already forces off.
     "Generative & Synthesis/Rich_Formant_Grains.praat":
         "synthesises formant grains from its own parameters; reads no input sound",
+    # New 2026-10-05. A delay-network synthesizer that starts from a burst of its own and then
+    # rings by feedback ("random initial delay-line contents; no input at all afterwards"), so
+    # it mentions neither `selected` nor `"Sound"`. See the smoke sweep for the ending check:
+    # the driver takes the highest-numbered Sound left, so it must leave exactly one.
+    "Generative & Synthesis/Self_Oscillating_FDN_Synthesizer.praat":
+        "rings a feedback delay network from its own excitation; reads no input sound",
 }
 
 # The plugin folder whose scripts *synthesise* rather than transform: they build a Sound from
