@@ -50296,6 +50296,7 @@ param_notes = [
   { before = 2, text = "Wet dry: -1 = use the preset's value; 0 = dry only, 100 = wet only" },
   { before = 7, text = "Which of the two selected Sounds is the SOURCE (dry)? The other is the kernel." },
   { before = 10, text = "Stretch is resample-like: 200% = twice as long AND an octave lower" },
+  { before = 15, text = "Mix page: used only on the Custom preset or with Show parameters on" },
 ]
 
 [[process.params]]

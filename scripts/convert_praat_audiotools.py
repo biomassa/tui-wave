@@ -405,6 +405,13 @@ PAUSE_HOISTS: dict[str, dict] = {
         # The role page's options are the two Sounds' names, `option: nameA$` / `nameB$`. The
         # driver reads the inputs in order, so option 1 is the first input.
         "relabel_options": {"Source": ["First input is the source", "Second input is the source"]},
+        # The mix page repeats the form's "Wet dry (%)" label, so the dialog has two rows with one
+        # name. The script does this on purpose (-1 on the form means "use the preset's value"),
+        # and the label cannot change because Praat derives the script variable from it. Say
+        # which row is which instead.
+        "add_notes": {
+            (2, "Wet dry (%)"): "Mix page: used only on the Custom preset or with Show parameters on",
+        },
     },
     # Guarded by `if preset = 1` (Custom). Its `else` branch already assigns the same variables
     # to the same defaults, which is what makes the rewrite verifiable by inspection: the
@@ -1200,6 +1207,12 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
                                     f"relabel gives {len(labels)} (upstream changed it?)")
                 else:
                     copied.options = list(labels)
+            # A note the script does not carry, for a row the dialog would otherwise leave
+            # unexplained. Keyed by (block, name) because a pause field may repeat a form
+            # field's label, and the name alone cannot say which row is meant.
+            extra = hoist.get("add_notes", {}).get((index, copied.name))
+            if extra:
+                copied.notes = [Note(text=extra, section=False), *copied.notes]
             # A hoisted `Play`/`Draw` toggle is the same hazard as a form one -- `Play` blocks
             # for the audio's real duration -- so it gets the same forced-off default.
             if copied.kind == "toggle" and SILENCE_RE.match(copied.name):
@@ -1214,6 +1227,9 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
             params.extend(tag(block["fields"], i))
         # Loud, like a stale `lock_on`: a relabel for a field the script no longer has means
         # upstream renamed it, and the labels would be applied to nothing.
+        for block_index, name in hoist.get("add_notes", {}):
+            if not any(p.name == name and p.pause_block == block_index for p in params):
+                return f"no hoisted field {name!r} in block {block_index} to add a note to"
         for name in hoist.get("relabel_options", {}):
             if not any(p.name == name and p.kind == "choice" for p in params):
                 return f"no hoisted choice named {name!r} to relabel (upstream renamed it?)"
