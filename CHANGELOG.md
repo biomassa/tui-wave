@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-10-05 (2.16.1)
 
 - **praatAudioTools updated to `2c78bca`**, which adds one new process: **Latent Pbind** (py
   group). It learns a small latent space from the selected sound and plays a SuperCollider-style
