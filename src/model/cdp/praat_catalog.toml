@@ -50288,15 +50288,17 @@ category = "praat"
 subcategory = "Reverb"
 short_description = "Creative Convolution — flexible convolution mixing for impulse responses and arbitrary sound kernels"
 description = "Creative Convolution — flexible convolution mixing for impulse responses and arbitrary sound kernels. Pure Praat; the DSP core is Praat's own \"Sounds: Convolve\". Any Sound can be the kernel: a measured or synthetic IR, a noise burst, an instrumental note, a Self-Oscillating FDN rendering. Convolution transfers the temporal and spectral identity of the kernel onto the source.\n\nSignal path: Source -> dry path ------------------------------------+ Kernel -> trim -> stretch -> reverse -> fades -> (stereo | pair) -> pre-delay -> Convolve -> [feedback] -> | RMS match -> wet gain -> width -> pan -> wet -> mixer mixer (linear or equal power) -> end fade -> normalisation -> clipping protection -> output (stereo) Complements IR Analysis (detailed IR preparation); this tool only prepares the kernel as far as convolution needs.\n\nMeasured facts this script relies on (Praat 6.4.06): - Convolve is channel-wise for stereo x stereo (L*L, R*R) and broadcasts a mono input over a stereo one. - Scaling \"sum\" returns unity for a unit impulse (a measured IR keeps its own level); \"integral\" scales by the sample period (1/sr); \"normalize\" and \"peak 0.99\" rescale the result. Default: sum. - Kernel sample k (1-based) acts as a delay of k-1 samples; the wet result is mixed with the dry by sample index (verified: a unit- impulse kernel reproduces the dry signal sample for sample).\n\nKernel Stretch is RESAMPLE-LIKE scaling, not pitch-preserving: the kernel's sampling frequency is reinterpreted (Override sampling frequency) and resampled back to the source rate, so 200% doubles the kernel's duration AND moves its spectrum down an octave; 50% halves the duration and moves it up an octave.\n\nStereo from a mono kernel, without delays or modulation of the source: complementary slow amplitude modulation of the kernel tail, kL = k (1 + d m(t)), kR = k (1 - d m(t)), m = smoothed seeded noise (< 40 Hz). For a MONO source, L + R is exactly twice the mono-kernel response, so that case is mono-compatible by construction. With a stereo source, Praat convolves channel-wise (L*L, R*R), so this exact sum identity does not apply. The first 5 ms of the kernel are left untouched so the attack stays centred. d = 0.5 (Stereo Wet), 0.9 (Wide Wet and the late part of Early Center / Late Wide)."
+praat_form_locks = [["Show parameters", true]]
 input = "dual_wav"
 output = "wav"
 stereo_native = true
 output_is_stereo = false
 param_notes = [
+  { before = 1, text = "No effect in this app: set Wet dry on the mix page further down" },
   { before = 2, text = "Wet dry: -1 = use the preset's value; 0 = dry only, 100 = wet only" },
-  { before = 7, text = "Which of the two selected Sounds is the SOURCE (dry)? The other is the kernel." },
-  { before = 10, text = "Stretch is resample-like: 200% = twice as long AND an octave lower" },
-  { before = 15, text = "Mix page: used only on the Custom preset or with Show parameters on" },
+  { before = 6, text = "Which of the two selected Sounds is the SOURCE (dry)? The other is the kernel." },
+  { before = 9, text = "Stretch is resample-like: 200% = twice as long AND an octave lower" },
+  { before = 14, text = "This is the Wet dry that applies; the main row above does not" },
 ]
 
 [[process.params]]
@@ -50338,13 +50340,6 @@ step = 0.01
 default = -1.0
 exponential = false
 scale = "plain"
-
-[[process.params]]
-name = "Show parameters"
-description = ""
-automatable = false
-kind = "toggle"
-default = false
 
 [[process.params]]
 name = "Draw visualisation"

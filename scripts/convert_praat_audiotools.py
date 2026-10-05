@@ -397,10 +397,13 @@ PAUSE_HOISTS: dict[str, dict] = {
         "why": "network and excitation/advanced pages, moved off the Show parameters toggle",
     },
     # New in the 2026-10-05 bump. Three pages: an unconditional "which Sound is the source?"
-    # page, then kernel and mix pages behind `if show_parameters or preset = 10`. Hoisted without
-    # `lock_on` (the chosen design), so the two detail pages apply only on Custom or with Show
-    # parameters on, as the author wrote it.
+    # page, then kernel and mix pages behind `if show_parameters or preset = 10`. Locked on
+    # `Show parameters` so every row in the dialog always applies: first hoisted without a lock,
+    # the kernel and mix rows were shown but ignored unless Custom or Show parameters was on, and
+    # the user's rule is that every option shown is under their control. The cost is the same as
+    # the FDN's: the page values overwrite what a preset sets, so Preset steers little.
     "Reverb/Creative_Convolution.praat": {
+        "lock_on": ["Show parameters"],
         "why": "role page (which Sound is the source) plus kernel and mix pages",
         # The role page's options are the two Sounds' names, `option: nameA$` / `nameB$`. The
         # driver reads the inputs in order, so option 1 is the first input.
@@ -410,7 +413,12 @@ PAUSE_HOISTS: dict[str, dict] = {
         # and the label cannot change because Praat derives the script variable from it. Say
         # which row is which instead.
         "add_notes": {
-            (2, "Wet dry (%)"): "Mix page: used only on the Custom preset or with Show parameters on",
+            (2, "Wet dry (%)"): "This is the Wet dry that applies; the main row above does not",
+        },
+        # With `Show parameters` locked on, the mix page always runs and assigns the same
+        # variable after the form's row was read, so the form's row can never take effect.
+        "form_notes": {
+            "Wet dry (%)": "No effect in this app: set Wet dry on the mix page further down",
         },
     },
     # Guarded by `if preset = 1` (Custom). Its `else` branch already assigns the same variables
@@ -1219,6 +1227,15 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
                 copied.default = False
             out.append(copied)
         return out
+
+    # A note on one of the *form's* own rows, for a row that the hoist leaves with no effect.
+    # It cannot be dropped: Praat fills a form by position, so removing one shifts every later
+    # argument.
+    for name, text in hoist.get("form_notes", {}).items():
+        target = next((p for p in form_params if p.name == name), None)
+        if target is None:
+            return f"no form parameter named {name!r} to add a note to (upstream renamed it?)"
+        target.notes = [Note(text=text, section=False), *target.notes]
 
     split_on = hoist.get("split_on")
     if not split_on:

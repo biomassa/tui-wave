@@ -1931,11 +1931,16 @@ mod tests {
         else {
             panic!("Creative Convolution is not in the catalog");
         };
-        let source_param = def
-            .params
-            .iter()
-            .position(|p| p.name == "Source")
-            .expect("the role page must be hoisted as a Source row");
+        let at = |name: &str, nth: usize| {
+            def.params
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.name == name)
+                .nth(nth)
+                .unwrap_or_else(|| panic!("{name} #{nth} is not a dialog row"))
+                .0
+        };
+        let source_param = at("Source", 0);
         let crate::model::cdp::ParamKind::Choice { options, .. } = &def.params[source_param].kind else {
             panic!("Source is not a choice");
         };
@@ -1944,6 +1949,13 @@ mod tests {
             &["First input is the source", "Second input is the source"],
             "the raw script variables nameA$/nameB$ must not reach the dialog"
         );
+        assert!(
+            def.params.iter().all(|p| p.name != "Show parameters"),
+            "the toggle is locked and must not be a dialog row"
+        );
+        let kernel_stretch = at("Kernel stretch (%)", 0);
+        let form_wet_dry = at("Wet dry (%)", 0);
+        let mix_wet_dry = at("Wet dry (%)", 1);
 
         let state = std::env::temp_dir().join(format!("praat-cc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&state);
@@ -1956,10 +1968,10 @@ mod tests {
             .map(|i| (i as f32 * 330.0 * std::f32::consts::TAU / sample_rate as f32).sin() * 0.4)
             .collect();
 
-        let mut rendered: Vec<Vec<f32>> = Vec::new();
-        for choice in [0usize, 1] {
+        use crate::model::cdp::ParamValue;
+        let render = |label: &str, edit: &dyn Fn(&mut Vec<ParamValue>)| -> Vec<f32> {
             let mut values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
-            values[source_param] = crate::model::cdp::ParamValue::Choice(choice);
+            edit(&mut values);
             let planned = crate::model::praat::plan_praat_job_with(
                 def,
                 &values,
@@ -1967,7 +1979,7 @@ mod tests {
                 python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref(),
                 2,
             )
-            .unwrap_or_else(|e| panic!("plan failed: {e}"));
+            .unwrap_or_else(|e| panic!("{label}: plan failed: {e}"));
             let job = PraatJob {
                 id: 0,
                 praat_bin: praat_bin_for(""),
@@ -1980,17 +1992,28 @@ mod tests {
                 prefs_dir: prefs.clone(),
                 python_venv_bin: python_venv_bin(&state_dir()),
             };
-            let out = run(&job).unwrap_or_else(|e| panic!("source {}: {e}", choice + 1));
+            let out = run(&job).unwrap_or_else(|e| panic!("{label}: {e}"));
             let first = out.result.first().cloned().unwrap_or_default();
             let peak = first.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-            assert!(peak > 0.01, "source {}: peak {peak} — rendered silence", choice + 1);
-            rendered.push(first);
-        }
+            assert!(peak > 0.01, "{label}: peak {peak} — rendered silence");
+            first
+        };
+
+        let base = render("base", &|_| {});
+        let swapped = render("source 2", &|v| v[source_param] = ParamValue::Choice(1));
+        // The kernel and mix pages sit behind `Show parameters`, locked on, so these rows must
+        // act on a default preset instead of being shown and ignored.
+        let stretched = render("kernel stretch", &|v| v[kernel_stretch] = ParamValue::Number(200.0));
+        let mix_edited = render("mix wet dry", &|v| v[mix_wet_dry] = ParamValue::Number(90.0));
+        let form_edited = render("form wet dry", &|v| v[form_wet_dry] = ParamValue::Number(90.0));
         let _ = std::fs::remove_dir_all(&state);
+
+        assert!(base != swapped, "the other Sound as source rendered identical audio");
+        assert!(base != stretched, "Kernel stretch is shown but has no effect");
+        assert!(base != mix_edited, "the mix page's Wet dry is shown but has no effect");
         assert!(
-            rendered[0] != rendered[1],
-            "choosing the other Sound as the source rendered identical audio — the Source row \
-             is not reaching the script"
+            base == form_edited,
+            "the main Wet dry row now has an effect, so its 'No effect' note is wrong"
         );
     }
 
