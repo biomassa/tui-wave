@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-10-06 (2.16.1)
 
 - **praatAudioTools updated to `bb0947e`**, which adds two processes. **Self-Oscillating FDN
   Synthesizer** (Generative) builds a sound from nothing with a feedback delay network that
@@ -14,8 +14,6 @@
   would set. No existing process changed.
 - **Airwindows updated to the latest upstream**, which adds one effect: **kRockstar2**, a hall
   reverb that uses a larger feedback matrix than kRockstar. No existing effect changed.
-
-## 2026-10-05 (2.16.1)
 
 - **praatAudioTools updated to `2c78bca`**, which adds one new process: **Latent Pbind** (py
   group). It learns a small latent space from the selected sound and plays a SuperCollider-style
