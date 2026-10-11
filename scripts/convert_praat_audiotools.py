@@ -90,6 +90,12 @@ PY_ALLOWED_IMPORTS = {
     "numpy",
     "scipy",
     "soundfile",
+    # `rtmidi` (python-rtmidi): `performance_launcher.py` imports it inside a `try`/`except` for
+    # optional MIDI keyboard triggering ("the launcher must keep working without it"), so a
+    # missing package turns MIDI off and nothing else. Allowed, not installed: `setup.sh` does
+    # not offer it. Without this entry, the 2026-10-10 version of that helper dropped Performance
+    # Launcher from the catalog as `out_of_scope`.
+    "rtmidi",
     # The optional extras `setup.sh` offers, needed only by the interactive editors:
     # `sounddevice` for Arranger and Performance Launcher, `PIL` (pillow) for Spectral Eraser.
     # Listing them here means those three appear in the browser whether or not the extras were
@@ -420,6 +426,17 @@ PAUSE_HOISTS: dict[str, dict] = {
         "form_notes": {
             "Wet dry (%)": "No effect in this app: set Wet dry on the mix page further down",
         },
+    },
+    # New in the 2026-10-11 bump. Both put their settings pages behind a plain form checkbox
+    # (`if show_details or preset = 7`, `if show_parameters or preset = 5`), locked on like the
+    # FDN and Creative Convolution so every row in the dialog applies.
+    "AI & Adaptive/Anti_Similarity_Spectral_Resistance.praat": {
+        "lock_on": ["Show details"],
+        "why": "analysis/behaviour and temporal/spectral pages, moved off the Show details toggle",
+    },
+    "Reverb/Stereo_Velvet_Noise_Reverb.praat": {
+        "lock_on": ["Show parameters"],
+        "why": "parameters page, moved off the Show parameters toggle",
     },
     # Guarded by `if preset = 1` (Custom). Its `else` branch already assigns the same variables
     # to the same defaults, which is what makes the rewrite verifiable by inspection: the

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **praatAudioTools updated to `e202dbd`**, which adds two processes. **Anti-Similarity Spectral
+  Resistance** (AI & Adaptive) works against what makes a sound recognisable, in four modes:
+  carving away its most stable spectral regions, fragmenting it in time, drifting its spectrum,
+  or both. **Stereo Velvet Noise Reverb** (Reverb) is a reverb built from sparse velvet-noise
+  pulses, with a separate decay for low and high frequencies. The settings pages of both are in
+  the same dialog and always apply, so the Preset row steers little. **Performance Launcher**
+  gained optional MIDI keyboard triggering; the launcher still works without the Python package
+  `python-rtmidi`, and MIDI is simply off. tui-wave does not install it. If you want MIDI, add it
+  with `~/.config/tui-wave/praat/pyenv/bin/pip install python-rtmidi`. A third new script, Spatial
+  Dramaturgy Composer, is not in the browser yet.
+
 ## 2026-10-06 (2.16.1)
 
 - **praatAudioTools updated to `bb0947e`**, which adds two processes. **Self-Oscillating FDN

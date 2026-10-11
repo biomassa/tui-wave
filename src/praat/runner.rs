@@ -2088,6 +2088,106 @@ mod tests {
         );
     }
 
+    /// Scripts whose settings pages were hoisted behind a locked `Show details` /
+    /// `Show parameters` checkbox. The smoke sweep says the run finishes; this says a value that
+    /// lives only on a hoisted page reaches the script, by changing it and requiring different
+    /// audio from the same input.
+    #[test]
+    fn hoisted_page_settings_reach_the_script_for_the_2026_10_11_scripts() {
+        require_praat!();
+        let checkout =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/praat-audiotools");
+        if crate::praat::validate_audiotools_dir(&checkout).is_err() {
+            return; // submodule not initialised
+        }
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let state = std::env::temp_dir().join(format!("praat-hoist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        let prefs = prepare_prefs_dir(&state, &checkout);
+        let sample_rate = 44_100u32;
+        let tone: Vec<f32> = (0..sample_rate as usize)
+            .map(|i| {
+                let t = i as f32 / sample_rate as f32;
+                (t * 220.0 * std::f32::consts::TAU).sin() * 0.4 * (1.0 + (t * 3.0 * std::f32::consts::TAU).sin()) / 2.0
+                    + (t * 1_300.0 * std::f32::consts::TAU).sin() * 0.1
+            })
+            .collect();
+
+        // The optional pair selects a processing mode first: Anti-Similarity's spectral
+        // settings act only in the modes that name them (C for instability). Option 0 of the menu
+        // is "From preset", so A is 1 and C is 3.
+        for (key, mode, param, changed) in [
+            ("praat_reverb_stereo_velvet_noise_reverb", None, "RT60 (s)", 0.5),
+            (
+                "praat_ai_adaptive_anti_similarity_spectral_resistance",
+                Some(("Processing mode", 3usize)),
+                "Instability depth (dB)",
+                12.0,
+            ),
+        ] {
+            let def = catalog
+                .processes
+                .iter()
+                .find(|d| d.key == key)
+                .unwrap_or_else(|| panic!("{key} is not in the catalog"));
+            assert!(
+                def.params.iter().all(|p| p.name != "Show details" && p.name != "Show parameters"),
+                "{key}: the toggle is locked and must not be a dialog row"
+            );
+            let idx = def
+                .params
+                .iter()
+                .position(|p| p.name == param && p.praat_pause_block.is_some())
+                .unwrap_or_else(|| panic!("{key}: {param} is not a hoisted row"));
+            let mut rendered: Vec<Vec<f32>> = Vec::new();
+            for edit in [false, true] {
+                let mut values: Vec<_> =
+                    def.params.iter().map(|p| p.kind.default_value()).collect();
+                if let Some((mode_param, option)) = mode {
+                    let at = def
+                        .params
+                        .iter()
+                        .position(|p| p.name == mode_param)
+                        .unwrap_or_else(|| panic!("{key}: no {mode_param} row"));
+                    values[at] = crate::model::cdp::ParamValue::Choice(option);
+                }
+                if edit {
+                    values[idx] = crate::model::cdp::ParamValue::Number(changed);
+                }
+                let planned = crate::model::praat::plan_praat_job_with(
+                    def,
+                    &values,
+                    &checkout,
+                    python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref(),
+                    1,
+                )
+                .unwrap_or_else(|e| panic!("{key}: plan failed: {e}"));
+                let job = PraatJob {
+                    id: 0,
+                    praat_bin: praat_bin_for(""),
+                    inputs: vec![vec![tone.clone()]],
+                    photo_path: None,
+                    planned,
+                    input_sample_rate: sample_rate,
+                    purpose: JobPurpose::Apply,
+                    timeout: Duration::from_secs(60),
+                    prefs_dir: prefs.clone(),
+                    python_venv_bin: python_venv_bin(&state_dir()),
+                };
+                let out = run(&job).unwrap_or_else(|e| panic!("{key} edit={edit}: {e}"));
+                let first = out.result.first().cloned().unwrap_or_default();
+                let peak = first.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+                assert!(peak > 0.001, "{key} edit={edit}: peak {peak} — rendered silence");
+                rendered.push(first);
+            }
+            assert!(
+                rendered[0] != rendered[1],
+                "{key}: changing {param} rendered identical audio — the hoisted page is not applied"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
     /// sweep does not double in cost.
     #[test]
     fn praat_draw_smoke_test() {
