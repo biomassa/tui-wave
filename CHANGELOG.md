@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-10-11 (2.16.2)
 
 - **praatAudioTools updated to `e202dbd`**, which adds two processes. **Anti-Similarity Spectral
   Resistance** (AI & Adaptive) works against what makes a sound recognisable, in four modes:
