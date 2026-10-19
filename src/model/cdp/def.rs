@@ -997,6 +997,16 @@ pub struct ScriptPreset {
     pub values: Vec<f64>,
 }
 
+/// The 0-based option a preset table value names for a choice row, if it names one.
+///
+/// A table holds the script's own numbers, and Praat numbers an option menu from 1. Anything
+/// that is not a whole number inside that range is not an option, so the row is left as it is
+/// rather than guessed at.
+pub fn script_preset_choice(value: f64, options: usize) -> Option<usize> {
+    (value.fract() == 0.0 && value >= 1.0 && (value as usize) <= options)
+        .then(|| value as usize - 1)
+}
+
 impl ScriptPreset {
     /// The (param index, value) pairs this preset sets, ignoring any trailing entry that has
     /// no counterpart — a defensive truncation so a hand-edited user catalog with mismatched

@@ -1526,7 +1526,7 @@ def mentions_variable(code: str, variable: str) -> bool:
     return pattern.search(code) is not None
 
 
-PAUSE_FIELD_DEFAULT_RE = re.compile(r"\"([^\"]+)\"\s*,\s*([A-Za-z_]\w*\$?)\s*$")
+PAUSE_FIELD_DEFAULT_RE = re.compile(r"\"([^\"]+)\"\s*,\s*(.+?)\s*$")
 
 
 def field_default_variable(label: str, source: str) -> str | None:
@@ -1551,7 +1551,13 @@ def field_default_variable(label: str, source: str) -> str | None:
             continue
         match = PAUSE_FIELD_DEFAULT_RE.search(line.strip())
         if match and match.group(1) == label:
-            return match.group(2)
+            # `string$ (x)` / `fixed$(x, 2)` seed a numeric field from `x` the same way a bare
+            # `x` seeds a choice or a boolean, so they name the same variable. Anything that
+            # does not reduce to one bare identifier (arithmetic, a call) names none.
+            seed = unwrap_string_cast(match.group(2))
+            if re.fullmatch(r"[A-Za-z_]\w*\$?", seed):
+                return seed
+            return None
     return None
 
 
@@ -1681,6 +1687,194 @@ def preset_coverage_gap(proc: "Process", source: str) -> str | None:
     return "; ".join(problems)
 
 
+class _Unevaluable(Exception):
+    """A preset procedure uses something the evaluator below does not model."""
+
+
+_PROC_HEAD_RE = re.compile(r"^procedure[ \t]+(\w+)[ \t]*:[ \t]*(\.\w+)[ \t]*$", re.M)
+_PROC_CALL_RE = re.compile(r"^[ \t]*@(\w+)[ \t]*:[ \t]*(\w+)[ \t]*$", re.M)
+_NUMERIC_ASSIGN_RE = re.compile(r"^([A-Za-z_]\w*)\s*=\s*(-?\d+(?:\.\d+)?)$")
+_ANY_ASSIGN_RE = re.compile(r"^([A-Za-z_][\w.]*\$?)\s*=\s*\S")
+
+
+def preset_procedure(source: str, selector_names: set[str]):
+    """`(parameter, body_lines)` of the procedure the script calls with its preset selector.
+
+    Four of the 2026-10 praatAudioTools scripts keep their presets in
+    `procedure applyPreset: .p ... endproc` and call it as `@applyPreset: preset`, instead of
+    spelling the chain out at the top level where `extract_script_presets` reads it. Only a call
+    whose single argument is exactly the selector counts; anything else is not "the preset".
+    """
+    for call in _PROC_CALL_RE.finditer(source):
+        name, argument = call.groups()
+        if argument not in selector_names:
+            continue
+        head = next((h for h in _PROC_HEAD_RE.finditer(source) if h.group(1) == name), None)
+        if head is None:
+            continue
+        end = re.compile(r"^endproc\b", re.M).search(source, head.end())
+        if end is None:
+            continue
+        return head.group(2), source[head.end():end.start()].splitlines()
+    return None
+
+
+_COND_TERM = r"\(?\s*{p}\s*(=|<>|<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)\s*\)?"
+
+
+def evaluate_preset_procedure(lines: list[str], parameter: str, option: int):
+    """Run a preset procedure for `option`; every numeric variable it assigns, with its value.
+
+    A deliberately small interpreter: numeric-literal assignments, and `if`/`elsif`/`elif`/`else`
+    chains whose conditions compare the procedure's own parameter with a literal, joined by `or`
+    and `and` (`and` binds tighter, as in Praat). Anything else raises `_Unevaluable`, so a script
+    whose presets are more than that is skipped rather than half-read. Reading the *whole*
+    procedure, not just each branch's own assignments, is the point: these procedures set shared
+    defaults before the chain and let a branch override them, so one branch alone is not what
+    the preset sets.
+
+    A value computed by an expression is `None`: the variable is assigned, to something this
+    cannot know.
+    """
+    term = re.compile(_COND_TERM.format(p=re.escape(parameter)))
+
+    def holds(condition: str) -> bool:
+        for conjunction in re.split(r"\s+or\s+", condition.strip()):
+            result = True
+            for part in re.split(r"\s+and\s+", conjunction):
+                match = term.fullmatch(part.strip())
+                if not match:
+                    raise _Unevaluable(condition)
+                op, literal = match.group(1), float(match.group(2))
+                result = result and {
+                    "=": option == literal, "<>": option != literal, "<=": option <= literal,
+                    ">=": option >= literal, "<": option < literal, ">": option > literal,
+                }[op]
+            if result:
+                return True
+        return False
+
+    env: dict = {}
+    # One frame per open `if`: whether the enclosing code is live, and whether a branch of this
+    # chain has already been taken.
+    frames: list[list[bool]] = []
+    active = True
+    for raw in lines:
+        line = re.sub(r"\s+#.*$", "", raw).strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("if "):
+            taken = active and holds(line[3:])
+            frames.append([active, taken])
+            active = taken
+        elif line.startswith(("elsif ", "elif ")):
+            if not frames:
+                raise _Unevaluable(line)
+            parent, taken = frames[-1]
+            now = parent and not taken and holds(line.split(None, 1)[1])
+            frames[-1][1] = taken or now
+            active = now
+        elif line == "else":
+            if not frames:
+                raise _Unevaluable(line)
+            parent, taken = frames[-1]
+            active = parent and not taken
+            frames[-1][1] = True
+        elif line == "endif":
+            if not frames:
+                raise _Unevaluable(line)
+            active = frames.pop()[0]
+        elif (assign := _NUMERIC_ASSIGN_RE.match(line)):
+            if active:
+                env[assign.group(1)] = float(assign.group(2))
+        elif (assign := _ANY_ASSIGN_RE.match(line)):
+            # `name$ = ...` is text and never a row; a numeric expression is unknowable here.
+            if active and not assign.group(1).endswith("$"):
+                env[assign.group(1)] = None
+        else:
+            raise _Unevaluable(line)
+    if frames:
+        raise _Unevaluable("unterminated if")
+    return env
+
+
+def procedure_presets(source, params, preset_index, by_variable, selector_names, custom):
+    """`{option: {param_index: value}}` from a `procedure ...: .p` preset, or None.
+
+    Returns None rather than a partial table whenever the procedure is not fully understood, or
+    assigns a row from a computed value: a table that is nearly right makes the dialog assert
+    something the run does not do, which is worse than no table.
+    """
+    found = preset_procedure(source, selector_names)
+    if found is None:
+        return None
+    parameter, lines = found
+    # A preset assigns the variable that *seeds* a row (`rt60`), which is not the one Praat
+    # derives from the row's label (`rT60`) -- the script copies one into the other after the
+    # page. `by_variable` carries the derived names, so add the seeds, and let them win.
+    by_variable = dict(by_variable)
+    for index, param in enumerate(params):
+        if param.pause_block is not None:
+            seed = field_default_variable(param.name, source)
+            if seed:
+                by_variable[seed] = index
+    options = params[preset_index].options
+    blocks: dict[int, dict[int, float]] = {}
+    try:
+        for option in range(1, len(options) + 1):
+            if option - 1 == custom:
+                continue
+            env = evaluate_preset_procedure(lines, parameter, option)
+            row: dict[int, float] = {}
+            for variable, value in env.items():
+                target = by_variable.get(variable)
+                if target is None or target == preset_index:
+                    continue
+                if value is None:
+                    return None
+                row[target] = value
+            if row:
+                blocks[option] = row
+    except _Unevaluable:
+        return None
+    return blocks or None
+
+
+def fill_default_preset_rows(proc: "Process") -> None:
+    """Open a hoisted dialog on the values its default preset actually sets.
+
+    A hoisted row overrides the script's own preset at run time (the rewrite assigns it after
+    the preset code), and the dialog opens on its default preset. If the rows then hold the
+    script's plain base values instead, what the menu says and what runs disagree from the first
+    frame: Anti-Similarity's rows were all zero under "Fragile Continuity", so every setting did
+    nothing, and the FDN's decayed under "Self-Oscillating".
+
+    Only hoisted rows, since the script re-applies the preset to the form's own rows itself, and
+    only when the default is a real preset: Custom is defined by the rows. A toggle that
+    `SILENCE_RE` keeps off stays off however a preset sets it, as on the form.
+    """
+    if proc.preset_param is None:
+        return
+    preset = proc.params[proc.preset_param]
+    default = int(preset.default or 0)
+    if default == proc.preset_custom_option:
+        return
+    table = proc.script_presets.get(default + 1)
+    if not table:
+        return
+    for index, value in table.items():
+        row = proc.params[index]
+        if row.pause_block is None:
+            continue
+        if row.kind == "number":
+            row.default = value
+        elif row.kind == "toggle":
+            if not SILENCE_RE.match(row.name):
+                row.default = value != 0
+        elif row.kind == "choice" and float(value).is_integer() and 1 <= value <= len(row.options):
+            row.default = int(value) - 1
+
+
 def extract_script_presets(source: str, params: list[Param]):
     """Return `(preset_index, custom_option, {option_index: {param_index: value}})`, or None.
 
@@ -1786,14 +1980,17 @@ def extract_script_presets(source: str, params: list[Param]):
                 blocks[current][target] = float(assignment.group(2))
 
     blocks = {option: values for option, values in blocks.items() if values}
-    if not blocks:
-        return None
-
     options = params[preset_index].options
     custom = next(
         (i for i, label in enumerate(options) if CUSTOM_OPTION_RE.search(label)),
         0,
     )
+    if not blocks:
+        # Presets kept in a `procedure applyPreset: .p` instead of a top-level chain.
+        blocks = procedure_presets(source, params, preset_index, by_variable, selector_names,
+                                   custom)
+        if not blocks:
+            return None
     return preset_index, custom, blocks
 
 
@@ -3347,6 +3544,7 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
             proc.preset_param = index
             proc.preset_custom_option = custom
             proc.script_presets = blocks
+            fill_default_preset_rows(proc)
             preset_rows.append(proc.params[index])
 
         # Renamed *after* every extraction, which maps assignments back to fields by their
@@ -3922,6 +4120,62 @@ def selftest() -> int:
     check("non-folder path still caught",
           bool(path_rule.search(without_ignored_paths('    sentence: "Model", "C:\\m.ts"\n'))),
           True)
+
+    # --- preset procedures ----------------------------------------------------------------
+    # `procedure applyPreset: .p`, called as `@applyPreset: preset`. Shared defaults come first
+    # and a branch overrides them; an `or` condition and a `>=` guard both occur in the real
+    # scripts. Reading one branch alone would drop the shared defaults.
+    body = [
+        "    width = 50            # shared default",
+        "    mode = 1",
+        "    if .p >= 3",
+        "        mode = 2",
+        "    endif",
+        "    if .p = 1",
+        "        depth = 6",
+        "        width = 70",
+        "    elsif .p = 2 or .p = 4",
+        "        depth = 9",
+        "    else",
+        "        depth = 0",
+        "    endif",
+    ]
+    found = preset_procedure("@applyPreset: preset\nprocedure applyPreset: .p\n"
+                             + "\n".join(body) + "\nendproc\n", {"preset"})
+    check("preset procedure found", found is not None and found[0], ".p")
+    if found:
+        for option, want in [
+            (1, {"width": 70.0, "mode": 1.0, "depth": 6.0}),
+            (2, {"width": 50.0, "mode": 1.0, "depth": 9.0}),
+            (3, {"width": 50.0, "mode": 2.0, "depth": 0.0}),
+            (4, {"width": 50.0, "mode": 2.0, "depth": 9.0}),
+        ]:
+            check(f"preset procedure, option {option}",
+                  evaluate_preset_procedure(found[1], ".p", option), want)
+    # A condition about anything but the selector, or a statement it does not model, is a
+    # refusal and not a guess.
+    for bad, label in [
+        (["if other = 1", "x = 2", "endif"], "condition on another variable"),
+        (["x = 2", "@helper: .p"], "a call it cannot follow"),
+        (["if .p = 1", "x = 2"], "unterminated if"),
+    ]:
+        try:
+            evaluate_preset_procedure(bad, ".p", 1)
+            failures.append(f"preset procedure should refuse: {label}")
+        except _Unevaluable:
+            pass
+    # A computed value is assigned but unknowable, and a text variable is never a row.
+    check("preset procedure, computed value",
+          evaluate_preset_procedure(["x = y * 2", "name$ = \"a\""], ".p", 1), {"x": None})
+
+    # --- pause-field seeds ----------------------------------------------------------------
+    # `string$ (x)` seeds a numeric row from `x` exactly as a bare `x` seeds a choice, and the
+    # preset assigns `x`, not the label-derived name. A space before the parenthesis is legal.
+    seeded = 'beginPause: "P"\n    positive: "RT60 (s)", string$ (rt60)\n    boolean: "Reverse", rev\n'
+    check("seed: string$ with a space", field_default_variable("RT60 (s)", seeded), "rt60")
+    check("seed: bare identifier", field_default_variable("Reverse", seeded), "rev")
+    check("seed: an expression names no variable",
+          field_default_variable("X", 'real: "X", a + b\n'), None)
 
     for failure in failures:
         print(f"  FAIL  {failure}")

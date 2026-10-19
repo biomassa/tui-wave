@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **Anti-Similarity Spectral Resistance and Self-Oscillating FDN Synthesizer now do something at
+  their default settings.** Both came in 2.16.1 and 2.16.2 with their settings pages in the
+  dialog, and those rows started from plain base values that override the Preset menu. For
+  Anti-Similarity every depth row started at zero, so the output was the input, exactly; for the
+  FDN the rows decayed, so it gave a faint click and nothing else. Both now open on the values of
+  their default preset (Fragile Continuity, Self-Oscillating); the FDN is about twenty times
+  louder at its defaults and holds its level. Choosing another Preset fills every row with that
+  preset's values, and editing a row switches the Preset to Custom, as before.
+- **Presets now fill option menus, not only number and checkbox rows.** For example the FDN's
+  excitation type, nonlinearity and feedback matrix. Before, choosing a preset left them on the
+  old option while the run used them. This applies to every process with an Internal Preset row,
+  in the params dialog and in the chain editor.
+- **Processes with settings pages in the dialog open on their default preset.** Seven more were
+  affected: Creative Convolution, Stereo Velvet Noise Reverb, Self-Similarity Spectral
+  Resynthesis (2), Grisey Spectral Becoming Engine, Kotoński FSM Event Generator, Pulsar
+  Synthesis Engine and Jitter Shimmer Formant Mapping. The change is small for most. Stereo Velvet Noise Reverb is the clearest: it now opens on its
+  default preset, Small Bright Room (0.6 s decay, 25% wet), instead of a 2 s decay at 35% wet. Pick
+  another Preset, or edit a row, for a longer tail.
+
 - **praatAudioTools updated to `acf29bf`**, which adds **Intelligent Mastering Maximizer**
   (Dynamics & Envelope). It measures the loudness of the sound, then renders a lookahead peak
   limiter to a loudness target (-18 to -10 LUFS or your own), with a true-peak ceiling. Its seven

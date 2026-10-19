@@ -1371,12 +1371,18 @@ mod tests {
         // minutes of wall clock and plays audio the whole time, so re-testing one group after
         // touching it was otherwise all-or-nothing.
         let filter = std::env::var("TUI_WAVE_PRAAT_SMOKE_FILTER").unwrap_or_default();
+        // `TUI_WAVE_PRAAT_AUDIT=hoisted` narrows the audit to the processes whose settings pages
+        // were hoisted into the dialog, the only ones a hoisted row can override a preset in.
+        let hoisted_only = std::env::var("TUI_WAVE_PRAAT_AUDIT").ok().as_deref() == Some("hoisted");
         let matches = |d: &crate::model::cdp::ProcessDef| {
             d.backend() == crate::model::cdp::def::Backend::Praat
                 && (filter.is_empty() || d.key.contains(&filter))
+                && (!hoisted_only || d.params.iter().any(|p| p.praat_pause_block.is_some()))
         };
 
         let mut failures: Vec<String> = Vec::new();
+        let audit = matches!(std::env::var("TUI_WAVE_PRAAT_AUDIT").ok().as_deref(), Some("1") | Some("hoisted"));
+        let mut audit_findings: Vec<String> = Vec::new();
         let mut ran = 0usize;
         let total = catalog.processes.iter().filter(|d| matches(d)).count();
 
@@ -1545,6 +1551,137 @@ mod tests {
                 ran += 1;
                 let outcome = run(&job);
                 let elapsed = started.elapsed();
+                // `TUI_WAVE_PRAAT_AUDIT=1`: also judge what the defaults *sound* like. The sweep
+                // above only asks whether a run finishes; a dialog whose defaults reproduce the
+                // input, or whose rows override the script's presets with inert values, finishes
+                // fine and does nothing. Mono only, to keep the extra runs to one per entry.
+                if audit && width == "mono" {
+                    if let Ok(out) = &outcome {
+                        // One render of this entry with `vals`, on the same input as the sweep run.
+                        let render = |vals: &Vec<crate::model::cdp::ParamValue>| -> Option<Vec<Vec<f32>>> {
+                            let planned = crate::model::praat::plan_praat_job_with(
+                                def,
+                                vals,
+                                &checkout,
+                                python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref(),
+                                1,
+                            )
+                            .ok()?;
+                            let job = PraatJob {
+                                id: 0,
+                                praat_bin: praat_bin_for(""),
+                                inputs: vec![width_channels.clone(); input_count],
+                                photo_path: planned.photo_input.then(|| photo.clone()),
+                                planned,
+                                input_sample_rate: sample_rate,
+                                purpose: JobPurpose::Apply,
+                                timeout: budget,
+                                prefs_dir: prefs.clone(),
+                                python_venv_bin: python_venv_bin(&state_dir()),
+                            };
+                            run(&job).ok().map(|o| o.result)
+                        };
+                        let first = out.result.first().cloned().unwrap_or_default();
+                        let peak = first.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+                        let input = &width_channels[0];
+                        let identical = !input.is_empty()
+                            && first.len() == input.len()
+                            && first.iter().zip(input).all(|(a, b)| (a - b).abs() < 1e-6);
+                        if peak < 1e-4 {
+                            audit_findings.push(format!("{}: silent output (peak {peak:.1e})", def.key));
+                        } else if identical && input_count > 0 {
+                            audit_findings.push(format!("{}: output is identical to the input", def.key));
+                        }
+                        let hoisted = def.params.iter().any(|p| p.praat_pause_block.is_some());
+                        if let (true, Some(pp)) = (hoisted, def.preset_param) {
+                            if let crate::model::cdp::ParamKind::Choice { options, default } =
+                                &def.params[pp].kind
+                            {
+                                // Two renders of the *same* values tell whether the entry is
+                                // deterministic at all; a random one cannot be compared run to run.
+                                let repeat = render(&values);
+                                let deterministic = repeat.as_ref().map(|r| r.first()) == Some(out.result.first());
+                                // Open-state check: the dialog opens on its default preset with the
+                                // rows at their catalog defaults, and a hoisted row overrides the
+                                // preset at run time. If filling the rows from the default preset's
+                                // own table changes the audio, the menu and the run disagree at open.
+                                if *default != def.preset_custom_option {
+                                    if let Some(table) =
+                                        def.script_presets.iter().find(|t| t.option == *default)
+                                    {
+                                        let mut filled = values.clone();
+                                        for (i, v) in table.pairs() {
+                                            match &def.params[i].kind {
+                                                crate::model::cdp::ParamKind::Number { .. } => {
+                                                    filled[i] = crate::model::cdp::ParamValue::Number(v)
+                                                }
+                                                crate::model::cdp::ParamKind::Toggle { .. } => {
+                                                    filled[i] = crate::model::cdp::ParamValue::Toggle(v != 0.0)
+                                                }
+                                                crate::model::cdp::ParamKind::Choice { options, .. } => {
+                                                    let k = (v as usize).saturating_sub(1);
+                                                    if k < options.len() {
+                                                        filled[i] = crate::model::cdp::ParamValue::Choice(k)
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        if filled == values {
+                                            audit_findings.push(format!("{}: open-state ok (rows already equal the table)", def.key));
+                                        } else if !deterministic {
+                                            audit_findings.push(format!("{}: open-state INCONCLUSIVE (two identical runs differ: random output)", def.key));
+                                        } else if let Some(r3) = render(&filled) {
+                                            if r3.first() != out.result.first() {
+                                                audit_findings.push(format!("{}: OPEN-STATE the rows at open do not match the default preset (filling them from its table changes the audio)", def.key));
+                                            } else {
+                                                audit_findings.push(format!("{}: open-state ok (filled rows sound identical)", def.key));
+                                            }
+                                        }
+                                    }
+                                }
+                                // Presets that the hoisted rows override: another preset must
+                                // change the audio when the rows are left at their defaults.
+                                let other = (0..options.len())
+                                    .find(|o| o != default && *o != def.preset_custom_option);
+                                if let (Some(other), true) = (other, deterministic) {
+                                    let mut values2 = values.clone();
+                                    values2[pp] = crate::model::cdp::ParamValue::Choice(other);
+                                    // As the dialog does when the row is cycled: the other
+                                    // preset's table is written into the rows.
+                                    if let Some(table) =
+                                        def.script_presets.iter().find(|t| t.option == other)
+                                    {
+                                        for (i, v) in table.pairs() {
+                                            match &def.params[i].kind {
+                                                crate::model::cdp::ParamKind::Number { .. } => {
+                                                    values2[i] = crate::model::cdp::ParamValue::Number(v)
+                                                }
+                                                crate::model::cdp::ParamKind::Toggle { .. } => {
+                                                    values2[i] = crate::model::cdp::ParamValue::Toggle(v != 0.0)
+                                                }
+                                                crate::model::cdp::ParamKind::Choice { options, .. } => {
+                                                    if let Some(k) = crate::model::cdp::def::script_preset_choice(v, options.len()) {
+                                                        values2[i] = crate::model::cdp::ParamValue::Choice(k)
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                    if let Some(r2) = render(&values2) {
+                                        if r2.first() == out.result.first() {
+                                            audit_findings.push(format!(
+                                                "{}: switching Preset ({} -> {}) changes nothing; the hoisted rows override it",
+                                                def.key, options[*default], options[other]
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if let Err(err) = outcome {
                     let detail = match &err {
                         PraatError::NonZeroExit { output, .. } => output
@@ -1566,6 +1703,12 @@ mod tests {
         sweep_log!("praat smoke: {} ran, {} failed\n", ran, failures.len());
         for failure in &failures {
             sweep_log!("  {failure}\n");
+        }
+        if audit {
+            sweep_log!("praat audit: {} finding(s)\n", audit_findings.len());
+            for finding in &audit_findings {
+                sweep_log!("  AUDIT {finding}\n");
+            }
         }
         assert!(ran > 0, "no Praat entries found in the catalog");
     }
@@ -2190,6 +2333,105 @@ mod tests {
                 "{key}: changing {param} rendered identical audio — the hoisted page is not applied"
             );
         }
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    /// Two scripts shipped doing nothing at their defaults, because their hoisted rows held the
+    /// script's plain base values and the rows override the preset the menu names:
+    /// Anti-Similarity returned the input byte for byte, and the FDN clicked and faded. Both
+    /// must now do what their default preset does. And choosing another preset, which fills the
+    /// rows the way the dialog does, must change the audio, or the menu steers nothing.
+    #[test]
+    fn hoisted_defaults_do_what_the_default_preset_does() {
+        require_praat!();
+        let checkout =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/praat-audiotools");
+        if crate::praat::validate_audiotools_dir(&checkout).is_err() {
+            return; // submodule not initialised
+        }
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let state = std::env::temp_dir().join(format!("praat-defaults-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        let prefs = prepare_prefs_dir(&state, &checkout);
+        let sr = 44_100u32;
+        let tone: Vec<f32> = (0..sr as usize * 2)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                (t * 220.0 * std::f32::consts::TAU).sin() * 0.3
+                    + (t * 1_300.0 * std::f32::consts::TAU).sin() * 0.1
+            })
+            .collect();
+        use crate::model::cdp::{ParamKind, ParamValue};
+        let render = |def: &crate::model::cdp::ProcessDef, values: &Vec<ParamValue>, inputs: usize| {
+            let planned = crate::model::praat::plan_praat_job_with(
+                def,
+                values,
+                &checkout,
+                python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref(),
+                inputs,
+            )
+            .unwrap_or_else(|e| panic!("{}: plan failed: {e}", def.key));
+            let job = PraatJob {
+                id: 0,
+                praat_bin: praat_bin_for(""),
+                inputs: if inputs == 0 { Vec::new() } else { vec![vec![tone.clone()]] },
+                photo_path: None,
+                planned,
+                input_sample_rate: sr,
+                purpose: JobPurpose::Apply,
+                timeout: Duration::from_secs(90),
+                prefs_dir: prefs.clone(),
+                python_venv_bin: python_venv_bin(&state_dir()),
+            };
+            run(&job).unwrap_or_else(|e| panic!("{}: {e}", def.key)).result.first().cloned().unwrap_or_default()
+        };
+        // What choosing `option` in the dialog does: the preset's table written into the rows.
+        let filled = |def: &crate::model::cdp::ProcessDef, option: usize| {
+            let mut values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+            let pp = def.preset_param.expect("preset row");
+            values[pp] = ParamValue::Choice(option);
+            let table = def.script_presets.iter().find(|t| t.option == option).expect("table");
+            for (i, v) in table.pairs() {
+                match &def.params[i].kind {
+                    ParamKind::Number { .. } => values[i] = ParamValue::Number(v),
+                    ParamKind::Toggle { .. } => values[i] = ParamValue::Toggle(v != 0.0),
+                    ParamKind::Choice { options, .. } => {
+                        if let Some(k) = crate::model::cdp::def::script_preset_choice(v, options.len()) {
+                            values[i] = ParamValue::Choice(k);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            values
+        };
+        let find = |key: &str| catalog.processes.iter().find(|d| d.key == key).expect(key);
+
+        // Anti-Similarity: the default must not reproduce the input.
+        let anti = find("praat_ai_adaptive_anti_similarity_spectral_resistance");
+        let defaults: Vec<_> = anti.params.iter().map(|p| p.kind.default_value()).collect();
+        let out = render(anti, &defaults, 1);
+        let n = out.len().min(tone.len());
+        let change = (0..n).map(|i| (out[i] - tone[i]).abs()).sum::<f32>() / n as f32;
+        assert!(change > 0.005, "Anti-Similarity at its defaults barely changes the input: {change}");
+        // Another preset (Stasis Fracture, option 2 of the menu) changes the sound again.
+        let other = render(anti, &filled(anti, 1), 1);
+        assert!(other != out, "choosing another Anti-Similarity preset changes nothing");
+
+        // FDN: the default preset self-oscillates, so the tail must hold its level.
+        let fdn = find("praat_generative_synthesis_self_oscillating_fdn_synthesizer");
+        let defaults: Vec<_> = fdn.params.iter().map(|p| p.kind.default_value()).collect();
+        let out = render(fdn, &defaults, 0);
+        let rms = |a: f32, b: f32| {
+            let (lo, hi) = ((a * sr as f32) as usize, ((b * sr as f32) as usize).min(out.len()));
+            (out[lo..hi].iter().map(|v| v * v).sum::<f32>() / (hi - lo) as f32).sqrt()
+        };
+        let (early, tail) = (rms(0.05, 0.5), rms(2.0, 6.0));
+        eprintln!("FDN default: early rms {early:.5}, tail rms {tail:.5}");
+        assert!(early > 0.001, "the FDN's default is essentially silent: {early}");
+        assert!(tail > 0.5 * early, "the FDN's default dies away: early {early}, tail {tail}");
+        let other = render(fdn, &filled(fdn, 0), 0);
+        assert!(other != out, "choosing another FDN preset changes nothing");
         let _ = std::fs::remove_dir_all(&state);
     }
 

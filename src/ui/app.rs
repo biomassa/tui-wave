@@ -10143,6 +10143,13 @@ impl App {
                                 Some(ParamKind::Toggle { .. }) => {
                                     step.values[i] = ParamValue::Toggle(value != 0.0);
                                 }
+                                Some(ParamKind::Choice { options, .. }) => {
+                                    if let Some(k) =
+                                        crate::model::cdp::def::script_preset_choice(value, options.len())
+                                    {
+                                        step.values[i] = ParamValue::Choice(k);
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -15158,8 +15165,14 @@ impl App {
                     *input = TextInput::fresh(text);
                 }
                 Some(CdpField::Toggle { on }) => *on = value != 0.0,
-                // A preset that assigns to a choice or a datafile-shaped field is not something
-                // the extractor emits; ignore rather than guess.
+                // A table names a choice by the script's own 1-based option number.
+                Some(CdpField::Choice { selected, options, .. }) => {
+                    if let Some(k) = crate::model::cdp::def::script_preset_choice(value, options.len()) {
+                        *selected = k;
+                    }
+                }
+                // A datafile-shaped field is not something the extractor emits; ignore rather
+                // than guess.
                 _ => {}
             }
         }
@@ -34868,6 +34881,106 @@ mod tests {
             panic!("preset param should be a choice")
         };
         *selected
+    }
+
+    /// A preset table names a choice row by the script's own 1-based option number, and a
+    /// whole number outside the menu is not an option. The fill used to skip choice rows, so a
+    /// preset that sets an option menu (the FDN's excitation type, nonlinearity, matrix) left it
+    /// on the old value while the run, which reads the row, used it.
+    #[test]
+    fn a_preset_table_value_names_a_one_based_choice() {
+        use crate::model::cdp::def::script_preset_choice;
+        assert_eq!(script_preset_choice(1.0, 3), Some(0));
+        assert_eq!(script_preset_choice(3.0, 3), Some(2));
+        assert_eq!(script_preset_choice(0.0, 3), None, "Praat numbers options from 1");
+        assert_eq!(script_preset_choice(4.0, 3), None, "past the end of the menu");
+        assert_eq!(script_preset_choice(1.5, 3), None, "not a whole number");
+        assert_eq!(script_preset_choice(-1.0, 3), None);
+    }
+
+    /// Cycling the Internal Preset of a hoisted script fills its choice rows too, not only the
+    /// numbers. The FDN's preset 5 differs from the default preset in an option menu.
+    #[test]
+    fn cycling_the_internal_preset_fills_choice_rows() {
+        let mut app = new_app(Some(doc(0.25, 100)), None);
+        let key = "praat_generative_synthesis_self_oscillating_fdn_synthesizer";
+        let index = app.cdp_catalog.processes.iter().position(|d| d.key == key).expect(key);
+        let def = app.cdp_catalog.processes[index].clone();
+        let preset_param = def.preset_param.expect("the FDN has an internal preset row");
+        app.open_cdp_params(index);
+        let start = preset_selection(&app, preset_param);
+        if let Some(Dialog::CdpParams { focus, .. }) = app.dialog.as_mut() {
+            *focus = preset_param + 1;
+        }
+        press(&mut app, KeyCode::Right);
+        let chosen = preset_selection(&app, preset_param);
+        assert_ne!(chosen, start, "the row must move to the next preset");
+        let table = def.script_presets.iter().find(|p| p.option == chosen).expect("a table");
+        let mut choices = 0;
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no dialog") };
+        for (param, value) in table.pairs() {
+            if let CdpField::Choice { selected, options, .. } = &fields[param] {
+                choices += 1;
+                assert_eq!(
+                    Some(*selected),
+                    crate::model::cdp::def::script_preset_choice(value, options.len()),
+                    "choice row {param} shows option {selected}, the preset sets {value}"
+                );
+            }
+        }
+        assert!(choices > 0, "the FDN presets set option menus; the test would prove nothing");
+    }
+
+    /// A hoisted row overrides the script's own preset at run time, and the dialog opens on its
+    /// default preset. So the rows must open holding that preset's values, or the menu and the
+    /// run disagree from the first frame: Anti-Similarity opened with every depth at zero under
+    /// "Fragile Continuity" and returned the input unchanged, and the FDN's instability sat below
+    /// the preset's, so it clicked and faded. Checked for every process, not just those two.
+    #[test]
+    fn hoisted_rows_open_on_the_default_presets_values() {
+        use crate::model::cdp::{ParamKind, def::script_preset_choice};
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let mut checked = 0;
+        for def in &catalog.processes {
+            let Some(pp) = def.preset_param else { continue };
+            let ParamKind::Choice { default, .. } = &def.params[pp].kind else { continue };
+            if *default == def.preset_custom_option {
+                continue; // Custom is defined by the rows
+            }
+            let Some(table) = def.script_presets.iter().find(|t| t.option == *default) else {
+                continue;
+            };
+            for (i, value) in table.pairs() {
+                let row = &def.params[i];
+                if row.praat_pause_block.is_none() {
+                    continue; // the script re-applies the preset to its own form rows
+                }
+                checked += 1;
+                match &row.kind {
+                    ParamKind::Number { default: d, .. } => assert!(
+                        (d - value).abs() < 1e-9,
+                        "{}: {} opens at {d}, its default preset sets {value}",
+                        def.key,
+                        row.name
+                    ),
+                    ParamKind::Toggle { default: d } => {
+                        let silenced = ["play", "draw", "show", "visuali", "demo", "open_", "export"]
+                            .iter()
+                            .any(|p| row.name.to_lowercase().starts_with(p));
+                        if !silenced {
+                            assert_eq!(*d, value != 0.0, "{}: {}", def.key, row.name);
+                        }
+                    }
+                    ParamKind::Choice { default: d, options } => {
+                        if let Some(k) = script_preset_choice(value, options.len()) {
+                            assert_eq!(*d, k, "{}: {} opens on the wrong option", def.key, row.name);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(checked > 50, "only {checked} hoisted rows were checked; the catalog changed shape");
     }
 
     /// A CDP process has no script presets, so cycling one of its choices must not touch the
