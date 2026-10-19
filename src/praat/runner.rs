@@ -2089,11 +2089,11 @@ mod tests {
     }
 
     /// Scripts whose settings pages were hoisted behind a locked `Show details` /
-    /// `Show parameters` checkbox. The smoke sweep says the run finishes; this says a value that
+    /// `Show parameters` / `Show dynamics settings` checkbox. The smoke sweep says the run finishes; this says a value that
     /// lives only on a hoisted page reaches the script, by changing it and requiring different
     /// audio from the same input.
     #[test]
-    fn hoisted_page_settings_reach_the_script_for_the_2026_10_11_scripts() {
+    fn hoisted_page_settings_reach_the_script_for_the_newer_scripts() {
         require_praat!();
         let checkout =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/praat-audiotools");
@@ -2110,6 +2110,9 @@ mod tests {
                 let t = i as f32 / sample_rate as f32;
                 (t * 220.0 * std::f32::consts::TAU).sin() * 0.4 * (1.0 + (t * 3.0 * std::f32::consts::TAU).sin()) / 2.0
                     + (t * 1_300.0 * std::f32::consts::TAU).sin() * 0.1
+                    // Loud transients: a limiter's lookahead only matters when it has peaks to
+                    // limit, and the loudness stage lifts the tone toward them.
+                    + if i % 7_000 < 12 { 0.95 } else { 0.0 }
             })
             .collect();
 
@@ -2124,6 +2127,8 @@ mod tests {
                 "Instability depth (dB)",
                 12.0,
             ),
+            // Valid range is 0.5-20 ms; the page default is 1.
+            ("praat_dynamics_envelope_intelligent_mastering_maximizer", None, "Lookahead ms", 8.0),
         ] {
             let def = catalog
                 .processes

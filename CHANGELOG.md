@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- **praatAudioTools updated to `acf29bf`**, which adds **Intelligent Mastering Maximizer**
+  (Dynamics & Envelope). It measures the loudness of the sound, then renders a lookahead peak
+  limiter to a loudness target (-18 to -10 LUFS or your own), with a true-peak ceiling. Its seven
+  dynamics settings (lookahead, release times, knee and so on) are in the same dialog and always
+  apply, so the Mode menu steers little. The Vector Chain **Composition_2** is back in the
+  browser, because upstream removed the hardcoded path that kept it out. **MDS Space Navigator**
+  has a new "Draw visualization" row at the end of its dialog; saved presets for it keep working.
+  Three new scripts are not in the browser: Chladni Resonance Lab (a live simulation window),
+  Audio Tools Call & Response (a live microphone engine) and Acoustic Morphology Composer (a Qt
+  desktop application).
+- **Airwindows updated to the latest upstream**, which adds two effects: **DeRez5**, a bit and
+  sample rate crusher that builds on DeRez4, and **VerbSevens**, a reference reverb made for
+  testing reverb matrices. No existing effect changed.
+
 ## 2026-10-11 (2.16.2)
 
 - **praatAudioTools updated to `e202dbd`**, which adds two processes. **Anti-Similarity Spectral

@@ -438,6 +438,14 @@ PAUSE_HOISTS: dict[str, dict] = {
         "lock_on": ["Show parameters"],
         "why": "parameters page, moved off the Show parameters toggle",
     },
+    # New in the 2026-10-19 bump. Seven dynamics settings on one page behind
+    # `if show_dynamics_settings or mode = 7`; the toggle is a plain form boolean, locked on like
+    # the other new scripts so every row applies. The page's title is built from `modeName$`,
+    # which the rewrite does not need.
+    "Dynamics & Envelope/Intelligent_Mastering_Maximizer.praat": {
+        "lock_on": ["Show_dynamics_settings"],
+        "why": "dynamics settings page, moved off the Show dynamics settings toggle",
+    },
     # Guarded by `if preset = 1` (Custom). Its `else` branch already assigns the same variables
     # to the same defaults, which is what makes the rewrite verifiable by inspection: the
     # hoisted assignments and the script's own placeholder block must agree.

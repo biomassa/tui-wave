@@ -34578,7 +34578,9 @@ mod tests {
             .iter()
             .filter(|p| p.bin.starts_with("Vector Chain/"))
             .collect();
-        assert_eq!(chains.len(), 17, "every chain entry");
+        // 17 -> 18 on 2026-10-19: the acf29bf bump removed the hardcoded path that kept
+        // `Composition_2` excluded.
+        assert_eq!(chains.len(), 18, "every chain entry");
         for def in chains {
             assert!(App::praat_opens_new_buffer(def), "{}", def.key);
         }
