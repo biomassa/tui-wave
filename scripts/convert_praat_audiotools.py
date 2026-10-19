@@ -1866,6 +1866,7 @@ def fill_default_preset_rows(proc: "Process") -> None:
         row = proc.params[index]
         if row.pause_block is None:
             continue
+        row.base_default = row.default
         if row.kind == "number":
             row.default = value
         elif row.kind == "toggle":
@@ -2090,6 +2091,11 @@ class Param:
     # Like `pause_block`, it means "not a runScript: argument" -- the script asked for this with
     # a dialog, so its form has no slot for it. See DIRECTORY_HOISTS.
     directory_var: str = ""
+    # What the row held before `fill_default_preset_rows` moved it onto the default preset's
+    # value: the script's plain base value. Not emitted. The Vector Chain translator needs it,
+    # since a chain that picks a preset, or Custom, wants that preset's values for the page
+    # rows, never the default preset's.
+    base_default: object = None
     # `comment` lines the form placed immediately *before* this field, in source order, and --
     # for the last field of a body only -- the ones placed after it. See `note_rows`, which
     # flattens both into the (index, note) pairs the catalog stores; keeping "after" separate
@@ -3857,6 +3863,39 @@ def render_report(processes: list[Process], excluded: list[tuple[str, str, str]]
     return "\n".join(lines).rstrip() + "\n"
 
 
+def finalize(processes: list[Process]) -> tuple[list[str], list[str]]:
+    """The steps between `collect()` and writing the catalog; `(errors, renamed keys)`.
+
+    Shared with the Vector Chain translator, which must see a process exactly as the catalog
+    ships it: the keys `disambiguate` suffixes and the toggles `SILENCE_EXEMPTIONS` turns back
+    on are both decided here, not in `collect()`.
+    """
+    errors: list[str] = []
+    # Re-enable the toggles `SILENCE_RE` forced off but the script cannot run without. Applied
+    # here rather than in `parse_fields`, which sees a field's label and never the script it
+    # came from. Unknown keys are a hard error: an entry that no longer matches is the shape
+    # that silently stops applying, which is the whole failure this table exists to prevent.
+    for rel, wanted in SILENCE_EXEMPTIONS.items():
+        matches = [proc for proc in processes if proc.bin == rel]
+        if not matches:
+            errors.append(f"SILENCE_EXEMPTIONS names {rel!r}, which is not a shipped process")
+            return errors, []
+        for proc in matches:
+            for name in wanted:
+                hits = [param for param in proc.params if param.name == name]
+                if not hits:
+                    errors.append(f"SILENCE_EXEMPTIONS[{rel!r}] names parameter {name!r}, "
+                                  f"which {proc.key} does not declare")
+                    return errors, []
+                for param in hits:
+                    param.default = True
+
+    # Must happen before anything is written: a repeated key is an *override* to
+    # `CdpCatalog::load`, not an error, so a collision silently deletes a process from the
+    # browser rather than failing anywhere.
+    return errors, disambiguate(processes)
+
+
 def main() -> int:
     # The parser self-test runs on every conversion, not just when asked for. It costs
     # milliseconds, and the failure it guards against is silent: a parser that stops
@@ -3885,30 +3924,11 @@ def main() -> int:
 
     processes, excluded = collect()
 
-    # Re-enable the toggles `SILENCE_RE` forced off but the script cannot run without. Applied
-    # here rather than in `parse_fields`, which sees a field's label and never the script it
-    # came from. Unknown keys are a hard error: an entry that no longer matches is the shape
-    # that silently stops applying, which is the whole failure this table exists to prevent.
-    for rel, wanted in SILENCE_EXEMPTIONS.items():
-        matches = [proc for proc in processes if proc.bin == rel]
-        if not matches:
-            print(f"error: SILENCE_EXEMPTIONS names {rel!r}, which is not a shipped process",
-                  file=sys.stderr)
-            return 1
-        for proc in matches:
-            for name in wanted:
-                hits = [param for param in proc.params if param.name == name]
-                if not hits:
-                    print(f"error: SILENCE_EXEMPTIONS[{rel!r}] names parameter {name!r}, "
-                          f"which {proc.key} does not declare", file=sys.stderr)
-                    return 1
-                for param in hits:
-                    param.default = True
-
-    # Must happen before anything is written: a repeated key is an *override* to
-    # `CdpCatalog::load`, not an error, so a collision silently deletes a process from the
-    # browser rather than failing anywhere.
-    renamed = disambiguate(processes)
+    errors, renamed = finalize(processes)
+    for error in errors:
+        print(f"error: {error}", file=sys.stderr)
+    if errors:
+        return 1
     if renamed:
         print(f"note: {len(renamed)} script(s) renamed to avoid a key collision "
               f"(upstream ships near-identical filenames):", file=sys.stderr)
