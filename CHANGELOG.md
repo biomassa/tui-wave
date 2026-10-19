@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-10-19 (2.17.0)
 
 - **A chain can hold generators and steps with several inputs.** A process that makes its own
   sound (CDP's synthesis programs, Praat's Generative group) can now be a chain step: it ignores
