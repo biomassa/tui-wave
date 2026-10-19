@@ -997,6 +997,11 @@ pub struct ScriptPreset {
     pub values: Vec<f64>,
 }
 
+/// Most extra inputs (branches) one chain step may take: Stereo Mixer's eight sounds, less the
+/// running audio that is its first. CDP's variadic processes accept any number of files, and an
+/// editor that offered fifty input rows would not be usable, so this is also their ceiling.
+pub const MAX_VARIADIC_BRANCHES: usize = 7;
+
 /// The 0-based option a preset table value names for a choice row, if it names one.
 ///
 /// A table holds the script's own numbers, and Praat numbers an option menu from 1. Anything
@@ -1425,8 +1430,26 @@ impl ProcessDef {
         }
         match self.input {
             IoKind::DualWav | IoKind::DualAna => 1,
+            // The running buffer is the first input, so a process taking N files takes N - 1
+            // branches. Capped at the chain editor's limit, because CDP's variadic processes
+            // accept "any number" and a list of fifty input rows is not an editor.
+            IoKind::VariadicWav => {
+                let (min, max, _) = self.input_arity();
+                let ceiling = max.map_or(MAX_VARIADIC_BRANCHES, |m| m.saturating_sub(1));
+                ceiling.min(MAX_VARIADIC_BRANCHES).max(min.saturating_sub(1))
+            }
             _ => 0,
         }
+    }
+
+    /// Whether this process makes its sound from its own parameters and reads no input at all
+    /// (`IoKind::None`: CDP's synthesis programs, the Praat `Generative` group).
+    ///
+    /// In a chain such a step ignores whatever audio reaches it and its own result becomes the
+    /// running audio. The chain editor says so on the step, because the audio it drops is
+    /// otherwise invisible.
+    pub fn generates(&self) -> bool {
+        self.input == IoKind::None
     }
 
     /// Whether input 0 comes from the chain's running buffer. True for every process except a
@@ -1457,6 +1480,7 @@ impl ProcessDef {
         }
         match self.input {
             IoKind::DualWav | IoKind::DualAna => 1,
+            IoKind::VariadicWav => self.input_arity().0.saturating_sub(1),
             _ => 0,
         }
     }

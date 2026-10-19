@@ -909,6 +909,22 @@ no CDP installed.
 
 The top row cycles your saved chains, exactly as the preset row of a parameter form does.
 
+**Generators in a chain.** A process that makes its own sound and reads no input, such as a CDP
+synthesis program or a Praat Generative script, can be a step. It ignores the audio that reaches
+it, and its own sound becomes the audio for the next step. The editor says so under the step:
+"generates its own sound; ignores the audio coming in". A chain that starts with a generator
+needs no open buffer, and its result opens as a new buffer. So does any chain that has a
+generator, or that ends at a sample rate other than the document's, in which case the result
+keeps the rate it was made at. An envelope cannot be attached to a generator's parameter.
+
+**Steps with several inputs.** A process that takes several sounds, such as Stereo Mixer, takes
+the audio reaching it as its first input. Each further input is a row under the step, numbered
+from the 2nd. Press `Enter` or click on **+ Add input** to add one, up to the most the process
+accepts (Stereo Mixer takes eight sounds in all). A new input starts as a copy of the incoming
+audio, so an empty one is that audio unchanged. Left and Right change what an input starts
+from, the incoming audio or an open buffer you pick, and `Del` removes it. Steps you add under
+an input process it before the mix, so a generator there supplies a sound of its own.
+
 ### Automating a parameter
 
 A field in green accepts a breakpoint envelope, which changes the value over time. Move to the

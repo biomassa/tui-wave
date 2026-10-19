@@ -114,6 +114,11 @@ impl Branch {
     pub fn buffer() -> Self {
         Self { source: BranchSource::Buffer, steps: Vec::new() }
     }
+
+    /// An empty branch that starts from a copy of the audio reaching its step.
+    pub fn tap() -> Self {
+        Self { source: BranchSource::Tap, steps: Vec::new() }
+    }
 }
 
 /// One step in a chain: which process, its parameter values (mirrors `preset::CdpPreset`'s
@@ -197,12 +202,16 @@ pub enum ChainError {
     /// `process_key` doesn't match anything in the loaded catalog — the most likely real
     /// cause is a saved chain surviving a catalog change that renamed or removed a process.
     UnknownProcess { key: String },
-    /// The process's `input`/`output` shape isn't `Wav`/`Ana`-in, `Wav`/`Ana`-out — synthesis
-    /// (`IoKind::None`), pitch-curve transforms (`IoKind::Curve`), and glob-output processes
-    /// (`IoKind::WavGlob`) each produce a result shape ("no real input," "a curve, not
-    /// audio," "N new buffers") that doesn't compose into "feeds the next step's audio
-    /// input".
+    /// The process's shape isn't one a chain can use — pitch-curve transforms
+    /// (`IoKind::Curve`), glob-output processes (`IoKind::WavGlob`) and grouped input
+    /// (`IoKind::GroupedWav`) each have a result or input shape ("a curve, not audio," "N new
+    /// buffers," "files in even-sized groups") that doesn't compose into "feeds the next
+    /// step's audio input". See [`process_is_chainable`].
     ProcessNotChainable { key: String },
+    /// A generator step holds an envelope reference. A bank curve is stretched over the audio
+    /// reaching the step, and a generator ignores that audio: its length comes from its own
+    /// settings, so there is no duration to stretch the curve over.
+    EnvelopeOnGenerator { key: String, param: usize },
     /// More branches than this step's process has inputs to feed. Replaced the old
     /// `SideChainOnSingleInputStep`, which could only say "one is too many for a step that
     /// takes one input"; arity is now a number rather than a yes/no.
@@ -442,12 +451,15 @@ fn collect_finished_outputs(
     }
 }
 
-/// Whether `def` can be a chain step at all: it must both consume the previous step's audio
-/// and produce audio for the next one. That rules out synthesis (`IoKind::None` — nothing
-/// upstream to consume), pitch-curve transforms (`IoKind::Curve` — carries no audio on either
-/// side), glob output (`IoKind::WavGlob` — many results, not one to feed onward), and the
-/// variadic input kinds (`VariadicWav`/`GroupedWav` — their extra files come from a per-run
-/// picker a saved chain has no way to carry).
+/// Whether `def` can be a chain step at all: it must produce audio for the next step, and its
+/// inputs must be something a chain can supply.
+///
+/// A **generator** (`IoKind::None`) is a step that ignores the audio reaching it and whose own
+/// sound becomes the running audio; a **multi-input** process (`VariadicWav`) takes the running
+/// audio as input 1 and one branch for each further input. Pitch-curve transforms
+/// (`IoKind::Curve` — carries no audio on either side), glob output (`IoKind::WavGlob` — many
+/// results, not one to feed onward) and grouped input (`GroupedWav` — its files come in
+/// even-sized groups from a per-run picker) stay out.
 ///
 /// Public and shared with `ui::app`'s browser filter (`cdp_filter_entries`) rather than
 /// duplicated there. It *was* duplicated, as `matches!(output, Wav | Ana) && input != None` —
@@ -455,8 +467,19 @@ fn collect_finished_outputs(
 /// and then silently diverged the moment `VariadicWav`/`GroupedWav` were added, offering those
 /// processes as chain steps that `validate` would immediately reject. Hence one function.
 pub fn process_is_chainable(def: &super::ProcessDef) -> bool {
-    matches!(def.input, IoKind::Wav | IoKind::Ana | IoKind::DualWav | IoKind::DualAna)
-        && matches!(def.output, IoKind::Wav | IoKind::Ana)
+    // Listed by name, no wildcard: a new input kind is refused until someone decides what it
+    // means in a chain. `Photo`, `Curve`, `WavGlob` and `GroupedWav` are still refused.
+    matches!(
+        def.input,
+        IoKind::Wav
+            | IoKind::Ana
+            | IoKind::DualWav
+            | IoKind::DualAna
+            // A generator ignores what arrives and its own sound becomes the running audio.
+            | IoKind::None
+            // The running audio is input 1 and each further input is a branch.
+            | IoKind::VariadicWav
+    ) && matches!(def.output, IoKind::Wav | IoKind::Ana)
 }
 
 impl ChainStep {
@@ -497,6 +520,9 @@ impl ChainStep {
                 ParamValue::Breakpoints(_) => {
                     return Err(ChainError::RawEnvelopeInChain { key: self.process_key.clone(), param: i })
                 }
+                ParamValue::EnvelopeRef(_) if def.generates() => {
+                    return Err(ChainError::EnvelopeOnGenerator { key: self.process_key.clone(), param: i })
+                }
                 ParamValue::EnvelopeRef(reference) => {
                     if !bank.contains(&reference.name) {
                         return Err(ChainError::Bank(BankError::UnknownEnvelope {
@@ -523,16 +549,21 @@ impl ChainStep {
     /// which has the `ProcessDef` in hand and no reason to look it up again by key.
     pub fn normalize_branches_for(&mut self, def: &super::ProcessDef) {
         while self.branches.len() < def.branch_arity_min() {
-            self.branches.push(Branch::buffer());
+            self.branches.push(Self::mandatory_branch(def));
         }
+    }
+
+    /// What a mandatory branch starts as. A dual-input process's second input has always been a
+    /// separately picked document, so `Buffer`; a multi-input process's extra inputs start as a
+    /// copy of the running audio, which is what makes an empty one the dry signal.
+    fn mandatory_branch(def: &super::ProcessDef) -> Branch {
+        if def.input == IoKind::VariadicWav { Branch::tap() } else { Branch::buffer() }
     }
 
     fn normalize_branches(&mut self, catalog: &CdpCatalog) {
         if let Some(def) = catalog.processes.iter().find(|p| p.key == self.process_key) {
             while self.branches.len() < def.branch_arity_min() {
-                // Mandatory branches are the dual-input second input, which has always been fed
-                // by a separately picked document -- `Buffer`, never `Tap`.
-                self.branches.push(Branch::buffer());
+                self.branches.push(Self::mandatory_branch(def));
             }
         }
         for branch in &mut self.branches {
@@ -697,13 +728,82 @@ mod tests {
         );
     }
 
+    /// A synthesis process reads no input, and used to be refused for it. It is a step now: it
+    /// ignores whatever reaches it and its own sound becomes the running audio. Curve and glob
+    /// processes (below) are still refused, so this loosens exactly one thing.
     #[test]
-    fn a_synthesis_process_is_not_chainable() {
-        // synth_wave_1: input = none -- nothing for a prior step's output to feed into.
+    fn a_synthesis_process_is_a_generator_step() {
+        let catalog = catalog();
+        let def = catalog.find("synth_wave_1").expect("synth_wave_1 in the catalog");
+        assert!(def.generates());
+        assert!(process_is_chainable(def));
+        assert_eq!(chain(vec![step("synth_wave_1")]).validate(&catalog), Ok(()));
+        // It takes no inputs, so no branches either.
+        assert_eq!(def.branch_arity(), 0);
+        let mut with_branch = step("synth_wave_1");
+        with_branch.branches.push(Branch::tap());
         assert_eq!(
-            chain(vec![step("synth_wave_1")]).validate(&catalog()),
-            Err(ChainError::ProcessNotChainable { key: "synth_wave_1".into() })
+            chain(vec![with_branch]).validate(&catalog),
+            Err(ChainError::TooManyBranches { key: "synth_wave_1".into(), arity: 0, actual: 1 })
         );
+    }
+
+    /// A bank curve is stretched over the audio reaching its step, and a generator ignores that
+    /// audio, so there is nothing to stretch it over.
+    #[test]
+    fn a_generator_step_cannot_hold_an_envelope_reference() {
+        let catalog = catalog();
+        let def = catalog.find("synth_wave_1").expect("synth_wave_1 in the catalog");
+        let mut generator = step("synth_wave_1");
+        generator.values = def.params.iter().map(|p| p.kind.default_value()).collect();
+        let slot = generator
+            .values
+            .iter()
+            .position(|v| matches!(v, ParamValue::Number(_)))
+            .expect("a numeric parameter");
+        generator.values[slot] =
+            ParamValue::EnvelopeRef(EnvelopeRef { name: "shape".into(), min: 0.0, max: 1.0, invert: false });
+        let mut c = chain(vec![generator]);
+        c.bank.envelopes.push(BankEnvelope { name: "shape".into(), points: vec![(0.0, 0.0), (1.0, 1.0)] });
+        assert_eq!(
+            c.validate(&catalog),
+            Err(ChainError::EnvelopeOnGenerator { key: "synth_wave_1".into(), param: slot })
+        );
+    }
+
+    /// A multi-input process takes the running audio as its first input and one branch for
+    /// each further input, up to a ceiling the editor can draw.
+    #[test]
+    fn a_multi_input_process_takes_its_extra_inputs_as_branches() {
+        let catalog = catalog();
+        let def = catalog
+            .find("praat_spatial_surround_stereo_mixer")
+            .expect("Stereo Mixer in the catalog");
+        assert_eq!(def.input, IoKind::VariadicWav);
+        assert!(process_is_chainable(def));
+        let (min, _, _) = def.input_arity();
+        assert_eq!(def.branch_arity_min(), min.saturating_sub(1));
+        assert_eq!(def.branch_arity(), crate::model::cdp::def::MAX_VARIADIC_BRANCHES);
+        // Three extra inputs, each an empty tap (the dry signal), is a valid four-way mix.
+        let mut mixer = step("praat_spatial_surround_stereo_mixer");
+        mixer.branches = vec![Branch::tap(), Branch::tap(), Branch::tap()];
+        assert_eq!(chain(vec![mixer.clone()]).validate(&catalog), Ok(()));
+        // One more than the ceiling is refused.
+        mixer.branches = vec![Branch::tap(); crate::model::cdp::def::MAX_VARIADIC_BRANCHES + 1];
+        assert!(matches!(
+            chain(vec![mixer]).validate(&catalog),
+            Err(ChainError::TooManyBranches { .. })
+        ));
+        // A mandatory extra input starts as a tap, not a picked buffer.
+        let mut normalized = step("praat_spatial_surround_stereo_mixer");
+        normalized.normalize_branches_for(def);
+        assert!(normalized.branches.iter().all(|b| b.source == BranchSource::Tap));
+        // Grouped input stays out: its files come in even-sized groups from a per-run picker.
+        assert!(catalog
+            .processes
+            .iter()
+            .filter(|p| p.input == IoKind::GroupedWav)
+            .all(|p| !process_is_chainable(p)));
     }
 
     #[test]

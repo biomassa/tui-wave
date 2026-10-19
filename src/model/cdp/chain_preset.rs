@@ -61,6 +61,42 @@ fn other_chain_in_file_for_in(dir: &Path, name: &str) -> Option<String> {
     (stored != name).then_some(stored)
 }
 
+/// The Vector Chain presets `scripts/explicate_vector_chains.py` writes, loaded back through
+/// the app's own reader. `None` when Python or the praatAudioTools checkout is not there, so a
+/// test can skip; a translator that runs and fails is a failure, not a skip.
+///
+/// Runs the real script with `--no-report`, so it never rewrites the committed report. A fresh
+/// directory per call keeps parallel tests apart.
+#[cfg(test)]
+pub(crate) fn translated_vector_chains() -> Option<Vec<CdpChain>> {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !root.join("third_party/praat-audiotools/Vector Chain").is_dir() {
+        return None;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "tui-wave-vector-chains-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = std::process::Command::new("python3")
+        .args(["-W", "ignore", "scripts/explicate_vector_chains.py", "--no-report", "--chains"])
+        .arg(&dir)
+        .current_dir(root)
+        .output()
+        .ok()?;
+    assert!(
+        out.status.success(),
+        "the Vector Chain translator failed:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let chains = list_chains_in(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    Some(chains)
+}
+
 /// A missing directory yields an empty `Vec`. Each file is parsed independently: one
 /// malformed chain file is skipped (not counted, not panicking), every other valid chain
 /// still loads — the same "one bad entry doesn't take the rest down with it" philosophy as
@@ -124,6 +160,58 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).ok();
         }
+    }
+
+    /// Every Vector Chain the translator writes must load through the app's own reader and pass
+    /// the app's own chain validation: the loader skips a malformed file without a word, and a
+    /// preset that validates is one the editor can open and Run can start.
+    ///
+    /// And chain_7 is the one that needed generators in a chain and several inputs on a step:
+    /// HMM Timbre Sequencing, then Stereo Mixer taking the three generators as branches, then
+    /// Golden Ratio. Its structure is checked, not just that it loads.
+    #[test]
+    fn the_translated_vector_chains_load_and_validate() {
+        use crate::model::cdp::chain::BranchSource;
+        let Some(chains) = translated_vector_chains() else {
+            eprintln!("skipping: python3 or the praatAudioTools checkout is unavailable");
+            return;
+        };
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        assert!(chains.len() >= 14, "expected the 14 translatable chains, got {}", chains.len());
+        for chain in &chains {
+            assert_eq!(chain.validate(&catalog), Ok(()), "{} does not validate", chain.name);
+        }
+        let chain_7 = chains
+            .iter()
+            .find(|c| c.name == "AudioTools chain_7")
+            .expect("chain_7 translates now that a chain can hold generators and multi-input steps");
+        let keys: Vec<&str> = chain_7.steps.iter().map(|s| s.process_key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "praat_ai_adaptive_hmm_timbre_sequencing",
+                "praat_spatial_surround_stereo_mixer",
+                "praat_filter_color_golden_ratio_processor"
+            ]
+        );
+        let mixer = &chain_7.steps[1];
+        let generators: Vec<&str> = mixer
+            .branches
+            .iter()
+            .map(|b| {
+                assert_eq!(b.source, BranchSource::Tap);
+                assert_eq!(b.steps.len(), 1, "each branch is one generator");
+                b.steps[0].process_key.as_str()
+            })
+            .collect();
+        assert_eq!(
+            generators,
+            [
+                "praat_generative_synthesis_koto_ski_fsm_event_generator",
+                "praat_generative_synthesis_risset_s_mutations",
+                "praat_generative_synthesis_stockhausen_studie_ii_generator"
+            ]
+        );
     }
 
     fn sample_chain(name: &str) -> CdpChain {

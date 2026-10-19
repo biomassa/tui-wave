@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **A chain can hold generators and steps with several inputs.** A process that makes its own
+  sound (CDP's synthesis programs, Praat's Generative group) can now be a chain step: it ignores
+  the audio reaching it and its sound becomes the audio for the next step, and the editor says so
+  under the step. A chain that starts with a generator runs with no buffer open. A process that
+  takes several sounds, such as Stereo Mixer, takes the audio reaching it as its first input and
+  one **+ Add input** row for each further one, each with its own steps if you want. A chain with
+  a generator, or one that ends at a sample rate other than the document's, opens its result as
+  a new buffer at the rate it was made at; before, a rate mismatch was refused.
+- **The Vector Chain presets include `chain_7`, `chain_2` and `Live_2`.** `chain_7` is HMM
+  Timbre Sequencing, then Stereo Mixer taking three generators as its inputs, then Golden Ratio
+  Processor. `chain_2` and `Live_2` could not be translated before: they pass a list of numbers
+  to 8-channel Speed Deviations, which the translator now understands. To get them, run
+  `python3 scripts/explicate_vector_chains.py --chains ~/.config/tui-wave/cdp_chains`; it also
+  rewrites `docs/vector-chain-stages.txt`, which no longer reports false mismatches for scripts
+  that use the `form:` spelling.
 - **Anti-Similarity Spectral Resistance and Self-Oscillating FDN Synthesizer now do something at
   their default settings.** Both came in 2.16.1 and 2.16.2 with their settings pages in the
   dialog, and those rows started from plain base values that override the Preset menu. For

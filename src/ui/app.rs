@@ -3869,6 +3869,10 @@ enum ChainEditorRow {
     /// `Buffer` branch also picks *which* open document feeds it. That pick used to live on the
     /// owning step's own row, which only worked while a step could have at most one branch.
     BranchHeader(ChainPath),
+    /// "+ Add input" under a multi-input step, carrying the *step's* path: adds one more
+    /// parallel input, starting as a copy of the audio reaching the step. Shown only while the
+    /// step's process can take another (`ProcessDef::branch_arity`).
+    AddInput(ChainPath),
     /// "+ Add step" affordance for the list at `path` (`[]` = the main chain, a branch's own
     /// path = that branch), inserting at `index`.
     ///
@@ -4258,6 +4262,9 @@ enum DisplayRow {
     /// counts levels.
     PvocAnalyze { depth: usize },
     PvocResynthesize { depth: usize },
+    /// A note under a generator step saying it ignores the audio reaching it. Non-selectable:
+    /// it states what the step does, and without it the audio it drops would be invisible.
+    GeneratorNote { depth: usize },
     /// A purely visual empty line — currently just the gap set off before "Preview the whole
     /// chain" (`chain_display_rows`), separating the step list from the two trailing
     /// run/preview actions.
@@ -4572,6 +4579,19 @@ fn ana_window_note(param: &crate::model::cdp::ParamDef, values: &[f64], len_samp
     }
 }
 
+/// "2nd", "3rd", "4th" ... for the number of a step's input. The running audio is the 1st, so
+/// the first branch reads as the 2nd; up to eight, Stereo Mixer's ceiling.
+fn input_ordinal(n: usize) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
 /// Whether this step gathers *every* input from a branch, and so is drawn as a split with
 /// columns. False for a dual-input CDP process, whose single branch is only its second infile.
 /// An unknown process is not a combiner: the layout it would get is the more elaborate one.
@@ -4618,6 +4638,11 @@ fn layout_chain_step_rows(
     }
     layout.cells.push((DisplayRow::Row(ChainEditorRow::Step(path.to_vec())), cell(*y)));
     *y += 1;
+    let def = catalog.processes.iter().find(|p| p.key == step.process_key);
+    if def.is_some_and(|d| d.generates()) {
+        layout.cells.push((DisplayRow::GeneratorNote { depth }, cell(*y)));
+        *y += 1;
+    }
     // A dual-input process's branch, above the parameters: it is an input, and an input is read
     // before a setting is applied. Its own steps sit one level in, under the row naming it, so
     // "where does the second input come from" and "what happens to it on the way in" are one
@@ -4667,6 +4692,17 @@ fn layout_chain_step_rows(
             ));
             *y += 1;
         }
+    }
+    // A multi-input process can take more inputs than it has: one more row to add one, until it
+    // is full. A dual-input process's single input always exists, so it never gets this.
+    if def.is_some_and(|d| {
+        d.input == crate::model::cdp::IoKind::VariadicWav && step.branches.len() < d.branch_arity()
+    }) {
+        layout.cells.push((
+            DisplayRow::Row(ChainEditorRow::AddInput(path.to_vec())),
+            cell(*y),
+        ));
+        *y += 1;
     }
     for index in visible_param_indices(step, catalog) {
         layout.cells.push((
@@ -4979,6 +5015,7 @@ fn first_missing_buffer_pick(
     steps: &[crate::model::cdp::ChainStep],
     parent_path: &[crate::model::cdp::PathSeg],
     picks: &std::collections::HashMap<ChainPath, usize>,
+    catalog: &crate::model::cdp::CdpCatalog,
 ) -> Option<ChainPath> {
     use crate::model::cdp::{BranchSource, PathSeg};
     for (i, step) in steps.iter().enumerate() {
@@ -4987,10 +5024,18 @@ fn first_missing_buffer_pick(
         for (b, branch) in step.branches.iter().enumerate() {
             let mut branch_path = step_path.clone();
             branch_path.push(PathSeg::Branch(b));
-            if branch.source == BranchSource::Buffer && !picks.contains_key(&branch_path) {
+            // A branch whose first step is a generator ignores the audio it is seeded with, so
+            // the document it would be picked from is moot.
+            let starts_with_generator = branch.steps.first().is_some_and(|first| {
+                catalog.processes.iter().any(|p| p.key == first.process_key && p.generates())
+            });
+            if branch.source == BranchSource::Buffer
+                && !starts_with_generator
+                && !picks.contains_key(&branch_path)
+            {
                 return Some(branch_path);
             }
-            if let Some(p) = first_missing_buffer_pick(&branch.steps, &branch_path, picks) {
+            if let Some(p) = first_missing_buffer_pick(&branch.steps, &branch_path, picks, catalog) {
                 return Some(p);
             }
         }
@@ -5027,6 +5072,9 @@ fn chain_error_message(err: &crate::model::cdp::ChainError) -> String {
         // Not reachable through the editor: a chain step's envelope is converted into the
         // chain's own bank when the step is committed, precisely so a value in absolute
         // seconds can't survive into a chain and mis-time itself against a later selection.
+        ChainError::EnvelopeOnGenerator { key, .. } => format!(
+            "\"{key}\" makes its own sound, so its length does not come from the chain; an envelope can't be stretched over it"
+        ),
         ChainError::RawEnvelopeInChain { key, param } => {
             format!("internal error: \"{key}\" parameter {param} holds an unconverted envelope")
         }
@@ -9108,6 +9156,7 @@ impl App {
                     let activates = match clicked {
                         ChainEditorRow::RemoveSplit(_)
                         | ChainEditorRow::AddStep { .. }
+                        | ChainEditorRow::AddInput(_)
                         | ChainEditorRow::BranchOut(_)
                         | ChainEditorRow::Out
                         | ChainEditorRow::Preview
@@ -11031,7 +11080,14 @@ impl App {
         let Some(state) = self.cdp_chain_editor.as_mut() else { return };
         let at = rows.iter().position(|r| *r == state.selected).unwrap_or(0);
         let landmark =
-            |r: &ChainEditorRow| matches!(r, ChainEditorRow::Step(_) | ChainEditorRow::AddStep { .. });
+            |r: &ChainEditorRow| {
+                matches!(
+                    r,
+                    ChainEditorRow::Step(_)
+                        | ChainEditorRow::AddStep { .. }
+                        | ChainEditorRow::AddInput(_)
+                )
+            };
         let next = if delta > 0 {
             rows.iter().enumerate().skip(at + 1).find(|(_, r)| landmark(r))
         } else {
@@ -11047,6 +11103,39 @@ impl App {
     /// [`ProcessDef::branch_arity_min`] — a dual-input process's second input is mandatory, and
     /// a combiner with one leg combines nothing. Refused with a message rather than silently
     /// ignored, so the key does not appear broken on the rows where it cannot apply.
+    /// Adds one more input to the multi-input step at `step_path`, starting as a copy of the
+    /// audio that reaches the step, and selects its row. Refused once the step's process has
+    /// all the inputs it can take.
+    fn add_chain_input(&mut self, step_path: &[crate::model::cdp::PathSeg]) {
+        use crate::model::cdp::PathSeg;
+        let Some(ceiling) = self
+            .cdp_chain_editor
+            .as_ref()
+            .and_then(|s| crate::model::cdp::step_at(&s.chain, step_path))
+            .and_then(|step| {
+                self.cdp_catalog
+                    .processes
+                    .iter()
+                    .find(|p| p.key == step.process_key)
+                    .map(|d| d.branch_arity())
+            })
+        else {
+            return;
+        };
+        let step_path = step_path.to_vec();
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let Some(step) = crate::model::cdp::step_at_mut(&mut state.chain, &step_path) else { return };
+        if step.branches.len() >= ceiling {
+            state.error = Some(format!("This step takes at most {} inputs", ceiling + 1));
+            return;
+        }
+        step.branches.push(crate::model::cdp::chain::Branch::tap());
+        let mut added = step_path;
+        added.push(PathSeg::Branch(step.branches.len() - 1));
+        state.selected = ChainEditorRow::BranchHeader(added);
+        state.error = None;
+    }
+
     fn delete_chain_branch(&mut self, path: &[crate::model::cdp::PathSeg]) {
         use crate::model::cdp::PathSeg;
         let Some((&last, step_path)) = path.split_last() else { return };
@@ -11292,6 +11381,7 @@ impl App {
             ChainEditorRow::AddStep { path, index } => {
                 self.open_cdp_chain_step_target(ChainEditTarget::Insert { parent: path, index })
             }
+            ChainEditorRow::AddInput(path) => self.add_chain_input(&path),
             ChainEditorRow::BranchOut(parent_path) => self.branch_out_at_end(&parent_path),
             ChainEditorRow::RemoveSplit(path) => self.remove_chain_split(&path),
             // Enter on a parameter opens its step's own dialog. For a slider-driven value that
@@ -11349,6 +11439,7 @@ impl App {
             ChainEditorRow::RemoveSplit(path) => self.remove_chain_split(&path),
             ChainEditorRow::Param { .. }
             | ChainEditorRow::AddStep { .. }
+            | ChainEditorRow::AddInput(_)
             | ChainEditorRow::BranchOut(_)
             | ChainEditorRow::Out
             | ChainEditorRow::Preview
@@ -12541,7 +12632,10 @@ impl App {
         // input kind: one unnamed list for a flat `VariadicWav`, two channel-role lists for
         // `GroupedWav` (`repair repair` — see `IoKind::GroupedWav`'s doc comment for why the
         // split is presented rather than left to the user to compute).
+        // In a chain, a multi-input step takes its extra inputs as branches in the chain editor,
+        // so the dialog offers no document picker for them.
         let variadic_input = match def.input {
+            IoKind::VariadicWav if self.cdp_chain_edit_target.is_some() => None,
             IoKind::VariadicWav | IoKind::GroupedWav => {
                 let doc_indices: Vec<usize> = (0..self.documents.len()).collect();
                 let names = doc_indices.iter().map(|&i| self.buffer_name(i)).collect();
@@ -16600,7 +16694,7 @@ impl App {
             return;
         }
         if let Some(path) =
-            first_missing_buffer_pick(&state.chain.steps, &[], &state.buffer_picks)
+            first_missing_buffer_pick(&state.chain.steps, &[], &state.buffer_picks, &self.cdp_catalog)
         {
             if let Some(state) = self.cdp_chain_editor.as_mut() {
                 state.error = Some(format!(
@@ -16612,8 +16706,27 @@ impl App {
         }
 
         let idx = self.active_document;
-        let Some(doc) = self.documents.get(idx) else { return };
-        let Some(range) = self.operation_range(idx, self.snap_to_zero) else {
+        // A chain that starts with a generator needs no audio: its first step ignores the input.
+        // Nothing open means a new buffer (`finish_chain_run`), at the rate of whatever is open
+        // or CD rate when nothing is.
+        let first_generates = state.chain.steps.first().is_some_and(|step| {
+            self.cdp_catalog.processes.iter().any(|p| p.key == step.process_key && p.generates())
+        });
+        let Some((main_buffer, main_sample_rate, range, idx)) = (match (
+            self.documents.get(idx),
+            self.operation_range(idx, self.snap_to_zero),
+        ) {
+            (Some(doc), Some(range)) => {
+                Some((doc.slice(range.0..range.1), doc.sample_rate, range, idx))
+            }
+            _ if first_generates => Some((
+                Vec::new(),
+                self.documents.get(idx).map(|d| d.sample_rate).unwrap_or(44_100),
+                (0, 0),
+                usize::MAX,
+            )),
+            _ => None,
+        }) else {
             if let Some(state) = self.cdp_chain_editor.as_mut() {
                 state.error = Some("No audio selected to run the chain on".into());
             }
@@ -16630,8 +16743,6 @@ impl App {
 
         let chain = state.chain.clone();
         let buffer_picks = state.buffer_picks.clone();
-        let main_buffer = doc.slice(range.0..range.1);
-        let main_sample_rate = doc.sample_rate;
         self.start_chain_run(chain, buffer_picks, main_buffer, main_sample_rate, idx, range, finish);
     }
 
@@ -16844,7 +16955,7 @@ impl App {
             output: state.chain.output,
         };
 
-        if let Some(missing) = first_missing_buffer_pick(&temp_chain.steps, &parent_path, &state.buffer_picks) {
+        if let Some(missing) = first_missing_buffer_pick(&temp_chain.steps, &parent_path, &state.buffer_picks, &self.cdp_catalog) {
             if let Some(state) = self.cdp_chain_editor.as_mut() {
                 state.error = Some(format!(
                     "Step at {} needs a second-input buffer picked (Left/Right) before previewing",
@@ -16951,6 +17062,19 @@ impl App {
         result.iter().any(|channel| !channel.is_empty())
     }
 
+    /// `channels` recorded at `from` Hz, converted to `to` Hz; the audio itself when the rates
+    /// already agree. The same conversion the native combiner applies to its legs.
+    fn chain_audio_at_rate(channels: &[Vec<f32>], from: u32, to: u32) -> Vec<Vec<f32>> {
+        if from == to || from == 0 || to == 0 {
+            return channels.to_vec();
+        }
+        let ratio = to as f64 / from as f64;
+        channels
+            .iter()
+            .map(|c| crate::commands::resample::resample_channel(c, ratio))
+            .collect()
+    }
+
     fn submit_current_chain_stage(&mut self) {
         let Some(run) = self.cdp_pending_chain_run.as_ref() else { return };
         let Some(frame) = run.frames.last() else { return };
@@ -16969,6 +17093,10 @@ impl App {
             return;
         };
         let is_dual = matches!(def.input, crate::model::cdp::IoKind::DualWav | crate::model::cdp::IoKind::DualAna);
+        // A generator reads nothing; a multi-input step takes the running audio as input 1 and
+        // one branch for each further input.
+        let is_generator = def.generates();
+        let is_variadic = def.input == crate::model::cdp::IoKind::VariadicWav;
         let mut this_path = parent_path.clone();
         this_path.push(crate::model::cdp::PathSeg::Step(index));
 
@@ -17005,18 +17133,28 @@ impl App {
             let branch = step.branches[b].clone();
             let mut branch_path = this_path.clone();
             branch_path.push(crate::model::cdp::PathSeg::Branch(b));
-            let seed = match &branch.source {
-                // A tap copies the signal arriving at this step, so every leg of a combiner
-                // starts from the same audio and differs only in what its own steps do to it.
-                crate::model::cdp::BranchSource::Tap => {
-                    Some((frame.running_buffer.clone(), frame.running_rate))
-                }
-                crate::model::cdp::BranchSource::Buffer => self.chain_picked_buffer(&branch_path),
-                // An earlier branch's finished output, taken from the memo rather than run
-                // again. `CdpChain::validate` has already refused any reference to a branch that
-                // has not completed by now, so a miss here means the chain was never validated.
-                crate::model::cdp::BranchSource::From(source) => {
-                    run.finished_outputs.get(source).cloned()
+            // A branch that starts with a generator ignores what it is seeded with, so there is
+            // nothing to tap or pick: it starts from silence and the generator supplies the sound.
+            let starts_with_generator = branch.steps.first().is_some_and(|first| {
+                self.cdp_catalog.processes.iter().any(|p| p.key == first.process_key && p.generates())
+            });
+            let seed = if starts_with_generator {
+                Some((Vec::new(), frame.running_rate))
+            } else {
+                match &branch.source {
+                    // A tap copies the signal arriving at this step, so every leg of a combiner
+                    // starts from the same audio and differs only in what its own steps do to it.
+                    crate::model::cdp::BranchSource::Tap => {
+                        Some((frame.running_buffer.clone(), frame.running_rate))
+                    }
+                    crate::model::cdp::BranchSource::Buffer => self.chain_picked_buffer(&branch_path),
+                    // An earlier branch's finished output, taken from the memo rather than run
+                    // again. `CdpChain::validate` has already refused any reference to a branch
+                    // that has not completed by now, so a miss here means the chain was never
+                    // validated.
+                    crate::model::cdp::BranchSource::From(source) => {
+                        run.finished_outputs.get(source).cloned()
+                    }
                 }
             };
             let Some((buf, rate)) = seed else {
@@ -17095,8 +17233,16 @@ impl App {
         let Some(frame) = run.frames.last() else { return };
         let primary = frame.running_buffer.clone();
         let primary_rate = frame.running_rate;
-        let secondary: Option<Vec<Vec<f32>>> =
-            is_dual.then(|| collected.first().map(|(b, _)| b.clone())).flatten();
+        // Every extra input is brought to the running audio's rate first: a job carries one
+        // sample rate, and a branch that diverged (a generator with its own Sample rate, any
+        // step that resamples) would otherwise be read at the wrong pitch and speed.
+        let secondary: Option<Vec<Vec<f32>>> = is_dual
+            .then(|| {
+                collected
+                    .first()
+                    .map(|(buffer, rate)| Self::chain_audio_at_rate(buffer, *rate, primary_rate))
+            })
+            .flatten();
 
         // A native combiner is the one step that reads *only* its branches, and the one that
         // needs no runner at all: it is arithmetic over buffers already in hand, so it renders
@@ -17114,9 +17260,19 @@ impl App {
         // frame stack, the branch that produced `secondary`, and the buffer handed to the
         // next step are all plain audio, so a chain can mix the backends freely.
         if def.backend() == crate::model::cdp::def::Backend::Praat {
-            let mut inputs = vec![primary];
+            // A generator takes no input at all: handing it the running audio would not match the
+            // zero inputs its plan expects.
+            let mut inputs = Vec::new();
+            if !is_generator {
+                inputs.push(primary);
+            }
             if let Some(secondary) = secondary {
                 inputs.push(secondary);
+            }
+            if is_variadic {
+                for (buffer, rate) in &collected {
+                    inputs.push(Self::chain_audio_at_rate(buffer, *rate, primary_rate));
+                }
             }
             self.submit_praat_chain_step(&def, &values, inputs, primary_rate);
             return;
@@ -17134,13 +17290,31 @@ impl App {
             return;
         }
 
-        let mut input_specs = vec![crate::model::cdp::InputSpec {
-            head_tail_marks: Vec::new(),
-            channels: primary.len().max(1),
-            sample_rate: primary_rate,
-            len_samples: primary.first().map(|c| c.len()).unwrap_or(0),
-        }];
-        let mut inputs = vec![primary];
+        // A generator has no input file, so it gets no spec: `plan_job` routes `IoKind::None` to
+        // the synthesis planner, which would index a spec that is not there.
+        let mut input_specs = Vec::new();
+        let mut inputs = Vec::new();
+        if !is_generator {
+            input_specs.push(crate::model::cdp::InputSpec {
+                head_tail_marks: Vec::new(),
+                channels: primary.len().max(1),
+                sample_rate: primary_rate,
+                len_samples: primary.first().map(|c| c.len()).unwrap_or(0),
+            });
+            inputs.push(primary);
+        }
+        if is_variadic {
+            for (buffer, rate) in &collected {
+                let buffer = Self::chain_audio_at_rate(buffer, *rate, primary_rate);
+                input_specs.push(crate::model::cdp::InputSpec {
+                    head_tail_marks: Vec::new(),
+                    channels: buffer.len().max(1),
+                    sample_rate: primary_rate,
+                    len_samples: buffer.first().map(|c| c.len()).unwrap_or(0),
+                });
+                inputs.push(buffer);
+            }
+        }
         if let Some(secondary) = &secondary {
             input_specs.push(crate::model::cdp::InputSpec {
                 head_tail_marks: Vec::new(),
@@ -17621,16 +17795,6 @@ impl App {
         match finish {
             ChainRunFinish::Splice => {
                 let doc_rate = self.documents.get(doc_index).map(|d| d.sample_rate);
-                if doc_rate != Some(final_frame.running_rate) {
-                    self.dialog = Some(Dialog::Info {
-                        message: format!(
-                            "Chain output is {} Hz but the document is {} Hz.",
-                            final_frame.running_rate,
-                            doc_rate.unwrap_or(0)
-                        ),
-                    });
-                    return;
-                }
                 // Each top-level step's own pvoc anal/synth wrap (or wavecycle rounding, for
                 // a time-domain process) pads/trims its output independently of every other
                 // step -- `chain.steps[1]` re-analyzes `chain.steps[0]`'s already-padded
@@ -17676,7 +17840,23 @@ impl App {
                 // The chain's own `output` setting (the editor's OUT row) is the other way in.
                 // It is an *or*, not an override: a preference to splice cannot overrule a
                 // process whose result would not fit the document it came from.
+                //
+                // Three more reasons to open a new buffer, none of them a preference. A result at
+                // a different rate than the document cannot be spliced into it, and is opened at
+                // its own rate rather than converted or refused. A generator on the spine makes
+                // a sound whose length and rate come from its own settings, which has no
+                // relationship to the selection, the rule `process_forces_new_buffer` already
+                // applies to a generator run on its own. And with no document open there is
+                // nothing to splice into.
                 let opens_new_buffer = chain.output == crate::model::cdp::ChainOutput::NewBuffer
+                    || doc_rate != Some(final_frame.running_rate)
+                    || chain.steps.iter().any(|s| {
+                        self.cdp_catalog
+                            .processes
+                            .iter()
+                            .find(|p| p.key == s.process_key)
+                            .is_some_and(|d| d.generates())
+                    })
                     || chain.steps.iter().any(|s| {
                         self.cdp_catalog
                             .processes
@@ -30891,6 +31071,18 @@ fn render_cdp_chain_editor_dialog(
                 ))));
                 continue;
             }
+            // What a generator does, said under its name. In the same pale style as the other
+            // notes, and indented as a step's own detail, since it describes that step.
+            DisplayRow::GeneratorNote { .. } => {
+                rendered.push((*cell, Line::from(Span::styled(
+                    format!(
+                        "{}generates its own sound; ignores the audio coming in",
+                        chain_indent(depth, ChainIndent::Detail)
+                    ),
+                    disabled_style,
+                ))));
+                continue;
+            }
             DisplayRow::Blank => {
                 rendered.push((*cell, Line::raw("")));
                 continue;
@@ -30953,11 +31145,16 @@ fn render_cdp_chain_editor_dialog(
                 // A combiner's empty leg is the dry signal, which is worth saying. A second
                 // infile is named rather than described: nothing happens to it either way.
                 let (lead, note) = if inline {
-                    ("2nd input: ", "")
+                    // The running audio is input 1, so the first branch is the 2nd input.
+                    let nth = match path.last() {
+                        Some(crate::model::cdp::PathSeg::Branch(b)) => b + 2,
+                        _ => 2,
+                    };
+                    (format!("{} input: ", input_ordinal(nth)), "")
                 } else if branch.steps.is_empty() {
-                    ("", "   (passes through)")
+                    (String::new(), "   (passes through)")
                 } else {
-                    ("", "")
+                    (String::new(), "")
                 };
                 vec![Span::styled(format!("{indent}\u{2190} {lead}{source}{note}"), style)]
             }
@@ -31181,6 +31378,20 @@ fn render_cdp_chain_editor_dialog(
                     Span::styled("        ", Style::default().bg(theme::SURFACE0)),
                     Span::styled("\u{2a2f} Remove branch", button_style(selected)),
                 ]
+            }
+            // One more input for a multi-input step. A button like "+ Add step", on the row of the
+            // step it belongs to rather than at the end of a list.
+            ChainEditorRow::AddInput(_) => {
+                let indent = chain_indent(depth, ChainIndent::Detail);
+                let mut spans =
+                    vec![Span::styled(format!("{indent}+ Add input"), button_style(selected))];
+                if roomy {
+                    spans.push(Span::styled(
+                        "   mix in another sound",
+                        if selected { style } else { disabled_style },
+                    ));
+                }
+                spans
             }
             ChainEditorRow::BranchOut(_) => {
                 let indent = chain_indent(depth, ChainIndent::Step);
@@ -33458,6 +33669,140 @@ mod tests {
         );
     }
 
+    /// A multi-input step shows "+ Add input" until it holds every input its process can take,
+    /// and the row is a button like "+ Add step": Enter and a single click both add an input,
+    /// which starts as a copy of the audio reaching the step, and Del on an input takes it out.
+    #[test]
+    fn a_multi_input_step_offers_add_input_until_it_is_full() {
+        use crate::model::cdp::chain::BranchSource;
+        use crate::model::cdp::PathSeg::{Branch as B, Step as S};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 1000)), None);
+        app.handle_action(Action::CdpChain);
+        let mixer = chain_of(&app, &["praat_spatial_surround_stereo_mixer"]).steps.remove(0);
+        if let Some(state) = app.cdp_chain_editor.as_mut() {
+            state.chain.steps.push(mixer);
+            state.selected = ChainEditorRow::AddInput(vec![S(0)]);
+        }
+        let ceiling = crate::model::cdp::def::MAX_VARIADIC_BRANCHES;
+        let has_add = |app: &App| {
+            chain_editor_rows(app.cdp_chain_editor.as_ref().unwrap(), &app.cdp_catalog)
+                .contains(&ChainEditorRow::AddInput(vec![S(0)]))
+        };
+        let branches = |app: &App| app.cdp_chain_editor.as_ref().unwrap().chain.steps[0].branches.clone();
+        assert!(has_add(&app), "a step with room for inputs offers to add one");
+
+        // Enter adds one, and selects its row.
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(branches(&app).len(), 1);
+        assert_eq!(branches(&app)[0].source, BranchSource::Tap, "a new input starts as the incoming audio");
+        assert_eq!(
+            app.cdp_chain_editor.as_ref().unwrap().selected,
+            ChainEditorRow::BranchHeader(vec![S(0), B(0)])
+        );
+
+        // One click on the row does the same, with the mouse alone.
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let display = chain_display_rows(app.cdp_chain_editor.as_ref().unwrap(), &app.cdp_catalog);
+        let at = display
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Row(ChainEditorRow::AddInput(_))))
+            .expect("the + Add input row");
+        let rect = app.dialog_row_rects[at];
+        assert!(rect.width > 0, "+ Add input must have a hittable rect");
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x + 3,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(branches(&app).len(), 2, "a single click adds an input, as Enter does");
+
+        // The input rows are numbered from the 2nd, the running audio being the 1st.
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(screen.contains("2nd input:") && screen.contains("3rd input:"), "{screen}");
+
+        // Fill it: the row goes away once the step has every input it can take.
+        for _ in branches(&app).len()..ceiling {
+            if let Some(state) = app.cdp_chain_editor.as_mut() {
+                state.selected = ChainEditorRow::AddInput(vec![S(0)]);
+            }
+            press(&mut app, KeyCode::Enter);
+        }
+        assert_eq!(branches(&app).len(), ceiling);
+        assert!(!has_add(&app), "a full step offers no more inputs");
+
+        // Del on an input removes it, and the row comes back.
+        if let Some(state) = app.cdp_chain_editor.as_mut() {
+            state.selected = ChainEditorRow::BranchHeader(vec![S(0), B(ceiling - 1)]);
+        }
+        press(&mut app, KeyCode::Delete);
+        assert_eq!(branches(&app).len(), ceiling - 1);
+        assert!(has_add(&app));
+    }
+
+    /// A generator ignores the audio reaching it, and the editor says so on the step: the audio
+    /// it drops is otherwise invisible. Ordinary steps carry no such line.
+    #[test]
+    fn a_generator_step_says_it_ignores_the_audio_coming_in() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = new_app(Some(doc(0.1, 1000)), None);
+        app.handle_action(Action::CdpChain);
+        if let Some(state) = app.cdp_chain_editor.as_mut() {
+            state.chain.steps.push(chain_step("blur_avrg"));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let note = "generates its own sound; ignores the audio coming in";
+        assert!(!buffer_text(terminal.backend().buffer()).contains(note), "an ordinary step has no note");
+
+        if let Some(state) = app.cdp_chain_editor.as_mut() {
+            state.chain.steps.push(chain_step("synth_wave_1"));
+        }
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(buffer_text(terminal.backend().buffer()).contains(note), "a generator says what it does");
+        // Not a row you can land on: it states a fact and has no action.
+        let display = chain_display_rows(app.cdp_chain_editor.as_ref().unwrap(), &app.cdp_catalog);
+        let notes = display.iter().filter(|r| matches!(r, DisplayRow::GeneratorNote { .. })).count();
+        assert_eq!(notes, 1, "one note, under the generator and not under the other step");
+    }
+
+    #[test]
+    fn input_ordinals_read_naturally() {
+        let words: Vec<String> = (2..=8).map(input_ordinal).collect();
+        assert_eq!(words, ["2nd", "3rd", "4th", "5th", "6th", "7th", "8th"]);
+        assert_eq!(input_ordinal(11), "11th");
+        assert_eq!(input_ordinal(12), "12th");
+        assert_eq!(input_ordinal(21), "21st");
+    }
+
+    /// In a chain the extra inputs of a multi-input step are branches in the chain editor, so
+    /// the params dialog must not also offer a document picker for them.
+    #[test]
+    fn a_multi_input_chain_step_has_no_document_picker() {
+        let mut app = new_app(Some(doc(0.1, 1000)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "praat_spatial_surround_stereo_mixer")
+            .expect("Stereo Mixer");
+        app.open_cdp_params(index);
+        let Some(Dialog::CdpParams { variadic_input, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(variadic_input.is_some(), "run on its own, it picks its inputs from the open buffers");
+        app.dialog = None;
+        app.cdp_chain_edit_target = Some(ChainEditTarget::Insert { parent: Vec::new(), index: 0 });
+        app.open_cdp_params(index);
+        let Some(Dialog::CdpParams { variadic_input, .. }) = &app.dialog else { panic!("no dialog") };
+        assert!(variadic_input.is_none(), "as a chain step its inputs are branches");
+    }
+
     /// A step's editor is a whole params session, so a stray click must not open one: the first
     /// click selects, the second opens — the Files panel's rule.
     #[test]
@@ -34404,6 +34749,261 @@ mod tests {
         );
         drain_chain_run(&mut app);
         assert!(app.documents[0].dirty, "the mixed chain should have modified the document");
+    }
+
+    /// `chain_of`'s step for `key`, with the parameter called `name` set to `value`.
+    fn chain_step_with(
+        app: &App,
+        key: &str,
+        name: &str,
+        value: f64,
+    ) -> crate::model::cdp::ChainStep {
+        let def = app.cdp_catalog.processes.iter().find(|p| p.key == key).expect(key);
+        let mut step = chain_of(app, &[key]).steps.remove(0);
+        let slot = def.params.iter().position(|p| p.name == name).unwrap_or_else(|| panic!("{key} has no {name}"));
+        step.values[slot] = crate::model::cdp::ParamValue::Number(value);
+        step
+    }
+
+    /// A generator in the middle of a chain ignores the audio reaching it and its own sound
+    /// becomes the running audio: the next step works on two seconds of synthesis, not on the
+    /// one second of tone that went in. The result opens as a new buffer, as a generator run on
+    /// its own does, and the document it was started from is left alone.
+    #[test]
+    fn a_generator_in_the_middle_of_a_chain_replaces_the_audio() {
+        let _home = crate::config::TestConfigHome::new("a_generator_in_the_middle_of_a_cha");
+        let tone: Vec<f32> = (0..44_100)
+            .map(|i| (i as f32 * 220.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.5)
+            .collect();
+        let mut document = doc(0.0, 44_100);
+        document.channels = vec![tone.clone()];
+        let mut app = new_app(Some(document), None);
+        if !app.praat_ready() {
+            eprintln!("skipping: praat unavailable");
+            return;
+        }
+        let generator = chain_step_with(&app, "praat_generative_synthesis_risset_s_mutations", "Duration_s", 2.0);
+        let mut chain = chain_of(&app, &["praat_distortion_hard_clip", "praat_distortion_full_wave_rectifier_abs"]);
+        chain.steps.insert(1, generator);
+        app.start_chain_run(
+            chain, std::collections::HashMap::new(), vec![tone.clone()], 44_100, 0, (0, 44_100),
+            ChainRunFinish::Splice,
+        );
+        drain_chain_run(&mut app);
+        assert_eq!(app.documents.len(), 2, "a chain with a generator opens a new buffer");
+        assert!(!app.documents[0].dirty, "the source document must not be spliced over");
+        let made = app.documents.last().unwrap();
+        let frames = made.channels[0].len() as f64 / made.sample_rate as f64;
+        assert!((1.9..2.2).contains(&frames), "the generator's 2 s replaces the 1 s input: {frames} s");
+        assert!(made.channels[0].iter().any(|s| s.abs() > 0.01), "the result is not silent");
+    }
+
+    /// A chain that starts with a generator needs no audio at all, so it runs with nothing open
+    /// and the result opens as a new buffer, like Record and the other generators.
+    #[test]
+    fn a_chain_that_starts_with_a_generator_runs_with_nothing_open() {
+        let _home = crate::config::TestConfigHome::new("a_chain_that_starts_with_a_generat");
+        let mut app = new_app(None, None);
+        if !app.praat_ready() {
+            eprintln!("skipping: praat unavailable");
+            return;
+        }
+        let chain = crate::model::cdp::CdpChain {
+            steps: vec![chain_step_with(&app, "praat_generative_synthesis_risset_s_mutations", "Duration_s", 2.0)],
+            ..chain_of(&app, &[])
+        };
+        app.start_chain_run(
+            chain, std::collections::HashMap::new(), Vec::new(), 44_100, usize::MAX, (0, 0),
+            ChainRunFinish::Splice,
+        );
+        drain_chain_run(&mut app);
+        assert_eq!(app.documents.len(), 1, "the result opens as the only buffer");
+        let made = &app.documents[0];
+        assert!(made.path.is_none() && made.dirty);
+        assert!(made.channels[0].len() > 80_000, "about two seconds of audio");
+    }
+
+    /// Run from the chain editor itself, not just the runner: with no document open, a chain
+    /// whose first step is a generator starts, and an ordinary chain says it needs audio.
+    #[test]
+    fn run_in_the_chain_editor_starts_a_generator_chain_with_nothing_open() {
+        let _home = crate::config::TestConfigHome::new("run_in_the_chain_editor_starts_a_g");
+        let mut app = new_app(None, None);
+        if !app.praat_ready() {
+            eprintln!("skipping: praat unavailable");
+            return;
+        }
+        app.handle_action(Action::CdpChain);
+        let generator = chain_step_with(&app, "praat_generative_synthesis_risset_s_mutations", "Duration_s", 2.0);
+        let ordinary = chain_of(&app, &["praat_distortion_hard_clip"]).steps.remove(0);
+
+        // An ordinary chain has nothing to run on.
+        if let Some(state) = app.cdp_chain_editor.as_mut() {
+            state.chain.steps = vec![ordinary];
+        }
+        app.run_cdp_chain(ChainRunFinish::Splice);
+        assert!(app.cdp_pending_chain_run.is_none(), "an ordinary chain needs audio");
+        assert!(
+            app.cdp_chain_editor.as_ref().and_then(|s| s.error.clone()).is_some_and(|e| e.contains("No audio")),
+            "and says so"
+        );
+
+        // A generator-first chain runs, and its result is the only buffer.
+        if let Some(state) = app.cdp_chain_editor.as_mut() {
+            state.chain.steps = vec![generator];
+            state.error = None;
+        }
+        app.run_cdp_chain(ChainRunFinish::Splice);
+        drain_chain_run(&mut app);
+        assert_eq!(app.documents.len(), 1, "the generated sound opens as a new buffer");
+        assert!(app.documents[0].channels[0].len() > 80_000);
+    }
+
+    /// A generator whose own sample rate differs from the document's cannot be spliced into it,
+    /// and is not converted or refused: it opens as a new buffer at the rate it was made at.
+    #[test]
+    fn a_chain_ending_at_another_rate_opens_a_new_buffer_at_its_own_rate() {
+        let _home = crate::config::TestConfigHome::new("a_chain_ending_at_another_rate_op");
+        let mut document = doc(0.0, 48_000);
+        document.sample_rate = 48_000;
+        document.channels = vec![(0..48_000).map(|i| (i as f32 * 0.03).sin() * 0.4).collect()];
+        let mut app = new_app(Some(document), None);
+        if !app.praat_ready() {
+            eprintln!("skipping: praat unavailable");
+            return;
+        }
+        // The generator's own Sample rate parameter is 44100 by default.
+        let chain = crate::model::cdp::CdpChain {
+            steps: vec![chain_step_with(&app, "praat_generative_synthesis_risset_s_mutations", "Duration_s", 2.0)],
+            ..chain_of(&app, &[])
+        };
+        let source = app.documents[0].channels.clone();
+        app.start_chain_run(
+            chain, std::collections::HashMap::new(), source, 48_000, 0, (0, 48_000),
+            ChainRunFinish::Splice,
+        );
+        drain_chain_run(&mut app);
+        assert_eq!(app.documents.len(), 2);
+        assert_eq!(app.documents[0].sample_rate, 48_000);
+        assert!(!app.documents[0].dirty);
+        assert_eq!(app.documents.last().unwrap().sample_rate, 44_100, "kept at the rate it was made at");
+    }
+
+    /// A multi-input step takes the running audio as its first input and one branch for each
+    /// further input, and every branch counts: a generator in a branch changes the mix (and its
+    /// length, since the mix runs to the longest input), and so does an effect in a branch.
+    #[test]
+    fn a_multi_input_step_mixes_the_running_audio_with_its_branches() {
+        use crate::model::cdp::chain::{Branch, BranchSource};
+        use crate::model::cdp::ChainOutput;
+        let _home = crate::config::TestConfigHome::new("a_multi_input_step_mixes_the_runn");
+        let tone: Vec<f32> = (0..44_100)
+            .map(|i| (i as f32 * 220.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.5)
+            .collect();
+        let mut document = doc(0.0, 44_100);
+        document.channels = vec![tone.clone()];
+        let mut app = new_app(Some(document), None);
+        if !app.praat_ready() {
+            eprintln!("skipping: praat unavailable");
+            return;
+        }
+        let generator = chain_step_with(&app, "praat_generative_synthesis_risset_s_mutations", "Duration_s", 3.0);
+        let clip = chain_of(&app, &["praat_distortion_hard_clip"]).steps.remove(0);
+        let render = |app: &mut App, extra: Vec<Branch>| -> (Vec<Vec<f32>>, u32) {
+            let mut chain = chain_of(app, &["praat_spatial_surround_stereo_mixer"]);
+            chain.steps[0].branches = extra;
+            chain.output = ChainOutput::NewBuffer;
+            app.start_chain_run(
+                chain, std::collections::HashMap::new(), vec![tone.clone()], 44_100, 0, (0, 44_100),
+                ChainRunFinish::Splice,
+            );
+            drain_chain_run(app);
+            let made = app.documents.last().unwrap();
+            (made.channels.clone(), made.sample_rate)
+        };
+        let tap = |steps: Vec<crate::model::cdp::ChainStep>| Branch { source: BranchSource::Tap, steps };
+        let (dry, rate) = render(&mut app, vec![tap(Vec::new())]);
+        let (with_generator, _) = render(&mut app, vec![tap(vec![generator])]);
+        let (with_clip, _) = render(&mut app, vec![tap(vec![clip])]);
+        assert_eq!(rate, 44_100);
+        assert_eq!(dry.len(), 2, "Stereo Mixer makes a stereo result");
+        assert!(dry[0].len() < 50_000, "two copies of a 1 s tone are 1 s long");
+        assert!(with_generator[0].len() > 130_000, "the mix runs to the 3 s generator: {}", with_generator[0].len());
+        assert!(with_clip != dry, "an effect in the branch changes the mix");
+    }
+
+    /// The same, through CDP: a CDP synthesis process is a generator step too, and needs no
+    /// input file.
+    #[test]
+    fn a_cdp_generator_is_a_chain_step_that_needs_no_buffer() {
+        let _home = crate::config::TestConfigHome::new("a_cdp_generator_is_a_chain_step_t");
+        let mut app = new_app(None, None);
+        let cdp_dir = std::path::PathBuf::from(&app.config.cdp_dir);
+        if crate::cdp::validate_cdp_dir(&cdp_dir).is_err() {
+            eprintln!("skipping: no real CDP install");
+            return;
+        }
+        let chain = crate::model::cdp::CdpChain {
+            steps: vec![chain_step_with(&app, "synth_wave_1", "Output Duration", 1.0)],
+            ..chain_of(&app, &[])
+        };
+        app.start_chain_run(
+            chain, std::collections::HashMap::new(), Vec::new(), 44_100, usize::MAX, (0, 0),
+            ChainRunFinish::Splice,
+        );
+        drain_chain_run(&mut app);
+        assert_eq!(app.documents.len(), 1);
+        let made = &app.documents[0];
+        assert!(made.channels[0].len() > 40_000, "about a second of audio");
+        assert!(made.channels[0].iter().any(|s| s.abs() > 0.01));
+    }
+
+    /// The translated Vector Chain `chain_7` runs: HMM Timbre Sequencing on the input, three
+    /// 30 s generators as the branches of Stereo Mixer, then Golden Ratio. The result is stereo
+    /// (the mixer's), about the generators' length rather than the input's, and not silent.
+    /// Exactly equal to Praat's own run is impossible, since Stockhausen is random; the
+    /// structure of the sound is what is checked.
+    #[test]
+    fn the_translated_chain_7_runs_end_to_end() {
+        let _home = crate::config::TestConfigHome::new("the_translated_chain_7_runs_end_to");
+        let Some(chains) = crate::model::cdp::chain_preset::translated_vector_chains() else {
+            eprintln!("skipping: python3 or the praatAudioTools checkout is unavailable");
+            return;
+        };
+        let mut chain = chains
+            .into_iter()
+            .find(|c| c.name == "AudioTools chain_7")
+            .expect("chain_7 translates");
+        // Several seconds of changing material, so the timbre sequencer has states to find.
+        let sr = 44_100usize;
+        let input: Vec<f32> = (0..sr * 8)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                let f = 180.0 + 90.0 * (t * 0.7).sin() + 40.0 * (t / 8.0 * 6.0).floor();
+                (t * f * std::f32::consts::TAU).sin() * 0.4
+                    + ((i * 7919 % 211) as f32 / 211.0 - 0.5) * 0.05
+            })
+            .collect();
+        let mut document = doc(0.0, sr * 8);
+        document.channels = vec![input.clone()];
+        let mut app = new_app(Some(document), None);
+        if !app.praat_ready() {
+            eprintln!("skipping: praat unavailable");
+            return;
+        }
+        chain.output = crate::model::cdp::ChainOutput::NewBuffer;
+        app.start_chain_run(
+            chain, std::collections::HashMap::new(), vec![input], 44_100, 0, (0, sr * 8),
+            ChainRunFinish::Splice,
+        );
+        drain_chain_run(&mut app);
+        assert_eq!(app.documents.len(), 2, "the result opens as a new buffer");
+        let made = app.documents.last().unwrap();
+        assert_eq!(made.channels.len(), 2, "Stereo Mixer makes a stereo result");
+        let seconds = made.channels[0].len() as f64 / made.sample_rate as f64;
+        assert!((25.0..45.0).contains(&seconds), "about the generators' 30 s, not the input's 8 s: {seconds}");
+        let peak = made.channels.iter().flatten().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(peak > 0.05 && peak <= 1.0, "audible and not clipped: peak {peak}");
     }
 
     /// A Praat-only chain must not demand a CDP installation it never invokes.
@@ -43032,19 +43632,23 @@ mod tests {
         );
     }
 
-    /// Chain-mode filtering (`cdp_chain_edit_target.is_some()`): synthesis (`IoKind::None`)
-    /// and glob-output processes must be excluded from the picker, since neither composes
-    /// into "feeds the next step's audio input" —
-    /// but an ordinary Wav/Ana single-input process must still show up.
+    /// Chain-mode filtering (`cdp_chain_edit_target.is_some()`): glob-output and pitch-curve
+    /// processes are excluded from the picker, since neither composes into "feeds the next
+    /// step's audio input", while an ordinary Wav/Ana single-input process and a generator
+    /// (`IoKind::None`) show up.
     #[test]
-    fn chain_edit_mode_excludes_synthesis_and_glob_output_processes_from_the_browser() {
+    fn chain_edit_mode_offers_generators_and_excludes_glob_output_and_curve_processes() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
         app.cdp_chain_edit_target = Some(ChainEditTarget::Insert { parent: Vec::new(), index: 0 });
         let entries = app.cdp_filter_entries("", CdpDomainRow::All, CdpGroupChoice::AllInDomain, &[]);
         let keys: Vec<&str> = entries.iter().map(|&i| app.cdp_catalog.processes[i].key.as_str()).collect();
 
-        assert!(!keys.contains(&"synth_wave_1"), "a synthesis process (no real input) must not appear while building a chain");
+        // A synthesis process is a generator step now: it ignores the audio reaching it and its
+        // own sound becomes the running audio. Glob output (many results, not one) and curves
+        // (no audio at all) are still not steps.
+        assert!(keys.contains(&"synth_wave_1"), "a generator is a chain step");
         assert!(!keys.contains(&"distcut_distcut_1"), "a glob-output process (many results, not one) must not appear while building a chain");
+        assert!(!keys.contains(&"repitch_quantise_1"), "a pitch-curve process carries no audio and must not appear while building a chain");
         assert!(keys.contains(&"blur_avrg"), "an ordinary chainable process must still appear");
 
         app.cdp_chain_edit_target = None;
@@ -43629,14 +44233,29 @@ mod tests {
     /// from a picker a chain has no way to carry (`SuspendedStepEdit.variadic_input` is
     /// therefore always `None`). Guards the assumption the whole chain-side plumbing rests on.
     #[test]
-    fn chain_edit_mode_excludes_variadic_input_processes_from_the_browser() {
+    fn chain_edit_mode_offers_multi_input_processes_and_excludes_grouped_and_glob_ones() {
         let mut app = new_app(Some(doc(0.1, 100)), None);
         app.cdp_chain_edit_target = Some(ChainEditTarget::Insert { parent: Vec::new(), index: 0 });
         let entries = app.cdp_filter_entries("", CdpDomainRow::All, CdpGroupChoice::AllInDomain, &[]);
         let keys: Vec<&str> = entries.iter().map(|&i| app.cdp_catalog.processes[i].key.as_str()).collect();
-        for key in ["pulser_multi_1", "pulser_multi_2", "pulser_multi_3", "tesselate_tesselate", "repair_repair"] {
-            assert!(!keys.contains(&key), "{key} takes a variadic input list and cannot be a chain step");
+        // Multi-input processes (`VariadicWav`) are steps now, taking their extra inputs as
+        // branches; glob output and grouped input are not. So the browser agrees with
+        // `process_is_chainable` for every one of them, whichever way it falls.
+        let mut variadic = 0;
+        for def in &app.cdp_catalog.processes {
+            if matches!(def.input, crate::model::cdp::IoKind::VariadicWav | crate::model::cdp::IoKind::GroupedWav) {
+                variadic += 1;
+                assert_eq!(
+                    keys.contains(&def.key.as_str()),
+                    crate::model::cdp::chain::process_is_chainable(def),
+                    "{}: the browser and the chain rule disagree",
+                    def.key
+                );
+            }
         }
+        assert!(variadic > 5, "the catalog has multi-input processes to check");
+        assert!(keys.contains(&"praat_spatial_surround_stereo_mixer"), "Stereo Mixer is a multi-input step");
+        assert!(!keys.contains(&"repair_repair"), "repair writes a glob of files and cannot be a chain step");
     }
 
     fn chain_step(key: &str) -> crate::model::cdp::ChainStep {
