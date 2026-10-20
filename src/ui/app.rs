@@ -3220,6 +3220,10 @@ enum Confirm {
     /// Esc in an envelope editor whose shape was changed. Like the chain draft, a drawn shape
     /// has no undo, so Esc asks before it discards one.
     DiscardEnvelope,
+    /// A Praat run has passed its time limit and is still going (`PraatEvent::Overdue`). It
+    /// keeps running while this is on screen; yes stops it, no lets it carry on, and the runner
+    /// asks again one more limit later. Cleared by itself if the run finishes first.
+    StopOverdueJob { job: u64, seconds: u64 },
 }
 
 /// Which save prompt a `ReplaceSavedByName` came from.
@@ -3456,6 +3460,8 @@ pub struct App {
     /// A pending y/n confirmation (quit, or closing a dirty buffer). Intercepts the next
     /// keypress as a confirmation instead of routing it through the normal keymap.
     confirm: Option<Confirm>,
+    /// Where the confirm question was last drawn, for clicking its answers.
+    confirm_rect: Rect,
     /// Sample position where the current mouse-down started (for drag-to-select).
     mouse_down_anchor: Option<usize>,
     /// Index of the marker currently being dragged with the mouse, if any.
@@ -5314,6 +5320,7 @@ impl App {
             file_panel_area: Rect::default(),
             buffer_panel_area: Rect::default(),
             confirm: None,
+            confirm_rect: Rect::default(),
             mouse_down_anchor: None,
             dragging_marker: None,
             dragging_marker_start_position: None,
@@ -6843,7 +6850,11 @@ impl App {
                 self.confirm,
                 Some(Confirm::Quit | Confirm::CloseBuffer(_) | Confirm::CloseCurve(_))
             );
-        let proceed = save || matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
+        // Stopping an overdue run also answers to Enter: the question offers one action, and
+        // "keep waiting" is what every other key, Esc included, does.
+        let stop_on_enter = key.code == KeyCode::Enter
+            && matches!(self.confirm, Some(Confirm::StopOverdueJob { .. }));
+        let proceed = save || stop_on_enter || matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
         if !proceed {
             // A declined rename goes back to its dialog with the name typed, so it can be
             // changed. (Save As is still open underneath its confirm.)
@@ -6933,6 +6944,8 @@ impl App {
                     self.discard_cdp_envelope_edit();
                 }
             }
+            // The same stop the Running dialog's Esc sends; the run then finishes as cancelled.
+            Confirm::StopOverdueJob { .. } => self.praat_runner.cancel(),
         }
     }
 
@@ -16287,6 +16300,8 @@ impl App {
             } else {
                 crate::praat::DEFAULT_TIMEOUT
             },
+            // Passing the limit asks whether to stop, rather than stopping (see `PraatJob`).
+            ask_on_timeout: true,
             inputs,
             // `planned.photo_input` and this must agree — the driver's form field and the
             // runner's argv are filled from the two independently, and Praat fills a form by
@@ -16332,7 +16347,26 @@ impl App {
                         }
                     }
                 }
+                // Still running past its limit: ask whether to stop it, over its Running dialog. A
+                // question already up for this run just shows the new time; one for something
+                // else is never replaced.
+                crate::praat::PraatEvent::Overdue { job, seconds } => {
+                    if !matches!(self.dialog, Some(Dialog::CdpRunning { job_id, .. }) if job_id == job) {
+                        continue;
+                    }
+                    match self.confirm.as_mut() {
+                        Some(Confirm::StopOverdueJob { job: asked, seconds: shown }) if *asked == job => {
+                            *shown = seconds;
+                        }
+                        Some(_) => {}
+                        None => self.confirm = Some(Confirm::StopOverdueJob { job, seconds }),
+                    }
+                }
                 crate::praat::PraatEvent::Finished { job, purpose, result } => {
+                    // The run ended while its question was up: the question is moot.
+                    if matches!(self.confirm, Some(Confirm::StopOverdueJob { job: asked, .. }) if asked == job) {
+                        self.confirm = None;
+                    }
                     // Same guard as `tick_cdp`: act only on the job the visible dialog waits on,
                     // checked before `cdp_pending.take()` so a stray event cannot consume a
                     // pending it does not own and strand the real completion.
@@ -17703,6 +17737,7 @@ impl App {
             input_sample_rate: sample_rate,
             purpose: crate::cdp::JobPurpose::Apply,
             timeout: crate::praat::DEFAULT_TIMEOUT,
+            ask_on_timeout: true,
         });
         self.dialog = Some(Dialog::CdpRunning {
             job_id,
@@ -21206,6 +21241,23 @@ impl App {
         // `Confirm::RevertEnvelopeToConstant`, where a click would edit the very points the
         // modal is offering to discard.
         if self.confirm.is_some() {
+            // The overdue question answers to clicks on its two answers. The others still
+            // take keys only.
+            if let (Some(Confirm::StopOverdueJob { seconds, .. }), MouseEventKind::Down(MouseButton::Left)) =
+                (self.confirm.as_ref(), mouse.kind)
+            {
+                let r = self.confirm_rect;
+                let inside = mouse.column >= r.x
+                    && mouse.column < r.x + r.width
+                    && mouse.row >= r.y
+                    && mouse.row < r.y + r.height;
+                let text = overdue_question(*seconds);
+                match (inside && mouse.row == r.y + 1).then(|| overdue_click_answer(r, &text, mouse.column)).flatten() {
+                    Some(true) => self.handle_confirm_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+                    Some(false) => self.confirm = None,
+                    None => {}
+                }
+            }
             return;
         }
         // Checked first since it needs Drag/Up events too, unlike the generic dialog-click
@@ -24527,6 +24579,10 @@ impl App {
                 Confirm::DiscardEnvelope => {
                     " Discard the changes to this envelope? — (y) discard · (n) keep editing ".to_string()
                 }
+                Confirm::StopOverdueJob { seconds, .. } => format!(
+                    "{}\n Scripts that play their result run in real time, so a long selection can take this long. ",
+                    overdue_question(*seconds)
+                ),
                 Confirm::ReplaceSavedByName { name, other, .. } => format!(
                     " Saving \"{name}\" would replace the saved \"{other}\" (same file name) — (y) replace · (n) choose another name "
                 ),
@@ -24535,7 +24591,7 @@ impl App {
                     format!(" \"{name}\" already exists — (y) replace it · (n) choose another name ")
                 }
             };
-            render_confirm(frame, area, &text);
+            self.confirm_rect = render_confirm(frame, area, &text);
         }
     }
 
@@ -25282,9 +25338,11 @@ fn hints_bar_rect(popup: Rect, width: u16) -> Rect {
     Rect { x: popup.x + 1, y: popup.y + popup.height - 2, width, height: 1 }
 }
 
-fn render_confirm(frame: &mut Frame, area: Rect, text: &str) {
-    let width = (text.chars().count() as u16 + 2).min(area.width);
-    let height = 3.min(area.height);
+fn render_confirm(frame: &mut Frame, area: Rect, text: &str) -> Rect {
+    // One question per line; most have one line.
+    let widest = text.lines().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+    let width = (widest + 2).min(area.width);
+    let height = (text.lines().count() as u16 + 2).min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -25300,6 +25358,39 @@ fn render_confirm(frame: &mut Frame, area: Rect, text: &str) {
         .alignment(Alignment::Center)
         .block(block);
     frame.render_widget(paragraph, popup);
+    popup
+}
+
+/// The overdue question's first line, the one with the answers on it.
+fn overdue_question(seconds: u64) -> String {
+    format!(" Still running after {}. Stop it? — (y) stop · (n) keep waiting ", format_elapsed(seconds))
+}
+
+/// `seconds` as `m:ss`, the way the Running dialog and the overdue question show time.
+fn format_elapsed(seconds: u64) -> String {
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
+/// What a click at `column` on the overdue question answers: `Some(true)` on "(y) stop",
+/// `Some(false)` on "(n) keep waiting", `None` anywhere else. Computed from the same centred
+/// first line `render_confirm` drew.
+fn overdue_click_answer(rect: Rect, text: &str, column: u16) -> Option<bool> {
+    let line = text.lines().next()?;
+    let inner = rect.width.saturating_sub(2);
+    let len = line.chars().count() as u16;
+    let start = rect.x + 1 + inner.saturating_sub(len) / 2;
+    let span = |label: &str| {
+        let at = line.find(label)?;
+        let x = start + line[..at].chars().count() as u16;
+        Some(x..x + label.chars().count() as u16)
+    };
+    if span("(y) stop").is_some_and(|r| r.contains(&column)) {
+        Some(true)
+    } else if span("(n) keep waiting").is_some_and(|r| r.contains(&column)) {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Renders the Mix-to-Mono dialog: one row per source channel with a live dB field,
@@ -33183,6 +33274,93 @@ mod tests {
         app.tick_praat();
         let text = dialog_text_after_running(&app);
         assert!(text.contains("Internal error") && text.contains("boom in praat"), "{text}");
+    }
+
+    /// A Praat run past its limit is not stopped: a question appears over its Running dialog.
+    /// A later report updates the time shown, `n` (or Esc) keeps waiting, the run finishing
+    /// takes the question away, and a report for some other job is ignored.
+    #[test]
+    fn an_overdue_praat_run_asks_instead_of_stopping() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = app_running_job_7();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.praat_runner.events = rx;
+        let overdue = |seconds| crate::praat::PraatEvent::Overdue { job: 7, seconds };
+
+        tx.send(crate::praat::PraatEvent::Overdue { job: 99, seconds: 120 }).unwrap();
+        app.tick_praat();
+        assert!(app.confirm.is_none(), "another job's report is not this run's question");
+
+        tx.send(overdue(120)).unwrap();
+        app.tick_praat();
+        assert!(matches!(app.confirm, Some(Confirm::StopOverdueJob { job: 7, seconds: 120 })));
+        assert!(matches!(app.dialog, Some(Dialog::CdpRunning { .. })), "the run goes on underneath");
+        tx.send(overdue(240)).unwrap();
+        app.tick_praat();
+        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(screen.contains("Still running after 4:00. Stop it?"), "{screen}");
+        assert!(screen.contains("real time"), "the reason is on the second line: {screen}");
+
+        for keep in [KeyCode::Char('n'), KeyCode::Esc] {
+            app.confirm = Some(Confirm::StopOverdueJob { job: 7, seconds: 120 });
+            app.handle_key(KeyEvent::new(keep, KeyModifiers::NONE));
+            assert!(app.confirm.is_none());
+            assert!(!app.praat_runner.cancel_requested(), "{keep:?} keeps waiting");
+            assert!(matches!(app.dialog, Some(Dialog::CdpRunning { .. })));
+        }
+
+        tx.send(overdue(360)).unwrap();
+        app.tick_praat();
+        tx.send(crate::praat::PraatEvent::Finished {
+            job: 7,
+            purpose: crate::cdp::JobPurpose::Apply,
+            result: Err(crate::praat::PraatError::Cancelled),
+        })
+        .unwrap();
+        app.tick_praat();
+        assert!(app.confirm.is_none(), "a finished run's question goes away by itself");
+    }
+
+    /// `y`, Enter and a click on "(y) stop" each stop the run; a click on "(n) keep waiting"
+    /// keeps it.
+    #[test]
+    fn stopping_an_overdue_praat_run_by_key_or_click() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        for stop in [KeyCode::Char('y'), KeyCode::Enter] {
+            let mut app = app_running_job_7();
+            app.confirm = Some(Confirm::StopOverdueJob { job: 7, seconds: 120 });
+            app.handle_key(KeyEvent::new(stop, KeyModifiers::NONE));
+            assert!(app.confirm.is_none());
+            assert!(app.praat_runner.cancel_requested(), "{stop:?} stops the run");
+        }
+        let click_on = |label: &str| {
+            let mut app = app_running_job_7();
+            app.confirm = Some(Confirm::StopOverdueJob { job: 7, seconds: 120 });
+            let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let rect = app.confirm_rect;
+            let row = rect.y + 1;
+            let line: String = (0..terminal.backend().buffer().area.width)
+                .map(|x| terminal.backend().buffer()[(x, row)].symbol().to_string())
+                .collect();
+            let at = line.find(label).unwrap_or_else(|| panic!("{label:?} on {line:?}"));
+            let column = line[..at].chars().count() as u16 + 1;
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            });
+            app
+        };
+        let stopped = click_on("(y) stop");
+        assert!(stopped.confirm.is_none() && stopped.praat_runner.cancel_requested());
+        let kept = click_on("(n) keep waiting");
+        assert!(kept.confirm.is_none() && !kept.praat_runner.cancel_requested());
     }
 
     #[test]

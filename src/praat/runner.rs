@@ -92,6 +92,12 @@ pub struct PraatJob {
     pub input_sample_rate: u32,
     pub purpose: JobPurpose,
     pub timeout: Duration,
+    /// What `timeout` means. `false`: the run is killed when it passes it, which is what the
+    /// tests and the smoke sweep want. `true`, for every run the app starts: the run is *not*
+    /// stopped; the runner reports `PraatEvent::Overdue` and asks again each further `timeout`,
+    /// and the app asks the user whether to stop it. A script that plays its result runs in
+    /// real time, so a long selection can pass any fixed limit while working correctly.
+    pub ask_on_timeout: bool,
     /// A Praat preferences directory this app owns, containing a `plugin_AudioTools` symlink to
     /// the checkout — see `prepare_prefs_dir`. `None` runs Praat against its own default
     /// preferences folder, which is fine for every process that does not chain siblings.
@@ -179,6 +185,8 @@ impl std::fmt::Display for PraatError {
 
 pub enum PraatEvent {
     Started { job: u64, label: String },
+    /// The job has run for `seconds` and is still going (`PraatJob::ask_on_timeout`).
+    Overdue { job: u64, seconds: u64 },
     Finished { job: u64, purpose: JobPurpose, result: Result<PraatJobOutput, PraatError> },
 }
 
@@ -205,8 +213,11 @@ impl PraatRunner {
                     job: id,
                     label: job.planned.label.clone(),
                 });
+                let overdue = |seconds: u64| {
+                    let _ = event_tx.send(PraatEvent::Overdue { job: id, seconds });
+                };
                 let result = crate::cdp::runner::run_catching(
-                    || run_job(&job, &cancel_for_thread),
+                    || run_job(&job, &cancel_for_thread, &overdue),
                     |message| PraatError::Panicked { message },
                 );
                 let _ = event_tx.send(PraatEvent::Finished { job: id, purpose, result });
@@ -223,6 +234,12 @@ impl PraatRunner {
     /// Best-effort cancellation of the running job; takes effect at the next poll tick.
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether a cancel has been asked for and not yet picked up by the next job.
+    #[cfg(test)]
+    pub fn cancel_requested(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
     }
 }
 
@@ -261,7 +278,11 @@ impl Drop for TempDirGuard {
     }
 }
 
-fn run_job(job: &PraatJob, cancel: &AtomicBool) -> Result<PraatJobOutput, PraatError> {
+fn run_job(
+    job: &PraatJob,
+    cancel: &AtomicBool,
+    overdue: &dyn Fn(u64),
+) -> Result<PraatJobOutput, PraatError> {
     // The process-wide counter (not just `job.id`) keeps concurrent runners' temp dirs distinct
     // even when two jobs share an id — ids are only unique per `App`, and the test suite runs
     // many runners in one process.
@@ -279,12 +300,13 @@ fn run_job(job: &PraatJob, cancel: &AtomicBool) -> Result<PraatJobOutput, PraatE
         });
     }
     let _guard = TempDirGuard(temp_dir.clone());
-    run_job_body(job, cancel, &temp_dir)
+    run_job_body(job, cancel, overdue, &temp_dir)
 }
 
 fn run_job_body(
     job: &PraatJob,
     cancel: &AtomicBool,
+    overdue: &dyn Fn(u64),
     temp_dir: &Path,
 ) -> Result<PraatJobOutput, PraatError> {
     let output_path = temp_dir.join(&job.planned.output_name);
@@ -420,6 +442,7 @@ fn run_job_body(
         picture_path.as_deref(),
         temp_dir,
         cancel,
+        overdue,
     )?;
 
     match std::fs::metadata(&output_path) {
@@ -451,6 +474,7 @@ fn run_praat(
     picture_path: Option<&Path>,
     temp_dir: &Path,
     cancel: &AtomicBool,
+    overdue: &dyn Fn(u64),
 ) -> Result<(), PraatError> {
     // `--run` is mandatory, not merely conventional: Praat's own manual says that without it
     // the behaviour is unspecified when output is redirected, and it may start the GUI and
@@ -515,16 +539,24 @@ fn run_praat(
     let stderr_handle = child.stderr.take().map(|s| thread::spawn(move || crate::cdp::runner::drain_lossy(s)));
 
     let started = Instant::now();
+    let mut deadline = job.timeout;
     let status = loop {
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(PraatError::Cancelled);
         }
-        if started.elapsed() >= job.timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(PraatError::TimedOut { seconds: job.timeout.as_secs() });
+        if started.elapsed() >= deadline {
+            if job.ask_on_timeout {
+                // Keep running and ask; the user stops it through `cancel` if they choose to.
+                // The next question comes one more `timeout` later.
+                overdue(started.elapsed().as_secs());
+                deadline += job.timeout.max(Duration::from_secs(1));
+            } else {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(PraatError::TimedOut { seconds: job.timeout.as_secs() });
+            }
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -825,13 +857,14 @@ mod tests {
             input_sample_rate: 44_100,
             purpose: JobPurpose::Apply,
             timeout,
+            ask_on_timeout: false,
             prefs_dir: None,
             python_venv_bin: None,
         }
     }
 
     fn run(job: &PraatJob) -> Result<PraatJobOutput, PraatError> {
-        run_job(job, &AtomicBool::new(false))
+        run_job(job, &AtomicBool::new(false), &|_| {})
     }
 
     #[test]
@@ -998,6 +1031,28 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(30), "timeout did not fire promptly");
     }
 
+    /// With `ask_on_timeout`, passing the limit does not stop the run: the runner reports how
+    /// long it has run, once per further limit, and the script carries on to its own end.
+    #[test]
+    fn a_run_past_its_limit_is_reported_not_stopped_when_asked_to() {
+        require_praat!();
+        let mut job = job_with(
+            "form Driver\n    infile Input_file\n    outfile Output_file\nendform\n\
+             elapsed = 0\nrepeat\n    elapsed = elapsed + stopwatch\nuntil elapsed > 2.6\n",
+            Duration::from_secs(1),
+        );
+        job.ask_on_timeout = true;
+        let seen = std::sync::Mutex::new(Vec::new());
+        let result = run_job(&job, &AtomicBool::new(false), &|seconds| seen.lock().unwrap().push(seconds));
+        assert!(
+            !matches!(result, Err(PraatError::TimedOut { .. })),
+            "the run must not be killed at its limit: {result:?}"
+        );
+        let seen = seen.into_inner().unwrap();
+        assert!(seen.len() >= 2, "asked once per further limit, got {seen:?}");
+        assert!(seen.windows(2).all(|w| w[0] < w[1]), "each report is later than the last: {seen:?}");
+    }
+
     #[test]
     fn cancelling_stops_a_long_running_script() {
         require_praat!();
@@ -1012,7 +1067,7 @@ mod tests {
             thread::sleep(Duration::from_millis(300));
             flag.store(true, Ordering::Relaxed);
         });
-        assert!(matches!(run_job(&job, &cancel), Err(PraatError::Cancelled)));
+        assert!(matches!(run_job(&job, &cancel, &|_| {}), Err(PraatError::Cancelled)));
     }
 
     /// The temp directory must not outlive the job, however the job ended — including while a
@@ -1542,6 +1597,7 @@ mod tests {
                     input_sample_rate: sample_rate,
                     purpose: JobPurpose::Apply,
                     timeout: budget,
+                    ask_on_timeout: false,
                     prefs_dir: prefs.clone(),
                     // The sweep exercises the `py` group too, so it needs the same venv the app
                     // uses — otherwise every Python-backed process fails on missing imports here
@@ -1576,6 +1632,7 @@ mod tests {
                                 input_sample_rate: sample_rate,
                                 purpose: JobPurpose::Apply,
                                 timeout: budget,
+                                ask_on_timeout: false,
                                 prefs_dir: prefs.clone(),
                                 python_venv_bin: python_venv_bin(&state_dir()),
                             };
@@ -1926,6 +1983,7 @@ mod tests {
                 input_sample_rate: sample_rate,
                 purpose: JobPurpose::Apply,
                 timeout: Duration::from_secs(120),
+                ask_on_timeout: false,
                 prefs_dir: prefs.clone(),
                 python_venv_bin: None,
             };
@@ -2018,6 +2076,7 @@ mod tests {
                 // Well under the 60s the hang used to consume, so a regression to the session
                 // loop fails here quickly rather than stalling the suite.
                 timeout: Duration::from_secs(30),
+                ask_on_timeout: false,
                 prefs_dir: prefs.clone(),
                 python_venv_bin: python_venv_bin(&state_dir()),
             };
@@ -2132,6 +2191,7 @@ mod tests {
                 input_sample_rate: sample_rate,
                 purpose: JobPurpose::Apply,
                 timeout: Duration::from_secs(60),
+                ask_on_timeout: false,
                 prefs_dir: prefs.clone(),
                 python_venv_bin: python_venv_bin(&state_dir()),
             };
@@ -2215,6 +2275,7 @@ mod tests {
                 input_sample_rate: 44_100,
                 purpose: JobPurpose::Apply,
                 timeout: Duration::from_secs(60),
+                ask_on_timeout: false,
                 prefs_dir: prefs.clone(),
                 python_venv_bin: python_venv_bin(&state_dir()),
             };
@@ -2319,6 +2380,7 @@ mod tests {
                     input_sample_rate: sample_rate,
                     purpose: JobPurpose::Apply,
                     timeout: Duration::from_secs(60),
+                    ask_on_timeout: false,
                     prefs_dir: prefs.clone(),
                     python_venv_bin: python_venv_bin(&state_dir()),
                 };
@@ -2380,6 +2442,7 @@ mod tests {
                 input_sample_rate: sr,
                 purpose: JobPurpose::Apply,
                 timeout: Duration::from_secs(90),
+                ask_on_timeout: false,
                 prefs_dir: prefs.clone(),
                 python_venv_bin: python_venv_bin(&state_dir()),
             };
@@ -2519,6 +2582,7 @@ mod tests {
                 // that never returns would look indistinguishable from a hung sweep for four
                 // minutes. 60s is well past the slowest measured drawing run.
                 timeout: Duration::from_secs(60),
+                ask_on_timeout: false,
                 prefs_dir: prefs.clone(),
                 // The sweep exercises the `py` group too, so it needs the same venv the app
                 // uses — otherwise every Python-backed process fails on missing imports here

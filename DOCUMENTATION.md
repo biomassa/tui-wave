@@ -249,6 +249,13 @@ Four of the `py` processes open a window of their own — Arranger, Performance 
 Spatial Panner and Spectral Eraser. Those run with no time limit, because you decide when they
 are done. `Esc` cancels.
 
+Every other Praat run is checked after two minutes (four for one that draws a picture). It is
+not stopped then: a question appears, "Still running after 2:00. Stop it?". `y`, `Enter` or a
+click on "(y) stop" stops it; `n`, `Esc` or a click on "(n) keep waiting" lets it go on, and the
+question comes back after the same time again. A script that plays its result runs in real time,
+so a long selection can take that long and still be working. `Esc` on the running dialog stops
+a run at any time.
+
 ---
 
 ## 2. Start the program

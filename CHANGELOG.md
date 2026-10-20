@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **A long Praat run is no longer stopped without asking.** A run that passed two minutes (four
+  for one that draws) used to be killed with "The script did not finish within 120s and was
+  stopped". It now keeps running and a question appears: "Still running after 2:00. Stop it?".
+  `y`, `Enter` or a click on "(y) stop" stops it; `n`, `Esc` or a click on "(n) keep waiting"
+  lets it go on, and the question comes back after the same time again. If the run finishes
+  while the question is up, the question goes away.
 - **The chain editor can show the chain as a block diagram.** Press `g` (or click `g:diagram`)
   to open it in its own window: every step is a box with its name, backend and preset, the
   signal runs left to right, the inputs of a multi-input step are stacked under it, and a reused
