@@ -1,5 +1,6 @@
 pub mod app;
 pub mod buffer_panel;
+pub mod chain_diagram;
 pub mod dest_picker;
 pub mod dialog_rows;
 pub mod file_panel;

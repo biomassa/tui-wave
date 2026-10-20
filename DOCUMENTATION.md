@@ -905,9 +905,21 @@ no CDP installed.
 | `d` | Delete the step |
 | `s` | Save the chain under a name |
 | `l` | Load the chain you last ran |
+| `g` | Show the chain as a block diagram |
 | `Esc` | Close |
 
 The top row cycles your saved chains, exactly as the preset row of a parameter form does.
+
+**The block diagram.** `g` (or a click on `g:diagram` in the hints bar) opens a picture of the
+whole chain in its own window: the signal goes left to right, from IN to OUT, and each step is a
+box with its name, its backend and, for a script with its own presets, the preset it uses. The
+inputs of a step that takes several sounds are stacked under it, a picked file is named where
+its input starts, and an output that a later step reuses is drawn as a line from the box that
+makes it. A generator is marked `gen`; audio that reaches one stops at a `╳`, since it ignores
+it. The arrow keys move the cursor to the nearest box in that direction, and the view scrolls to
+follow it. `Enter` closes the diagram with that step selected in the editor; `Esc` or `g` closes
+it and leaves the editor as it was. With the mouse, click a box to move the cursor to it and
+click it again to go to it; the wheel moves the cursor along the chain.
 
 **Generators in a chain.** A process that makes its own sound and reads no input, such as a CDP
 synthesis program or a Praat Generative script, can be a step. It ignores the audio that reaches

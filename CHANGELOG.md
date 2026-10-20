@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **The chain editor can show the chain as a block diagram.** Press `g` (or click `g:diagram`)
+  to open it in its own window: every step is a box with its name, backend and preset, the
+  signal runs left to right, the inputs of a multi-input step are stacked under it, and a reused
+  output is drawn as a line from the step that makes it. Move between boxes with the arrow keys
+  or the mouse; `Enter` (or a second click on a box) goes back to the editor with that step
+  selected.
+
 ## 2026-10-19 (2.17.0)
 
 - **A chain can hold generators and steps with several inputs.** A process that makes its own

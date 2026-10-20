@@ -2295,6 +2295,8 @@ enum HintAction {
     Submit,
     Cancel,
     ToggleNewBuffer,
+    /// The chain editor's `g:diagram`.
+    OpenDiagram,
 }
 
 /// What the params dialog's Ctrl+B hint shows.
@@ -3802,6 +3804,44 @@ enum ChainEditTarget {
 /// module path. See `model::cdp::chain::PathSeg` for the Step/Branch alternation rule.
 type ChainPath = crate::model::cdp::Path;
 
+/// The block diagram drawn over the chain editor (`g`): which box the cursor is on, and where the
+/// view is scrolled to. Modal over the editor while it is open, like `ChainEditorState.envelope`.
+struct ChainDiagramState {
+    /// `None` only for a chain with no steps, which draws IN straight to OUT.
+    selected: Option<ChainPath>,
+    /// Top-left of the visible part of the picture. Cells, because the renderer is what knows the
+    /// viewport's size, and it moves the view to keep the selected box in sight.
+    scroll_x: std::cell::Cell<u16>,
+    scroll_y: std::cell::Cell<u16>,
+}
+
+/// The chain's block diagram, laid out for this session: picked buffers are named as the editor
+/// names them, and each box carries the backend badge the editor's rows carry.
+fn chain_diagram_of(
+    state: &ChainEditorState,
+    catalog: &crate::model::cdp::CdpCatalog,
+    documents: &[Document],
+) -> crate::ui::chain_diagram::Diagram {
+    let picked = |path: &[crate::model::cdp::PathSeg]| {
+        state.buffer_picks.get(path).map(|&i| document_display_name(documents, i))
+    };
+    let badge = |d: &crate::model::cdp::ProcessDef| cdp_backend_badge(d).to_string();
+    let ctx = crate::ui::chain_diagram::Context { catalog, picked_buffer: &picked, badge: &badge };
+    crate::ui::chain_diagram::layout(&state.chain, &ctx)
+}
+
+/// An open document's name as the chain editor shows it: the file name, or `_NEW_007` for one
+/// never saved.
+fn document_display_name(documents: &[Document], idx: usize) -> String {
+    match documents.get(idx).and_then(|d| d.path.as_ref()) {
+        Some(p) => p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "untitled".to_string()),
+        None => format!("_NEW_{:03}", idx + 1),
+    }
+}
+
 /// The indent for a row of `kind` at `depth` levels of nesting *within its own column*.
 ///
 /// One level is four columns, and a parameter sits two in from the step it belongs to — enough
@@ -3986,6 +4026,8 @@ struct ChainEditorState {
     /// chain rather than watching for keystrokes is what covers every editing route at once:
     /// typing, a slider step, a cycled choice, an envelope attached, a branch re-pointed.
     previewed: Option<crate::model::cdp::CdpChain>,
+    /// The block diagram, while it is open over the editor.
+    diagram: Option<ChainDiagramState>,
     /// The row the view is scrolled to.
     ///
     /// **Stored**, unlike every other scroll position in this app, which derives itself from the
@@ -4100,7 +4142,7 @@ impl ChainEditorState {
             envelope: None,
             assign_picker: None,
             view_rows: std::cell::Cell::new(1),
-            previewed: None,
+            previewed: None, diagram: None,
             scroll_top: std::cell::Cell::new(0),
             bank_selected: 0,
         }
@@ -8767,6 +8809,7 @@ impl App {
                 Some(HintAction::Submit) => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
                 Some(HintAction::Cancel) => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
                 Some(HintAction::ToggleNewBuffer) => KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+                Some(HintAction::OpenDiagram) => KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
                 None => return,
             };
             if self.save_as_active {
@@ -9109,6 +9152,21 @@ impl App {
             // session, and a stray click landing on one should not open it.
             Some(Dialog::CdpChainEditor) => {
                 let Some(state) = self.cdp_chain_editor.as_ref() else { return };
+                // The diagram's targets are its boxes, in layout order. One click moves the cursor
+                // there; a second on the selected box goes to it, as a step row opens.
+                if let Some(open) = state.diagram.as_ref() {
+                    let diagram = chain_diagram_of(state, &self.cdp_catalog, &self.documents);
+                    if let Some(clicked) = diagram.boxes.get(row).map(|b| b.path.clone()) {
+                        let was_selected = open.selected.as_ref() == Some(&clicked);
+                        if let Some(d) = self.cdp_chain_editor.as_mut().and_then(|s| s.diagram.as_mut()) {
+                            d.selected = Some(clicked);
+                        }
+                        if was_selected && double_click {
+                            self.go_to_chain_diagram_selection();
+                        }
+                    }
+                    return;
+                }
                 let rows = chain_display_rows(state, &self.cdp_catalog);
                 // Bank rows are appended after the step rows, so an index past the display list
                 // is one of them. Clicking focuses the pane as well as selecting — the pane owns
@@ -9810,6 +9868,11 @@ impl App {
             self.handle_bank_envelope_key(key);
             return;
         }
+        // So is the block diagram.
+        if self.cdp_chain_editor.as_ref().is_some_and(|s| s.diagram.is_some()) {
+            self.handle_chain_diagram_key(key);
+            return;
+        }
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let focus = self.cdp_chain_editor.as_ref().map(|s| s.focus).unwrap_or_default();
@@ -9944,6 +10007,8 @@ impl App {
             KeyCode::Enter => self.activate_chain_editor_row(),
             KeyCode::Delete => self.delete_chain_editor_row(),
             KeyCode::Char('s') => self.open_chain_save_prompt(),
+            // `g` for graph: the chain as a block diagram.
+            KeyCode::Char('g') => self.open_chain_diagram(),
             // `r` for recall. Moved off `l`, which vim navigation wanted, and onto a free key
             // with a better mnemonic than the one it left.
             KeyCode::Char('r') | KeyCode::Char('R') if ctrl => self.recall_last_chain(),
@@ -11103,6 +11168,89 @@ impl App {
     /// [`ProcessDef::branch_arity_min`] — a dual-input process's second input is mandatory, and
     /// a combiner with one leg combines nothing. Refused with a message rather than silently
     /// ignored, so the key does not appear broken on the rows where it cannot apply.
+    /// Opens the block diagram over the chain editor, with the cursor on the step the editor has
+    /// selected (or on the step a selected parameter, input or add-input row belongs to).
+    fn open_chain_diagram(&mut self) {
+        use crate::model::cdp::PathSeg;
+        let Some(state) = self.cdp_chain_editor.as_ref() else { return };
+        let from_row = match &state.selected {
+            ChainEditorRow::Step(path)
+            | ChainEditorRow::Param { path, .. }
+            | ChainEditorRow::AddInput(path)
+            | ChainEditorRow::RemoveSplit(path) => Some(path.clone()),
+            // An input row belongs to the step it feeds.
+            ChainEditorRow::BranchHeader(path) => path.split_last().map(|(_, step)| step.to_vec()),
+            // The step just before where a new one would go.
+            ChainEditorRow::AddStep { path, index } if *index > 0 => {
+                let mut step = path.clone();
+                step.push(PathSeg::Step(index - 1));
+                Some(step)
+            }
+            _ => None,
+        };
+        let diagram = chain_diagram_of(state, &self.cdp_catalog, &self.documents);
+        let selected = from_row
+            .filter(|p| diagram.box_at(p).is_some())
+            .or_else(|| diagram.boxes.first().map(|b| b.path.clone()));
+        if let Some(state) = self.cdp_chain_editor.as_mut() {
+            state.diagram = Some(ChainDiagramState {
+                selected,
+                scroll_x: std::cell::Cell::new(0),
+                scroll_y: std::cell::Cell::new(0),
+            });
+            state.error = None;
+        }
+    }
+
+    /// Keys while the block diagram is open: the arrows move the cursor to the nearest box that
+    /// way, Enter goes to that step in the editor, Esc or `g` closes the diagram.
+    fn handle_chain_diagram_key(&mut self, key: KeyEvent) {
+        use crate::ui::chain_diagram::Direction;
+        let direction = match key.code {
+            KeyCode::Left => Some(Direction::Left),
+            KeyCode::Right => Some(Direction::Right),
+            KeyCode::Up => Some(Direction::Up),
+            KeyCode::Down => Some(Direction::Down),
+            _ => None,
+        };
+        if let Some(direction) = direction {
+            self.move_chain_diagram_cursor(direction);
+            return;
+        }
+        match key.code {
+            KeyCode::Enter => self.go_to_chain_diagram_selection(),
+            KeyCode::Esc | KeyCode::Char('g') => {
+                if let Some(state) = self.cdp_chain_editor.as_mut() {
+                    state.diagram = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn move_chain_diagram_cursor(&mut self, direction: crate::ui::chain_diagram::Direction) {
+        let Some(state) = self.cdp_chain_editor.as_ref() else { return };
+        let Some(from) = state.diagram.as_ref().and_then(|d| d.selected.clone()) else { return };
+        let diagram = chain_diagram_of(state, &self.cdp_catalog, &self.documents);
+        if let Some(next) = crate::ui::chain_diagram::nearest_in_direction(&diagram, &from, direction) {
+            if let Some(d) = self.cdp_chain_editor.as_mut().and_then(|s| s.diagram.as_mut()) {
+                d.selected = Some(next);
+            }
+        }
+    }
+
+    /// Closes the diagram onto the editor with the selected box's step row selected. The step is
+    /// not opened: the point is to find it, and Enter in the editor opens it from there.
+    fn go_to_chain_diagram_selection(&mut self) {
+        let Some(state) = self.cdp_chain_editor.as_mut() else { return };
+        let Some(diagram) = state.diagram.take() else { return };
+        if let Some(path) = diagram.selected {
+            state.selected = ChainEditorRow::Step(path);
+            state.focus = ChainFocus::Steps;
+            state.error = None;
+        }
+    }
+
     /// Adds one more input to the multi-input step at `step_path`, starting as a copy of the
     /// audio that reaches the step, and selects its row. Refused once the step's process has
     /// all the inputs it can take.
@@ -21105,6 +21253,15 @@ impl App {
             {
                 const WHEEL_ROWS: i32 = 3;
                 let delta = if mouse.kind == MouseEventKind::ScrollUp { -WHEEL_ROWS } else { WHEEL_ROWS };
+                // Over the diagram the wheel moves the cursor along the flow, and the view follows
+                // it, for the same reason it moves the editor's selection below.
+                if self.cdp_chain_editor.as_ref().is_some_and(|s| s.diagram.is_some()) {
+                    use crate::ui::chain_diagram::Direction;
+                    let direction =
+                        if mouse.kind == MouseEventKind::ScrollUp { Direction::Left } else { Direction::Right };
+                    self.move_chain_diagram_cursor(direction);
+                    return;
+                }
                 if self.cdp_chain_editor.as_ref().is_some_and(|s| s.focus == ChainFocus::Bank) {
                     if let Some(state) = self.cdp_chain_editor.as_mut() {
                         let count = state.chain.bank.envelopes.len() as i32;
@@ -24437,6 +24594,8 @@ impl App {
             "Enter" | "Ret" => Some(HintAction::Submit),
             "Esc" => Some(HintAction::Cancel),
             "Ctrl+B" => Some(HintAction::ToggleNewBuffer),
+            // Only the chain editor's bar offers `g`, and it means the diagram there.
+            "g" if matches!(self.dialog, Some(Dialog::CdpChainEditor)) => Some(HintAction::OpenDiagram),
             _ => None,
         }
     }
@@ -25595,7 +25754,14 @@ fn render_dialog(
             if let Some(edit) = chain_editor.and_then(|s| s.envelope.as_ref()) {
                 return render_cdp_envelope_editor(frame, area, &[], edit, None, curves, graphics_mode);
             }
-            return render_cdp_chain_editor_dialog(frame, area, chain_editor, catalog, documents, chain_input, chain_input_len);
+            let rects = render_cdp_chain_editor_dialog(frame, area, chain_editor, catalog, documents, chain_input, chain_input_len);
+            // The block diagram sits over the editor and owns every click while it is open.
+            if let Some(state) = chain_editor {
+                if let Some(diagram) = state.diagram.as_ref() {
+                    return render_chain_diagram(frame, area, state, diagram, catalog, documents);
+                }
+            }
+            return rects;
         }
         Dialog::AutoTrim {
             method, threshold, min_silence, pad_lead, pad_trail, fade_ms, snap, remove_gaps,
@@ -30936,6 +31102,182 @@ fn chain_bank_sparkline_rows(points: &[(f64, f64)]) -> [String; 2] {
     ]
 }
 
+/// The chain's block diagram, centered over the chain editor. Returns one click target per box
+/// (in layout order, zero-size when scrolled out of view), then the hints bar.
+///
+/// The view follows the cursor: before drawing, it scrolls just far enough to bring the selected
+/// box fully into sight, and arrows on the frame say which way more of the picture lies.
+fn render_chain_diagram(
+    frame: &mut Frame,
+    area: Rect,
+    state: &ChainEditorState,
+    open: &ChainDiagramState,
+    catalog: &crate::model::cdp::CdpCatalog,
+    documents: &[Document],
+) -> Vec<Rect> {
+    use crate::ui::chain_diagram::{line_glyph, BOX_HEIGHT};
+    let diagram = chain_diagram_of(state, catalog, documents);
+
+    // Sized to the picture, within the screen: one column of padding each side, the picture,
+    // then a blank row and the hints.
+    let max_w = area.width.saturating_sub(4).max(1);
+    let max_h = area.height.saturating_sub(2).max(1);
+    let width = (diagram.width + 4).max(44).min(max_w);
+    let height = (diagram.height + 5).min(max_h);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+    let name = if state.chain.name.is_empty() { "unsaved chain" } else { state.chain.name.as_str() };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER).bg(theme::SURFACE0))
+        .style(Style::default().bg(theme::SURFACE0))
+        .title(Span::styled(
+            format!(" Chain diagram: {name} "),
+            Style::default().fg(theme::TEXT).bg(theme::SURFACE0),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if inner.width < 3 || inner.height < 3 {
+        return Vec::new();
+    }
+    let view = Rect {
+        x: inner.x + 1,
+        y: inner.y,
+        width: inner.width.saturating_sub(2),
+        height: inner.height.saturating_sub(2),
+    };
+    let hints_area = Rect { x: inner.x, y: inner.y + inner.height - 1, width: inner.width, height: 1 };
+
+    // Follow the cursor: scroll just enough to show the whole selected box.
+    let max_sx = diagram.width.saturating_sub(view.width);
+    let max_sy = diagram.height.saturating_sub(view.height);
+    let mut sx = open.scroll_x.get().min(max_sx);
+    let mut sy = open.scroll_y.get().min(max_sy);
+    let selected_box = open.selected.as_ref().and_then(|p| diagram.box_at(p));
+    if let Some(b) = selected_box {
+        if b.x < sx {
+            sx = b.x.saturating_sub(2);
+        } else if b.x + b.width > sx + view.width {
+            sx = (b.x + b.width + 2).saturating_sub(view.width).min(max_sx);
+        }
+        if b.y < sy {
+            sy = b.y.saturating_sub(1);
+        } else if b.y + BOX_HEIGHT > sy + view.height {
+            sy = (b.y + BOX_HEIGHT + 1).saturating_sub(view.height).min(max_sy);
+        }
+    }
+    open.scroll_x.set(sx);
+    open.scroll_y.set(sy);
+
+    let line_style = Style::default().fg(theme::SUBTEXT0).bg(theme::SURFACE0);
+    let tag_style = Style::default().fg(theme::ANNOTATION).bg(theme::SURFACE0);
+    let buf = frame.buffer_mut();
+    let mut put = |x: u16, y: u16, text: &str, style: Style| {
+        if y < sy || y >= sy + view.height {
+            return;
+        }
+        for (i, ch) in text.chars().enumerate() {
+            let cx = x + i as u16;
+            if cx < sx || cx >= sx + view.width {
+                continue;
+            }
+            let cell = &mut buf[(view.x + cx - sx, view.y + y - sy)];
+            cell.set_char(ch);
+            cell.set_style(style);
+        }
+    };
+    for (&(x, y), &bits) in &diagram.lines {
+        put(x, y, &line_glyph(bits).to_string(), line_style);
+    }
+    for &(x, y) in &diagram.arrows {
+        put(x, y, "\u{25b6}", line_style);
+    }
+    for tag in &diagram.tags {
+        put(tag.x, tag.y, &tag.text, tag_style);
+    }
+    for b in &diagram.boxes {
+        let selected = open.selected.as_ref() == Some(&b.path);
+        // The selected box is the one thing in the picture you can act on, so it alone wears
+        // the focus colour, frame and text alike.
+        let frame_style = if selected {
+            Style::default().fg(theme::FOCUS).bg(theme::SURFACE0)
+        } else {
+            Style::default().fg(theme::BORDER).bg(theme::SURFACE0)
+        };
+        let title_style = if selected {
+            Style::default().fg(theme::FOCUS).bg(theme::SURFACE0).add_modifier(ratatui::style::Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::PROCESS_NAME).bg(theme::SURFACE0)
+        };
+        let inner_w = b.width.saturating_sub(2) as usize;
+        put(b.x, b.y, &format!("\u{250c}{}\u{2510}", "\u{2500}".repeat(inner_w)), frame_style);
+        put(b.x, b.y + 1, &format!("\u{2502} {:<w$} \u{2502}", b.title, w = inner_w.saturating_sub(2)), title_style);
+        put(b.x, b.y + 2, &format!("\u{2502} {:<w$} \u{2502}", b.preset, w = inner_w.saturating_sub(2)), tag_style);
+        put(b.x, b.y + 3, &format!("\u{2514}{}\u{2518}", "\u{2500}".repeat(inner_w)), frame_style);
+        // The frame's sides keep the frame colour around coloured text.
+        put(b.x, b.y + 1, "\u{2502}", frame_style);
+        put(b.x + b.width - 1, b.y + 1, "\u{2502}", frame_style);
+        put(b.x, b.y + 2, "\u{2502}", frame_style);
+        put(b.x + b.width - 1, b.y + 2, "\u{2502}", frame_style);
+    }
+
+    // More picture beyond an edge: an arrow on that edge of the frame.
+    let more = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let mid_y = popup.y + popup.height / 2;
+    let mid_x = popup.x + popup.width / 2;
+    if sx > 0 {
+        buf[(popup.x, mid_y)].set_char('\u{25c0}').set_style(more);
+    }
+    if sx < max_sx {
+        buf[(popup.x + popup.width - 1, mid_y)].set_char('\u{25b6}').set_style(more);
+    }
+    if sy > 0 {
+        buf[(mid_x, popup.y)].set_char('\u{25b2}').set_style(more);
+    }
+    if sy < max_sy {
+        buf[(mid_x, popup.y + popup.height - 1)].set_char('\u{25bc}').set_style(more);
+    }
+
+    let hint_style = Style::default().fg(theme::SHORTCUT).bg(theme::SURFACE0);
+    let label_style = Style::default().fg(theme::CHROME_FG).bg(theme::SURFACE0);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" \u{2190}\u{2191}\u{2193}\u{2192}", hint_style),
+            Span::styled(":move  ", label_style),
+            Span::styled("Enter", hint_style),
+            Span::styled(":go to step  ", label_style),
+            Span::styled("Esc", hint_style),
+            Span::styled(":close", label_style),
+        ])),
+        hints_area,
+    );
+
+    // One target per box, clipped to the view; a box out of view gets an unhittable rect, so a
+    // row index is a box index directly.
+    let mut rects: Vec<Rect> = diagram
+        .boxes
+        .iter()
+        .map(|b| {
+            let x0 = b.x.max(sx);
+            let x1 = (b.x + b.width).min(sx + view.width);
+            let y0 = b.y.max(sy);
+            let y1 = (b.y + BOX_HEIGHT).min(sy + view.height);
+            if x0 >= x1 || y0 >= y1 {
+                Rect::default()
+            } else {
+                Rect { x: view.x + x0 - sx, y: view.y + y0 - sy, width: x1 - x0, height: y1 - y0 }
+            }
+        })
+        .collect();
+    rects.push(hints_area);
+    rects
+}
+
 fn render_cdp_chain_editor_dialog(
     frame: &mut Frame,
     area: Rect,
@@ -31691,6 +32033,8 @@ fn render_cdp_chain_editor_dialog(
                 Span::styled(":delete  ", label_style),
                 Span::styled("s", hint_style),
                 Span::styled(":save  ", label_style),
+                Span::styled("g", hint_style),
+                Span::styled(":diagram  ", label_style),
                 Span::styled("Esc", hint_style),
                 Span::styled(":close", label_style),
             ]),
@@ -33667,6 +34011,159 @@ mod tests {
             matches!(app.dialog, Some(Dialog::CdpBrowser { .. })),
             "clicking + Add step must open the process browser, as Enter on it does"
         );
+    }
+
+    /// A chain editor holding `blur_avrg`, then Stereo Mixer fed by one generator, then Hard Clip.
+    fn app_with_a_diagrammable_chain() -> App {
+        use crate::model::cdp::chain::{Branch, BranchSource};
+        let mut app = new_app(Some(doc(0.1, 1000)), None);
+        app.handle_action(Action::CdpChain);
+        let mut mixer = chain_of(&app, &["praat_spatial_surround_stereo_mixer"]).steps.remove(0);
+        mixer.branches = vec![Branch {
+            source: BranchSource::Tap,
+            steps: chain_of(&app, &["praat_generative_synthesis_risset_s_mutations"]).steps,
+        }];
+        let mut steps = chain_of(&app, &["blur_avrg"]).steps;
+        steps.push(mixer);
+        steps.extend(chain_of(&app, &["praat_distortion_hard_clip"]).steps);
+        if let Some(state) = app.cdp_chain_editor.as_mut() {
+            state.chain.steps = steps;
+            state.selected = ChainEditorRow::Step(vec![crate::model::cdp::PathSeg::Step(1)]);
+        }
+        app
+    }
+
+    fn diagram_cursor(app: &App) -> Option<ChainPath> {
+        app.cdp_chain_editor.as_ref()?.diagram.as_ref()?.selected.clone()
+    }
+
+    /// `g` opens the diagram on the step the editor has selected; the arrows move the cursor to
+    /// the nearest box that way; Enter closes it onto that step's row, without opening it; Esc
+    /// and `g` close it and leave the editor as it was.
+    #[test]
+    fn the_chain_diagram_opens_moves_and_goes_to_a_step() {
+        use crate::model::cdp::PathSeg::{Branch as B, Step as S};
+        let mut app = app_with_a_diagrammable_chain();
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(diagram_cursor(&app), Some(vec![S(1)]), "it opens on the selected step");
+        assert!(matches!(app.dialog, Some(Dialog::CdpChainEditor)), "over the chain editor");
+
+        press(&mut app, KeyCode::Right);
+        assert_eq!(diagram_cursor(&app), Some(vec![S(2)]));
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(diagram_cursor(&app), Some(vec![S(1), B(0), S(0)]), "down into the input lane");
+        // Keys in the diagram do not reach the editor underneath.
+        let steps_before = app.cdp_chain_editor.as_ref().unwrap().chain.steps.len();
+        press(&mut app, KeyCode::Delete);
+        assert_eq!(app.cdp_chain_editor.as_ref().unwrap().chain.steps.len(), steps_before);
+
+        press(&mut app, KeyCode::Enter);
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert!(state.diagram.is_none(), "Enter closes the diagram");
+        assert_eq!(state.selected, ChainEditorRow::Step(vec![S(1), B(0), S(0)]));
+        assert!(matches!(app.dialog, Some(Dialog::CdpChainEditor)), "and does not open the step");
+
+        for close in [KeyCode::Esc, KeyCode::Char('g')] {
+            press(&mut app, KeyCode::Char('g'));
+            press(&mut app, KeyCode::Right);
+            press(&mut app, close);
+            let state = app.cdp_chain_editor.as_ref().unwrap();
+            assert!(state.diagram.is_none());
+            assert_eq!(
+                state.selected,
+                ChainEditorRow::Step(vec![S(1), B(0), S(0)]),
+                "closing leaves the editor's selection alone"
+            );
+        }
+    }
+
+    /// The diagram works with the mouse alone: the editor's `g:diagram` hint opens it, a click
+    /// on a box moves the cursor there and a second click goes to it, the wheel moves along the
+    /// flow, and the `Esc:close` hint closes it.
+    #[test]
+    fn the_chain_diagram_works_with_the_mouse() {
+        use crate::model::cdp::PathSeg::{Branch as B, Step as S};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = app_with_a_diagrammable_chain();
+        let mut terminal = Terminal::new(TestBackend::new(160, 44)).unwrap();
+        let click_hint = |app: &mut App, terminal: &mut Terminal<TestBackend>, hint: &str| {
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let rect = *app.dialog_row_rects.last().expect("hints rect");
+            let col = app.dialog_hints_text.find(hint).unwrap_or_else(|| panic!("{hint:?} in {:?}", app.dialog_hints_text));
+            let col = app.dialog_hints_text[..col].chars().count() as u16;
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + col,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            });
+        };
+        click_hint(&mut app, &mut terminal, "g:diagram");
+        assert_eq!(diagram_cursor(&app), Some(vec![S(1)]), "the hint opens the diagram");
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(screen.contains("Chain diagram") && screen.contains("Stereo Mixer"), "{screen}");
+        assert!(screen.contains("Enter:go to step"), "{screen}");
+
+        // The generator's box is the third laid out: blur_avrg, then the mixer's input lane.
+        let diagram = chain_diagram_of(app.cdp_chain_editor.as_ref().unwrap(), &app.cdp_catalog, &app.documents);
+        let target = diagram.boxes.iter().position(|b| b.path == vec![S(1), B(0), S(0)]).unwrap();
+        let rect = app.dialog_row_rects[target];
+        assert!(rect.width > 0, "the box is on screen and hittable");
+        let click = |app: &mut App| {
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + 2,
+                row: rect.y + 1,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        click(&mut app);
+        assert_eq!(diagram_cursor(&app), Some(vec![S(1), B(0), S(0)]), "one click moves the cursor");
+        click(&mut app);
+        let state = app.cdp_chain_editor.as_ref().unwrap();
+        assert!(state.diagram.is_none(), "a second click goes to the step");
+        assert_eq!(state.selected, ChainEditorRow::Step(vec![S(1), B(0), S(0)]));
+
+        // The wheel moves along the flow.
+        press(&mut app, KeyCode::Char('g'));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        if let Some(d) = app.cdp_chain_editor.as_mut().and_then(|s| s.diagram.as_mut()) {
+            d.selected = Some(vec![S(0)]);
+        }
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 80,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_ne!(diagram_cursor(&app), Some(vec![S(0)]), "the wheel moves the cursor on");
+
+        click_hint(&mut app, &mut terminal, "Esc:close");
+        assert!(app.cdp_chain_editor.as_ref().unwrap().diagram.is_none(), "the Esc hint closes it");
+        assert!(matches!(app.dialog, Some(Dialog::CdpChainEditor)));
+    }
+
+    /// An empty chain still opens: IN goes straight to OUT and there is no cursor to move.
+    #[test]
+    fn an_empty_chain_draws_in_straight_to_out() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = new_app(Some(doc(0.1, 1000)), None);
+        app.handle_action(Action::CdpChain);
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(diagram_cursor(&app), None);
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.cdp_chain_editor.as_ref().unwrap().diagram.is_none());
+        press(&mut app, KeyCode::Char('g'));
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(screen.contains("IN") && screen.contains("OUT"), "{screen}");
     }
 
     /// A multi-input step shows "+ Add input" until it holds every input its process can take,
@@ -41815,7 +42312,7 @@ mod tests {
                 crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), branches: Vec::new(), legacy_side_chain: Vec::new() },
             ],
         };
-        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_refs: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
+        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_refs: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, diagram: None, scroll_top: Default::default(), bank_selected: 0,
             chain,
             buffer_picks: std::collections::HashMap::new(),
             selected: ChainEditorRow::Run,
@@ -41888,7 +42385,7 @@ mod tests {
                 crate::model::cdp::ChainStep { process_key: "phase_phase_1".into(), values: Vec::new(), branches: Vec::new(), legacy_side_chain: Vec::new() },
             ],
         };
-        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_refs: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
+        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_refs: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, diagram: None, scroll_top: Default::default(), bank_selected: 0,
             chain,
             buffer_picks: std::collections::HashMap::new(),
             selected: ChainEditorRow::Run,
@@ -41960,7 +42457,7 @@ mod tests {
                 crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values, branches: Vec::new(), legacy_side_chain: Vec::new() },
             ],
         };
-        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_refs: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
+        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_refs: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, diagram: None, scroll_top: Default::default(), bank_selected: 0,
             chain,
             buffer_picks: std::collections::HashMap::new(),
             selected: ChainEditorRow::Run,
@@ -42022,7 +42519,7 @@ mod tests {
                 crate::model::cdp::ChainStep { process_key: "blur_avrg".into(), values, branches: Vec::new(), legacy_side_chain: Vec::new() },
             ],
         };
-        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_refs: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
+        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_refs: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, diagram: None, scroll_top: Default::default(), bank_selected: 0,
             chain,
             buffer_picks: std::collections::HashMap::new(),
             selected: ChainEditorRow::Run,
@@ -42067,7 +42564,7 @@ mod tests {
         let mut app = new_app(Some(doc(0.5, 200)), None);
         app.config.cdp_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cdp").to_string_lossy().to_string();
 
-        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_refs: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, scroll_top: Default::default(), bank_selected: 0,
+        app.cdp_chain_editor = Some(ChainEditorState { step_edit_time_max: 1.0, step_edit_envelope_refs: Vec::new(), focus: Default::default(), param_edit: None, envelope: None, assign_picker: None, view_rows: std::cell::Cell::new(1), previewed: None, diagram: None, scroll_top: Default::default(), bank_selected: 0,
             chain: crate::model::cdp::CdpChain { bank: Default::default(), output: Default::default(),
                 name: "Preview Test".into(),
                 steps: vec![crate::model::cdp::ChainStep {
@@ -42206,6 +42703,7 @@ mod tests {
             "Ctrl+R:recall",
             "Del:delete",
             "s:save",
+            "g:diagram",
             "Esc:close",
         ] {
             assert!(screen.contains(hint), "{hint:?} was clipped off the bar: {screen}");
@@ -44294,7 +44792,7 @@ mod tests {
             envelope: None,
             assign_picker: None,
             view_rows: std::cell::Cell::new(1),
-            previewed: None,
+            previewed: None, diagram: None,
             scroll_top: Default::default(),
             bank_selected: 0,
             chain,
