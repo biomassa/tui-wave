@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-10-20 (2.18.0)
 
 - **A long Praat run is no longer stopped without asking.** A run that passed two minutes (four
   for one that draws) used to be killed with "The script did not finish within 120s and was
