@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Airwindows updated to the latest upstream**, which adds **Echojam** (Ambience), an echo effect
+  that is secretly a reverb. It was left out before because upstream had not yet written its
+  description.
+
 ## 2026-10-20 (2.18.0)
 
 - **A long Praat run is no longer stopped without asking.** A run that passed two minutes (four
