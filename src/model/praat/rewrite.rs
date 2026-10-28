@@ -796,6 +796,152 @@ fn default_button(line: &str) -> u32 {
         .unwrap_or(1)
 }
 
+/// Puts back the arguments a Vector Chain's `runScript:` calls are missing, in a copy of the chain
+/// that runs from the job's temp directory. Returns the new source and the fixes that matched
+/// no call — non-empty means the chain on disk is not the one the catalog was generated from.
+///
+/// A call written over several lines (`...` continuations, as the `*_Random` chains do) is
+/// joined and written back as one line when it is fixed; Praat does not care, and a call that
+/// needs no fix is left exactly as it was. Arguments split on commas outside quotes and
+/// parentheses, so `fixed$(x, 2)` stays one argument.
+///
+/// Running a copy moves the chain's folder, and the chains find the scripts they call relative
+/// to it: by a `"../Pitch/x.praat"` literal, which Praat resolves against the calling script's
+/// folder, or by a `defaultDirectory$ + "/../…"` fallback. Both are pointed back at
+/// `original_dir`. The primary route, `preferencesDirectory$ + "/plugin_AudioTools/"`, is the
+/// redirected preferences folder and needs nothing.
+pub fn fix_chain_arguments<'a>(
+    source: &str,
+    fixes: &'a [crate::model::cdp::def::PraatArgumentFix],
+    original_dir: &str,
+) -> (String, Vec<&'a crate::model::cdp::def::PraatArgumentFix>) {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut matched = vec![false; fixes.len()];
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let Some(call) = line.trim_start().strip_prefix("runScript:") else {
+            out.push(line.to_string());
+            i += 1;
+            continue;
+        };
+        let mut end = i + 1;
+        let mut joined = call.trim().to_string();
+        while let Some(next) = lines.get(end).and_then(|l| l.trim_start().strip_prefix("...")) {
+            joined = format!("{}, {}", joined.trim_end().trim_end_matches(','), next.trim());
+            end += 1;
+        }
+        let parts = split_call_arguments(&joined);
+        let fix = parts.split_first().and_then(|(token, args)| {
+            fixes.iter().position(|f| f.call == *token && f.passed == args.len() && f.insert_at <= args.len())
+        });
+        match fix {
+            Some(k) => {
+                matched[k] = true;
+                let mut parts = parts;
+                parts.insert(fixes[k].insert_at + 1, fixes[k].value.clone());
+                let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+                out.push(format!("{indent}runScript: {}", parts.join(", ")));
+            }
+            None => out.extend(lines[i..end].iter().map(|l| l.to_string())),
+        }
+        i = end;
+    }
+    let mut text = out.join("\n");
+    if source.ends_with('\n') {
+        text.push('\n');
+    }
+    let dir = original_dir.replace('"', "\"\"");
+    let text = text
+        .split_inclusive('\n')
+        .map(|line| {
+            if line.trim_start().starts_with('#') {
+                line.to_string()
+            } else {
+                line.replace("\"../", &format!("\"{dir}/../"))
+            }
+        })
+        .collect::<String>();
+    let (text, _) = super::python::rewrite_default_directory(&text, original_dir);
+    let unmatched = fixes.iter().zip(matched).filter(|(_, m)| !m).map(|(f, _)| f).collect();
+    (text, unmatched)
+}
+
+/// A `runScript:` argument list split on commas outside double quotes and parentheses, each
+/// part trimmed. The same rule as the converter's `split_args`.
+fn split_call_arguments(text: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let (mut quoted, mut depth) = (false, 0i32);
+    for c in text.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => depth -= 1,
+            _ => {}
+        }
+        if c == ',' && !quoted && depth == 0 {
+            parts.push(current.trim().to_string());
+            current.clear();
+        } else {
+            current.push(c);
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(current.trim().to_string());
+    }
+    parts
+}
+
+#[cfg(test)]
+mod chain_argument_tests {
+    use super::*;
+    use crate::model::cdp::def::PraatArgumentFix;
+
+    fn fix(call: &str, passed: usize, insert_at: usize) -> PraatArgumentFix {
+        PraatArgumentFix { call: call.into(), passed, insert_at, value: "0".into() }
+    }
+
+    #[test]
+    fn a_short_call_gets_its_argument_back_at_the_right_place() {
+        let source = "path2$ = \"../Pitch/X.praat\"\nrunScript: path2$, \"Custom\", 100, 0, 1\n";
+        let fixes = [fix("path2$", 4, 3)];
+        let (out, unmatched) = fix_chain_arguments(source, &fixes, "/p/Vector Chain");
+        assert!(unmatched.is_empty());
+        assert!(out.contains("runScript: path2$, \"Custom\", 100, 0, 0, 1\n"), "{out}");
+        assert!(out.contains("path2$ = \"/p/Vector Chain/../Pitch/X.praat\""), "{out}");
+    }
+
+    #[test]
+    fn a_call_over_several_lines_is_joined_and_commas_in_quotes_and_calls_stay_put() {
+        let source = "runScript: path_intro$, \"a, b\", fixed$(x, 2),\n    ... drone_width, 0\nnext = 1\n";
+        let fixes = [fix("path_intro$", 4, 3)];
+        let (out, unmatched) = fix_chain_arguments(source, &fixes, "/p");
+        assert!(unmatched.is_empty());
+        assert_eq!(out, "runScript: path_intro$, \"a, b\", fixed$(x, 2), drone_width, 0, 0\nnext = 1\n");
+    }
+
+    /// A chain fixed upstream passes the full count, so the fix matches nothing and the call is
+    /// left alone — and reported, so the stale catalog entry is noticed.
+    #[test]
+    fn a_call_already_complete_is_left_alone_and_the_fix_reported_unmatched() {
+        let source = "runScript: p$, 1, 2, 3, 4, 5\n";
+        let fixes = [fix("p$", 4, 3)];
+        let (out, unmatched) = fix_chain_arguments(source, &fixes, "/p");
+        assert_eq!(out, source);
+        assert_eq!(unmatched, vec![&fixes[0]]);
+    }
+
+    #[test]
+    fn default_directory_and_comments_are_handled() {
+        let source = "# see \"../x\"\nb$ = defaultDirectory$ + \"/../Pitch/X.praat\"\n";
+        let (out, _) = fix_chain_arguments(source, &[], "/p/VC");
+        assert!(out.starts_with("# see \"../x\"\n"), "{out}");
+        assert!(out.contains("b$ = \"/p/VC\" + \"/../Pitch/X.praat\""), "{out}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

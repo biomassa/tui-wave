@@ -64,6 +64,20 @@ pub struct PraatPlannedJob {
     /// The runner writes a copy with every interpreter assignment repointed. See
     /// `praat::python` for why `PATH` alone cannot do this on macOS.
     pub python_rewrite: Option<PythonRewrite>,
+    /// Vector Chain only: arguments to put back into calls upstream left one short — see
+    /// `ProcessDef::praat_argument_fixes`. Applied to the same single copy as the passes above.
+    pub argument_fixes: Vec<crate::model::cdp::def::PraatArgumentFix>,
+}
+
+impl PraatPlannedJob {
+    /// The filename of the rewritten copy the driver calls, when the script runs as one. The one
+    /// place that decides, so the runner writes the copy under the name the driver was given.
+    pub fn rewritten_script_name(&self) -> Option<&str> {
+        let rewritten = self.pause_rewrite.is_some()
+            || self.python_rewrite.is_some()
+            || !self.argument_fixes.is_empty();
+        rewritten.then_some(REWRITTEN_SCRIPT)
+    }
 }
 
 /// Repointing a `py`-group script's interpreter.
@@ -429,11 +443,12 @@ pub fn plan_praat_job_with(
         });
     // Both a rewritten copy and a built-in are siblings of the driver, so a bare filename
     // resolves — see `PauseRewrite::script_name`.
-    let called_script = match (&builtin_source, &pause_rewrite, &python_rewrite) {
-        (Some(builtin), _, _) => builtin.script_name.clone(),
-        (None, Some(rewrite), _) => rewrite.script_name.clone(),
-        (None, None, Some(rewrite)) => rewrite.script_name.clone(),
-        (None, None, None) => script_path.to_string_lossy().into_owned(),
+    let argument_fixes = def.praat_argument_fixes.clone();
+    let rewritten = pause_rewrite.is_some() || python_rewrite.is_some() || !argument_fixes.is_empty();
+    let called_script = match &builtin_source {
+        Some(builtin) => builtin.script_name.clone(),
+        None if rewritten => REWRITTEN_SCRIPT.to_string(),
+        None => script_path.to_string_lossy().into_owned(),
     };
     let photo_input = praat_needs_photo(def);
     let driver_source = driver_script(
@@ -455,6 +470,7 @@ pub fn plan_praat_job_with(
         pause_rewrite,
         builtin_source,
         python_rewrite,
+        argument_fixes,
     })
 }
 
@@ -606,7 +622,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false, praat_pause_button: None,
+            praat_python_rewrite: false, praat_argument_fixes: Vec::new(), praat_pause_button: None,
             requires_simple_wav_input: false,
             sidecar_extension: None,
             min_inputs: None,
@@ -1004,6 +1020,25 @@ mod pause_hoist_tests {
             !job.driver_source.contains("0.375"),
             "a hoisted value must travel in the script, not on the argument list"
         );
+    }
+
+    /// Every argument fix the catalog carries must still match a call in the pinned chain. One
+    /// that does not means the catalog and the scripts were generated apart — the runner would
+    /// refuse that chain — or upstream fixed the chain and the converter was not re-run.
+    #[test]
+    fn every_chain_argument_fix_still_applies_to_its_chain() {
+        let (catalog, _) = CdpCatalog::load(None);
+        for def in catalog.processes.iter().filter(|d| !d.praat_argument_fixes.is_empty()) {
+            let Ok(source) = std::fs::read_to_string(checkout().join(&def.bin)) else {
+                return; // submodule not initialised
+            };
+            let (_, unmatched) = crate::model::praat::rewrite::fix_chain_arguments(
+                &source,
+                &def.praat_argument_fixes,
+                "/plugin/Vector Chain",
+            );
+            assert!(unmatched.is_empty(), "{}: {unmatched:?} match no call", def.key);
+        }
     }
 
     /// What an auto param must be for the rest of the app to treat it right: a number (the only

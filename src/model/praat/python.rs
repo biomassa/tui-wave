@@ -133,7 +133,7 @@ const DEFAULT_DIRECTORY: &str = "defaultDirectory$";
 /// Textual and identifier-aware: `defaultDirectory$` is only replaced where it stands alone, so
 /// a longer name that merely contains it is untouched. Quoted strings are left alone too — a
 /// script that *prints* the word should keep printing it.
-fn rewrite_default_directory(source: &str, dir: &str) -> (String, usize) {
+pub(crate) fn rewrite_default_directory(source: &str, dir: &str) -> (String, usize) {
     let literal = format!("\"{}\"", dir.replace('"', "\"\""));
     let mut out = String::with_capacity(source.len());
     let mut count = 0;

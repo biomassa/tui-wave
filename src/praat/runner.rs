@@ -350,7 +350,7 @@ fn run_job_body(
     // in sequence to one text, written once, under the one filename both plans name. They touch
     // disjoint lines (interpreter assignments; dialog statements), so the order is immaterial;
     // what would not be immaterial is writing the file twice and having the second copy win.
-    if job.planned.python_rewrite.is_some() || job.planned.pause_rewrite.is_some() {
+    if let Some(name) = job.planned.rewritten_script_name() {
         let mut source = std::fs::read_to_string(&job.planned.script_path).map_err(|e| {
             PraatError::OutputRead {
                 path: job.planned.script_path.display().to_string(),
@@ -417,11 +417,32 @@ fn run_job_body(
             source = crate::model::praat::rewrite::repair_branch_scoped_variables(&source);
         }
 
-        let name = match (&job.planned.pause_rewrite, &job.planned.python_rewrite) {
-            (Some(rewrite), _) => &rewrite.script_name,
-            (None, Some(rewrite)) => &rewrite.script_name,
-            (None, None) => unreachable!("guarded by the condition above"),
-        };
+        // A Vector Chain whose calls upstream left one argument short (the script it calls
+        // gained a field). See `rewrite::fix_chain_arguments`. A fix that matches no call means
+        // the scripts on disk are not the ones this build's catalog was generated from.
+        if !job.planned.argument_fixes.is_empty() {
+            let original_dir = job
+                .planned
+                .script_path
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let (fixed, unmatched) = crate::model::praat::rewrite::fix_chain_arguments(
+                &source,
+                &job.planned.argument_fixes,
+                &original_dir,
+            );
+            if let Some(first) = unmatched.first() {
+                return Err(fail(format!(
+                    "this chain's call through {} does not match what this version of tui-wave \
+                     expects; the praatAudioTools scripts are probably a different version — \
+                     update them (or tui-wave) so the two agree",
+                    first.call
+                )));
+            }
+            source = fixed;
+        }
+
         let path = temp_dir.join(name);
         std::fs::write(&path, source).map_err(|e| PraatError::OutputRead {
             path: path.display().to_string(),
@@ -850,6 +871,7 @@ mod tests {
                 pause_rewrite: None,
                 builtin_source: None,
                 python_rewrite: None,
+                argument_fixes: Vec::new(),
                 label: "test".into(),
             },
             inputs: vec![vec![vec![0.0f32; 1000], vec![0.0f32; 1000]]],
@@ -1181,6 +1203,11 @@ mod tests {
     /// `chain_3` is the replacement rather than `chain_1` because this test's fixture is a plain
     /// tone: `chain_1` opens on `MDS_Space_Navigator`, which segments its input into words and
     /// refuses one with fewer than two. That is a property of the fixture, not of the chain.
+    ///
+    /// Planned through the catalog entry rather than a bare driver, so it runs what the app runs:
+    /// at upstream's 2026-10 scripts `chain_3` calls Bimodal Contour Grammar one argument short,
+    /// and the catalog's argument fix puts it back in a copy of the chain. That copy runs from
+    /// the temp directory, so this also proves its `"../Pitch/…"` paths still find their scripts.
     #[test]
     fn a_chained_script_finds_its_siblings_through_the_redirected_prefs_dir() {
         require_praat!();
@@ -1202,12 +1229,10 @@ mod tests {
             .map(|i| (i as f32 * 220.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.5)
             .collect();
         job.inputs = vec![vec![tone]];
-        job.planned.driver_source = crate::model::praat::driver::driver_script(
-            &script.to_string_lossy(),
-            &[],
-            crate::model::praat::driver::DriverOptions::default(),
-        )
-        .unwrap();
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("praat_vector_chain_chain_3").expect("chain_3 in catalog");
+        let values: Vec<_> = def.params.iter().map(|p| p.default_value()).collect();
+        job.planned = crate::model::praat::plan_praat_job_with(def, &values, &checkout, None, 1).expect("plans");
 
         match run(&job) {
             Ok(out) => assert!(!out.result.is_empty(), "chained script produced no audio"),

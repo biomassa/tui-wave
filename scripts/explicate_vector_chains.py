@@ -67,40 +67,8 @@ TRUE_WORDS = ("yes", "on", "true", "1")
 FALSE_WORDS = ("no", "off", "false", "0")
 
 
-def logical_lines(text: str) -> str:
-    """Join Praat's `...` continuation lines back onto the statement they continue.
-
-    Load-bearing, not cosmetic: a `runScript:` argument list is routinely split across three
-    lines, and reading only the first gives a short argument count that is indistinguishable
-    from a real arity bug. Six chains looked broken until this existed.
-    """
-    out: list[str] = []
-    for raw in text.split("\n"):
-        stripped = raw.strip()
-        if stripped.startswith("...") and out:
-            out[-1] = out[-1].rstrip().rstrip(",") + ", " + stripped[3:].strip()
-        else:
-            out.append(raw)
-    return "\n".join(out)
-
-
-def split_args(text: str) -> list[str]:
-    """Split an argument list on commas outside double quotes."""
-    args: list[str] = []
-    current = ""
-    quoted = False
-    for char in text:
-        if char == '"':
-            quoted = not quoted
-            current += char
-        elif char == "," and not quoted:
-            args.append(current.strip())
-            current = ""
-        else:
-            current += char
-    if current.strip():
-        args.append(current.strip())
-    return args
+logical_lines = conv.logical_lines
+split_args = conv.split_args
 
 
 # The words the report has always used for a field's kind, so it reads the same for the
@@ -111,23 +79,7 @@ _REPORT_KIND = {
 }
 
 
-def positional_fields(text: str) -> list[list] | None:
-    """The script's first `form`, one entry per positional `runScript:` argument.
-
-    Each entry is a list of the converter's `Param`s: normally one, but a `key=value` text field
-    is a single argument that the converter splits into several numbers, so those travel
-    together. `None` when the form cannot be read at all.
-    """
-    params = conv.parse_form(text)
-    if isinstance(params, str):
-        return None
-    fields: list[list] = []
-    for param in params:
-        if param.key_value_group and fields and fields[-1][0].key_value_group == param.key_value_group:
-            fields[-1].append(param)
-        else:
-            fields.append([param])
-    return fields
+positional_fields = conv.positional_fields
 
 
 def form_fields(path: Path) -> list[tuple[str, str]] | None:
@@ -159,23 +111,7 @@ def load_model() -> dict[str, "conv.Process"]:
     return {path: found[0] for path, found in by_bin.items() if len(found) == 1}
 
 
-def stage_paths(text: str) -> dict[str, str]:
-    """Stage-path variables, mapped to the script each one names.
-
-    The chains build a stage path three ways -- a bare relative literal, a `pluginPath$ +`
-    concatenation, and a `defaultDirectory$` fallback for when the first is not readable. All of
-    them end in the quoted script name, and a fallback always names the same target as the
-    assignment it backs up, so the first assignment seen is the answer.
-    """
-    paths: dict[str, str] = {}
-    for match in re.finditer(r"^\s*(\w+\$)\s*=\s*(.+)$", text, re.M):
-        variable, expression = match.group(1), match.group(2)
-        if variable in paths:
-            continue
-        literals = re.findall(r'"([^"]*\.praat)"', expression)
-        if literals:
-            paths[variable] = literals[-1]
-    return paths
+stage_paths = conv.stage_paths
 
 
 def resolve(rel: str) -> Path:
@@ -185,14 +121,18 @@ def resolve(rel: str) -> Path:
     return (base / rel).resolve()
 
 
-def stages(chain: Path) -> list[tuple[str, Path, list[str]]]:
-    """(relative bin, resolved path, arguments) for each `runScript:` stage, in order."""
+def stages(chain: Path, fixes=()) -> list[tuple[str, Path, list[str]]]:
+    """(relative bin, resolved path, arguments) for each `runScript:` stage, in order.
+
+    `fixes` are the chain entry's `argument_fixes` (`conv.CHAIN_ARGUMENT_FIXES`): a call upstream
+    left one argument short gets it back, exactly as the runner's copy of the chain does.
+    """
     text = logical_lines(chain.read_text(encoding="utf-8", errors="replace"))
     paths = stage_paths(text)
     found = []
     for match in re.finditer(r"^\s*runScript:\s*([^\n]+)$", text, re.M):
         parts = split_args(match.group(1))
-        token, args = parts[0], parts[1:]
+        token, args = parts[0], conv.fixed_args(parts[0], parts[1:], fixes)
         rel = paths.get(token, token.strip('"'))
         target = resolve(rel)
         try:
@@ -400,7 +340,8 @@ def stage_step(shown: str, text_path: Path, args: list[str], model: dict):
 
 def build_chain(chain: Path, model: dict):
     """The chain as a list of steps, each `(key, values, branches)`, or the reasons it cannot be."""
-    found = stages(chain)
+    entry = model.get(str(chain.relative_to(PLUGIN)).replace("\\", "/"))
+    found = stages(chain, entry.argument_fixes if entry else ())
     flows = stage_flow(chain)
     if not found:
         return [], ["no runScript: stages"]

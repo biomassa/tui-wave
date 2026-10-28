@@ -974,6 +974,19 @@ SILENCE_RE = re.compile(r"^(play|draw|show|visuali|demo|open_|export)", re.I)
 # declare. Neither can prove the *defect* is still there — only running the script with the
 # toggle off can, which is what the smoke sweep does — so an entry outliving its bug costs a
 # forced-on toggle, not a broken process.
+# Vector Chain calls that upstream left one argument short when it added a field to the script
+# they call. Praat fills a `runScript:` call positionally and refuses a short one ("Found 13
+# arguments but expected more"), so the whole chain stops at that stage. Keyed by the *called*
+# script; `field` is the field that was added and `value` what to pass for it.
+#
+# Only a call exactly one argument short of the target's form gets the value, inserted at that
+# field's position: the converter computes both from the target's form, emits them on each chain
+# entry that has such a call (`praat_argument_fixes`), and the runner applies them to a copy of
+# the chain. So the table gives way to upstream by itself -- a chain fixed upstream passes the
+# full count and nothing matches -- and an entry that matches no call anywhere is an error, so it
+# is deleted rather than kept. The translator applies the same fixes to the chain presets.
+CHAIN_ARGUMENT_FIXES: dict[str, dict[str, str]] = {}
+
 SILENCE_EXEMPTIONS: dict[str, dict[str, str]] = {
     "Analysis/Multi-Layer Audio Visualizer (EAnalysis Style).praat": {
         # Two reasons at once, and either alone would justify the entry. The crash:
@@ -2212,6 +2225,9 @@ class Process:
     # Emits `praat_python_rewrite = true`, which tells the app to run a copy of the script with
     # every one of those assignments repointed at the interpreter it chose.
     python_rewrite: bool = False
+    # Vector Chain only: `runScript:` calls that pass one argument too few, with the value to put
+    # back. Each is (call token, arguments passed, insert index, value). See CHAIN_ARGUMENT_FIXES.
+    argument_fixes: list = field(default_factory=list)
 
 
 def unquote(text: str, colon_form: bool) -> str:
@@ -3419,6 +3435,141 @@ def submodule_sha() -> str:
 PHOTO_HINT_RE = re.compile(r'numberOfSelected\s*\(\s*"Photo"\s*\)|select a Photo object', re.I)
 
 
+def logical_lines(text: str) -> str:
+    """Join Praat's `...` continuation lines back onto the statement they continue.
+
+    Load-bearing, not cosmetic: a `runScript:` argument list is routinely split across three
+    lines, and reading only the first gives a short argument count that is indistinguishable
+    from a real arity bug. Six chains looked broken until this existed.
+    """
+    out: list[str] = []
+    for raw in text.split("\n"):
+        stripped = raw.strip()
+        if stripped.startswith("...") and out:
+            out[-1] = out[-1].rstrip().rstrip(",") + ", " + stripped[3:].strip()
+        else:
+            out.append(raw)
+    return "\n".join(out)
+
+
+def split_args(text: str) -> list[str]:
+    """Split an argument list on commas outside double quotes and parentheses."""
+    args: list[str] = []
+    current = ""
+    quoted = False
+    depth = 0
+    for char in text:
+        if char == '"':
+            quoted = not quoted
+        elif not quoted and char == "(":
+            depth += 1
+        elif not quoted and char == ")":
+            depth -= 1
+        if char == "," and not quoted and depth == 0:
+            args.append(current.strip())
+            current = ""
+        else:
+            current += char
+    if current.strip():
+        args.append(current.strip())
+    return args
+
+
+def positional_fields(text: str) -> list[list] | None:
+    """The script's first `form`, one entry per positional `runScript:` argument.
+
+    Each entry is a list of the converter's `Param`s: normally one, but a `key=value` text field
+    is a single argument that the converter splits into several numbers, so those travel
+    together. `None` when the form cannot be read at all.
+    """
+    params = parse_form(text)
+    if isinstance(params, str):
+        return None
+    fields: list[list] = []
+    for param in params:
+        if param.key_value_group and fields and fields[-1][0].key_value_group == param.key_value_group:
+            fields[-1].append(param)
+        else:
+            fields.append([param])
+    return fields
+
+
+def stage_paths(text: str) -> dict[str, str]:
+    """Stage-path variables, mapped to the script each one names.
+
+    The chains build a stage path three ways -- a bare relative literal, a `pluginPath$ +`
+    concatenation, and a `defaultDirectory$` fallback for when the first is not readable. All of
+    them end in the quoted script name, and a fallback always names the same target as the
+    assignment it backs up, so the first assignment seen is the answer.
+    """
+    paths: dict[str, str] = {}
+    for match in re.finditer(r"^\s*(\w+\$)\s*=\s*(.+)$", text, re.M):
+        variable, expression = match.group(1), match.group(2)
+        if variable in paths:
+            continue
+        literals = re.findall(r'"([^"]*\.praat)"', expression)
+        if literals:
+            paths[variable] = literals[-1]
+    return paths
+
+
+def stage_target(rel: str) -> Path:
+    """`../Reverb/x.praat` is relative to the chains folder; `Reverb/x.praat`, which comes from a
+    `pluginPath$ +` concatenation, is relative to the plugin root."""
+    base = PLUGIN / "Vector Chain" if rel.startswith("../") else PLUGIN
+    return (base / rel).resolve()
+
+
+def chain_calls(source: str) -> list[tuple[str, str, list[str]]]:
+    """(call token, called script relative to the plugin root, arguments) per `runScript:`."""
+    text = logical_lines(source)
+    paths = stage_paths(text)
+    calls = []
+    for match in re.finditer(r"^\s*runScript:\s*([^\n]+)$", text, re.M):
+        parts = split_args(match.group(1))
+        token, args = parts[0], parts[1:]
+        target = stage_target(paths.get(token, token.strip('"')))
+        try:
+            rel = str(target.relative_to(PLUGIN.resolve())).replace("\\", "/")
+        except ValueError:
+            rel = ""
+        calls.append((token, rel, args))
+    return calls
+
+
+def argument_fixes_for(source: str, used: set[str]) -> list[tuple[str, int, int, str]]:
+    """The CHAIN_ARGUMENT_FIXES that apply to this chain's calls, as emitted on its entry.
+
+    `used` collects the table keys that matched, so the caller can refuse a table entry that
+    matched nothing.
+    """
+    fixes: list[tuple[str, int, int, str]] = []
+    for token, rel, args in chain_calls(source):
+        fix = CHAIN_ARGUMENT_FIXES.get(rel)
+        if fix is None:
+            continue
+        fields = positional_fields(read_script(PLUGIN / rel))
+        if fields is None:
+            continue
+        names = [group[0].key_value_group or group[0].name for group in fields]
+        if fix["field"] not in names or len(args) != len(fields) - 1:
+            continue
+        entry = (token, len(args), names.index(fix["field"]), fix["value"])
+        if entry not in fixes:
+            fixes.append(entry)
+        used.add(rel)
+    return fixes
+
+
+def fixed_args(token: str, args: list[str], fixes) -> list[str]:
+    """`args` with any fix for this call put back -- the translator's view of the runner's
+    rewrite, so a chain preset gets the same arguments the chain runs with."""
+    for call, passed, at, value in fixes:
+        if call == token and len(args) == passed:
+            return args[:at] + [value] + args[at:]
+    return args
+
+
 def check_stale_keys() -> list[str]:
     """Names in a path-keyed table that no longer match any script in the checkout.
 
@@ -3827,6 +3978,13 @@ def render_catalog(processes: list[Process], sha: str) -> str:
             out.append("praat_builtin = true")
         if proc.python_rewrite:
             out.append("praat_python_rewrite = true")
+        if proc.argument_fixes:
+            fixes = ", ".join(
+                f"{{ call = {toml_string(call)}, passed = {passed}, insert_at = {at}, "
+                f"value = {toml_string(value)} }}"
+                for call, passed, at, value in proc.argument_fixes
+            )
+            out.append(f"praat_argument_fixes = [{fixes}]")
         if proc.form_locks:
             pairs = ", ".join(f"[{toml_string(n)}, {'true' if v else 'false'}]"
                               for n, v in proc.form_locks)
@@ -3994,6 +4152,18 @@ def finalize(processes: list[Process]) -> tuple[list[str], list[str]]:
                 for param in hits:
                     param.default = True
 
+    # Vector Chain calls left one argument short upstream. A table entry that fixes nothing is
+    # an error, so the table empties itself once upstream fixes its chains.
+    used: set[str] = set()
+    for proc in processes:
+        if proc.bin.startswith("Vector Chain/"):
+            proc.argument_fixes = argument_fixes_for(read_script(PLUGIN / proc.bin), used)
+    for rel in sorted(set(CHAIN_ARGUMENT_FIXES) - used):
+        errors.append(f"CHAIN_ARGUMENT_FIXES names {rel!r}, but no chain calls it one argument "
+                      f"short any more -- delete the entry")
+    if errors:
+        return errors, []
+
     # Must happen before anything is written: a repeated key is an *override* to
     # `CdpCatalog::load`, not an error, so a collision silently deletes a process from the
     # browser rather than failing anywhere.
@@ -4141,6 +4311,19 @@ def selftest() -> int:
           parse_fields('real: "Region_start", fixed$(a + b, 3)\n', {}),
           "non-numeric default for 'Region_start': 'fixed$(a + b, 3)'")
     check("auto -- never in a form", isinstance(parse_fields("real Region_start sugStart\n"), str), True)
+
+    # --- Vector Chain calls: argument splitting and the fixes put back ------------------------
+    check("split_args -- commas in quotes and calls stay put",
+          split_args('p$, "a, b", fixed$(x, 2), 3'), ["p$", '"a, b"', "fixed$(x, 2)", "3"])
+    check("logical_lines -- a continued call is one line",
+          logical_lines("runScript: p$, 1,\n    ... 2, 3\nx = 1"), "runScript: p$, 1, 2, 3\nx = 1")
+    fixes = [("p$", 3, 2, "0")]
+    check("fixed_args -- a short call gets its value", fixed_args("p$", ["1", "2", "9"], fixes),
+          ["1", "2", "0", "9"])
+    check("fixed_args -- a complete call is left alone", fixed_args("p$", ["1", "2", "0", "9"], fixes),
+          ["1", "2", "0", "9"])
+    check("fixed_args -- another call is left alone", fixed_args("q$", ["1", "2", "9"], fixes),
+          ["1", "2", "9"])
 
     # --- comments built at run time: keep the wording that stands on its own ----------------
     check("built comment -- regions",

@@ -1042,6 +1042,24 @@ impl ScriptPreset {
     }
 }
 
+/// One argument to put back into a Vector Chain's `runScript:` call.
+///
+/// Upstream adds a field to a script and does not always update the chains that call it, and
+/// Praat refuses a call one argument short. This names the call by the token it passes as the
+/// script (`path_intro$`), and applies only while the call still passes exactly `passed`
+/// arguments — a chain fixed upstream passes one more, and nothing matches.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PraatArgumentFix {
+    /// The call's first argument, exactly as the chain writes it.
+    pub call: String,
+    /// How many arguments after it the short call passes.
+    pub passed: usize,
+    /// Where the missing one goes, counted among those arguments.
+    pub insert_at: usize,
+    /// The argument to insert, as Praat source (`0`).
+    pub value: String,
+}
+
 /// One CDP process: which binary to invoke, what its parameters are, and how it fits into
 /// the wav/ana pipeline.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1182,6 +1200,11 @@ pub struct ProcessDef {
     /// fails. The app runs a copy with those assignments repointed; see `model::praat::python`.
     #[serde(default)]
     pub praat_python_rewrite: bool,
+    /// Vector Chain only: `runScript:` calls upstream left one argument short, with the value to
+    /// put back. Computed by the converter from its `CHAIN_ARGUMENT_FIXES` table; the runner
+    /// applies them to a copy of the chain (`praat::rewrite::fix_chain_arguments`).
+    #[serde(default)]
+    pub praat_argument_fixes: Vec<PraatArgumentFix>,
     /// The `endPause` button this script's pause blocks should report as pressed, overriding each
     /// block's own declared default. See [`crate::model::praat::plan::PauseRewrite::button_override`]
     /// for why a declared default is normally right and what makes a wizard the exception.
@@ -1675,7 +1698,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false, praat_pause_button: None,
+            praat_python_rewrite: false, praat_argument_fixes: Vec::new(), praat_pause_button: None,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1757,7 +1780,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false, praat_pause_button: None,
+            praat_python_rewrite: false, praat_argument_fixes: Vec::new(), praat_pause_button: None,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1857,7 +1880,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false, praat_pause_button: None,
+            praat_python_rewrite: false, praat_argument_fixes: Vec::new(), praat_pause_button: None,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -1928,7 +1951,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false, praat_pause_button: None,
+            praat_python_rewrite: false, praat_argument_fixes: Vec::new(), praat_pause_button: None,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -2007,7 +2030,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false, praat_pause_button: None,
+            praat_python_rewrite: false, praat_argument_fixes: Vec::new(), praat_pause_button: None,
             requires_simple_wav_input: false, sidecar_extension: None, min_inputs: None,
             needs_head_tail_marks: false,
             head_tail_marks_unpaired: false,
@@ -2071,7 +2094,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false, praat_pause_button: None,
+            praat_python_rewrite: false, praat_argument_fixes: Vec::new(), praat_pause_button: None,
             requires_simple_wav_input: false,
             sidecar_extension: None,
             needs_head_tail_marks: false,
