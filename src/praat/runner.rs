@@ -1534,6 +1534,8 @@ mod tests {
                     crate::model::cdp::ParamKind::FolderPath => {
                         crate::model::cdp::ParamValue::Text(corpus_path.clone())
                     }
+                    // What the dialog opens on: the script fills it in, as it does in the app.
+                    _ if p.praat_auto_seed.is_some() => crate::model::cdp::ParamValue::Auto,
                     _ => p.kind.default_value(),
                 })
                 .collect();

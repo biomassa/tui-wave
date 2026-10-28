@@ -1088,8 +1088,12 @@ mod pause_hoist_tests {
         let (catalog, _) = CdpCatalog::load(None);
         let mut failures = Vec::new();
         for def in catalog.processes.iter().filter(|p| p.backend() == Backend::Praat) {
-            let values: Vec<ParamValue> =
-                def.params.iter().map(|p| p.kind.default_value()).collect();
+            // An auto row opens on `Auto`, as in the dialog, not on its placeholder number.
+            let values: Vec<ParamValue> = def
+                .params
+                .iter()
+                .map(|p| if p.praat_auto_seed.is_some() { ParamValue::Auto } else { p.kind.default_value() })
+                .collect();
             if let Err(err) = plan_praat_job(def, &values, &checkout()) {
                 failures.push(format!("{}: {err}", def.key));
             }
