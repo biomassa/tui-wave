@@ -63,7 +63,7 @@ set -euo pipefail
 # value with the header of src/model/cdp/praat_catalog.toml. Change it only together with the
 # catalog, by hand: update-praat-scripts.sh moves the submodule and regenerates the catalog, but
 # does not edit this line.
-PINNED_COMMIT="acf29bf4af2406d520cc0ed7569ce09be9c2f3c9"
+PINNED_COMMIT="e9a916a91556870e88f45b9945b97c924e72a3bf"
 UPSTREAM="https://github.com/ShaiCohen-ops/Praat-plugin_AudioTools"
 
 # Where tui-wave keeps its state. These paths must match config_home() in src/config.rs.

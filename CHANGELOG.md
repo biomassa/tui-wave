@@ -9,8 +9,31 @@
   in a settings page from the sound they are given, for example loop regions picked inside it.
   Such a field shows a grey **auto** and the script supplies the value when it runs; type a number
   to set it yourself, and delete the number to go back to auto. It works the same way in the
-  chain editor. No process uses it yet: the first will be Reich Generator's Dual Locked Loops
-  mode, with the next praatAudioTools update.
+  chain editor. Reich Generator's Dual Locked Loops settings are the first to use it.
+- **praatAudioTools updated to `e9a916a`.**
+  - **Audio Quantizer** is new (Dynamics & Envelope). It finds the note onsets of a one-voice
+    recording (voice, flute) and moves them toward a tempo grid, stretching the audio between
+    them. Its advanced settings are in the same dialog. Only the straight grid is offered: the
+    two groove grid types need a second sound or a Praat Table, which the app cannot pass.
+  - **Reich Generator** has a new **Dual Locked Loops** mode: two loops from two regions of the
+    sound, phasing against each other. Its settings are in the same dialog, and the four region
+    times are on **auto** (the script picks two regions in the sound) until you type them.
+  - **Virtual Subharmonic Generator** is rewritten (v0.7.1): new presets (Subtle, Moderate,
+    Strong, Small-Speaker Replacement), the stereo settings moved into the advanced rows, and new
+    Harmonic generator, Stereo layer, Original low cut and Keep difference settings. Saved presets
+    for it are no longer offered, because its number of settings changed.
+  - **Sound Duplicator** has a second mode that repeats the sound to a target duration. Saved
+    presets for it are no longer offered, because its number of settings changed; save them
+    again.
+  - **Neural Ambient Drone Designer** and **Bimodal Contour Grammar** have a new Draw
+    visualization row.
+  - **Ten Vector Chains work again**: chain_2, chain_3, Composition_1, Composition_2, Live_1,
+    Live_2, Live_3 and the three Random variants. Upstream added a field to the two scripts above
+    without updating the chains that call them, so Praat stopped each chain at that step with
+    "Found 13 arguments but expected more". The app now runs these chains with the missing value
+    put back (drawing off), until upstream fixes them.
+  - Live Lab, a new script, is not in the browser: it is a MIDI-controlled live performance
+    launcher, not a process.
 - **A dialog note no longer shows Praat code.** Evolving Convolution Field's advanced settings
   showed the note `Pre-filled from the " + characterDisplay$ + " preset.`; a note the script
   builds while it runs now keeps only the wording that makes sense without the script's values.

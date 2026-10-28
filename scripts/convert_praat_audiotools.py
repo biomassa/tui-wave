@@ -291,6 +291,15 @@ GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
     # Sound (`input = "wav"`), so that mode could not work here even without the dialog -- and
     # the option's own label says so. Dropping it leaves the four oscillator modes, which are
     # what the process is for.
+    # The two groove pages are reached only under these grid types: one reads a second selected
+    # Sound as the rhythmic reference, the other a groove Table object. The app hands Praat one
+    # Sound and no Table, so neither could work here; Straight grid is what is left.
+    "Dynamics & Envelope/Audio_Quantizer.praat": {
+        "drop_options": {
+            "Grid_type": ["Learned groove from a reference Sound", "Groove from a groove Table"],
+        },
+        "why": "the groove pages are reached only under grid types needing a second Sound or a Table",
+    },
     "Filter & Color/XMod.praat": {
         "drop_options": {
             "Mod_source": ["Second Sound (select 2 sounds)"],
@@ -488,6 +497,22 @@ PAUSE_HOISTS: dict[str, dict] = {
     # two Praat pages would have done.
     "Pitch/Pitch_Processor.praat": {
         "why": "Detune / Canon settings pages plus an advanced page, behind the Settings optionmenu",
+    },
+    # The Dual Locked Loops page (v0.7.1, 2026-10). No `lock_on`, like Pitch_Processor: the page
+    # sits behind `if mode$ = "Dual Locked Loops"`, so its rows apply in that mode and are inert
+    # in Single. Its four region rows are pre-filled from loop regions the script picks at random
+    # inside the input sound, so they are auto fields (see `auto_seed`).
+    "Time & Granular/Reich_Generator.praat": {
+        "why": "Dual Locked Loops page, behind the Mode optionmenu",
+    },
+    # New 2026-10. Three pages: advanced settings (block 0, behind `Advanced_settings`), and one
+    # each for the "learned groove" and "groove Table" grid types. Only the first is hoisted; the
+    # other two belong to grid types that need a second Sound or a Table object, which the app
+    # cannot hand Praat, and GUI_BLOCKING_OVERRIDES drops those options so they cannot be reached.
+    "Dynamics & Envelope/Audio_Quantizer.praat": {
+        "lock_on": ["Advanced_settings"],
+        "blocks": [0],
+        "why": "advanced settings page (onset detection and resynthesis detail)",
     },
     "Pitch/Undertone_Field.praat": {
         "lock_on": ["Show_advanced_settings"],
@@ -985,7 +1010,13 @@ SILENCE_RE = re.compile(r"^(play|draw|show|visuali|demo|open_|export)", re.I)
 # the chain. So the table gives way to upstream by itself -- a chain fixed upstream passes the
 # full count and nothing matches -- and an entry that matches no call anywhere is an error, so it
 # is deleted rather than kept. The translator applies the same fixes to the chain presets.
-CHAIN_ARGUMENT_FIXES: dict[str, dict[str, str]] = {}
+CHAIN_ARGUMENT_FIXES: dict[str, dict[str, str]] = {
+    # 2026-10: both gained `Draw_visualization` just before their last field; the chains that call
+    # them (chain_2, chain_3, Composition_1/2, Live_1/2/3 and their Random variants) did not.
+    # 0 is what the app runs with anyway, since it turns every drawing toggle off.
+    "AI & Adaptive/Neural_Ambient_Drone_Designer.praat": {"field": "Draw_visualization", "value": "0"},
+    "Pitch/Bimodal_Contour_Grammar.praat": {"field": "Draw_visualization", "value": "0"},
+}
 
 SILENCE_EXEMPTIONS: dict[str, dict[str, str]] = {
     "Analysis/Multi-Layer Audio Visualizer (EAnalysis Style).praat": {
@@ -1232,8 +1263,19 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
             elif form_params:
                 form_params[-1].notes_after.extend(carried)
         form_locks.append((name, True))
+    # `blocks` hoists only the pages listed, by index in source order. The rest are deleted by
+    # the rewrite (it removes any block no param refers to), so this is only right for a page
+    # the dialog cannot reach -- Audio Quantizer's groove pages, behind grid types that
+    # `drop_options` removes.
+    only = hoist.get("blocks")
+    if only is not None and any(i >= len(blocks) for i in only):
+        return f"blocks {only} names a page the script does not have (it has {len(blocks)})"
+
+    def wanted(i: int) -> bool:
+        return only is None or i in only
+
     for i, block in enumerate(blocks):
-        if isinstance(block["fields"], str):
+        if wanted(i) and isinstance(block["fields"], str):
             return f"block {i} ({block['title']!r}): {block['fields']}"
 
     problems: list[str] = []
@@ -1279,7 +1321,8 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
     if not split_on:
         params = list(form_params)
         for i, block in enumerate(blocks):
-            params.extend(tag(block["fields"], i))
+            if wanted(i):
+                params.extend(tag(block["fields"], i))
         # Loud, like a stale `lock_on`: a relabel for a field the script no longer has means
         # upstream renamed it, and the labels would be applied to nothing.
         for block_index, name in hoist.get("add_notes", {}):

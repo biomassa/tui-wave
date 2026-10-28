@@ -17,6 +17,7 @@ Composition_1.praat
 ==============================================================================
 
   Stage 1: AI & Adaptive/Neural_Ambient_Drone_Designer.praat
+    !! ARITY MISMATCH: chain passes 13 argument(s), form declares 14 field(s)
      1. Preset               = "Manual"   [optionmenu]
      2. Output_duration_sec  = 15.0   [real]
      3. Number_of_layers     = 3   [real]
@@ -29,7 +30,8 @@ Composition_1.praat
     10. Kmeans_iterations    = 10   [real]
     11. Stereo_width         = 0.7   [real]
     12. Seed                 = 0   [real]
-    13. Play_result          = 0   [boolean]
+    13. Draw_visualization   = 0   [boolean]
+    14. Play_result          = (not supplied)   [boolean]
 
   Stage 2: Time & Granular/Percussive Audio Groove Creator.praat
      1. Pattern_length      = "4 bars"   [optionmenu]
@@ -79,6 +81,7 @@ Composition_2.praat
      9. Play_result         = 0   [boolean]
 
   Stage 2: AI & Adaptive/Neural_Ambient_Drone_Designer.praat
+    !! ARITY MISMATCH: chain passes 13 argument(s), form declares 14 field(s)
      1. Preset               = "Evolving Pad"   [optionmenu]
      2. Output_duration_sec  = 20.0   [real]
      3. Number_of_layers     = 4   [real]
@@ -91,7 +94,8 @@ Composition_2.praat
     10. Kmeans_iterations    = 10   [real]
     11. Stereo_width         = 0.75   [real]
     12. Seed                 = 0   [real]
-    13. Play_result          = 0   [boolean]
+    13. Draw_visualization   = 0   [boolean]
+    14. Play_result          = (not supplied)   [boolean]
 
   Stage 3: Spatial & Surround/8-channel_speed_deviations.praat
      1. Preset                       = "Custom (use mode below)"   [optionmenu]
@@ -133,6 +137,7 @@ Live_1.praat
 ==============================================================================
 
   Stage 1: AI & Adaptive/Neural_Ambient_Drone_Designer.praat
+    !! ARITY MISMATCH: chain passes 13 argument(s), form declares 14 field(s)
      1. Preset               = "Manual"   [optionmenu]
      2. Output_duration_sec  = 15.0   [real]
      3. Number_of_layers     = 3   [real]
@@ -145,7 +150,8 @@ Live_1.praat
     10. Kmeans_iterations    = 10   [real]
     11. Stereo_width         = 0.7   [real]
     12. Seed                 = 0   [real]
-    13. Play_result          = 0   [boolean]
+    13. Draw_visualization   = 0   [boolean]
+    14. Play_result          = (not supplied)   [boolean]
 
   Stage 2: Time & Granular/Percussive Audio Groove Creator.praat
      1. Pattern_length      = "4 bars"   [optionmenu]
@@ -184,6 +190,7 @@ Live_1_Random.praat
 ==============================================================================
 
   Stage 1: AI & Adaptive/Neural_Ambient_Drone_Designer.praat
+    !! ARITY MISMATCH: chain passes 13 argument(s), form declares 14 field(s)
      1. Preset               = "Manual"   [optionmenu]
      2. Output_duration_sec  = drone_dur   [real]
      3. Number_of_layers     = drone_layers   [real]
@@ -196,7 +203,8 @@ Live_1_Random.praat
     10. Kmeans_iterations    = drone_kmeans   [real]
     11. Stereo_width         = drone_width   [real]
     12. Seed                 = 0   [real]
-    13. Play_result          = 0   [boolean]
+    13. Draw_visualization   = 0   [boolean]
+    14. Play_result          = (not supplied)   [boolean]
 
   Stage 2: Time & Granular/Percussive Audio Groove Creator.praat
      1. Pattern_length      = groove_dur$   [optionmenu]
@@ -246,6 +254,7 @@ Live_2.praat
      9. Play_result         = 0   [boolean]
 
   Stage 2: AI & Adaptive/Neural_Ambient_Drone_Designer.praat
+    !! ARITY MISMATCH: chain passes 13 argument(s), form declares 14 field(s)
      1. Preset               = "Evolving Pad"   [optionmenu]
      2. Output_duration_sec  = 20.0   [real]
      3. Number_of_layers     = 4   [real]
@@ -258,7 +267,8 @@ Live_2.praat
     10. Kmeans_iterations    = 10   [real]
     11. Stereo_width         = 0.75   [real]
     12. Seed                 = 0   [real]
-    13. Play_result          = 0   [boolean]
+    13. Draw_visualization   = 0   [boolean]
+    14. Play_result          = (not supplied)   [boolean]
 
   Stage 3: Spatial & Surround/8-channel_speed_deviations.praat
      1. Preset                       = "Custom (use mode below)"   [optionmenu]
@@ -293,6 +303,7 @@ Live_2_Random.praat
      9. Play_result         = 0   [boolean]
 
   Stage 2: AI & Adaptive/Neural_Ambient_Drone_Designer.praat
+    !! ARITY MISMATCH: chain passes 13 argument(s), form declares 14 field(s)
      1. Preset               = drone_preset$   [optionmenu]
      2. Output_duration_sec  = drone_dur   [real]
      3. Number_of_layers     = drone_layers   [real]
@@ -305,7 +316,8 @@ Live_2_Random.praat
     10. Kmeans_iterations    = drone_kmeans   [real]
     11. Stereo_width         = drone_width   [real]
     12. Seed                 = drone_seed   [real]
-    13. Play_result          = 0   [boolean]
+    13. Draw_visualization   = 0   [boolean]
+    14. Play_result          = (not supplied)   [boolean]
 
   Stage 3: Spatial & Surround/8-channel_speed_deviations.praat
      1. Preset                       = spatial_preset$   [optionmenu]
@@ -342,6 +354,7 @@ Live_3.praat
     11. Play_result           = 0   [boolean]
 
   Stage 2: Pitch/Bimodal_Contour_Grammar.praat
+    !! ARITY MISMATCH: chain passes 16 argument(s), form declares 17 field(s)
      1. Preset               = "Custom"   [optionmenu]
      2. Pitch_base_lo_Hz     = 100   [real]
      3. Pitch_base_hi_Hz     = 200   [real]
@@ -357,7 +370,8 @@ Live_3.praat
     13. loudnessVariation    = 10   [real]
     14. showGrid             = 0   [boolean]
     15. showNoteLabels       = 0   [boolean]
-    16. playAfterGeneration  = 0   [boolean]
+    16. Draw_visualization   = 0   [boolean]
+    17. playAfterGeneration  = (not supplied)   [boolean]
 
   Stage 3: Time & Granular/Percussive Audio Groove Creator.praat
      1. Pattern_length      = "4 bars"   [optionmenu]
@@ -393,6 +407,7 @@ Live_3_Random.praat
     11. Play_result           = 0   [boolean]
 
   Stage 2: Pitch/Bimodal_Contour_Grammar.praat
+    !! ARITY MISMATCH: chain passes 16 argument(s), form declares 17 field(s)
      1. Preset               = bc_preset$   [optionmenu]
      2. Pitch_base_lo_Hz     = bc_lo   [real]
      3. Pitch_base_hi_Hz     = bc_hi   [real]
@@ -408,7 +423,8 @@ Live_3_Random.praat
     13. loudnessVariation    = contour_variation   [real]
     14. showGrid             = contour_grid   [boolean]
     15. showNoteLabels       = contour_labels   [boolean]
-    16. playAfterGeneration  = 0   [boolean]
+    16. Draw_visualization   = 0   [boolean]
+    17. playAfterGeneration  = (not supplied)   [boolean]
 
   Stage 3: Time & Granular/Percussive Audio Groove Creator.praat
      1. Pattern_length      = groove_dur$   [optionmenu]
@@ -663,6 +679,7 @@ chain_2.praat
      9. Play_result         = 0   [boolean]
 
   Stage 2: AI & Adaptive/Neural_Ambient_Drone_Designer.praat
+    !! ARITY MISMATCH: chain passes 13 argument(s), form declares 14 field(s)
      1. Preset               = "Manual"   [optionmenu]
      2. Output_duration_sec  = 20.0   [real]
      3. Number_of_layers     = 3   [real]
@@ -675,7 +692,8 @@ chain_2.praat
     10. Kmeans_iterations    = 10   [real]
     11. Stereo_width         = 0.7   [real]
     12. Seed                 = 0   [real]
-    13. Play_result          = 0   [boolean]
+    13. Draw_visualization   = 0   [boolean]
+    14. Play_result          = (not supplied)   [boolean]
 
   Stage 3: Spatial & Surround/8-channel_speed_deviations.praat
      1. Preset                       = "Custom (use mode below)"   [optionmenu]
@@ -712,6 +730,7 @@ chain_3.praat
     11. Play_result           = 0   [boolean]
 
   Stage 2: Pitch/Bimodal_Contour_Grammar.praat
+    !! ARITY MISMATCH: chain passes 16 argument(s), form declares 17 field(s)
      1. Preset               = "Custom"   [optionmenu]
      2. Pitch_base_lo_Hz     = 100   [real]
      3. Pitch_base_hi_Hz     = 200   [real]
@@ -727,7 +746,8 @@ chain_3.praat
     13. loudnessVariation    = 10   [real]
     14. showGrid             = 0   [boolean]
     15. showNoteLabels       = 0   [boolean]
-    16. playAfterGeneration  = 0   [boolean]
+    16. Draw_visualization   = 0   [boolean]
+    17. playAfterGeneration  = (not supplied)   [boolean]
 
   Stage 3: Time & Granular/Percussive Audio Groove Creator.praat
      1. Pattern_length      = "4 bars"   [optionmenu]

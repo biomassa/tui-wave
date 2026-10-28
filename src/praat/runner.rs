@@ -1811,6 +1811,9 @@ mod tests {
     /// entry that never needed it. Same reasoning as `melody_fixture`, which exists for the one
     /// script that wants discrete pitched notes.
     const LONG_FIXTURE_ENTRIES: &[&str] = &[
+        // Moves note onsets toward a grid, so it needs onsets: a steady tone has none and it
+        // refuses with "No note onsets were detected".
+        "praat_dynamics_envelope_audio_quantizer",
         "praat_time_granular_dramaturgical_structure_composer",
         "praat_time_granular_mds_space_navigator",
         "praat_vector_chain_chain_1",
