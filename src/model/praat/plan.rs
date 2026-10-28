@@ -134,6 +134,15 @@ fn assignment_for(param: &ParamDef, value: &ParamValue) -> Result<Assignment, Pr
         (ParamKind::Number { .. }, ParamValue::Number(v)) => {
             Ok(Assignment::Number { label, value: *v })
         }
+        // Spliced into the script verbatim, so it is checked here rather than trusted: the
+        // built-in catalog only ever carries an identifier, but a user catalog could carry
+        // anything.
+        (ParamKind::Number { .. }, ParamValue::Auto) => match &param.praat_auto_seed {
+            Some(seed) if is_praat_identifier(seed) => {
+                Ok(Assignment::Seed { label, seed: seed.clone() })
+            }
+            _ => Err(PraatPlanError::ParamTypeMismatch { param: param.name.clone() }),
+        },
         (ParamKind::Toggle { .. }, ParamValue::Toggle(on)) => {
             Ok(Assignment::Number { label, value: if *on { 1.0 } else { 0.0 } })
         }
@@ -163,6 +172,15 @@ fn assignment_for(param: &ParamDef, value: &ParamValue) -> Result<Assignment, Pr
         }
         _ => Err(PraatPlanError::UnsupportedParamKind { param: param.name.clone() }),
     }
+}
+
+/// A Praat variable name as the converter admits it for an auto seed: a letter, then letters,
+/// digits and underscores. Procedure-local (`.x`), string (`x$`) and indexed names are left out
+/// on purpose — a seed is a numeric field's pre-fill, and nothing needing more has been seen.
+fn is_praat_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Why a Praat job could not be planned.
@@ -545,6 +563,7 @@ mod tests {
             before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
             range_scales_with_input_duration: false,
@@ -860,6 +879,70 @@ mod tests {
             Err(PraatPlanError::NotAPraatProcess)
         );
     }
+
+    /// A hoisted field whose pre-fill the script computes at run time (Reich Generator's random
+    /// loop regions). Left on auto, the field's variable must be assigned from that seed where
+    /// the pause stood — *not* left unassigned: the seed and the field are often different
+    /// variables, and an unassigned one is "Unknown variable" further down. A typed number
+    /// overrides the seed like any other hoisted value.
+    #[test]
+    fn an_auto_field_is_assigned_from_its_seed_and_a_typed_one_from_its_value() {
+        let source = "form Test\n    real Gain 1\nendform\n\
+                      sugStart = 0.25\n\
+                      beginPause: \"Regions\"\n    real: \"Region_start\", fixed$(sugStart, 3)\n\
+                      clicked = endPause: \"Cancel\", \"Render\", 2, 1\n\
+                      appendInfoLine: region_start\n";
+        let auto = ParamDef {
+            praat_pause_block: Some(0),
+            praat_auto_seed: Some("sugStart".into()),
+            ..number("Region_start", 0.0)
+        };
+        let def = praat_def(vec![number("Gain", 1.0), auto]);
+        let script = |value: ParamValue| {
+            let job = plan_praat_job(&def, &[ParamValue::Number(1.0), value], Path::new("/plugin"))
+                .expect("plans");
+            let rewrite = job.pause_rewrite.expect("a hoisted param rewrites");
+            crate::model::praat::rewrite::rewrite_pause_blocks(source, &rewrite.blocks, &[], None)
+                .expect("rewrites")
+        };
+
+        let left_on_auto = script(ParamValue::Auto);
+        assert!(left_on_auto.contains("region_start = sugStart"), "{left_on_auto}");
+        assert!(!left_on_auto.contains("beginPause"), "the pause must be gone: {left_on_auto}");
+
+        let typed = script(ParamValue::Number(1.5));
+        assert!(typed.contains("region_start = 1.5"), "{typed}");
+        assert!(!typed.contains("sugStart\n"), "a typed value replaces the seed: {typed}");
+    }
+
+    /// Auto has no spelling as a positional `runScript:` argument — Praat cannot skip one — and
+    /// a seed is spliced into the script, so anything but a bare identifier is refused.
+    #[test]
+    fn auto_is_refused_on_a_form_field_and_with_a_seed_that_is_not_a_name() {
+        let on_form = praat_def(vec![ParamDef {
+            praat_auto_seed: Some("x".into()),
+            ..number("Gain", 1.0)
+        }]);
+        assert!(matches!(
+            plan_praat_job(&on_form, &[ParamValue::Auto], Path::new("/plugin")),
+            Err(PraatPlanError::ParamTypeMismatch { .. })
+        ));
+
+        for seed in ["a + b", "x$", ".local", "1x", "", "x\nexitScript ()"] {
+            let def = praat_def(vec![ParamDef {
+                praat_pause_block: Some(0),
+                praat_auto_seed: Some(seed.into()),
+                ..number("Region_start", 0.0)
+            }]);
+            assert!(
+                matches!(
+                    plan_praat_job(&def, &[ParamValue::Auto], Path::new("/plugin")),
+                    Err(PraatPlanError::ParamTypeMismatch { .. })
+                ),
+                "seed {seed:?} must be refused"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -921,6 +1004,34 @@ mod pause_hoist_tests {
             !job.driver_source.contains("0.375"),
             "a hoisted value must travel in the script, not on the argument list"
         );
+    }
+
+    /// What an auto param must be for the rest of the app to treat it right: a number (the only
+    /// kind the dialog shows "auto" for), hoisted (a positional argument cannot be left out),
+    /// seeded from a bare name (it is spliced into the script), and without a closed range —
+    /// the dialog gives it no slider, because the value is not known until the run, and a
+    /// range would make every other part of the dialog expect one.
+    #[test]
+    fn every_auto_param_is_a_hoisted_open_ended_number_with_a_named_seed() {
+        let (catalog, _) = CdpCatalog::load(None);
+        for def in &catalog.processes {
+            for param in def.params.iter().filter(|p| p.praat_auto_seed.is_some()) {
+                let what = format!("{} / {}", def.key, param.name);
+                let ParamKind::Number { min, max, .. } = &param.kind else {
+                    panic!("{what}: auto on a non-number");
+                };
+                assert!(param.praat_pause_block.is_some(), "{what}: auto on a form field");
+                assert!(
+                    super::is_praat_identifier(param.praat_auto_seed.as_deref().unwrap()),
+                    "{what}: seed is not a bare name"
+                );
+                // `param_slider::applies`, restated: `model` does not reach into `ui`.
+                assert!(
+                    !(min.is_finite() && max.is_finite() && max > min),
+                    "{what}: an auto field must not have a closed range"
+                );
+            }
+        }
     }
 
     /// The same end-to-end check for a hoisted *folder*, and it needs to be its own test for the

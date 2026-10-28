@@ -332,6 +332,12 @@ pub enum ParamValue {
     /// `crystal rotate`'s two-section VDAT datafile — see `ParamKind::CrystalVdat` and
     /// `CrystalVdat`'s own doc comments for the shape and why it isn't two separate params.
     CrystalVdat(CrystalVdat),
+    /// No value: the script computes this one itself, from its input, at run time. Only valid
+    /// for a param with [`ParamDef::praat_auto_seed`] set, and only ever reaches Praat as the
+    /// assignment `<variable> = <seed>` in the rewritten pause block — the same expression
+    /// Praat's own dialog would have been pre-filled from. A positional `form` argument cannot
+    /// be skipped, so `praat::plan` refuses it there.
+    Auto,
 }
 
 /// `crystal rotate`'s VDAT companion datafile, as edited in the UI and written by
@@ -880,6 +886,21 @@ pub struct ParamDef {
     /// `praat::rewrite::rewrite_directory_choosers`.
     #[serde(default)]
     pub praat_directory_var: Option<String>,
+    /// `Some(seed)` for a hoisted pause field whose default is **computed by the script at run
+    /// time** rather than written as a number — `seed` is the variable the script pre-fills
+    /// the field from (`real: "Dual_A_Start_sec", fixed$(dual_A_Start_sec, 3)` → `dual_A_Start_sec`).
+    ///
+    /// Reich Generator's Dual page suggests two loop regions picked at random inside the input
+    /// sound; no number written into the catalog could stand for that. Such a field opens
+    /// empty and reads "auto" ([`ParamValue::Auto`]); left that way, the rewrite assigns the
+    /// field's variable from `seed` at the place the pause block stood, which is exactly the
+    /// value Praat's dialog would have shown and returned unedited. Typing a number overrides
+    /// it like any other hoisted field.
+    ///
+    /// Always a bare identifier: the converter admits nothing else, and `praat::plan` checks
+    /// again before splicing it into a script.
+    #[serde(default)]
+    pub praat_auto_seed: Option<String>,
     /// `Some(field)` for a number split out of a Praat `key=value` field — `field` names the
     /// script parameter the value rejoins, and [`key_value_key`](Self::key_value_key) is its key
     /// inside it.
@@ -1375,6 +1396,9 @@ impl ParamDef {
     /// on a limiter toggle it reads off, so a chain would appear to be set to something it is
     /// not, and adjusting one row would commit that misreading to the rest.
     pub fn default_value(&self) -> ParamValue {
+        if self.praat_auto_seed.is_some() {
+            return ParamValue::Auto;
+        }
         match &self.kind {
             ParamKind::Number { default, integer, .. } => {
                 ParamValue::Number(if *integer { default.round() } else { *default })
@@ -1614,6 +1638,7 @@ mod tests {
             before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::Number {
@@ -1685,6 +1710,7 @@ mod tests {
             before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::Toggle { default: false },
@@ -1703,6 +1729,7 @@ mod tests {
             before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::Choice {
@@ -1770,6 +1797,7 @@ mod tests {
             before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::Table {
@@ -1868,6 +1896,7 @@ mod tests {
             before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::MarkerTimeList {
@@ -1947,6 +1976,7 @@ mod tests {
             before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::HiliteBand {
@@ -2013,6 +2043,7 @@ mod tests {
             before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::CrystalVdat,

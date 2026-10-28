@@ -311,6 +311,11 @@ pub enum Assignment {
     Choice { label: String, index: usize, text: String },
     /// `sentence`/`word`/`text` — only a `$` variable.
     Text { label: String, value: String },
+    /// A field left on "auto" (`ParamValue::Auto`): its variable takes the value of `seed`, the
+    /// script variable Praat's own dialog would have been pre-filled from — so the run gets
+    /// the number the dialog would have shown and returned unedited. `seed` is a bare
+    /// identifier; `praat::plan` checks that before building one of these.
+    Seed { label: String, seed: String },
 }
 
 impl Assignment {
@@ -332,6 +337,9 @@ impl Assignment {
             }
             Assignment::Text { label, value } => {
                 vec![format!("{}$ = {}", corrected_variable(label, source), string_literal(value))]
+            }
+            Assignment::Seed { label, seed } => {
+                vec![format!("{} = {seed}", corrected_variable(label, source))]
             }
         }
     }

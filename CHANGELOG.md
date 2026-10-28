@@ -5,6 +5,15 @@
 - **Airwindows updated to the latest upstream**, which adds **Echojam** (Ambience), an echo effect
   that is secretly a reverb. It was left out before because upstream had not yet written its
   description.
+- **A Praat setting the script works out for itself can now be left on "auto".** Some scripts fill
+  in a settings page from the sound they are given, for example loop regions picked inside it.
+  Such a field shows a grey **auto** and the script supplies the value when it runs; type a number
+  to set it yourself, and delete the number to go back to auto. It works the same way in the
+  chain editor. No process uses it yet: the first will be Reich Generator's Dual Locked Loops
+  mode, with the next praatAudioTools update.
+- **A dialog note no longer shows Praat code.** Evolving Convolution Field's advanced settings
+  showed the note `Pre-filled from the " + characterDisplay$ + " preset.`; a note the script
+  builds while it runs now keeps only the wording that makes sense without the script's values.
 
 ## 2026-10-20 (2.18.0)
 

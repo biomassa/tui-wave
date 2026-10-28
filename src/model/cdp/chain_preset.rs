@@ -330,6 +330,7 @@ mod tests {
                     transpose_additive: true,
                 }]),
                 ParamValue::FormantBufferRef,
+                ParamValue::Auto,
                 ParamValue::FilePath("/tmp/some/where.wav".into()),
                 ParamValue::Text("free text".into()),
                 ParamValue::CrystalVdat(CrystalVdat {

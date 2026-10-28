@@ -2040,11 +2040,83 @@ class Note:
     section: bool
 
 
+def string_expression_pieces(text: str) -> list[tuple[bool, str]] | None:
+    """Split a Praat string expression on its top-level `+` into (is_literal, text) pieces.
+
+    None when it is not a concatenation -- a single literal, or anything this does not read.
+    A literal's text is unquoted, with Praat's doubled `""` turned back into one quote.
+    """
+    pieces: list[tuple[bool, str]] = []
+    current = ""
+    in_string = False
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == '"':
+            if in_string and text[i + 1:i + 2] == '"':
+                current += '""'
+                i += 2
+                continue
+            in_string = not in_string
+        if c == "+" and not in_string:
+            pieces.append(current.strip())
+            current = ""
+        else:
+            current += c
+        i += 1
+    if in_string:
+        return None
+    pieces.append(current.strip())
+    if len(pieces) < 2 or any(not p for p in pieces):
+        return None
+    out = []
+    for piece in pieces:
+        if len(piece) >= 2 and piece[0] == '"' and piece[-1] == '"':
+            out.append((True, piece[1:-1].replace('""', '"')))
+        else:
+            out.append((False, piece))
+    return out
+
+
+def literal_parts_of_comment(text: str) -> str | None:
+    """The fixed wording of a `comment:` built at run time, or None if it is not one.
+
+    Reich Generator's Dual page writes `"Source " + dual_dialogName$ + ": " + fixed$(…) + " s.
+    Two units, …"`: the script fills in the sound's name and length when its dialog opens, which
+    this app's dialog cannot. Shown raw, the note was Praat source code. So the computed pieces
+    are left out, and with each one the words that only make sense around it -- back to the
+    previous `.`/`;` in the text before it, and up to the next one in the text after. What
+    remains is the sentences that stand on their own: "Two units, one voice each: …", or
+    "Regions (s from the start of the Sound; edit, then Render to lock)".
+    """
+    pieces = string_expression_pieces(text)
+    if pieces is None or all(literal for literal, _ in pieces):
+        return None
+    kept: list[str] = []
+    for index, (literal, piece) in enumerate(pieces):
+        if not literal:
+            continue
+        computed_before = index > 0 and not pieces[index - 1][0]
+        computed_after = index + 1 < len(pieces) and not pieces[index + 1][0]
+        if computed_before:
+            cut = min((piece.find(b) for b in ".;" if b in piece), default=-1)
+            piece = piece[cut + 1:] if cut >= 0 else ""
+        if computed_after:
+            cut = max(piece.rfind(b) for b in ".;")
+            piece = piece[:cut + 1] if cut >= 0 else ""
+        if piece.strip():
+            kept.append(piece.strip())
+    return " ".join(kept)
+
+
 def classify_comment(text: str, colon_form: bool) -> Note | None:
     """Turn a `comment` line's operand into a `Note`, or None if it carries no information."""
     body = text.strip()
+    built = literal_parts_of_comment(body) if colon_form else None
+    if built is not None:
+        body = built
     # The modern `comment: "..."` syntax quotes its operand; the classic `comment ...` does not.
-    if colon_form and len(body) >= 2 and body[0] == '"' and body[-1] == '"':
+    elif colon_form and len(body) >= 2 and body[0] == '"' and body[-1] == '"':
         body = body[1:-1].strip()
     bare = body.strip(HEADING_DECORATION)
     # Nothing but decoration: a horizontal rule with no title, or an empty `comment`. The
@@ -2091,6 +2163,10 @@ class Param:
     # Like `pause_block`, it means "not a runScript: argument" -- the script asked for this with
     # a dialog, so its form has no slot for it. See DIRECTORY_HOISTS.
     directory_var: str = ""
+    # The script variable a pause field is pre-filled from, when that value only exists at run
+    # time (Reich Generator's random loop regions). Emits `praat_auto_seed`; the field opens on
+    # "auto" and the rewrite assigns it from this variable. See `auto_seed`.
+    auto_seed: str = ""
     # What the row held before `fill_default_preset_rows` moved it onto the default preset's
     # value: the script's plain base value. Not emitted. The Vector Chain translator needs it,
     # since a chain that picks a preset, or Custom, wants that preset's values for the page
@@ -2554,6 +2630,25 @@ def unwrap_string_cast(value: str) -> str:
     return value
 
 
+AUTO_SEED_RE = re.compile(r"^[A-Za-z]\w*$")
+
+
+def auto_seed(value_text: str) -> str | None:
+    """The variable a pause field is pre-filled from, when no number can stand for it.
+
+    Reich Generator's Dual page seeds four fields with `fixed$(dual_A_Start_sec, 3)`, where
+    `dual_A_Start_sec` holds a loop region the script picked at random inside the input sound a
+    few lines earlier. No catalog default can be that, so the field becomes "auto": it is left
+    for the script to fill, by assigning it from this same variable where the pause stood.
+
+    Only ever called for a *pause* field: a `form` field travels as a positional argument, which
+    cannot be left out. And only a bare name qualifies -- the rewrite splices it into the script,
+    and an expression is still the loud "non-numeric default" it always was.
+    """
+    seed = unwrap_string_cast(value_text.strip()).strip() if value_text else ""
+    return seed if AUTO_SEED_RE.match(seed) else None
+
+
 def parse_fields(body: str, variables: dict[str, str] | None = None) -> list[Param] | str:
     """Parse a run of Praat field declarations -- a `form` body or a `beginPause` body.
 
@@ -2617,6 +2712,7 @@ def parse_fields(body: str, variables: dict[str, str] | None = None) -> list[Par
         # above it (`positive: "Frame length s", frame_length_s`) rather than as a literal.
         # Resolve it from those assignments; an unresolvable one falls through and is reported
         # by the caller as a non-numeric default, which is the honest outcome.
+        declared_text = value_text
         if value_text and not NUMBER_RE.match(value_text.strip()):
             resolved = variables.get(unwrap_string_cast(value_text), None) if variables else None
             if resolved is not None:
@@ -2639,7 +2735,13 @@ def parse_fields(body: str, variables: dict[str, str] | None = None) -> list[Par
             try:
                 default = float(token)
             except ValueError:
-                return f"non-numeric default for {name!r}: {value_text!r}"
+                seed = auto_seed(declared_text) if variables is not None else None
+                if seed is None:
+                    return f"non-numeric default for {name!r}: {value_text!r}"
+                param = make_number(keyword, name, 0.0)
+                param.auto_seed = seed
+                params.append(param)
+                continue
             params.append(make_number(keyword, name, default))
         elif keyword in TEXT_KEYWORDS:
             # Most of these are not prose. A `sentence` whose default is a delimited run of
@@ -3777,6 +3879,8 @@ def render_catalog(processes: list[Process], sha: str) -> str:
                 out.append(f"praat_pause_block = {param.pause_block}")
             if param.directory_var:
                 out.append(f"praat_directory_var = {toml_string(param.directory_var)}")
+            if param.auto_seed:
+                out.append(f"praat_auto_seed = {toml_string(param.auto_seed)}")
             if param.key_value_group:
                 out.append(f"key_value_group = {toml_string(param.key_value_group)}")
                 out.append(f"key_value_key = {toml_string(param.key_value_key)}")
@@ -4021,6 +4125,33 @@ def selftest() -> int:
     for expr in ("string$(a + b)", "fixed$(a + b, 2)", "fixed$(x, places)", "string$(f(x))",
                  "string$(x) + y"):
         check(f"string$ unwrap -- {expr} left alone", unwrap_string_cast(expr), expr)
+
+    # --- auto fields: a pause field pre-filled from a value computed at run time ----------
+    # Reich Generator's Dual page (2026-10). A bare name, wrapped or not, becomes "auto" and
+    # keeps the name as its seed; an expression is still refused, and a `form` field (no
+    # `variables`) can never be auto, because a positional argument cannot be left out.
+    auto_body = ('real: "Region_start", fixed$(sugStart, 3)\n'
+                 'positive: "Region_end", sugEnd\n'
+                 'real: "Rate", "100"\n')
+    auto_fields = parse_fields(auto_body, {})
+    check("auto -- seeds", [(p.name, p.auto_seed) for p in auto_fields] if isinstance(auto_fields, list)
+          else auto_fields,
+          [("Region_start", "sugStart"), ("Region_end", "sugEnd"), ("Rate", "")])
+    check("auto -- an expression is still refused",
+          parse_fields('real: "Region_start", fixed$(a + b, 3)\n', {}),
+          "non-numeric default for 'Region_start': 'fixed$(a + b, 3)'")
+    check("auto -- never in a form", isinstance(parse_fields("real Region_start sugStart\n"), str), True)
+
+    # --- comments built at run time: keep the wording that stands on its own ----------------
+    check("built comment -- regions",
+          literal_parts_of_comment('"--- Regions (s from the start of the Sound; " + note$ + "; edit, then Render to lock) ---"'),
+          "--- Regions (s from the start of the Sound; edit, then Render to lock) ---")
+    check("built comment -- source line keeps its free-standing sentence",
+          literal_parts_of_comment('"Source " + name$ + ": " + fixed$(dur, 3) + " s. Two units, one voice each."'),
+          "Two units, one voice each.")
+    check("built comment -- nothing free-standing", literal_parts_of_comment('"Pre-filled from the " + p$ + " preset."'), "")
+    check("built comment -- a plain literal is not one", literal_parts_of_comment('"a + b"'), None)
+    check("built comment -- doubled quotes", literal_parts_of_comment('"Say ""hi"". " + x$'), 'Say "hi".')
 
     # --- the two together, which is the shape that actually arrived ------------------
     # The variable is assigned above the block, exactly as the real scripts do -- that is what

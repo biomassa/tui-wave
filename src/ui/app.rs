@@ -862,6 +862,10 @@ enum CdpField {
         integer: bool,
         exponential: bool,
         envelope: Option<Vec<(f64, f64)>>,
+        /// The param has a `praat_auto_seed`: an empty `input` means "auto" — the script
+        /// computes the value itself — and `to_value` returns `ParamValue::Auto` for it. Such
+        /// a field never gets a slider, because its value is not known until the run.
+        auto: bool,
     },
     Toggle { on: bool },
     /// `options` is cloned from the `ParamKind::Choice` at construction time so cycling it
@@ -994,14 +998,20 @@ impl CdpField {
                 integer: *integer,
             },
             ParamKind::Number { default, min, max, step, integer, exponential, .. } => {
+                let auto = param.praat_auto_seed.is_some();
                 CdpField::Number {
-                    input: TextInput::fresh(format_cdp_number_for_display(*default, *integer)),
+                    input: TextInput::fresh(if auto {
+                        String::new()
+                    } else {
+                        format_cdp_number_for_display(*default, *integer)
+                    }),
                     min: *min,
                     max: *max,
                     step: *step,
                     integer: *integer,
                     exponential: *exponential,
                     envelope: None,
+                    auto,
                 }
             }
             ParamKind::Toggle { default } => CdpField::Toggle { on: *default },
@@ -1086,7 +1096,22 @@ impl CdpField {
                 integer: *integer,
                 exponential: *exponential,
                 envelope: None,
+                auto: param.praat_auto_seed.is_some(),
             },
+            (ParamKind::Number { min, max, step, integer, exponential, .. }, ParamValue::Auto)
+                if param.praat_auto_seed.is_some() =>
+            {
+                CdpField::Number {
+                    input: TextInput::fresh(String::new()),
+                    min: *min,
+                    max: *max,
+                    step: *step,
+                    integer: *integer,
+                    exponential: *exponential,
+                    envelope: None,
+                    auto: true,
+                }
+            }
             (ParamKind::Number { min, max, step, integer, exponential, .. }, ParamValue::Breakpoints(points)) => CdpField::Number {
                 input: TextInput::fresh(format_cdp_number_for_display(
                     points.first().map(|&(_, v)| v).unwrap_or(0.0),
@@ -1098,6 +1123,7 @@ impl CdpField {
                 integer: *integer,
                 exponential: *exponential,
                 envelope: Some(points.clone()),
+                auto: param.praat_auto_seed.is_some(),
             },
             (ParamKind::Number { min, max, step, integer, .. }, ParamValue::List(values)) => {
                 CdpField::List { values: values.clone(), min: *min, max: *max, step: *step, integer: *integer }
@@ -1177,6 +1203,7 @@ impl CdpField {
         use crate::model::cdp::ParamValue;
         match self {
             CdpField::Number { envelope: Some(points), .. } => ParamValue::Breakpoints(points.clone()),
+            CdpField::Number { input, auto: true, .. } if input.value().trim().is_empty() => ParamValue::Auto,
             CdpField::Number { input, .. } => {
                 ParamValue::Number(input.value().trim().parse::<f64>().unwrap_or(0.0))
             }
@@ -10108,7 +10135,6 @@ impl App {
         use crate::model::cdp::{ParamKind, ParamValue};
         let Some(state) = self.cdp_chain_editor.as_mut() else { return };
         let Some((path, index, input)) = state.param_edit.take() else { return };
-        let Ok(typed) = input.value().trim().parse::<f64>() else { return };
         let Some(def) = self
             .cdp_chain_editor
             .as_ref()
@@ -10123,13 +10149,21 @@ impl App {
             return;
         };
         let (min, max, integer) = (*min, *max, *integer);
-        let clamped = typed.clamp(min, max);
+        // Typing the number away returns an auto parameter to "auto", as in the params dialog.
+        let value = match input.value().trim() {
+            "" if def.params[index].praat_auto_seed.is_some() => ParamValue::Auto,
+            text => {
+                let Ok(typed) = text.parse::<f64>() else { return };
+                let clamped = typed.clamp(min, max);
+                ParamValue::Number(if integer { clamped.round() } else { clamped })
+            }
+        };
         let Some(state) = self.cdp_chain_editor.as_mut() else { return };
         let Some(step) = crate::model::cdp::step_at_mut(&mut state.chain, &path) else { return };
         while step.values.len() < def.params.len() {
             step.values.push(def.params[step.values.len()].default_value());
         }
-        step.values[index] = ParamValue::Number(if integer { clamped.round() } else { clamped });
+        step.values[index] = value;
         state.error = None;
     }
 
@@ -10218,6 +10252,11 @@ impl App {
         // the slider on every envelope-capable parameter in the CDP catalog.
         if matches!(current, ParamValue::EnvelopeRef(_) | ParamValue::Breakpoints(_)) {
             self.cycle_chain_param_envelope_by(dir);
+            return;
+        }
+        // Nothing to step from: the value is the script's, known only once it runs. Typing a
+        // number is the way off "auto", as in the params dialog, where the row has no slider.
+        if current == ParamValue::Auto {
             return;
         }
         let next = match (&param.kind, &current) {
@@ -15720,9 +15759,13 @@ impl App {
     ) -> Option<usize> {
         use crate::model::cdp::ParamKind;
         for (i, (param, field)) in def.params.iter().zip(fields).enumerate() {
-            if let (ParamKind::Number { min, max, integer, .. }, CdpField::Number { input, envelope, .. }) =
+            if let (ParamKind::Number { min, max, integer, .. }, CdpField::Number { input, envelope, auto, .. }) =
                 (&param.kind, field)
             {
+                // Left empty, an auto field is complete: the script supplies the value.
+                if *auto && input.value().trim().is_empty() {
+                    continue;
+                }
                 if param.required_envelope {
                     if envelope.is_none() {
                         return Some(i);
@@ -29908,6 +29951,10 @@ fn cdp_track_cell_at(track_start: usize, x_in_row: u16) -> Option<usize> {
     (cell < param_slider::CELLS).then_some(cell)
 }
 
+/// What an auto field (`CdpField::Number::auto`, left empty) shows in place of a number, in the
+/// params dialog and the chain editor alike.
+const AUTO_VALUE_TEXT: &str = "auto";
+
 /// Writes the value at `stop` into a `Number` field. A no-op on any other field kind, so the
 /// caller need not re-establish what it already checked.
 fn cdp_set_slider_stop(field: Option<&mut CdpField>, stop: usize) {
@@ -30411,8 +30458,12 @@ fn render_cdp_params_dialog(
                 Span::styled(range_and_slider_pad.clone(), range_style),
                 Span::styled(" (not set — e to edit)", dim_style),
             ]),
-            CdpField::Number { input, min, max, integer, exponential, .. } => {
+            CdpField::Number { input, min, max, integer, exponential, auto, .. } => {
                 let range = format!("{:<range_width$}", format_cdp_range(*min, *max, *integer));
+                // Left empty, an auto field reads "auto": the script fills it in at run time.
+                // Grey when idle so it reads as a placeholder rather than a typed value, peach
+                // like any value when focused; typing a digit replaces it.
+                let shows_auto = *auto && input.value().trim().is_empty();
                 // The knob tracks whatever is *in the field*, including a half-typed number:
                 // the slider is a read-out of the value as much as a control over it, and one
                 // that froze while you typed would be reporting a value that is no longer there.
@@ -30431,7 +30482,22 @@ fn render_cdp_params_dialog(
                 // may legitimately be longer than any value this app would generate.
                 let pad_to = |rendered: usize| " ".repeat(number_width.saturating_sub(rendered));
                 let value_pad = pad_to(input.value().chars().count());
-                if is_focused {
+                if shows_auto {
+                    let mut spans = vec![
+                        Span::styled(label, label_style_here),
+                        Span::styled(range, range_style),
+                    ];
+                    spans.extend(slider(is_focused));
+                    spans.push(Span::styled(" ", base));
+                    let style = if is_focused {
+                        focus_value_style
+                    } else {
+                        base.fg(theme::ANNOTATION)
+                    };
+                    spans.push(Span::styled(AUTO_VALUE_TEXT, style));
+                    spans.push(Span::styled(pad_to(AUTO_VALUE_TEXT.len()), base));
+                    Line::from(spans)
+                } else if is_focused {
                     let mut spans = vec![
                         Span::styled(label, label_style_here),
                         Span::styled(range, range_style),
@@ -31756,6 +31822,12 @@ fn render_cdp_chain_editor_dialog(
                                     Style::default().fg(theme::FOCUS).bg(theme::SURFACE0),
                                 ));
                             }
+                            // Grey like the params dialog's, unless the row's own highlight
+                            // already covers it.
+                            None if matches!(value, Some(ParamValue::Auto)) => spans.push(Span::styled(
+                                AUTO_VALUE_TEXT,
+                                if selected { style } else { base.fg(theme::ANNOTATION) },
+                            )),
                             None => spans.push(Span::styled(
                                 format!(
                                     "{}{}",
@@ -34841,6 +34913,7 @@ mod tests {
             integer: false,
             exponential: false,
             envelope: Some(vec![(0.0, 220.0), (1.0, 9000.0), (2.0, 220.0)]),
+            auto: false,
         }];
         let edit = CdpEnvelopeEdit {
             label: None,
@@ -36229,6 +36302,9 @@ mod tests {
                 let row = &def.params[i];
                 if row.praat_pause_block.is_none() {
                     continue; // the script re-applies the preset to its own form rows
+                }
+                if row.praat_auto_seed.is_some() {
+                    continue; // opens on "auto": the script's own value, preset applied
                 }
                 checked += 1;
                 match &row.kind {
@@ -39560,6 +39636,7 @@ mod tests {
                 before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
                 kind: ParamKind::Number {
@@ -43231,6 +43308,7 @@ mod tests {
                 before_outfile: true,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
                 kind: ParamKind::FormantBufferRef {
@@ -43323,6 +43401,7 @@ mod tests {
                 before_outfile: true,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
                 kind: ParamKind::FormantBufferRef {
@@ -44166,6 +44245,7 @@ mod tests {
                     integer: false,
                     exponential: false,
                     envelope: None,
+                    auto: false,
                 })
                 .collect();
             airwindows_param_displays(def, &fields)
@@ -46416,6 +46496,49 @@ mod tests {
     /// Typing a number straight into a parameter row, which is what a numeric field does
     /// everywhere else in this app and was the one place it did not (user report, against a
     /// mixer's gain: the slider was the only way in).
+    /// The chain editor's half of an auto field: the row reads "auto", Left/Right have nothing
+    /// to step from, a typed number replaces it, and deleting that number returns it to auto.
+    #[test]
+    fn an_auto_parameter_row_reads_auto_takes_a_number_and_returns_to_auto() {
+        use crate::model::cdp::{ParamValue, PathSeg::Step as S};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let (mut app, field) = app_with_an_auto_field();
+        app.dialog = None;
+        let mut chain = crate::model::cdp::CdpChain {
+            bank: Default::default(),
+            output: Default::default(),
+            name: "t".into(),
+            steps: vec![chain_step("praat_distortion_sidechain_feedback_vca")],
+        };
+        chain.normalize_branches(&app.cdp_catalog);
+        app.cdp_chain_editor = Some(fresh_chain_editor_state(chain));
+        app.dialog = Some(Dialog::CdpChainEditor);
+        app.cdp_chain_editor.as_mut().unwrap().selected =
+            ChainEditorRow::Param { path: vec![S(0)], index: field };
+        let value = |app: &App| {
+            app.cdp_chain_editor.as_ref().unwrap().chain.steps[0].values.get(field).cloned()
+        };
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 60)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        let row = screen.lines().find(|l| l.contains("Output_Gain")).expect("the row is on screen");
+        assert!(row.contains(AUTO_VALUE_TEXT), "{row}");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(value(&app), Some(ParamValue::Auto), "Right has no value to step from");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(value(&app), Some(ParamValue::Number(4.0)));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(value(&app), Some(ParamValue::Auto), "an emptied number returns to auto");
+    }
+
     #[test]
     fn typing_a_number_on_a_parameter_row_replaces_the_value() {
         use crate::model::cdp::{ParamValue, PathSeg::Step as S};
@@ -49671,6 +49794,77 @@ mod tests {
         assert!((value(&app, 0) - 0.005).abs() < 1e-4, "got {}", value(&app, 0));
     }
 
+    /// A Praat process with one hoisted field turned into an auto field — the catalog has none
+    /// yet at the pinned scripts, so a real entry is borrowed and its `Output_Gain` row made
+    /// one. Returns the app, with the params dialog open, and that field's index.
+    fn app_with_an_auto_field() -> (App, usize) {
+        use crate::model::cdp::ParamKind;
+        let mut app = new_app(Some(doc(0.1, 100)), None);
+        let index = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .position(|p| p.key == "praat_distortion_sidechain_feedback_vca")
+            .expect("Sidechain Feedback VCA in catalog");
+        let def = &mut app.cdp_catalog.processes[index];
+        let field = def.params.iter().position(|p| p.name == "Output_Gain").expect("Output_Gain");
+        let param = &mut def.params[field];
+        assert!(param.praat_pause_block.is_some(), "Output_Gain must be hoisted for this to mean anything");
+        param.praat_auto_seed = Some("outputGainSeed".into());
+        if let ParamKind::Number { min, max, .. } = &mut param.kind {
+            (*min, *max) = (f64::NEG_INFINITY, f64::INFINITY);
+        }
+        app.open_cdp_params(index);
+        let Some(Dialog::CdpParams { focus, .. }) = &mut app.dialog else { panic!("no params dialog") };
+        *focus = field + 1; // focus 0 is the preset row; fields start at 1
+        (app, field)
+    }
+
+    fn params_value(app: &App, field: usize) -> crate::model::cdp::ParamValue {
+        let Some(Dialog::CdpParams { fields, .. }) = &app.dialog else { panic!("no params dialog") };
+        fields[field].to_value()
+    }
+
+    /// An auto field opens empty and reads "auto", passes validation that way, takes a typed
+    /// number, and goes back to auto when that number is deleted.
+    #[test]
+    fn an_auto_field_opens_on_auto_takes_a_number_and_returns_to_auto() {
+        use crate::model::cdp::ParamValue;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let (mut app, field) = app_with_an_auto_field();
+        assert_eq!(params_value(&app, field), ParamValue::Auto);
+        {
+            let Some(Dialog::CdpParams { catalog_index, fields, .. }) = &app.dialog else { panic!() };
+            let def = &app.cdp_catalog.processes[*catalog_index];
+            assert_eq!(App::cdp_validate_fields(def, fields), None, "an empty auto field is complete");
+        }
+        let mut terminal = Terminal::new(TestBackend::new(160, 60)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        let row = screen.lines().find(|l| l.contains("Output_Gain")).expect("the row is on screen");
+        assert!(row.contains(AUTO_VALUE_TEXT), "{row}");
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
+        assert_eq!(params_value(&app, field), ParamValue::Number(25.0));
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(params_value(&app, field), ParamValue::Auto, "deleting the number returns to auto");
+    }
+
+    /// Reopening a saved value of auto lands on auto, not on a zero.
+    #[test]
+    fn a_saved_auto_value_reopens_as_auto() {
+        use crate::model::cdp::ParamValue;
+        let (app, field) = app_with_an_auto_field();
+        let Some(Dialog::CdpParams { catalog_index, .. }) = &app.dialog else { panic!() };
+        let param = &app.cdp_catalog.processes[*catalog_index].params[field];
+        assert_eq!(CdpField::from_value(param, &ParamValue::Auto).to_value(), ParamValue::Auto);
+        assert_eq!(param.default_value(), ParamValue::Auto);
+    }
+
     /// A value the user typed themselves is theirs to keep — the re-seed only ever replaces a
     /// field still holding what it was seeded with.
     #[test]
@@ -49691,6 +49885,7 @@ mod tests {
                 integer: false,
                 exponential: false,
                 envelope: None,
+                auto: false,
             };
             *focus = 3;
         }
@@ -54513,6 +54708,7 @@ mod tests {
                 before_outfile: true,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
                 kind: ParamKind::FormantBufferRef {

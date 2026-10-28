@@ -66923,7 +66923,6 @@ param_notes = [
   { before = 6, text = "IR generations", section = true },
   { before = 10, text = "Field", section = true },
   { before = 13, text = "Output", section = true },
-  { before = 16, text = "Pre-filled from the \" + characterDisplay$ + \" preset." },
   { before = 26, text = "Adaptive contour" },
   { before = 29, text = "Material memory" },
 ]

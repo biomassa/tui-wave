@@ -193,10 +193,12 @@ mod tests {
                 ParamValue::Toggle(true),
                 ParamValue::Choice(2),
                 ParamValue::Breakpoints(vec![(0.0, 0.0), (0.5, 10.0), (1.0, 0.0)]),
+                // A unit variant, like `FormantBufferRef`: a bare string in the same array.
+                ParamValue::Auto,
             ], ..Default::default() };
         save_preset_in(&dir.0, "test_process", preset.clone());
 
-        let loaded = load_presets_in(&dir.0, "test_process", 4);
+        let loaded = load_presets_in(&dir.0, "test_process", 5);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0], preset);
     }

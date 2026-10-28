@@ -388,6 +388,10 @@ def stage_step(shown: str, text_path: Path, args: list[str], model: dict):
             values[index] = default_value(
                 param, (raw != 0) if param.kind == "toggle" else (int(raw) - 1 if param.kind == "choice" else raw)
             )
+        elif param.auto_seed:
+            # The script computes it from the sound it is given, as in the dialog. A unit
+            # variant: `Auto = {}` is how a `[[values]]` table spells it.
+            values[index] = ("Auto", "{}")
         else:
             base = param.base_default if param.base_default is not None else param.default
             values[index] = default_value(param, base)

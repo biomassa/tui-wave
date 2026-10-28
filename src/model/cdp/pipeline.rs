@@ -809,6 +809,16 @@ fn plan_param(
         // this planner at all (`model::praat::plan` handles those). Emitted as a plain token so
         // such an entry behaves predictably rather than silently dropping the value.
         ParamValue::Text(text) => ParamPlan { arg: format_arg(&param.flag, text), deferred: None },
+        // Praat-only as well: "the script computes it" has no meaning for a CDP binary, so a
+        // hand-written entry carrying it gets the param's own default rather than no token,
+        // which would shift every later positional.
+        ParamValue::Auto => {
+            let default = match &param.kind {
+                super::def::ParamKind::Number { default, .. } => *default,
+                _ => 0.0,
+            };
+            ParamPlan { arg: format_arg(&param.flag, &default.to_string()), deferred: None }
+        }
         // `crystal rotate`'s two-section VDAT file (see `ParamKind::CrystalVdat`). Same
         // "extra text file in the temp dir, argv token is its filename" mechanism as every
         // other datafile kind; only the file's own layout is bespoke, and it's the one
@@ -2675,6 +2685,7 @@ mod tests {
             before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::Number { min, max, step: 1.0, default, exponential: false, scale, integer: false },
@@ -3163,6 +3174,7 @@ mod tests {
                 before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
                 kind: ParamKind::Toggle { default: auto_gain_default },
@@ -3181,6 +3193,7 @@ mod tests {
                 before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
                 kind: ParamKind::Toggle { default: false },
@@ -3308,6 +3321,7 @@ mod tests {
                 before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
                 kind: ParamKind::FilePath { extension: "matrix".into() },
@@ -3326,6 +3340,7 @@ mod tests {
                 before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
                 kind: ParamKind::Toggle { default: auto_gain_default },
@@ -3344,6 +3359,7 @@ mod tests {
                 before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
                 kind: ParamKind::Toggle { default: false },
@@ -3814,6 +3830,7 @@ mod tests {
             before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
                 kind: ParamKind::Toggle { default: false },
@@ -3832,6 +3849,7 @@ mod tests {
             before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
                 kind: ParamKind::Choice { options: vec!["44100".into(), "48000".into()], default: 0 },
@@ -4065,6 +4083,7 @@ mod tests {
             before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::Number {
@@ -4679,6 +4698,7 @@ mod tests {
             before_outfile: false,
             praat_pause_block: None,
             praat_directory_var: None,
+            praat_auto_seed: None,
             key_value_group: None,
             key_value_key: None,
             kind: ParamKind::CrystalVdat,
