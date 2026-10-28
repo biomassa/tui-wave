@@ -2141,9 +2141,10 @@ def literal_parts_of_comment(text: str) -> str | None:
     Two units, …"`: the script fills in the sound's name and length when its dialog opens, which
     this app's dialog cannot. Shown raw, the note was Praat source code. So the computed pieces
     are left out, and with each one the words that only make sense around it -- back to the
-    previous `.`/`;` in the text before it, and up to the next one in the text after. What
-    remains is the sentences that stand on their own: "Two units, one voice each: …", or
-    "Regions (s from the start of the Sound; edit, then Render to lock)".
+    previous `.`/`;` in the text before it, and up to the next one in the text after: "Regions
+    (s from the start of the Sound; edit, then Render to lock)". A note whose *opening* words
+    went with a computed piece is dropped whole, because what is left of it would be a fragment
+    of a different note; that is the "Source …" line.
     """
     pieces = string_expression_pieces(text)
     if pieces is None or all(literal for literal, _ in pieces):
@@ -2151,6 +2152,8 @@ def literal_parts_of_comment(text: str) -> str | None:
     kept: list[str] = []
     for index, (literal, piece) in enumerate(pieces):
         if not literal:
+            if index == 0:
+                return ""
             continue
         computed_before = index > 0 and not pieces[index - 1][0]
         computed_after = index + 1 < len(pieces) and not pieces[index + 1][0]
@@ -2162,6 +2165,8 @@ def literal_parts_of_comment(text: str) -> str | None:
             piece = piece[:cut + 1] if cut >= 0 else ""
         if piece.strip():
             kept.append(piece.strip())
+        elif index == 0:
+            return ""
     return " ".join(kept)
 
 
@@ -4372,9 +4377,11 @@ def selftest() -> int:
     check("built comment -- regions",
           literal_parts_of_comment('"--- Regions (s from the start of the Sound; " + note$ + "; edit, then Render to lock) ---"'),
           "--- Regions (s from the start of the Sound; edit, then Render to lock) ---")
-    check("built comment -- source line keeps its free-standing sentence",
+    check("built comment -- a note that opens on computed text is dropped",
           literal_parts_of_comment('"Source " + name$ + ": " + fixed$(dur, 3) + " s. Two units, one voice each."'),
-          "Two units, one voice each.")
+          "")
+    check("built comment -- so is one that starts with the value itself",
+          literal_parts_of_comment('name$ + " is loaded. Edit below."'), "")
     check("built comment -- nothing free-standing", literal_parts_of_comment('"Pre-filled from the " + p$ + " preset."'), "")
     check("built comment -- a plain literal is not one", literal_parts_of_comment('"a + b"'), None)
     check("built comment -- doubled quotes", literal_parts_of_comment('"Say ""hi"". " + x$'), 'Say "hi".')

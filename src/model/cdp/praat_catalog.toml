@@ -78047,7 +78047,6 @@ param_notes = [
   { before = 11, text = "Reproducibility [0 = fresh random sequence each run]", section = true },
   { before = 12, text = "Visualizations", section = true },
   { before = 13, text = "Output", section = true },
-  { before = 14, text = "Two units, one voice each: A loops Region A, B loops Region B." },
   { before = 14, text = "Regions (s from the start of the Sound; edit, then Render to lock)", section = true },
   { before = 18, text = "Timing (rates 50-200%; speed and pitch change together)", section = true },
   { before = 21, text = "Target Relative Cycle only (B rate is then derived from A)", section = true },
