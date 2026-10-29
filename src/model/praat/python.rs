@@ -88,6 +88,18 @@ fn split_literal_assignment(line: &str) -> Option<(&str, &str, &str)> {
         return None;
     }
     let name = lhs.trim();
+    // A string-array slot, `gsc_exe$[gsc_nc] = "python3"`, fills one entry of a candidate list
+    // (`NMF_Granular_Spatial_Composer`, 2026-10-28). The index is a plain expression; the name
+    // in front of it is what has to be a string variable.
+    let name = match name.strip_suffix(']').and_then(|n| n.split_once('[')) {
+        Some((array, index))
+            if index.chars().all(|c| c.is_alphanumeric() || " _+-".contains(c)) =>
+        {
+            array.trim_end()
+        }
+        Some(_) => return None,
+        None => name,
+    };
     let name = name.strip_suffix('$')?;
     // `'` is Praat's variable interpolation: `candidate'nCand'$ = "python3"` fills one of a
     // numbered list of candidates (`IRCAM_rave_model`, from the 2026-10-04 bump).
@@ -241,6 +253,17 @@ mod tests {
         let (out, replaced) = rewrite_for_venv(source, "/venv/bin/python3", "/plugin/py");
         assert_eq!(replaced, 1);
         assert!(out.contains("candidate'nCand'$ = \"/venv/bin/python3\""), "{out}");
+    }
+
+    #[test]
+    fn a_string_array_slot_is_repointed() {
+        let source = "        gsc_exe$[gsc_nc] = \"python3\"\n        gsc_arg$[gsc_nc] = \"\"\n";
+        let (out, replaced) = rewrite_for_venv(source, "/venv/bin/python3", "/plugin/py");
+        assert_eq!(replaced, 1);
+        assert!(out.contains("gsc_exe$[gsc_nc] = \"/venv/bin/python3\""), "{out}");
+        // A numeric array slot is not a string variable, whatever it holds.
+        let (_, replaced) = rewrite_for_venv("x[1] = \"python3\"\n", "/venv/bin/python3", "/p");
+        assert_eq!(replaced, 0);
     }
 
     #[test]
@@ -537,7 +560,10 @@ python_command$ = \"py\"
         // 48 -> 49 on 2026-09-30: the a4c0921 bump brought `Scattering_Texture_Generator`, and
         // `kymatio`, which its helper needs, was admitted to the base set.
         // 49 -> 50 on 2026-10-04: the 2c78bca bump brought `LatentPbind` (numpy/scipy only).
-        assert_eq!(flagged, 50, "the py group is 50 processes");
+        // 50 -> 51 on 2026-10-29: the 41d6a68 bump brought `NMF_Granular_Spatial_Composer`,
+        // hoisted out of its Custom preset page, whose interpreter candidates are string-array
+        // slots (`gsc_exe$[gsc_nc]`) the matcher now reads.
+        assert_eq!(flagged, 51, "the py group is 51 processes");
     }
 
     /// End to end through the planner: a py-group process must come out asking for a rewritten

@@ -300,6 +300,14 @@ GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
         },
         "why": "the groove pages are reached only under grid types needing a second Sound or a Table",
     },
+    # Not a blocking construct: the driver keeps one Sound, and "All Outputs" leaves up to five,
+    # so four would be lost. See its PAUSE_HOISTS entry.
+    "py/NMF_Granular_Spatial_Composer.praat": {
+        "drop_options": {
+            "Rendering": ["All Outputs"],
+        },
+        "why": "All Outputs leaves several Sounds and the driver keeps only one",
+    },
     "Filter & Color/XMod.praat": {
         "drop_options": {
             "Mod_source": ["Second Sound (select 2 sounds)"],
@@ -513,6 +521,20 @@ PAUSE_HOISTS: dict[str, dict] = {
         "lock_on": ["Advanced_settings"],
         "blocks": [0],
         "why": "advanced settings page (onset detection and resynthesis detail)",
+    },
+    # New 2026-10-28. One page, behind `else` of `if preset <= 4`: the Custom preset's eight
+    # values. No `lock_on`, like Pitch_Processor: the page's rows apply under Custom and are inert
+    # under the four named presets. The rest of the entry is about what the app can receive.
+    # The driver keeps one Sound, so "All Outputs" (up to five) is dropped. `Play` is a *menu*,
+    # which `SILENCE_RE` does not reach, and every value but None plays in Praat for the result's
+    # full length, so it is locked to None. `Retain_work_files` leaves a folder in the system
+    # temp directory that nothing here shows or removes, so it is locked off. Every output is at
+    # the engine's 16 kHz analysis rate, which cannot be spliced into an ordinary document, so
+    # the result always opens a new buffer.
+    "py/NMF_Granular_Spatial_Composer.praat": {
+        "lock_values": {"Play": "None", "Retain_work_files": False},
+        "new_buffer": True,
+        "why": "Custom preset page (density, grain size, locality, speed, envelope, seed)",
     },
     "Pitch/Undertone_Field.praat": {
         "lock_on": ["Show_advanced_settings"],
@@ -1240,7 +1262,7 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
     # assignments the rewrite emits sit *inside* the guard — so the toggle has to be forced on
     # or the hoisted values are silently ignored. Locked, because with the dialog gone it no
     # longer shows anything: it only decides whether the fields below take effect.
-    form_locks: list[tuple[str, bool]] = []
+    form_locks: list[tuple[str, int]] = []
     for name in hoist.get("lock_on", []):
         param = next((p for p in form_params if p.name == name), None)
         if param is None:
@@ -1262,7 +1284,32 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
                 form_params[dropped].notes[:0] = carried
             elif form_params:
                 form_params[-1].notes_after.extend(carried)
-        form_locks.append((name, True))
+        form_locks.append((name, 1))
+    # `lock_values` takes a form field off the dialog at a fixed value, for a field whose other
+    # values the app cannot honour (a `Play` menu that blocks the run, a toggle that leaves files
+    # behind). A toggle maps to True/False, a choice to an option label; the label is resolved to
+    # its 1-based index here, so a reworded option is a converter error, not a silent shift.
+    for name, value in hoist.get("lock_values", {}).items():
+        param = next((p for p in form_params if p.name == name), None)
+        if param is None:
+            return f"no parameter named {name!r} to lock (upstream renamed or removed it?)"
+        if param.kind == "toggle" and isinstance(value, bool):
+            number = 1 if value else 0
+        elif param.kind == "choice" and isinstance(value, str):
+            if value not in param.options:
+                return f"{name!r} has no option {value!r} to lock to (upstream reworded it?)"
+            number = param.options.index(value) + 1
+        else:
+            return f"cannot lock {param.kind} {name!r} to {value!r}"
+        dropped = form_params.index(param)
+        carried = param.notes + param.notes_after
+        form_params = [p for p in form_params if p is not param]
+        if carried:
+            if dropped < len(form_params):
+                form_params[dropped].notes[:0] = carried
+            elif form_params:
+                form_params[-1].notes_after.extend(carried)
+        form_locks.append((name, number))
     # `blocks` hoists only the pages listed, by index in source order. The rest are deleted by
     # the rewrite (it removes any block no param refers to), so this is only right for a page
     # the dialog cannot reach -- Audio Quantizer's groove pages, behind grid types that
@@ -1342,7 +1389,8 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
                         # `FM_Texture_Generator` alone stayed `wav` when the folder went
                         # zero-input.
                         input_kind=zero_or_photo_input_kind(str(rel).replace("\\", "/")),
-                        form_locks=form_locks)]
+                        form_locks=form_locks,
+                        output_new_buffer=bool(hoist.get("new_buffer")))]
 
     # --- split: one entry per option of a hoisted optionmenu ------------------------------
     variants = hoist.get("variants", {})
@@ -2252,8 +2300,12 @@ class Process:
     inputs: int = 1
     # Opens its own window and waits: the runner runs it unbounded. See PY_INTERACTIVE_IMPORTS.
     interactive: bool = False
-    # `boolean` form fields deleted from the script and assigned instead — see `lock_on`.
+    # Form fields deleted from the script and assigned instead, as (name, value): a toggle's
+    # 0/1 or a choice's 1-based option index -- see `lock_on` and `lock_values`.
     form_locks: list = field(default_factory=list)
+    # The result always opens a new buffer, whatever Ctrl+B says. Emits `output_new_buffer`,
+    # the flag CDP's MULTICHANNEL family uses. Set by a PAUSE_HOISTS entry's `new_buffer`.
+    output_new_buffer: bool = False
     # Read out of the script's own `# Description:` header block -- see `extract_description`.
     # Empty for the handful of scripts that carry no such header; the emitter falls back to the
     # title, which is what every entry used to get.
@@ -3960,8 +4012,10 @@ BUILTINS = [
 # exactly these scripts, and its `no_real_script_can_still_reach_a_hardcoded_interpreter` test is
 # what keeps the two honest -- this only has to decide *whether* a script needs the treatment.
 PYTHON_LITERAL_RE = re.compile(r'^(?:.*[/\\])?(?:py|python[0-9.]*)(?:\.exe)?$')
-# `'` admits Praat's interpolation (`candidate'nCand'$`), as `split_literal_assignment` does.
-PYTHON_ASSIGN_RE = re.compile(r'^\s*[A-Za-z_][A-Za-z0-9_\']*\$\s*=\s*"([^"]*)"\s*$')
+# `'` admits Praat's interpolation (`candidate'nCand'$`), as `split_literal_assignment` does,
+# and so does the optional string-array slot (`gsc_exe$[gsc_nc]`).
+PYTHON_ASSIGN_RE = re.compile(
+    r'^\s*[A-Za-z_][A-Za-z0-9_\']*\$(?:\[[A-Za-z0-9_ +-]*\])?\s*=\s*"([^"]*)"\s*$')
 
 
 def counts_python_assignments(source: str) -> int:
@@ -4034,9 +4088,10 @@ def render_catalog(processes: list[Process], sha: str) -> str:
             )
             out.append(f"praat_argument_fixes = [{fixes}]")
         if proc.form_locks:
-            pairs = ", ".join(f"[{toml_string(n)}, {'true' if v else 'false'}]"
-                              for n, v in proc.form_locks)
+            pairs = ", ".join(f"[{toml_string(n)}, {int(v)}]" for n, v in proc.form_locks)
             out.append(f"praat_form_locks = [{pairs}]")
+        if proc.output_new_buffer:
+            out.append("output_new_buffer = true")
         input_kind = proc.input_kind or ("dual_wav" if proc.inputs == 2 else "wav")
         out.append(f'input = "{input_kind}"')
         # `input_arity` defaults a variadic floor to 1, so this is emitted only where the script

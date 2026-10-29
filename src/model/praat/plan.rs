@@ -386,11 +386,7 @@ pub fn plan_praat_job_with(
     }
 
     let script_path = audiotools_dir.join(&def.bin);
-    let form_locks: Vec<(String, f64)> = def
-        .praat_form_locks
-        .iter()
-        .map(|(label, on)| (label.clone(), if *on { 1.0 } else { 0.0 }))
-        .collect();
+    let form_locks: Vec<(String, f64)> = def.praat_form_locks.clone();
     // A script with no dialog to rewrite still needs a copy when it carries the branch-scoped
     // variable defect — see `rewrite::repair_branch_scoped_variables`. Detected by reading the
     // script here rather than recorded in the catalog, so it is re-derived every run and an

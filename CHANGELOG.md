@@ -10,7 +10,14 @@
   Such a field shows a grey **auto** and the script supplies the value when it runs; type a number
   to set it yourself, and delete the number to go back to auto. It works the same way in the
   chain editor. Reich Generator's Dual Locked Loops settings are the first to use it.
-- **praatAudioTools updated to `e9a916a`.**
+- **praatAudioTools updated to `41d6a68`.**
+  - **NMF Granular Spatial Composer** is new (py). It takes a sound apart into spectral parts
+    (NMF) and rebuilds it as a granular cloud, rendered as mono, stereo (Source Islands or Grain
+    Orbit) or 4-channel quad (Quad Constellation). The eight Custom preset settings are in the
+    same dialog and apply when Preset is Custom. The result is at 16 kHz, so it always opens in a
+    new buffer. With Quad stereo preview on (the default), Quad Constellation returns the stereo
+    downmix; turn it off to get the 4 channels. "All Outputs" is not offered, because the app
+    takes one sound back. It needs scikit-learn, which the setup script's analysis tier installs.
   - **Audio Quantizer** is new (Dynamics & Envelope). It finds the note onsets of a one-voice
     recording (voice, flute) and moves them toward a tempo grid, stretching the audio between
     them. Its advanced settings are in the same dialog. Only the straight grid is offered: the

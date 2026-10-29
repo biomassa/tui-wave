@@ -92,7 +92,7 @@ impl std::fmt::Display for RewriteError {
             ),
             RewriteError::MissingFormLock { label } => write!(
                 f,
-                "script's form no longer declares the boolean {label}; \
+                "script's form no longer declares the field {label}; \
                  the plugin may have been updated — regenerate the catalog"
             ),
         }
@@ -366,7 +366,8 @@ fn render_number(value: f64) -> String {
 ///
 /// Indentation of the `beginPause` line is carried onto the generated lines, purely so a failed
 /// run's leftover script in the temp directory is still readable — Praat itself does not care.
-/// Remove a `boolean` field from the script's `form` and assign its variable instead.
+/// Remove a `boolean` or `optionmenu`/`choice` field from the script's `form` and assign its
+/// variable instead.
 ///
 /// For a toggle that exists only to gate a hoisted block — `Show_advanced_settings` guarding an
 /// "advanced parameters" dialog. Once those parameters are in this app's own dialog the switch
@@ -379,6 +380,11 @@ fn render_number(value: f64) -> String {
 /// everything consistent: Praat fills a form positionally, so a field the catalog no longer
 /// declares must not be there to receive an argument either. The variable is then assigned
 /// immediately after `endform`, before any code that reads it.
+///
+/// A menu goes with its `option`/`button` lines, and is assigned the way Praat fills one: the
+/// 1-based index to `name` and the option's label to `name$`. A value past the last option is
+/// [`RewriteError::MissingFormLock`] too, since the catalog's index was resolved against a
+/// different list.
 fn apply_form_locks(
     lines: &mut Vec<String>,
     locks: &[(String, f64)],
@@ -402,23 +408,36 @@ fn apply_form_locks(
         // with the parse that produced the `lock_on` name -- and disagreement here is not a
         // no-op, it is the hard `MissingFormLock` below. Two of the eleven scripts hoisted in
         // the 2026-08-22 bump are written that way.
+        let mut menu = false;
         let position = lines.iter().position(|l| {
-            let rest = l.trim().strip_prefix("boolean").unwrap_or("");
+            let trimmed = l.trim();
+            let (rest, is_menu) = if let Some(rest) = trimmed.strip_prefix("boolean") {
+                (rest, false)
+            } else if let Some(rest) =
+                trimmed.strip_prefix("optionmenu").or_else(|| trimmed.strip_prefix("choice"))
+            {
+                (rest, true)
+            } else {
+                return false;
+            };
             // The modern colon syntax quotes its label: `boolean: "Advanced_settings", 0`,
             // first seen in `IR_Analysis.praat`'s 2026-09-14 bump. Every prior `lock_on` script
             // used the classic `boolean Label value` shape, which is why this arm did not exist
             // until a colon-syntax *main form* (not merely a pause page, which already goes
             // through the same `parse_fields` either way) needed a field locked out of it.
-            if let Some(after_colon) = rest.strip_prefix(':') {
-                return after_colon.trim_start().strip_prefix('"').is_some_and(|after_quote| {
+            let found = if let Some(after_colon) = rest.strip_prefix(':') {
+                after_colon.trim_start().strip_prefix('"').is_some_and(|after_quote| {
                     after_quote.strip_prefix(label.as_str()).is_some_and(|after| after.starts_with('"'))
-                });
-            }
-            let Some(rest) = rest.strip_prefix(char::is_whitespace) else { return false };
-            rest.trim_start().strip_prefix(label.as_str()).is_some_and(|after| {
-                let after = after.strip_prefix(':').unwrap_or(after);
-                after.chars().next().is_none_or(char::is_whitespace)
-            })
+                })
+            } else {
+                let Some(rest) = rest.strip_prefix(char::is_whitespace) else { return false };
+                rest.trim_start().strip_prefix(label.as_str()).is_some_and(|after| {
+                    let after = after.strip_prefix(':').unwrap_or(after);
+                    after.chars().next().is_none_or(char::is_whitespace)
+                })
+            };
+            menu = found && is_menu;
+            found
         });
         // Not finding it is an error rather than a no-op, for the reason a missing directory
         // chooser is: the assignment below has already committed to the field being gone, so
@@ -429,7 +448,22 @@ fn apply_form_locks(
             return Err(RewriteError::MissingFormLock { label: label.clone() });
         };
         lines.remove(at);
-        assignments.push(format!("{} = {}", variable_name(label), render_number(*value)));
+        let variable = variable_name(label);
+        assignments.push(format!("{} = {}", variable, render_number(*value)));
+        if menu {
+            let mut options: Vec<String> = Vec::new();
+            while let Some(option) = lines.get(at).and_then(|l| menu_option_label(l)) {
+                options.push(option);
+                lines.remove(at);
+            }
+            let chosen = (*value >= 1.0 && value.fract() == 0.0)
+                .then(|| options.get(*value as usize - 1))
+                .flatten();
+            let Some(chosen) = chosen else {
+                return Err(RewriteError::MissingFormLock { label: label.clone() });
+            };
+            assignments.push(format!("{}$ = \"{}\"", variable, chosen.replace('"', "\"\"")));
+        }
     }
     if let Some(at) = lines.iter().position(|l| l.trim() == "endform") {
         for (offset, line) in assignments.into_iter().enumerate() {
@@ -437,6 +471,19 @@ fn apply_form_locks(
         }
     }
     Ok(())
+}
+
+/// The label of an `option`/`button` line under a form menu, in either syntax: `option Soft`
+/// or `option: "Soft"`. `None` for any other line, which is where the menu ends.
+fn menu_option_label(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let rest = trimmed.strip_prefix("option").or_else(|| trimmed.strip_prefix("button"))?;
+    if let Some(after_colon) = rest.strip_prefix(':') {
+        let quoted = after_colon.trim().strip_prefix('"')?.strip_suffix('"')?;
+        return Some(quoted.replace("\"\"", "\""));
+    }
+    let label = rest.strip_prefix(char::is_whitespace)?.trim();
+    (!label.is_empty()).then(|| label.to_string())
 }
 
 /// Give a variable assigned only inside an `if` arm a value on the arm that reads it without it.
@@ -1616,6 +1663,40 @@ mod form_lock_tests {
             RewriteError::MissingFormLock { label } => assert_eq!(label, "Gone_toggle"),
             other => panic!("expected MissingFormLock, got {other:?}"),
         }
+    }
+
+    /// A locked menu leaves the form with its option lines and is assigned as Praat fills one:
+    /// the index to `play`, the label to `play$`. The next field, whose keyword also starts
+    /// with "option", must not be taken for one of its options.
+    #[test]
+    fn a_locked_menu_is_deleted_with_its_options_and_assigned_both_ways() {
+        let source = "form Test\n    optionmenu Play: 1\n        option Auto (first)\n        \
+                      option None\n    optionmenu Next: 1\n        option A\nendform\n";
+        let out = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Play".into(), 2.0)], None)
+            .expect("rewrites");
+
+        assert!(!out.contains("Play:") && !out.contains("Auto (first)") && !out.contains("option None"),
+                "the menu and its options must be gone:\n{out}");
+        assert!(out.contains("optionmenu Next: 1\n        option A"), "the next menu must survive:\n{out}");
+        let after_endform = out.split("endform\n").nth(1).expect("an endform");
+        assert!(after_endform.starts_with("play = 2\nplay$ = \"None\""), "assigned after the form:\n{out}");
+
+        let colon = "form: \"Test\"\n    optionmenu: \"Play\", 1\n        option: \"Auto\"\n        \
+                     option: \"None\"\nendform\n";
+        let out = rewrite_pause_blocks(colon, &BTreeMap::new(), &[("Play".into(), 2.0)], None)
+            .expect("rewrites");
+        assert!(!out.contains("option"), "colon-syntax options must go too:\n{out}");
+        assert!(out.contains("play$ = \"None\""), "{out}");
+    }
+
+    /// An index past the menu's last option means the catalog was resolved against a different
+    /// list, so it fails rather than assigning a label that does not exist.
+    #[test]
+    fn a_menu_lock_past_the_last_option_is_an_error() {
+        let source = "form Test\n    optionmenu Play: 1\n        option Auto\nendform\n";
+        let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Play".into(), 3.0)], None)
+            .expect_err("an out-of-range option must fail");
+        assert!(matches!(err, RewriteError::MissingFormLock { .. }));
     }
 
     /// No locks means the form is untouched — every other process must be unaffected.

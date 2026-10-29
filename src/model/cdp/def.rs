@@ -1178,8 +1178,12 @@ pub struct ProcessDef {
     /// Removing it from the *form* rather than hiding the row is what keeps the two sides
     /// consistent: Praat fills a form positionally, so a field the catalog no longer declares
     /// must not remain in the script waiting for an argument.
+    ///
+    /// The value is what the variable is assigned: 0/1 for a `boolean`, the 1-based option
+    /// index for an `optionmenu`/`choice` (NMF Granular Spatial Composer's `Play` menu, whose
+    /// every other option plays the result inside Praat and holds up the run).
     #[serde(default)]
-    pub praat_form_locks: Vec<(String, bool)>,
+    pub praat_form_locks: Vec<(String, f64)>,
     /// True for a Praat process whose script tui-wave ships itself rather than running out of
     /// the praatAudioTools submodule — see `model::praat::builtin`, which holds the source and
     /// keys it by [`ProcessDef::key`].
