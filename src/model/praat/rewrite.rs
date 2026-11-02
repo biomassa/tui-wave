@@ -989,8 +989,68 @@ mod chain_argument_tests {
     }
 }
 
+/// Point a script from upstream's `CDP/` folder at the CDP programs this app already uses.
+///
+/// The engine looks for programs only in `<plugin>/CDP/engine/<platform>`, and upstream ships
+/// Windows binaries alone, so on Linux and macOS it would find nothing. Its comment says that
+/// `cdpx_engineDir$` may be overridden, so `cdp_dir` is assigned straight after `@cdpx_init`.
+///
+/// A copy runs from the job's temp directory, so what the script finds relative to itself is
+/// pointed back at `original_dir`: the `include` of the engine, and the folder handed to
+/// `@cdpx_init`, which holds upstream's process tables.
+///
+/// `Play` is removed because the Chains and Compositions call it unconditionally, with no
+/// `Play_result` toggle for the app to turn off.
+///
+/// Returns `None` when the script has no `include` of the engine or no `@cdpx_init`: the scripts
+/// on disk are then not the ones this build's catalog was made from.
+pub fn rewrite_cdp_engine(source: &str, original_dir: &str, cdp_dir: &str) -> Option<String> {
+    let (mut included, mut initialised) = (false, false);
+    let mut out: Vec<String> = Vec::with_capacity(source.lines().count() + 1);
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed == "Play" {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("include internal/") {
+            out.push(format!("include {original_dir}/internal/{rest}"));
+            included = true;
+        } else if trimmed == "@cdpx_init: defaultDirectory$" {
+            out.push(format!("@cdpx_init: {}", string_literal(original_dir)));
+            out.push(format!("cdpx_engineDir$ = {}", string_literal(cdp_dir)));
+            initialised = true;
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    (included && initialised).then(|| out.join("\n") + "\n")
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_cdp_script_is_pointed_at_the_configured_programs_and_cannot_play() {
+        let source = "include internal/cdp_engine.praat\n\
+                      @cdpx_init: defaultDirectory$\n\
+                      if play_result\n    Play\nendif\nPlay\nPlay it\n";
+        let out = rewrite_cdp_engine(source, "/plugin/CDP", "/home/u/cdp").unwrap();
+        assert_eq!(
+            out,
+            "include /plugin/CDP/internal/cdp_engine.praat\n\
+             @cdpx_init: \"/plugin/CDP\"\n\
+             cdpx_engineDir$ = \"/home/u/cdp\"\n\
+             if play_result\nendif\nPlay it\n"
+        );
+    }
+
+    /// Without the engine call there is nothing to redirect, so the script would look in its
+    /// own folder and report a missing program instead of the real cause.
+    #[test]
+    fn a_cdp_script_without_the_engine_call_is_refused() {
+        assert_eq!(rewrite_cdp_engine("include internal/cdp_engine.praat\n", "/p", "/c"), None);
+        assert_eq!(rewrite_cdp_engine("@cdpx_init: defaultDirectory$\n", "/p", "/c"), None);
+    }
+
     use super::*;
 
     /// Whether any line *executes* a pause, as opposed to mentioning one in prose. Both target

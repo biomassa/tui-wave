@@ -15,4 +15,4 @@ pub mod rewrite;
 
 /// The four-argument form is the one production uses; `plan::plan_praat_job` remains for the
 /// callers and tests that have nothing to do with Python. See its doc comment.
-pub use plan::plan_praat_job_with;
+pub use plan::{plan_praat_job_with, praat_uses_cdp_engine};

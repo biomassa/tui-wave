@@ -1137,7 +1137,10 @@ long as the audio does, and a few can hang outright. A script that draws gets fo
 because rendering a figure is slow. The four interactive `py` editors of section 1 get no limit
 at all, because you decide when they are done. Press `Esc` to stop any run early.
 
-**Not every script is listed.** 457 of the 499 are. The other 42 cannot be driven without a
+**The Praat+CDP group needs CDP as well as Praat.** Its scripts analyse the sound in Praat and
+process it with the programs in your CDP folder. Until that folder is set, Apply is dimmed.
+
+**Not every script is listed.** 502 of the 558 are. The other 56 cannot be driven without a
 window, need a corpus of other files, or work on things that are not sounds.
 `docs/praat-excluded-scripts.md` names every one and why.
 

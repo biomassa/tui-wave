@@ -79,6 +79,7 @@ pub const PRAAT_GROUPS: &[&str] = &[
     "Generative",
     "Modulation",
     "Pitch",
+    "Praat+CDP",
     "Reverb",
     "Spatial",
     "Spectral",
@@ -169,6 +170,7 @@ const PRAAT_DIRS: &[(&str, &str)] = &[
     ("Time & Granular", "Time/Granular"),
     ("Vector Chain", "Vector Chain"),
     ("py", "py"),
+    ("CDP", "Praat+CDP"),
 ];
 
 /// Time-domain `bin` → group. Most groups are named after their principal binary; the extra

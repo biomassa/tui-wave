@@ -12623,6 +12623,16 @@ impl App {
                 }
             }
             crate::model::cdp::def::Backend::Praat => {
+                let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
+                if crate::model::praat::praat_uses_cdp_engine(def)
+                    && (self.config.cdp_dir.is_empty()
+                        || crate::cdp::validate_cdp_dir(&cdp_dir).is_err())
+                {
+                    return Some(
+                        "CDP is not set up — this process needs the CDP binaries (Options ▸ Configure CDP Directory)"
+                            .to_string(),
+                    );
+                }
                 if !self.praat_ready() {
                     return Some(
                         "Praat is not set up — this process needs the praat binary and the praatAudioTools scripts (see README)"
@@ -16291,10 +16301,11 @@ impl App {
             return Some(message);
         }
 
-        let planned = match crate::model::praat::plan_praat_job_with(def, values, &audiotools_dir, crate::praat::runner::python_venv_interpreter(&praat_state_dir()).as_deref(), inputs.len()) {
+        let mut planned = match crate::model::praat::plan_praat_job_with(def, values, &audiotools_dir, crate::praat::runner::python_venv_interpreter(&praat_state_dir()).as_deref(), inputs.len()) {
             Ok(planned) => planned,
             Err(err) => return Some(err.to_string()),
         };
+        planned.set_cdp_dir(&self.config.cdp_dir);
 
         let job_id = self.cdp_next_job_id;
         self.cdp_next_job_id += 1;
@@ -17676,7 +17687,7 @@ impl App {
             return false;
         }
         crate::model::cdp::cdp_group(def)
-            .is_some_and(|g| g.name == "Generative" || g.name == "Vector Chain")
+            .is_some_and(|g| matches!(g.name, "Generative" | "Vector Chain" | "Praat+CDP"))
             || def
                 .params
                 .iter()
@@ -17750,10 +17761,11 @@ impl App {
         if let Err(message) = crate::praat::probe_praat(&self.config.praat_bin) {
             return fail(self, message);
         }
-        let planned = match crate::model::praat::plan_praat_job_with(def, values, &audiotools_dir, crate::praat::runner::python_venv_interpreter(&praat_state_dir()).as_deref(), inputs.len()) {
+        let mut planned = match crate::model::praat::plan_praat_job_with(def, values, &audiotools_dir, crate::praat::runner::python_venv_interpreter(&praat_state_dir()).as_deref(), inputs.len()) {
             Ok(planned) => planned,
             Err(err) => return fail(self, err.to_string()),
         };
+        planned.set_cdp_dir(&self.config.cdp_dir);
 
         if let Some(run) = self.cdp_pending_chain_run.as_mut() {
             run.pending_step_count = 1;
@@ -43662,6 +43674,42 @@ mod tests {
             None,
             "Airwindows is compiled in and must never be blocked on an install"
         );
+    }
+
+    /// A Praat script that runs CDP needs both programs, so a missing CDP folder blocks it even
+    /// though it is a Praat process. Other Praat processes are not asked about CDP.
+    #[test]
+    fn a_praat_cdp_script_says_so_when_cdp_is_not_set_up() {
+        let mut config = Config::default();
+        config.cdp_dir = String::new();
+        let mut app = App::new_with_config(Some(doc(0.1, 44100)), None, config);
+
+        let position = |app: &App, key: &str| {
+            app.cdp_catalog.processes.iter().position(|p| p.key == key).expect(key)
+        };
+        let chain = position(&app, "praat_cdp_cdp_chain_1");
+        app.open_cdp_params(chain);
+        let blocker = app.cdp_params_blocker().expect("CDP is unset, so Apply must be blocked");
+        assert!(blocker.contains("CDP is not set up"), "unhelpful blocker: {blocker}");
+
+        let other = position(&app, "praat_spectral_allpassdiffuser");
+        app.open_cdp_params(other);
+        let blocker = app.cdp_params_blocker();
+        assert!(!blocker.is_some_and(|b| b.contains("CDP")), "this process does not need CDP");
+    }
+
+    /// These fold to mono, return stereo and run past the input, so a splice would not fit.
+    #[test]
+    fn a_praat_cdp_script_always_opens_a_new_buffer() {
+        let app = App::new_with_config(Some(doc(0.1, 44100)), None, Config::default());
+        let scripts: Vec<_> = app
+            .cdp_catalog
+            .processes
+            .iter()
+            .filter(|p| crate::model::praat::praat_uses_cdp_engine(p))
+            .collect();
+        assert_eq!(scripts.len(), 9);
+        assert!(scripts.iter().all(|p| App::process_forces_new_buffer(p)));
     }
 
     /// Regression test for a shipped bug (user report, 2026-08-12): an Airwindows step in a

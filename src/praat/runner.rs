@@ -443,6 +443,29 @@ fn run_job_body(
             source = fixed;
         }
 
+        // A script that drives CDP. See `rewrite::rewrite_cdp_engine`.
+        if let Some(cdp_dir) = &job.planned.cdp_dir {
+            let original_dir = job
+                .planned
+                .script_path
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            source = crate::model::praat::rewrite::rewrite_cdp_engine(
+                &source,
+                &original_dir,
+                cdp_dir,
+            )
+            .ok_or_else(|| {
+                fail(
+                    "this script does not start CDP the way this version of tui-wave expects; \
+                     the praatAudioTools scripts are probably a different version — update \
+                     them (or tui-wave) so the two agree"
+                        .to_string(),
+                )
+            })?;
+        }
+
         let path = temp_dir.join(name);
         std::fs::write(&path, source).map_err(|e| PraatError::OutputRead {
             path: path.display().to_string(),
@@ -872,6 +895,7 @@ mod tests {
                 builtin_source: None,
                 python_rewrite: None,
                 argument_fixes: Vec::new(),
+                cdp_dir: None,
                 label: "test".into(),
             },
             inputs: vec![vec![vec![0.0f32; 1000], vec![0.0f32; 1000]]],
@@ -1601,7 +1625,7 @@ mod tests {
                 // Re-planned per width rather than planned once and reused: a plan is derived
                 // from the def and its values and not from the audio, but re-deriving keeps the
                 // two runs independent, so neither can inherit anything the other left behind.
-                let planned = match crate::model::praat::plan_praat_job_with(def, &values, &checkout, python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref(), 1) {
+                let mut planned = match crate::model::praat::plan_praat_job_with(def, &values, &checkout, python_venv_interpreter(&crate::ui::app::praat_state_dir()).as_deref(), 1) {
                     Ok(planned) => planned,
                     Err(err) => {
                         failures.push(format!("{} [{width}]: plan failed: {err}", def.key));
@@ -1609,6 +1633,9 @@ mod tests {
                         continue;
                     }
                 };
+                // The `CDP/` scripts run the programs in the user's own CDP install, wherever the
+                // app is configured to find it.
+                planned.set_cdp_dir(&crate::config::Config::load().cdp_dir);
                 // A two-Sound process gets the same fixture on both sides; self-processing is a
                 // valid shape for everything being checked here.
                 let input_count = planned.input_names.len();
@@ -1815,6 +1842,13 @@ mod tests {
         // refuses with "No note onsets were detected".
         "praat_dynamics_envelope_audio_quantizer",
         "praat_time_granular_dramaturgical_structure_composer",
+        // CDP `specfnu` stops with "No valid pitch found" on a plain tone.
+        "praat_cdp_cdp_chain_1",
+        "praat_cdp_cdp_composition_1",
+        // Refuses anything under 2.5 s.
+        "praat_cdp_intensity_driven_temporal_walk",
+        // Tunes each melodic event to the next, so a steady tone gives it no events.
+        "praat_cdp_spectral_anticipation",
         "praat_time_granular_mds_space_navigator",
         "praat_vector_chain_chain_1",
         "praat_py_phasespacecomposer",

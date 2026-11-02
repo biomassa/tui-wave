@@ -3,14 +3,32 @@
 ## Unreleased
 
 - **Airwindows updated to the latest upstream**, which adds **Echojam** (Ambience), an echo effect
-  that is secretly a reverb. It was left out before because upstream had not yet written its
-  description.
+  that is secretly a reverb, and **PunchyDeluxe** (Amp Sims), a smoother form of PointyDeluxe. Both
+  were left out before because upstream had not yet written their descriptions.
 - **A Praat setting the script works out for itself can now be left on "auto".** Some scripts fill
   in a settings page from the sound they are given, for example loop regions picked inside it.
   Such a field shows a grey **auto** and the script supplies the value when it runs; type a number
   to set it yourself, and delete the number to go back to auto. It works the same way in the
   chain editor. Reich Generator's Dual Locked Loops settings are the first to use it.
-- **praatAudioTools updated to `41d6a68`.**
+- **praatAudioTools updated to `c2e91ec`.**
+  - **New group: Praat+CDP.** Nine scripts analyse a sound in Praat and process it with your CDP
+    programs, so they need both installed; Apply is dimmed until the CDP folder is set. The result
+    always opens in a new buffer. **Intensity Driven Temporal Walk** makes a stereo drunken walk
+    through the sound, with a steady clock on the left and a clock driven by loudness on the
+    right. **Spectral Hysteresis** smears the spectrum with a decay steered by the melody.
+    **Spectral Anticipation** tunes each note of a phrase to the next one and freezes it into a
+    cloud, in stereo or multichannel. **CDP Chain 1-3** and **CDP Composition 1-3** run fixed
+    gestures with no settings. CDP Process Explorer is left out, because the CDP browser already
+    does its job.
+  - **Spectral Noise Shaping** is rewritten (v1.5.1), with eight generation modes, texture
+    presets, and Spectral continuity, Envelope and Corpus weighting settings. Its advanced
+    settings are in the same dialog. N fft, Chunk size and Hop length stay on **auto** (set by
+    the Texture preset) until you type them. Variation and Spectral continuity apply under Manual.
+    Saved presets for it no longer line up.
+  - **Analogique B** has a new Engine menu: the noise mass as before, or a Markov chain or a
+    149.5-second section plan modelled on the piece. Duration now defaults to 0.5 minutes.
+  - **Studie II Generator** gets a Serial reconstruction of the piece, with Start at, Whole piece
+    and Apply score corrections settings. Wet-only reverb model is gone.
   - **NMF Granular Spatial Composer** is new (py). It takes a sound apart into spectral parts
     (NMF) and rebuilds it as a granular cloud, rendered as mono, stereo (Source Islands or Grain
     Orbit) or 4-channel quad (Quad Constellation). The eight Custom preset settings are in the

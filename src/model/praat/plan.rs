@@ -67,15 +67,27 @@ pub struct PraatPlannedJob {
     /// Vector Chain only: arguments to put back into calls upstream left one short — see
     /// `ProcessDef::praat_argument_fixes`. Applied to the same single copy as the passes above.
     pub argument_fixes: Vec<crate::model::cdp::def::PraatArgumentFix>,
+    /// `Some` for a script that runs CDP through upstream's `cdp_engine.praat`. The planner sets
+    /// `Some(empty)`, because `cdp_dir` is configuration it does not know; the caller fills it
+    /// with [`PraatPlannedJob::set_cdp_dir`]. See `rewrite::rewrite_cdp_engine`.
+    pub cdp_dir: Option<String>,
 }
 
 impl PraatPlannedJob {
+    /// Tell a script that drives CDP where the programs are. Does nothing for any other script.
+    pub fn set_cdp_dir(&mut self, dir: &str) {
+        if let Some(slot) = &mut self.cdp_dir {
+            *slot = dir.to_string();
+        }
+    }
+
     /// The filename of the rewritten copy the driver calls, when the script runs as one. The one
     /// place that decides, so the runner writes the copy under the name the driver was given.
     pub fn rewritten_script_name(&self) -> Option<&str> {
         let rewritten = self.pause_rewrite.is_some()
             || self.python_rewrite.is_some()
-            || !self.argument_fixes.is_empty();
+            || !self.argument_fixes.is_empty()
+            || self.cdp_dir.is_some();
         rewritten.then_some(REWRITTEN_SCRIPT)
     }
 }
@@ -440,7 +452,11 @@ pub fn plan_praat_job_with(
     // Both a rewritten copy and a built-in are siblings of the driver, so a bare filename
     // resolves — see `PauseRewrite::script_name`.
     let argument_fixes = def.praat_argument_fixes.clone();
-    let rewritten = pause_rewrite.is_some() || python_rewrite.is_some() || !argument_fixes.is_empty();
+    let cdp_dir = praat_uses_cdp_engine(def).then(String::new);
+    let rewritten = pause_rewrite.is_some()
+        || python_rewrite.is_some()
+        || !argument_fixes.is_empty()
+        || cdp_dir.is_some();
     let called_script = match &builtin_source {
         Some(builtin) => builtin.script_name.clone(),
         None if rewritten => REWRITTEN_SCRIPT.to_string(),
@@ -467,7 +483,14 @@ pub fn plan_praat_job_with(
         builtin_source,
         python_rewrite,
         argument_fixes,
+        cdp_dir,
     })
+}
+
+/// Whether this Praat script hands its audio to CDP, and so needs `cdp_dir` set up as well as
+/// Praat. Every script in upstream's `CDP/` folder does, and no other.
+pub fn praat_uses_cdp_engine(def: &ProcessDef) -> bool {
+    def.backend() == Backend::Praat && def.bin.starts_with("CDP/")
 }
 
 /// Whether this run will paint something into Praat's Picture window — i.e. whether the driver
@@ -747,6 +770,24 @@ mod tests {
             plan_praat_job(&def, &[ParamValue::Table(vec![])], Path::new("/p")),
             Err(PraatPlanError::UnsupportedParamKind { param: "Taps".into() })
         );
+    }
+
+    /// The app's CDP folder reaches only the scripts that run CDP, and such a script always
+    /// runs as a copy, because the original looks for programs in its own folder.
+    #[test]
+    fn only_a_script_in_the_cdp_folder_runs_as_a_copy_with_the_cdp_dir() {
+        let mut def = praat_def(vec![]);
+        def.bin = "CDP/CDP_Chain_1.praat".into();
+        let mut job = plan_praat_job(&def, &[], Path::new("/p")).unwrap();
+        job.set_cdp_dir("/home/u/cdp");
+        assert_eq!(job.cdp_dir.as_deref(), Some("/home/u/cdp"));
+        assert_eq!(job.rewritten_script_name(), Some(REWRITTEN_SCRIPT));
+
+        def.bin = "Spectral/Whatever.praat".into();
+        let mut job = plan_praat_job(&def, &[], Path::new("/p")).unwrap();
+        job.set_cdp_dir("/home/u/cdp");
+        assert_eq!(job.cdp_dir, None);
+        assert_eq!(job.rewritten_script_name(), None);
     }
 
     /// A variadic process's input count is a property of the **run**, not of the definition, so

@@ -65,6 +65,10 @@ GROUP_DIRS = {
     # (numpy/scipy/soundfile on PATH) is visible in the browser rather than a surprise at run
     # time -- and so they can be avoided wholesale by anyone who has not installed them.
     "py": "py",
+    # Praat scripts that hand their audio to CDP through upstream's `internal/cdp_engine.praat`.
+    # Their own heading for the same reason as `py`: they need a second program. Upstream ships
+    # only Windows binaries, so `rewrite::rewrite_cdp_engine` points the engine at `cdp_dir`.
+    "CDP": "Praat+CDP",
 }
 
 # `py/` shells out to Python/IRCAM/VST3 tooling and is out of scope entirely. `Max-MSP` is a
@@ -517,6 +521,18 @@ PAUSE_HOISTS: dict[str, dict] = {
     # each for the "learned groove" and "groove Table" grid types. Only the first is hoisted; the
     # other two belong to grid types that need a second Sound or a Table object, which the app
     # cannot hand Praat, and GUI_BLOCKING_OVERRIDES drops those options so they cannot be reached.
+    # The Advanced page (v1.5, 2026-11), pre-filled from the Texture preset. It repeats Variation
+    # and Spectral continuity from the form so that they can override a preset; shown twice under
+    # one name they would read as a mistake, so the page's copies are left out and the form's
+    # apply under Manual, as the form's own comment says. N fft, Chunk size and Hop length are
+    # seeded from the preset, so they are auto fields. Nothing is unreachable: Manual plus typed
+    # grid values gives every combination.
+    "py/Spectral_Noise_Shaping.praat": {
+        "lock_on": ["Show_advanced_settings"],
+        "omit_rows": {0: ["Variation", "Spectral continuity"]},
+        "auto_rows": {(0, "Chunk size"): "chunk_size", (0, "Hop length"): "hop_length"},
+        "why": "advanced settings page (analysis grid, sample rate, mode options)",
+    },
     "Dynamics & Envelope/Audio_Quantizer.praat": {
         "lock_on": ["Advanced_settings"],
         "blocks": [0],
@@ -532,6 +548,7 @@ PAUSE_HOISTS: dict[str, dict] = {
     # the engine's 16 kHz analysis rate, which cannot be spliced into an ordinary document, so
     # the result always opens a new buffer.
     "py/NMF_Granular_Spatial_Composer.praat": {
+        "add_notes": {(0, "Density"): "These settings apply only when Preset is Custom."},
         "lock_values": {"Play": "None", "Retain_work_files": False},
         "new_buffer": True,
         "why": "Custom preset page (density, grain size, locality, speed, envelope, seed)",
@@ -1330,8 +1347,17 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
     def tag(fields, index):
         out = []
         for param in fields:
+            # A page row left out of the dialog. The rewrite assigns only the rows it is given,
+            # so the script keeps whatever value the variable already held.
+            if param.name in hoist.get("omit_rows", {}).get(index, ()):
+                continue
             copied = replace(param)
             copied.pause_block = index
+            # A row whose seed is a literal on one path and computed on another. `auto_seed` sees
+            # the literal, so a preset-set row has to be named here to be left to the script.
+            seed = hoist.get("auto_rows", {}).get((index, copied.name))
+            if seed:
+                copied.auto_seed = seed
             # A choice whose labels are script variables (`option: nameA$`) reads as raw text
             # in the dialog. Only the labels change: the rewrite writes the 1-based index, which
             # is what the script reads, and the label to `<name>$`, which it does not.
@@ -3150,6 +3176,13 @@ PHOTO_INPUTS: dict[str, str] = {
 # is pure install cost, so anything imported by these helpers and nothing else comes back out of
 # `PY_ALLOWED_IMPORTS` -- see `cv2` there.
 NEVER_PLANNED: dict[str, str] = {
+    # Not a process: the library every other script in `CDP/` includes.
+    "CDP/internal/cdp_engine.praat":
+        "shared library of the CDP scripts, not a process",
+    # A browser for running one CDP process at a time, made of pages that lead to each other. The
+    # app's CDP backend already is that browser, with its own dialogs.
+    "CDP/CDP_Process_Explorer.praat":
+        "an interactive browser of CDP processes, which the app's CDP backend already provides",
     # Opens the webcam, calibrates for 2 seconds against the background, then records 10 seconds
     # of free-hand motion and derives three control channels from frame differencing. It is a
     # live performance instrument that happens to write a CSV: the transformation afterwards is
