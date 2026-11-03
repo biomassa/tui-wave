@@ -12649,6 +12649,7 @@ stereo_native = true
 output_is_stereo = false
 param_notes = [
   { before = 0, text = "Composition" },
+  { before = 0, text = "Presets change only the right channel: how long its resonance holds. Balanced Memory matches Custom's defaults." },
   { before = 1, text = "Pitch & Stability Analysis" },
   { before = 8, text = "Spectral Memory (CDP Decay)" },
   { before = 12, text = "Mix & Output" },
@@ -89650,7 +89651,7 @@ stereo_native = true
 output_is_stereo = false
 param_notes = [
   { before = 0, text = "Corpus folder (leave blank to choose after Apply)" },
-  { before = 7, text = "(Manual only: presets set their own; Advanced shows and overrides all)" },
+  { before = 7, text = "Variation and Spectral continuity apply under Manual; presets set their own" },
   { before = 11, text = "Analysis / synthesis grid (chunk: power of 2, at least 2 x hop)" },
   { before = 16, text = "Mode options" },
   { before = 17, text = "(Replay: 0 = fit one source file to Duration; 2 = half speed)" },

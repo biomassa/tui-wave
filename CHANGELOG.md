@@ -15,7 +15,8 @@
     programs, so they need both installed; Apply is dimmed until the CDP folder is set. The result
     always opens in a new buffer. **Intensity Driven Temporal Walk** makes a stereo drunken walk
     through the sound, with a steady clock on the left and a clock driven by loudness on the
-    right. **Spectral Hysteresis** smears the spectrum with a decay steered by the melody.
+    right. **Spectral Hysteresis** smears the spectrum with a decay steered by the melody;
+    a note under Preset says that presets change only the right channel.
     **Spectral Anticipation** tunes each note of a phrase to the next one and freezes it into a
     cloud, in stereo or multichannel. **CDP Chain 1-3** and **CDP Composition 1-3** run fixed
     gestures with no settings. CDP Process Explorer is left out, because the CDP browser already

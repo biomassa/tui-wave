@@ -3165,6 +3165,42 @@ PHOTO_INPUTS: dict[str, str] = {
         "additive synthesis; R/G/B drive interleaved harmonic groups",
 }
 
+# Notes the dialog shows in place of, or as well as, a script's own `comment` lines. `add` puts a
+# note above the named form row; `replace` swaps one comment's text for another. Both are loud
+# when the row or the text is gone, so an upstream edit is noticed instead of silently undone.
+NOTE_EDITS: dict[str, dict] = {
+    # Presets set only the adaptive (right) channel's decays, and Balanced Memory repeats
+    # Custom's defaults, so on a first listen the presets seem to do nothing. Asked 2026-11-03.
+    "CDP/Spectral_Hysteresis.praat": {
+        "add": {"Preset": "Presets change only the right channel: how long its resonance holds. "
+                          "Balanced Memory matches Custom's defaults."},
+    },
+    # The Advanced page this comment points at is part of the main dialog now (PAUSE_HOISTS),
+    # and its copies of these two rows are left out. Asked 2026-11-03.
+    "py/Spectral_Noise_Shaping.praat": {
+        "replace": {"(Manual only: presets set their own; Advanced shows and overrides all)":
+                    "Variation and Spectral continuity apply under Manual; presets set their own"},
+    },
+}
+
+
+def apply_note_edits(params: list, edits: dict) -> str | None:
+    """Apply one `NOTE_EDITS` entry to a script's form params; a problem string if stale."""
+    for name, text in edits.get("add", {}).items():
+        target = next((p for p in params if p.name == name), None)
+        if target is None:
+            return f"no form parameter named {name!r} to add a note to (upstream renamed it?)"
+        target.notes = [*target.notes, Note(text=text, section=False)]
+    for old, new in edits.get("replace", {}).items():
+        hits = [(p, i, attr) for p in params for attr in ("notes", "notes_after")
+                for i, n in enumerate(getattr(p, attr)) if n.text == old]
+        if len(hits) != 1:
+            return f"comment {old!r} found {len(hits)} times, expected once (upstream changed it?)"
+        p, i, attr = hits[0]
+        getattr(p, attr)[i] = Note(text=new, section=getattr(p, attr)[i].section)
+    return None
+
+
 # Scripts this app will not offer, as a decision rather than as an obstacle.
 #
 # Distinct from `OUT_OF_SCOPE`, which reads as "this does not fit the shape of the app" and
@@ -3739,6 +3775,7 @@ def check_stale_keys() -> list[str]:
         # Stale here means a toggle silently goes back to forced-off and the script starts
         # failing again on an unassigned read — the exact regression the entry prevents.
         ("SILENCE_EXEMPTIONS", SILENCE_EXEMPTIONS),
+        ("NOTE_EDITS", NOTE_EDITS),
     ):
         for key in table:
             if key not in present:
@@ -3860,6 +3897,11 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
         if isinstance(params, str):
             excluded.append((str(rel), "unparseable_form", params))
             continue
+        if rel_key in NOTE_EDITS:
+            problem = apply_note_edits(params, NOTE_EDITS[rel_key])
+            if problem:
+                excluded.append((str(rel), "unparseable_form", f"note edit failed: {problem}"))
+                continue
 
         # Appended before anything downstream reads `params`, so the folder lands after the
         # form's own fields on both the ordinary and the pause-hoisted path. No script needs both
