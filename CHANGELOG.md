@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-11-03 (2.19.0)
 
 - **Airwindows updated to the latest upstream**, which adds **Echojam** (Ambience), an echo effect
   that is secretly a reverb, and **PunchyDeluxe** (Amp Sims), a smoother form of PointyDeluxe. Both
