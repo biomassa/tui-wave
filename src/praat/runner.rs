@@ -1292,6 +1292,72 @@ mod tests {
         );
     }
 
+    /// The Vector Chain presets in `docs/vector-chain-presets/` were generated from the commit the
+    /// catalog names, and each still fits the catalog: every step names a process that exists
+    /// and carries one value per parameter. A bump that skips `scripts/bump-praat.sh` (or its
+    /// preset step) fails here instead of leaving presets whose values land in the wrong rows.
+    #[test]
+    fn the_vector_chain_presets_match_the_catalog() {
+        fn check(
+            step: &crate::model::cdp::chain::ChainStep,
+            catalog: &crate::model::cdp::CdpCatalog,
+            file: &str,
+            problems: &mut Vec<String>,
+        ) {
+            match catalog.processes.iter().find(|d| d.key == step.process_key) {
+                None => problems.push(format!("{file}: no process {}", step.process_key)),
+                Some(def) if def.params.len() != step.values.len() => problems.push(format!(
+                    "{file}: {} has {} values, the catalog has {} parameters",
+                    step.process_key,
+                    step.values.len(),
+                    def.params.len()
+                )),
+                Some(_) => {}
+            }
+            for branch in &step.branches {
+                for inner in &branch.steps {
+                    check(inner, catalog, file, problems);
+                }
+            }
+        }
+
+        let expected = catalog_commit().expect("the catalog header names its source commit");
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/vector-chain-presets");
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let mut problems = Vec::new();
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).expect("docs/vector-chain-presets ships with the repo") {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            seen += 1;
+            let file = path.file_name().unwrap().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let source = text
+                .lines()
+                .next()
+                .and_then(|l| l.split("at commit ").nth(1))
+                .map(|s| s.trim_end_matches('.'))
+                .unwrap_or("an unknown commit");
+            if source != expected {
+                problems.push(format!("{file}: generated from {source}, the catalog is {expected}"));
+            }
+            let chain: crate::model::cdp::chain::CdpChain =
+                toml::from_str(&text).unwrap_or_else(|e| panic!("{file} does not parse: {e}"));
+            for step in &chain.steps {
+                check(step, &catalog, &file, &mut problems);
+            }
+        }
+        assert!(seen > 0, "no presets in {}", dir.display());
+        assert!(
+            problems.is_empty(),
+            "Vector Chain presets are stale; run scripts/bump-praat.sh (or \
+             explicate_vector_chains.py --chains docs/vector-chain-presets):\n{}",
+            problems.join("\n")
+        );
+    }
+
     /// The bundled submodule is on the commit the catalog names, so a source checkout reports no
     /// staleness. This is also what proves `checkout_commit` can read a real `.git` — the
     /// submodule's is a `.git` *file* pointing into the parent's modules directory, not a
