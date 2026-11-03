@@ -10,7 +10,7 @@
   Such a field shows a grey **auto** and the script supplies the value when it runs; type a number
   to set it yourself, and delete the number to go back to auto. It works the same way in the
   chain editor. Reich Generator's Dual Locked Loops settings are the first to use it.
-- **praatAudioTools updated to `c2e91ec`.**
+- **praatAudioTools updated to `7d2dccc`.**
   - **New group: Praat+CDP.** Nine scripts analyse a sound in Praat and process it with your CDP
     programs, so they need both installed; Apply is dimmed until the CDP folder is set. The result
     always opens in a new buffer. **Intensity Driven Temporal Walk** makes a stereo drunken walk
@@ -58,6 +58,15 @@
     without updating the chains that call them, so Praat stopped each chain at that step with
     "Found 13 arguments but expected more". The app now runs these chains with the missing value
     put back (drawing off), until upstream fixes them.
+  - **Giant FFT Recomposer** (v0.4) has a new **Wet fade-in duration** setting (1 second by
+    default): the processed sound fades in over that time. Presets no longer replace
+    Transformation depth; the depth you set now scales each preset's character. The default
+    result is unchanged. Saved presets for it no longer line up.
+  - **AI Conductor Mix** is now **Conductor Mix**, after upstream renamed the script. Version 3.3
+    adds an **Interpretive behaviour** menu (Original, Responsive, Complementary), Interpretive
+    memory, Contextual strength, Phrase awareness and a **Spatial mode** with fixed chamber
+    positions; Memory weight is now Energy memory weight. The defaults give the result as before.
+    Its saved presets and recent-list entry do not carry over.
   - Live Lab, a new script, is not in the browser: it is a MIDI-controlled live performance
     launcher, not a process.
 - **A dialog note no longer shows Praat code.** Evolving Convolution Field's advanced settings
