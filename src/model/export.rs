@@ -143,7 +143,10 @@ fn write_flac(doc: &Document, path: &Path, depth: BitDepth, dither: bool) -> col
     stream
         .write(&mut sink)
         .map_err(|e| color_eyre::eyre::eyre!("FLAC serialize failed: {e}"))?;
-    let mut bytes = sink.as_slice().to_vec();
+    // The sink's own buffer, not a copy of it: `ByteSink` is `MemSink<u8>`, whose storage is
+    // exactly the encoded bytes.
+    drop(stream);
+    let mut bytes = sink.into_inner();
     normalize_fixed_blocksize_streaminfo(&mut bytes);
     // Staged and renamed (`model::atomic`): the payload is built in memory, so the window is
     // narrower than the WAV writer's per-sample loop, but a full disk still turns a plain write

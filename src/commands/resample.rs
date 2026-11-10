@@ -42,37 +42,21 @@ pub fn resample_channel(input: &[f32], ratio: f64) -> Vec<f32> {
     let half_f = half as f64;
     let (sin_wstep, cos_wstep) = (-std::f64::consts::PI / half_f).sin_cos();
 
+    let kernel = Kernel { input, cutoff, half_f, sin_step, cos_step, sin_wstep, cos_wstep };
     let mut out = Vec::with_capacity(out_len);
     for i in 0..out_len {
         let center = i as f64 / ratio; // position in input-sample units
         let n0 = center.floor() as isize;
         let n_start = n0 - half + 1;
-        let tau_start = center - n_start as f64;
-        // Angles at the first tap; each iteration rotates them to the next.
-        let (mut sin_a, mut cos_a) = (std::f64::consts::PI * cutoff * tau_start).sin_cos();
-        let (mut sin_w, mut cos_w) = (std::f64::consts::PI * tau_start / half_f).sin_cos();
-        let mut acc = 0.0f64;
-        let mut norm = 0.0f64;
-        for n in n_start..=(n0 + half) {
-            let tau = center - n as f64;
-            if n >= 0 && n < len && tau.abs() <= half_f {
-                // `sin_a` is `sin(PI * cutoff * tau)` — the sinc's numerator, with the same
-                // small-argument guard the standalone `sinc` uses.
-                let x = cutoff * tau;
-                let s = if x.abs() < 1e-9 { 1.0 } else { sin_a / (std::f64::consts::PI * x) };
-                // Hann window over the [-half, half] support; `cos_w` is its cosine term.
-                let w = 0.5 * (1.0 + cos_w);
-                let h = s * cutoff * w;
-                acc += input[n as usize] as f64 * h;
-                norm += h;
-            }
-            let next_sin_a = sin_a * cos_step + cos_a * sin_step;
-            cos_a = cos_a * cos_step - sin_a * sin_step;
-            sin_a = next_sin_a;
-            let next_sin_w = sin_w * cos_wstep + cos_w * sin_wstep;
-            cos_w = cos_w * cos_wstep - sin_w * sin_wstep;
-            sin_w = next_sin_w;
-        }
+        let n_end = n0 + half;
+        // Away from the two ends every tap lands inside the input, so the per-tap bounds test
+        // is dropped there. Same operations in the same order either way, so the output is
+        // bit-identical; only the branch goes.
+        let (acc, norm) = if n_start >= 0 && n_end < len {
+            kernel.convolve::<false>(center, n_start, n_end)
+        } else {
+            kernel.convolve::<true>(center, n_start, n_end)
+        };
         out.push(if norm.abs() > 1e-12 {
             (acc / norm) as f32
         } else {
@@ -80,6 +64,60 @@ pub fn resample_channel(input: &[f32], ratio: f64) -> Vec<f32> {
         });
     }
     out
+}
+
+/// What one output sample's convolution needs, fixed for the whole channel.
+struct Kernel<'a> {
+    input: &'a [f32],
+    cutoff: f64,
+    half_f: f64,
+    sin_step: f64,
+    cos_step: f64,
+    sin_wstep: f64,
+    cos_wstep: f64,
+}
+
+impl Kernel<'_> {
+    /// Sum of weighted taps `n_start..=n_end` around `center`, and the sum of the weights.
+    /// `CHECKED` skips taps outside the input; without it the caller guarantees there are none.
+    #[inline(always)]
+    fn convolve<const CHECKED: bool>(&self, center: f64, n_start: isize, n_end: isize) -> (f64, f64) {
+        let len = self.input.len() as isize;
+        let (cutoff, half_f) = (self.cutoff, self.half_f);
+        let tau_start = center - n_start as f64;
+        // Angles at the first tap; each iteration rotates them to the next.
+        let (mut sin_a, mut cos_a) = (std::f64::consts::PI * cutoff * tau_start).sin_cos();
+        let (mut sin_w, mut cos_w) = (std::f64::consts::PI * tau_start / half_f).sin_cos();
+        let mut acc = 0.0f64;
+        let mut norm = 0.0f64;
+        for n in n_start..=n_end {
+            let tau = center - n as f64;
+            if !CHECKED || (n >= 0 && n < len && tau.abs() <= half_f) {
+                // `sin_a` is `sin(PI * cutoff * tau)` — the sinc's numerator, with the same
+                // small-argument guard the standalone `sinc` uses.
+                let x = cutoff * tau;
+                let s = if x.abs() < 1e-9 { 1.0 } else { sin_a / (std::f64::consts::PI * x) };
+                // Hann window over the [-half, half] support; `cos_w` is its cosine term.
+                let w = 0.5 * (1.0 + cos_w);
+                let h = s * cutoff * w;
+                acc += self.input[n as usize] as f64 * h;
+                norm += h;
+            }
+            let next_sin_a = sin_a * self.cos_step + cos_a * self.sin_step;
+            cos_a = cos_a * self.cos_step - sin_a * self.sin_step;
+            sin_a = next_sin_a;
+            let next_sin_w = sin_w * self.cos_wstep + cos_w * self.sin_wstep;
+            cos_w = cos_w * self.cos_wstep - sin_w * self.sin_wstep;
+            sin_w = next_sin_w;
+        }
+        (acc, norm)
+    }
+}
+
+/// [`resample_channel`] on every channel, one worker thread per channel up to the core count.
+/// Channels share nothing, so this is the same result as resampling them in turn.
+pub fn resample_channels(channels: &[Vec<f32>], ratio: f64) -> Vec<Vec<f32>> {
+    crate::model::par::map_channels(channels, |c| resample_channel(c, ratio))
 }
 
 /// Resamples the whole document to `target_rate`. A whole-file operation (not range-based):
@@ -110,13 +148,11 @@ impl Command for ResampleCommand {
             return;
         }
         let ratio = self.target_rate as f64 / doc.sample_rate as f64;
-        self.original =
-            Some((doc.channels.clone(), doc.sample_rate, doc.markers.clone(), doc.head_tail_marks.clone()));
-        doc.channels = doc
-            .channels
-            .iter()
-            .map(|c| resample_channel(c, ratio))
-            .collect();
+        // The original channels are moved into the undo snapshot rather than cloned: the
+        // document gets new ones anyway, so a clone only added a third full copy at the peak.
+        let original = std::mem::take(&mut doc.channels);
+        doc.channels = resample_channels(&original, ratio);
+        self.original = Some((original, doc.sample_rate, doc.markers.clone(), doc.head_tail_marks.clone()));
         // Marker positions are in samples, so they scale with the rate change.
         let new_len = doc.channels.first().map(|c| c.len()).unwrap_or(0);
         for m in &mut doc.markers {
@@ -167,6 +203,72 @@ pub fn resample_command(target_rate: u32) -> Box<dyn Command> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tap loop as it was before the interior taps lost their bounds test, kept verbatim so
+    /// the claim that the split is bit-identical is checked rather than asserted.
+    fn reference_resample(input: &[f32], ratio: f64) -> Vec<f32> {
+        if input.is_empty() || ratio <= 0.0 {
+            return Vec::new();
+        }
+        let out_len = ((input.len() as f64) * ratio).round().max(1.0) as usize;
+        let cutoff = ratio.min(1.0);
+        let half = (HALF_TAPS as f64 / cutoff).ceil() as isize;
+        let len = input.len() as isize;
+        let (sin_step, cos_step) = (-std::f64::consts::PI * cutoff).sin_cos();
+        let half_f = half as f64;
+        let (sin_wstep, cos_wstep) = (-std::f64::consts::PI / half_f).sin_cos();
+        let mut out = Vec::with_capacity(out_len);
+        for i in 0..out_len {
+            let center = i as f64 / ratio;
+            let n0 = center.floor() as isize;
+            let n_start = n0 - half + 1;
+            let tau_start = center - n_start as f64;
+            let (mut sin_a, mut cos_a) = (std::f64::consts::PI * cutoff * tau_start).sin_cos();
+            let (mut sin_w, mut cos_w) = (std::f64::consts::PI * tau_start / half_f).sin_cos();
+            let mut acc = 0.0f64;
+            let mut norm = 0.0f64;
+            for n in n_start..=(n0 + half) {
+                let tau = center - n as f64;
+                if n >= 0 && n < len && tau.abs() <= half_f {
+                    let x = cutoff * tau;
+                    let s = if x.abs() < 1e-9 { 1.0 } else { sin_a / (std::f64::consts::PI * x) };
+                    let w = 0.5 * (1.0 + cos_w);
+                    let h = s * cutoff * w;
+                    acc += input[n as usize] as f64 * h;
+                    norm += h;
+                }
+                let next_sin_a = sin_a * cos_step + cos_a * sin_step;
+                cos_a = cos_a * cos_step - sin_a * sin_step;
+                sin_a = next_sin_a;
+                let next_sin_w = sin_w * cos_wstep + cos_w * sin_wstep;
+                cos_w = cos_w * cos_wstep - sin_w * sin_wstep;
+                sin_w = next_sin_w;
+            }
+            out.push(if norm.abs() > 1e-12 { (acc / norm) as f32 } else { 0.0 });
+        }
+        out
+    }
+
+    #[test]
+    fn the_branch_free_interior_is_bit_identical_to_the_checked_loop() {
+        let input: Vec<f32> = (0..3000).map(|i| ((i as f32) * 0.037).sin() * 0.8).collect();
+        for ratio in [0.5, 48000.0 / 44100.0, 44100.0 / 48000.0, 2.0, 0.25, 3.0] {
+            let got = resample_channel(&input, ratio);
+            let want = reference_resample(&input, ratio);
+            assert_eq!(got.len(), want.len());
+            assert!(
+                got.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "ratio {ratio}: output differs from the checked loop"
+            );
+        }
+        // Shorter than the kernel: every output sample takes the checked path.
+        let short = &input[..20];
+        assert_eq!(resample_channel(short, 2.0), reference_resample(short, 2.0));
+        // And the parallel form is the same as resampling channel by channel.
+        let channels = vec![input.clone(), input.iter().map(|s| -s).collect()];
+        let par = resample_channels(&channels, 0.5);
+        assert_eq!(par, channels.iter().map(|c| resample_channel(c, 0.5)).collect::<Vec<_>>());
+    }
 
     /// Head/tail marks are sample positions, so they scale with the rate change; undo restores
     /// the snapshot rather than scaling back, because the round-to-whole-samples in each

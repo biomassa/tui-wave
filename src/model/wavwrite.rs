@@ -41,6 +41,104 @@ pub struct WavWriter {
     data_size_at: u64,
     data_bytes: u64,
     frames: u64,
+    /// Reused between blocks by `write_planes`.
+    scratch: Vec<u8>,
+}
+
+/// Frames encoded per `write_all`. Small enough that the scratch buffer stays in cache at 56
+/// channels (4096 x 56 x 4 bytes = ~900KB), large enough that the per-call cost disappears.
+const BLOCK_FRAMES: usize = 4096;
+
+/// Appends frames `start..start + frames` of `planes` to `out`, interleaved and encoded at
+/// `depth`.
+///
+/// Every WAV writer here shares this so they encode identically: the bit-depth `match` sits
+/// outside the sample loops, and the dither generator is called in frame-major order (frame 0
+/// channel 0, frame 0 channel 1, ...), the order the per-sample writers used, so dithered output
+/// is unchanged byte for byte. A plane shorter than the range reads as silence.
+pub fn encode_interleaved(
+    planes: &[&[f32]],
+    start: usize,
+    frames: usize,
+    depth: BitDepth,
+    mut dither: Option<&mut DitherRng>,
+    out: &mut Vec<u8>,
+) {
+    let width = (depth.bits() / 8) as usize;
+    out.reserve(frames * planes.len() * width);
+    let bits = depth.bits();
+    let at = |plane: &[f32], f: usize| plane.get(f).copied().unwrap_or(0.0);
+    match depth {
+        BitDepth::Float32 => {
+            for f in start..start + frames {
+                for plane in planes {
+                    out.extend_from_slice(&at(plane, f).to_le_bytes());
+                }
+            }
+        }
+        BitDepth::Int16 => {
+            for f in start..start + frames {
+                for plane in planes {
+                    let q = quantize(at(plane, f), bits, dither.as_deref_mut()) as i16;
+                    out.extend_from_slice(&q.to_le_bytes());
+                }
+            }
+        }
+        BitDepth::Int24 => {
+            for f in start..start + frames {
+                for plane in planes {
+                    let q = quantize(at(plane, f), bits, dither.as_deref_mut());
+                    out.extend_from_slice(&q.to_le_bytes()[..3]);
+                }
+            }
+        }
+    }
+}
+
+/// Writes `planes` as a WAV whose bytes are exactly what `hound` writes for the same `spec`
+/// and samples, but encoded a block at a time instead of one `write_sample` call per sample.
+///
+/// The header comes from hound itself (an empty file written to memory), so the
+/// WAVE_FORMAT_EXTENSIBLE layout hound picks for float and multichannel files is reproduced
+/// rather than re-implemented; CDP binaries are sensitive to those bytes. Only the two size
+/// fields are filled in here, the same way hound's `finalize` does. hound writes no pad byte
+/// after an odd-length `data` chunk, so neither does this.
+///
+/// The caller must keep the data under 4GB (hound's sizes are `u32`); `save_wav_with` sends
+/// larger documents to [`WavWriter`] instead.
+pub fn write_hound_compatible(
+    path: &Path,
+    spec: hound::WavSpec,
+    planes: &[&[f32]],
+    frames: usize,
+    depth: BitDepth,
+    dither: bool,
+) -> color_eyre::Result<()> {
+    let mut header = Vec::new();
+    hound::WavWriter::new(std::io::Cursor::new(&mut header), spec)?.finalize()?;
+    let planes = &planes[..planes.len().min(spec.channels as usize)];
+    let data_bytes = frames as u64 * planes.len() as u64 * (depth.bits() / 8) as u64;
+    let data_bytes = u32::try_from(data_bytes)
+        .map_err(|_| color_eyre::eyre::eyre!("audio too large for a plain RIFF WAV"))?;
+    let riff_size = (header.len() as u32 - 8) + data_bytes;
+    header[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    let data_len_at = header.len() - 4;
+    header[data_len_at..].copy_from_slice(&data_bytes.to_le_bytes());
+
+    let mut out = BufWriter::new(File::create(path)?);
+    out.write_all(&header)?;
+    let mut rng = DitherRng::new();
+    let mut scratch = Vec::new();
+    let mut f = 0;
+    while f < frames {
+        let n = BLOCK_FRAMES.min(frames - f);
+        scratch.clear();
+        encode_interleaved(planes, f, n, depth, dither.then_some(&mut rng), &mut scratch);
+        out.write_all(&scratch)?;
+        f += n;
+    }
+    out.flush()?;
+    Ok(())
 }
 
 impl WavWriter {
@@ -88,6 +186,7 @@ impl WavWriter {
             data_size_at,
             data_bytes: 0,
             frames: 0,
+            scratch: Vec::new(),
         })
     }
 
@@ -98,27 +197,15 @@ impl WavWriter {
     /// has: the streaming reader deinterleaves, and a resident `Document` is deinterleaved by
     /// construction. Interleaving on the way out avoids a copy in between.
     pub fn write_planes(&mut self, planes: &[&[f32]], frames: usize) -> std::io::Result<()> {
-        let bits = self.depth.bits();
-        for f in 0..frames {
-            for plane in planes.iter().take(self.channels) {
-                let sample = plane.get(f).copied().unwrap_or(0.0);
-                match self.depth {
-                    BitDepth::Float32 => {
-                        self.out.write_all(&sample.to_le_bytes())?;
-                        self.data_bytes += 4;
-                    }
-                    BitDepth::Int16 => {
-                        let q = quantize(sample, bits, self.dither.as_mut()) as i16;
-                        self.out.write_all(&q.to_le_bytes())?;
-                        self.data_bytes += 2;
-                    }
-                    BitDepth::Int24 => {
-                        let q = quantize(sample, bits, self.dither.as_mut());
-                        self.out.write_all(&q.to_le_bytes()[..3])?;
-                        self.data_bytes += 3;
-                    }
-                }
-            }
+        let planes = &planes[..planes.len().min(self.channels)];
+        let mut f = 0;
+        while f < frames {
+            let n = BLOCK_FRAMES.min(frames - f);
+            self.scratch.clear();
+            encode_interleaved(planes, f, n, self.depth, self.dither.as_mut(), &mut self.scratch);
+            self.out.write_all(&self.scratch)?;
+            self.data_bytes += self.scratch.len() as u64;
+            f += n;
         }
         self.frames += frames as u64;
         Ok(())

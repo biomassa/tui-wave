@@ -117,7 +117,10 @@ impl Command for CdpProcessCommand {
             }
         }
         self.removed = Some(doc.remove_range(start..end));
-        doc.insert_range(start, self.new_data.clone());
+        // Taken, not cloned: the result lives in the document while applied, and `undo` takes
+        // it back out. Keeping a copy here doubled every applied process's undo memory.
+        let new_data = std::mem::take(&mut self.new_data);
+        doc.insert_range(start, &new_data);
         // `remove_range` collapses every marker inside the replaced range onto its start
         // (then `insert_range` shifts them past the result), which would destroy the whole
         // set — they all end up on one sample. Both mark systems are instead repositioned
@@ -194,9 +197,11 @@ impl Command for CdpProcessCommand {
 
     fn undo(&mut self, doc: &mut Document) {
         let (start, _) = self.range;
-        doc.remove_range(start..start + self.inserted_len);
+        // Possibly wider than the original result (see `PasteCommand::undo`); a redo inserts
+        // the same audio.
+        self.new_data = doc.remove_range(start..start + self.inserted_len);
         if let Some(removed) = self.removed.take() {
-            doc.insert_range(start, removed);
+            doc.insert_range(start, &removed);
         }
         if let Some(markers) = self.markers_before.take() {
             doc.markers = markers;

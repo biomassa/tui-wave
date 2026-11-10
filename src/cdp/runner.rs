@@ -649,13 +649,15 @@ fn load_outputs(job: &Job, temp_dir: &Path) -> Result<JobOutput, CdpError> {
 
     for spec in &job.planned.output_files {
         let path = temp_dir.join(&spec.relative_name);
-        let doc = load_wav(&path).map_err(|e| CdpError::OutputRead {
+        let mut doc = load_wav(&path).map_err(|e| CdpError::OutputRead {
             path: path.display().to_string(),
             message: e.to_string(),
         })?;
         sample_rate = doc.sample_rate;
+        // Moved, not cloned: `doc` is dropped at the end of this iteration, and each of its
+        // channels goes to exactly one destination (`i` is unique per entry).
         for (i, &dest_ch) in spec.dest_channels.iter().enumerate() {
-            channels[dest_ch] = doc.channels.get(i).cloned().unwrap_or_default();
+            channels[dest_ch] = doc.channels.get_mut(i).map(std::mem::take).unwrap_or_default();
         }
     }
 

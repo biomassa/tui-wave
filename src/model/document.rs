@@ -369,6 +369,13 @@ impl Document {
     /// *next* rise rather than re-triggering on the one just found. Used by "Auto-Insert
     /// Markers at Transients".
     pub fn find_all_rising_edges(&self, threshold_db: f32) -> Vec<usize> {
+        self.rising_edges_before(usize::MAX, threshold_db)
+    }
+
+    /// `find_all_rising_edges`, stopping at the first edge at or after `limit`. Edges come out
+    /// in ascending order (each search resumes from the edge before it), so every edge below
+    /// `limit` is found without scanning the rest of the file.
+    fn rising_edges_before(&self, limit: usize, threshold_db: f32) -> Vec<usize> {
         const TRANSIENT_FRAME_MS: f64 = 10.0;
         const TRANSIENT_MIN_LEVEL: f32 = 0.01;
         const EPS: f32 = 1e-6;
@@ -394,6 +401,9 @@ impl Document {
 
         let mut pos = 0;
         while let Some(edge) = self.find_next_rising_edge(pos, threshold_db) {
+            if edge >= limit {
+                break;
+            }
             edges.push(edge);
             pos = edge;
         }
@@ -404,7 +414,9 @@ impl Document {
     /// Transient" navigation — the same definition of "transient" as `find_next_rising_edge`,
     /// just picking the closest one behind the cursor rather than ahead of it.
     pub fn find_previous_rising_edge(&self, before: usize, threshold_db: f32) -> Option<usize> {
-        self.find_all_rising_edges(threshold_db).into_iter().filter(|&pos| pos < before).max()
+        // Stops scanning at `before`: on a long multichannel file, scanning to the end on every
+        // keypress cost a pass over every sample behind *and* ahead of the cursor.
+        self.rising_edges_before(before, threshold_db).into_iter().filter(|&pos| pos < before).max()
     }
 
     /// RMS amplitude within `[start, end)`, taking the loudest channel — a transient in any
@@ -440,6 +452,17 @@ impl Document {
     /// Vec per channel), so the caller can store them for undo. Markers shift with the cut:
     /// those after the range move left, those inside it collapse to the cut point.
     pub fn remove_range(&mut self, range: Range<usize>) -> Vec<Vec<f32>> {
+        self.remove_range_inner(range, true)
+    }
+
+    /// [`Self::remove_range`] without collecting the removed samples, for a caller that already
+    /// holds a copy of them (Cut, whose clipboard copy is also its undo data). Markers move
+    /// exactly as they do there.
+    pub fn delete_range(&mut self, range: Range<usize>) {
+        self.remove_range_inner(range, false);
+    }
+
+    fn remove_range_inner(&mut self, range: Range<usize>, collect: bool) -> Vec<Vec<f32>> {
         let len = self.len_samples();
         let start = range.start.min(len);
         let end = range.end.min(len);
@@ -450,7 +473,12 @@ impl Document {
             .map(|channel| {
                 let end = range.end.min(channel.len());
                 let start = range.start.min(end);
-                channel.splice(start..end, std::iter::empty()).collect()
+                if collect {
+                    channel.splice(start..end, std::iter::empty()).collect()
+                } else {
+                    channel.drain(start..end);
+                    Vec::new()
+                }
             })
             .collect();
         for m in &mut self.markers {
@@ -495,7 +523,7 @@ impl Document {
     /// channel's real length — reachable in practice via a mono CDP synthesis result
     /// (`commands::cdp`) spliced into a stereo document. Markers at or after `at` shift
     /// right by the inserted length so they stay anchored to the same audio.
-    pub fn insert_range(&mut self, at: usize, data: Vec<Vec<f32>>) {
+    pub fn insert_range(&mut self, at: usize, data: &[Vec<f32>]) {
         let Some(first) = data.first() else { return };
         let count = first.len();
         for (i, channel) in self.channels.iter_mut().enumerate() {
@@ -754,7 +782,7 @@ mod tests {
             Marker { position: 10, label: "a".into() },
             Marker { position: 30, label: "b".into() },
         ];
-        document.insert_range(20, vec![vec![0.0; 5]]); // insert 5 at 20
+        document.insert_range(20, &[vec![0.0; 5]]); // insert 5 at 20
         assert_eq!(document.markers[0].position, 10); // before insert, unchanged
         assert_eq!(document.markers[1].position, 35); // after insert, +5
     }
@@ -794,7 +822,7 @@ mod tests {
     fn insert_range_shifts_head_tail_marks() {
         let mut document = doc(vec![0.0; 50]);
         document.head_tail_marks = vec![10, 30];
-        document.insert_range(20, vec![vec![0.0; 5]]);
+        document.insert_range(20, &[vec![0.0; 5]]);
         assert_eq!(document.head_tail_marks, vec![10, 35]);
     }
 
@@ -836,7 +864,7 @@ mod tests {
         let mut document = doc(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
         let removed = document.remove_range(1..3);
         assert_eq!(document.channels, vec![vec![1.0, 4.0, 5.0]]);
-        document.insert_range(1, removed);
+        document.insert_range(1, &removed);
         assert_eq!(document.channels, vec![vec![1.0, 2.0, 3.0, 4.0, 5.0]]);
     }
 
@@ -857,7 +885,7 @@ mod tests {
             sample_rate: 44100,
             ..doc(vec![])
         };
-        document.insert_range(1, vec![vec![9.0, 9.0]]);
+        document.insert_range(1, &vec![vec![9.0, 9.0]]);
         assert_eq!(document.channels[0], vec![1.0, 9.0, 9.0, 2.0, 3.0]);
         assert_eq!(document.channels[1], vec![10.0, 9.0, 9.0, 20.0, 30.0]);
         assert_eq!(
@@ -873,7 +901,7 @@ mod tests {
     #[test]
     fn inserting_stereo_data_into_a_mono_document_drops_the_extra_channel() {
         let mut document = doc(vec![1.0, 2.0, 3.0]);
-        document.insert_range(1, vec![vec![9.0, 9.0], vec![99.0, 99.0]]);
+        document.insert_range(1, &vec![vec![9.0, 9.0], vec![99.0, 99.0]]);
         assert_eq!(document.channels, vec![vec![1.0, 9.0, 9.0, 2.0, 3.0]]);
     }
 }

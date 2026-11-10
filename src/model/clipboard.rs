@@ -2,7 +2,8 @@
 /// different open document, not just the one it was cut from.
 #[derive(Default)]
 pub struct Clipboard {
-    pub channels: Vec<Vec<f32>>,
+    /// Shared, so Paste and Cut's undo data can hold the same samples without copying them.
+    pub channels: std::sync::Arc<Vec<Vec<f32>>>,
     pub sample_rate: u32,
 }
 
@@ -11,8 +12,8 @@ impl Clipboard {
         self.channels.is_empty() || self.channels.iter().all(|c| c.is_empty())
     }
 
-    pub fn set(&mut self, channels: Vec<Vec<f32>>, sample_rate: u32) {
-        self.channels = channels;
+    pub fn set(&mut self, channels: impl Into<std::sync::Arc<Vec<Vec<f32>>>>, sample_rate: u32) {
+        self.channels = channels.into();
         self.sample_rate = sample_rate;
     }
 }

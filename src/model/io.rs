@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use hound::{SampleFormat, WavSpec, WavWriter};
+use hound::{SampleFormat, WavSpec};
 
 use super::document::Document;
 
@@ -479,27 +479,8 @@ fn save_wav_with_hound_limit(
             super::bwf::append_aux_chunks(staging, &doc.markers, &doc.bext)?;
             return Ok(());
         }
-        let mut writer = WavWriter::create(staging, spec)?;
-        match depth {
-            BitDepth::Float32 => {
-                for i in 0..doc.len_samples() {
-                    for channel in &doc.channels {
-                        writer.write_sample(channel[i])?;
-                    }
-                }
-            }
-            BitDepth::Int16 | BitDepth::Int24 => {
-                let bits = depth.bits();
-                let mut rng = DitherRng::new();
-                for i in 0..doc.len_samples() {
-                    for channel in &doc.channels {
-                        let q = quantize(channel[i], bits, dither.then_some(&mut rng));
-                        writer.write_sample(q)?;
-                    }
-                }
-            }
-        }
-        writer.finalize()?;
+        let planes: Vec<&[f32]> = doc.channels.iter().map(|c| c.as_slice()).collect();
+        super::wavwrite::write_hound_compatible(staging, spec, &planes, doc.len_samples(), depth, dither)?;
         // Append cue/adtl marker chunks and any preserved bext after hound's fmt/data.
         super::bwf::append_aux_chunks(staging, &doc.markers, &doc.bext)?;
         Ok(())
@@ -869,6 +850,54 @@ mod tests {
     /// An ordinary save must be byte-for-byte what hound itself writes, at every depth and for
     /// a multichannel file (which hound writes as WAVE_FORMAT_EXTENSIBLE). CDP reads these
     /// headers, and its binaries are strict about fields such as the channel mask.
+    /// The block writer against hound's own per-sample writer: every depth, with and without
+    /// dither, mono/stereo (hound's plain PCMWAVEFORMAT for ints) and wider (EXTENSIBLE), and a
+    /// length that crosses a block boundary and ends on an odd byte at 24-bit mono.
+    #[test]
+    fn block_writes_are_byte_identical_to_hound_per_sample_writes() {
+        let dir = std::env::temp_dir();
+        let frames = 4999;
+        for channels in [1usize, 2, 3, 6] {
+            let mut doc = approx_doc(Vec::new());
+            doc.channels = (0..channels)
+                .map(|c| (0..frames).map(|i| ((i * (c + 1)) as f32 * 0.001).sin() * 0.9).collect())
+                .collect();
+            for depth in [BitDepth::Float32, BitDepth::Int24, BitDepth::Int16] {
+                for dither in [false, true] {
+                    let tag = format!("{channels}_{}_{dither}_{}", depth.bits(), std::process::id());
+                    let ours = dir.join(format!("tui_wave_blk_ours_{tag}.wav"));
+                    let theirs = dir.join(format!("tui_wave_blk_hound_{tag}.wav"));
+                    save_wav_with(&doc, &ours, depth, dither).unwrap();
+                    let spec = WavSpec {
+                        channels: channels as u16,
+                        sample_rate: doc.sample_rate,
+                        bits_per_sample: depth.bits(),
+                        sample_format: depth.sample_format(),
+                    };
+                    let mut w = hound::WavWriter::create(&theirs, spec).unwrap();
+                    let mut rng = DitherRng::new();
+                    for i in 0..frames {
+                        for c in &doc.channels {
+                            match depth {
+                                BitDepth::Float32 => w.write_sample(c[i]).unwrap(),
+                                _ => w
+                                    .write_sample(quantize(c[i], depth.bits(), dither.then_some(&mut rng)))
+                                    .unwrap(),
+                            }
+                        }
+                    }
+                    w.finalize().unwrap();
+                    assert!(
+                        std::fs::read(&ours).unwrap() == std::fs::read(&theirs).unwrap(),
+                        "{channels}ch {depth:?} dither={dither}"
+                    );
+                    std::fs::remove_file(&ours).unwrap();
+                    std::fs::remove_file(&theirs).unwrap();
+                }
+            }
+        }
+    }
+
     #[test]
     fn an_ordinary_save_is_byte_identical_to_hound() {
         let mut doc = approx_doc((0..500).map(|i| (i as f32 / 500.0) - 0.5).collect());
@@ -885,7 +914,7 @@ mod tests {
                 bits_per_sample: depth.bits(),
                 sample_format: depth.sample_format(),
             };
-            let mut w = WavWriter::create(&theirs, spec).unwrap();
+            let mut w = hound::WavWriter::create(&theirs, spec).unwrap();
             for i in 0..500 {
                 for c in &doc.channels {
                     match depth {

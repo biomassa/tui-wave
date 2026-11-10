@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::model::command::Command;
 use crate::model::document::{Document, Marker};
@@ -9,7 +10,9 @@ use crate::model::document::{Document, Marker};
 #[derive(Debug)]
 pub struct RemoveRangeCommand {
     range: Range<usize>,
-    removed: Option<Vec<Vec<f32>>>,
+    /// Shared with the clipboard for a Cut (see [`RemoveRangeCommand::sharing`]), so the
+    /// removed audio exists once rather than twice.
+    removed: Option<Arc<Vec<Vec<f32>>>>,
     /// Marker snapshot from before the cut. `remove_range` shifts markers live, but a marker
     /// that fell inside the cut can't be reconstructed from the shift alone, so undo restores
     /// the exact prior set.
@@ -31,13 +34,26 @@ impl RemoveRangeCommand {
             label,
         }
     }
+
+    /// A removal whose undo data is already known: `removed` must be what `range` holds now.
+    /// Cut builds the clipboard copy first and hands the same `Arc` here, so the document's
+    /// samples are copied once instead of once for the clipboard and again for undo.
+    pub fn sharing(range: Range<usize>, label: &'static str, removed: Arc<Vec<Vec<f32>>>) -> Self {
+        Self { removed: Some(removed), ..Self::new(range, label) }
+    }
 }
 
 impl Command for RemoveRangeCommand {
     fn execute(&mut self, doc: &mut Document) {
         self.markers_before = Some(doc.markers.clone());
         self.head_tail_marks_before = Some(doc.head_tail_marks.clone());
-        self.removed = Some(doc.remove_range(self.range.clone()));
+        // `removed` is only already set on the first execute of a `sharing` command; `undo`
+        // takes it, so a redo collects the samples again.
+        if self.removed.is_some() {
+            doc.delete_range(self.range.clone());
+        } else {
+            self.removed = Some(Arc::new(doc.remove_range(self.range.clone())));
+        }
         // `remove_range` deliberately leaves marks stacked on the cut point (it preserves
         // entry count for `commands::cdp`'s positional restore) — collapse them here, now
         // that nothing else needs the one-to-one correspondence. Undo restores the snapshot
@@ -50,7 +66,7 @@ impl Command for RemoveRangeCommand {
 
     fn undo(&mut self, doc: &mut Document) {
         let removed = self.removed.take().expect("undo called before execute");
-        doc.insert_range(self.range.start, removed);
+        doc.insert_range(self.range.start, &removed);
         if let Some(markers) = self.markers_before.take() {
             doc.markers = markers;
         }
@@ -62,7 +78,7 @@ impl Command for RemoveRangeCommand {
     }
 
     fn stored_bytes(&self) -> usize {
-        self.removed.as_deref().map_or(0, crate::model::command::sample_bytes)
+        self.removed.as_deref().map_or(0, |r| crate::model::command::sample_bytes(r))
     }
 
     fn is_noop(&self) -> bool {

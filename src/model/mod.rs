@@ -13,6 +13,7 @@ pub mod formant;
 pub mod headstails;
 pub mod history;
 pub mod io;
+pub mod par;
 pub mod praat;
 pub mod riff;
 pub mod selection;

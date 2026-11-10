@@ -65,10 +65,12 @@ impl Command for RemoveChannelsCommand {
         // channel is already back in place, which ascending order guarantees. `channels` and
         // `original_channels` stay the same length throughout, so the same `at` is correct for
         // both inserts.
-        for (i, samples, original) in &self.removed {
-            let at = (*i).min(doc.channels.len());
-            doc.channels.insert(at, samples.clone());
-            doc.original_channels.insert(at, *original);
+        // Drained, not cloned: `execute` clears and refills `removed` on redo, so the samples
+        // are moved back into the document instead of copied.
+        for (i, samples, original) in self.removed.drain(..) {
+            let at = i.min(doc.channels.len());
+            doc.channels.insert(at, samples);
+            doc.original_channels.insert(at, original);
         }
         doc.dirty = true;
     }

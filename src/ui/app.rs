@@ -5296,7 +5296,7 @@ impl App {
         let audio_channels = documents.first().map(|doc| doc.channel_count());
         let waveform_caches: Vec<Vec<WaveformCache>> = documents
             .iter()
-            .map(|doc| doc.channels.iter().map(|c| WaveformCache::build(c)).collect())
+            .map(|doc| WaveformCache::build_all(&doc.channels))
             .collect();
         let histories = documents.iter().map(|_| history_for(&config)).collect();
         let menu_shortcuts = build_action_display_map(&config.keybindings, false);
@@ -6515,7 +6515,7 @@ impl App {
         if !self.active_doc().is_some_and(|doc| doc.is_streaming()) {
             let built: Vec<WaveformCache> = self
                 .active_doc()
-                .map(|doc| doc.channels.iter().map(|c| WaveformCache::build(c)).collect())
+                .map(|doc| WaveformCache::build_all(&doc.channels))
                 .unwrap_or_default();
             if let Some(slot) = self.waveform_caches.get_mut(self.active_document) {
                 *slot = built;
@@ -6584,7 +6584,7 @@ impl App {
                     }
                 }
             }
-            let playhead_before = self.playhead_position;
+            let playhead_before = self.playhead_view_key();
             self.sync_playhead_from_audio();
             if let Some(audio) = &self.audio {
                 audio.release_if_finished();
@@ -6607,7 +6607,7 @@ impl App {
             // loops, so the frame where its dialog left the screen is the frame it must end.
             self.sweep_cdp_preview_audio();
             self.tick_viewport_follow();
-            if self.playhead_position != playhead_before {
+            if self.playhead_view_key() != playhead_before {
                 needs_redraw = true;
             }
             // The `CdpRunning` spinner and step label are time-/event-driven, not input-
@@ -17305,10 +17305,7 @@ impl App {
             return channels.to_vec();
         }
         let ratio = to as f64 / from as f64;
-        channels
-            .iter()
-            .map(|c| crate::commands::resample::resample_channel(c, ratio))
-            .collect()
+        crate::commands::resample::resample_channels(channels, ratio)
     }
 
     fn submit_current_chain_stage(&mut self) {
@@ -18294,10 +18291,7 @@ impl App {
                 } else {
                     // `resample_channel` takes a ratio, matching `ResampleCommand`'s own use.
                     let ratio = target_rate as f64 / *rate as f64;
-                    channels
-                        .iter()
-                        .map(|c| crate::commands::resample::resample_channel(c, ratio))
-                        .collect()
+                    crate::commands::resample::resample_channels(channels, ratio)
                 }
             })
             .collect();
@@ -21228,6 +21222,35 @@ impl App {
         Some(dsp::Fold::from_peaks(&self.active_channel_peaks()?))
     }
 
+    /// What the playhead looks like on screen: the scroll position and the column it is drawn
+    /// in, at the resolution the active renderer draws it — a pixel column in graphics mode
+    /// (`waveform_image::draw_marker_line`), a terminal cell otherwise
+    /// (`waveform::playhead_column`).
+    ///
+    /// `App::run` redraws during playback when this changes, instead of on every new playhead
+    /// sample. Zoomed out, the playhead stays in one column for many frames, and in graphics mode
+    /// each redraw re-encodes every pane image.
+    fn playhead_view_key(&self) -> Option<(usize, i64)> {
+        let playhead = self.playhead_position?;
+        let Some(viewport) = self.viewport.as_ref() else {
+            return Some((0, playhead as i64));
+        };
+        let scroll = viewport.scroll_offset;
+        let offset = playhead as f64 - scroll as f64;
+        let width = self.content_width;
+        let pixel_columns = match &self.picker {
+            Some(picker) if self.graphics_mode => width as u32 * picker.font_size().width.max(1) as u32,
+            _ => 0,
+        };
+        let column = if pixel_columns > 0 {
+            let samples_per_pixel = viewport.span(width) as f64 / pixel_columns as f64;
+            (offset / samples_per_pixel.max(f64::MIN_POSITIVE)).floor() as i64
+        } else {
+            (offset / viewport.samples_per_column.max(f64::MIN_POSITIVE)).floor() as i64
+        };
+        Some((scroll, column))
+    }
+
     fn sync_playhead_from_audio(&mut self) {
         let Some(audio) = self.audio.as_ref() else { return };
         if audio.playing.load(std::sync::atomic::Ordering::Relaxed) {
@@ -23339,8 +23362,9 @@ impl App {
                         (start, end)
                     };
                     if start < end {
-                        self.clipboard.set(document.slice(start..end), document.sample_rate);
-                        self.histories[idx].apply(cut_command(start..end), document);
+                        let removed = std::sync::Arc::new(document.slice(start..end));
+                        self.clipboard.set(removed.clone(), document.sample_rate);
+                        self.histories[idx].apply(cut_command(start..end, removed), document);
                     }
                 }
             }
@@ -23914,16 +23938,22 @@ impl App {
                 .waveform_caches
                 .get(doc_idx)
                 .and_then(|v| v.get(self.documents[doc_idx].source_channel(i)));
-            let widget = WaveformWidget {
-                samples,
-                viewport,
-                cache,
-                selection,
-                cursor: self.documents[doc_idx].cursor,
-                playhead: self.playhead_position,
-                gradient: self.dot_matrix_gradient,
-            };
-            frame.render_widget(widget, channel_inner);
+            // The text renderer is the fallback for when no image is drawn; when one is, the
+            // image covers exactly `channel_inner`, so drawing the text first is wasted work
+            // every frame.
+            let image_drawn = self.graphics_mode && !overlay_active && self.picker.is_some();
+            if !image_drawn {
+                let widget = WaveformWidget {
+                    samples,
+                    viewport,
+                    cache,
+                    selection,
+                    cursor: self.documents[doc_idx].cursor,
+                    playhead: self.playhead_position,
+                    gradient: self.dot_matrix_gradient,
+                };
+                frame.render_widget(widget, channel_inner);
+            }
 
             // Graphics mode: when a graphics-capable terminal was detected at startup,
             // rasterize this channel's waveform into a real bitmap and display it via the

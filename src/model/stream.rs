@@ -121,9 +121,12 @@ impl StreamedSamples {
         self.channel_map.read().map(|m| m.len()).unwrap_or(0)
     }
 
-    /// The source channel logical channel `channel` reads from.
-    fn source_channel(&self, channel: usize) -> Option<usize> {
-        self.channel_map.read().ok()?.get(channel).copied()
+    /// The source channel logical channel `channel` reads from, plus the logical channel count, under one lock and without
+    /// cloning the map. `with_slice` needs both on every call, and it runs per column (and per
+    /// pixel in the polyline renderer) while drawing a streamed buffer.
+    fn source_channel_and_count(&self, channel: usize) -> Option<(usize, usize)> {
+        let map = self.channel_map.read().ok()?;
+        Some((*map.get(channel)?, map.len()))
     }
 
     pub fn len_samples(&self) -> usize {
@@ -189,7 +192,7 @@ impl StreamedSamples {
         let total = self.len_samples();
         let end = end.min(total);
         let start = start.min(end);
-        let Some(source_channel) = self.source_channel(channel) else {
+        let Some((source_channel, logical_channels)) = self.source_channel_and_count(channel) else {
             return f(&[]);
         };
         if start >= end {
@@ -244,10 +247,9 @@ impl StreamedSamples {
             }
         }
 
-        let map = self.channel_map();
         let set = &mut windows[0];
-        if set.decoded.len() < map.len() {
-            set.decoded.resize_with(map.len(), || None);
+        if set.decoded.len() < logical_channels {
+            set.decoded.resize_with(logical_channels, || None);
         }
         if set.decoded.get(channel).is_some_and(Option::is_none) {
             let mut out = Vec::new();
@@ -284,13 +286,31 @@ impl StreamedSamples {
         for ch in source_buf.iter_mut() {
             ch.clear();
         }
+        // Only the channels the map still shows are decoded: after Remove Empty Channels that
+        // can be 8 of 56.
+        let mut wanted = vec![false; self.info.channels];
+        for &source in &map {
+            if let Some(w) = wanted.get_mut(source) {
+                *w = true;
+            }
+        }
         let frames_read = {
             let mut wav = self.frames.lock().unwrap();
-            wav.read_into(first_frame, frames, &mut source_buf)?
+            wav.read_into_selected(first_frame, frames, &mut source_buf, Some(&wanted))?
         };
+        // Swapped rather than copied when every source channel appears once (always true for a
+        // map built by `retain_channels`): `out[logical]` takes the decoded block and the
+        // scratch slot takes `out`'s old, already-cleared allocation for the next call. A map
+        // that repeated a source would hand the second user an empty slot, so that case copies.
+        let mut seen = vec![false; self.info.channels];
+        let unique = map.iter().all(|&s| s < seen.len() && !std::mem::replace(&mut seen[s], true));
         for (logical, &source) in map.iter().enumerate() {
-            if let Some(src) = source_buf.get(source) {
-                out[logical].extend_from_slice(src);
+            if let Some(src) = source_buf.get_mut(source) {
+                if unique {
+                    std::mem::swap(&mut out[logical], src);
+                } else {
+                    out[logical].extend_from_slice(src);
+                }
             }
         }
         Ok(frames_read)

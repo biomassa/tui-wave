@@ -268,6 +268,21 @@ impl WavFrames {
         frames: usize,
         out: &mut [Vec<f32>],
     ) -> io::Result<usize> {
+        self.read_into_selected(first_frame, frames, out, None)
+    }
+
+    /// [`Self::read_into`], decoding only the source channels `wanted` marks (all of them when
+    /// `None`). The disk read is the same either way, since frames are interleaved; what is
+    /// saved is the decode of channels nobody will look at, such as the empty channels a
+    /// streamed buffer has dropped from its channel map. Unwanted entries of `out` are left
+    /// untouched.
+    pub fn read_into_selected(
+        &mut self,
+        first_frame: u64,
+        frames: usize,
+        out: &mut [Vec<f32>],
+        wanted: Option<&[bool]>,
+    ) -> io::Result<usize> {
         if out.len() < self.info.channels {
             return Err(invalid("output buffer has fewer channels than the file"));
         }
@@ -299,6 +314,9 @@ impl WavFrames {
         // *width* decoded out of that slot — the two are different quantities.
         let stride = self.info.bytes_per_channel();
         for (ch, out_ch) in out.iter_mut().enumerate().take(self.info.channels) {
+            if wanted.is_some_and(|w| !w.get(ch).copied().unwrap_or(false)) {
+                continue;
+            }
             out_ch.reserve(frames);
             let base = ch * stride;
             let bytes = &self.scratch[..frames * bpf];

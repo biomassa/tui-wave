@@ -62,7 +62,9 @@ mod undo_accounting_tests {
             ("high-pass", super::high_pass::high_pass_command(100, 200, 1000.0), RANGE_100),
             ("reverse", super::reverse::reverse_command(100, 200), 0),
             ("delete", super::delete::delete_command(100..200), RANGE_100),
-            ("paste", super::paste::paste_command(100, vec![vec![0.5; 100]; 2]), RANGE_100),
+            // Nothing: while a paste is applied its audio lives only in the document (undo takes
+            // it back out), so the undo stack holds no copy of it. It counts again once undone.
+            ("paste", super::paste::paste_command(100, vec![vec![0.5; 100]; 2]), 0),
             ("trim", super::trim::trim_command(100, 200), (1000 - 100) * 2 * 4),
             ("remove dc", super::remove_dc::remove_dc_command(DcEstimator::default()), 0),
             ("remove channel", super::remove_channels::remove_channels_command(vec![1]), 1000 * 4),

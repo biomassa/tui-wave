@@ -30,12 +30,21 @@ impl Command for TrimCommand {
         if start >= end || end > doc.len_samples() {
             return;
         }
-        self.before = Some(doc.channels.iter().map(|c| c[..start].to_vec()).collect());
-        self.after = Some(doc.channels.iter().map(|c| c[end..].to_vec()).collect());
-        for channel in &mut doc.channels {
-            let trimmed = channel[start..end].to_vec();
-            *channel = trimmed;
+        // One channel at a time, so the transient extra memory is one channel's worth rather
+        // than the whole document's. The original allocation becomes `before` (truncated in
+        // place), so only the kept region and the tail are copied.
+        let mut before = Vec::with_capacity(doc.channels.len());
+        let mut after = Vec::with_capacity(doc.channels.len());
+        for channel in doc.channels.iter_mut() {
+            let kept = channel[start..end].to_vec();
+            after.push(channel[end..].to_vec());
+            let mut head = std::mem::replace(channel, kept);
+            head.truncate(start);
+            head.shrink_to_fit();
+            before.push(head);
         }
+        self.before = Some(before);
+        self.after = Some(after);
         // Keep only markers inside the kept region, re-based to the new origin.
         self.markers_before = Some(doc.markers.clone());
         doc.markers.retain(|m| m.position >= start && m.position <= end);
@@ -69,10 +78,10 @@ impl Command for TrimCommand {
         // document: undoing a paste leaves a selection whose `end` is past the new length, and
         // Trim only checks `start < end` before applying.
         let (Some(before), Some(after)) = (self.before.take(), self.after.take()) else { return };
-        for (i, channel) in doc.channels.iter_mut().enumerate() {
-            let mut restored = before[i].clone();
+        for ((channel, mut restored), tail) in doc.channels.iter_mut().zip(before).zip(after) {
+            restored.reserve_exact(channel.len() + tail.len());
             restored.extend_from_slice(channel);
-            restored.extend_from_slice(&after[i]);
+            restored.extend_from_slice(&tail);
             *channel = restored;
         }
         if let Some(markers) = self.markers_before.take() {

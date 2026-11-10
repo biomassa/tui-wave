@@ -161,6 +161,15 @@ impl WaveformCache {
         builder.finish()
     }
 
+    /// One pyramid per channel, built in parallel.
+    ///
+    /// Every edit rebuilds the active document's pyramids on the UI thread, and channels are
+    /// independent, so a 30-channel document builds in about the time of `channels / cores`
+    /// channels instead of all of them in series.
+    pub fn build_all(channels: &[Vec<f32>]) -> Vec<Self> {
+        crate::model::par::map_channels(channels, |c| Self::build(c))
+    }
+
     /// Highest absolute sample value in the channel — used to auto-fit the initial
     /// vertical zoom so a quiet file doesn't render using only a sliver of the available
     /// height, and by Remove Empty Channels (via `dsp::channels_below_peaks`) to decide which

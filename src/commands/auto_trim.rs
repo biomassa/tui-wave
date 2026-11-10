@@ -193,8 +193,14 @@ impl Command for AutoTrimCommand {
             .collect();
         order.sort_by_key(|(start, _)| *start);
 
+        // `before` was taken out of the command, so each channel's head is moved into place
+        // and extended rather than cloned.
+        let mut before = before.into_iter();
         for (ch, channel) in doc.channels.iter_mut().enumerate() {
-            let mut restored: Vec<f32> = before.get(ch).cloned().unwrap_or_default();
+            let mut restored: Vec<f32> = before.next().unwrap_or_default();
+            let gap_len: usize = gaps.iter().filter_map(|g| g.get(ch)).map(|g| g.len()).sum();
+            let tail_len = after.get(ch).map_or(0, |t| t.len());
+            restored.reserve_exact(channel.len() + gap_len + tail_len);
             // Where each segment starts in the *spliced* buffer, so a segment's samples can be
             // found however the pieces are ordered on the original timeline.
             let mut segment_at = Vec::with_capacity(segments.len());
@@ -208,7 +214,9 @@ impl Command for AutoTrimCommand {
                     Piece::Segment(i) => {
                         let (s, e) = segments[*i];
                         let from = segment_at[*i];
-                        let mut samples = channel[from..from + (e - s)].to_vec();
+                        let piece_at = restored.len();
+                        restored.extend_from_slice(&channel[from..from + (e - s)]);
+                        let samples = &mut restored[piece_at..];
                         // The fade is undone here, while this piece is still exactly the region
                         // the fade was applied to.
                         if let Some((head, tail)) = edges.get(*i) {
@@ -220,7 +228,6 @@ impl Command for AutoTrimCommand {
                                 samples[from..].copy_from_slice(t);
                             }
                         }
-                        restored.extend_from_slice(&samples);
                     }
                     Piece::Gap(i) => {
                         if let Some(gap) = gaps.get(*i).and_then(|g| g.get(ch)) {
