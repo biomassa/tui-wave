@@ -130,6 +130,9 @@ pub enum CdpError {
 }
 
 pub enum CdpEvent {
+    /// `index` counts the steps started before this one, not its position in the plan: when
+    /// lanes run in parallel, plan positions start out of order, and the Running dialog's
+    /// "Step i/N" should still count up. In order, the two are the same.
     StepStarted { job: u64, index: usize, total: usize, label: String },
     Finished { job: u64, purpose: JobPurpose, result: Result<JobOutput, CdpError> },
 }
@@ -303,6 +306,7 @@ fn run_lanes_in_parallel(
 ) -> Result<(), CdpError> {
     let total = job.planned.steps.len();
     let next_lane = std::sync::atomic::AtomicUsize::new(0);
+    let started = std::sync::atomic::AtomicUsize::new(0);
     let abort = AtomicBool::new(false);
     let first_error: std::sync::Mutex<Option<CdpError>> = std::sync::Mutex::new(None);
     let workers = crate::model::par::worker_count(lanes.len());
@@ -314,7 +318,8 @@ fn run_lanes_in_parallel(
                         if cancel.load(Ordering::Relaxed) || abort.load(Ordering::Relaxed) {
                             return;
                         }
-                        if let Err(e) = run_one_step(job, index, total, events, cancel, &abort, temp_dir) {
+                        let shown = started.fetch_add(1, Ordering::Relaxed);
+                        if let Err(e) = run_one_step(job, index, shown, total, events, cancel, &abort, temp_dir) {
                             let mut slot = first_error.lock().unwrap_or_else(|p| p.into_inner());
                             // A step killed because another lane failed reports `Cancelled`;
                             // keep the failure that caused it.
@@ -353,15 +358,18 @@ fn run_steps_in_order(
         if index == 1 {
             resolve_matrix_gain_calibration(job, temp_dir)?;
         }
-        run_one_step(job, index, total, events, cancel, &no_abort, temp_dir)?;
+        run_one_step(job, index, index, total, events, cancel, &no_abort, temp_dir)?;
     }
     Ok(())
 }
 
-/// Runs step `index` and checks it produced its output.
+/// Runs step `index` and checks it produced its output. `shown` is the step number the
+/// Running dialog gets (see `CdpEvent::StepStarted`).
+#[allow(clippy::too_many_arguments)]
 fn run_one_step(
     job: &Job,
     index: usize,
+    shown: usize,
     total: usize,
     events: &Sender<CdpEvent>,
     cancel: &AtomicBool,
@@ -375,7 +383,7 @@ fn run_one_step(
 
     let _ = events.send(CdpEvent::StepStarted {
         job: job.id,
-        index,
+        index: shown,
         total,
         label: step.label.clone(),
     });

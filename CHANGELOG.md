@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Less waiting and less memory on large and multichannel files.**
+  - After an edit, the waveform overview is rebuilt on all CPU cores.
+  - Resample uses all CPU cores and needs one copy of the audio less.
+  - A CDP process that runs once per channel now runs the channels
+    at the same time.
+  - Play no longer copies the whole buffer before it starts.
+  - Save writes the same files as before, with less work per sample.
+  - Previous Transient no longer reads past the cursor.
+  - Cut, Paste, Trim, Auto-Trim, Remove Empty Channels and CDP
+    processes keep less audio in memory for undo.
+  - In graphics mode, playback redraws only when the playhead moves
+    on screen.
+
 ## 2026-11-03 (2.19.0)
 
 - **Airwindows updated to the latest upstream**, which adds **Echojam** (Ambience), an echo effect
