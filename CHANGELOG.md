@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-11-10 (2.20.0)
 
 - **Less waiting and less memory on large and multichannel files.**
   - After an edit, the waveform overview is rebuilt on all CPU cores.
