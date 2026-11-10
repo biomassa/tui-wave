@@ -3495,22 +3495,55 @@ mod tests {
         );
     }
 
-    /// Runs every catalog entry once, at its own declared defaults, against a short mono
-    /// sine and asserts it succeeds — the bulk-authoring safety net `CDP-Ext-Plan.md`'s Tier
-    /// 0 depends on: a hand-typed `[[process]]` entry can have the wrong argv shape (subprog
-    /// misspelled, params in the wrong order, a mode string CDP doesn't recognise) even when
-    /// it parses as valid TOML, and that only shows up by actually running it. Deliberately
-    /// separate from `TUI_WAVE_CDP_DIR`'s always-on gating (`require_cdp!`) — iterating the
-    /// whole catalog takes real wall-clock time (a CDP invocation per entry, several needing
-    /// a `pvoc anal`/`synth` wrap), which is fine for a manually-triggered check but not for
-    /// every `cargo test`. A dual-input process gets the same mono input on both sides
-    /// (self-processing is always valid for the argv shapes we care about here); a
-    /// `PlanError::UnsupportedInV1` is a known, accepted gap, not a smoke-test failure —
-    /// though as of 2026-07-28 no catalog entry produces one any more (`morph_glide`, the only
-    /// entry that ever did, now plans via `ProcessDef::spec_grab_prepass`), so that branch is
-    /// a safety net for the non-catalog `IoKind`s rather than something exercised in practice.
-    /// Collects every failure before asserting, so one bad entry's
-    /// error doesn't hide every other one behind it.
+    /// Catalog entries that fail against the smoke test's fixture for reasons outside their argv
+    /// shape; each is explained in `catalog_smoke_test`. The lane parity sweep skips them too:
+    /// they fail in order anyway, and `specfnu_specfnu_19` crashes CDP with a double free,
+    /// leaving a core dump on every run.
+    const KNOWN_FIXTURE_FAILURES: &[&str] = &[
+        "envspeak_envspeak_1",
+        "envspeak_envspeak_2",
+        "envspeak_envspeak_5",
+        "envspeak_envspeak_6",
+        "extend_scramble_1",
+        "gate_gate_1",
+        "gate_gate_2",
+        "grain_align",
+        "grain_reverse",
+        "grainex_extend",
+        "matrix_matrix_2",
+        "modify_brassage_4",
+        "modify_space_2",
+        "modify_space_4",
+        "specfnu_specfnu_19",
+        "spin_stereo_1",
+        "tostereo_tostereo",
+        // psow_interp requires each input be a pre-grabbed single grain (e.g. via
+        // psow_grab with duration 0) -- fed an ordinary recording, the real binary
+        // hard-rejects it: "File 1 is not a valid pitch-sync grain file". A
+        // fixture-content issue, not a catalog bug (found while cataloging the psow
+        // family, 2026-07-15).
+        "psow_interp",
+        // The multichannel batch (2026-08-03). This fixture is one mono channel, and
+        // `ProcessDef.input_channels` is a hard demand of the real binary rather than a
+        // preference, so these four are refused by `plan_job` before a binary is ever
+        // spawned — the same "needs real stereo input" situation `spin_stereo_1` and
+        // `tostereo_tostereo` are listed above for, just reported as a clean
+        // `InputChannelCount` plan error instead of a CDP exit code. Each was confirmed by
+        // hand against the real binary and a file of the right width, all from float32
+        // input written by this app's own writer: pairex 8ch -> a 2ch file, mchshred mode 2
+        // 6ch -> a 6ch file, spin stereo modes 2/3 stereo -> 8ch files.
+        "mchshred_shred_2",
+        "pairex_pairex",
+        "spin_stereo_2",
+        "spin_stereo_3",
+        // Needs audio with real silences between events to find any ("NO SILENCES FOUND IN
+        // FILE") — a constant-level tone has none, exactly the `envspeak_*` situation
+        // above. Its two siblings (`mchanpan_mchanpan_4`/`_9`) take the same input and pass
+        // here, which is what shows this to be the fixture's content and not the entry's
+        // argv shape.
+        "mchanpan_mchanpan_3",
+    ];
+
     /// Two lanes run as shell scripts standing in for CDP binaries, so the parallel failure and
     /// cancel paths are tested without a CDP install: a failing lane stops the sleeping one and is
     /// the error reported, and a cancel stops both and is reported as a cancel.
@@ -3606,7 +3639,7 @@ mod tests {
         let mut failures = Vec::new();
         for def in &catalog.processes {
             let arity = def.input_arity().0;
-            if !(1..=2).contains(&arity) {
+            if !(1..=2).contains(&arity) || KNOWN_FIXTURE_FAILURES.contains(&def.key.as_str()) {
                 continue;
             }
             let plain = def.params.iter().all(|p| {
@@ -3675,6 +3708,22 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
+    /// Runs every catalog entry once, at its own declared defaults, against a short mono
+    /// sine and asserts it succeeds — the bulk-authoring safety net `CDP-Ext-Plan.md`'s Tier
+    /// 0 depends on: a hand-typed `[[process]]` entry can have the wrong argv shape (subprog
+    /// misspelled, params in the wrong order, a mode string CDP doesn't recognise) even when
+    /// it parses as valid TOML, and that only shows up by actually running it. Deliberately
+    /// separate from `TUI_WAVE_CDP_DIR`'s always-on gating (`require_cdp!`) — iterating the
+    /// whole catalog takes real wall-clock time (a CDP invocation per entry, several needing
+    /// a `pvoc anal`/`synth` wrap), which is fine for a manually-triggered check but not for
+    /// every `cargo test`. A dual-input process gets the same mono input on both sides
+    /// (self-processing is always valid for the argv shapes we care about here); a
+    /// `PlanError::UnsupportedInV1` is a known, accepted gap, not a smoke-test failure —
+    /// though as of 2026-07-28 no catalog entry produces one any more (`morph_glide`, the only
+    /// entry that ever did, now plans via `ProcessDef::spec_grab_prepass`), so that branch is
+    /// a safety net for the non-catalog `IoKind`s rather than something exercised in practice.
+    /// Collects every failure before asserting, so one bad entry's
+    /// error doesn't hide every other one behind it.
     #[test]
     fn catalog_smoke_test() {
         if std::env::var("TUI_WAVE_CDP_SMOKE").ok().as_deref() != Some("1") {
@@ -3767,50 +3816,7 @@ mod tests {
         // because the fixture still can't exercise it.
         const KNOWN_EMPTY_OUTPUT: &[&str] = &["distort_filter_1", "distort_filter_3"];
 
-        const KNOWN_FIXTURE_FAILURES: &[&str] = &[
-            "envspeak_envspeak_1",
-            "envspeak_envspeak_2",
-            "envspeak_envspeak_5",
-            "envspeak_envspeak_6",
-            "extend_scramble_1",
-            "gate_gate_1",
-            "gate_gate_2",
-            "grain_align",
-            "grain_reverse",
-            "grainex_extend",
-            "matrix_matrix_2",
-            "modify_brassage_4",
-            "modify_space_2",
-            "modify_space_4",
-            "specfnu_specfnu_19",
-            "spin_stereo_1",
-            "tostereo_tostereo",
-            // psow_interp requires each input be a pre-grabbed single grain (e.g. via
-            // psow_grab with duration 0) -- fed an ordinary recording, the real binary
-            // hard-rejects it: "File 1 is not a valid pitch-sync grain file". A
-            // fixture-content issue, not a catalog bug (found while cataloging the psow
-            // family, 2026-07-15).
-            "psow_interp",
-            // The multichannel batch (2026-08-03). This fixture is one mono channel, and
-            // `ProcessDef.input_channels` is a hard demand of the real binary rather than a
-            // preference, so these four are refused by `plan_job` before a binary is ever
-            // spawned — the same "needs real stereo input" situation `spin_stereo_1` and
-            // `tostereo_tostereo` are listed above for, just reported as a clean
-            // `InputChannelCount` plan error instead of a CDP exit code. Each was confirmed by
-            // hand against the real binary and a file of the right width, all from float32
-            // input written by this app's own writer: pairex 8ch -> a 2ch file, mchshred mode 2
-            // 6ch -> a 6ch file, spin stereo modes 2/3 stereo -> 8ch files.
-            "mchshred_shred_2",
-            "pairex_pairex",
-            "spin_stereo_2",
-            "spin_stereo_3",
-            // Needs audio with real silences between events to find any ("NO SILENCES FOUND IN
-            // FILE") — a constant-level tone has none, exactly the `envspeak_*` situation
-            // above. Its two siblings (`mchanpan_mchanpan_4`/`_9`) take the same input and pass
-            // here, which is what shows this to be the fixture's content and not the entry's
-            // argv shape.
-            "mchanpan_mchanpan_3",
-        ];
+        // `KNOWN_FIXTURE_FAILURES` itself is at module level, shared with the lane parity sweep.
 
         let (catalog, warnings) = crate::model::cdp::CdpCatalog::load(None);
         assert!(warnings.is_empty(), "catalog failed to parse: {warnings:?}");
