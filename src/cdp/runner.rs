@@ -3503,7 +3503,74 @@ mod tests {
     /// a safety net for the non-catalog `IoKind`s rather than something exercised in practice.
     /// Collects every failure before asserting, so one bad entry's
     /// error doesn't hide every other one behind it.
-    /// Runs every single-input catalog process that splits into lanes on a stereo selection
+    /// Two lanes run as shell scripts standing in for CDP binaries, so the parallel failure and
+    /// cancel paths are tested without a CDP install: a failing lane stops the sleeping one and is
+    /// the error reported, and a cancel stops both and is reported as a cancel.
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_lane_stops_the_others_and_a_cancel_stops_all() {
+        use std::os::unix::fs::PermissionsExt;
+        let bin_dir = std::env::temp_dir().join(format!("tui-wave-lane-bins-{}", std::process::id()));
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let _bins = TempDirGuard(bin_dir.clone());
+        for (name, body) in [("slow", "sleep 5"), ("fail", "exit 3")] {
+            let path = bin_dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let def = catalog.find("housekeep_extract_4").unwrap();
+        let input = crate::model::cdp::InputSpec { channels: 2, sample_rate: 44_100, len_samples: 100, head_tail_marks: vec![] };
+        let on = vec![
+            crate::model::cdp::ParamValue::Number(-0.004),
+            crate::model::cdp::ParamValue::Number(0.003),
+            crate::model::cdp::ParamValue::Toggle(true),
+        ];
+        let base = crate::model::cdp::plan_job(def, &on, std::slice::from_ref(&input), &crate::model::cdp::PvocSettings::default()).unwrap();
+        let job_with = |bins: [&str; 2]| {
+            let mut planned = base.clone();
+            for (step, bin) in planned.steps.iter_mut().zip(bins) {
+                step.bin = bin.into();
+                step.args.clear();
+            }
+            assert!(crate::model::cdp::pipeline::independent_lanes(&planned).is_some());
+            Job {
+                id: 901,
+                cdp_dir: bin_dir.clone(),
+                planned,
+                inputs: vec![vec![vec![0.1; 100], vec![0.2; 100]]],
+                input_sample_rate: 44_100,
+                purpose: JobPurpose::Apply,
+            }
+        };
+        let run = |job: &Job, cancel: &AtomicBool| {
+            let dir = std::env::temp_dir().join(format!("tui-wave-lane-fail-{}-{}", std::process::id(), job.planned.steps[0].bin));
+            std::fs::create_dir_all(&dir).unwrap();
+            let _guard = TempDirGuard(dir.clone());
+            let (tx, _rx) = unbounded();
+            let started = std::time::Instant::now();
+            let result = run_job_body_with(job, &tx, cancel, &dir, true);
+            (result, started.elapsed())
+        };
+
+        let (result, elapsed) = run(&job_with(["slow", "fail"]), &AtomicBool::new(false));
+        assert!(matches!(result, Err(CdpError::NonZeroExit { code: Some(3), .. })), "the failure is reported: {:?}", result.err());
+        assert!(elapsed < Duration::from_secs(3), "the sleeping lane was stopped, took {elapsed:?}");
+
+        let cancel = AtomicBool::new(false);
+        let (result, elapsed) = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(200));
+                cancel.store(true, Ordering::Relaxed);
+            });
+            run(&job_with(["slow", "slow"]), &cancel)
+        });
+        assert!(matches!(result, Err(CdpError::Cancelled)), "a cancel is a cancel: {:?}", result.err());
+        assert!(elapsed < Duration::from_secs(3), "both lanes were stopped, took {elapsed:?}");
+    }
+
+    /// Runs every single- and dual-input catalog process that splits into lanes on a stereo
+    /// selection (the same stereo buffer on both inputs of a dual-input one)
     /// twice in order and once with its lanes in parallel, and requires the parallel result to
     /// match. Guards against a CDP program that writes a fixed-name scratch file into its
     /// working directory, which two lanes running at once would share. A process whose two
@@ -3530,7 +3597,8 @@ mod tests {
         let mut random = Vec::new();
         let mut failures = Vec::new();
         for def in &catalog.processes {
-            if def.input_arity().0 != 1 {
+            let arity = def.input_arity().0;
+            if !(1..=2).contains(&arity) {
                 continue;
             }
             let plain = def.params.iter().all(|p| {
@@ -3553,7 +3621,7 @@ mod tests {
             }) {
                 continue;
             }
-            let Ok(planned) = crate::model::cdp::plan_job(def, &values, std::slice::from_ref(&input), &crate::model::cdp::PvocSettings::default())
+            let Ok(planned) = crate::model::cdp::plan_job(def, &values, &vec![input.clone(); arity], &crate::model::cdp::PvocSettings::default())
             else {
                 continue;
             };
@@ -3564,7 +3632,7 @@ mod tests {
                 id: 900,
                 cdp_dir: cdp_dir.clone(),
                 planned,
-                inputs: vec![stereo.clone()],
+                inputs: vec![stereo.clone(); arity],
                 input_sample_rate: sample_rate,
                 purpose: JobPurpose::Apply,
             };

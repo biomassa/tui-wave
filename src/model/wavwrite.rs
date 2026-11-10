@@ -120,7 +120,9 @@ pub fn write_hound_compatible(
     let data_bytes = frames as u64 * planes.len() as u64 * (depth.bits() / 8) as u64;
     let data_bytes = u32::try_from(data_bytes)
         .map_err(|_| color_eyre::eyre::eyre!("audio too large for a plain RIFF WAV"))?;
-    let riff_size = (header.len() as u32 - 8) + data_bytes;
+    let riff_size = (header.len() as u32 - 8)
+        .checked_add(data_bytes)
+        .ok_or_else(|| color_eyre::eyre::eyre!("audio too large for a plain RIFF WAV"))?;
     header[4..8].copy_from_slice(&riff_size.to_le_bytes());
     let data_len_at = header.len() - 4;
     header[data_len_at..].copy_from_slice(&data_bytes.to_le_bytes());

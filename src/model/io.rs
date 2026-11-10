@@ -433,6 +433,15 @@ pub(crate) fn write_temp_wav(
         sample_format: depth.sample_format(),
     };
     let frames = planes.first().map_or(0, |p| p.len());
+    // Past hound's limit, RF64 through `WavWriter`, the same switch `save_wav_with` makes.
+    let data_bytes = frames as u64 * spec.channels as u64 * (depth.bits() as u64 / 8);
+    if data_bytes > HOUND_MAX_DATA_BYTES {
+        let mut writer =
+            super::wavwrite::WavWriter::create(path, spec.channels as usize, sample_rate, depth, false)?;
+        writer.write_planes(planes, frames)?;
+        writer.finalize()?;
+        return Ok(());
+    }
     super::wavwrite::write_hound_compatible(path, spec, planes, frames, depth, false)
 }
 
@@ -919,6 +928,30 @@ mod tests {
                     std::fs::remove_file(&ours).unwrap();
                     std::fs::remove_file(&theirs).unwrap();
                 }
+            }
+        }
+    }
+
+    /// CDP and Praat get their inputs from `write_temp_wav`; they must be the same bytes the
+    /// runners wrote through `save_wav_with` before, at both depths the runners use.
+    #[test]
+    fn temp_wavs_are_byte_identical_to_an_ordinary_save() {
+        let dir = std::env::temp_dir();
+        for channels in [1usize, 2, 5] {
+            let mut doc = approx_doc(Vec::new());
+            doc.channels = (0..channels)
+                .map(|c| (0..3001).map(|i| ((i + c * 7) as f32 * 0.01).sin() * 0.7).collect())
+                .collect();
+            let planes: Vec<&[f32]> = doc.channels.iter().map(Vec::as_slice).collect();
+            for depth in [BitDepth::Float32, BitDepth::Int16] {
+                let tag = format!("{channels}_{}_{}", depth.bits(), std::process::id());
+                let temp = dir.join(format!("tui_wave_temp_{tag}.wav"));
+                let saved = dir.join(format!("tui_wave_saved_{tag}.wav"));
+                write_temp_wav(&temp, &planes, doc.sample_rate, depth).unwrap();
+                save_wav_with(&doc, &saved, depth, false).unwrap();
+                assert!(std::fs::read(&temp).unwrap() == std::fs::read(&saved).unwrap(), "{channels}ch {depth:?}");
+                std::fs::remove_file(&temp).unwrap();
+                std::fs::remove_file(&saved).unwrap();
             }
         }
     }
