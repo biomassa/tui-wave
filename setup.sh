@@ -63,7 +63,7 @@ set -euo pipefail
 # value with the header of src/model/cdp/praat_catalog.toml. Change it only together with the
 # catalog, by hand: update-praat-scripts.sh moves the submodule and regenerates the catalog, but
 # does not edit this line.
-PINNED_COMMIT=7d2dccc7e8362195300d5af6f120a05849987358
+PINNED_COMMIT=749cbd0701469f373ddbf9f9b8391cad06c1db48
 UPSTREAM="https://github.com/ShaiCohen-ops/Praat-plugin_AudioTools"
 
 # Where tui-wave keeps its state. These paths must match config_home() in src/config.rs.
@@ -750,19 +750,19 @@ else
     TORCH_INDEX="--index-url https://download.pytorch.org/whl/cpu"
   fi
   info ""
-  ANALYSIS_TIER="librosa:librosa scikit-learn:sklearn nara-wpe:nara_wpe mido:mido"
+  ANALYSIS_TIER="librosa:librosa scikit-learn:sklearn nara-wpe:nara_wpe mido:mido stumpy:stumpy"
   missing=$(missing_from_tier $ANALYSIS_TIER)
   if [ -z "$missing" ]; then
     ok "analysis libraries already installed — nothing to download"
   else
-    if [ "$missing" = "librosa scikit-learn nara-wpe mido" ]; then
-      info "Optional: analysis libraries (~60 MB) — ${BLUE}$missing${RESET}"
+    if [ "$missing" = "librosa scikit-learn nara-wpe mido stumpy" ]; then
+      info "Optional: analysis libraries (~270 MB) — ${BLUE}$missing${RESET}"
     else
       info "Optional: analysis libraries — ${BLUE}$missing${RESET} (the others are already installed)"
     fi
     info "  enables ${GREEN}AI Conductor Mix, Dereverberation, IdentitySeparation,${RESET}"
-    info "  ${GREEN}RF Concatenative, Recomposer (x2), Semantic timbre retrieval${RESET}"
-    info "  and ${GREEN}ThermodynamicTransform${RESET}"
+    info "  ${GREEN}RF Concatenative, Recomposer (x2), Semantic timbre retrieval${RESET},"
+    info "  ${GREEN}ThermodynamicTransform${RESET} and ${GREEN}Gestural Lineage Composer${RESET}"
     if confirm "Install the analysis libraries?"; then
       for pkg in $missing; do
         run_with_progress "installing ${BLUE}$pkg${RESET}" "$PIP" install --disable-pip-version-check \

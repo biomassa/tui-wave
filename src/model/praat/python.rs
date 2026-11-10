@@ -533,8 +533,10 @@ python_command$ = \"py\"
     fn exactly_the_py_group_is_flagged_for_a_python_rewrite() {
         let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
         let mut flagged = 0;
+        // Outside `py/` but driving a Python helper all the same, so it needs the venv too.
+        const PYTHON_ELSEWHERE: &[&str] = &["Vector Chain/Generative_Exploration_Map.praat"];
         for def in &catalog.processes {
-            let in_py_group = def.bin.starts_with("py/");
+            let in_py_group = def.bin.starts_with("py/") || PYTHON_ELSEWHERE.contains(&def.bin.as_str());
             assert_eq!(
                 def.praat_python_rewrite, in_py_group,
                 "{} : bin {:?} but praat_python_rewrite = {}",
@@ -563,7 +565,10 @@ python_command$ = \"py\"
         // 50 -> 51 on 2026-10-29: the 41d6a68 bump brought `NMF_Granular_Spatial_Composer`,
         // hoisted out of its Custom preset page, whose interpreter candidates are string-array
         // slots (`gsc_exe$[gsc_nc]`) the matcher now reads.
-        assert_eq!(flagged, 51, "the py group is 51 processes");
+        // 51 -> 52 on 2026-11-10: the 749cbd0 bump brought `Gestural_Lineage_Composer`, with
+        // `stumpy` admitted to the analysis tier and its TextGrid-only unit dropped.
+        // Plus Generative_Exploration_Map, the first flagged entry outside `py/`.
+        assert_eq!(flagged, 53, "the py group plus PYTHON_ELSEWHERE is 53 processes");
     }
 
     /// End to end through the planner: a py-group process must come out asking for a rewritten

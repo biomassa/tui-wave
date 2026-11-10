@@ -141,6 +141,11 @@ PY_ALLOWED_IMPORTS = {
     "sklearn",
     "nara_wpe",
     "mido",
+    # Matrix-profile search, for `Gestural_Lineage_Composer` (the 749cbd0 bump, 2026-11-10).
+    # In this tier rather than the base set, at the user's choice: with numba and llvmlite it
+    # is ~210 MB. Checked on Python 3.14 / numpy 2.4 before it was admitted (`stumpy.stump`
+    # runs).
+    "stumpy",
     # ML tier -- torch (5 processes), and the codec/synthesis stacks built on it. Kept behind
     # its own prompt: `torch` alone is roughly 2.5 GB, and several of these additionally need
     # model files the library install does not provide (IRCAM's RAVE wants a `.ts` the user
@@ -241,6 +246,10 @@ def python_helper_requirements(script: Path) -> tuple[list[str], set[str]] | Non
 #   drop_options  -- name an `optionmenu` param and the option labels to remove. Safe to drop
 #                    outright, because Praat matches an optionmenu by *label* and the catalog
 #                    stores labels verbatim, so nothing is positional here.
+#
+#   optional_non_sound_input -- answers `non_sound_input` for this script alone, when the
+#                    other object is optional and only the options `drop_options` removes
+#                    need it.
 GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
     # Both of these call `chooseFolder$` -- but only as a *fallback for a blank field*, and both
     # say so in the same comment: "use the typed path, or fall back to a dialog when the field is
@@ -317,6 +326,17 @@ GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
             "Mod_source": ["Second Sound (select 2 sounds)"],
         },
         "why": "the carrier-choice pause is reached only under the Second Sound mod source",
+    },
+    # New in the 749cbd0 bump. It asks for "exactly one Sound object (optionally together with
+    # one TextGrid)", which `non_sound_input` reads as needing a TextGrid. Only the "Phrases
+    # (TextGrid)" analysis unit reads one; the app hands Praat one Sound, so that option goes
+    # (the user's choice, 2026-11-10) and the other two units remain.
+    "py/Gestural_Lineage_Composer.praat": {
+        "drop_options": {
+            "Analysis_unit": ["Phrases (TextGrid)"],
+        },
+        "optional_non_sound_input": True,
+        "why": "the TextGrid is optional and read only by the Phrases (TextGrid) unit",
     },
     "Spatial & Surround/Advanced_Stereo_Panner.praat": {
         "drop_options": {
@@ -969,6 +989,43 @@ PAUSE_HOISTS: dict[str, dict] = {
         "lock_on": ["Advanced_settings"],
         "why": "advanced analysis page, plus three optional stages (prepare/sculpt/audition) "
                "left unlocked since each defaults off and gates real extra processing",
+    },
+    # The 749cbd0 bump (2026-11-10). Five scripts moved settings onto a `beginPause` page behind
+    # a form boolean; three were catalogued before and would have dropped out. All five are
+    # locked on, the rule the user chose for the FDN and Creative Convolution: every row the
+    # dialog shows applies. Each script assigns the page's variables above the guard.
+    "Spatial & Surround/8-Channel_Spectral_Shift.praat": {
+        "lock_on": ["Edit_motion_and_mix_parameters"],
+        "why": "motion and mix page (depth, rate, phase spread, shape, target, wet)",
+    },
+    "Spectral/Spectral_Gesture_Forge.praat": {
+        "lock_on": ["More_reverb_settings"],
+        "why": "reverb details page",
+    },
+    "Analysis/Spectrum_Envelope_Lab.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "advanced F0 and peak-validation page",
+    },
+    # Guard `preset = 1 or edit_parameters` (preset 1 is Custom). Locked, so the two pages'
+    # values override what the other presets set -- the FDN's trade, chosen by the user again.
+    "Spectral/Fractal_Spectral_Hologram.praat": {
+        "lock_on": ["Edit_parameters"],
+        "why": "analysis/fractal-map and time/texture pages",
+    },
+    # The page is the chosen preset's eight values, pre-filled; locked like the others.
+    "py/HierarchicalRecomposition.praat": {
+        "lock_on": ["Edit_preset_values"],
+        "why": "preset values page",
+    },
+    # New script, same shape: an advanced page pre-filled from the preset, some rows declared
+    # only for one Analysis unit. Locked like the five above.
+    # Its `TextGrid tier` row is read only by the Phrases (TextGrid) unit, which
+    # `GUI_BLOCKING_OVERRIDES` drops, so the row goes with it. (Its label also derives
+    # `textGrid_tier` where the script reads `textgrid_tier`, so it did nothing in Praat either.)
+    "py/Gestural_Lineage_Composer.praat": {
+        "lock_on": ["Advanced_settings"],
+        "omit_rows": {0: ["TextGrid tier"]},
+        "why": "advanced engine, phrase and order-test page",
     },
 }
 
@@ -3259,6 +3316,11 @@ NEVER_PLANNED: dict[str, str] = {
     # of PY_ALLOWED_IMPORTS -- installing them cannot bring this back.
     "py/CorpusMap.praat":
         "launches a detached Qt window and returns no Sound; nothing comes back to the editor",
+    # New in the 749cbd0 bump. It picks its material from folders of sound files through
+    # folder dialogs (or plans an arrangement for Ableton Live); the selected Sound is not its
+    # input. Excluded at the user's choice (2026-11-10) rather than hoisting its seven pages.
+    "Time & Granular/TimeLine_Composer.praat":
+        "composes from folders of files, not the open selection",
 }
 
 # Scripts that are *defective upstream* — not blocked by their own nature (`NEVER_PLANNED`)
@@ -3870,7 +3932,10 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
              # ...except a listed image sonifier, whose Photo input this app *can* supply.
              # Deliberately narrow: it answers `non_sound_input` alone, so one of these that
              # also opened a GUI or hardcoded a path would still be excluded for that.
-             and not (slug == "non_sound_input" and rel_key in PHOTO_INPUTS)),
+             and not (slug == "non_sound_input" and rel_key in PHOTO_INPUTS)
+             # ...and an override that drops every option needing the other object.
+             and not (slug == "non_sound_input" and override
+                      and override.get("optional_non_sound_input"))),
             None,
         )
         if hit:

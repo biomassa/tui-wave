@@ -35983,7 +35983,8 @@ mod tests {
             .collect();
         // 17 -> 18 on 2026-10-19: the acf29bf bump removed the hardcoded path that kept
         // `Composition_2` excluded.
-        assert_eq!(chains.len(), 18, "every chain entry");
+        // 18 -> 19 on 2026-11-10: the 749cbd0 bump brought `Generative_Exploration_Map`.
+        assert_eq!(chains.len(), 19, "every chain entry");
         for def in chains {
             assert!(App::praat_opens_new_buffer(def), "{}", def.key);
         }

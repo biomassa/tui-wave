@@ -133,6 +133,13 @@ Composition_2.praat
     15. Play result                  = (not supplied)   [boolean]
 
 ==============================================================================
+Generative_Exploration_Map.praat
+==============================================================================
+
+  Stage 1: enginePath$
+    !! script not found: /home/dingus/scripts/tui-wave-experimental/third_party/praat-audiotools/enginePath$
+
+==============================================================================
 Live_1.praat
 ==============================================================================
 

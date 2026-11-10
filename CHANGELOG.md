@@ -14,6 +14,28 @@
     processes keep less audio in memory for undo.
   - In graphics mode, playback redraws only when the playhead moves
     on screen.
+- **Airwindows updated to the latest upstream**, which adds **Weave**
+  (Saturation), an overdrive with a good texture.
+- **praatAudioTools updated to `749cbd0`.**
+  - **New:** Spectrum Envelope Lab (Analysis), Spectral Gesture Forge
+    (Spectral), Gestural Lineage Composer (py) and Generative
+    Exploration Map (Vector Chain).
+  - **Gestural Lineage Composer needs the Python package `stumpy`**,
+    which `setup.sh` now offers with the analysis libraries. If you
+    installed those before, run
+    `~/.config/tui-wave/praat/pyenv/bin/pip install stumpy`.
+    Its "Phrases (TextGrid)" analysis unit is left out, because it
+    needs a TextGrid.
+  - **Generative Exploration Map opens its own map window** and waits
+    until you close it.
+  - **Rewritten upstream, with new settings:** GRM-Style Resonator,
+    Fractal Spectral Hologram, 8-Channel Spectral Shift,
+    Hierarchical Recomposition and Spectral Freeze. The settings pages
+    of the Fractal, 8-Channel and Hierarchical processes are now part
+    of the dialog. Saved presets for these five no longer line up.
+  - Audio Quantizer has reliability fixes.
+  - TimeLine Composer is not included: it builds a piece from folders
+    of files, not from the selection.
 
 ## 2026-11-03 (2.19.0)
 
